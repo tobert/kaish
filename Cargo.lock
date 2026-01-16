@@ -605,6 +605,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaish-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "capnp",
+ "capnp-rpc",
+ "futures",
+ "kaish-kernel",
+ "kaish-schema",
+ "proptest",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "kaish-kernel"
 version = "0.1.0"
 dependencies = [
