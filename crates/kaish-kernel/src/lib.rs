@@ -6,9 +6,9 @@
 //! - **Parser**: Builds AST from tokens using chumsky
 //! - **AST**: Type definitions for the abstract syntax tree
 //! - **Interpreter**: Expression evaluation, scopes, and the `$?` result type
+//! - **VFS**: Virtual filesystem with mount points
 //!
 //! Future layers will add:
-//! - VFS (virtual filesystem) with mount points
 //! - Tool registry and builtins
 //! - Job scheduler for pipelines and background tasks
 
@@ -16,3 +16,4 @@ pub mod ast;
 pub mod interpreter;
 pub mod lexer;
 pub mod parser;
+pub mod vfs;
