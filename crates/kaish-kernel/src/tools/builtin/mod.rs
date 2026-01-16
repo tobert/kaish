@@ -8,6 +8,7 @@ mod cd;
 mod cp;
 mod date;
 mod echo;
+mod gather;
 mod grep;
 mod help;
 mod jobs;
@@ -16,6 +17,7 @@ mod mkdir;
 mod mv;
 mod pwd;
 mod rm;
+mod scatter;
 mod wait;
 mod write;
 
@@ -29,6 +31,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(cp::Cp);
     registry.register(date::Date);
     registry.register(echo::Echo);
+    registry.register(gather::Gather);
     registry.register(grep::Grep);
     registry.register(help::Help);
     registry.register(jobs::Jobs);
@@ -37,6 +40,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(mv::Mv);
     registry.register(pwd::Pwd);
     registry.register(rm::Rm);
+    registry.register(scatter::Scatter);
     registry.register(wait::Wait);
     registry.register(write::Write);
 }
