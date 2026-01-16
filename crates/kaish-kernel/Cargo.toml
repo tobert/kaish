@@ -30,6 +30,10 @@ logos = { workspace = true }
 chumsky = { workspace = true }
 ariadne = { workspace = true }
 
+# Builtins
+regex = { workspace = true }
+chrono = { workspace = true }
+
 [dev-dependencies]
 proptest = { workspace = true }
 

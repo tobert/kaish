@@ -42,6 +42,12 @@ ariadne = "0.5"
 # REPL (L4)
 rustyline = "15"
 
+# Pattern matching (grep)
+regex = "1"
+
+# Date/time (date)
+chrono = "0.4"
+
 # Testing
 proptest = "1"
 

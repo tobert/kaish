@@ -6,6 +6,8 @@ use std::sync::Arc;
 use crate::interpreter::Scope;
 use crate::vfs::VfsRouter;
 
+use super::traits::ToolSchema;
+
 /// Execution context passed to tools.
 ///
 /// Provides access to the VFS, scope, and other kernel state.
@@ -20,6 +22,8 @@ pub struct ExecContext {
     pub prev_cwd: Option<PathBuf>,
     /// Standard input for the tool (from pipeline).
     pub stdin: Option<String>,
+    /// Tool schemas for help command.
+    pub tool_schemas: Vec<ToolSchema>,
 }
 
 impl ExecContext {
@@ -31,6 +35,7 @@ impl ExecContext {
             cwd: PathBuf::from("/"),
             prev_cwd: None,
             stdin: None,
+            tool_schemas: Vec::new(),
         }
     }
 
@@ -42,7 +47,13 @@ impl ExecContext {
             cwd: PathBuf::from("/"),
             prev_cwd: None,
             stdin: None,
+            tool_schemas: Vec::new(),
         }
+    }
+
+    /// Set the available tool schemas (for help command).
+    pub fn set_tool_schemas(&mut self, schemas: Vec<ToolSchema>) {
+        self.tool_schemas = schemas;
     }
 
     /// Set stdin for this execution.
