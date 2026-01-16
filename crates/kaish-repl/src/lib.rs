@@ -1,7 +1,7 @@
 //! kaish REPL — Interactive shell for 会sh.
 //!
 //! This is an evolving REPL that grows with each layer of the kaish project.
-//! Currently (L7), it provides:
+//! Currently (L8), it provides:
 //!
 //! - Parse input and display AST (`/ast` toggle)
 //! - Evaluate expressions with persistent Scope
@@ -9,7 +9,8 @@
 //! - Real tool execution via VFS
 //! - Pipeline execution (`a | b | c`)
 //! - Background jobs (`cmd &`) with `jobs` and `wait` commands
-//! - Meta-commands: `/help`, `/quit`, `/ast`, `/scope`, `/cwd`, `/jobs`
+//! - MCP tool integration via pre-configured ToolRegistry
+//! - Meta-commands: `/help`, `/quit`, `/ast`, `/scope`, `/cwd`, `/jobs`, `/tools`
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -47,6 +48,33 @@ impl Repl {
 
     /// Create a new REPL with VFS rooted at the given path.
     pub fn with_root(root: PathBuf) -> Result<Self> {
+        let mut tools = ToolRegistry::new();
+        register_builtins(&mut tools);
+        Self::with_tools(root, tools)
+    }
+
+    /// Create a new REPL with a custom ToolRegistry.
+    ///
+    /// This allows MCP tools to be pre-registered before starting the REPL.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use kaish_kernel::mcp::{McpClient, McpConfig, McpTransport, register_mcp_tools};
+    /// use kaish_kernel::tools::{ToolRegistry, register_builtins};
+    ///
+    /// let mut tools = ToolRegistry::new();
+    /// register_builtins(&mut tools);
+    ///
+    /// // Connect to an MCP server and register its tools
+    /// let client = Arc::new(McpClient::new(McpConfig { ... }));
+    /// client.connect().await?;
+    /// register_mcp_tools(&client, &mut tools).await?;
+    ///
+    /// // Create REPL with MCP tools
+    /// let repl = Repl::with_tools(root, tools)?;
+    /// ```
+    pub fn with_tools(root: PathBuf, tools: ToolRegistry) -> Result<Self> {
         // Build the VFS
         let mut vfs = VfsRouter::new();
 
@@ -64,9 +92,7 @@ impl Repl {
         let mut exec_ctx = ExecContext::new(Arc::new(vfs));
         exec_ctx.set_cwd(PathBuf::from("/mnt/local"));
 
-        // Build tool registry with builtins
-        let mut tools = ToolRegistry::new();
-        register_builtins(&mut tools);
+        // Wrap tools in Arc
         let tools = Arc::new(tools);
 
         // Create job manager and add to context

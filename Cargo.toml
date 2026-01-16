@@ -48,6 +48,9 @@ regex = "1"
 # Date/time (date)
 chrono = "0.4"
 
+# MCP client (L8) - using local path for latest; needs server feature for shared model types
+rmcp = { path = "../rmcp/crates/rmcp", default-features = true, features = ["client", "transport-child-process"] }
+
 # Testing
 proptest = "1"
 

@@ -34,6 +34,9 @@ ariadne = { workspace = true }
 regex = { workspace = true }
 chrono = { workspace = true }
 
+# MCP client (L8)
+rmcp = { workspace = true }
+
 [dev-dependencies]
 proptest = { workspace = true }
 

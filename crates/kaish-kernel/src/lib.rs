@@ -9,10 +9,12 @@
 //! - **VFS**: Virtual filesystem with mount points
 //! - **Tools**: Tool trait, registry, and builtin commands
 //! - **Scheduler**: Pipeline execution and background job management
+//! - **MCP**: Model Context Protocol client for external tools
 
 pub mod ast;
 pub mod interpreter;
 pub mod lexer;
+pub mod mcp;
 pub mod parser;
 pub mod scheduler;
 pub mod tools;
