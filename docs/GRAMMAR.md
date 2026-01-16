@@ -84,9 +84,16 @@ command     = IDENT , { argument } ;
 
 (* === Arguments === *)
 
-argument    = positional | named ;
+argument    = positional | named | flag_arg ;
 positional  = value ;
 named       = IDENT , "=" , value ;
+
+(* Flags: planned for L6.1 - see "Flag Arguments" section below *)
+flag_arg    = SHORT_FLAG , [ value ]
+            | LONG_FLAG , [ "=" , value ]
+            ;
+SHORT_FLAG  = "-" , ALPHA , { ALPHA | DIGIT } ;
+LONG_FLAG   = "--" , IDENT ;
 
 (* === Values === *)
 
@@ -427,6 +434,128 @@ The `$(cmd)` expression evaluates to the command's result object (same structure
 This design keeps conditions as pure expressions (no hidden side effects) while making
 command execution explicit. The `&&` and `||` operators work on expression results,
 avoiding bash's ambiguous statement chaining semantics.
+
+## Flag Arguments (`-x` and `--name`)
+
+**Status:** Design complete, implementation pending (L6.1)
+
+Unix tools use `-x` (short) and `--name` (long) flags extensively. kaish needs to support
+these for git, curl, and other common tools.
+
+### Current Limitation
+
+The lexer rejects `-l` because:
+- `-?[0-9]+` matches negative integers, but `-l` has no digits
+- `[a-zA-Z_][a-zA-Z0-9_-]*` matches identifiers, but can't start with `-`
+
+```bash
+ls -l           # ❌ lexer error: unexpected character '-'
+git commit -m   # ❌ lexer error
+```
+
+### Design: Flag Tokens
+
+Add two new token types:
+
+```ebnf
+SHORT_FLAG  = "-" , ALPHA , { ALPHA | DIGIT } ;   (* -l, -m, -vvv *)
+LONG_FLAG   = "--" , IDENT ;                       (* --long, --message *)
+```
+
+Examples:
+```bash
+ls -l                    # SHORT_FLAG(l)
+ls -la                   # SHORT_FLAG(la) - combined short flags
+git commit -m "msg"      # SHORT_FLAG(m), STRING(msg)
+git push --force         # LONG_FLAG(force)
+git commit --message="x" # LONG_FLAG(message), EQ, STRING(x)
+```
+
+### Parser Changes
+
+Extend argument grammar:
+
+```ebnf
+argument    = positional | named | flag_arg ;
+positional  = value ;
+named       = IDENT , "=" , value ;
+flag_arg    = SHORT_FLAG , [ value ]
+            | LONG_FLAG , [ "=" , value ]
+            ;
+```
+
+### ToolArgs Mapping
+
+Flags map to `ToolArgs` as follows:
+
+| Syntax | ToolArgs Field | Example |
+|--------|----------------|---------|
+| `-l` | `flags.insert("l")` | `ls -l` → flags={"l"} |
+| `-la` | `flags.insert("l"), flags.insert("a")` | `ls -la` → flags={"l","a"} |
+| `-m "msg"` | `named.insert("m", "msg")` | `git -m "hi"` → named={"m":"hi"} |
+| `--force` | `flags.insert("force")` | `git --force` → flags={"force"} |
+| `--message="x"` | `named.insert("message", "x")` | named={"message":"x"} |
+
+### Short Flag Value Binding
+
+Short flags followed by a value bind to that value:
+```bash
+git commit -m "message"   # -m takes "message" as its value
+curl -H "Auth: x"         # -H takes "Auth: x" as its value
+```
+
+This is **positional binding** - the flag consumes the next positional arg.
+Tools must declare which short flags take values vs are boolean.
+
+### Tool Schema Extension
+
+Tools declare flag metadata in their schema:
+
+```rust
+ToolSchema::new("git-commit", "Create a commit")
+    .flag(FlagSchema::short("m").takes_value("Commit message"))
+    .flag(FlagSchema::short("a").boolean("Stage all modified files"))
+    .flag(FlagSchema::long("amend").boolean("Amend previous commit"))
+    .flag(FlagSchema::long("message").takes_value("Commit message"))
+```
+
+Without schema info, flags are treated as boolean by default.
+
+### Git Compatibility Examples
+
+```bash
+# These should all work:
+git status
+git add "file.txt"
+git commit -m "message"
+git commit --message="message"
+git push --force
+git push -f
+git log --oneline -n 5
+git diff --staged
+git branch -d "feature"
+git checkout -b "new-branch"
+```
+
+### Implementation Plan
+
+1. **Lexer**: Add `ShortFlag(String)` and `LongFlag(String)` tokens
+2. **Parser**: Extend argument parsing to handle flag tokens
+3. **ToolArgs**: Already has `flags: HashSet<String>`, add value binding logic
+4. **Tools**: Update builtins to use new flag API (ls -l, etc.)
+5. **Schema**: Add `FlagSchema` for tool introspection
+
+### Edge Cases
+
+| Input | Interpretation |
+|-------|----------------|
+| `--` | End of flags marker (everything after is positional) |
+| `-` | Single dash (often means stdin) - treat as positional string |
+| `---` | Error: invalid flag syntax |
+| `-123` | Negative integer, not a flag |
+| `--foo-bar` | Long flag "foo-bar" |
+
+---
 
 ## Deferred Features: Future Compatibility
 
