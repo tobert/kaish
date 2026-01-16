@@ -8,13 +8,12 @@
 //! - **Interpreter**: Expression evaluation, scopes, and the `$?` result type
 //! - **VFS**: Virtual filesystem with mount points
 //! - **Tools**: Tool trait, registry, and builtin commands
-//!
-//! Future layers will add:
-//! - Job scheduler for pipelines and background tasks
+//! - **Scheduler**: Pipeline execution and background job management
 
 pub mod ast;
 pub mod interpreter;
 pub mod lexer;
 pub mod parser;
+pub mod scheduler;
 pub mod tools;
 pub mod vfs;

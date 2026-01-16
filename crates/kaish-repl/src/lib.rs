@@ -1,13 +1,15 @@
 //! kaish REPL — Interactive shell for 会sh.
 //!
 //! This is an evolving REPL that grows with each layer of the kaish project.
-//! Currently (L6), it provides:
+//! Currently (L7), it provides:
 //!
 //! - Parse input and display AST (`/ast` toggle)
 //! - Evaluate expressions with persistent Scope
 //! - `set X = value` assignments
-//! - Real tool execution via VFS (ls, cat, echo, cd, pwd, mkdir, write, rm)
-//! - Meta-commands: `/help`, `/quit`, `/ast`, `/scope`, `/cwd`
+//! - Real tool execution via VFS
+//! - Pipeline execution (`a | b | c`)
+//! - Background jobs (`cmd &`) with `jobs` and `wait` commands
+//! - Meta-commands: `/help`, `/quit`, `/ast`, `/scope`, `/cwd`, `/jobs`
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,6 +23,7 @@ use tokio::runtime::Runtime;
 use kaish_kernel::ast::{Arg, Expr, Pipeline, Stmt, Value};
 use kaish_kernel::interpreter::{ExecResult, Scope};
 use kaish_kernel::parser::parse;
+use kaish_kernel::scheduler::{JobManager, PipelineRunner};
 use kaish_kernel::tools::{ExecContext, ToolArgs, ToolRegistry, register_builtins};
 use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
 
@@ -28,9 +31,11 @@ use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
 pub struct Repl {
     scope: Scope,
     show_ast: bool,
-    tools: ToolRegistry,
+    tools: Arc<ToolRegistry>,
     exec_ctx: ExecContext,
     runtime: Runtime,
+    pipeline_runner: PipelineRunner,
+    job_manager: Arc<JobManager>,
 }
 
 impl Repl {
@@ -62,6 +67,14 @@ impl Repl {
         // Build tool registry with builtins
         let mut tools = ToolRegistry::new();
         register_builtins(&mut tools);
+        let tools = Arc::new(tools);
+
+        // Create job manager and add to context
+        let job_manager = Arc::new(JobManager::new());
+        exec_ctx.set_job_manager(job_manager.clone());
+
+        // Create pipeline runner
+        let pipeline_runner = PipelineRunner::new(tools.clone());
 
         // Create tokio runtime for async tool execution
         let runtime = Runtime::new().context("Failed to create tokio runtime")?;
@@ -72,6 +85,8 @@ impl Repl {
             tools,
             exec_ctx,
             runtime,
+            pipeline_runner,
+            job_manager,
         })
     }
 
@@ -253,26 +268,46 @@ impl Repl {
         Ok(result)
     }
 
-    /// Execute a pipeline (stub implementation).
+    /// Execute a pipeline using the PipelineRunner.
     fn execute_pipeline(&mut self, pipeline: &Pipeline) -> Result<ExecResult> {
-        if pipeline.commands.len() == 1 {
-            // Single command, just execute it
-            let cmd = &pipeline.commands[0];
-            let mut result = self.execute_command(&cmd.name, &cmd.args)?;
-            if pipeline.background {
-                result = ExecResult::success(format!("[bg] {}", result.out));
-            }
-            return Ok(result);
-        }
-
-        // Multi-command pipeline: stub
         let cmd_names: Vec<_> = pipeline.commands.iter().map(|c| c.name.as_str()).collect();
         let pipeline_str = cmd_names.join(" | ");
 
         if pipeline.background {
-            Ok(ExecResult::success(format!("[stub] {} &", pipeline_str)))
+            // Spawn as background job
+            // We need to clone what we need for the async task
+            let commands = pipeline.commands.clone();
+            let tools = self.tools.clone();
+            let vfs = self.exec_ctx.vfs.clone();
+            let cwd = self.exec_ctx.cwd.clone();
+            let scope = self.exec_ctx.scope.clone();
+            let job_manager = self.job_manager.clone();
+
+            let job_id = self.runtime.block_on(async {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+
+                let id = job_manager.register(pipeline_str.clone(), rx).await;
+
+                tokio::spawn(async move {
+                    let mut ctx = ExecContext::with_scope(vfs, scope);
+                    ctx.set_cwd(cwd);
+                    ctx.set_job_manager(job_manager);
+
+                    let runner = PipelineRunner::new(tools);
+                    let result = runner.run(&commands, &mut ctx).await;
+                    let _ = tx.send(result);
+                });
+
+                id
+            });
+
+            Ok(ExecResult::success(format!("[{}] {}\n", job_id, pipeline_str)))
         } else {
-            Ok(ExecResult::success(format!("[stub pipeline] {}", pipeline_str)))
+            // Run synchronously
+            let result = self.runtime.block_on(
+                self.pipeline_runner.run(&pipeline.commands, &mut self.exec_ctx)
+            );
+            Ok(result)
         }
     }
 
@@ -416,6 +451,18 @@ impl Repl {
                 let names = self.tools.names();
                 Ok(Some(format!("Available tools: {}", names.join(", "))))
             }
+            "/jobs" => {
+                let jobs = self.runtime.block_on(self.job_manager.list());
+                if jobs.is_empty() {
+                    Ok(Some("(no background jobs)".to_string()))
+                } else {
+                    let mut output = String::from("Background jobs:\n");
+                    for job in jobs {
+                        output.push_str(&format!("  [{}] {} {}\n", job.id, job.status, job.command));
+                    }
+                    Ok(Some(output.trim_end().to_string()))
+                }
+            }
             _ => {
                 Ok(Some(format!("Unknown command: {}\nType /help for available commands.", command)))
             }
@@ -555,7 +602,7 @@ fn result_to_value(result: &ExecResult) -> Value {
     Value::Object(fields)
 }
 
-const HELP_TEXT: &str = r#"会sh — kaish REPL (Layer 6)
+const HELP_TEXT: &str = r#"会sh — kaish REPL (Layer 7: Pipes & Jobs)
 
 Meta Commands:
   /help, /h, /?     Show this help
@@ -565,38 +612,48 @@ Meta Commands:
   /result, /$?      Show last command result
   /cwd              Show current working directory
   /tools            List available tools
+  /jobs             List background jobs
 
 Built-in Tools:
   echo [args...]    Print arguments
+  cat <path> [-n]   Read file contents (-n for line numbers)
+  ls [path] [-la]   List directory (-a hidden, -l long)
+  cd [path | -]     Change directory (- for previous)
   pwd               Print working directory
-  cd [path]         Change directory
-  ls [path] [-l]    List directory contents
-  cat <path>        Read file contents
   mkdir <path>      Create directory
+  rm <path> [-rf]   Remove file/directory
+  cp <src> <dst> [-r]  Copy file/directory
+  mv <src> <dst>    Move/rename
+  grep <pattern> [path] [-inv]  Search patterns
   write <path> <content>  Write to file
-  rm <path>         Remove file or empty directory
+  date [format]     Current date/time
+  assert <cond>     Assert condition (for tests)
+  help [tool]       Show tool help
+  jobs              List background jobs
+  wait [job_id]     Wait for background jobs
 
 Language:
   set X = value     Assign a variable
   ${VAR}            Variable reference
   ${VAR.field}      Nested access
   ${?.ok}           Last result access
-  a | b             Pipeline (stub)
+  a | b | c         Pipeline (connects stdout → stdin)
+  cmd &             Run in background
   if cond; then ... fi
   for X in arr; do ... done
 
 Examples:
   ls                         # List current directory
-  cd subdir                  # Change to subdir
-  cat README.md              # Read a file
-  echo "Hello ${USER}"       # Print with variable
-  set DATA = {"count": 42}   # Create object
-  echo ${DATA.count}         # Access field
+  cat file.txt | grep hello  # Pipeline: search in file
+  echo hello | grep ell      # Pipeline: filter text
+  sleep 5 &                  # Background job
+  jobs                       # List running jobs
+  wait                       # Wait for all jobs
 "#;
 
 /// Run the REPL.
 pub fn run() -> Result<()> {
-    println!("会sh — kaish v{} (Layer 6: Tools)", env!("CARGO_PKG_VERSION"));
+    println!("会sh — kaish v{} (Layer 7: Pipes & Jobs)", env!("CARGO_PKG_VERSION"));
     println!("Type /help for commands, /quit to exit.\n");
 
     let mut rl: Editor<(), DefaultHistory> = Editor::new()

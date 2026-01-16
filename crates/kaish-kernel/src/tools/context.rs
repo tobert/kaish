@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::interpreter::Scope;
+use crate::scheduler::JobManager;
 use crate::vfs::VfsRouter;
 
 use super::traits::ToolSchema;
@@ -24,6 +25,8 @@ pub struct ExecContext {
     pub stdin: Option<String>,
     /// Tool schemas for help command.
     pub tool_schemas: Vec<ToolSchema>,
+    /// Job manager for background jobs (optional).
+    pub job_manager: Option<Arc<JobManager>>,
 }
 
 impl ExecContext {
@@ -36,6 +39,7 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             tool_schemas: Vec::new(),
+            job_manager: None,
         }
     }
 
@@ -48,12 +52,18 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             tool_schemas: Vec::new(),
+            job_manager: None,
         }
     }
 
     /// Set the available tool schemas (for help command).
     pub fn set_tool_schemas(&mut self, schemas: Vec<ToolSchema>) {
         self.tool_schemas = schemas;
+    }
+
+    /// Set the job manager for background job tracking.
+    pub fn set_job_manager(&mut self, manager: Arc<JobManager>) {
+        self.job_manager = Some(manager);
     }
 
     /// Set stdin for this execution.

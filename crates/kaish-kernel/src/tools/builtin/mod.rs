@@ -10,11 +10,13 @@ mod date;
 mod echo;
 mod grep;
 mod help;
+mod jobs;
 mod ls;
 mod mkdir;
 mod mv;
 mod pwd;
 mod rm;
+mod wait;
 mod write;
 
 use super::ToolRegistry;
@@ -29,10 +31,12 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(echo::Echo);
     registry.register(grep::Grep);
     registry.register(help::Help);
+    registry.register(jobs::Jobs);
     registry.register(ls::Ls);
     registry.register(mkdir::Mkdir);
     registry.register(mv::Mv);
     registry.register(pwd::Pwd);
     registry.register(rm::Rm);
+    registry.register(wait::Wait);
     registry.register(write::Write);
 }
