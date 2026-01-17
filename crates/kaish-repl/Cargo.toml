@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 kaish-kernel = { path = "../kaish-kernel" }
+kaish-client = { path = "../kaish-client" }
 
 # Line editing
 rustyline = { workspace = true }

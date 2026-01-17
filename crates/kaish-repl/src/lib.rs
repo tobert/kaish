@@ -831,3 +831,156 @@ pub fn run() -> Result<()> {
 
     Ok(())
 }
+
+/// Run a REPL connected to a remote kernel via IpcClient.
+///
+/// This REPL forwards commands to the remote kernel and displays results.
+/// The `LocalSet` is required because IpcClient uses spawn_local internally.
+pub fn run_with_client(
+    client: kaish_client::IpcClient,
+    rt: &Runtime,
+    local: &tokio::task::LocalSet,
+) -> Result<()> {
+    use kaish_client::KernelClient;
+
+    let mut rl: Editor<(), DefaultHistory> = Editor::new()
+        .context("Failed to create editor")?;
+
+    // Load history
+    let history_path = dirs::data_dir()
+        .map(|p| p.join("kaish").join("history.txt"));
+    if let Some(ref path) = history_path {
+        let _ = rl.load_history(path);
+    }
+
+    loop {
+        let prompt = "会sh> ";
+
+        match rl.readline(prompt) {
+            Ok(line) => {
+                let _ = rl.add_history_entry(line.as_str());
+                let trimmed = line.trim();
+
+                // Handle local meta-commands
+                if trimmed == "/quit" || trimmed == "/q" || trimmed == "/exit" {
+                    break;
+                }
+
+                if trimmed == "/help" || trimmed == "/h" || trimmed == "/?" {
+                    println!("{}", CONNECTED_HELP_TEXT);
+                    continue;
+                }
+
+                if trimmed == "/ping" {
+                    match local.block_on(rt, client.ping()) {
+                        Ok(pong) => println!("Kernel: {pong}"),
+                        Err(e) => eprintln!("Ping failed: {e}"),
+                    }
+                    continue;
+                }
+
+                if trimmed == "/vars" || trimmed == "/scope" {
+                    match local.block_on(rt, client.list_vars()) {
+                        Ok(vars) => {
+                            if vars.is_empty() {
+                                println!("(no variables set)");
+                            } else {
+                                println!("Variables:");
+                                for (name, value) in vars {
+                                    println!("  {} = {}", name, format_value(&value));
+                                }
+                            }
+                        }
+                        Err(e) => eprintln!("Error listing variables: {e}"),
+                    }
+                    continue;
+                }
+
+                if trimmed == "/cwd" {
+                    match local.block_on(rt, client.cwd()) {
+                        Ok(cwd) => println!("{cwd}"),
+                        Err(e) => eprintln!("Error getting cwd: {e}"),
+                    }
+                    continue;
+                }
+
+                if trimmed == "/shutdown" {
+                    match local.block_on(rt, client.shutdown()) {
+                        Ok(()) => {
+                            println!("Kernel shutdown requested.");
+                            break;
+                        }
+                        Err(e) => eprintln!("Shutdown failed: {e}"),
+                    }
+                    continue;
+                }
+
+                // Skip empty lines
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                // Skip unknown meta-commands
+                if trimmed.starts_with('/') {
+                    println!("Unknown command: {trimmed}");
+                    println!("Type /help for available commands.");
+                    continue;
+                }
+
+                // Execute on remote kernel
+                match local.block_on(rt, client.execute(&line)) {
+                    Ok(result) => {
+                        if !result.out.is_empty() {
+                            print!("{}", result.out);
+                            if !result.out.ends_with('\n') {
+                                println!();
+                            }
+                        }
+                        if !result.err.is_empty() {
+                            eprintln!("{}", result.err);
+                        }
+                        if !result.ok() {
+                            println!("✗ exit code: {}", result.code);
+                        }
+                    }
+                    Err(e) => eprintln!("Execution error: {e}"),
+                }
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!("^C");
+                continue;
+            }
+            Err(ReadlineError::Eof) => {
+                println!("^D");
+                break;
+            }
+            Err(err) => {
+                eprintln!("Error: {err}");
+                break;
+            }
+        }
+    }
+
+    // Save history
+    if let Some(ref path) = history_path {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = rl.save_history(path);
+    }
+
+    Ok(())
+}
+
+const CONNECTED_HELP_TEXT: &str = r#"会sh — Connected REPL
+
+Meta Commands:
+  /help, /h, /?     Show this help
+  /quit, /q, /exit  Exit the REPL
+  /ping             Ping the kernel
+  /vars, /scope     List all variables
+  /cwd              Show current working directory
+  /shutdown         Shutdown the remote kernel
+
+All other input is sent to the remote kernel for execution.
+"#;

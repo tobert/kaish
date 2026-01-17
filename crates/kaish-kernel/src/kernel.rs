@@ -76,6 +76,17 @@ impl KernelConfig {
             cwd: PathBuf::from("/"),
         }
     }
+
+    /// Create a persistent kernel config with the given name.
+    pub fn persistent(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            persist: true,
+            mount_local: true,
+            local_root: None,
+            cwd: PathBuf::from("/"),
+        }
+    }
 }
 
 /// The Kernel (核) — executes kaish code.
