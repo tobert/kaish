@@ -33,6 +33,7 @@ pub fn format_stmt(stmt: &Stmt) -> String {
         Stmt::If(if_stmt) => format_if(if_stmt),
         Stmt::For(for_loop) => format_for(for_loop),
         Stmt::While(while_loop) => format_while(while_loop),
+        Stmt::Case(case_stmt) => format_case(case_stmt),
         Stmt::Break(n) => match n {
             Some(level) => format!("(break {})", level),
             None => "(break)".to_string(),
@@ -99,6 +100,7 @@ fn format_redirect(redir: &Redirect) -> String {
         RedirectKind::StdoutOverwrite => ">",
         RedirectKind::StdoutAppend => ">>",
         RedirectKind::Stdin => "<",
+        RedirectKind::HereDoc => "<<",
         RedirectKind::Stderr => "2>",
         RedirectKind::Both => "&>",
     };
@@ -152,7 +154,7 @@ fn format_if(if_stmt: &IfStmt) -> String {
 
 /// Format a for loop as an S-expression.
 fn format_for(for_loop: &ForLoop) -> String {
-    let iter = format_expr(&for_loop.iterable);
+    let items: Vec<String> = for_loop.items.iter().map(format_expr).collect();
     let body_stmts: Vec<String> = for_loop
         .body
         .iter()
@@ -160,9 +162,9 @@ fn format_for(for_loop: &ForLoop) -> String {
         .map(format_stmt)
         .collect();
     format!(
-        "(for {} {} (do {}))",
+        "(for {} (in {}) (do {}))",
         for_loop.variable,
-        iter,
+        items.join(" "),
         body_stmts.join(" ")
     )
 }
@@ -177,6 +179,29 @@ fn format_while(while_loop: &WhileLoop) -> String {
         .map(format_stmt)
         .collect();
     format!("(while {} (do {}))", cond, body_stmts.join(" "))
+}
+
+/// Format a case statement as an S-expression.
+fn format_case(case_stmt: &CaseStmt) -> String {
+    let expr = format_expr(&case_stmt.expr);
+    let branches: Vec<String> = case_stmt
+        .branches
+        .iter()
+        .map(format_case_branch)
+        .collect();
+    format!("(case {} ({}))", expr, branches.join(" "))
+}
+
+/// Format a case branch as an S-expression.
+fn format_case_branch(branch: &CaseBranch) -> String {
+    let patterns = branch.patterns.join("|");
+    let body_stmts: Vec<String> = branch
+        .body
+        .iter()
+        .filter(|s| !matches!(s, Stmt::Empty))
+        .map(format_stmt)
+        .collect();
+    format!("(branch \"{}\" ({}))", patterns, body_stmts.join(" "))
 }
 
 /// Format a tool definition as an S-expression.
@@ -206,8 +231,6 @@ fn format_param(param: &ParamDef) -> String {
             ParamType::Int => "int",
             ParamType::Float => "float",
             ParamType::Bool => "bool",
-            ParamType::Array => "array",
-            ParamType::Object => "object",
         })
         .unwrap_or("any");
 
@@ -258,6 +281,7 @@ pub fn format_expr(expr: &Expr) -> String {
         Expr::VarWithDefault { name, default } => {
             format!("(var-default {} \"{}\")", name, default)
         }
+        Expr::Arithmetic(expr_str) => format!("(arithmetic \"{}\")", expr_str),
     }
 }
 
@@ -316,25 +340,6 @@ fn format_value(value: &Value) -> String {
         Value::Int(n) => format!("(int {})", n),
         Value::Float(f) => format!("(float {})", f),
         Value::String(s) => format!("(string \"{}\")", escape_for_display(s)),
-        Value::Array(items) => {
-            if items.is_empty() {
-                "(array)".to_string()
-            } else {
-                let inner: Vec<String> = items.iter().map(format_expr).collect();
-                format!("(array {})", inner.join(" "))
-            }
-        }
-        Value::Object(pairs) => {
-            if pairs.is_empty() {
-                "(object)".to_string()
-            } else {
-                let inner: Vec<String> = pairs
-                    .iter()
-                    .map(|(k, v)| format!("(pair {} {})", k, format_expr(v)))
-                    .collect();
-                format!("(object {})", inner.join(" "))
-            }
-        }
     }
 }
 
@@ -344,7 +349,6 @@ fn format_varpath(path: &VarPath) -> String {
         .iter()
         .map(|seg| match seg {
             VarSegment::Field(name) => name.clone(),
-            VarSegment::Index(idx) => format!("[{}]", idx),
         })
         .collect::<Vec<_>>()
         .join(".")
@@ -365,20 +369,6 @@ mod tests {
     }
 
     #[test]
-    fn format_empty_array() {
-        assert_eq!(format_value(&Value::Array(vec![])), "(array)");
-    }
-
-    #[test]
-    fn format_array_with_items() {
-        let arr = Value::Array(vec![
-            Expr::Literal(Value::Int(1)),
-            Expr::Literal(Value::Int(2)),
-        ]);
-        assert_eq!(format_value(&arr), "(array (int 1) (int 2))");
-    }
-
-    #[test]
     fn format_varpath_simple() {
         let path = VarPath::simple("X");
         assert_eq!(format_varpath(&path), "X");
@@ -390,9 +380,8 @@ mod tests {
             segments: vec![
                 VarSegment::Field("VAR".to_string()),
                 VarSegment::Field("field".to_string()),
-                VarSegment::Index(0),
             ],
         };
-        assert_eq!(format_varpath(&path), "VAR.field.[0]");
+        assert_eq!(format_varpath(&path), "VAR.field");
     }
 }

@@ -26,6 +26,8 @@ pub enum Stmt {
     For(ForLoop),
     /// While loop: `while cond; do ...; done`
     While(WhileLoop),
+    /// Case statement: `case expr in pattern) ... ;; esac`
+    Case(CaseStmt),
     /// Break out of loop: `break` or `break N`
     Break(Option<usize>),
     /// Continue to next iteration: `continue` or `continue N`
@@ -82,7 +84,8 @@ pub struct IfStmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ForLoop {
     pub variable: String,
-    pub iterable: Expr,
+    /// Items to iterate over. Each is evaluated, then word-split for iteration.
+    pub items: Vec<Expr>,
     pub body: Vec<Stmt>,
 }
 
@@ -90,6 +93,32 @@ pub struct ForLoop {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WhileLoop {
     pub condition: Box<Expr>,
+    pub body: Vec<Stmt>,
+}
+
+/// Case statement for pattern matching.
+///
+/// ```kaish
+/// case $VAR in
+///     pattern1) commands ;;
+///     pattern2|pattern3) commands ;;
+///     *) default ;;
+/// esac
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseStmt {
+    /// The expression to match against
+    pub expr: Expr,
+    /// The pattern branches
+    pub branches: Vec<CaseBranch>,
+}
+
+/// A single branch in a case statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseBranch {
+    /// Glob patterns to match (separated by `|`)
+    pub patterns: Vec<String>,
+    /// Commands to execute if matched
     pub body: Vec<Stmt>,
 }
 
@@ -116,8 +145,6 @@ pub enum ParamType {
     Int,
     Float,
     Bool,
-    Array,
-    Object,
 }
 
 /// A command argument (positional or named).
@@ -149,6 +176,8 @@ pub enum RedirectKind {
     StdoutAppend,
     /// `<` stdin from file
     Stdin,
+    /// `<<EOF ... EOF` stdin from here-doc
+    HereDoc,
     /// `2>` stderr to file
     Stderr,
     /// `&>` both stdout and stderr to file
@@ -184,6 +213,8 @@ pub enum Expr {
     VarLength(String),
     /// Variable with default: `${VAR:-default}` - use default if VAR is unset or empty
     VarWithDefault { name: String, default: String },
+    /// Arithmetic expansion: `$((expr))` - evaluates to integer
+    Arithmetic(String),
 }
 
 /// Test expression for `[[ ... ]]` conditionals.
@@ -241,6 +272,10 @@ pub enum TestCmpOp {
 }
 
 /// A literal value.
+///
+/// Note: Arrays and objects are intentionally not supported. JSON data from
+/// MCP tools is stored as strings and processed with `jq`. For complex data
+/// manipulation, use Rhai integration.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Null,
@@ -248,11 +283,12 @@ pub enum Value {
     Int(i64),
     Float(f64),
     String(String),
-    Array(Vec<Expr>),
-    Object(Vec<(String, Expr)>),
 }
 
-/// Variable reference path: `${VAR.field[0].nested}`
+/// Variable reference path: `${VAR}` or `${?.field}` for special variables.
+///
+/// Simple variable references support only field access for special variables
+/// like `$?`. Array indexing is not supported - use `jq` for JSON processing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VarPath {
     pub segments: Vec<VarSegment>,
@@ -271,9 +307,8 @@ impl VarPath {
 #[derive(Debug, Clone, PartialEq)]
 pub enum VarSegment {
     /// Field access: `.field` or initial name
+    /// Only supported for special variables like `$?`
     Field(String),
-    /// Array index: `[0]`
-    Index(usize),
 }
 
 /// Part of an interpolated string.
@@ -333,6 +368,7 @@ impl fmt::Display for RedirectKind {
             RedirectKind::StdoutOverwrite => write!(f, ">"),
             RedirectKind::StdoutAppend => write!(f, ">>"),
             RedirectKind::Stdin => write!(f, "<"),
+            RedirectKind::HereDoc => write!(f, "<<"),
             RedirectKind::Stderr => write!(f, "2>"),
             RedirectKind::Both => write!(f, "&>"),
         }
