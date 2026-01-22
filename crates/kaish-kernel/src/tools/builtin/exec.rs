@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use tokio::process::Command;
 
-use crate::ast::{Expr, Value};
+use crate::ast::Value;
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
@@ -33,15 +33,15 @@ impl Tool for Exec {
             ))
             .param(ParamSchema::optional(
                 "argv",
-                "array",
-                Value::Array(vec![]),
-                "Argument vector",
+                "string",
+                Value::Null,
+                "Arguments as space-separated string",
             ))
             .param(ParamSchema::optional(
                 "env",
-                "object",
-                Value::Object(vec![]),
-                "Environment variables to add",
+                "string",
+                Value::Null,
+                "Environment variables as JSON string",
             ))
             .param(ParamSchema::optional(
                 "clear_env",
@@ -134,40 +134,44 @@ impl Tool for Exec {
 }
 
 /// Extract an array of strings from a Value.
+///
+/// Supports:
+/// - String: split on whitespace (shell-style)
+/// - JSON array string: parse and extract string items
 fn extract_string_array(value: &Value) -> Vec<String> {
     match value {
-        Value::Array(items) => items
-            .iter()
-            .filter_map(|expr| {
-                if let Expr::Literal(Value::String(s)) = expr {
-                    Some(s.clone())
-                } else if let Expr::Literal(Value::Int(i)) = expr {
-                    Some(i.to_string())
-                } else {
-                    None
+        Value::String(s) => {
+            // Try to parse as JSON array first
+            if s.starts_with('[') {
+                if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(s) {
+                    return arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect();
                 }
-            })
-            .collect(),
-        Value::String(s) => vec![s.clone()],
+            }
+            // Otherwise split on whitespace
+            s.split_whitespace().map(String::from).collect()
+        }
         _ => vec![],
     }
 }
 
-/// Extract a string→string mapping from an Object value.
+/// Extract a string→string mapping from a Value.
+///
+/// Supports:
+/// - String: parse as JSON object
 fn extract_string_object(value: &Value) -> Vec<(String, String)> {
     match value {
-        Value::Object(pairs) => pairs
-            .iter()
-            .filter_map(|(key, expr)| {
-                if let Expr::Literal(Value::String(v)) = expr {
-                    Some((key.clone(), v.clone()))
-                } else if let Expr::Literal(Value::Int(i)) = expr {
-                    Some((key.clone(), i.to_string()))
-                } else {
-                    None
-                }
-            })
-            .collect(),
+        Value::String(s) => {
+            if let Ok(obj) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s) {
+                return obj
+                    .iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect();
+            }
+            vec![]
+        }
         _ => vec![],
     }
 }
@@ -190,9 +194,10 @@ mod tests {
         let mut args = ToolArgs::new();
         args.named
             .insert("command".to_string(), Value::String("/bin/echo".into()));
+        // Args are now space-separated strings or JSON arrays
         args.named.insert(
             "argv".to_string(),
-            Value::Array(vec![Expr::Literal(Value::String("hello".into()))]),
+            Value::String("hello".into()),
         );
 
         let result = Exec.execute(args, &mut ctx).await;
@@ -220,12 +225,10 @@ mod tests {
         let mut args = ToolArgs::new();
         args.named
             .insert("command".to_string(), Value::String("/usr/bin/env".into()));
+        // Env is now a JSON object string
         args.named.insert(
             "env".to_string(),
-            Value::Object(vec![(
-                "MY_TEST_VAR".to_string(),
-                Expr::Literal(Value::String("test_value".into())),
-            )]),
+            Value::String(r#"{"MY_TEST_VAR": "test_value"}"#.into()),
         );
         args.flags.insert("clear_env".to_string());
 

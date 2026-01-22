@@ -56,8 +56,6 @@ fn is_truthy(value: &Value) -> bool {
         Value::Int(i) => *i != 0,
         Value::Float(f) => *f != 0.0,
         Value::String(s) => !s.is_empty() && s != "false" && s != "0",
-        Value::Array(arr) => !arr.is_empty(),
-        Value::Object(obj) => !obj.is_empty(),
     }
 }
 
@@ -157,20 +155,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_assert_array_truthy() {
+    async fn test_assert_json_string_truthy() {
         let mut ctx = make_ctx();
 
-        // Non-empty array is truthy
+        // Non-empty JSON string is truthy
         let mut args = ToolArgs::new();
-        args.positional.push(Value::Array(vec![crate::ast::Expr::Literal(Value::Int(1))]));
+        args.positional.push(Value::String("[1, 2]".into()));
         let result = Assert.execute(args, &mut ctx).await;
         assert!(result.ok());
 
-        // Empty array is falsy
+        // "[]" is a non-empty string so it's truthy
         let mut args = ToolArgs::new();
-        args.positional.push(Value::Array(vec![]));
+        args.positional.push(Value::String("[]".into()));
         let result = Assert.execute(args, &mut ctx).await;
-        assert!(!result.ok());
+        assert!(result.ok());
     }
 
     #[tokio::test]

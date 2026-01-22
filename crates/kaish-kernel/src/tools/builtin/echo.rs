@@ -20,7 +20,7 @@ impl Tool for Echo {
             .param(ParamSchema::optional(
                 "args",
                 "any",
-                Value::Array(vec![]),
+                Value::Null,
                 "Values to print",
             ))
             .param(ParamSchema::optional(
@@ -60,10 +60,6 @@ fn value_to_string(value: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
         Value::String(s) => s.clone(),
-        // Arrays and objects contain Expr nodes that need evaluation first.
-        // For echo purposes, just indicate their type.
-        Value::Array(arr) => format!("[array:{}]", arr.len()),
-        Value::Object(obj) => format!("{{object:{}}}", obj.len()),
     }
 }
 

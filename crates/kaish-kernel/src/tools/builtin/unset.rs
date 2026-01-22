@@ -52,8 +52,6 @@ fn value_to_string(value: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
         Value::String(s) => s.clone(),
-        Value::Array(_) => "[array]".to_string(),
-        Value::Object(_) => "{object}".to_string(),
     }
 }
 

@@ -105,7 +105,7 @@ mod tests {
                 .param(ParamSchema::optional(
                     "args",
                     "any",
-                    Value::Array(vec![]),
+                    Value::Null,
                     "Values to print",
                 )),
             ToolSchema::new("cat", "Read and output file contents")

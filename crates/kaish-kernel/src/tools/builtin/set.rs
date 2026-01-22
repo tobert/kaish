@@ -24,8 +24,8 @@ impl Tool for Set {
         ToolSchema::new("set", "Set shell options")
             .param(ParamSchema::optional(
                 "options",
-                "array",
-                Value::Array(vec![]),
+                "string",
+                Value::Null,
                 "Shell options (-e, +e, etc.)",
             ))
     }

@@ -60,11 +60,6 @@ fn value_to_string(value: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Null => "null".to_string(),
-        // Arrays and objects in tool args are evaluated to concrete values,
-        // so for now just indicate their type. Real JSON serialization would
-        // require evaluating the Expr nodes first.
-        Value::Array(_) => "[array]".to_string(),
-        Value::Object(_) => "{object}".to_string(),
     }
 }
 

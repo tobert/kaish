@@ -57,10 +57,6 @@ fn format_value(value: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
         Value::String(s) => format!("\"{}\"", s.replace('\"', "\\\"")),
-        Value::Array(_) | Value::Object(_) => {
-            let json = value_to_json(value);
-            serde_json::to_string(&json).unwrap_or_else(|_| "[complex]".to_string())
-        }
     }
 }
 
@@ -142,20 +138,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_vars_complex_values() {
+    async fn test_vars_json_string_values() {
         let mut ctx = make_ctx();
+        // JSON objects/arrays are now stored as strings
         ctx.scope.set(
             "OBJ",
-            Value::Object(vec![
-                ("key".into(), crate::ast::Expr::Literal(Value::String("val".into()))),
-            ]),
+            Value::String(r#"{"key": "val"}"#.into()),
         );
         ctx.scope.set(
             "ARR",
-            Value::Array(vec![
-                crate::ast::Expr::Literal(Value::Int(1)),
-                crate::ast::Expr::Literal(Value::Int(2)),
-            ]),
+            Value::String(r#"[1, 2]"#.into()),
         );
 
         let args = ToolArgs::new();
