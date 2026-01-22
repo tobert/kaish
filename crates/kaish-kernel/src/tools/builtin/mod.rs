@@ -19,6 +19,7 @@ mod ls;
 mod mkdir;
 mod mv;
 mod pwd;
+mod read;
 mod rm;
 mod scatter;
 mod set;
@@ -51,6 +52,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(mkdir::Mkdir);
     registry.register(mv::Mv);
     registry.register(pwd::Pwd);
+    registry.register(read::Read);
     registry.register(rm::Rm);
     registry.register(scatter::Scatter);
     registry.register(set::Set);
