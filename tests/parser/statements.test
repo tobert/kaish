@@ -150,6 +150,7 @@ set MSG = 'hello $NAME'
 
 # test: bash_assign_int
 # expect: ok
+# bourne: yes
 ---
 X=5
 ---
@@ -158,6 +159,7 @@ X=5
 
 # test: bash_assign_string
 # expect: ok
+# bourne: yes
 ---
 NAME="alice"
 ---
@@ -186,6 +188,7 @@ local MSG = "hello"
 
 # test: cmd_simple
 # expect: ok
+# bourne: yes
 ---
 echo
 ---
@@ -194,6 +197,7 @@ echo
 
 # test: cmd_positional_string
 # expect: ok
+# bourne: yes
 ---
 echo "hello"
 ---
@@ -202,6 +206,7 @@ echo "hello"
 
 # test: cmd_positional_multiple
 # expect: ok
+# bourne: yes
 ---
 echo "hello" "world"
 ---
@@ -246,6 +251,7 @@ grep "pattern" path="/src" context=3
 
 # test: pipe_two
 # expect: ok
+# bourne: yes
 ---
 a | b
 ---
@@ -293,6 +299,7 @@ a | b | c &
 
 # test: redirect_stdout
 # expect: ok
+# bourne: yes
 ---
 echo "hello" > /tmp/out
 ---
@@ -301,6 +308,7 @@ echo "hello" > /tmp/out
 
 # test: redirect_append
 # expect: ok
+# bourne: yes
 ---
 echo "more" >> /tmp/out
 ---
@@ -309,6 +317,7 @@ echo "more" >> /tmp/out
 
 # test: redirect_stdin
 # expect: ok
+# bourne: yes
 ---
 wc < /tmp/input
 ---
@@ -400,11 +409,11 @@ for X in ${LIST}; do
     echo ${X}
 done
 ---
-(for X (varref LIST) (do (cmd echo (pos (varref X)))))
+(for X (in (varref LIST)) (do (cmd echo (pos (varref X)))))
 ===
 
 # test: for_array_literal
-# expect: ok
+# expect: KNOWN_FAILURE arrays removed for bash compatibility
 ---
 for N in [1, 2, 3]; do
     echo ${N}
@@ -558,6 +567,7 @@ cat input | scatter | process | gather progress=true errors="/tmp/err"
 
 # test: test_file_exists
 # expect: ok
+# bourne: yes
 ---
 [[ -f /etc/hosts ]]
 ---
@@ -566,6 +576,7 @@ cat input | scatter | process | gather progress=true errors="/tmp/err"
 
 # test: test_file_dir
 # expect: ok
+# bourne: yes
 ---
 [[ -d /tmp ]]
 ---
@@ -574,6 +585,7 @@ cat input | scatter | process | gather progress=true errors="/tmp/err"
 
 # test: test_string_empty
 # expect: ok
+# bourne: yes
 ---
 [[ -z $VAR ]]
 ---
@@ -582,6 +594,7 @@ cat input | scatter | process | gather progress=true errors="/tmp/err"
 
 # test: test_string_nonempty
 # expect: ok
+# bourne: yes
 ---
 [[ -n $VAR ]]
 ---
@@ -590,6 +603,7 @@ cat input | scatter | process | gather progress=true errors="/tmp/err"
 
 # test: test_comparison_eq
 # expect: ok
+# bourne: yes
 ---
 [[ $X == "value" ]]
 ---
@@ -598,6 +612,7 @@ cat input | scatter | process | gather progress=true errors="/tmp/err"
 
 # test: test_comparison_neq
 # expect: ok
+# bourne: yes
 ---
 [[ $X != "other" ]]
 ---
@@ -626,6 +641,7 @@ cat input | scatter | process | gather progress=true errors="/tmp/err"
 
 # test: stmt_and_chain
 # expect: ok
+# bourne: yes
 ---
 cmd1 && cmd2
 ---
@@ -634,6 +650,7 @@ cmd1 && cmd2
 
 # test: stmt_or_chain
 # expect: ok
+# bourne: yes
 ---
 cmd1 || cmd2
 ---
@@ -642,6 +659,7 @@ cmd1 || cmd2
 
 # test: stmt_chain_three
 # expect: ok
+# bourne: yes
 ---
 mkdir dir && cd dir && init
 ---
@@ -650,6 +668,7 @@ mkdir dir && cd dir && init
 
 # test: stmt_chain_mixed
 # expect: ok
+# bourne: yes
 ---
 try-primary || try-fallback || echo "failed"
 ---
@@ -828,6 +847,7 @@ cmd [[1, 2], [3, 4]]
 
 # test: set_command_with_flag_e
 # expect: ok
+# bourne: yes
 ---
 set -e
 ---
@@ -881,6 +901,7 @@ set -e && echo "strict mode"
 
 # test: true_as_command
 # expect: ok
+# bourne: yes
 ---
 true
 ---
@@ -889,6 +910,7 @@ true
 
 # test: false_as_command
 # expect: ok
+# bourne: yes
 ---
 false
 ---
@@ -971,4 +993,70 @@ git commit -m "msg"
 cmd -- -not-a-flag
 ---
 (cmd cmd (pos (string "--")) (shortflag not-a-flag))
+===
+
+# ============================================================
+# CASE STATEMENTS
+# ============================================================
+
+# test: case_simple
+# expect: ok
+---
+case "hello" in
+    hello) echo "matched" ;;
+esac
+---
+(case (string "hello") ((branch "hello" ((cmd echo (pos (string "matched")))))))
+===
+
+# test: case_multiple_branches
+# expect: ok
+---
+case ${X} in
+    foo) echo "foo" ;;
+    bar) echo "bar" ;;
+esac
+---
+(case (varref X) ((branch "foo" ((cmd echo (pos (string "foo"))))) (branch "bar" ((cmd echo (pos (string "bar")))))))
+===
+
+# test: case_with_patterns
+# expect: ok
+---
+case "test.rs" in
+    "*.py") echo "Python" ;;
+    "*.rs") echo "Rust" ;;
+esac
+---
+(case (string "test.rs") ((branch "*.py" ((cmd echo (pos (string "Python"))))) (branch "*.rs" ((cmd echo (pos (string "Rust")))))))
+===
+
+# test: case_multiple_patterns
+# expect: ok
+---
+case "y" in
+    "y"|"yes") echo "yes" ;;
+esac
+---
+(case (string "y") ((branch "y|yes" ((cmd echo (pos (string "yes")))))))
+===
+
+# test: case_with_default
+# expect: ok
+---
+case "x" in
+    "*") echo "default" ;;
+esac
+---
+(case (string "x") ((branch "*" ((cmd echo (pos (string "default")))))))
+===
+
+# test: case_optional_lparen
+# expect: ok
+---
+case "x" in
+    (foo) echo "foo" ;;
+esac
+---
+(case (string "x") ((branch "foo" ((cmd echo (pos (string "foo")))))))
 ===

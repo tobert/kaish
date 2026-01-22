@@ -5,18 +5,63 @@
 use kaish_repl::Repl;
 
 /// Helper to run multiple lines through a REPL and collect outputs.
+///
+/// For multi-line constructs (if/fi, for/done, case/esac, while/done),
+/// lines are joined before parsing so that the parser can handle them
+/// as complete statements.
 fn run_script(script: &str) -> Vec<String> {
     let mut repl = Repl::new().expect("Failed to create REPL");
     let mut outputs = Vec::new();
 
+    // Collect lines, joining multi-line constructs
+    let mut current_block = String::new();
+    let mut block_depth: usize = 0;
+
     for line in script.lines() {
-        // Skip comments and empty lines
+        // Skip comments and empty lines at the top level
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        if block_depth == 0 && (trimmed.is_empty() || trimmed.starts_with('#')) {
             continue;
         }
 
-        match repl.process_line(line) {
+        // Track block depth for multi-line constructs
+        // Count opening keywords (if, for, while, case)
+        for word in trimmed.split_whitespace() {
+            match word {
+                "if" | "for" | "while" | "case" => block_depth += 1,
+                "fi" | "done" | "esac" => block_depth = block_depth.saturating_sub(1),
+                _ => {}
+            }
+            // Handle semi-terminated keywords like "fi;" or "done;"
+            let word_clean = word.trim_end_matches(';');
+            match word_clean {
+                "fi" | "done" | "esac" if word != word_clean => {
+                    // Already counted above, but with semicolon
+                }
+                _ => {}
+            }
+        }
+
+        // Append line to current block
+        if !current_block.is_empty() {
+            current_block.push('\n');
+        }
+        current_block.push_str(trimmed);
+
+        // If we're at top level (depth 0), process the block
+        if block_depth == 0 && !current_block.is_empty() {
+            match repl.process_line(&current_block) {
+                Ok(Some(output)) => outputs.push(output),
+                Ok(None) => {}
+                Err(e) => outputs.push(format!("ERROR: {}", e)),
+            }
+            current_block.clear();
+        }
+    }
+
+    // Process any remaining content
+    if !current_block.is_empty() {
+        match repl.process_line(&current_block) {
             Ok(Some(output)) => outputs.push(output),
             Ok(None) => {}
             Err(e) => outputs.push(format!("ERROR: {}", e)),
@@ -49,7 +94,7 @@ fn scope_basic_variable() {
 fn scope_variable_shadowing_in_loop() {
     let outputs = run_script(r#"
         set X = "outer"
-        for I in ["inner"]; do set X = ${I}; echo ${X}; done
+        for I in "inner"; do set X = ${I}; echo ${X}; done
         echo ${X}
     "#);
     // Note: Current behavior - X in loop is in inner frame, so outer X unchanged
@@ -59,12 +104,14 @@ fn scope_variable_shadowing_in_loop() {
 }
 
 #[test]
-fn scope_nested_object_access() {
+fn scope_json_as_string() {
+    // Objects are now stored as JSON strings, processed with jq
     let outputs = run_script(r#"
-        set DATA = {"user": {"name": "Alice"}}
-        echo ${DATA.user.name}
+        set DATA = '{"user": {"name": "Alice"}}'
+        echo ${DATA}
     "#);
-    assert!(outputs_contain(&outputs, &["Alice"]));
+    let joined = outputs.join("\n");
+    assert!(joined.contains("Alice"), "JSON string should contain Alice. Output was: {}", joined);
 }
 
 #[test]
@@ -128,21 +175,24 @@ fn interpolation_adjacent_no_space() {
 }
 
 #[test]
-fn interpolation_nested_path() {
+fn interpolation_json_string() {
+    // Objects are now JSON strings
     let outputs = run_script(r#"
-        set OBJ = {"inner": {"value": "nested"}}
-        echo "got: ${OBJ.inner.value}"
+        set OBJ = '{"inner": {"value": "nested"}}'
+        echo "got: ${OBJ}"
     "#);
-    assert!(outputs_contain(&outputs, &["got: nested"]));
+    let joined = outputs.join("\n");
+    assert!(joined.contains("nested"), "JSON string should contain nested. Output was: {}", joined);
 }
 
 #[test]
-fn interpolation_array_index() {
+fn interpolation_word_split() {
+    // Arrays are now space-separated strings, use word splitting
     let outputs = run_script(r#"
-        set ARR = ["zero", "one", "two"]
-        echo "index 1: ${ARR[1]}"
+        set ITEMS = "zero one two"
+        for I in ${ITEMS}; do echo ${I}; done
     "#);
-    assert!(outputs_contain(&outputs, &["index 1: one"]));
+    assert!(outputs_contain(&outputs, &["zero", "one", "two"]));
 }
 
 #[test]
@@ -286,22 +336,23 @@ fn expr_truthiness_null() {
 }
 
 #[test]
-fn expr_truthiness_empty_array() {
+fn expr_truthiness_empty_string_var() {
+    // Empty string variable is falsy
     let outputs = run_script(r#"
-        set EMPTY = []
-        if ${EMPTY}; then echo "wrong"; else echo "empty array falsy"; fi
+        set EMPTY = ""
+        if ${EMPTY}; then echo "wrong"; else echo "empty var falsy"; fi
     "#);
-    assert!(outputs_contain(&outputs, &["empty array falsy"]));
+    assert!(outputs_contain(&outputs, &["empty var falsy"]));
 }
 
 #[test]
-fn expr_truthiness_empty_object() {
-    // Objects are always truthy, even empty
+fn expr_truthiness_non_empty_string() {
+    // Non-empty strings are truthy
     let outputs = run_script(r#"
-        set OBJ = {}
-        if ${OBJ}; then echo "object truthy"; fi
+        set STR = "hello"
+        if ${STR}; then echo "string truthy"; fi
     "#);
-    assert!(outputs_contain(&outputs, &["object truthy"]));
+    assert!(outputs_contain(&outputs, &["string truthy"]));
 }
 
 // ============================================================================
@@ -339,8 +390,9 @@ fn control_nested_if() {
 
 #[test]
 fn control_for_loop() {
+    // POSIX-style word splitting: space-separated strings
     let outputs = run_script(r#"
-        for I in [1, 2, 3]; do echo ${I}; done
+        for I in "1 2 3"; do echo ${I}; done
     "#);
     let joined = outputs.join("\n");
     assert!(joined.contains("1"), "Output was: {}", joined);
@@ -351,15 +403,16 @@ fn control_for_loop() {
 #[test]
 fn control_nested_loops() {
     let outputs = run_script(r#"
-        for I in [1, 2]; do for J in ["a", "b"]; do echo "${I}-${J}"; done; done
+        for I in "1 2"; do for J in "a b"; do echo "${I}-${J}"; done; done
     "#);
     assert!(outputs_contain(&outputs, &["1-a", "1-b", "2-a", "2-b"]));
 }
 
 #[test]
 fn control_empty_loop() {
+    // Empty string produces no iterations
     let outputs = run_script(r#"
-        set EMPTY = []
+        set EMPTY = ""
         for I in ${EMPTY}; do echo "never"; done
         echo "after"
     "#);
@@ -369,8 +422,9 @@ fn control_empty_loop() {
 
 #[test]
 fn control_loop_with_conditional() {
+    // Note: word-split values are strings, compare with string "2"
     let outputs = run_script(r#"
-        for I in [1, 2, 3]; do if ${I} == 2; then echo "found two"; fi; done
+        for I in "1 2 3"; do if ${I} == "2"; then echo "found two"; fi; done
     "#);
     assert!(outputs_contain(&outputs, &["found two"]));
 }
@@ -380,27 +434,24 @@ fn control_loop_with_conditional() {
 // ============================================================================
 
 #[test]
-fn cmd_subst_in_condition() {
-    // KNOWN LIMITATION: $(builtin) where builtin is `true` or `false` doesn't parse
-    // as the parser expects a command name (identifier), not a keyword.
-    // This test uses echo to verify command substitution captures results.
+fn cmd_subst_basic() {
+    // Command substitution captures stdout as a string
     let outputs = run_script(r#"
         set R = $(echo "hello")
-        echo ${R.ok}
-        echo ${R.out}
+        echo ${R}
     "#);
     let joined = outputs.join("\n");
-    assert!(joined.contains("true"), "Should have ok=true. Output was: {}", joined);
-    assert!(joined.contains("hello"), "Should have out=hello. Output was: {}", joined);
+    assert!(joined.contains("hello"), "Should have captured output. Output was: {}", joined);
 }
 
 #[test]
-fn cmd_subst_result_access() {
+fn cmd_subst_last_result() {
+    // $? returns last command exit code
     let outputs = run_script(r#"
-        set RESULT = $(echo "hello")
-        echo ${RESULT.ok}
+        echo "hello"
+        echo "code was ${?}"
     "#);
-    assert!(outputs_contain(&outputs, &["true"]));
+    assert!(outputs_contain(&outputs, &["code was 0"]));
 }
 
 // ============================================================================
@@ -429,13 +480,13 @@ fn error_invalid_path() {
 }
 
 #[test]
-fn error_out_of_bounds() {
+fn error_invalid_field_access() {
     let outputs = run_script(r#"
-        set ARR = [1, 2]
-        echo ${ARR[99]}
+        set NUM = 42
+        echo ${NUM.field}
     "#);
     let joined = outputs.join("\n");
-    // Should error or return undefined
+    // Should error on field access of non-object
     assert!(joined.contains("ERROR") || joined.contains("undefined"));
 }
 
@@ -486,19 +537,22 @@ fn stress_many_variables() {
 }
 
 #[test]
-fn stress_deep_object() {
+fn stress_json_string() {
+    // Complex JSON stored as string
     let outputs = run_script(r#"
-        set D = {"a": {"b": {"c": {"d": "deep"}}}}
-        echo ${D.a.b.c.d}
+        set D = '{"a": {"b": {"c": {"d": "deep"}}}}'
+        echo ${D}
     "#);
-    assert!(outputs_contain(&outputs, &["deep"]));
+    let joined = outputs.join("\n");
+    assert!(joined.contains("deep"), "JSON string should contain deep. Output was: {}", joined);
 }
 
 #[test]
-fn stress_large_array() {
+fn stress_many_items() {
+    // POSIX word splitting with many items
     let outputs = run_script(r#"
-        set ARR = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        for I in ${ARR}; do echo ${I}; done
+        set ITEMS = "1 2 3 4 5 6 7 8 9 10"
+        for I in ${ITEMS}; do echo ${I}; done
     "#);
     assert!(outputs_contain(&outputs, &["1", "5", "10"]));
 }
@@ -597,4 +651,545 @@ fn introspect_mounts_json_format() {
     // Should contain JSON structure
     assert!(joined.contains("\"path\""), "mounts --json should have path. Output was: {}", joined);
     assert!(joined.contains("\"read_only\""), "mounts --json should have read_only. Output was: {}", joined);
+}
+
+// ============================================================================
+// Case Statement Integration Tests
+// ============================================================================
+
+#[test]
+fn case_simple_match() {
+    let outputs = run_script(r#"
+        set EXT = "rs"
+        case ${EXT} in
+            rs) echo "Rust" ;;
+            py) echo "Python" ;;
+        esac
+    "#);
+    assert!(outputs_contain(&outputs, &["Rust"]));
+}
+
+#[test]
+fn case_wildcard_match() {
+    let outputs = run_script(r#"
+        set FILE = "main.rs"
+        case ${FILE} in
+            *.py) echo "Python" ;;
+            *.rs) echo "Rust" ;;
+            *) echo "Unknown" ;;
+        esac
+    "#);
+    assert!(outputs_contain(&outputs, &["Rust"]));
+}
+
+#[test]
+fn case_default_fallthrough() {
+    let outputs = run_script(r#"
+        set FILE = "data.json"
+        case ${FILE} in
+            *.py) echo "Python" ;;
+            *.rs) echo "Rust" ;;
+            *) echo "Other" ;;
+        esac
+    "#);
+    assert!(outputs_contain(&outputs, &["Other"]));
+}
+
+#[test]
+fn case_no_match() {
+    let outputs = run_script(r#"
+        set X = "nomatch"
+        case ${X} in
+            foo) echo "foo" ;;
+            bar) echo "bar" ;;
+        esac
+        echo "done"
+    "#);
+    // Should not match anything, then continue to echo done
+    assert!(outputs_contain(&outputs, &["done"]));
+    let joined = outputs.join("\n");
+    assert!(!joined.contains("foo") && !joined.contains("bar"));
+}
+
+#[test]
+fn case_multiple_patterns() {
+    // Test multiple patterns with | separator
+    let outputs = run_script(r#"
+        set EXT = "ts"
+        case ${EXT} in
+            js|ts|jsx|tsx) echo "JavaScript family" ;;
+            py|pyc|pyw) echo "Python family" ;;
+            *) echo "other" ;;
+        esac
+    "#);
+    assert!(outputs_contain(&outputs, &["JavaScript family"]));
+}
+
+#[test]
+fn case_char_class() {
+    let outputs = run_script(r#"
+        set CH = "B"
+        case ${CH} in
+            [a-z]) echo "lower" ;;
+            [A-Z]) echo "upper" ;;
+            [0-9]) echo "digit" ;;
+        esac
+    "#);
+    assert!(outputs_contain(&outputs, &["upper"]));
+}
+
+#[test]
+fn case_question_mark() {
+    let outputs = run_script(r#"
+        set CODE = "A1"
+        case ${CODE} in
+            ??) echo "two chars" ;;
+            ???) echo "three chars" ;;
+        esac
+    "#);
+    assert!(outputs_contain(&outputs, &["two chars"]));
+}
+
+#[test]
+fn case_in_loop() {
+    let outputs = run_script(r#"
+        for F in "a.rs" "b.py" "c.go"; do
+            case ${F} in
+                *.rs) echo "rust" ;;
+                *.py) echo "python" ;;
+                *) echo "other" ;;
+            esac
+        done
+    "#);
+    let joined = outputs.join("\n");
+    assert!(joined.contains("rust"), "Should find rust");
+    assert!(joined.contains("python"), "Should find python");
+    assert!(joined.contains("other"), "Should find other");
+}
+
+#[test]
+fn case_nested_control_flow() {
+    let outputs = run_script(r#"
+        set X = "test"
+        case ${X} in
+            test)
+                if true; then
+                    echo "nested-if"
+                fi
+            ;;
+        esac
+    "#);
+    assert!(outputs_contain(&outputs, &["nested-if"]));
+}
+
+#[test]
+fn case_with_brace_expansion() {
+    let outputs = run_script(r#"
+        set FILE = "code.ts"
+        case ${FILE} in
+            *.{js,ts}) echo "JavaScript family" ;;
+            *.{c,cpp,h}) echo "C family" ;;
+            *) echo "Unknown" ;;
+        esac
+    "#);
+    assert!(outputs_contain(&outputs, &["JavaScript family"]));
+}
+
+// ============================================================================
+// Arithmetic Expression Integration Tests
+// ============================================================================
+
+#[test]
+fn arithmetic_simple() {
+    let outputs = run_script(r#"
+        set X = $((1 + 2))
+        echo ${X}
+    "#);
+    assert!(outputs_contain(&outputs, &["3"]));
+}
+
+#[test]
+fn arithmetic_with_variables() {
+    let outputs = run_script(r#"
+        set A = 10
+        set B = 20
+        set C = $((A + B))
+        echo ${C}
+    "#);
+    assert!(outputs_contain(&outputs, &["30"]));
+}
+
+#[test]
+fn arithmetic_complex() {
+    let outputs = run_script(r#"
+        set X = $((2 * (3 + 4) - 5))
+        echo ${X}
+    "#);
+    assert!(outputs_contain(&outputs, &["9"]));
+}
+
+#[test]
+fn arithmetic_negative() {
+    let outputs = run_script(r#"
+        set X = $((-5 + 3))
+        echo ${X}
+    "#);
+    assert!(outputs_contain(&outputs, &["-2"]));
+}
+
+#[test]
+fn arithmetic_modulo() {
+    let outputs = run_script(r#"
+        set X = $((17 % 5))
+        echo ${X}
+    "#);
+    assert!(outputs_contain(&outputs, &["2"]));
+}
+
+#[test]
+fn arithmetic_in_condition() {
+    let outputs = run_script(r#"
+        set A = 5
+        set B = 3
+        if [[ $((A + B)) -gt 5 ]]; then
+            echo "sum is big"
+        fi
+    "#);
+    assert!(outputs_contain(&outputs, &["sum is big"]));
+}
+
+#[test]
+fn arithmetic_in_loop() {
+    let outputs = run_script(r#"
+        set SUM = 0
+        for N in 1 2 3 4 5; do
+            set SUM = $((SUM + N))
+        done
+        echo ${SUM}
+    "#);
+    assert!(outputs_contain(&outputs, &["15"]));
+}
+
+#[test]
+fn arithmetic_division() {
+    let outputs = run_script(r#"
+        set X = $((100 / 4))
+        echo ${X}
+    "#);
+    assert!(outputs_contain(&outputs, &["25"]));
+}
+
+#[test]
+fn arithmetic_precedence() {
+    let outputs = run_script(r#"
+        set X = $((2 + 3 * 4))
+        echo ${X}
+    "#);
+    // Should be 14, not 20
+    assert!(outputs_contain(&outputs, &["14"]));
+}
+
+#[test]
+fn arithmetic_dollar_var() {
+    let outputs = run_script(r#"
+        set N = 7
+        set X = $(($N * 2))
+        echo ${X}
+    "#);
+    assert!(outputs_contain(&outputs, &["14"]));
+}
+
+// ============================================================================
+// Cross-Feature Tests
+// ============================================================================
+
+#[test]
+fn cross_case_with_arithmetic() {
+    let outputs = run_script(r#"
+        set N = $((2 + 3))
+        case ${N} in
+            5) echo "five" ;;
+            *) echo "other" ;;
+        esac
+    "#);
+    assert!(outputs_contain(&outputs, &["five"]));
+}
+
+#[test]
+fn cross_loop_with_arithmetic_and_case() {
+    let outputs = run_script(r#"
+        for I in 1 2 3; do
+            set DOUBLE = $((I * 2))
+            case ${DOUBLE} in
+                2) echo "one doubled" ;;
+                4) echo "two doubled" ;;
+                6) echo "three doubled" ;;
+            esac
+        done
+    "#);
+    let joined = outputs.join("\n");
+    assert!(joined.contains("one doubled"));
+    assert!(joined.contains("two doubled"));
+    assert!(joined.contains("three doubled"));
+}
+
+#[test]
+fn cross_condition_with_arithmetic() {
+    let outputs = run_script(r#"
+        set A = 10
+        set B = 5
+        if [[ $((A - B)) -gt 3 ]]; then
+            echo "difference is significant"
+        else
+            echo "difference is small"
+        fi
+    "#);
+    assert!(outputs_contain(&outputs, &["difference is significant"]));
+}
+
+#[test]
+fn cross_nested_case_statements() {
+    let outputs = run_script(r#"
+        set CATEGORY = "animal"
+        set TYPE = "dog"
+        case ${CATEGORY} in
+            animal)
+                case ${TYPE} in
+                    dog) echo "woof" ;;
+                    cat) echo "meow" ;;
+                esac
+            ;;
+            plant) echo "photosynthesis" ;;
+        esac
+    "#);
+    assert!(outputs_contain(&outputs, &["woof"]));
+}
+
+#[test]
+#[ignore = "loop scope isolation: set in loop doesn't modify outer variable"]
+fn cross_arithmetic_increment_pattern() {
+    // Note: This tests bash behavior where variables assigned in a loop
+    // persist after the loop. kaish uses frame-based scoping where
+    // `set` in a loop creates a local variable in the loop's frame.
+    let outputs = run_script(r#"
+        set COUNT = 0
+        for ITEM in "a" "b" "c"; do
+            set COUNT = $((COUNT + 1))
+        done
+        echo "total: ${COUNT}"
+    "#);
+    assert!(outputs_contain(&outputs, &["total: 3"]));
+}
+
+#[test]
+fn cross_conditional_arithmetic() {
+    let outputs = run_script(r#"
+        set X = 10
+        if [[ $X -gt 5 ]]; then
+            set Y = $((X * 2))
+        else
+            set Y = $((X / 2))
+        fi
+        echo ${Y}
+    "#);
+    assert!(outputs_contain(&outputs, &["20"]));
+}
+
+#[test]
+fn cross_case_in_if() {
+    let outputs = run_script(r#"
+        set FLAG = true
+        if ${FLAG}; then
+            case "test.rs" in
+                *.rs) echo "rust in if" ;;
+            esac
+        fi
+    "#);
+    assert!(outputs_contain(&outputs, &["rust in if"]));
+}
+
+// ============================================================================
+// String and Variable Edge Cases
+// ============================================================================
+
+#[test]
+#[ignore = "VarWithDefault not supported in interpolated strings"]
+fn var_with_default_unset() {
+    let outputs = run_script(r#"
+        echo "${UNDEFINED:-fallback}"
+    "#);
+    assert!(outputs_contain(&outputs, &["fallback"]));
+}
+
+#[test]
+fn var_with_default_set() {
+    let outputs = run_script(r#"
+        set DEFINED = "value"
+        echo "${DEFINED:-fallback}"
+    "#);
+    assert!(outputs_contain(&outputs, &["value"]));
+}
+
+#[test]
+#[ignore = "VarWithDefault not supported in interpolated strings"]
+fn var_with_default_empty() {
+    let outputs = run_script(r#"
+        set EMPTY = ""
+        echo "${EMPTY:-fallback}"
+    "#);
+    assert!(outputs_contain(&outputs, &["fallback"]));
+}
+
+#[test]
+#[ignore = "VarLength not supported in interpolated strings"]
+fn var_length() {
+    let outputs = run_script(r#"
+        set MSG = "hello"
+        echo "${#MSG}"
+    "#);
+    assert!(outputs_contain(&outputs, &["5"]));
+}
+
+#[test]
+#[ignore = "VarLength not supported in interpolated strings"]
+fn var_length_empty() {
+    let outputs = run_script(r#"
+        set EMPTY = ""
+        echo "${#EMPTY}"
+    "#);
+    assert!(outputs_contain(&outputs, &["0"]));
+}
+
+// ============================================================================
+// Control Flow Edge Cases
+// ============================================================================
+
+#[test]
+#[ignore = "while loop with arithmetic condition needs work"]
+fn while_loop_with_counter() {
+    let outputs = run_script(r#"
+        set I = 0
+        while [[ $I -lt 3 ]]; do
+            echo "iteration ${I}"
+            set I = $((I + 1))
+        done
+    "#);
+    let joined = outputs.join("\n");
+    assert!(joined.contains("iteration 0"));
+    assert!(joined.contains("iteration 1"));
+    assert!(joined.contains("iteration 2"));
+}
+
+#[test]
+#[ignore = "break/continue not properly handled in REPL execution"]
+fn break_in_loop() {
+    let outputs = run_script(r#"
+        for I in "1" "2" "3" "4" "5"; do
+            if [[ $I > "2" ]]; then
+                break
+            fi
+            echo ${I}
+        done
+        echo "done"
+    "#);
+    let joined = outputs.join("\n");
+    assert!(joined.contains("1"), "Should contain 1: {}", joined);
+    assert!(joined.contains("2"), "Should contain 2: {}", joined);
+    assert!(!joined.contains("3"), "Should not contain 3: {}", joined);
+    assert!(joined.contains("done"), "Should contain done: {}", joined);
+}
+
+#[test]
+#[ignore = "break/continue not properly handled in REPL execution"]
+fn continue_in_loop() {
+    let outputs = run_script(r#"
+        for I in "1" "2" "3" "4" "5"; do
+            if [[ $I == "3" ]]; then
+                continue
+            fi
+            echo ${I}
+        done
+    "#);
+    let joined = outputs.join("\n");
+    assert!(joined.contains("1"), "Should contain 1: {}", joined);
+    assert!(joined.contains("2"), "Should contain 2: {}", joined);
+    assert!(!joined.contains("\n3\n") && !joined.contains("3\n") && !joined.contains("\n3"), "Should not contain 3 as separate output: {}", joined);
+    assert!(joined.contains("4"), "Should contain 4: {}", joined);
+    assert!(joined.contains("5"), "Should contain 5: {}", joined);
+}
+
+#[test]
+fn elif_chain() {
+    let outputs = run_script(r#"
+        set X = 2
+        if [[ $X == 1 ]]; then
+            echo "one"
+        elif [[ $X == 2 ]]; then
+            echo "two"
+        elif [[ $X == 3 ]]; then
+            echo "three"
+        else
+            echo "other"
+        fi
+    "#);
+    assert!(outputs_contain(&outputs, &["two"]));
+}
+
+// ============================================================================
+// Glob Pattern Tests
+// ============================================================================
+
+#[test]
+fn glob_asterisk() {
+    let outputs = run_script(r#"
+        case "hello.txt" in
+            *.txt) echo "text file" ;;
+        esac
+    "#);
+    assert!(outputs_contain(&outputs, &["text file"]));
+}
+
+#[test]
+fn glob_question() {
+    let outputs = run_script(r#"
+        case "ab" in
+            ??) echo "two chars" ;;
+            ???) echo "three chars" ;;
+        esac
+    "#);
+    assert!(outputs_contain(&outputs, &["two chars"]));
+}
+
+#[test]
+fn glob_char_class_range() {
+    let outputs = run_script(r#"
+        case "5" in
+            [0-9]) echo "digit" ;;
+            [a-z]) echo "letter" ;;
+        esac
+    "#);
+    assert!(outputs_contain(&outputs, &["digit"]));
+}
+
+#[test]
+#[ignore = "negated char class [!...] needs Bang token in lexer"]
+fn glob_char_class_negated() {
+    let outputs = run_script(r#"
+        case "A" in
+            [!a-z]) echo "not lowercase" ;;
+            [a-z]) echo "lowercase" ;;
+        esac
+    "#);
+    assert!(outputs_contain(&outputs, &["not lowercase"]));
+}
+
+#[test]
+fn glob_brace_expansion() {
+    let outputs = run_script(r#"
+        case "file.go" in
+            *.{rs,go,py}) echo "supported lang" ;;
+            *) echo "unsupported" ;;
+        esac
+    "#);
+    assert!(outputs_contain(&outputs, &["supported lang"]));
 }

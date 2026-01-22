@@ -52,6 +52,15 @@ const KNOWN_FAILING_TESTS: &[&str] = &[
     // Other edge cases
     "named_arg_with_spaces_error",
     "double_dash_ends_flags",
+    // Array/object syntax removed (Phase 0 - bash compatibility)
+    "assign_array_empty",
+    "assign_array_ints",
+    "assign_array_mixed",
+    "assign_object_empty",
+    "for_array_literal",
+    "tool_typed_array",
+    "tool_typed_object",
+    "nested_array_not_test",
 ];
 
 #[test]
