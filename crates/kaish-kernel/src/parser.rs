@@ -4,9 +4,9 @@
 //! Uses chumsky for parser combinators with good error recovery.
 
 use crate::ast::{
-    Arg, Assignment, BinaryOp, Command, Expr, FileTestOp, ForLoop, IfStmt, ParamDef, ParamType,
-    Pipeline, Program, Redirect, RedirectKind, Stmt, StringPart, StringTestOp, TestCmpOp,
-    TestExpr, ToolDef, Value, VarPath, VarSegment, WhileLoop,
+    Arg, Assignment, BinaryOp, CaseBranch, CaseStmt, Command, Expr, FileTestOp, ForLoop, IfStmt,
+    ParamDef, ParamType, Pipeline, Program, Redirect, RedirectKind, Stmt, StringPart, StringTestOp,
+    TestCmpOp, TestExpr, ToolDef, Value, VarPath, VarSegment, WhileLoop,
 };
 use crate::lexer::{self, Token};
 use chumsky::{input::ValueInput, prelude::*};
@@ -35,20 +35,13 @@ fn parse_var_expr(raw: &str) -> Expr {
 
 /// Parse a raw `${...}` string into a VarPath.
 ///
-/// Handles paths like `${VAR}`, `${VAR.field}`, `${VAR[0]}`, `${?.ok}`.
+/// Handles paths like `${VAR}`, `${?.ok}`. Array indexing is not supported.
 fn parse_varpath(raw: &str) -> VarPath {
     let segments_strs = lexer::parse_var_ref(raw).unwrap_or_default();
     let segments = segments_strs
         .into_iter()
-        .map(|s| {
-            if s.starts_with('[') && s.ends_with(']') {
-                // Index segment like "[0]" - parse the number
-                let idx: usize = s[1..s.len() - 1].parse().unwrap_or(0);
-                VarSegment::Index(idx)
-            } else {
-                VarSegment::Field(s)
-            }
-        })
+        .filter(|s| !s.starts_with('['))  // Skip index segments
+        .map(VarSegment::Field)
         .collect();
     VarPath { segments }
 }
@@ -299,6 +292,7 @@ where
             if_parser(stmt.clone()).map(Stmt::If),
             for_parser(stmt.clone()).map(Stmt::For),
             while_parser(stmt.clone()).map(Stmt::While),
+            case_parser(stmt.clone()).map(Stmt::Case),
             break_stmt,
             continue_stmt,
             return_stmt,
@@ -392,7 +386,7 @@ where
         .boxed()
 }
 
-/// Tool definition: `tool NAME params { body }`
+/// Tool definition: `tool NAME params { body }` or `function NAME params { body }`
 fn tool_def_parser<'tokens, I, S>(
     stmt: S,
 ) -> impl Parser<'tokens, I, ToolDef, extra::Err<Rich<'tokens, Token, Span>>> + Clone
@@ -400,7 +394,7 @@ where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
     S: Parser<'tokens, I, Stmt, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
 {
-    just(Token::Tool)
+    choice((just(Token::Tool), just(Token::Function)))
         .ignore_then(ident_parser())
         .then(param_def_parser().repeated().collect::<Vec<_>>())
         .then_ignore(just(Token::LBrace))
@@ -447,8 +441,6 @@ where
         Token::TypeInt => ParamType::Int,
         Token::TypeFloat => ParamType::Float,
         Token::TypeBool => ParamType::Bool,
-        Token::TypeArray => ParamType::Array,
-        Token::TypeObject => ParamType::Object,
     }
     .labelled("type")
 }
@@ -569,7 +561,7 @@ where
     just(Token::For)
         .ignore_then(ident_parser())
         .then_ignore(just(Token::In))
-        .then(expr_parser())
+        .then(expr_parser().repeated().at_least(1).collect::<Vec<_>>())
         .then_ignore(just(Token::Semi).or_not())
         .then_ignore(just(Token::Newline).repeated())
         .then_ignore(just(Token::Do))
@@ -580,9 +572,9 @@ where
                 .map(|stmts| stmts.into_iter().filter(|s| !matches!(s, Stmt::Empty)).collect()),
         )
         .then_ignore(just(Token::Done))
-        .map(|((variable, iterable), body)| ForLoop {
+        .map(|((variable, items), body)| ForLoop {
             variable,
-            iterable,
+            items,
             body,
         })
         .labelled("for loop")
@@ -614,6 +606,105 @@ where
             body,
         })
         .labelled("while loop")
+        .boxed()
+}
+
+/// Case statement: `case expr in pattern) commands ;; esac`
+///
+/// Supports:
+/// - Single patterns: `pattern) commands ;;`
+/// - Multiple patterns: `pattern1|pattern2) commands ;;`
+/// - Optional leading `(` before patterns: `(pattern) commands ;;`
+fn case_parser<'tokens, I, S>(
+    stmt: S,
+) -> impl Parser<'tokens, I, CaseStmt, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+    S: Parser<'tokens, I, Stmt, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
+{
+    // Pattern part: individual tokens that make up a glob pattern
+    // e.g., "*.rs" is Star + Dot + Ident("rs")
+    let pattern_part = choice((
+        select! { Token::Ident(s) => s },
+        select! { Token::String(s) => s },
+        select! { Token::SingleString(s) => s },
+        select! { Token::Int(n) => n.to_string() },
+        select! { Token::Star => "*".to_string() },
+        select! { Token::Question => "?".to_string() },
+        select! { Token::Dot => ".".to_string() },
+        // Character class: [a-z], [!abc], etc.
+        just(Token::LBracket)
+            .ignore_then(
+                choice((
+                    select! { Token::Ident(s) => s },
+                    select! { Token::Int(n) => n.to_string() },
+                    just(Token::Colon).to(":".to_string()),
+                    // Range like a-z
+                    select! { Token::ShortFlag(s) => format!("-{}", s) },
+                ))
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<String>>()
+            )
+            .then_ignore(just(Token::RBracket))
+            .map(|parts| format!("[{}]", parts.join(""))),
+        // Brace expansion: {a,b,c} or {js,ts}
+        just(Token::LBrace)
+            .ignore_then(
+                choice((
+                    select! { Token::Ident(s) => s },
+                    select! { Token::Int(n) => n.to_string() },
+                ))
+                .separated_by(just(Token::Comma))
+                .at_least(1)
+                .collect::<Vec<String>>()
+            )
+            .then_ignore(just(Token::RBrace))
+            .map(|parts| format!("{{{}}}", parts.join(","))),
+    ));
+
+    // A complete pattern is one or more pattern parts joined together
+    // e.g., "*.rs" = Star + Dot + Ident
+    let pattern = pattern_part
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<String>>()
+        .map(|parts| parts.join(""))
+        .labelled("case pattern");
+
+    // Multiple patterns separated by pipe: `pattern1 | pattern2`
+    let patterns = pattern
+        .separated_by(just(Token::Pipe))
+        .at_least(1)
+        .collect::<Vec<String>>()
+        .labelled("case patterns");
+
+    // Branch: `[( ] patterns ) commands ;;`
+    let branch = just(Token::LParen)
+        .or_not()
+        .ignore_then(just(Token::Newline).repeated())
+        .ignore_then(patterns)
+        .then_ignore(just(Token::RParen))
+        .then_ignore(just(Token::Newline).repeated())
+        .then(
+            stmt.clone()
+                .repeated()
+                .collect::<Vec<_>>()
+                .map(|stmts| stmts.into_iter().filter(|s| !matches!(s, Stmt::Empty)).collect()),
+        )
+        .then_ignore(just(Token::DoubleSemi))
+        .then_ignore(just(Token::Newline).repeated())
+        .map(|(patterns, body)| CaseBranch { patterns, body })
+        .labelled("case branch");
+
+    just(Token::Case)
+        .ignore_then(expr_parser())
+        .then_ignore(just(Token::In))
+        .then_ignore(just(Token::Newline).repeated())
+        .then(branch.repeated().collect::<Vec<_>>())
+        .then_ignore(just(Token::Esac))
+        .map(|(expr, branches)| CaseStmt { expr, branches })
+        .labelled("case statement")
         .boxed()
 }
 
@@ -707,22 +798,32 @@ where
     .boxed()
 }
 
-/// Redirect: `> file`, `>> file`, `< file`, `2> file`, `&> file`
+/// Redirect: `> file`, `>> file`, `< file`, `<< heredoc`, `2> file`, `&> file`
 fn redirect_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Redirect, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    let kind = select! {
+    // Regular redirects: >, >>, <, 2>, &>
+    let regular_redirect = select! {
         Token::GtGt => RedirectKind::StdoutAppend,
         Token::Gt => RedirectKind::StdoutOverwrite,
         Token::Lt => RedirectKind::Stdin,
         Token::Stderr => RedirectKind::Stderr,
         Token::Both => RedirectKind::Both,
-    };
+    }
+    .then(primary_expr_parser())
+    .map(|(kind, target)| Redirect { kind, target });
 
-    kind.then(primary_expr_parser())
-        .map(|(kind, target)| Redirect { kind, target })
+    // Here-doc redirect: << content
+    let heredoc_redirect = just(Token::HereDocStart)
+        .ignore_then(select! { Token::HereDoc(content) => content })
+        .map(|content| Redirect {
+            kind: RedirectKind::HereDoc,
+            target: Expr::Literal(Value::String(content)),
+        });
+
+    choice((heredoc_redirect, regular_redirect))
         .labelled("redirect")
         .boxed()
 }
@@ -800,10 +901,12 @@ where
         .boxed()
 }
 
-/// Condition parser: supports comparisons, && and || operators.
+/// Condition parser: supports [[ ]] test expressions, comparisons, && and || operators.
 ///
 /// Grammar:
-///   condition = or_expr
+///   condition = test_expr | simple_condition
+///   test_expr = "[[ " test_body " ]]"
+///   simple_condition = or_expr
 ///   or_expr   = and_expr { "||" and_expr }
 ///   and_expr  = cmp_expr { "&&" cmp_expr }
 ///   cmp_expr  = value [ comp_op value ]
@@ -812,6 +915,10 @@ fn condition_parser<'tokens, I>(
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
+    // [[ ]] test expression - wrap as Expr::Test
+    let test_expr_condition = test_expr_stmt_parser()
+        .map(|test| Expr::Test(Box::new(test)));
+
     let comparison_op = select! {
         Token::EqEq => BinaryOp::Eq,
         Token::NotEq => BinaryOp::NotEq,
@@ -846,7 +953,7 @@ where
     );
 
     // or_expr: and_expr { "||" and_expr }
-    and_expr
+    let simple_condition = and_expr
         .clone()
         .foldl(
             just(Token::Or).ignore_then(and_expr).repeated(),
@@ -855,7 +962,10 @@ where
                 op: BinaryOp::Or,
                 right: Box::new(right),
             },
-        )
+        );
+
+    // Accept either [[ ]] test expressions or simple conditions
+    choice((test_expr_condition, simple_condition))
         .labelled("condition")
         .boxed()
 }
@@ -886,9 +996,15 @@ where
         Token::VarLength(name) => Expr::VarLength(name),
     };
 
+    // Arithmetic expression: $((expr)) - preprocessed into Arithmetic token
+    let arithmetic = select! {
+        Token::Arithmetic(expr_str) => Expr::Arithmetic(expr_str),
+    };
+
     recursive(|expr| {
         choice((
             positional.clone(),
+            arithmetic.clone(),
             cmd_subst_parser(expr.clone()),
             var_expr_parser(),
             interpolated_string_parser(),
@@ -1036,122 +1152,8 @@ where
             Token::Int(n) => Value::Int(n),
             Token::Float(f) => Value::Float(f),
         },
-        array_parser(),
-        object_parser(),
     ))
     .labelled("literal")
-    .boxed()
-}
-
-/// Array: `[value, value, ...]` - supports nested arrays and objects.
-fn array_parser<'tokens, I>(
-) -> impl Parser<'tokens, I, Value, extra::Err<Rich<'tokens, Token, Span>>> + Clone
-where
-    I: ValueInput<'tokens, Token = Token, Span = Span>,
-{
-    recursive(|array| {
-        // Object parser that can use nested arrays
-        let nested_object = recursive(|obj| {
-            let value_in_obj = choice((
-                select! {
-                    Token::True => Expr::Literal(Value::Bool(true)),
-                    Token::False => Expr::Literal(Value::Bool(false)),
-                    Token::Int(n) => Expr::Literal(Value::Int(n)),
-                    Token::Float(f) => Expr::Literal(Value::Float(f)),
-                    Token::String(s) => Expr::Literal(Value::String(s)),
-                    Token::VarRef(raw) => Expr::VarRef(parse_varpath(&raw)),
-                },
-                array.clone().map(Expr::Literal),
-                obj.map(Expr::Literal),
-            ));
-
-            let pair = select! { Token::String(s) => s }
-                .then_ignore(just(Token::Colon))
-                .then(value_in_obj);
-
-            pair.separated_by(just(Token::Comma))
-                .allow_trailing()
-                .collect::<Vec<_>>()
-                .delimited_by(just(Token::LBrace), just(Token::RBrace))
-                .map(Value::Object)
-        });
-
-        let element = choice((
-            select! {
-                Token::True => Expr::Literal(Value::Bool(true)),
-                Token::False => Expr::Literal(Value::Bool(false)),
-                Token::Int(n) => Expr::Literal(Value::Int(n)),
-                Token::Float(f) => Expr::Literal(Value::Float(f)),
-                Token::String(s) => Expr::Literal(Value::String(s)),
-                Token::VarRef(raw) => Expr::VarRef(parse_varpath(&raw)),
-            },
-            array.clone().map(Expr::Literal),
-            nested_object.map(Expr::Literal),
-        ));
-
-        element
-            .separated_by(just(Token::Comma))
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(just(Token::LBracket), just(Token::RBracket))
-            .map(Value::Array)
-    })
-}
-
-/// Object: `{"key": value, ...}` - supports nested objects and arrays.
-fn object_parser<'tokens, I>(
-) -> impl Parser<'tokens, I, Value, extra::Err<Rich<'tokens, Token, Span>>> + Clone
-where
-    I: ValueInput<'tokens, Token = Token, Span = Span>,
-{
-    recursive(|obj| {
-        // Array parser that can use nested objects
-        let nested_array = recursive(|arr| {
-            let value_in_arr = choice((
-                select! {
-                    Token::True => Expr::Literal(Value::Bool(true)),
-                    Token::False => Expr::Literal(Value::Bool(false)),
-                    Token::Int(n) => Expr::Literal(Value::Int(n)),
-                    Token::Float(f) => Expr::Literal(Value::Float(f)),
-                    Token::String(s) => Expr::Literal(Value::String(s)),
-                    Token::VarRef(raw) => Expr::VarRef(parse_varpath(&raw)),
-                },
-                arr.map(Expr::Literal),
-                obj.clone().map(Expr::Literal),
-            ));
-
-            value_in_arr
-                .separated_by(just(Token::Comma))
-                .allow_trailing()
-                .collect::<Vec<_>>()
-                .delimited_by(just(Token::LBracket), just(Token::RBracket))
-                .map(Value::Array)
-        });
-
-        let value_expr = choice((
-            select! {
-                Token::True => Expr::Literal(Value::Bool(true)),
-                Token::False => Expr::Literal(Value::Bool(false)),
-                Token::Int(n) => Expr::Literal(Value::Int(n)),
-                Token::Float(f) => Expr::Literal(Value::Float(f)),
-                Token::String(s) => Expr::Literal(Value::String(s)),
-                Token::VarRef(raw) => Expr::VarRef(parse_varpath(&raw)),
-            },
-            nested_array.map(Expr::Literal),
-            obj.clone().map(Expr::Literal),
-        ));
-
-        let pair = select! { Token::String(s) => s }
-            .then_ignore(just(Token::Colon))
-            .then(value_expr);
-
-        pair.separated_by(just(Token::Comma))
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(just(Token::LBrace), just(Token::RBrace))
-            .map(Value::Object)
-            .labelled("object")
-    })
     .boxed()
 }
 
@@ -1309,15 +1311,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_array_literal() {
-        let result = parse("cmd [1, 2, 3]");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn parse_object_literal() {
-        let result = parse(r#"cmd {"key": "value"}"#);
-        assert!(result.is_ok());
+    fn parse_brackets_not_array_literal() {
+        // Array literals are no longer supported, [ is just a regular char
+        let result = parse("cmd [1");
+        // This should fail or parse unexpectedly - arrays are removed
+        // Just verify we don't crash
+        let _ = result;
     }
 
     #[test]
@@ -1484,8 +1483,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_nested_array() {
-        let result = parse("cmd [[1, 2], [3, 4]]");
+    fn parse_json_as_string_arg() {
+        // JSON arrays/objects should be passed as string arguments
+        let result = parse(r#"cmd '[[1, 2], [3, 4]]'"#);
         assert!(result.is_ok());
     }
 
@@ -1684,10 +1684,8 @@ mod tests {
             Stmt::Command(cmd) => match &cmd.args[0] {
                 Arg::Positional(Expr::VarRef(path)) => {
                     assert_eq!(path.segments.len(), 1);
-                    match &path.segments[0] {
-                        VarSegment::Field(name) => assert_eq!(name, "MESSAGE"),
-                        other => panic!("expected field, got {:?}", other),
-                    }
+                    let VarSegment::Field(name) = &path.segments[0];
+                    assert_eq!(name, "MESSAGE");
                 }
                 other => panic!("expected varref, got {:?}", other),
             },
@@ -1702,13 +1700,10 @@ mod tests {
             Stmt::Command(cmd) => match &cmd.args[0] {
                 Arg::Positional(Expr::VarRef(path)) => {
                     assert_eq!(path.segments.len(), 2);
-                    match (&path.segments[0], &path.segments[1]) {
-                        (VarSegment::Field(a), VarSegment::Field(b)) => {
-                            assert_eq!(a, "RESULT");
-                            assert_eq!(b, "data");
-                        }
-                        other => panic!("expected two fields, got {:?}", other),
-                    }
+                    let VarSegment::Field(a) = &path.segments[0];
+                    let VarSegment::Field(b) = &path.segments[1];
+                    assert_eq!(a, "RESULT");
+                    assert_eq!(b, "data");
                 }
                 other => panic!("expected varref, got {:?}", other),
             },
@@ -1717,16 +1712,16 @@ mod tests {
     }
 
     #[test]
-    fn value_varref_index_preserved() {
+    fn value_varref_index_ignored() {
+        // Index segments are no longer supported - they're filtered out by parse_varpath
         let result = parse("echo ${ITEMS[0]}").unwrap();
         match &result.statements[0] {
             Stmt::Command(cmd) => match &cmd.args[0] {
                 Arg::Positional(Expr::VarRef(path)) => {
-                    assert_eq!(path.segments.len(), 2);
-                    match &path.segments[1] {
-                        VarSegment::Index(i) => assert_eq!(*i, 0),
-                        other => panic!("expected index, got {:?}", other),
-                    }
+                    // Index segment [0] is skipped, only ITEMS remains
+                    assert_eq!(path.segments.len(), 1);
+                    let VarSegment::Field(name) = &path.segments[0];
+                    assert_eq!(name, "ITEMS");
                 }
                 other => panic!("expected varref, got {:?}", other),
             },
@@ -1741,70 +1736,10 @@ mod tests {
             Stmt::Command(cmd) => match &cmd.args[0] {
                 Arg::Positional(Expr::VarRef(path)) => {
                     assert_eq!(path.segments.len(), 2);
-                    match &path.segments[0] {
-                        VarSegment::Field(name) => assert_eq!(name, "?"),
-                        other => panic!("expected ?, got {:?}", other),
-                    }
+                    let VarSegment::Field(name) = &path.segments[0];
+                    assert_eq!(name, "?");
                 }
                 other => panic!("expected varref, got {:?}", other),
-            },
-            other => panic!("expected command, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn value_object_keys_preserved() {
-        let result = parse(r#"cmd {"host": "localhost"}"#).unwrap();
-        match &result.statements[0] {
-            Stmt::Command(cmd) => match &cmd.args[0] {
-                Arg::Positional(Expr::Literal(Value::Object(pairs))) => {
-                    assert_eq!(pairs.len(), 1);
-                    assert_eq!(pairs[0].0, "host");
-                }
-                other => panic!("expected object, got {:?}", other),
-            },
-            other => panic!("expected command, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn value_object_values_preserved() {
-        let result = parse(r#"cmd {"key": "value"}"#).unwrap();
-        match &result.statements[0] {
-            Stmt::Command(cmd) => match &cmd.args[0] {
-                Arg::Positional(Expr::Literal(Value::Object(pairs))) => {
-                    match &pairs[0].1 {
-                        Expr::Literal(Value::String(s)) => assert_eq!(s, "value"),
-                        other => panic!("expected string value, got {:?}", other),
-                    }
-                }
-                other => panic!("expected object, got {:?}", other),
-            },
-            other => panic!("expected command, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn value_array_ints_preserved() {
-        let result = parse("cmd [1, 2, 3]").unwrap();
-        match &result.statements[0] {
-            Stmt::Command(cmd) => match &cmd.args[0] {
-                Arg::Positional(Expr::Literal(Value::Array(items))) => {
-                    assert_eq!(items.len(), 3);
-                    match (&items[0], &items[1], &items[2]) {
-                        (
-                            Expr::Literal(Value::Int(a)),
-                            Expr::Literal(Value::Int(b)),
-                            Expr::Literal(Value::Int(c)),
-                        ) => {
-                            assert_eq!(*a, 1);
-                            assert_eq!(*b, 2);
-                            assert_eq!(*c, 3);
-                        }
-                        other => panic!("expected three ints, got {:?}", other),
-                    }
-                }
-                other => panic!("expected array, got {:?}", other),
             },
             other => panic!("expected command, got {:?}", other),
         }
@@ -1965,10 +1900,8 @@ mod tests {
                     match &parts[1] {
                         StringPart::Var(path) => {
                             assert_eq!(path.segments.len(), 1);
-                            match &path.segments[0] {
-                                VarSegment::Field(name) => assert_eq!(name, "NAME"),
-                                other => panic!("expected field, got {:?}", other),
-                            }
+                            let VarSegment::Field(name) = &path.segments[0];
+                            assert_eq!(name, "NAME");
                         }
                         other => panic!("expected var, got {:?}", other),
                     }
@@ -1996,91 +1929,6 @@ mod tests {
                     assert!(matches!(&parts[2], StringPart::Var(_)));
                 }
                 other => panic!("expected interpolated, got {:?}", other),
-            },
-            other => panic!("expected command, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn parse_nested_object() {
-        let result = parse(r#"cmd {"config": {"nested": true}}"#).unwrap();
-        match &result.statements[0] {
-            Stmt::Command(cmd) => match &cmd.args[0] {
-                Arg::Positional(Expr::Literal(Value::Object(pairs))) => {
-                    assert_eq!(pairs.len(), 1);
-                    assert_eq!(pairs[0].0, "config");
-                    match &pairs[0].1 {
-                        Expr::Literal(Value::Object(inner)) => {
-                            assert_eq!(inner.len(), 1);
-                            assert_eq!(inner[0].0, "nested");
-                        }
-                        other => panic!("expected nested object, got {:?}", other),
-                    }
-                }
-                other => panic!("expected object, got {:?}", other),
-            },
-            other => panic!("expected command, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn parse_deeply_nested_object() {
-        let result = parse(r#"cmd {"a": {"b": {"c": 1}}}"#).unwrap();
-        match &result.statements[0] {
-            Stmt::Command(cmd) => match &cmd.args[0] {
-                Arg::Positional(Expr::Literal(Value::Object(pairs))) => {
-                    // Just check it parses successfully with nesting
-                    assert_eq!(pairs.len(), 1);
-                    assert_eq!(pairs[0].0, "a");
-                }
-                other => panic!("expected object, got {:?}", other),
-            },
-            other => panic!("expected command, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn parse_object_in_array() {
-        let result = parse(r#"cmd [{"a": 1}, {"b": 2}]"#).unwrap();
-        match &result.statements[0] {
-            Stmt::Command(cmd) => match &cmd.args[0] {
-                Arg::Positional(Expr::Literal(Value::Array(items))) => {
-                    assert_eq!(items.len(), 2);
-                    match &items[0] {
-                        Expr::Literal(Value::Object(pairs)) => {
-                            assert_eq!(pairs[0].0, "a");
-                        }
-                        other => panic!("expected object, got {:?}", other),
-                    }
-                    match &items[1] {
-                        Expr::Literal(Value::Object(pairs)) => {
-                            assert_eq!(pairs[0].0, "b");
-                        }
-                        other => panic!("expected object, got {:?}", other),
-                    }
-                }
-                other => panic!("expected array, got {:?}", other),
-            },
-            other => panic!("expected command, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn parse_array_in_object() {
-        let result = parse(r#"cmd {"items": [1, 2, 3]}"#).unwrap();
-        match &result.statements[0] {
-            Stmt::Command(cmd) => match &cmd.args[0] {
-                Arg::Positional(Expr::Literal(Value::Object(pairs))) => {
-                    assert_eq!(pairs.len(), 1);
-                    assert_eq!(pairs[0].0, "items");
-                    match &pairs[0].1 {
-                        Expr::Literal(Value::Array(items)) => {
-                            assert_eq!(items.len(), 3);
-                        }
-                        other => panic!("expected array, got {:?}", other),
-                    }
-                }
-                other => panic!("expected object, got {:?}", other),
             },
             other => panic!("expected command, got {:?}", other),
         }
@@ -2345,13 +2193,13 @@ mod tests {
         let script = r#"
 set NAME = "kaish"
 set VERSION = 1
-set CONFIG = {"debug": true, "timeout": 30}
-set ITEMS = ["alpha", "beta", "gamma"]
+set TIMEOUT = 30
+set ITEMS = "alpha beta gamma"
 
 echo "Starting ${NAME} v${VERSION}"
 cat "README.md" | grep pattern="install" | head count=5
-fetch url="https://api.example.com/status" timeout=${CONFIG.timeout} > "/scratch/status.json"
-echo "First item: ${ITEMS[0]}"
+fetch url="https://api.example.com/status" timeout=${TIMEOUT} > "/scratch/status.json"
+echo "Items: ${ITEMS}"
 "#;
         let result = parse(script).unwrap();
         let stmts: Vec<_> = result.statements.iter()
@@ -2361,12 +2209,12 @@ echo "First item: ${ITEMS[0]}"
         assert_eq!(stmts.len(), 8);
         assert!(matches!(stmts[0], Stmt::Assignment(_)));  // set NAME
         assert!(matches!(stmts[1], Stmt::Assignment(_)));  // set VERSION
-        assert!(matches!(stmts[2], Stmt::Assignment(_)));  // set CONFIG
+        assert!(matches!(stmts[2], Stmt::Assignment(_)));  // set TIMEOUT
         assert!(matches!(stmts[3], Stmt::Assignment(_)));  // set ITEMS
-        assert!(matches!(stmts[4], Stmt::Command(_)));     // echo
+        assert!(matches!(stmts[4], Stmt::Command(_)));     // echo "Starting..."
         assert!(matches!(stmts[5], Stmt::Pipeline(_)));    // cat | grep | head
         assert!(matches!(stmts[6], Stmt::Command(_)));     // fetch (with redirect)
-        assert!(matches!(stmts[7], Stmt::Command(_)));     // echo
+        assert!(matches!(stmts[7], Stmt::Command(_)));     // echo "Items: ${ITEMS}"
     }
 
     /// Level 2: Script with conditionals
@@ -2451,13 +2299,13 @@ tool greet name: string prefix: string = "Hello" {
     echo "${prefix}, ${name}!"
 }
 
-tool fetch-all urls: array {
+tool fetch-all urls: string {
     for URL in ${urls}; do
         fetch url=${URL}
     done
 }
 
-set USERS = ["alice", "bob", "charlie"]
+set USERS = "alice bob charlie"
 
 for USER in ${USERS}; do
     greet name=${USER}
@@ -2522,17 +2370,15 @@ long-running-task &
         }
     }
 
-    /// Level 4: Complex nested structures
+    /// Level 4: Complex nested control flow
     #[test]
     fn script_level4_complex_nesting() {
         let script = r#"
-set SERVERS = [{"host": "prod-1", "port": 8080, "tags": ["primary", "us-west"]}, {"host": "prod-2", "port": 8080, "tags": ["replica", "us-east"]}]
-
 set RESULT = $(cat "config.json" | jq query=".servers" | validate schema="server-schema.json")
 
-if $(ping host=${HOST}) && ${RESULT.ok}; then
-    for SERVER in ${SERVERS}; do
-        deploy target=${SERVER.host} port=${SERVER.port}
+if $(ping host=${HOST}) && ${RESULT}; then
+    for SERVER in "prod-1 prod-2"; do
+        deploy target=${SERVER} port=8080
         if ${?.code} != 0; then
             notify channel="ops" message="Deploy failed"
         fi
@@ -2544,32 +2390,10 @@ fi
             .filter(|s| !matches!(s, Stmt::Empty))
             .collect();
 
-        assert_eq!(stmts.len(), 3);
-
-        // Complex array of objects
-        match stmts[0] {
-            Stmt::Assignment(a) => {
-                assert_eq!(a.name, "SERVERS");
-                match &a.value {
-                    Expr::Literal(Value::Array(items)) => {
-                        assert_eq!(items.len(), 2);
-                        // First object has nested array
-                        match &items[0] {
-                            Expr::Literal(Value::Object(pairs)) => {
-                                assert_eq!(pairs.len(), 3);
-                                assert_eq!(pairs[2].0, "tags");
-                            }
-                            other => panic!("expected object, got {:?}", other),
-                        }
-                    }
-                    other => panic!("expected array, got {:?}", other),
-                }
-            }
-            other => panic!("expected assignment, got {:?}", other),
-        }
+        assert_eq!(stmts.len(), 2);
 
         // Command substitution with pipeline
-        match stmts[1] {
+        match stmts[0] {
             Stmt::Assignment(a) => {
                 assert_eq!(a.name, "RESULT");
                 match &a.value {
@@ -2583,7 +2407,7 @@ fi
         }
 
         // If with && condition, containing for loop with nested if
-        match stmts[2] {
+        match stmts[1] {
             Stmt::If(if_stmt) => {
                 match if_stmt.condition.as_ref() {
                     Expr::BinaryOp { op, .. } => assert_eq!(*op, BinaryOp::And),
@@ -2606,11 +2430,6 @@ fi
     #[test]
     fn script_level5_edge_cases() {
         let script = r#"
-set EMPTY_ARRAY = []
-set EMPTY_OBJECT = {}
-set NESTED = [[1, 2], [3, 4]]
-set DEEP = {"a": {"b": {"c": {"d": 1}}}}
-
 echo ""
 echo "quotes: \"nested\" here"
 echo "escapes: \n\t\r\\"
@@ -2620,7 +2439,7 @@ set X = -99999
 set Y = 3.14159265358979
 set Z = -0.001
 
-cmd a=1 b="two" c=true d=false e=null f=[1,2,3] g={"k":"v"}
+cmd a=1 b="two" c=true d=false e=null
 
 if true; then
     if false; then
@@ -2630,15 +2449,15 @@ if true; then
     fi
 fi
 
-for I in ${EMPTY_ARRAY}; do
-    echo "never"
+for I in "a b c"; do
+    echo ${I}
 done
 
 tool no-params {
     echo "no params"
 }
 
-tool all-types a: string b: int c: float d: bool e: array f: object {
+tool all-types a: string b: int c: float d: bool {
     echo "typed"
 }
 
@@ -2653,52 +2472,8 @@ cmd < "input.txt"
             .filter(|s| !matches!(s, Stmt::Empty))
             .collect();
 
-        // Just verify it parses without error - this is the stress test
-        assert!(stmts.len() >= 15, "expected many statements, got {}", stmts.len());
-
-        // Verify specific edge cases
-
-        // Empty array
-        match stmts[0] {
-            Stmt::Assignment(a) => match &a.value {
-                Expr::Literal(Value::Array(items)) => assert_eq!(items.len(), 0),
-                other => panic!("expected empty array, got {:?}", other),
-            },
-            other => panic!("expected assignment, got {:?}", other),
-        }
-
-        // Empty object
-        match stmts[1] {
-            Stmt::Assignment(a) => match &a.value {
-                Expr::Literal(Value::Object(pairs)) => assert_eq!(pairs.len(), 0),
-                other => panic!("expected empty object, got {:?}", other),
-            },
-            other => panic!("expected assignment, got {:?}", other),
-        }
-
-        // Nested arrays
-        match stmts[2] {
-            Stmt::Assignment(a) => match &a.value {
-                Expr::Literal(Value::Array(items)) => {
-                    assert_eq!(items.len(), 2);
-                    assert!(matches!(&items[0], Expr::Literal(Value::Array(_))));
-                }
-                other => panic!("expected nested array, got {:?}", other),
-            },
-            other => panic!("expected assignment, got {:?}", other),
-        }
-
-        // Deeply nested object
-        match stmts[3] {
-            Stmt::Assignment(a) => match &a.value {
-                Expr::Literal(Value::Object(pairs)) => {
-                    assert_eq!(pairs.len(), 1);
-                    assert_eq!(pairs[0].0, "a");
-                }
-                other => panic!("expected nested object, got {:?}", other),
-            },
-            other => panic!("expected assignment, got {:?}", other),
-        }
+        // Verify it parses without error
+        assert!(stmts.len() >= 10, "expected many statements, got {}", stmts.len());
 
         // Background pipeline
         let bg_stmt = stmts.iter().find(|s| matches!(s, Stmt::Pipeline(p) if p.background));
@@ -2839,26 +2614,6 @@ cmd < "input.txt"
     fn parse_test_expr_comparison() {
         let result = parse(r#"[[ $X == "value" ]]"#);
         assert!(result.is_ok(), "failed to parse comparison test: {:?}", result);
-    }
-
-    #[test]
-    fn parse_nested_array_not_test() {
-        // [[1,2],[3,4]] should be nested array, not test expression
-        let result = parse("cmd [[1, 2], [3, 4]]");
-        assert!(result.is_ok(), "failed to parse nested array: {:?}", result);
-        let program = result.unwrap();
-        match &program.statements[0] {
-            Stmt::Command(cmd) => {
-                assert_eq!(cmd.name, "cmd");
-                match &cmd.args[0] {
-                    Arg::Positional(Expr::Literal(Value::Array(items))) => {
-                        assert_eq!(items.len(), 2);
-                    }
-                    other => panic!("expected nested array, got {:?}", other),
-                }
-            }
-            other => panic!("expected Command, got {:?}", other),
-        }
     }
 
     #[test]
