@@ -123,6 +123,15 @@ pub enum Token {
     #[token("done")]
     Done,
 
+    #[token("case")]
+    Case,
+
+    #[token("esac")]
+    Esac,
+
+    #[token("function")]
+    Function,
+
     #[token("break")]
     Break,
 
@@ -155,12 +164,6 @@ pub enum Token {
 
     #[token("bool")]
     TypeBool,
-
-    #[token("array")]
-    TypeArray,
-
-    #[token("object")]
-    TypeObject,
 
     // ═══════════════════════════════════════════════════════════════════
     // Multi-character operators (must come before single-char versions)
@@ -197,6 +200,12 @@ pub enum Token {
 
     #[token("&>")]
     Both,
+
+    #[token("<<")]
+    HereDocStart,
+
+    #[token(";;")]
+    DoubleSemi,
 
     // ═══════════════════════════════════════════════════════════════════
     // Single-character operators and punctuation
@@ -246,9 +255,19 @@ pub enum Token {
     #[token(")")]
     RParen,
 
+    #[token("*")]
+    Star,
+
+    #[token("?")]
+    Question,
+
     // ═══════════════════════════════════════════════════════════════════
     // Command substitution
     // ═══════════════════════════════════════════════════════════════════
+
+    /// Arithmetic expression content: synthesized by preprocessing.
+    /// Contains the expression string between `$((` and `))`.
+    Arithmetic(String),
 
     /// Command substitution start: `$(` - begins a command substitution
     #[token("$(")]
@@ -309,6 +328,10 @@ pub enum Token {
     /// Variable string length: `${#VAR}`
     #[regex(r"\$\{#[a-zA-Z_][a-zA-Z0-9_]*\}", lex_var_length)]
     VarLength(String),
+
+    /// Here-doc content: synthesized by preprocessing, not directly lexed.
+    /// Contains the full content of the here-doc (without the delimiter lines).
+    HereDoc(String),
 
     /// Integer literal - value is the parsed i64
     #[regex(r"-?[0-9]+", lex_int, priority = 2)]
@@ -481,6 +504,9 @@ impl fmt::Display for Token {
             Token::In => write!(f, "in"),
             Token::Do => write!(f, "do"),
             Token::Done => write!(f, "done"),
+            Token::Case => write!(f, "case"),
+            Token::Esac => write!(f, "esac"),
+            Token::Function => write!(f, "function"),
             Token::Break => write!(f, "break"),
             Token::Continue => write!(f, "continue"),
             Token::Return => write!(f, "return"),
@@ -491,8 +517,6 @@ impl fmt::Display for Token {
             Token::TypeInt => write!(f, "int"),
             Token::TypeFloat => write!(f, "float"),
             Token::TypeBool => write!(f, "bool"),
-            Token::TypeArray => write!(f, "array"),
-            Token::TypeObject => write!(f, "object"),
             Token::And => write!(f, "&&"),
             Token::Or => write!(f, "||"),
             Token::EqEq => write!(f, "=="),
@@ -504,6 +528,8 @@ impl fmt::Display for Token {
             Token::GtGt => write!(f, ">>"),
             Token::Stderr => write!(f, "2>"),
             Token::Both => write!(f, "&>"),
+            Token::HereDocStart => write!(f, "<<"),
+            Token::DoubleSemi => write!(f, ";;"),
             Token::Eq => write!(f, "="),
             Token::Pipe => write!(f, "|"),
             Token::Amp => write!(f, "&"),
@@ -519,6 +545,9 @@ impl fmt::Display for Token {
             Token::RBracket => write!(f, "]"),
             Token::LParen => write!(f, "("),
             Token::RParen => write!(f, ")"),
+            Token::Star => write!(f, "*"),
+            Token::Question => write!(f, "?"),
+            Token::Arithmetic(s) => write!(f, "ARITHMETIC({})", s),
             Token::CmdSubstStart => write!(f, "$("),
             Token::LongFlag(s) => write!(f, "--{}", s),
             Token::ShortFlag(s) => write!(f, "-{}", s),
@@ -526,6 +555,7 @@ impl fmt::Display for Token {
             Token::DoubleDash => write!(f, "--"),
             Token::String(s) => write!(f, "STRING({:?})", s),
             Token::SingleString(s) => write!(f, "SINGLESTRING({:?})", s),
+            Token::HereDoc(s) => write!(f, "HEREDOC({:?})", s),
             Token::VarRef(v) => write!(f, "VARREF({})", v),
             Token::SimpleVarRef(v) => write!(f, "SIMPLEVARREF({})", v),
             Token::Positional(n) => write!(f, "${}", n),
@@ -563,6 +593,9 @@ impl Token {
                 | Token::In
                 | Token::Do
                 | Token::Done
+                | Token::Case
+                | Token::Esac
+                | Token::Function
                 | Token::True
                 | Token::False
         )
@@ -576,8 +609,6 @@ impl Token {
                 | Token::TypeInt
                 | Token::TypeFloat
                 | Token::TypeBool
-                | Token::TypeArray
-                | Token::TypeObject
         )
     }
 
@@ -585,7 +616,7 @@ impl Token {
     pub fn starts_statement(&self) -> bool {
         matches!(
             self,
-            Token::Set | Token::Local | Token::Tool | Token::If | Token::For | Token::Ident(_) | Token::LBracket
+            Token::Set | Token::Local | Token::Tool | Token::Function | Token::If | Token::For | Token::Case | Token::Ident(_) | Token::LBracket
         )
     }
 
@@ -595,25 +626,277 @@ impl Token {
             self,
             Token::String(_)
                 | Token::SingleString(_)
+                | Token::HereDoc(_)
+                | Token::Arithmetic(_)
                 | Token::Int(_)
                 | Token::Float(_)
                 | Token::True
                 | Token::False
                 | Token::VarRef(_)
                 | Token::SimpleVarRef(_)
-                | Token::LBracket
-                | Token::LBrace
                 | Token::CmdSubstStart
         )
     }
+}
+
+/// Preprocess arithmetic expressions in source code.
+///
+/// Finds `$((expr))` patterns and replaces them with markers.
+/// Returns the preprocessed source and a vector of (marker, content) pairs.
+///
+/// Example:
+///   `X=$((1 + 2))`
+/// Becomes:
+///   `X=__ARITH_0__`
+/// With arithmetic[0] = ("__ARITH_0__", "1 + 2")
+fn preprocess_arithmetic(source: &str) -> (String, Vec<(String, String)>) {
+    let mut result = String::with_capacity(source.len());
+    let mut arithmetics: Vec<(String, String)> = Vec::new();
+    let mut chars = source.chars().peekable();
+    let mut arith_count = 0;
+
+    while let Some(ch) = chars.next() {
+        // Look for $(( (potential arithmetic)
+        if ch == '$' && chars.peek() == Some(&'(') {
+            // Peek ahead to see if it's $((
+            let mut peek_chars = chars.clone();
+            peek_chars.next(); // consume first (
+            if peek_chars.peek() == Some(&'(') {
+                // This is arithmetic $((
+                chars.next(); // consume first (
+                chars.next(); // consume second (
+
+                // Collect expression until matching ))
+                let mut expr = String::new();
+                let mut paren_depth = 0;
+
+                loop {
+                    match chars.next() {
+                        Some('(') => {
+                            paren_depth += 1;
+                            expr.push('(');
+                        }
+                        Some(')') => {
+                            if paren_depth > 0 {
+                                paren_depth -= 1;
+                                expr.push(')');
+                            } else {
+                                // Check for second )
+                                if chars.peek() == Some(&')') {
+                                    chars.next(); // consume second )
+                                    break;
+                                } else {
+                                    // Single ) inside - keep going
+                                    expr.push(')');
+                                }
+                            }
+                        }
+                        Some(c) => expr.push(c),
+                        None => {
+                            // EOF without closing ))
+                            break;
+                        }
+                    }
+                }
+
+                // Create a marker for this arithmetic
+                let marker = format!("__ARITH_{}__", arith_count);
+                arith_count += 1;
+                arithmetics.push((marker.clone(), expr));
+
+                // Output marker
+                result.push_str(&marker);
+            } else {
+                // This is command substitution $( - output normally
+                result.push(ch);
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    (result, arithmetics)
+}
+
+/// Preprocess here-docs in source code.
+///
+/// Finds `<<WORD` patterns and collects content until the delimiter line.
+/// Returns the preprocessed source and a vector of (marker, content) pairs.
+///
+/// Example:
+///   `cat <<EOF\nhello\nworld\nEOF`
+/// Becomes:
+///   `cat <<__HEREDOC_0__`
+/// With heredocs[0] = ("__HEREDOC_0__", "hello\nworld")
+fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String)>) {
+    let mut result = String::with_capacity(source.len());
+    let mut heredocs: Vec<(String, String)> = Vec::new();
+    let mut chars = source.chars().peekable();
+    let mut heredoc_count = 0;
+
+    while let Some(ch) = chars.next() {
+        // Look for << (potential here-doc)
+        if ch == '<' && chars.peek() == Some(&'<') {
+            chars.next(); // consume second <
+
+            // Check for optional - (strip leading tabs)
+            let strip_tabs = chars.peek() == Some(&'-');
+            if strip_tabs {
+                chars.next();
+            }
+
+            // Skip whitespace before delimiter
+            while let Some(&c) = chars.peek() {
+                if c == ' ' || c == '\t' {
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+
+            // Collect the delimiter word
+            let mut delimiter = String::new();
+            let quoted = chars.peek() == Some(&'\'') || chars.peek() == Some(&'"');
+            let quote_char = if quoted { chars.next() } else { None };
+
+            while let Some(&c) = chars.peek() {
+                if quoted {
+                    if Some(c) == quote_char {
+                        chars.next(); // consume closing quote
+                        break;
+                    }
+                } else if c.is_whitespace() || c == '\n' || c == '\r' {
+                    break;
+                }
+                delimiter.push(chars.next().unwrap());
+            }
+
+            if delimiter.is_empty() {
+                // Not a valid here-doc, output << literally
+                result.push_str("<<");
+                if strip_tabs {
+                    result.push('-');
+                }
+                continue;
+            }
+
+            // Skip to newline
+            while let Some(&c) = chars.peek() {
+                if c == '\n' {
+                    chars.next();
+                    break;
+                } else if c == '\r' {
+                    chars.next();
+                    if chars.peek() == Some(&'\n') {
+                        chars.next();
+                    }
+                    break;
+                }
+                result.push(chars.next().unwrap());
+            }
+
+            // Collect content until delimiter on its own line
+            let mut content = String::new();
+            let mut current_line = String::new();
+
+            loop {
+                match chars.next() {
+                    Some('\n') => {
+                        // Check if this line is the delimiter
+                        let trimmed = if strip_tabs {
+                            current_line.trim_start_matches('\t')
+                        } else {
+                            &current_line
+                        };
+                        if trimmed == delimiter {
+                            // Found end of here-doc
+                            break;
+                        }
+                        // Add line to content
+                        if !content.is_empty() || !current_line.is_empty() {
+                            content.push_str(&current_line);
+                            content.push('\n');
+                        }
+                        current_line.clear();
+                    }
+                    Some('\r') => {
+                        // Handle \r\n
+                        if chars.peek() == Some(&'\n') {
+                            chars.next();
+                        }
+                        let trimmed = if strip_tabs {
+                            current_line.trim_start_matches('\t')
+                        } else {
+                            &current_line
+                        };
+                        if trimmed == delimiter {
+                            break;
+                        }
+                        if !content.is_empty() || !current_line.is_empty() {
+                            content.push_str(&current_line);
+                            content.push('\n');
+                        }
+                        current_line.clear();
+                    }
+                    Some(c) => {
+                        current_line.push(c);
+                    }
+                    None => {
+                        // EOF - check if current line is the delimiter
+                        let trimmed = if strip_tabs {
+                            current_line.trim_start_matches('\t')
+                        } else {
+                            &current_line
+                        };
+                        if trimmed == delimiter {
+                            // Found delimiter at EOF
+                            break;
+                        }
+                        // Not a delimiter - include remaining content
+                        if !current_line.is_empty() {
+                            content.push_str(&current_line);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Remove trailing newline from content (we'll add it when needed)
+            let content = content.trim_end_matches('\n').to_string();
+
+            // Create a marker for this here-doc
+            let marker = format!("__HEREDOC_{}__", heredoc_count);
+            heredoc_count += 1;
+            heredocs.push((marker.clone(), content));
+
+            // Output << and marker
+            result.push_str("<<");
+            result.push_str(&marker);
+            result.push('\n'); // Preserve newline after here-doc
+        } else {
+            result.push(ch);
+        }
+    }
+
+    (result, heredocs)
 }
 
 /// Tokenize source code into a vector of spanned tokens.
 ///
 /// Skips whitespace and comments (unless you need them for formatting).
 /// Returns errors with their positions for nice error messages.
+///
+/// Handles:
+/// - Arithmetic: `$((expr))` becomes `Arithmetic("expr")`
+/// - Here-docs: `<<EOF\nhello\nEOF` becomes `HereDocStart` + `HereDoc("hello")`
 pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerError>>> {
-    let lexer = Token::lexer(source);
+    // Preprocess arithmetic first (before heredocs because heredoc content might contain $((
+    let (preprocessed, arithmetics) = preprocess_arithmetic(source);
+
+    // Then preprocess here-docs
+    let (preprocessed, heredocs) = preprocess_heredocs(&preprocessed);
+
+    let lexer = Token::lexer(&preprocessed);
     let mut tokens = Vec::new();
     let mut errors = Vec::new();
 
@@ -631,11 +914,48 @@ pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerEr
         }
     }
 
-    if errors.is_empty() {
-        Ok(tokens)
-    } else {
-        Err(errors)
+    if !errors.is_empty() {
+        return Err(errors);
     }
+
+    // Post-process: replace markers with actual token content
+    let mut final_tokens = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+
+    while i < tokens.len() {
+        // Check for arithmetic marker
+        if let Token::Ident(ref name) = tokens[i].token {
+            if name.starts_with("__ARITH_") && name.ends_with("__") {
+                if let Some((_, expr)) = arithmetics.iter().find(|(marker, _)| marker == name) {
+                    final_tokens.push(Spanned::new(Token::Arithmetic(expr.clone()), tokens[i].span.clone()));
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+
+        // Check for heredoc
+        if matches!(tokens[i].token, Token::HereDocStart) {
+            // Check if next token is a heredoc marker
+            if i + 1 < tokens.len() {
+                if let Token::Ident(ref name) = tokens[i + 1].token {
+                    if name.starts_with("__HEREDOC_") && name.ends_with("__") {
+                        // Find the corresponding content
+                        if let Some((_, content)) = heredocs.iter().find(|(marker, _)| marker == name) {
+                            final_tokens.push(Spanned::new(Token::HereDocStart, tokens[i].span.clone()));
+                            final_tokens.push(Spanned::new(Token::HereDoc(content.clone()), tokens[i + 1].span.clone()));
+                            i += 2;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        final_tokens.push(tokens[i].clone());
+        i += 1;
+    }
+
+    Ok(final_tokens)
 }
 
 /// Tokenize source code, preserving comments.
@@ -802,8 +1122,22 @@ mod tests {
         assert_eq!(lex("in"), vec![Token::In]);
         assert_eq!(lex("do"), vec![Token::Do]);
         assert_eq!(lex("done"), vec![Token::Done]);
+        assert_eq!(lex("case"), vec![Token::Case]);
+        assert_eq!(lex("esac"), vec![Token::Esac]);
+        assert_eq!(lex("function"), vec![Token::Function]);
         assert_eq!(lex("true"), vec![Token::True]);
         assert_eq!(lex("false"), vec![Token::False]);
+    }
+
+    #[test]
+    fn double_semicolon() {
+        assert_eq!(lex(";;"), vec![Token::DoubleSemi]);
+        // In case pattern context
+        assert_eq!(lex("echo \"hi\";;"), vec![
+            Token::Ident("echo".to_string()),
+            Token::String("hi".to_string()),
+            Token::DoubleSemi,
+        ]);
     }
 
     #[test]
@@ -812,8 +1146,6 @@ mod tests {
         assert_eq!(lex("int"), vec![Token::TypeInt]);
         assert_eq!(lex("float"), vec![Token::TypeFloat]);
         assert_eq!(lex("bool"), vec![Token::TypeBool]);
-        assert_eq!(lex("array"), vec![Token::TypeArray]);
-        assert_eq!(lex("object"), vec![Token::TypeObject]);
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -1588,5 +1920,133 @@ mod tests {
             lex("exit 1"),
             vec![Token::Exit, Token::Int(1)]
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Here-doc tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn heredoc_simple() {
+        let source = "cat <<EOF\nhello\nworld\nEOF";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![
+            Token::Ident("cat".to_string()),
+            Token::HereDocStart,
+            Token::HereDoc("hello\nworld".to_string()),
+            Token::Newline,
+        ]);
+    }
+
+    #[test]
+    fn heredoc_empty() {
+        let source = "cat <<EOF\nEOF";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![
+            Token::Ident("cat".to_string()),
+            Token::HereDocStart,
+            Token::HereDoc("".to_string()),
+            Token::Newline,
+        ]);
+    }
+
+    #[test]
+    fn heredoc_with_special_chars() {
+        let source = "cat <<EOF\n$VAR and \"quoted\" 'single'\nEOF";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![
+            Token::Ident("cat".to_string()),
+            Token::HereDocStart,
+            Token::HereDoc("$VAR and \"quoted\" 'single'".to_string()),
+            Token::Newline,
+        ]);
+    }
+
+    #[test]
+    fn heredoc_multiline() {
+        let source = "cat <<END\nline1\nline2\nline3\nEND";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![
+            Token::Ident("cat".to_string()),
+            Token::HereDocStart,
+            Token::HereDoc("line1\nline2\nline3".to_string()),
+            Token::Newline,
+        ]);
+    }
+
+    #[test]
+    fn heredoc_in_command() {
+        let source = "cat <<EOF\nhello\nEOF\necho goodbye";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![
+            Token::Ident("cat".to_string()),
+            Token::HereDocStart,
+            Token::HereDoc("hello".to_string()),
+            Token::Newline,
+            Token::Ident("echo".to_string()),
+            Token::Ident("goodbye".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn heredoc_strip_tabs() {
+        let source = "cat <<-EOF\n\thello\n\tworld\n\tEOF";
+        let tokens = lex(source);
+        // Content has tabs preserved, only delimiter matching strips tabs
+        assert_eq!(tokens, vec![
+            Token::Ident("cat".to_string()),
+            Token::HereDocStart,
+            Token::HereDoc("\thello\n\tworld".to_string()),
+            Token::Newline,
+        ]);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Arithmetic expression tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn arithmetic_simple() {
+        let source = "$((1 + 2))";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![Token::Arithmetic("1 + 2".to_string())]);
+    }
+
+    #[test]
+    fn arithmetic_in_assignment() {
+        let source = "X=$((5 * 3))";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![
+            Token::Ident("X".to_string()),
+            Token::Eq,
+            Token::Arithmetic("5 * 3".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn arithmetic_with_nested_parens() {
+        let source = "$((2 * (3 + 4)))";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![Token::Arithmetic("2 * (3 + 4)".to_string())]);
+    }
+
+    #[test]
+    fn arithmetic_with_variable() {
+        let source = "$((X + 1))";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![Token::Arithmetic("X + 1".to_string())]);
+    }
+
+    #[test]
+    fn arithmetic_command_subst_not_confused() {
+        // $( should not be treated as arithmetic
+        let source = "$(echo hello)";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![
+            Token::CmdSubstStart,
+            Token::Ident("echo".to_string()),
+            Token::Ident("hello".to_string()),
+            Token::RParen,
+        ]);
     }
 }

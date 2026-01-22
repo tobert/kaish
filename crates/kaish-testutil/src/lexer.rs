@@ -155,6 +155,9 @@ pub fn format_token(token: &Token) -> String {
         Token::In => "IN".to_string(),
         Token::Do => "DO".to_string(),
         Token::Done => "DONE".to_string(),
+        Token::Case => "CASE".to_string(),
+        Token::Esac => "ESAC".to_string(),
+        Token::Function => "FUNCTION".to_string(),
         Token::Break => "BREAK".to_string(),
         Token::Continue => "CONTINUE".to_string(),
         Token::Return => "RETURN".to_string(),
@@ -167,8 +170,6 @@ pub fn format_token(token: &Token) -> String {
         Token::TypeInt => "TYPEINT".to_string(),
         Token::TypeFloat => "TYPEFLOAT".to_string(),
         Token::TypeBool => "TYPEBOOL".to_string(),
-        Token::TypeArray => "TYPEARRAY".to_string(),
-        Token::TypeObject => "TYPEOBJECT".to_string(),
 
         // Operators
         Token::And => "AMPAMP".to_string(),
@@ -182,6 +183,8 @@ pub fn format_token(token: &Token) -> String {
         Token::GtGt => "REDIR_APPEND".to_string(),
         Token::Stderr => "REDIR_ERR".to_string(),
         Token::Both => "REDIR_BOTH".to_string(),
+        Token::HereDocStart => "HEREDOC_START".to_string(),
+        Token::DoubleSemi => "DOUBLESEMI".to_string(),
 
         // Single-char operators
         Token::Eq => "EQ".to_string(),
@@ -201,8 +204,11 @@ pub fn format_token(token: &Token) -> String {
         Token::RBracket => "RBRACK".to_string(),
         Token::LParen => "LPAREN".to_string(),
         Token::RParen => "RPAREN".to_string(),
+        Token::Star => "STAR".to_string(),
+        Token::Question => "QUESTION".to_string(),
 
-        // Command substitution
+        // Arithmetic and command substitution
+        Token::Arithmetic(s) => format!("ARITH({})", s),
         Token::CmdSubstStart => "CMDSUBST".to_string(),
 
         // Flags
@@ -214,6 +220,7 @@ pub fn format_token(token: &Token) -> String {
         // Literals
         Token::String(s) => format!("STRING({})", escape_string_for_display(s)),
         Token::SingleString(s) => format!("SINGLESTRING({})", s),
+        Token::HereDoc(s) => format!("HEREDOC({})", escape_string_for_display(s)),
         Token::VarRef(s) => format!("VARREF({})", s),
         Token::SimpleVarRef(s) => format!("SIMPLEVARREF({})", s),
         Token::Positional(n) => format!("POSITIONAL({})", n),
