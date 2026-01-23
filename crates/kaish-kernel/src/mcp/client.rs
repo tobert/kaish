@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use rmcp::model::{CallToolRequestParams, CallToolResult, Tool as McpTool};
+use rmcp::model::{CallToolRequestParam, CallToolResult, Tool as McpTool};
 use rmcp::service::{RoleClient, RunningService, ServiceExt};
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use rmcp::ClientHandler;
@@ -152,8 +152,7 @@ impl McpClient {
             .context("Not connected to MCP server")?;
 
         let result = service
-            .call_tool(CallToolRequestParams {
-                meta: None,
+            .call_tool(CallToolRequestParam {
                 name: name.to_string().into(),
                 arguments,
                 task: None,

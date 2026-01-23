@@ -53,8 +53,8 @@ regex = "1"
 # Date/time (date)
 chrono = "0.4"
 
-# MCP client (L8) - using local path for latest; needs server feature for shared model types
-rmcp = { path = "../rmcp/crates/rmcp", default-features = true, features = ["client", "transport-child-process"] }
+# MCP client (L8)
+rmcp = { version = "0.13", default-features = true, features = ["client", "transport-child-process"] }
 
 # State persistence (L10)
 rusqlite = { version = "0.32", features = ["bundled"] }
