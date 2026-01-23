@@ -966,22 +966,6 @@ fn cross_nested_case_statements() {
 }
 
 #[test]
-#[ignore = "loop scope isolation: set in loop doesn't modify outer variable"]
-fn cross_arithmetic_increment_pattern() {
-    // Note: This tests bash behavior where variables assigned in a loop
-    // persist after the loop. kaish uses frame-based scoping where
-    // `set` in a loop creates a local variable in the loop's frame.
-    let outputs = run_script(r#"
-        set COUNT = 0
-        for ITEM in "a" "b" "c"; do
-            set COUNT = $((COUNT + 1))
-        done
-        echo "total: ${COUNT}"
-    "#);
-    assert!(outputs_contain(&outputs, &["total: 3"]));
-}
-
-#[test]
 fn cross_conditional_arithmetic() {
     let outputs = run_script(r#"
         set X = 10
@@ -1013,7 +997,6 @@ fn cross_case_in_if() {
 // ============================================================================
 
 #[test]
-#[ignore = "VarWithDefault not supported in interpolated strings"]
 fn var_with_default_unset() {
     let outputs = run_script(r#"
         echo "${UNDEFINED:-fallback}"
@@ -1031,7 +1014,6 @@ fn var_with_default_set() {
 }
 
 #[test]
-#[ignore = "VarWithDefault not supported in interpolated strings"]
 fn var_with_default_empty() {
     let outputs = run_script(r#"
         set EMPTY = ""
@@ -1041,7 +1023,6 @@ fn var_with_default_empty() {
 }
 
 #[test]
-#[ignore = "VarLength not supported in interpolated strings"]
 fn var_length() {
     let outputs = run_script(r#"
         set MSG = "hello"
@@ -1051,7 +1032,6 @@ fn var_length() {
 }
 
 #[test]
-#[ignore = "VarLength not supported in interpolated strings"]
 fn var_length_empty() {
     let outputs = run_script(r#"
         set EMPTY = ""
@@ -1065,7 +1045,6 @@ fn var_length_empty() {
 // ============================================================================
 
 #[test]
-#[ignore = "while loop with arithmetic condition needs work"]
 fn while_loop_with_counter() {
     let outputs = run_script(r#"
         set I = 0

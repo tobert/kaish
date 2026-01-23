@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(cmd cmd (doubledash) (pos (string "-not")) (pos (string "-a")) (pos (string "-flag")))

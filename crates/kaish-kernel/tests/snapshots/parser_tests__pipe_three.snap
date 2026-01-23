@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(pipeline (cmd cat (pos (string "file"))) (cmd grep (pos (string "pattern"))) (cmd head (pos (int 10))))

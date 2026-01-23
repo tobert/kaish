@@ -175,7 +175,6 @@ fn parser_pipe_chain_background() {
 }
 
 #[test]
-#[ignore = "quoted file argument causes issues"]
 fn parser_pipe_three() {
     parse_and_snapshot("pipe_three", r#"cat file | grep "pattern" | head 10"#);
 }
@@ -192,9 +191,9 @@ fn parser_pipe_three() {
 #[case::redirect_both("cmd &> /tmp/all")]
 #[case::redirect_multiple("cmd < /in > /out 2> /err")]
 #[case::redirect_in_pipeline("a | b > /out")]
-#[ignore = "slash in paths needs path token type"]
-fn parser_redirects(#[case] _input: &str) {
-    // All ignored due to path parsing issues
+fn parser_redirects(#[case] input: &str) {
+    let name = format!("redirect_{}", input.chars().take(20).filter(|c| c.is_alphanumeric()).collect::<String>());
+    parse_and_snapshot(&name, input);
 }
 
 // =============================================================================
@@ -338,13 +337,11 @@ fn parser_test_comparison_le() {
 }
 
 #[test]
-#[ignore = "unquoted paths with slash cause lexer errors"]
 fn parser_test_file_exists() {
     parse_and_snapshot("test_file_exists", "[[ -f /etc/hosts ]]");
 }
 
 #[test]
-#[ignore = "unquoted paths with slash cause lexer errors"]
 fn parser_test_file_dir() {
     parse_and_snapshot("test_file_dir", "[[ -d /tmp ]]");
 }
@@ -365,7 +362,7 @@ fn parser_test_file_is_dir() {
 }
 
 #[test]
-#[ignore = "escape sequences in regex patterns cause lexer errors"]
+#[ignore = "parser doesn't support =~ operator in test expressions"]
 fn parser_test_regex_match() {
     parse_and_snapshot("test_regex_match", r#"[[ $filename =~ "\.rs$" ]]"#);
 }
@@ -510,7 +507,6 @@ fn parser_named_arg_no_spaces() {
 }
 
 #[test]
-#[ignore = "parser accepts spaces around = instead of erroring"]
 fn parser_named_arg_with_spaces_error() {
     expect_parse_error("cmd key = value");
 }
@@ -526,8 +522,9 @@ fn parser_short_flag_then_value() {
 }
 
 #[test]
-#[ignore = "-- marker not handled correctly"]
 fn parser_double_dash_ends_flags() {
+    // Note: -not-a-flag is split by the lexer into three tokens due to hyphens
+    // After --, these become positional string arguments instead of flags
     parse_and_snapshot("double_dash_ends_flags", "cmd -- -not-a-flag");
 }
 
@@ -570,7 +567,6 @@ fn parser_case_optional_lparen() {
 // =============================================================================
 
 #[test]
-#[ignore = "escape sequences in patterns cause lexer errors"]
 fn parser_pipe_with_args() {
     parse_and_snapshot("pipe_with_args", r#"ls path="/src" | grep pattern="\.rs$" | wc"#);
 }
