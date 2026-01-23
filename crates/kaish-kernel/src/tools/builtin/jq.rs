@@ -109,11 +109,10 @@ impl Tool for Jq {
         };
 
         // Write input to stdin
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Err(e) = stdin.write_all(input.as_bytes()).await {
+        if let Some(mut stdin) = child.stdin.take()
+            && let Err(e) = stdin.write_all(input.as_bytes()).await {
                 return ExecResult::failure(1, format!("jq: failed to write stdin: {}", e));
             }
-        }
 
         // Collect output
         match child.wait_with_output().await {

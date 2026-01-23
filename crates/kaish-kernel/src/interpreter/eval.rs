@@ -117,7 +117,7 @@ impl<'a, E: Executor> Evaluator<'a, E> {
 
     /// Evaluate arithmetic expansion: `$((expr))`
     fn eval_arithmetic(&mut self, expr_str: &str) -> EvalResult<Value> {
-        arithmetic::eval_arithmetic(expr_str, &self.scope)
+        arithmetic::eval_arithmetic(expr_str, self.scope)
             .map(Value::Int)
             .map_err(|e| EvalError::ArithmeticError(e.to_string()))
     }
@@ -133,11 +133,11 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                     FileTestOp::Exists => path.exists(),
                     FileTestOp::IsFile => path.is_file(),
                     FileTestOp::IsDir => path.is_dir(),
-                    FileTestOp::Readable => path.exists() && std::fs::metadata(&path).is_ok(),
+                    FileTestOp::Readable => path.exists() && std::fs::metadata(path).is_ok(),
                     FileTestOp::Writable => {
                         // Check if we can write to the file
                         if path.exists() {
-                            std::fs::OpenOptions::new().write(true).open(&path).is_ok()
+                            std::fs::OpenOptions::new().write(true).open(path).is_ok()
                         } else {
                             false
                         }

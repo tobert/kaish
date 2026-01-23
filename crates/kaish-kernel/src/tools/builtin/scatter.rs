@@ -78,8 +78,8 @@ fn split_items(input: &str) -> Vec<String> {
     let trimmed = input.trim();
 
     // Try to parse as JSON array first
-    if trimmed.starts_with('[') {
-        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
+    if trimmed.starts_with('[')
+        && let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
             return arr
                 .into_iter()
                 .map(|v| match v {
@@ -88,7 +88,6 @@ fn split_items(input: &str) -> Vec<String> {
                 })
                 .collect();
         }
-    }
 
     // Fall back to line splitting
     trimmed

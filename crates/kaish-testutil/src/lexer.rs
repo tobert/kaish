@@ -44,7 +44,7 @@ pub fn parse_lexer_tests(content: &str) -> Vec<LexerTestCase> {
         // We look for the pattern of multiple spaces followed by "| " as the separator.
         if let Some(sep_idx) = find_test_separator(line) {
             let input = line[..sep_idx].trim().to_string();
-            let expected_str = line[sep_idx..].trim_start_matches(|c| c == ' ' || c == '|').trim();
+            let expected_str = line[sep_idx..].trim_start_matches([' ', '|']).trim();
 
             let expected = if expected_str.starts_with("ERROR:") {
                 let msg = expected_str.strip_prefix("ERROR:").unwrap_or("").trim();
@@ -90,7 +90,7 @@ fn find_test_separator(line: &str) -> Option<usize> {
     }
 
     // Fallback: look for " | " (single space, for simple cases)
-    line.find(" | ").map(|idx| idx)
+    line.find(" | ")
 }
 
 /// Parse expected tokens from a space-separated string.
@@ -101,7 +101,7 @@ fn parse_expected_tokens(s: &str) -> Vec<String> {
     let mut current = String::new();
     let mut paren_depth = 0;
 
-    while let Some(ch) = chars.next() {
+    for ch in chars {
         match ch {
             '(' => {
                 paren_depth += 1;

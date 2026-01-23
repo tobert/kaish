@@ -66,7 +66,7 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
 
                 // Collect until '}'
                 let mut var_content = String::from("${");
-                while let Some(c) = chars.next() {
+                for c in chars.by_ref() {
                     var_content.push(c);
                     if c == '}' {
                         break;
@@ -239,7 +239,7 @@ where
 
         // set with flags: `set -e`, `set -e -u -o pipefail`
         let set_with_flags = just(Token::Set)
-            .then(set_flag_arg.clone())
+            .then(set_flag_arg)
             .then(
                 choice((
                     set_flag_arg,
@@ -1003,8 +1003,8 @@ where
 
     recursive(|expr| {
         choice((
-            positional.clone(),
-            arithmetic.clone(),
+            positional,
+            arithmetic,
             cmd_subst_parser(expr.clone()),
             var_expr_parser(),
             interpolated_string_parser(),
@@ -1118,11 +1118,10 @@ where
         if s.contains('$') {
             // Parse interpolated parts
             let parts = parse_interpolated_string(&s);
-            if parts.len() == 1 {
-                if let StringPart::Literal(text) = &parts[0] {
+            if parts.len() == 1
+                && let StringPart::Literal(text) = &parts[0] {
                     return Expr::Literal(Value::String(text.clone()));
                 }
-            }
             Expr::Interpolated(parts)
         } else {
             Expr::Literal(Value::String(s))

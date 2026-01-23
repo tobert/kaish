@@ -768,7 +768,9 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String)>) {
                 } else if c.is_whitespace() || c == '\n' || c == '\r' {
                     break;
                 }
-                delimiter.push(chars.next().unwrap());
+                if let Some(ch) = chars.next() {
+                    delimiter.push(ch);
+                }
             }
 
             if delimiter.is_empty() {
@@ -792,7 +794,9 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String)>) {
                     }
                     break;
                 }
-                result.push(chars.next().unwrap());
+                if let Some(ch) = chars.next() {
+                    result.push(ch);
+                }
             }
 
             // Collect content until delimiter on its own line
@@ -924,22 +928,20 @@ pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerEr
 
     while i < tokens.len() {
         // Check for arithmetic marker
-        if let Token::Ident(ref name) = tokens[i].token {
-            if name.starts_with("__ARITH_") && name.ends_with("__") {
-                if let Some((_, expr)) = arithmetics.iter().find(|(marker, _)| marker == name) {
+        if let Token::Ident(ref name) = tokens[i].token
+            && name.starts_with("__ARITH_") && name.ends_with("__")
+                && let Some((_, expr)) = arithmetics.iter().find(|(marker, _)| marker == name) {
                     final_tokens.push(Spanned::new(Token::Arithmetic(expr.clone()), tokens[i].span.clone()));
                     i += 1;
                     continue;
                 }
-            }
-        }
 
         // Check for heredoc
         if matches!(tokens[i].token, Token::HereDocStart) {
             // Check if next token is a heredoc marker
-            if i + 1 < tokens.len() {
-                if let Token::Ident(ref name) = tokens[i + 1].token {
-                    if name.starts_with("__HEREDOC_") && name.ends_with("__") {
+            if i + 1 < tokens.len()
+                && let Token::Ident(ref name) = tokens[i + 1].token
+                    && name.starts_with("__HEREDOC_") && name.ends_with("__") {
                         // Find the corresponding content
                         if let Some((_, content)) = heredocs.iter().find(|(marker, _)| marker == name) {
                             final_tokens.push(Spanned::new(Token::HereDocStart, tokens[i].span.clone()));
@@ -948,8 +950,6 @@ pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerEr
                             continue;
                         }
                     }
-                }
-            }
         }
         final_tokens.push(tokens[i].clone());
         i += 1;

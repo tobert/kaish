@@ -114,13 +114,11 @@ impl Repl {
         let state = Self::init_state(&mut exec_ctx)?;
 
         // Restore cwd from state if available
-        if let Some(ref store) = state {
-            if let Ok(cwd) = store.get_cwd() {
-                if cwd != "/" && !cwd.is_empty() {
+        if let Some(ref store) = state
+            && let Ok(cwd) = store.get_cwd()
+                && cwd != "/" && !cwd.is_empty() {
                     exec_ctx.set_cwd(PathBuf::from(&cwd));
                 }
-            }
-        }
 
         Ok(Self {
             show_ast: false,
@@ -148,13 +146,12 @@ impl Repl {
         };
 
         // Load variables into exec_ctx.scope
-        if let Some(ref store) = store {
-            if let Ok(vars) = store.load_all_variables() {
+        if let Some(ref store) = store
+            && let Ok(vars) = store.load_all_variables() {
                 for (name, value) in vars {
                     exec_ctx.scope.set(name, value);
                 }
             }
-        }
 
         Ok(store)
     }
@@ -215,11 +212,10 @@ impl Repl {
                 let value = self.eval_expr(&assign.value)?;
                 self.exec_ctx.scope.set(&assign.name, value.clone());
                 // Persist to state store
-                if let Some(ref store) = self.state {
-                    if let Err(e) = store.set_variable(&assign.name, &value) {
+                if let Some(ref store) = self.state
+                    && let Err(e) = store.set_variable(&assign.name, &value) {
                         tracing::warn!("Failed to persist variable {}: {}", assign.name, e);
                     }
-                }
                 Ok(Some(format!("{} = {}", assign.name, format_value(&value))))
             }
             Stmt::Command(cmd) => {
@@ -237,7 +233,7 @@ impl Repl {
                 let branch = if is_truthy(&cond_value) {
                     &if_stmt.then_branch
                 } else {
-                    if_stmt.else_branch.as_ref().map(|v| v.as_slice()).unwrap_or(&[])
+                    if_stmt.else_branch.as_deref().unwrap_or(&[])
                 };
 
                 let mut output = String::new();
@@ -449,11 +445,10 @@ impl Repl {
             // Update scope with new cwd for display
             self.exec_ctx.scope.set("CWD", Value::String(cwd_str.clone()));
             // Persist to state store
-            if let Some(ref store) = self.state {
-                if let Err(e) = store.set_cwd(&cwd_str) {
+            if let Some(ref store) = self.state
+                && let Err(e) = store.set_cwd(&cwd_str) {
                     tracing::warn!("Failed to persist cwd: {}", e);
                 }
-            }
         }
 
         Ok(result)
@@ -614,7 +609,7 @@ impl Repl {
                             FileTestOp::IsFile => p.is_file(),
                             FileTestOp::IsDir => p.is_dir(),
                             FileTestOp::Readable => p.exists(),
-                            FileTestOp::Writable => p.exists() && std::fs::OpenOptions::new().write(true).open(&p).is_ok(),
+                            FileTestOp::Writable => p.exists() && std::fs::OpenOptions::new().write(true).open(p).is_ok(),
                             FileTestOp::Executable => {
                                 #[cfg(unix)]
                                 {

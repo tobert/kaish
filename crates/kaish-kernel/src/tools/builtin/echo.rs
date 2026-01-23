@@ -37,7 +37,7 @@ impl Tool for Echo {
         let parts: Vec<String> = args
             .positional
             .iter()
-            .map(|v| value_to_string(v))
+            .map(value_to_string)
             .collect();
 
         let mut output = parts.join(" ");

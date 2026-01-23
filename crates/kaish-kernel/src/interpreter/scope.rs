@@ -149,9 +149,7 @@ impl Scope {
         }
 
         // Get the root variable name
-        let root_name = match &path.segments[0] {
-            VarSegment::Field(name) => name,
-        };
+        let VarSegment::Field(root_name) = &path.segments[0];
 
         // Special case: $? (last result)
         if root_name == "?" {
@@ -177,9 +175,7 @@ impl Scope {
         }
 
         // Allow ${?.code}, ${?.ok}, etc.
-        let field_name = match &segments[0] {
-            VarSegment::Field(name) => name,
-        };
+        let VarSegment::Field(field_name) = &segments[0];
 
         // Only single-level field access on $?
         if segments.len() > 1 {

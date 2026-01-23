@@ -62,13 +62,13 @@ impl Tool for Exec {
         let argv = args
             .get_named("argv")
             .or_else(|| args.get_positional(1))
-            .map(|v| extract_string_array(v))
+            .map(extract_string_array)
             .unwrap_or_default();
 
         // Get env (optional)
         let env_vars = args
             .get_named("env")
-            .map(|v| extract_string_object(v))
+            .map(extract_string_object)
             .unwrap_or_default();
 
         // Get clear_env flag
@@ -142,14 +142,13 @@ fn extract_string_array(value: &Value) -> Vec<String> {
     match value {
         Value::String(s) => {
             // Try to parse as JSON array first
-            if s.starts_with('[') {
-                if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(s) {
+            if s.starts_with('[')
+                && let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(s) {
                     return arr
                         .iter()
                         .filter_map(|v| v.as_str().map(String::from))
                         .collect();
                 }
-            }
             // Otherwise split on whitespace
             s.split_whitespace().map(String::from).collect()
         }

@@ -141,7 +141,7 @@ impl ToolArgs {
             return true;
         }
         // Fall back to checking named args (from name=true syntax)
-        self.named.get(name).map_or(false, |v| match v {
+        self.named.get(name).is_some_and(|v| match v {
             Value::Bool(b) => *b,
             Value::String(s) => !s.is_empty() && s != "false" && s != "0",
             _ => true,

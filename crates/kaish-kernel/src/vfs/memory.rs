@@ -173,9 +173,9 @@ impl Filesystem for MemoryFs {
 
         let mut result = Vec::new();
         for (entry_path, entry) in entries.iter() {
-            if let Some(parent) = entry_path.parent() {
-                if parent == prefix && entry_path != &normalized {
-                    if let Some(name) = entry_path.file_name() {
+            if let Some(parent) = entry_path.parent()
+                && parent == prefix && entry_path != &normalized
+                    && let Some(name) = entry_path.file_name() {
                         let entry_type = match entry {
                             Entry::File { .. } => EntryType::File,
                             Entry::Directory { .. } => EntryType::Directory,
@@ -185,8 +185,6 @@ impl Filesystem for MemoryFs {
                             entry_type,
                         });
                     }
-                }
-            }
         }
 
         // Sort for consistent ordering

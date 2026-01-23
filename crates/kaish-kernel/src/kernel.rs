@@ -164,13 +164,12 @@ impl Kernel {
         // Load scope from state if available
         let scope = if let Some(ref store) = state {
             let mut scope = Scope::new();
-            if let Ok(guard) = store.lock() {
-                if let Ok(vars) = guard.load_all_variables() {
+            if let Ok(guard) = store.lock()
+                && let Ok(vars) = guard.load_all_variables() {
                     for (name, value) in vars {
                         scope.set(name, value);
                     }
                 }
-            }
             scope
         } else {
             Scope::new()
@@ -277,11 +276,10 @@ impl Kernel {
                 drop(scope);
 
                 // Persist variable
-                if let Some(ref store) = self.state {
-                    if let Ok(guard) = store.lock() {
+                if let Some(ref store) = self.state
+                    && let Ok(guard) = store.lock() {
                         guard.set_variable(&assign.name, &value).ok();
                     }
-                }
 
                 Ok(ControlFlow::ok(ExecResult::success_data(value)))
             }
@@ -322,7 +320,7 @@ impl Kernel {
                 let branch = if is_truthy(&cond_value) {
                     &if_stmt.then_branch
                 } else {
-                    if_stmt.else_branch.as_ref().map(|v| v.as_slice()).unwrap_or(&[])
+                    if_stmt.else_branch.as_deref().unwrap_or(&[])
                 };
 
                 let mut flow = ControlFlow::ok(ExecResult::success(""));
@@ -596,11 +594,10 @@ impl Kernel {
         }
 
         // Persist cwd if changed
-        if let Some(ref store) = self.state {
-            if let Ok(guard) = store.lock() {
+        if let Some(ref store) = self.state
+            && let Ok(guard) = store.lock() {
                 guard.set_cwd(&ctx.cwd.to_string_lossy()).ok();
             }
-        }
 
         Ok(result)
     }
@@ -654,13 +651,11 @@ impl Kernel {
         }
 
         // Persist cwd if cd was called
-        if name == "cd" && result.ok() {
-            if let Some(ref store) = self.state {
-                if let Ok(guard) = store.lock() {
+        if name == "cd" && result.ok()
+            && let Some(ref store) = self.state
+                && let Ok(guard) = store.lock() {
                     guard.set_cwd(&ctx.cwd.to_string_lossy()).ok();
                 }
-            }
-        }
 
         Ok(result)
     }
@@ -704,11 +699,10 @@ impl Kernel {
         let mut scope = self.scope.write().await;
         scope.set_last_result(result.clone());
 
-        if let Some(ref store) = self.state {
-            if let Ok(guard) = store.lock() {
+        if let Some(ref store) = self.state
+            && let Ok(guard) = store.lock() {
                 guard.set_last_result(result).ok();
             }
-        }
     }
 
     /// Execute a user-defined tool with strict parameter isolation.
@@ -729,7 +723,7 @@ impl Kernel {
         // 3. Set up positional parameters ($0 = tool name, $1, $2, ... = positional args)
         let positional_args: Vec<String> = tool_args.positional
             .iter()
-            .map(|v| value_to_string(v))
+            .map(value_to_string)
             .collect();
         isolated_scope.set_positional(&def.name, positional_args);
 
@@ -923,11 +917,10 @@ impl Kernel {
         let mut scope = self.scope.write().await;
         scope.set(name.to_string(), value.clone());
 
-        if let Some(ref store) = self.state {
-            if let Ok(guard) = store.lock() {
+        if let Some(ref store) = self.state
+            && let Ok(guard) = store.lock() {
                 guard.set_variable(name, &value).ok();
             }
-        }
     }
 
     /// List all variables.
@@ -948,11 +941,10 @@ impl Kernel {
         let mut ctx = self.exec_ctx.write().await;
         ctx.set_cwd(path.clone());
 
-        if let Some(ref store) = self.state {
-            if let Ok(guard) = store.lock() {
+        if let Some(ref store) = self.state
+            && let Ok(guard) = store.lock() {
                 guard.set_cwd(&path.to_string_lossy()).ok();
             }
-        }
     }
 
     // --- Last Result ---

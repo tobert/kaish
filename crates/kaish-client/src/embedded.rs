@@ -50,14 +50,14 @@ impl EmbeddedClient {
     /// Create a new embedded client with a transient (non-persistent) kernel.
     pub fn transient() -> ClientResult<Self> {
         let kernel = Kernel::new(KernelConfig::transient())
-            .map_err(|e| ClientError::Other(e))?;
+            .map_err(ClientError::Other)?;
         Ok(Self::new(kernel))
     }
 
     /// Create a new embedded client with default configuration.
     pub fn with_defaults() -> ClientResult<Self> {
         let kernel = Kernel::new(KernelConfig::default())
-            .map_err(|e| ClientError::Other(e))?;
+            .map_err(ClientError::Other)?;
         Ok(Self::new(kernel))
     }
 
@@ -106,7 +106,7 @@ impl KernelClient for EmbeddedClient {
         self.kernel
             .reset()
             .await
-            .map_err(|e| ClientError::Other(e))
+            .map_err(ClientError::Other)
     }
 
     async fn ping(&self) -> ClientResult<String> {
