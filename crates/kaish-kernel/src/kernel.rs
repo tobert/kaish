@@ -688,6 +688,10 @@ impl Kernel {
                 Arg::LongFlag(name) => {
                     tool_args.flags.insert(name.clone());
                 }
+                Arg::DoubleDash => {
+                    // Marker for end of flags - no action needed here,
+                    // subsequent flags were converted to positional during parsing
+                }
             }
         }
 

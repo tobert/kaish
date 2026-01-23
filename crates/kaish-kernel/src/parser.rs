@@ -65,15 +65,28 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
                 chars.next();
 
                 // Collect until '}'
-                let mut var_content = String::from("${");
+                let mut var_content = String::new();
                 for c in chars.by_ref() {
-                    var_content.push(c);
                     if c == '}' {
                         break;
                     }
+                    var_content.push(c);
                 }
 
-                parts.push(StringPart::Var(parse_varpath(&var_content)));
+                // Parse the content for special syntax
+                let part = if var_content.starts_with('#') {
+                    // Variable length: ${#VAR}
+                    StringPart::VarLength(var_content[1..].to_string())
+                } else if let Some(colon_idx) = var_content.find(":-") {
+                    // Variable with default: ${VAR:-default}
+                    let name = var_content[..colon_idx].to_string();
+                    let default = var_content[colon_idx + 2..].to_string();
+                    StringPart::VarWithDefault { name, default }
+                } else {
+                    // Regular variable: ${VAR} or ${VAR.field}
+                    StringPart::Var(parse_varpath(&format!("${{{}}}", var_content)))
+                };
+                parts.push(part);
             } else if chars.peek().map(|c| c.is_ascii_alphabetic() || *c == '_').unwrap_or(false) {
                 // Simple variable reference $NAME
                 if !current_text.is_empty() {
@@ -743,7 +756,7 @@ where
     ));
 
     command_name
-        .then(arg_parser().repeated().collect::<Vec<_>>())
+        .then(args_list_parser())
         .then(redirect_parser().repeated().collect::<Vec<_>>())
         .map(|((name, args), redirects)| Command {
             name,
@@ -754,8 +767,51 @@ where
         .boxed()
 }
 
-/// Argument: positional value, `name=value`, or flags (`-x`, `--name`)
-fn arg_parser<'tokens, I>(
+/// Arguments list parser that handles `--` flag terminator.
+///
+/// After `--`, all subsequent flags are converted to positional string arguments.
+fn args_list_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, Vec<Arg>, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    // Arguments before `--` (normal parsing)
+    let pre_dash = arg_before_double_dash_parser()
+        .repeated()
+        .collect::<Vec<_>>();
+
+    // The `--` marker itself
+    let double_dash = select! {
+        Token::DoubleDash => Arg::DoubleDash,
+    };
+
+    // Arguments after `--` (flags become positional strings)
+    let post_dash_arg = choice((
+        // Flags become positional strings
+        select! {
+            Token::ShortFlag(name) => Arg::Positional(Expr::Literal(Value::String(format!("-{}", name)))),
+            Token::LongFlag(name) => Arg::Positional(Expr::Literal(Value::String(format!("--{}", name)))),
+        },
+        // Everything else stays the same
+        primary_expr_parser().map(Arg::Positional),
+    ));
+
+    let post_dash = post_dash_arg.repeated().collect::<Vec<_>>();
+
+    // Combine: args_before ++ [--] ++ args_after
+    pre_dash
+        .then(double_dash.then(post_dash).or_not())
+        .map(|(mut args, maybe_dd)| {
+            if let Some((dd, post)) = maybe_dd {
+                args.push(dd);
+                args.extend(post);
+            }
+            args
+        })
+}
+
+/// Argument parser for arguments before `--` (normal flag handling).
+fn arg_before_double_dash_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Arg, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
@@ -778,16 +834,31 @@ where
         Token::ShortFlag(name) => Arg::ShortFlag(name),
     };
 
-    // Named argument: name=value
-    let named = ident_parser()
-        .then_ignore(just(Token::Eq))
-        .then(primary_expr_parser())
-        .map(|(key, value)| Arg::Named { key, value });
+    // Named argument: name=value (must not have spaces around =)
+    // We use map_with to capture spans and validate adjacency
+    let named = select! {
+        Token::Ident(s) => s,
+    }
+    .map_with(|s, e| -> (String, Span) { (s, e.span()) })
+    .then(just(Token::Eq).map_with(|_, e| -> Span { e.span() }))
+    .then(primary_expr_parser().map_with(|expr, e| -> (Expr, Span) { (expr, e.span()) }))
+    .try_map(|(((key, key_span), eq_span), (value, value_span)): (((String, Span), Span), (Expr, Span)), span| {
+        // Check that key ends where = starts and = ends where value starts
+        if key_span.end != eq_span.start || eq_span.end != value_span.start {
+            Err(Rich::custom(
+                span,
+                "named argument must not have spaces around '=' (use 'key=value' not 'key = value')",
+            ))
+        } else {
+            Ok(Arg::Named { key, value })
+        }
+    });
 
     // Positional argument
     let positional = primary_expr_parser().map(Arg::Positional);
 
     // Order matters: try more specific patterns first
+    // Note: DoubleDash is NOT included here - it's handled by args_list_parser
     choice((
         long_flag_with_value,
         long_flag,
@@ -1011,6 +1082,8 @@ where
             literal_parser().map(Expr::Literal),
             // Bare identifiers become string literals (shell barewords)
             ident_parser().map(|s| Expr::Literal(Value::String(s))),
+            // Absolute paths become string literals
+            path_parser().map(|s| Expr::Literal(Value::String(s))),
         ))
         .labelled("expression")
     })
@@ -1166,6 +1239,18 @@ where
         Token::Ident(s) => s,
     }
     .labelled("identifier")
+}
+
+/// Path parser: matches absolute paths like `/tmp/out`, `/etc/hosts`.
+fn path_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, String, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    select! {
+        Token::Path(s) => s,
+    }
+    .labelled("path")
 }
 
 #[cfg(test)]

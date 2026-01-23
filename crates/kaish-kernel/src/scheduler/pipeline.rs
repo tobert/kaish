@@ -202,6 +202,9 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext) -> ToolArgs {
             Arg::LongFlag(name) => {
                 tool_args.flags.insert(name.clone());
             }
+            Arg::DoubleDash => {
+                // Marker for end of flags - no action needed
+            }
         }
     }
 
@@ -222,6 +225,26 @@ fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> {
                         if let Some(value) = ctx.scope.resolve_path(path) {
                             result.push_str(&value_to_string(&value));
                         }
+                    }
+                    crate::ast::StringPart::VarWithDefault { name, default } => {
+                        match ctx.scope.get(name) {
+                            Some(value) => {
+                                let s = value_to_string(value);
+                                if s.is_empty() {
+                                    result.push_str(default);
+                                } else {
+                                    result.push_str(&s);
+                                }
+                            }
+                            None => result.push_str(default),
+                        }
+                    }
+                    crate::ast::StringPart::VarLength(name) => {
+                        let len = match ctx.scope.get(name) {
+                            Some(value) => value_to_string(value).len(),
+                            None => 0,
+                        };
+                        result.push_str(&len.to_string());
                     }
                 }
             }

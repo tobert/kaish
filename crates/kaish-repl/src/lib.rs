@@ -433,6 +433,9 @@ impl Repl {
                 Arg::LongFlag(name) => {
                     tool_args.flags.insert(name.clone());
                 }
+                Arg::DoubleDash => {
+                    // Marker for end of flags - no action needed
+                }
             }
         }
 
@@ -520,6 +523,26 @@ impl Repl {
                             let value = self.exec_ctx.scope.resolve_path(path)
                                 .ok_or_else(|| anyhow::anyhow!("undefined variable in interpolation"))?;
                             result.push_str(&format_value_unquoted(&value));
+                        }
+                        kaish_kernel::ast::StringPart::VarWithDefault { name, default } => {
+                            match self.exec_ctx.scope.get(name) {
+                                Some(value) => {
+                                    let s = format_value_unquoted(value);
+                                    if s.is_empty() {
+                                        result.push_str(default);
+                                    } else {
+                                        result.push_str(&s);
+                                    }
+                                }
+                                None => result.push_str(default),
+                            }
+                        }
+                        kaish_kernel::ast::StringPart::VarLength(name) => {
+                            let len = match self.exec_ctx.scope.get(name) {
+                                Some(value) => format_value_unquoted(value).len(),
+                                None => 0,
+                            };
+                            result.push_str(&len.to_string());
                         }
                     }
                 }

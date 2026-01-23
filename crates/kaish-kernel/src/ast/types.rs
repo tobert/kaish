@@ -155,6 +155,8 @@ pub enum Arg {
     ShortFlag(String),
     /// Long flag: `--force`, `--verbose` (boolean flag)
     LongFlag(String),
+    /// Double-dash marker: `--` - signals end of flags
+    DoubleDash,
 }
 
 /// I/O redirection.
@@ -313,8 +315,12 @@ pub enum VarSegment {
 pub enum StringPart {
     /// Literal text
     Literal(String),
-    /// Variable interpolation
+    /// Variable interpolation: `${VAR}` or `$VAR`
     Var(VarPath),
+    /// Variable with default: `${VAR:-default}`
+    VarWithDefault { name: String, default: String },
+    /// Variable string length: `${#VAR}`
+    VarLength(String),
 }
 
 /// Binary operators.
