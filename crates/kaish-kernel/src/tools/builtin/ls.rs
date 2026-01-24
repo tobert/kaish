@@ -1,11 +1,13 @@
 //! ls — List directory contents.
 
 use async_trait::async_trait;
+use std::cmp::Ordering;
 use std::path::Path;
 
 use crate::ast::Value;
+use crate::backend::EntryInfo;
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
+use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Ls tool: list directory contents.
 pub struct Ls;
@@ -42,6 +44,34 @@ impl Tool for Ls {
                 Value::Bool(false),
                 "One entry per line (-1)",
             ))
+            .param(ParamSchema::optional(
+                "human",
+                "bool",
+                Value::Bool(false),
+                "Human-readable sizes (-h)",
+            ))
+            .param(ParamSchema::optional(
+                "sort_time",
+                "bool",
+                Value::Bool(false),
+                "Sort by modification time (-t)",
+            ))
+            .param(ParamSchema::optional(
+                "reverse",
+                "bool",
+                Value::Bool(false),
+                "Reverse sort order (-r)",
+            ))
+            .param(ParamSchema::optional(
+                "sort_size",
+                "bool",
+                Value::Bool(false),
+                "Sort by file size (-S)",
+            ))
+            .example("List current directory", "ls")
+            .example("Show hidden files with details", "ls -la /path")
+            .example("Sort by size, largest first", "ls -lS /path")
+            .example("Human-readable sizes", "ls -lh /path")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -52,15 +82,34 @@ impl Tool for Ls {
         let resolved = ctx.resolve_path(&path);
         let long_format = args.has_flag("long") || args.has_flag("l");
         let show_all = args.has_flag("all") || args.has_flag("a");
-        // -1 is always true for now (we output one per line), but flag is recognized
+        let human_readable = args.has_flag("human") || args.has_flag("h");
+        let sort_time = args.has_flag("sort_time") || args.has_flag("t");
+        let sort_size = args.has_flag("sort_size") || args.has_flag("S");
+        let reverse = args.has_flag("reverse") || args.has_flag("r");
 
         match ctx.backend.list(Path::new(&resolved)).await {
             Ok(entries) => {
                 // Filter hidden files (starting with .) unless -a is set
-                let filtered: Vec<_> = entries
+                let mut filtered: Vec<_> = entries
                     .into_iter()
                     .filter(|e| show_all || !e.name.starts_with('.'))
                     .collect();
+
+                // Sort entries
+                filtered.sort_by(|a, b| {
+                    let cmp = if sort_time {
+                        compare_by_time(a, b)
+                    } else if sort_size {
+                        compare_by_size(a, b)
+                    } else {
+                        a.name.cmp(&b.name)
+                    };
+                    if reverse {
+                        cmp.reverse()
+                    } else {
+                        cmp
+                    }
+                });
 
                 if filtered.is_empty() {
                     return ExecResult::success("");
@@ -71,7 +120,12 @@ impl Tool for Ls {
                         .iter()
                         .map(|e| {
                             let type_char = if e.is_dir { 'd' } else { '-' };
-                            format!("{}  {}", type_char, e.name)
+                            let size_str = if human_readable {
+                                format_human_size(e.size)
+                            } else {
+                                format!("{:>8}", e.size)
+                            };
+                            format!("{}  {}  {}", type_char, size_str, e.name)
                         })
                         .collect()
                 } else {
@@ -82,6 +136,41 @@ impl Tool for Ls {
             }
             Err(e) => ExecResult::failure(1, format!("ls: {}: {}", path, e)),
         }
+    }
+}
+
+/// Compare entries by modification time (newest first).
+fn compare_by_time(a: &EntryInfo, b: &EntryInfo) -> Ordering {
+    match (a.modified, b.modified) {
+        (Some(ta), Some(tb)) => tb.cmp(&ta), // Newest first
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => a.name.cmp(&b.name),
+    }
+}
+
+/// Compare entries by size (largest first).
+fn compare_by_size(a: &EntryInfo, b: &EntryInfo) -> Ordering {
+    b.size.cmp(&a.size) // Largest first
+}
+
+/// Format a size in human-readable form (1K, 2M, etc.).
+fn format_human_size(bytes: u64) -> String {
+    const UNITS: &[&str] = &["", "K", "M", "G", "T", "P"];
+    let mut size = bytes as f64;
+    let mut unit_idx = 0;
+
+    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit_idx += 1;
+    }
+
+    if unit_idx == 0 {
+        format!("{:>4}", bytes)
+    } else if size >= 10.0 {
+        format!("{:>3.0}{}", size, UNITS[unit_idx])
+    } else {
+        format!("{:>3.1}{}", size, UNITS[unit_idx])
     }
 }
 
@@ -123,8 +212,12 @@ mod tests {
 
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("d  subdir"));
-        assert!(result.out.contains("-  file1.txt"));
+        // Format is now: type  size  name
+        assert!(result.out.contains("subdir"));
+        assert!(result.out.contains("file1.txt"));
+        // Check type indicators
+        assert!(result.out.contains("d  "));
+        assert!(result.out.contains("-  "));
     }
 
     #[tokio::test]

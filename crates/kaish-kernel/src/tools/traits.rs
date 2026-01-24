@@ -47,6 +47,25 @@ impl ParamSchema {
     }
 }
 
+/// An example showing how to use a tool.
+#[derive(Debug, Clone)]
+pub struct Example {
+    /// Short description of what the example demonstrates.
+    pub description: String,
+    /// The example command/code.
+    pub code: String,
+}
+
+impl Example {
+    /// Create a new example.
+    pub fn new(description: impl Into<String>, code: impl Into<String>) -> Self {
+        Self {
+            description: description.into(),
+            code: code.into(),
+        }
+    }
+}
+
 /// Schema describing a tool's interface.
 #[derive(Debug, Clone)]
 pub struct ToolSchema {
@@ -56,6 +75,8 @@ pub struct ToolSchema {
     pub description: String,
     /// Parameter definitions.
     pub params: Vec<ParamSchema>,
+    /// Usage examples.
+    pub examples: Vec<Example>,
 }
 
 impl ToolSchema {
@@ -65,12 +86,19 @@ impl ToolSchema {
             name: name.into(),
             description: description.into(),
             params: Vec::new(),
+            examples: Vec::new(),
         }
     }
 
     /// Add a parameter to the schema.
     pub fn param(mut self, param: ParamSchema) -> Self {
         self.params.push(param);
+        self
+    }
+
+    /// Add an example to the schema.
+    pub fn example(mut self, description: impl Into<String>, code: impl Into<String>) -> Self {
+        self.examples.push(Example::new(description, code));
         self
     }
 }

@@ -3,31 +3,47 @@
 //! These tools are always available and provide core functionality.
 
 mod assert;
+mod basename;
 mod cat;
 mod cd;
 mod cp;
+mod cut;
 mod date;
+mod dirname;
 mod echo;
 mod exec;
 mod gather;
 mod grep;
+mod head;
 mod help;
 mod introspect;
 mod jobs;
 mod jq_native;
 mod ls;
-
 mod mkdir;
 mod mv;
+mod printf;
 mod pwd;
 mod read;
+mod readlink;
+mod realpath;
 mod rm;
 mod scatter;
+mod seq;
 mod set;
+mod sleep;
+mod sort;
+mod stat;
+mod tail;
+mod tee;
+mod touch;
+mod tr;
 mod true_false;
+mod uniq;
 mod unset;
 mod vars;
 mod wait;
+mod wc;
 mod write;
 
 use super::ToolRegistry;
@@ -35,14 +51,18 @@ use super::ToolRegistry;
 /// Register all built-in tools with the registry.
 pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(assert::Assert);
+    registry.register(basename::Basename);
     registry.register(cat::Cat);
     registry.register(cd::Cd);
     registry.register(cp::Cp);
+    registry.register(cut::Cut);
     registry.register(date::Date);
+    registry.register(dirname::Dirname);
     registry.register(echo::Echo);
     registry.register(exec::Exec);
     registry.register(gather::Gather);
     registry.register(grep::Grep);
+    registry.register(head::Head);
     registry.register(help::Help);
     registry.register(introspect::Checkpoints);
     registry.register(introspect::History);
@@ -53,15 +73,28 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(ls::Ls);
     registry.register(mkdir::Mkdir);
     registry.register(mv::Mv);
+    registry.register(printf::Printf);
     registry.register(pwd::Pwd);
     registry.register(read::Read);
+    registry.register(readlink::Readlink);
+    registry.register(realpath::Realpath);
     registry.register(rm::Rm);
     registry.register(scatter::Scatter);
+    registry.register(seq::Seq);
     registry.register(set::Set);
+    registry.register(sleep::Sleep);
+    registry.register(sort::Sort);
+    registry.register(stat::Stat);
+    registry.register(tail::Tail);
+    registry.register(tee::Tee);
+    registry.register(touch::Touch);
+    registry.register(tr::Tr);
     registry.register(true_false::True);
     registry.register(true_false::False);
+    registry.register(uniq::Uniq);
     registry.register(unset::Unset);
     registry.register(vars::Vars);
     registry.register(wait::Wait);
+    registry.register(wc::Wc);
     registry.register(write::Write);
 }

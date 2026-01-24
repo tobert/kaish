@@ -63,6 +63,14 @@ fn format_tool_help(schema: &ToolSchema) -> String {
         }
     }
 
+    if !schema.examples.is_empty() {
+        output.push_str("\nExamples:\n");
+        for example in &schema.examples {
+            output.push_str(&format!("  # {}\n", example.description));
+            output.push_str(&format!("  {}\n\n", example.code));
+        }
+    }
+
     output
 }
 

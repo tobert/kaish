@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
+use crate::ast::Value;
 use crate::backend::{BackendError, KernelBackend, WriteMode};
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
@@ -20,6 +21,12 @@ impl Tool for Mv {
         ToolSchema::new("mv", "Move (rename) files and directories")
             .param(ParamSchema::required("source", "string", "Source path"))
             .param(ParamSchema::required("dest", "string", "Destination path"))
+            .param(ParamSchema::optional(
+                "no_clobber",
+                "bool",
+                Value::Bool(false),
+                "Do not overwrite existing files (-n)",
+            ))
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -33,10 +40,11 @@ impl Tool for Mv {
             None => return ExecResult::failure(1, "mv: missing destination argument"),
         };
 
+        let no_clobber = args.has_flag("no_clobber") || args.has_flag("n");
         let src_path = ctx.resolve_path(&source);
         let dst_path = ctx.resolve_path(&dest);
 
-        match move_path(&*ctx.backend, &src_path, &dst_path).await {
+        match move_path(&*ctx.backend, &src_path, &dst_path, no_clobber).await {
             Ok(()) => ExecResult::success(""),
             Err(e) => ExecResult::failure(1, format!("mv: {}", e)),
         }
@@ -44,7 +52,12 @@ impl Tool for Mv {
 }
 
 /// Move a path to destination (copy + remove).
-async fn move_path(backend: &dyn KernelBackend, src: &Path, dst: &Path) -> Result<(), BackendError> {
+async fn move_path(
+    backend: &dyn KernelBackend,
+    src: &Path,
+    dst: &Path,
+    no_clobber: bool,
+) -> Result<(), BackendError> {
     let info = backend.stat(src).await?;
 
     // Determine final destination path
@@ -58,6 +71,11 @@ async fn move_path(backend: &dyn KernelBackend, src: &Path, dst: &Path) -> Resul
         }
         _ => dst.to_path_buf(),
     };
+
+    // Check for no-clobber mode
+    if no_clobber && backend.exists(&final_dst).await {
+        return Ok(()); // Silently skip if destination exists
+    }
 
     if info.is_dir {
         // Copy directory recursively, then remove source

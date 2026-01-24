@@ -27,6 +27,18 @@ impl Tool for Cp {
                 Value::Bool(false),
                 "Copy directories recursively (-r)",
             ))
+            .param(ParamSchema::optional(
+                "no_clobber",
+                "bool",
+                Value::Bool(false),
+                "Do not overwrite existing files (-n)",
+            ))
+            .param(ParamSchema::optional(
+                "preserve",
+                "bool",
+                Value::Bool(false),
+                "Preserve file attributes (-p)",
+            ))
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -41,10 +53,14 @@ impl Tool for Cp {
         };
 
         let recursive = args.has_flag("recursive") || args.has_flag("r");
+        let no_clobber = args.has_flag("no_clobber") || args.has_flag("n");
+        // preserve flag is recognized but VFS doesn't support attributes
+        let _preserve = args.has_flag("preserve") || args.has_flag("p");
+
         let src_path = ctx.resolve_path(&source);
         let dst_path = ctx.resolve_path(&dest);
 
-        match copy_path(&*ctx.backend, &src_path, &dst_path, recursive).await {
+        match copy_path(&*ctx.backend, &src_path, &dst_path, recursive, no_clobber).await {
             Ok(()) => ExecResult::success(""),
             Err(e) => ExecResult::failure(1, format!("cp: {}", e)),
         }
@@ -57,6 +73,7 @@ async fn copy_path(
     src: &Path,
     dst: &Path,
     recursive: bool,
+    no_clobber: bool,
 ) -> Result<(), BackendError> {
     let info = backend.stat(src).await?;
 
@@ -67,7 +84,7 @@ async fn copy_path(
                 src.display()
             )));
         }
-        copy_dir_recursive(backend, src, dst).await
+        copy_dir_recursive(backend, src, dst, no_clobber).await
     } else {
         // Check if destination is a directory
         let final_dst = match backend.stat(dst).await {
@@ -81,6 +98,11 @@ async fn copy_path(
             _ => dst.to_path_buf(),
         };
 
+        // Check for no-clobber mode
+        if no_clobber && backend.exists(&final_dst).await {
+            return Ok(()); // Silently skip existing files
+        }
+
         let data = backend.read(src, None).await?;
         backend.write(&final_dst, &data, WriteMode::Overwrite).await
     }
@@ -91,6 +113,7 @@ fn copy_dir_recursive<'a>(
     backend: &'a dyn KernelBackend,
     src: &'a Path,
     dst: &'a Path,
+    no_clobber: bool,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BackendError>> + Send + 'a>> {
     Box::pin(async move {
         // Create destination directory
@@ -103,8 +126,12 @@ fn copy_dir_recursive<'a>(
             let dst_child: PathBuf = dst.join(&entry.name);
 
             if entry.is_dir {
-                copy_dir_recursive(backend, &src_child, &dst_child).await?;
+                copy_dir_recursive(backend, &src_child, &dst_child, no_clobber).await?;
             } else {
+                // Check for no-clobber mode
+                if no_clobber && backend.exists(&dst_child).await {
+                    continue; // Skip existing files
+                }
                 let data = backend.read(&src_child, None).await?;
                 backend.write(&dst_child, &data, WriteMode::Overwrite).await?;
             }
