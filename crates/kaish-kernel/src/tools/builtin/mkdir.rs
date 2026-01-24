@@ -5,7 +5,6 @@ use std::path::Path;
 
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
-use crate::vfs::Filesystem;
 
 /// Mkdir tool: create directories.
 pub struct Mkdir;
@@ -29,7 +28,7 @@ impl Tool for Mkdir {
 
         let resolved = ctx.resolve_path(&path);
 
-        match ctx.vfs.mkdir(Path::new(&resolved)).await {
+        match ctx.backend.mkdir(Path::new(&resolved)).await {
             Ok(()) => ExecResult::success(""),
             Err(e) => ExecResult::failure(1, format!("mkdir: {}: {}", path, e)),
         }
@@ -58,9 +57,9 @@ mod tests {
         let result = Mkdir.execute(args, &mut ctx).await;
         assert!(result.ok());
 
-        // Verify it exists
-        let meta = ctx.vfs.stat(Path::new("/newdir")).await.unwrap();
-        assert!(meta.is_dir);
+        // Verify it exists via backend
+        let info = ctx.backend.stat(Path::new("/newdir")).await.unwrap();
+        assert!(info.is_dir);
     }
 
     #[tokio::test]
@@ -73,9 +72,9 @@ mod tests {
         assert!(result.ok());
 
         // Verify nested dirs exist
-        assert!(ctx.vfs.stat(Path::new("/a")).await.unwrap().is_dir);
-        assert!(ctx.vfs.stat(Path::new("/a/b")).await.unwrap().is_dir);
-        assert!(ctx.vfs.stat(Path::new("/a/b/c")).await.unwrap().is_dir);
+        assert!(ctx.backend.stat(Path::new("/a")).await.unwrap().is_dir);
+        assert!(ctx.backend.stat(Path::new("/a/b")).await.unwrap().is_dir);
+        assert!(ctx.backend.stat(Path::new("/a/b/c")).await.unwrap().is_dir);
     }
 
     #[tokio::test]

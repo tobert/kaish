@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
-use crate::vfs::Filesystem;
 
 /// Cd tool: change current working directory.
 pub struct Cd;
@@ -43,9 +42,9 @@ impl Tool for Cd {
         };
 
         // Verify the path exists and is a directory
-        match ctx.vfs.stat(Path::new(&resolved)).await {
-            Ok(meta) => {
-                if meta.is_dir {
+        match ctx.backend.stat(Path::new(&resolved)).await {
+            Ok(info) => {
+                if info.is_dir {
                     let new_cwd = resolved.clone();
                     ctx.set_cwd(new_cwd);
                     // For `cd -`, output the new directory (like bash)
@@ -66,7 +65,7 @@ impl Tool for Cd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vfs::{MemoryFs, VfsRouter};
+    use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::path::PathBuf;
     use std::sync::Arc;
 

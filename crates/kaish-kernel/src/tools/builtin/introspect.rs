@@ -167,7 +167,7 @@ impl Tool for Mounts {
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         let json_output = args.has_flag("json");
-        let mounts = ctx.vfs.list_mounts();
+        let mounts = ctx.backend.mounts();
 
         if json_output {
             let json_mounts: Vec<serde_json::Value> = mounts

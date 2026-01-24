@@ -6,7 +6,6 @@ use std::path::Path;
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
-use crate::vfs::Filesystem;
 
 /// Cat tool: read and output file contents.
 pub struct Cat;
@@ -47,7 +46,7 @@ impl Tool for Cat {
 
             let resolved = ctx.resolve_path(&path);
 
-            match ctx.vfs.read(Path::new(&resolved)).await {
+            match ctx.backend.read(Path::new(&resolved), None).await {
                 Ok(data) => match String::from_utf8(data) {
                     Ok(content) => {
                         if number_lines {
@@ -78,7 +77,7 @@ impl Tool for Cat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vfs::{MemoryFs, VfsRouter};
+    use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 
     async fn make_ctx() -> ExecContext {

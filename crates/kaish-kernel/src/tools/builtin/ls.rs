@@ -6,7 +6,6 @@ use std::path::Path;
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
-use crate::vfs::{EntryType, Filesystem};
 
 /// Ls tool: list directory contents.
 pub struct Ls;
@@ -55,7 +54,7 @@ impl Tool for Ls {
         let show_all = args.has_flag("all") || args.has_flag("a");
         // -1 is always true for now (we output one per line), but flag is recognized
 
-        match ctx.vfs.list(Path::new(&resolved)).await {
+        match ctx.backend.list(Path::new(&resolved)).await {
             Ok(entries) => {
                 // Filter hidden files (starting with .) unless -a is set
                 let filtered: Vec<_> = entries
@@ -71,10 +70,7 @@ impl Tool for Ls {
                     filtered
                         .iter()
                         .map(|e| {
-                            let type_char = match e.entry_type {
-                                EntryType::Directory => 'd',
-                                EntryType::File => '-',
-                            };
+                            let type_char = if e.is_dir { 'd' } else { '-' };
                             format!("{}  {}", type_char, e.name)
                         })
                         .collect()
@@ -92,7 +88,7 @@ impl Tool for Ls {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vfs::{MemoryFs, VfsRouter};
+    use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 
     async fn make_ctx() -> ExecContext {

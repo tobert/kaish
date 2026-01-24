@@ -1,13 +1,12 @@
 //! rm — Remove files and directories.
 
 use async_trait::async_trait;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
+use crate::backend::{BackendError, KernelBackend};
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
-use crate::vfs::{EntryType, Filesystem};
 
 /// Rm tool: remove files and directories.
 pub struct Rm;
@@ -45,7 +44,7 @@ impl Tool for Rm {
         let force = args.has_flag("force") || args.has_flag("f");
         let resolved = ctx.resolve_path(&path);
 
-        match remove_path(ctx, Path::new(&resolved), recursive, force).await {
+        match remove_path(&*ctx.backend, Path::new(&resolved), recursive, force).await {
             Ok(()) => ExecResult::success(""),
             Err(e) => ExecResult::failure(1, format!("rm: {}: {}", path, e)),
         }
@@ -53,17 +52,17 @@ impl Tool for Rm {
 }
 
 /// Remove a path, optionally recursively.
-async fn remove_path(ctx: &ExecContext, path: &Path, recursive: bool, force: bool) -> std::io::Result<()> {
+async fn remove_path(backend: &dyn KernelBackend, path: &Path, recursive: bool, force: bool) -> Result<(), BackendError> {
     // Check if path exists
-    match ctx.vfs.stat(path).await {
-        Ok(meta) => {
-            if meta.is_dir && recursive {
+    match backend.stat(path).await {
+        Ok(info) => {
+            if info.is_dir && recursive {
                 // Remove contents first
-                remove_dir_recursive(ctx, path).await?;
+                remove_dir_recursive(backend, path).await?;
             }
-            ctx.vfs.remove(path).await
+            backend.remove(path, false).await
         }
-        Err(e) if e.kind() == ErrorKind::NotFound && force => {
+        Err(BackendError::NotFound(_)) if force => {
             // -f ignores nonexistent files
             Ok(())
         }
@@ -73,23 +72,20 @@ async fn remove_path(ctx: &ExecContext, path: &Path, recursive: bool, force: boo
 
 /// Recursively remove directory contents, then the directory itself.
 fn remove_dir_recursive<'a>(
-    ctx: &'a ExecContext,
+    backend: &'a dyn KernelBackend,
     dir: &'a Path,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BackendError>> + Send + 'a>> {
     Box::pin(async move {
-        let entries = ctx.vfs.list(dir).await?;
+        let entries = backend.list(dir).await?;
 
         for entry in entries {
             let child_path: PathBuf = dir.join(&entry.name);
-            match entry.entry_type {
-                EntryType::Directory => {
-                    // Recurse into subdirectory
-                    remove_dir_recursive(ctx, &child_path).await?;
-                    ctx.vfs.remove(&child_path).await?;
-                }
-                EntryType::File => {
-                    ctx.vfs.remove(&child_path).await?;
-                }
+            if entry.is_dir {
+                // Recurse into subdirectory
+                remove_dir_recursive(backend, &child_path).await?;
+                backend.remove(&child_path, false).await?;
+            } else {
+                backend.remove(&child_path, false).await?;
             }
         }
 
@@ -124,7 +120,7 @@ mod tests {
         assert!(result.ok());
 
         // Verify deleted
-        assert!(!ctx.vfs.exists(Path::new("/file.txt")).await);
+        assert!(!ctx.backend.exists(Path::new("/file.txt")).await);
     }
 
     #[tokio::test]
@@ -136,7 +132,7 @@ mod tests {
         let result = Rm.execute(args, &mut ctx).await;
         assert!(result.ok());
 
-        assert!(!ctx.vfs.exists(Path::new("/emptydir")).await);
+        assert!(!ctx.backend.exists(Path::new("/emptydir")).await);
     }
 
     #[tokio::test]
@@ -148,7 +144,7 @@ mod tests {
         let result = Rm.execute(args, &mut ctx).await;
         assert!(!result.ok());
         // Directory should still exist
-        assert!(ctx.vfs.exists(Path::new("/fulldir")).await);
+        assert!(ctx.backend.exists(Path::new("/fulldir")).await);
     }
 
     #[tokio::test]
@@ -182,8 +178,8 @@ mod tests {
         assert!(result.ok());
 
         // Verify directory and contents removed
-        assert!(!ctx.vfs.exists(Path::new("/fulldir")).await);
-        assert!(!ctx.vfs.exists(Path::new("/fulldir/file.txt")).await);
+        assert!(!ctx.backend.exists(Path::new("/fulldir")).await);
+        assert!(!ctx.backend.exists(Path::new("/fulldir/file.txt")).await);
     }
 
     #[tokio::test]
@@ -195,7 +191,7 @@ mod tests {
 
         let result = Rm.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(!ctx.vfs.exists(Path::new("/fulldir")).await);
+        assert!(!ctx.backend.exists(Path::new("/fulldir")).await);
     }
 
     #[tokio::test]
@@ -239,8 +235,8 @@ mod tests {
         let result = Rm.execute(args, &mut ctx).await;
         assert!(result.ok());
 
-        assert!(!ctx.vfs.exists(Path::new("/deep")).await);
-        assert!(!ctx.vfs.exists(Path::new("/deep/a")).await);
-        assert!(!ctx.vfs.exists(Path::new("/deep/a/b")).await);
+        assert!(!ctx.backend.exists(Path::new("/deep")).await);
+        assert!(!ctx.backend.exists(Path::new("/deep/a")).await);
+        assert!(!ctx.backend.exists(Path::new("/deep/a/b")).await);
     }
 }

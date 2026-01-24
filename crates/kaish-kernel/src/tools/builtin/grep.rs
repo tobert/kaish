@@ -1,13 +1,12 @@
 //! grep — Search for patterns in files or stdin.
 
 use async_trait::async_trait;
-use regex::{Regex, RegexBuilder};
+use regex::RegexBuilder;
 use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
-use crate::vfs::Filesystem;
 
 /// Grep tool: search for patterns in text.
 pub struct Grep;
@@ -81,7 +80,7 @@ impl Tool for Grep {
         let input = match args.get_string("path", 1) {
             Some(path) => {
                 let resolved = ctx.resolve_path(&path);
-                match ctx.vfs.read(Path::new(&resolved)).await {
+                match ctx.backend.read(Path::new(&resolved), None).await {
                     Ok(data) => match String::from_utf8(data) {
                         Ok(s) => s,
                         Err(_) => {
@@ -111,7 +110,7 @@ impl Tool for Grep {
 }
 
 /// Search lines and return matching output and count.
-fn grep_lines(input: &str, regex: &Regex, show_line_numbers: bool, invert: bool) -> (String, usize) {
+fn grep_lines(input: &str, regex: &regex::Regex, show_line_numbers: bool, invert: bool) -> (String, usize) {
     let mut output = String::new();
     let mut match_count = 0;
 
@@ -136,7 +135,7 @@ fn grep_lines(input: &str, regex: &Regex, show_line_numbers: bool, invert: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vfs::{MemoryFs, VfsRouter};
+    use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 
     async fn make_ctx() -> ExecContext {

@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
+use crate::backend::WriteMode;
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
-use crate::vfs::Filesystem;
 
 /// Write tool: write content to a file.
 pub struct Write;
@@ -46,7 +46,7 @@ impl Tool for Write {
 
         let resolved = ctx.resolve_path(&path);
 
-        match ctx.vfs.write(Path::new(&resolved), content.as_bytes()).await {
+        match ctx.backend.write(Path::new(&resolved), content.as_bytes(), WriteMode::Overwrite).await {
             Ok(()) => ExecResult::success(format!("Wrote {} bytes to {}", content.len(), path)),
             Err(e) => ExecResult::failure(1, format!("write: {}: {}", path, e)),
         }
@@ -66,7 +66,7 @@ fn value_to_string(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
+    use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 
     async fn make_ctx() -> ExecContext {
@@ -85,8 +85,8 @@ mod tests {
         let result = Write.execute(args, &mut ctx).await;
         assert!(result.ok());
 
-        // Verify content
-        let data = ctx.vfs.read(Path::new("/test.txt")).await.unwrap();
+        // Verify content via backend
+        let data = ctx.backend.read(Path::new("/test.txt"), None).await.unwrap();
         assert_eq!(String::from_utf8(data).unwrap(), "hello world");
     }
 
@@ -100,7 +100,7 @@ mod tests {
         let result = Write.execute(args, &mut ctx).await;
         assert!(result.ok());
 
-        let data = ctx.vfs.read(Path::new("/test.txt")).await.unwrap();
+        let data = ctx.backend.read(Path::new("/test.txt"), None).await.unwrap();
         assert_eq!(String::from_utf8(data).unwrap(), "named content");
     }
 
@@ -114,7 +114,7 @@ mod tests {
         let result = Write.execute(args, &mut ctx).await;
         assert!(result.ok());
 
-        let data = ctx.vfs.read(Path::new("/a/b/c.txt")).await.unwrap();
+        let data = ctx.backend.read(Path::new("/a/b/c.txt"), None).await.unwrap();
         assert_eq!(String::from_utf8(data).unwrap(), "nested");
     }
 

@@ -154,7 +154,7 @@ impl ScatterGatherRunner {
             let commands = commands.to_vec();
             let var_name = var_name.clone();
             let base_scope = base_ctx.scope.clone();
-            let vfs = base_ctx.vfs.clone();
+            let backend = base_ctx.backend.clone();
             let cwd = base_ctx.cwd.clone();
 
             let handle = tokio::spawn(async move {
@@ -164,7 +164,7 @@ impl ScatterGatherRunner {
                 let mut scope = base_scope;
                 scope.set(&var_name, Value::String(item.clone()));
 
-                let mut ctx = ExecContext::with_scope(vfs, scope);
+                let mut ctx = ExecContext::with_backend_and_scope(backend, scope);
                 ctx.set_cwd(cwd);
 
                 // Run the commands using sequential runner (no nested scatter/gather)

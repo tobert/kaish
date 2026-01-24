@@ -25,7 +25,6 @@ use jaq_json::Val;
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
-use crate::vfs::Filesystem;
 
 /// Native jq tool using jaq (pure Rust jq implementation).
 pub struct JqNative;
@@ -244,9 +243,9 @@ impl Tool for JqNative {
         // Get input: from path or stdin
         let input = if let Some(path) = args.get_string("path", 999) {
             if !path.is_empty() {
-                // Read from VFS
+                // Read from backend
                 let resolved = ctx.resolve_path(&path);
-                match ctx.vfs.read(Path::new(&resolved)).await {
+                match ctx.backend.read(Path::new(&resolved), None).await {
                     Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                     Err(e) => {
                         return ExecResult::failure(1, format!("jq: failed to read {}: {}", path, e))
@@ -282,7 +281,8 @@ pub fn validate_filter(filter: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
+    use crate::backend::WriteMode;
+    use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 
     fn make_ctx() -> ExecContext {
@@ -385,9 +385,9 @@ mod tests {
     async fn test_jq_native_from_vfs_file() {
         let mut ctx = make_ctx();
 
-        // Write test data to VFS
-        ctx.vfs
-            .write(Path::new("/test.json"), br#"{"value": 42}"#)
+        // Write test data to backend
+        ctx.backend
+            .write(Path::new("/test.json"), br#"{"value": 42}"#, WriteMode::Overwrite)
             .await
             .expect("failed to write test file");
 

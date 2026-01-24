@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
+use crate::backend::{BackendError, KernelBackend, WriteMode};
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
-use crate::vfs::{EntryType, Filesystem};
 
 /// Cp tool: copy files and directories.
 pub struct Cp;
@@ -44,7 +44,7 @@ impl Tool for Cp {
         let src_path = ctx.resolve_path(&source);
         let dst_path = ctx.resolve_path(&dest);
 
-        match copy_path(ctx, &src_path, &dst_path, recursive).await {
+        match copy_path(&*ctx.backend, &src_path, &dst_path, recursive).await {
             Ok(()) => ExecResult::success(""),
             Err(e) => ExecResult::failure(1, format!("cp: {}", e)),
         }
@@ -53,63 +53,60 @@ impl Tool for Cp {
 
 /// Copy a path to destination, optionally recursively.
 async fn copy_path(
-    ctx: &ExecContext,
+    backend: &dyn KernelBackend,
     src: &Path,
     dst: &Path,
     recursive: bool,
-) -> std::io::Result<()> {
-    let meta = ctx.vfs.stat(src).await?;
+) -> Result<(), BackendError> {
+    let info = backend.stat(src).await?;
 
-    if meta.is_dir {
+    if info.is_dir {
         if !recursive {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{}: is a directory (use -r to copy)", src.display()),
-            ));
+            return Err(BackendError::InvalidOperation(format!(
+                "{}: is a directory (use -r to copy)",
+                src.display()
+            )));
         }
-        copy_dir_recursive(ctx, src, dst).await
+        copy_dir_recursive(backend, src, dst).await
     } else {
         // Check if destination is a directory
-        let final_dst = match ctx.vfs.stat(dst).await {
-            Ok(dst_meta) if dst_meta.is_dir => {
+        let final_dst = match backend.stat(dst).await {
+            Ok(dst_info) if dst_info.is_dir => {
                 // Copy into directory with same filename
                 let filename = src.file_name().ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid source path")
+                    BackendError::InvalidOperation("invalid source path".to_string())
                 })?;
                 dst.join(filename)
             }
             _ => dst.to_path_buf(),
         };
 
-        let data = ctx.vfs.read(src).await?;
-        ctx.vfs.write(&final_dst, &data).await
+        let data = backend.read(src, None).await?;
+        backend.write(&final_dst, &data, WriteMode::Overwrite).await
     }
 }
 
 /// Recursively copy a directory.
 fn copy_dir_recursive<'a>(
-    ctx: &'a ExecContext,
+    backend: &'a dyn KernelBackend,
     src: &'a Path,
     dst: &'a Path,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BackendError>> + Send + 'a>> {
     Box::pin(async move {
         // Create destination directory
-        ctx.vfs.mkdir(dst).await?;
+        backend.mkdir(dst).await?;
 
-        let entries = ctx.vfs.list(src).await?;
+        let entries = backend.list(src).await?;
 
         for entry in entries {
             let src_child: PathBuf = src.join(&entry.name);
             let dst_child: PathBuf = dst.join(&entry.name);
 
-            match entry.entry_type {
-                EntryType::Directory => {
-                    copy_dir_recursive(ctx, &src_child, &dst_child).await?;
-                }
-                EntryType::File => {
-                    let data = ctx.vfs.read(&src_child).await?;
-                    ctx.vfs.write(&dst_child, &data).await?;
-                }
+            if entry.is_dir {
+                copy_dir_recursive(backend, &src_child, &dst_child).await?;
+            } else {
+                let data = backend.read(&src_child, None).await?;
+                backend.write(&dst_child, &data, WriteMode::Overwrite).await?;
             }
         }
 
@@ -120,7 +117,7 @@ fn copy_dir_recursive<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vfs::{MemoryFs, VfsRouter};
+    use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 
     async fn make_ctx() -> ExecContext {
@@ -152,11 +149,11 @@ mod tests {
         assert!(result.ok());
 
         // Verify copy exists with same content
-        let data = ctx.vfs.read(Path::new("/copy.txt")).await.unwrap();
+        let data = ctx.backend.read(Path::new("/copy.txt"), None).await.unwrap();
         assert_eq!(data, b"hello world");
 
         // Original still exists
-        assert!(ctx.vfs.exists(Path::new("/file.txt")).await);
+        assert!(ctx.backend.exists(Path::new("/file.txt")).await);
     }
 
     #[tokio::test]
@@ -170,7 +167,7 @@ mod tests {
         assert!(result.ok());
 
         // File should be copied into destdir with same name
-        let data = ctx.vfs.read(Path::new("/destdir/file.txt")).await.unwrap();
+        let data = ctx.backend.read(Path::new("/destdir/file.txt"), None).await.unwrap();
         assert_eq!(data, b"hello world");
     }
 
@@ -198,11 +195,11 @@ mod tests {
         assert!(result.ok());
 
         // Verify recursive copy
-        assert!(ctx.vfs.exists(Path::new("/dircopy")).await);
-        assert!(ctx.vfs.exists(Path::new("/dircopy/nested.txt")).await);
-        assert!(ctx.vfs.exists(Path::new("/dircopy/sub/deep.txt")).await);
+        assert!(ctx.backend.exists(Path::new("/dircopy")).await);
+        assert!(ctx.backend.exists(Path::new("/dircopy/nested.txt")).await);
+        assert!(ctx.backend.exists(Path::new("/dircopy/sub/deep.txt")).await);
 
-        let data = ctx.vfs.read(Path::new("/dircopy/nested.txt")).await.unwrap();
+        let data = ctx.backend.read(Path::new("/dircopy/nested.txt"), None).await.unwrap();
         assert_eq!(data, b"nested content");
     }
 
@@ -216,7 +213,7 @@ mod tests {
 
         let result = Cp.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(ctx.vfs.exists(Path::new("/dircopy2")).await);
+        assert!(ctx.backend.exists(Path::new("/dircopy2")).await);
     }
 
     #[tokio::test]

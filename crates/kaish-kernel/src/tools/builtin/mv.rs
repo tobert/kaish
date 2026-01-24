@@ -3,9 +3,9 @@
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
+use crate::backend::{BackendError, KernelBackend, WriteMode};
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
-use crate::vfs::{EntryType, Filesystem};
 
 /// Mv tool: move/rename files and directories.
 pub struct Mv;
@@ -36,7 +36,7 @@ impl Tool for Mv {
         let src_path = ctx.resolve_path(&source);
         let dst_path = ctx.resolve_path(&dest);
 
-        match move_path(ctx, &src_path, &dst_path).await {
+        match move_path(&*ctx.backend, &src_path, &dst_path).await {
             Ok(()) => ExecResult::success(""),
             Err(e) => ExecResult::failure(1, format!("mv: {}", e)),
         }
@@ -44,31 +44,31 @@ impl Tool for Mv {
 }
 
 /// Move a path to destination (copy + remove).
-async fn move_path(ctx: &ExecContext, src: &Path, dst: &Path) -> std::io::Result<()> {
-    let meta = ctx.vfs.stat(src).await?;
+async fn move_path(backend: &dyn KernelBackend, src: &Path, dst: &Path) -> Result<(), BackendError> {
+    let info = backend.stat(src).await?;
 
     // Determine final destination path
-    let final_dst = match ctx.vfs.stat(dst).await {
-        Ok(dst_meta) if dst_meta.is_dir => {
+    let final_dst = match backend.stat(dst).await {
+        Ok(dst_info) if dst_info.is_dir => {
             // Move into directory with same filename
             let filename = src.file_name().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid source path")
+                BackendError::InvalidOperation("invalid source path".to_string())
             })?;
             dst.join(filename)
         }
         _ => dst.to_path_buf(),
     };
 
-    if meta.is_dir {
+    if info.is_dir {
         // Copy directory recursively, then remove source
-        move_dir_recursive(ctx, src, &final_dst).await?;
-        remove_dir_recursive(ctx, src).await?;
-        ctx.vfs.remove(src).await?;
+        move_dir_recursive(backend, src, &final_dst).await?;
+        remove_dir_recursive(backend, src).await?;
+        backend.remove(src, false).await?;
     } else {
         // Copy file, then remove source
-        let data = ctx.vfs.read(src).await?;
-        ctx.vfs.write(&final_dst, &data).await?;
-        ctx.vfs.remove(src).await?;
+        let data = backend.read(src, None).await?;
+        backend.write(&final_dst, &data, WriteMode::Overwrite).await?;
+        backend.remove(src, false).await?;
     }
 
     Ok(())
@@ -76,27 +76,24 @@ async fn move_path(ctx: &ExecContext, src: &Path, dst: &Path) -> std::io::Result
 
 /// Recursively copy a directory for move operation.
 fn move_dir_recursive<'a>(
-    ctx: &'a ExecContext,
+    backend: &'a dyn KernelBackend,
     src: &'a Path,
     dst: &'a Path,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BackendError>> + Send + 'a>> {
     Box::pin(async move {
-        ctx.vfs.mkdir(dst).await?;
+        backend.mkdir(dst).await?;
 
-        let entries = ctx.vfs.list(src).await?;
+        let entries = backend.list(src).await?;
 
         for entry in entries {
             let src_child: PathBuf = src.join(&entry.name);
             let dst_child: PathBuf = dst.join(&entry.name);
 
-            match entry.entry_type {
-                EntryType::Directory => {
-                    move_dir_recursive(ctx, &src_child, &dst_child).await?;
-                }
-                EntryType::File => {
-                    let data = ctx.vfs.read(&src_child).await?;
-                    ctx.vfs.write(&dst_child, &data).await?;
-                }
+            if entry.is_dir {
+                move_dir_recursive(backend, &src_child, &dst_child).await?;
+            } else {
+                let data = backend.read(&src_child, None).await?;
+                backend.write(&dst_child, &data, WriteMode::Overwrite).await?;
             }
         }
 
@@ -106,22 +103,19 @@ fn move_dir_recursive<'a>(
 
 /// Recursively remove directory contents (for cleanup after copy).
 fn remove_dir_recursive<'a>(
-    ctx: &'a ExecContext,
+    backend: &'a dyn KernelBackend,
     dir: &'a Path,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BackendError>> + Send + 'a>> {
     Box::pin(async move {
-        let entries = ctx.vfs.list(dir).await?;
+        let entries = backend.list(dir).await?;
 
         for entry in entries {
             let child_path: PathBuf = dir.join(&entry.name);
-            match entry.entry_type {
-                EntryType::Directory => {
-                    remove_dir_recursive(ctx, &child_path).await?;
-                    ctx.vfs.remove(&child_path).await?;
-                }
-                EntryType::File => {
-                    ctx.vfs.remove(&child_path).await?;
-                }
+            if entry.is_dir {
+                remove_dir_recursive(backend, &child_path).await?;
+                backend.remove(&child_path, false).await?;
+            } else {
+                backend.remove(&child_path, false).await?;
             }
         }
 
@@ -133,7 +127,7 @@ fn remove_dir_recursive<'a>(
 mod tests {
     use super::*;
     use crate::ast::Value;
-    use crate::vfs::{MemoryFs, VfsRouter};
+    use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 
     async fn make_ctx() -> ExecContext {
@@ -164,11 +158,11 @@ mod tests {
         assert!(result.ok());
 
         // New file exists with content
-        let data = ctx.vfs.read(Path::new("/renamed.txt")).await.unwrap();
+        let data = ctx.backend.read(Path::new("/renamed.txt"), None).await.unwrap();
         assert_eq!(data, b"hello world");
 
         // Original is gone
-        assert!(!ctx.vfs.exists(Path::new("/file.txt")).await);
+        assert!(!ctx.backend.exists(Path::new("/file.txt")).await);
     }
 
     #[tokio::test]
@@ -182,11 +176,11 @@ mod tests {
         assert!(result.ok());
 
         // File moved into destdir
-        let data = ctx.vfs.read(Path::new("/destdir/file.txt")).await.unwrap();
+        let data = ctx.backend.read(Path::new("/destdir/file.txt"), None).await.unwrap();
         assert_eq!(data, b"hello world");
 
         // Original is gone
-        assert!(!ctx.vfs.exists(Path::new("/file.txt")).await);
+        assert!(!ctx.backend.exists(Path::new("/file.txt")).await);
     }
 
     #[tokio::test]
@@ -200,15 +194,15 @@ mod tests {
         assert!(result.ok());
 
         // New location exists with all contents
-        assert!(ctx.vfs.exists(Path::new("/moved")).await);
-        assert!(ctx.vfs.exists(Path::new("/moved/nested.txt")).await);
-        assert!(ctx.vfs.exists(Path::new("/moved/sub/deep.txt")).await);
+        assert!(ctx.backend.exists(Path::new("/moved")).await);
+        assert!(ctx.backend.exists(Path::new("/moved/nested.txt")).await);
+        assert!(ctx.backend.exists(Path::new("/moved/sub/deep.txt")).await);
 
-        let data = ctx.vfs.read(Path::new("/moved/nested.txt")).await.unwrap();
+        let data = ctx.backend.read(Path::new("/moved/nested.txt"), None).await.unwrap();
         assert_eq!(data, b"nested content");
 
         // Original is gone
-        assert!(!ctx.vfs.exists(Path::new("/dir")).await);
+        assert!(!ctx.backend.exists(Path::new("/dir")).await);
     }
 
     #[tokio::test]
@@ -222,11 +216,11 @@ mod tests {
         assert!(result.ok());
 
         // Dir moved into destdir
-        assert!(ctx.vfs.exists(Path::new("/destdir/dir")).await);
-        assert!(ctx.vfs.exists(Path::new("/destdir/dir/nested.txt")).await);
+        assert!(ctx.backend.exists(Path::new("/destdir/dir")).await);
+        assert!(ctx.backend.exists(Path::new("/destdir/dir/nested.txt")).await);
 
         // Original is gone
-        assert!(!ctx.vfs.exists(Path::new("/dir")).await);
+        assert!(!ctx.backend.exists(Path::new("/dir")).await);
     }
 
     #[tokio::test]

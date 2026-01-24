@@ -538,7 +538,7 @@ impl Repl {
             // We need to clone what we need for the async task
             let commands = pipeline.commands.clone();
             let tools = self.tools.clone();
-            let vfs = self.exec_ctx.vfs.clone();
+            let backend = self.exec_ctx.backend.clone();
             let cwd = self.exec_ctx.cwd.clone();
             let scope = self.exec_ctx.scope.clone();
             let job_manager = self.job_manager.clone();
@@ -549,7 +549,7 @@ impl Repl {
                 let id = job_manager.register(pipeline_str.clone(), rx).await;
 
                 tokio::spawn(async move {
-                    let mut ctx = ExecContext::with_scope(vfs, scope);
+                    let mut ctx = ExecContext::with_backend_and_scope(backend, scope);
                     ctx.set_cwd(cwd);
                     ctx.set_job_manager(job_manager);
 
