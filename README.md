@@ -51,7 +51,7 @@ NAME=${NAME:-"default"}      # default value
 echo "Length: ${#NAME}"      # string length
 
 # MCP tools look like builtins
-exa.web_search query="rust parser combinators"
+exa.web_search --query "rust parser combinators"
 
 # 散/集 (san/shū) — scatter/gather parallelism
 cat urls.txt | scatter as=URL limit=4 | process-url url=$URL | gather > results.json
@@ -309,31 +309,80 @@ function greet name:string {
 
 ## Builtin Tools
 
+### Core
+
 | Tool | Description |
 |------|-------------|
 | `echo` | Output text |
-| `ls` | List directory |
+| `printf` | Formatted output |
+| `read` | Read from stdin |
 | `cd` | Change directory |
 | `pwd` | Print working directory |
+| `set` | Set shell options (`set -e`) |
+| `unset` | Unset variables |
+| `exec` | Execute external command |
+| `help` | Tool documentation |
+
+### Files & Directories
+
+| Tool | Description |
+|------|-------------|
+| `ls` | List directory |
 | `cat` | Read file |
-| `read` | Read from stdin |
+| `head` | First N lines |
+| `tail` | Last N lines |
 | `write` | Write to file |
+| `tee` | Read stdin, write to file and stdout |
+| `touch` | Create file / update timestamp |
+| `stat` | File metadata |
 | `mkdir` | Create directory |
 | `rm` | Remove file |
 | `cp` | Copy |
 | `mv` | Move |
+
+### Paths
+
+| Tool | Description |
+|------|-------------|
+| `basename` | Strip directory from path |
+| `dirname` | Strip filename from path |
+| `realpath` | Resolve to absolute path |
+| `readlink` | Read symlink target |
+
+### Text Processing
+
+| Tool | Description |
+|------|-------------|
 | `grep` | Search content |
+| `cut` | Extract fields/columns |
+| `tr` | Translate characters |
+| `sort` | Sort lines |
+| `uniq` | Filter duplicate lines |
+| `wc` | Count lines/words/chars |
 | `jq` | JSON query |
-| `exec` | Execute external command |
-| `help` | Tool documentation |
-| `set` | Set shell options (`set -e`) |
-| `unset` | Unset variables |
+
+### Utilities
+
+| Tool | Description |
+|------|-------------|
+| `seq` | Generate number sequences |
+| `sleep` | Delay execution |
+| `date` | Current timestamp |
+| `assert` | Test assertions |
+
+### Jobs & Parallelism
+
+| Tool | Description |
+|------|-------------|
 | `jobs` | List background jobs |
 | `wait` | Wait for jobs |
 | `scatter` | 散 — Parallel fan-out |
 | `gather` | 集 — Collect parallel results |
-| `assert` | Test assertions |
-| `date` | Current timestamp |
+
+### Introspection
+
+| Tool | Description |
+|------|-------------|
 | `vars` | List variables |
 | `tools` | List available tools |
 | `mounts` | List VFS mounts |
