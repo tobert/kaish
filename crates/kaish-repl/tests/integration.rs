@@ -1060,7 +1060,6 @@ fn while_loop_with_counter() {
 }
 
 #[test]
-#[ignore = "break/continue not properly handled in REPL execution"]
 fn break_in_loop() {
     let outputs = run_script(r#"
         for I in "1" "2" "3" "4" "5"; do
@@ -1079,7 +1078,6 @@ fn break_in_loop() {
 }
 
 #[test]
-#[ignore = "break/continue not properly handled in REPL execution"]
 fn continue_in_loop() {
     let outputs = run_script(r#"
         for I in "1" "2" "3" "4" "5"; do
@@ -1151,7 +1149,6 @@ fn glob_char_class_range() {
 }
 
 #[test]
-#[ignore = "negated char class [!...] needs Bang token in lexer"]
 fn glob_char_class_negated() {
     let outputs = run_script(r#"
         case "A" in

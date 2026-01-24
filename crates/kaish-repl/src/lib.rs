@@ -25,6 +25,18 @@ use tokio::runtime::Runtime;
 
 use kaish_kernel::ast::{Arg, Expr, Pipeline, Stmt, Value};
 use kaish_kernel::interpreter::{ExecResult, Scope};
+
+/// Result of executing a statement in the REPL.
+/// Used to propagate break/continue signals from loops.
+#[derive(Debug, Clone)]
+enum StmtResult {
+    /// Normal output from statement execution
+    Output(Option<String>),
+    /// Break from loop with remaining levels to break
+    Break(usize),
+    /// Continue to next iteration with remaining levels to skip
+    Continue(usize),
+}
 use kaish_kernel::parser::parse;
 use kaish_kernel::scheduler::{JobManager, PipelineRunner};
 use kaish_kernel::state::{StateStore, paths as state_paths};
@@ -190,11 +202,16 @@ impl Repl {
         // Execute each statement
         let mut output = String::new();
         for stmt in program.statements {
-            if let Some(result) = self.execute_stmt(&stmt)? {
-                if !output.is_empty() {
-                    output.push('\n');
+            match self.execute_stmt(&stmt)? {
+                StmtResult::Output(Some(result)) => {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(&result);
                 }
-                output.push_str(&result);
+                StmtResult::Output(None) => {}
+                // Break/continue at top level - just ignore (no enclosing loop)
+                StmtResult::Break(_) | StmtResult::Continue(_) => {}
             }
         }
 
@@ -206,7 +223,7 @@ impl Repl {
     }
 
     /// Execute a single statement.
-    fn execute_stmt(&mut self, stmt: &Stmt) -> Result<Option<String>> {
+    fn execute_stmt(&mut self, stmt: &Stmt) -> Result<StmtResult> {
         match stmt {
             Stmt::Assignment(assign) => {
                 let value = self.eval_expr(&assign.value)?;
@@ -216,17 +233,17 @@ impl Repl {
                     && let Err(e) = store.set_variable(&assign.name, &value) {
                         tracing::warn!("Failed to persist variable {}: {}", assign.name, e);
                     }
-                Ok(Some(format!("{} = {}", assign.name, format_value(&value))))
+                Ok(StmtResult::Output(Some(format!("{} = {}", assign.name, format_value(&value)))))
             }
             Stmt::Command(cmd) => {
                 let result = self.execute_command(&cmd.name, &cmd.args)?;
                 self.exec_ctx.scope.set_last_result(result.clone());
-                Ok(Some(format_result(&result)))
+                Ok(StmtResult::Output(Some(format_result(&result))))
             }
             Stmt::Pipeline(pipeline) => {
                 let result = self.execute_pipeline(pipeline)?;
                 self.exec_ctx.scope.set_last_result(result.clone());
-                Ok(Some(format_result(&result)))
+                Ok(StmtResult::Output(Some(format_result(&result))))
             }
             Stmt::If(if_stmt) => {
                 let cond_value = self.eval_expr(&if_stmt.condition)?;
@@ -238,14 +255,21 @@ impl Repl {
 
                 let mut output = String::new();
                 for stmt in branch {
-                    if let Some(result) = self.execute_stmt(stmt)? {
-                        if !output.is_empty() {
-                            output.push('\n');
+                    match self.execute_stmt(stmt)? {
+                        StmtResult::Output(Some(result)) => {
+                            if !output.is_empty() {
+                                output.push('\n');
+                            }
+                            output.push_str(&result);
                         }
-                        output.push_str(&result);
+                        StmtResult::Output(None) => {}
+                        // Propagate break/continue up
+                        flow @ (StmtResult::Break(_) | StmtResult::Continue(_)) => {
+                            return Ok(flow);
+                        }
                     }
                 }
-                Ok(if output.is_empty() { None } else { Some(output) })
+                Ok(StmtResult::Output(if output.is_empty() { None } else { Some(output) }))
             }
             Stmt::For(for_loop) => {
                 // Evaluate all items and collect words for iteration
@@ -264,23 +288,46 @@ impl Repl {
                 self.exec_ctx.scope.push_frame();
                 let mut output = String::new();
 
-                for word in words {
+                'outer: for word in words {
                     self.exec_ctx.scope.set(&for_loop.variable, Value::String(word));
                     for stmt in &for_loop.body {
-                        if let Some(result) = self.execute_stmt(stmt)? {
-                            if !output.is_empty() {
-                                output.push('\n');
+                        match self.execute_stmt(stmt)? {
+                            StmtResult::Output(Some(result)) => {
+                                if !output.is_empty() {
+                                    output.push('\n');
+                                }
+                                output.push_str(&result);
                             }
-                            output.push_str(&result);
+                            StmtResult::Output(None) => {}
+                            StmtResult::Break(levels) => {
+                                if levels <= 1 {
+                                    // Break this loop
+                                    break 'outer;
+                                } else {
+                                    // Break outer loop(s)
+                                    self.exec_ctx.scope.pop_frame();
+                                    return Ok(StmtResult::Break(levels - 1));
+                                }
+                            }
+                            StmtResult::Continue(levels) => {
+                                if levels <= 1 {
+                                    // Continue to next iteration
+                                    continue 'outer;
+                                } else {
+                                    // Continue in outer loop
+                                    self.exec_ctx.scope.pop_frame();
+                                    return Ok(StmtResult::Continue(levels - 1));
+                                }
+                            }
                         }
                     }
                 }
 
                 self.exec_ctx.scope.pop_frame();
-                Ok(if output.is_empty() { None } else { Some(output) })
+                Ok(StmtResult::Output(if output.is_empty() { None } else { Some(output) }))
             }
             Stmt::ToolDef(tool) => {
-                Ok(Some(format!("Defined tool: {}", tool.name)))
+                Ok(StmtResult::Output(Some(format!("Defined tool: {}", tool.name))))
             }
             Stmt::AndChain { left, right } => {
                 // Run right only if left succeeds
@@ -304,21 +351,38 @@ impl Repl {
             }
             Stmt::While(while_loop) => {
                 let mut output = String::new();
-                loop {
+                'while_loop: loop {
                     let cond_value = self.eval_expr(&while_loop.condition)?;
                     if !is_truthy(&cond_value) {
                         break;
                     }
                     for stmt in &while_loop.body {
-                        if let Some(result) = self.execute_stmt(stmt)? {
-                            if !output.is_empty() {
-                                output.push('\n');
+                        match self.execute_stmt(stmt)? {
+                            StmtResult::Output(Some(result)) => {
+                                if !output.is_empty() {
+                                    output.push('\n');
+                                }
+                                output.push_str(&result);
                             }
-                            output.push_str(&result);
+                            StmtResult::Output(None) => {}
+                            StmtResult::Break(levels) => {
+                                if levels <= 1 {
+                                    break 'while_loop;
+                                } else {
+                                    return Ok(StmtResult::Break(levels - 1));
+                                }
+                            }
+                            StmtResult::Continue(levels) => {
+                                if levels <= 1 {
+                                    continue 'while_loop;
+                                } else {
+                                    return Ok(StmtResult::Continue(levels - 1));
+                                }
+                            }
                         }
                     }
                 }
-                Ok(if output.is_empty() { None } else { Some(output) })
+                Ok(StmtResult::Output(if output.is_empty() { None } else { Some(output) }))
             }
             Stmt::Case(case_stmt) => {
                 // Evaluate the expression to match against
@@ -338,44 +402,51 @@ impl Repl {
                         // Execute the branch body
                         let mut output = String::new();
                         for stmt in &branch.body {
-                            if let Some(result) = self.execute_stmt(stmt)? {
-                                if !output.is_empty() {
-                                    output.push('\n');
+                            match self.execute_stmt(stmt)? {
+                                StmtResult::Output(Some(result)) => {
+                                    if !output.is_empty() {
+                                        output.push('\n');
+                                    }
+                                    output.push_str(&result);
                                 }
-                                output.push_str(&result);
+                                StmtResult::Output(None) => {}
+                                // Propagate break/continue from case branches
+                                flow @ (StmtResult::Break(_) | StmtResult::Continue(_)) => {
+                                    return Ok(flow);
+                                }
                             }
                         }
-                        return Ok(if output.is_empty() { None } else { Some(output) });
+                        return Ok(StmtResult::Output(if output.is_empty() { None } else { Some(output) }));
                     }
                 }
 
                 // No match - return nothing (like bash)
-                Ok(None)
+                Ok(StmtResult::Output(None))
             }
-            Stmt::Break(_) => {
-                // Break in REPL context - just return
-                Ok(Some("break".into()))
+            Stmt::Break(levels) => {
+                // Break from loop - return break signal with level count
+                Ok(StmtResult::Break(levels.unwrap_or(1)))
             }
-            Stmt::Continue(_) => {
-                // Continue in REPL context - just return
-                Ok(Some("continue".into()))
+            Stmt::Continue(levels) => {
+                // Continue in loop - return continue signal with level count
+                Ok(StmtResult::Continue(levels.unwrap_or(1)))
             }
             Stmt::Return(expr) => {
                 // Return in REPL context - evaluate and return value if present
                 if let Some(e) = expr {
                     let value = self.eval_expr(e)?;
-                    Ok(Some(format!("return {}", format_value(&value))))
+                    Ok(StmtResult::Output(Some(format!("return {}", format_value(&value)))))
                 } else {
-                    Ok(Some("return".into()))
+                    Ok(StmtResult::Output(Some("return".into())))
                 }
             }
             Stmt::Exit(expr) => {
                 // Exit in REPL context - just show message
                 if let Some(e) = expr {
                     let value = self.eval_expr(e)?;
-                    Ok(Some(format!("exit {}", format_value(&value))))
+                    Ok(StmtResult::Output(Some(format!("exit {}", format_value(&value)))))
                 } else {
-                    Ok(Some("exit".into()))
+                    Ok(StmtResult::Output(Some("exit".into())))
                 }
             }
             Stmt::Test(test_expr) => {
@@ -386,9 +457,9 @@ impl Repl {
                     Value::Bool(b) => b,
                     _ => false,
                 };
-                Ok(Some(format!("test: {}", is_true)))
+                Ok(StmtResult::Output(Some(format!("test: {}", is_true))))
             }
-            Stmt::Empty => Ok(None),
+            Stmt::Empty => Ok(StmtResult::Output(None)),
         }
     }
 
@@ -658,6 +729,25 @@ impl Repl {
                         match op {
                             TestCmpOp::Eq => values_equal(&l, &r),
                             TestCmpOp::NotEq => !values_equal(&l, &r),
+                            TestCmpOp::Match | TestCmpOp::NotMatch => {
+                                // Regex match
+                                let text = match &l {
+                                    Value::String(s) => s.as_str(),
+                                    _ => anyhow::bail!("=~ requires string on left, got {:?}", l),
+                                };
+                                let pattern = match &r {
+                                    Value::String(s) => s.as_str(),
+                                    _ => anyhow::bail!("=~ requires regex pattern string on right, got {:?}", r),
+                                };
+                                let re = regex::Regex::new(pattern)
+                                    .map_err(|e| anyhow::anyhow!("invalid regex: {}", e))?;
+                                let matches = re.is_match(text);
+                                match op {
+                                    TestCmpOp::Match => matches,
+                                    TestCmpOp::NotMatch => !matches,
+                                    _ => unreachable!(),
+                                }
+                            }
                             TestCmpOp::Gt | TestCmpOp::Lt | TestCmpOp::GtEq | TestCmpOp::LtEq => {
                                 let lnum = value_to_f64(&l);
                                 let rnum = value_to_f64(&r);
