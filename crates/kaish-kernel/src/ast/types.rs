@@ -214,6 +214,8 @@ pub enum Expr {
     VarWithDefault { name: String, default: String },
     /// Arithmetic expansion: `$((expr))` - evaluates to integer
     Arithmetic(String),
+    /// Command as condition: `if grep -q pattern file; then` - exit code determines truthiness
+    Command(Command),
 }
 
 /// Test expression for `[[ ... ]]` conditionals.

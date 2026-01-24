@@ -1394,12 +1394,11 @@ mod tests {
         // Set a flag
         kernel.execute(r#"set FLAG = "go""#).await.expect("set failed");
 
-        // Use string comparison as condition, change flag in body
-        // condition_parser uses direct comparisons (not [[ ]])
+        // Use string comparison as condition (shell-compatible [[ ]] syntax)
         // Note: Put echo last so we can check the output
         let result = kernel
             .execute(r#"
-                while ${FLAG} == "go"; do
+                while [[ ${FLAG} == "go" ]]; do
                     set FLAG = "stop"
                     echo "running"
                 done
@@ -1419,13 +1418,13 @@ mod tests {
     async fn test_while_numeric_comparison() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
-        // Test > comparison
+        // Test > comparison (shell-compatible [[ ]] with -gt)
         kernel.execute("set N = 5").await.expect("set failed");
 
         // Note: Put echo last so we can check the output
         let result = kernel
             .execute(r#"
-                while ${N} > 3; do
+                while [[ ${N} -gt 3 ]]; do
                     set N = 3
                     echo "N was greater"
                 done
@@ -1470,17 +1469,18 @@ mod tests {
         // Test continue in a while loop where variables persist
         // We use string state transition: "start" -> "middle" -> "end"
         // continue on "middle" should skip to next iteration
+        // Shell-compatible: use [[ ]] for comparisons
         let result = kernel
             .execute(r#"
                 set STATE = "start"
                 set AFTER_CONTINUE = "no"
-                while ${STATE} != "done"; do
-                    if ${STATE} == "start"; then
+                while [[ ${STATE} != "done" ]]; do
+                    if [[ ${STATE} == "start" ]]; then
                         set STATE = "middle"
                         continue
                         set AFTER_CONTINUE = "yes"
                     fi
-                    if ${STATE} == "middle"; then
+                    if [[ ${STATE} == "middle" ]]; then
                         set STATE = "done"
                     fi
                 done
@@ -1532,10 +1532,10 @@ mod tests {
     async fn test_return_from_tool() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
-        // Define a tool that returns early
+        // Define a tool that returns early (shell-compatible [[ ]] syntax)
         kernel
             .execute(r#"tool early_return x:int {
-                if ${x} == 1; then
+                if [[ ${x} == 1 ]]; then
                     return 42
                 fi
                 echo "not returned"
@@ -1558,10 +1558,10 @@ mod tests {
     async fn test_return_without_value() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
-        // Define a tool that returns without a value
+        // Define a tool that returns without a value (shell-compatible [[ ]] syntax)
         kernel
             .execute(r#"tool early_exit x:string {
-                if ${x} == "stop"; then
+                if [[ ${x} == "stop" ]]; then
                     return
                 fi
                 echo "continued"

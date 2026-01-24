@@ -286,6 +286,7 @@ pub fn format_expr(expr: &Expr) -> String {
             format!("(var-default {} \"{}\")", name, default)
         }
         Expr::Arithmetic(expr_str) => format!("(arithmetic \"{}\")", expr_str),
+        Expr::Command(cmd) => format_command(cmd),
     }
 }
 

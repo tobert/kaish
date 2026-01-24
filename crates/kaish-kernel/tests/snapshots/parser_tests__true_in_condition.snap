@@ -2,4 +2,4 @@
 source: crates/kaish-kernel/tests/parser_tests.rs
 expression: sexpr
 ---
-(if (bool true) (then (cmd echo (pos (string "yes")))) (else))
+(if (cmd true) (then (cmd echo (pos (string "yes")))) (else))

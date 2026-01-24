@@ -327,28 +327,26 @@ where
         ))
         .boxed();
 
-        // Statement chaining: base_stmt { ( "&&" | "||" ) base_stmt }
-        base_statement
+        // Statement chaining with precedence: && binds tighter than ||
+        // and_chain = base_stmt { "&&" base_stmt }
+        // or_chain  = and_chain { "||" and_chain }
+        let and_chain = base_statement
             .clone()
             .foldl(
-                choice((
-                    just(Token::And).to(true),  // true = && (and chain)
-                    just(Token::Or).to(false),  // false = || (or chain)
-                ))
-                .then(base_statement)
-                .repeated(),
-                |left, (is_and, right)| {
-                    if is_and {
-                        Stmt::AndChain {
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        }
-                    } else {
-                        Stmt::OrChain {
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        }
-                    }
+                just(Token::And).ignore_then(base_statement).repeated(),
+                |left, right| Stmt::AndChain {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            );
+
+        and_chain
+            .clone()
+            .foldl(
+                just(Token::Or).ignore_then(and_chain).repeated(),
+                |left, right| Stmt::OrChain {
+                    left: Box::new(left),
+                    right: Box::new(right),
                 },
             )
             .then_ignore(terminator)
@@ -980,50 +978,39 @@ where
         .boxed()
 }
 
-/// Condition parser: supports [[ ]] test expressions, comparisons, && and || operators.
+/// Condition parser: supports [[ ]] test expressions and commands with && / || chaining.
 ///
-/// Grammar:
-///   condition = test_expr | simple_condition
-///   test_expr = "[[ " test_body " ]]"
-///   simple_condition = or_expr
+/// Shell semantics: conditions are commands whose exit codes determine truthiness.
+/// - `if true; then` → runs `true` builtin, exit code 0 = truthy
+/// - `if grep -q pattern file; then` → runs command, checks exit code
+/// - `if a && b; then` → runs `a`, if exit 0, runs `b`
+///
+/// Use `[[ ]]` for comparisons: `if [[ $X -gt 5 ]]; then`
+///
+/// Grammar (with precedence - && binds tighter than ||):
+///   condition = or_expr
 ///   or_expr   = and_expr { "||" and_expr }
-///   and_expr  = cmp_expr { "&&" cmp_expr }
-///   cmp_expr  = value [ comp_op value ]
+///   and_expr  = base { "&&" base }
+///   base      = test_expr | command
 fn condition_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
     // [[ ]] test expression - wrap as Expr::Test
-    let test_expr_condition = test_expr_stmt_parser()
-        .map(|test| Expr::Test(Box::new(test)));
+    let test_expr_condition = test_expr_stmt_parser().map(|test| Expr::Test(Box::new(test)));
 
-    let comparison_op = select! {
-        Token::EqEq => BinaryOp::Eq,
-        Token::NotEq => BinaryOp::NotEq,
-        Token::Match => BinaryOp::Match,
-        Token::NotMatch => BinaryOp::NotMatch,
-        Token::Lt => BinaryOp::Lt,
-        Token::Gt => BinaryOp::Gt,
-        Token::LtEq => BinaryOp::LtEq,
-        Token::GtEq => BinaryOp::GtEq,
-    };
+    // Command as condition (includes true/false as command names)
+    // The command's exit code determines truthiness (0 = true, non-zero = false)
+    let command_condition = command_parser().map(Expr::Command);
 
-    // cmp_expr: value [ comp_op value ]
-    let cmp_expr = primary_expr_parser()
-        .then(comparison_op.then(primary_expr_parser()).or_not())
-        .map(|(left, maybe_op)| match maybe_op {
-            Some((op, right)) => Expr::BinaryOp {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-            },
-            None => left,
-        });
+    // Base: test expr OR command
+    let base = choice((test_expr_condition, command_condition));
 
-    // and_expr: cmp_expr { "&&" cmp_expr }
-    let and_expr = cmp_expr.clone().foldl(
-        just(Token::And).ignore_then(cmp_expr).repeated(),
+    // && has higher precedence than ||
+    // First chain with && (higher precedence)
+    let and_expr = base.clone().foldl(
+        just(Token::And).ignore_then(base).repeated(),
         |left, right| Expr::BinaryOp {
             left: Box::new(left),
             op: BinaryOp::And,
@@ -1031,8 +1018,8 @@ where
         },
     );
 
-    // or_expr: and_expr { "||" and_expr }
-    let simple_condition = and_expr
+    // Then chain with || (lower precedence)
+    and_expr
         .clone()
         .foldl(
             just(Token::Or).ignore_then(and_expr).repeated(),
@@ -1041,10 +1028,7 @@ where
                 op: BinaryOp::Or,
                 right: Box::new(right),
             },
-        );
-
-    // Accept either [[ ]] test expressions or simple conditions
-    choice((test_expr_condition, simple_condition))
+        )
         .labelled("condition")
         .boxed()
 }
@@ -1388,8 +1372,9 @@ mod tests {
 
     #[test]
     fn parse_multiple_elif() {
+        // Shell-compatible: use [[ ]] for comparisons
         let result = parse(
-            "if ${X} == 1; then echo one; elif ${X} == 2; then echo two; elif ${X} == 3; then echo three; else echo other; fi",
+            "if [[ ${X} == 1 ]]; then echo one; elif [[ ${X} == 2 ]]; then echo two; elif [[ ${X} == 3 ]]; then echo three; else echo other; fi",
         );
         assert!(result.is_ok(), "parse failed: {:?}", result);
     }
@@ -1877,18 +1862,22 @@ mod tests {
 
     #[test]
     fn parse_comparison_equals() {
-        let result = parse("if ${X} == 5; then echo; fi").unwrap();
+        // Shell-compatible: use [[ ]] for comparisons
+        let result = parse("if [[ ${X} == 5 ]]; then echo; fi").unwrap();
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
-                Expr::BinaryOp { left, op, right } => {
-                    assert!(matches!(left.as_ref(), Expr::VarRef(_)));
-                    assert_eq!(*op, BinaryOp::Eq);
-                    match right.as_ref() {
-                        Expr::Literal(Value::Int(n)) => assert_eq!(*n, 5),
-                        other => panic!("expected int, got {:?}", other),
+                Expr::Test(test) => match test.as_ref() {
+                    TestExpr::Comparison { left, op, right } => {
+                        assert!(matches!(left.as_ref(), Expr::VarRef(_)));
+                        assert_eq!(*op, TestCmpOp::Eq);
+                        match right.as_ref() {
+                            Expr::Literal(Value::Int(n)) => assert_eq!(*n, 5),
+                            other => panic!("expected int, got {:?}", other),
+                        }
                     }
-                }
-                other => panic!("expected binary op, got {:?}", other),
+                    other => panic!("expected comparison, got {:?}", other),
+                },
+                other => panic!("expected test expr, got {:?}", other),
             },
             other => panic!("expected if, got {:?}", other),
         }
@@ -1896,11 +1885,14 @@ mod tests {
 
     #[test]
     fn parse_comparison_not_equals() {
-        let result = parse("if ${X} != 0; then echo; fi").unwrap();
+        let result = parse("if [[ ${X} != 0 ]]; then echo; fi").unwrap();
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
-                Expr::BinaryOp { op, .. } => assert_eq!(*op, BinaryOp::NotEq),
-                other => panic!("expected binary op, got {:?}", other),
+                Expr::Test(test) => match test.as_ref() {
+                    TestExpr::Comparison { op, .. } => assert_eq!(*op, TestCmpOp::NotEq),
+                    other => panic!("expected comparison, got {:?}", other),
+                },
+                other => panic!("expected test expr, got {:?}", other),
             },
             other => panic!("expected if, got {:?}", other),
         }
@@ -1908,11 +1900,14 @@ mod tests {
 
     #[test]
     fn parse_comparison_less_than() {
-        let result = parse("if ${COUNT} < 10; then echo; fi").unwrap();
+        let result = parse("if [[ ${COUNT} -lt 10 ]]; then echo; fi").unwrap();
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
-                Expr::BinaryOp { op, .. } => assert_eq!(*op, BinaryOp::Lt),
-                other => panic!("expected binary op, got {:?}", other),
+                Expr::Test(test) => match test.as_ref() {
+                    TestExpr::Comparison { op, .. } => assert_eq!(*op, TestCmpOp::Lt),
+                    other => panic!("expected comparison, got {:?}", other),
+                },
+                other => panic!("expected test expr, got {:?}", other),
             },
             other => panic!("expected if, got {:?}", other),
         }
@@ -1920,11 +1915,14 @@ mod tests {
 
     #[test]
     fn parse_comparison_greater_than() {
-        let result = parse("if ${COUNT} > 0; then echo; fi").unwrap();
+        let result = parse("if [[ ${COUNT} -gt 0 ]]; then echo; fi").unwrap();
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
-                Expr::BinaryOp { op, .. } => assert_eq!(*op, BinaryOp::Gt),
-                other => panic!("expected binary op, got {:?}", other),
+                Expr::Test(test) => match test.as_ref() {
+                    TestExpr::Comparison { op, .. } => assert_eq!(*op, TestCmpOp::Gt),
+                    other => panic!("expected comparison, got {:?}", other),
+                },
+                other => panic!("expected test expr, got {:?}", other),
             },
             other => panic!("expected if, got {:?}", other),
         }
@@ -1932,11 +1930,14 @@ mod tests {
 
     #[test]
     fn parse_comparison_less_equal() {
-        let result = parse("if ${X} <= 100; then echo; fi").unwrap();
+        let result = parse("if [[ ${X} -le 100 ]]; then echo; fi").unwrap();
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
-                Expr::BinaryOp { op, .. } => assert_eq!(*op, BinaryOp::LtEq),
-                other => panic!("expected binary op, got {:?}", other),
+                Expr::Test(test) => match test.as_ref() {
+                    TestExpr::Comparison { op, .. } => assert_eq!(*op, TestCmpOp::LtEq),
+                    other => panic!("expected comparison, got {:?}", other),
+                },
+                other => panic!("expected test expr, got {:?}", other),
             },
             other => panic!("expected if, got {:?}", other),
         }
@@ -1944,11 +1945,14 @@ mod tests {
 
     #[test]
     fn parse_comparison_greater_equal() {
-        let result = parse("if ${X} >= 1; then echo; fi").unwrap();
+        let result = parse("if [[ ${X} -ge 1 ]]; then echo; fi").unwrap();
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
-                Expr::BinaryOp { op, .. } => assert_eq!(*op, BinaryOp::GtEq),
-                other => panic!("expected binary op, got {:?}", other),
+                Expr::Test(test) => match test.as_ref() {
+                    TestExpr::Comparison { op, .. } => assert_eq!(*op, TestCmpOp::GtEq),
+                    other => panic!("expected comparison, got {:?}", other),
+                },
+                other => panic!("expected test expr, got {:?}", other),
             },
             other => panic!("expected if, got {:?}", other),
         }
@@ -1956,11 +1960,14 @@ mod tests {
 
     #[test]
     fn parse_regex_match() {
-        let result = parse(r#"if ${NAME} =~ "^test"; then echo; fi"#).unwrap();
+        let result = parse(r#"if [[ ${NAME} =~ "^test" ]]; then echo; fi"#).unwrap();
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
-                Expr::BinaryOp { op, .. } => assert_eq!(*op, BinaryOp::Match),
-                other => panic!("expected binary op, got {:?}", other),
+                Expr::Test(test) => match test.as_ref() {
+                    TestExpr::Comparison { op, .. } => assert_eq!(*op, TestCmpOp::Match),
+                    other => panic!("expected comparison, got {:?}", other),
+                },
+                other => panic!("expected test expr, got {:?}", other),
             },
             other => panic!("expected if, got {:?}", other),
         }
@@ -1968,11 +1975,14 @@ mod tests {
 
     #[test]
     fn parse_regex_not_match() {
-        let result = parse(r#"if ${NAME} !~ "^test"; then echo; fi"#).unwrap();
+        let result = parse(r#"if [[ ${NAME} !~ "^test" ]]; then echo; fi"#).unwrap();
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
-                Expr::BinaryOp { op, .. } => assert_eq!(*op, BinaryOp::NotMatch),
-                other => panic!("expected binary op, got {:?}", other),
+                Expr::Test(test) => match test.as_ref() {
+                    TestExpr::Comparison { op, .. } => assert_eq!(*op, TestCmpOp::NotMatch),
+                    other => panic!("expected comparison, got {:?}", other),
+                },
+                other => panic!("expected test expr, got {:?}", other),
             },
             other => panic!("expected if, got {:?}", other),
         }
@@ -2059,18 +2069,21 @@ mod tests {
 
     #[test]
     fn parse_comparison_string_values() {
-        let result = parse(r#"if ${STATUS} == "ok"; then echo; fi"#).unwrap();
+        let result = parse(r#"if [[ ${STATUS} == "ok" ]]; then echo; fi"#).unwrap();
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
-                Expr::BinaryOp { left, op, right } => {
-                    assert!(matches!(left.as_ref(), Expr::VarRef(_)));
-                    assert_eq!(*op, BinaryOp::Eq);
-                    match right.as_ref() {
-                        Expr::Literal(Value::String(s)) => assert_eq!(s, "ok"),
-                        other => panic!("expected string, got {:?}", other),
+                Expr::Test(test) => match test.as_ref() {
+                    TestExpr::Comparison { left, op, right } => {
+                        assert!(matches!(left.as_ref(), Expr::VarRef(_)));
+                        assert_eq!(*op, TestCmpOp::Eq);
+                        match right.as_ref() {
+                            Expr::Literal(Value::String(s)) => assert_eq!(s, "ok"),
+                            other => panic!("expected string, got {:?}", other),
+                        }
                     }
-                }
-                other => panic!("expected binary op, got {:?}", other),
+                    other => panic!("expected comparison, got {:?}", other),
+                },
+                other => panic!("expected test expr, got {:?}", other),
             },
             other => panic!("expected if, got {:?}", other),
         }
@@ -2135,13 +2148,14 @@ mod tests {
 
     #[test]
     fn parse_cmd_subst_in_condition() {
-        let result = parse("if $(validate); then echo; fi").unwrap();
+        // Shell-compatible: conditions are commands, not command substitutions
+        let result = parse("if validate; then echo; fi").unwrap();
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
-                Expr::CommandSubst(pipeline) => {
-                    assert_eq!(pipeline.commands[0].name, "validate");
+                Expr::Command(cmd) => {
+                    assert_eq!(cmd.name, "validate");
                 }
-                other => panic!("expected command subst, got {:?}", other),
+                other => panic!("expected command, got {:?}", other),
             },
             other => panic!("expected if, got {:?}", other),
         }
@@ -2170,13 +2184,14 @@ mod tests {
 
     #[test]
     fn parse_condition_and() {
-        let result = parse("if $(check-a) && $(check-b); then echo; fi").unwrap();
+        // Shell-compatible: commands chained with &&
+        let result = parse("if check-a && check-b; then echo; fi").unwrap();
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
                 Expr::BinaryOp { left, op, right } => {
                     assert_eq!(*op, BinaryOp::And);
-                    assert!(matches!(left.as_ref(), Expr::CommandSubst(_)));
-                    assert!(matches!(right.as_ref(), Expr::CommandSubst(_)));
+                    assert!(matches!(left.as_ref(), Expr::Command(_)));
+                    assert!(matches!(right.as_ref(), Expr::Command(_)));
                 }
                 other => panic!("expected binary op, got {:?}", other),
             },
@@ -2186,13 +2201,13 @@ mod tests {
 
     #[test]
     fn parse_condition_or() {
-        let result = parse("if $(try-a) || $(try-b); then echo; fi").unwrap();
+        let result = parse("if try-a || try-b; then echo; fi").unwrap();
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
                 Expr::BinaryOp { left, op, right } => {
                     assert_eq!(*op, BinaryOp::Or);
-                    assert!(matches!(left.as_ref(), Expr::CommandSubst(_)));
-                    assert!(matches!(right.as_ref(), Expr::CommandSubst(_)));
+                    assert!(matches!(left.as_ref(), Expr::Command(_)));
+                    assert!(matches!(right.as_ref(), Expr::Command(_)));
                 }
                 other => panic!("expected binary op, got {:?}", other),
             },
@@ -2203,7 +2218,7 @@ mod tests {
     #[test]
     fn parse_condition_and_or_precedence() {
         // a && b || c should parse as (a && b) || c
-        let result = parse("if $(a) && $(b) || $(c); then echo; fi").unwrap();
+        let result = parse("if cmd-a && cmd-b || cmd-c; then echo; fi").unwrap();
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
                 Expr::BinaryOp { left, op, right } => {
@@ -2216,8 +2231,8 @@ mod tests {
                         }
                         other => panic!("expected binary op (&&), got {:?}", other),
                     }
-                    // Right side should be $(c)
-                    assert!(matches!(right.as_ref(), Expr::CommandSubst(_)));
+                    // Right side should be command
+                    assert!(matches!(right.as_ref(), Expr::Command(_)));
                 }
                 other => panic!("expected binary op, got {:?}", other),
             },
@@ -2227,7 +2242,7 @@ mod tests {
 
     #[test]
     fn parse_condition_multiple_and() {
-        let result = parse("if $(a) && $(b) && $(c); then echo; fi").unwrap();
+        let result = parse("if cmd-a && cmd-b && cmd-c; then echo; fi").unwrap();
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
                 Expr::BinaryOp { left, op, .. } => {
@@ -2248,25 +2263,31 @@ mod tests {
 
     #[test]
     fn parse_condition_mixed_comparison_and_logical() {
-        // ${X} == 5 && ${Y} > 0
-        let result = parse("if ${X} == 5 && ${Y} > 0; then echo; fi").unwrap();
+        // Shell-compatible: use [[ ]] for comparisons, && to chain them
+        let result = parse("if [[ ${X} == 5 ]] && [[ ${Y} -gt 0 ]]; then echo; fi").unwrap();
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
                 Expr::BinaryOp { left, op, right } => {
                     assert_eq!(*op, BinaryOp::And);
-                    // Left: ${X} == 5
+                    // Left: [[ ${X} == 5 ]]
                     match left.as_ref() {
-                        Expr::BinaryOp { op: left_op, .. } => {
-                            assert_eq!(*left_op, BinaryOp::Eq);
-                        }
-                        other => panic!("expected comparison, got {:?}", other),
+                        Expr::Test(test) => match test.as_ref() {
+                            TestExpr::Comparison { op: left_op, .. } => {
+                                assert_eq!(*left_op, TestCmpOp::Eq);
+                            }
+                            other => panic!("expected comparison, got {:?}", other),
+                        },
+                        other => panic!("expected test, got {:?}", other),
                     }
-                    // Right: ${Y} > 0
+                    // Right: [[ ${Y} -gt 0 ]]
                     match right.as_ref() {
-                        Expr::BinaryOp { op: right_op, .. } => {
-                            assert_eq!(*right_op, BinaryOp::Gt);
-                        }
-                        other => panic!("expected comparison, got {:?}", other),
+                        Expr::Test(test) => match test.as_ref() {
+                            TestExpr::Comparison { op: right_op, .. } => {
+                                assert_eq!(*right_op, TestCmpOp::Gt);
+                            }
+                            other => panic!("expected comparison, got {:?}", other),
+                        },
+                        other => panic!("expected test, got {:?}", other),
                     }
                 }
                 other => panic!("expected binary op, got {:?}", other),
@@ -2309,24 +2330,24 @@ echo "Items: ${ITEMS}"
         assert!(matches!(stmts[7], Stmt::Command(_)));     // echo "Items: ${ITEMS}"
     }
 
-    /// Level 2: Script with conditionals
+    /// Level 2: Script with conditionals (shell-compatible syntax)
     #[test]
     fn script_level2_branching() {
         let script = r#"
 set RESULT = $(validate "input.json")
 
-if ${RESULT.ok}; then
+if [[ ${RESULT.ok} == true ]]; then
     echo "Validation passed"
     process "input.json" > "output.json"
 else
     echo "Validation failed: ${RESULT.err}"
 fi
 
-if ${COUNT} > 0 && ${COUNT} <= 100; then
+if [[ ${COUNT} -gt 0 ]] && [[ ${COUNT} -le 100 ]]; then
     echo "Count in valid range"
 fi
 
-if $(check-network) || $(check-cache); then
+if check-network || check-cache; then
     fetch url=${URL}
 fi
 "#;
@@ -2367,14 +2388,14 @@ fi
             other => panic!("expected if, got {:?}", other),
         }
 
-        // Fourth: if with || of command substitutions
+        // Fourth: if with || of commands
         match stmts[3] {
             Stmt::If(if_stmt) => {
                 match if_stmt.condition.as_ref() {
                     Expr::BinaryOp { op, left, right } => {
                         assert_eq!(*op, BinaryOp::Or);
-                        assert!(matches!(left.as_ref(), Expr::CommandSubst(_)));
-                        assert!(matches!(right.as_ref(), Expr::CommandSubst(_)));
+                        assert!(matches!(left.as_ref(), Expr::Command(_)));
+                        assert!(matches!(right.as_ref(), Expr::Command(_)));
                     }
                     other => panic!("expected || condition, got {:?}", other),
                 }
@@ -2383,7 +2404,7 @@ fi
         }
     }
 
-    /// Level 3: Script with loops and tool definitions
+    /// Level 3: Script with loops and tool definitions (shell-compatible syntax)
     #[test]
     fn script_level3_loops_and_tools() {
         let script = r#"
@@ -2401,7 +2422,7 @@ set USERS = "alice bob charlie"
 
 for USER in ${USERS}; do
     greet name=${USER}
-    if ${USER} == "bob"; then
+    if [[ ${USER} == "bob" ]]; then
         echo "Found Bob!"
     fi
 done
@@ -2462,16 +2483,16 @@ long-running-task &
         }
     }
 
-    /// Level 4: Complex nested control flow
+    /// Level 4: Complex nested control flow (shell-compatible syntax)
     #[test]
     fn script_level4_complex_nesting() {
         let script = r#"
 set RESULT = $(cat "config.json" | jq query=".servers" | validate schema="server-schema.json")
 
-if $(ping host=${HOST}) && ${RESULT}; then
+if ping host=${HOST} && [[ ${RESULT} == true ]]; then
     for SERVER in "prod-1 prod-2"; do
         deploy target=${SERVER} port=8080
-        if ${?.code} != 0; then
+        if [[ ${?.code} != 0 ]]; then
             notify channel="ops" message="Deploy failed"
         fi
     done

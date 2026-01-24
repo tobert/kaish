@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(if (and (test (file -f (string "file"))) (cmd process-file)) (then (cmd echo (pos (string "processed")))) (else))

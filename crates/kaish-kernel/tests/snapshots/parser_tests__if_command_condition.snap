@@ -1,0 +1,6 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+assertion_line: 21
+expression: sexpr
+---
+(if (cmd test-something) (then (cmd echo (pos (string "passed")))) (else))

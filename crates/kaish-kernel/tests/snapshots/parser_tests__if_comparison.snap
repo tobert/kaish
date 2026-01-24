@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(if (test (cmp -gt (varref X) (int 5))) (then (cmd echo (pos (string "big")))) (else))

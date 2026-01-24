@@ -24,6 +24,7 @@ mod read;
 mod rm;
 mod scatter;
 mod set;
+mod true_false;
 mod unset;
 mod vars;
 mod wait;
@@ -57,6 +58,8 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(rm::Rm);
     registry.register(scatter::Scatter);
     registry.register(set::Set);
+    registry.register(true_false::True);
+    registry.register(true_false::False);
     registry.register(unset::Unset);
     registry.register(vars::Vars);
     registry.register(wait::Wait);

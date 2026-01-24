@@ -202,24 +202,24 @@ fn parser_redirects(#[case] input: &str) {
 
 #[test]
 fn parser_if_simple() {
-    parse_and_snapshot("if_simple", "if ${?.ok}; then\n    echo \"yes\"\nfi");
+    // Shell-compatible: compare result reference to true
+    parse_and_snapshot("if_simple", "if [[ ${?.ok} == true ]]; then\n    echo \"yes\"\nfi");
 }
 
 #[test]
 fn parser_if_else() {
-    parse_and_snapshot("if_else", "if ${?.ok}; then\n    echo \"yes\"\nelse\n    echo \"no\"\nfi");
+    // Shell-compatible: compare result reference to true
+    parse_and_snapshot("if_else", "if [[ ${?.ok} == true ]]; then\n    echo \"yes\"\nelse\n    echo \"no\"\nfi");
 }
 
 #[test]
-#[ignore = "parses identifier as string instead of command"]
 fn parser_if_command_condition() {
     parse_and_snapshot("if_command_condition", "if test-something; then\n    echo \"passed\"\nfi");
 }
 
 #[test]
-#[ignore = "parenthesized conditions not parsed"]
 fn parser_if_comparison() {
-    parse_and_snapshot("if_comparison", "if (${X} > 5); then\n    echo \"big\"\nfi");
+    parse_and_snapshot("if_comparison", "if [[ ${X} -gt 5 ]]; then\n    echo \"big\"\nfi");
 }
 
 #[test]
@@ -241,6 +241,49 @@ fn parser_or_chain() {
 #[test]
 fn parser_mixed_chain() {
     parse_and_snapshot("mixed_chain", "a && b || c");
+}
+
+#[test]
+fn parser_precedence_or_then_and() {
+    // CRITICAL: && binds tighter than ||, so this should parse as: a || (b && c)
+    // NOT as: (a || b) && c
+    parse_and_snapshot("precedence_or_then_and", "a || b && c");
+}
+
+#[test]
+fn parser_precedence_complex() {
+    // Tests both levels: a && b || c && d → (a && b) || (c && d)
+    parse_and_snapshot("precedence_complex", "a && b || c && d");
+}
+
+#[test]
+fn parser_precedence_deeply_chained() {
+    // Stress test: a || b || c && d && e → a || b || ((c && d) && e)
+    parse_and_snapshot("precedence_deeply_chained", "a || b || c && d && e");
+}
+
+#[test]
+fn parser_if_command_with_args() {
+    // Command with arguments as condition
+    parse_and_snapshot("if_command_with_args", "if grep -q pattern file; then\n    echo \"found\"\nfi");
+}
+
+#[test]
+fn parser_if_test_and_command() {
+    // Mixed: test expression && command
+    parse_and_snapshot("if_test_and_command", "if [[ -f file ]] && process-file; then\n    echo \"processed\"\nfi");
+}
+
+#[test]
+fn parser_if_command_or_test() {
+    // Mixed: command || test expression
+    parse_and_snapshot("if_command_or_test", "if check-cache || [[ -f backup ]]; then\n    echo \"data available\"\nfi");
+}
+
+#[test]
+fn parser_while_command_with_args() {
+    // while with command that has arguments
+    parse_and_snapshot("while_command_with_args", "while read-line input; do\n    echo ${line}\ndone");
 }
 
 // =============================================================================

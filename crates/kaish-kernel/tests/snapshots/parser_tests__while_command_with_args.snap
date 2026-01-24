@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(while (cmd read-line (pos (string "input"))) (do (cmd echo (pos (varref line)))))

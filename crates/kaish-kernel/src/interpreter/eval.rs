@@ -112,7 +112,28 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             Expr::VarLength(name) => self.eval_var_length(name),
             Expr::VarWithDefault { name, default } => self.eval_var_with_default(name, default),
             Expr::Arithmetic(expr_str) => self.eval_arithmetic(expr_str),
+            Expr::Command(cmd) => self.eval_command(cmd),
         }
+    }
+
+    /// Evaluate a command as a condition (exit code determines truthiness).
+    fn eval_command(&mut self, cmd: &crate::ast::Command) -> EvalResult<Value> {
+        // Special-case true/false builtins - they have well-known return values
+        // and don't need an executor to evaluate. Like real shells, any args are ignored.
+        match cmd.name.as_str() {
+            "true" => return Ok(Value::Bool(true)),
+            "false" => return Ok(Value::Bool(false)),
+            _ => {}
+        }
+
+        // For other commands, create a single-command pipeline to execute
+        let pipeline = crate::ast::Pipeline {
+            commands: vec![cmd.clone()],
+            background: false,
+        };
+        let result = self.executor.execute(&pipeline, self.scope)?;
+        // Exit code 0 = true, non-zero = false
+        Ok(Value::Bool(result.code == 0))
     }
 
     /// Evaluate arithmetic expansion: `$((expr))`
@@ -189,14 +210,14 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                         }
                     }
                     TestCmpOp::Gt | TestCmpOp::Lt | TestCmpOp::GtEq | TestCmpOp::LtEq => {
-                        // Numeric comparison
-                        let left_num = value_to_f64(&left_val);
-                        let right_num = value_to_f64(&right_val);
+                        // Ordered comparison (works for strings and numbers)
+                        // Type mismatches are errors - no silent coercion
+                        let ord = compare_values(&left_val, &right_val)?;
                         match op {
-                            TestCmpOp::Gt => left_num > right_num,
-                            TestCmpOp::Lt => left_num < right_num,
-                            TestCmpOp::GtEq => left_num >= right_num,
-                            TestCmpOp::LtEq => left_num <= right_num,
+                            TestCmpOp::Gt => ord.is_gt(),
+                            TestCmpOp::Lt => ord.is_lt(),
+                            TestCmpOp::GtEq => ord.is_ge(),
+                            TestCmpOp::LtEq => ord.is_le(),
                             _ => unreachable!(),
                         }
                     }
@@ -487,17 +508,6 @@ fn type_name(value: &Value) -> &'static str {
         Value::Int(_) => "int",
         Value::Float(_) => "float",
         Value::String(_) => "string",
-    }
-}
-
-/// Convert a value to f64 for numeric comparisons.
-fn value_to_f64(value: &Value) -> f64 {
-    match value {
-        Value::Null => 0.0,
-        Value::Int(i) => *i as f64,
-        Value::Float(f) => *f,
-        Value::String(s) => s.parse::<f64>().unwrap_or(0.0),
-        Value::Bool(b) => if *b { 1.0 } else { 0.0 },
     }
 }
 

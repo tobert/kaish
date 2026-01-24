@@ -2,4 +2,4 @@
 source: crates/kaish-kernel/tests/parser_tests.rs
 expression: sexpr
 ---
-(if (varref ?.ok) (then (cmd echo (pos (string "yes")))) (else))
+(if (test (cmp == (varref ?.ok) (bool true))) (then (cmd echo (pos (string "yes")))) (else))

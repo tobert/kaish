@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(if (or (cmd check-cache) (test (file -f (string "backup")))) (then (cmd echo (pos (string "data available")))) (else))

@@ -201,23 +201,23 @@ redir_op    = ">" | ">>" | "<" | "2>" | "&>" ;
 
 (* === Conditions === *)
 (*
- * Precedence (highest to lowest):
- *   1. Comparison operators (==, !=, <, >, etc.)
- *   2. && (logical and)
- *   3. || (logical or)
+ * Shell-compatible conditions: commands whose exit codes determine truthiness.
+ * - `if true; then` → runs `true` builtin (exit 0 = truthy)
+ * - `if grep -q pattern file; then` → runs command, checks exit code
+ * - `if cmd-a && cmd-b; then` → runs cmd-a, if exit 0, runs cmd-b
+ * - For comparisons, use [[ ]]: `if [[ $X == 5 ]]; then`
  *
- * So: a || b && c  parses as  a || (b && c)
+ * Precedence (highest to lowest):
+ *   1. && (logical and) - short-circuit
+ *   2. || (logical or) - short-circuit
+ *
+ * So: true || false && false  parses as  true || (false && false)
  *)
 condition   = or_expr ;
 or_expr     = and_expr , { "||" , and_expr } ;
-and_expr    = cmp_expr , { "&&" , cmp_expr } ;
-cmp_expr    = primary , [ comp_op , primary ] ;
-primary     = test_expr_stmt                         (* [[ -f path ]] *)
-            | cmd_subst                              (* $(validate) *)
-            | value                                  (* $VAR, true, false, literal *)
-            ;
-comp_op     = "==" | "!=" | "<" | ">" | "<=" | ">="
-            | "=~" | "!~"                            (* regex match / not match *)
+and_expr    = base_cond , { "&&" , base_cond } ;
+base_cond   = test_expr_stmt                         (* [[ -f path ]], [[ $X == 5 ]] *)
+            | command                                 (* true, false, grep -q pattern, etc. *)
             ;
 
 (* === Tokens (Lexer) === *)
@@ -390,7 +390,7 @@ fi
 │ flag          │ --force            │ LongFlag(force)           │
 │ param_exp     │ ${X:-default}      │ VarWithDefault(X, "...")  │
 │ var_length    │ ${#X}              │ VarLength(X)              │
-│ while         │ while true; do...  │ While(Lit(true), [...])   │
+│ while         │ while true; do...  │ While(Cmd(true), [...])   │
 │ test          │ [[ -f x ]]         │ Test(FileTest(IsFile, x)) │
 └─────────────────────────────────────────────────────────────────┘
 ```

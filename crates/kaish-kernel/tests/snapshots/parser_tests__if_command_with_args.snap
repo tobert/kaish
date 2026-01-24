@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(if (cmd grep (shortflag q) (pos (string "pattern")) (pos (string "file"))) (then (cmd echo (pos (string "found")))) (else))

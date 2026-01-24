@@ -2,4 +2,4 @@
 source: crates/kaish-kernel/tests/parser_tests.rs
 expression: sexpr
 ---
-(if (cmd true) (then (cmd echo)) (else))
+(or-chain (cmd a) (and-chain (cmd b) (cmd c)))
