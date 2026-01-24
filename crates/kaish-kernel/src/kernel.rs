@@ -32,13 +32,14 @@ use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 
 use crate::ast::{Arg, Stmt, ToolDef, Value};
+use crate::backend::KernelBackend;
 use crate::glob::glob_match;
 use crate::interpreter::{eval_expr, expand_tilde, value_to_string, ControlFlow, ExecResult, Scope};
 use crate::parser::parse;
 use crate::scheduler::{JobManager, PipelineRunner};
 use crate::state::{paths as state_paths, StateStore};
 use crate::tools::{register_builtins, ExecContext, ToolArgs, ToolRegistry};
-use crate::vfs::{Filesystem, LocalFs, MemoryFs, VfsRouter};
+use crate::vfs::{LocalFs, MemoryFs, VfsRouter};
 
 /// Configuration for kernel initialization.
 #[derive(Debug, Clone)]
@@ -214,6 +215,100 @@ impl Kernel {
     /// Create a transient kernel (no persistence).
     pub fn transient() -> Result<Self> {
         Self::new(KernelConfig::transient())
+    }
+
+    /// Create a kernel with a custom backend.
+    ///
+    /// This constructor allows embedding kaish in other systems that provide
+    /// their own storage backend (e.g., CRDT-backed storage in kaijutsu).
+    /// The provided backend will be used for all file operations in builtins.
+    ///
+    /// Note: A VfsRouter is still created internally for compatibility with
+    /// the `vfs()` method, but it won't be used for execution context operations.
+    pub fn with_backend(backend: Arc<dyn KernelBackend>, config: KernelConfig) -> Result<Self> {
+        // Create VFS for compatibility (but exec_ctx will use the provided backend)
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        vfs.mount("/tmp", MemoryFs::new());
+        if config.mount_local {
+            let root = config.local_root.unwrap_or_else(|| {
+                std::env::var("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("/"))
+            });
+            vfs.mount("/mnt/local", LocalFs::new(root));
+        }
+        let vfs = Arc::new(vfs);
+        let jobs = Arc::new(JobManager::new());
+
+        // Set up tools
+        let mut tools = ToolRegistry::new();
+        register_builtins(&mut tools);
+        let tools = Arc::new(tools);
+
+        // Pipeline runner
+        let runner = PipelineRunner::new(tools.clone());
+
+        // Set up state store if persistent
+        let state = if config.persist {
+            let state_dir = state_paths::kernels_dir();
+            std::fs::create_dir_all(&state_dir).ok();
+            let db_path = state_dir.join(format!("{}.db", config.name));
+            StateStore::open(&db_path)
+                .ok()
+                .map(|store| Arc::new(Mutex::new(store)))
+        } else {
+            None
+        };
+
+        // Load scope from state if available
+        let scope = if let Some(ref store) = state {
+            let mut scope = Scope::new();
+            if let Ok(guard) = store.lock()
+                && let Ok(vars) = guard.load_all_variables() {
+                    for (name, value) in vars {
+                        scope.set(name, value);
+                    }
+                }
+            scope
+        } else {
+            Scope::new()
+        };
+
+        // Load cwd from state if available, or use config
+        let cwd = if let Some(ref store) = state {
+            let stored = store
+                .lock()
+                .ok()
+                .and_then(|guard| guard.get_cwd().ok())
+                .unwrap_or_default();
+            if stored.is_empty() || stored == "/" {
+                config.cwd
+            } else {
+                PathBuf::from(stored)
+            }
+        } else {
+            config.cwd
+        };
+
+        // Create execution context with custom backend
+        let mut exec_ctx = ExecContext::with_backend(backend);
+        exec_ctx.set_cwd(cwd);
+        exec_ctx.set_job_manager(jobs.clone());
+        exec_ctx.set_tool_schemas(tools.schemas());
+        exec_ctx.state_store = state.clone();
+
+        Ok(Self {
+            name: config.name,
+            scope: RwLock::new(scope),
+            tools,
+            user_tools: RwLock::new(HashMap::new()),
+            vfs,
+            jobs,
+            runner,
+            exec_ctx: RwLock::new(exec_ctx),
+            state,
+        })
     }
 
     /// Get the kernel name.
@@ -830,10 +925,10 @@ impl Kernel {
             }
         };
 
-        // Read file content from VFS
+        // Read file content via backend
         let content = {
             let ctx = self.exec_ctx.read().await;
-            match ctx.vfs.read(&full_path).await {
+            match ctx.backend.read(&full_path, None).await {
                 Ok(bytes) => {
                     String::from_utf8(bytes).map_err(|e| {
                         anyhow::anyhow!("source: {}: invalid UTF-8: {}", path, e)

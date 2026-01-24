@@ -14,6 +14,7 @@
 
 pub mod arithmetic;
 pub mod ast;
+pub mod backend;
 pub mod glob;
 pub mod interpreter;
 pub mod kernel;
@@ -26,5 +27,9 @@ pub mod state;
 pub mod tools;
 pub mod vfs;
 
+pub use backend::{
+    BackendError, BackendResult, EntryInfo, KernelBackend, LocalBackend, PatchOp, ReadRange,
+    ToolInfo, ToolResult, WriteMode,
+};
 pub use kernel::{Kernel, KernelConfig};
 pub use rpc::KernelRpcServer;
