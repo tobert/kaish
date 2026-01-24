@@ -314,6 +314,8 @@ pub fn format_test_expr(test: &TestExpr) -> String {
             let op_str = match op {
                 TestCmpOp::Eq => "==",
                 TestCmpOp::NotEq => "!=",
+                TestCmpOp::Match => "=~",
+                TestCmpOp::NotMatch => "!~",
                 TestCmpOp::Gt => "-gt",
                 TestCmpOp::Lt => "-lt",
                 TestCmpOp::GtEq => "-ge",

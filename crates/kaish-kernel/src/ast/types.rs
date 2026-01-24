@@ -260,6 +260,10 @@ pub enum TestCmpOp {
     Eq,
     /// `!=` - string inequality
     NotEq,
+    /// `=~` - regex match
+    Match,
+    /// `!~` - regex not match
+    NotMatch,
     /// `-gt` - greater than (numeric)
     Gt,
     /// `-lt` - less than (numeric)
@@ -405,6 +409,8 @@ impl fmt::Display for TestCmpOp {
         match self {
             TestCmpOp::Eq => write!(f, "=="),
             TestCmpOp::NotEq => write!(f, "!="),
+            TestCmpOp::Match => write!(f, "=~"),
+            TestCmpOp::NotMatch => write!(f, "!~"),
             TestCmpOp::Gt => write!(f, "-gt"),
             TestCmpOp::Lt => write!(f, "-lt"),
             TestCmpOp::GtEq => write!(f, "-ge"),

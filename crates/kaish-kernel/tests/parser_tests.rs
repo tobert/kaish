@@ -362,9 +362,13 @@ fn parser_test_file_is_dir() {
 }
 
 #[test]
-#[ignore = "parser doesn't support =~ operator in test expressions"]
 fn parser_test_regex_match() {
     parse_and_snapshot("test_regex_match", r#"[[ $filename =~ "\.rs$" ]]"#);
+}
+
+#[test]
+fn parser_test_regex_not_match() {
+    parse_and_snapshot("test_regex_not_match", r#"[[ $name !~ "^test_" ]]"#);
 }
 
 // =============================================================================

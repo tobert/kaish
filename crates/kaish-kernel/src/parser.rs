@@ -645,13 +645,15 @@ where
         select! { Token::Star => "*".to_string() },
         select! { Token::Question => "?".to_string() },
         select! { Token::Dot => ".".to_string() },
-        // Character class: [a-z], [!abc], etc.
+        // Character class: [a-z], [!abc], [^abc], etc.
         just(Token::LBracket)
             .ignore_then(
                 choice((
                     select! { Token::Ident(s) => s },
                     select! { Token::Int(n) => n.to_string() },
                     just(Token::Colon).to(":".to_string()),
+                    // Negation: ! or ^ at start of char class
+                    just(Token::Bang).to("!".to_string()),
                     // Range like a-z
                     select! { Token::ShortFlag(s) => format!("-{}", s) },
                 ))
@@ -926,10 +928,16 @@ where
         Token::ShortFlag(s) if s == "n" => StringTestOp::IsNonEmpty,
     };
 
-    // Comparison operators: ==, !=, -gt, -lt, -ge, -le
+    // Comparison operators: ==, !=, =~, !~, >, <, >=, <=, -gt, -lt, -ge, -le
     let cmp_op = choice((
         just(Token::EqEq).to(TestCmpOp::Eq),
         just(Token::NotEq).to(TestCmpOp::NotEq),
+        just(Token::Match).to(TestCmpOp::Match),
+        just(Token::NotMatch).to(TestCmpOp::NotMatch),
+        just(Token::Gt).to(TestCmpOp::Gt),
+        just(Token::Lt).to(TestCmpOp::Lt),
+        just(Token::GtEq).to(TestCmpOp::GtEq),
+        just(Token::LtEq).to(TestCmpOp::LtEq),
         select! { Token::ShortFlag(s) if s == "gt" => TestCmpOp::Gt },
         select! { Token::ShortFlag(s) if s == "lt" => TestCmpOp::Lt },
         select! { Token::ShortFlag(s) if s == "ge" => TestCmpOp::GtEq },

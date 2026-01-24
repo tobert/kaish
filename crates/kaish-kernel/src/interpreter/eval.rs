@@ -172,6 +172,22 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                 match op {
                     TestCmpOp::Eq => values_equal(&left_val, &right_val),
                     TestCmpOp::NotEq => !values_equal(&left_val, &right_val),
+                    TestCmpOp::Match => {
+                        // Regex match
+                        match regex_match(&left_val, &right_val, false) {
+                            Ok(Value::Bool(b)) => b,
+                            Ok(_) => false,
+                            Err(_) => false,
+                        }
+                    }
+                    TestCmpOp::NotMatch => {
+                        // Regex not match
+                        match regex_match(&left_val, &right_val, true) {
+                            Ok(Value::Bool(b)) => b,
+                            Ok(_) => true,
+                            Err(_) => true,
+                        }
+                    }
                     TestCmpOp::Gt | TestCmpOp::Lt | TestCmpOp::GtEq | TestCmpOp::LtEq => {
                         // Numeric comparison
                         let left_num = value_to_f64(&left_val);
