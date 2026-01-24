@@ -78,6 +78,7 @@ fn format_token(token: &Token) -> String {
         Token::LParen => "LPAREN".to_string(),
         Token::RParen => "RPAREN".to_string(),
         Token::Star => "STAR".to_string(),
+        Token::Bang => "BANG".to_string(),
         Token::Question => "QUESTION".to_string(),
 
         // Arithmetic and command substitution
@@ -374,7 +375,25 @@ fn lexer_brackets(#[case] input: &str, #[case] expected: &[&str]) {
 #[case::punct_colon(":", &["COLON"])]
 #[case::punct_semi(";", &["SEMI"])]
 #[case::punct_dot(".", &["DOT"])]
+#[case::punct_star("*", &["STAR"])]
+#[case::punct_question("?", &["QUESTION"])]
+#[case::punct_bang("!", &["BANG"])]
 fn lexer_punctuation(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+// =============================================================================
+// Bang operator priority (multi-char operators should take precedence)
+// =============================================================================
+
+#[rstest]
+#[case::bang_alone("!", &["BANG"])]
+#[case::bang_neq_takes_priority("!=", &["NEQ"])]
+#[case::bang_notmatch_takes_priority("!~", &["NOTMATCH"])]
+#[case::bang_then_eq("! =", &["BANG", "EQ"])]
+#[case::bang_with_command("! true", &["BANG", "BOOL(true)"])]
+#[case::negated_char_class_pattern("[!a-z]", &["LBRACK", "BANG", "IDENT(a-z)", "RBRACK"])]
+fn lexer_bang_operator(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
 

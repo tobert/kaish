@@ -258,6 +258,9 @@ pub enum Token {
     #[token("*")]
     Star,
 
+    #[token("!")]
+    Bang,
+
     #[token("?")]
     Question,
 
@@ -559,6 +562,7 @@ impl fmt::Display for Token {
             Token::LParen => write!(f, "("),
             Token::RParen => write!(f, ")"),
             Token::Star => write!(f, "*"),
+            Token::Bang => write!(f, "!"),
             Token::Question => write!(f, "?"),
             Token::Arithmetic(s) => write!(f, "ARITHMETIC({})", s),
             Token::CmdSubstStart => write!(f, "$("),
