@@ -222,7 +222,13 @@ impl LocalBackend {
             let start = range.start_line.unwrap_or(1).saturating_sub(1);
             let end = range.end_line.unwrap_or(lines.len()).min(lines.len());
             let selected: Vec<&str> = lines.get(start..end).unwrap_or(&[]).to_vec();
-            return selected.join("\n").into_bytes();
+            let mut result = selected.join("\n");
+            // Preserve trailing newline only when reading to implicit end (no end_line specified)
+            // and the original content had a trailing newline
+            if range.end_line.is_none() && content_str.ends_with('\n') && !result.is_empty() {
+                result.push('\n');
+            }
+            return result.into_bytes();
         }
 
         content.to_vec()
@@ -388,12 +394,7 @@ impl KernelBackend for LocalBackend {
 
         // Execute the tool and convert ExecResult to ToolResult
         let exec_result = tool.execute(args, ctx).await;
-        Ok(ToolResult {
-            code: exec_result.code as i32,
-            stdout: exec_result.out,
-            stderr: exec_result.err,
-            data: None,
-        })
+        Ok(exec_result.into())
     }
 
     async fn list_tools(&self) -> BackendResult<Vec<ToolInfo>> {
