@@ -14,8 +14,9 @@ mod grep;
 mod help;
 mod introspect;
 mod jobs;
-mod jq;
+mod jq_native;
 mod ls;
+
 mod mkdir;
 mod mv;
 mod pwd;
@@ -47,7 +48,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(introspect::Mounts);
     registry.register(introspect::Tools);
     registry.register(jobs::Jobs);
-    registry.register(jq::Jq);
+    registry.register(jq_native::JqNative);
     registry.register(ls::Ls);
     registry.register(mkdir::Mkdir);
     registry.register(mv::Mv);

@@ -52,6 +52,11 @@ regex = "1"
 # Date/time (date)
 chrono = "0.4"
 
+# jq (native implementation via jaq v2)
+jaq-core = "2.2"
+jaq-std = "2.1"
+jaq-json = "1.1"
+
 # MCP client (L8)
 rmcp = { version = "0.13", default-features = true, features = ["client", "transport-child-process"] }
 
