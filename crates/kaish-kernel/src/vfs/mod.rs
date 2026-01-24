@@ -26,5 +26,5 @@ mod traits;
 
 pub use local::LocalFs;
 pub use memory::MemoryFs;
-pub use router::VfsRouter;
+pub use router::{MountInfo, VfsRouter};
 pub use traits::{DirEntry, EntryType, Filesystem, Metadata};
