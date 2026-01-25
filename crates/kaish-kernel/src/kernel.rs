@@ -37,7 +37,7 @@ use crate::glob::glob_match;
 use crate::interpreter::{eval_expr, expand_tilde, value_to_string, ControlFlow, ExecResult, Scope};
 use crate::parser::parse;
 use crate::scheduler::{JobManager, PipelineRunner};
-use crate::state::{paths as state_paths, StateStore};
+use crate::state::{paths as state_paths, HistoryEntry, StateStore};
 use crate::tools::{register_builtins, ExecContext, ToolArgs, ToolRegistry};
 use crate::vfs::{LocalFs, MemoryFs, VfsRouter};
 
@@ -150,7 +150,7 @@ impl Kernel {
         // Pipeline runner
         let runner = PipelineRunner::new(tools.clone());
 
-        // Set up state store if persistent
+        // Set up state store if persistent (for history only)
         let state = if config.persist {
             let state_dir = state_paths::kernels_dir();
             std::fs::create_dir_all(&state_dir).ok();
@@ -162,35 +162,9 @@ impl Kernel {
             None
         };
 
-        // Load scope from state if available
-        let scope = if let Some(ref store) = state {
-            let mut scope = Scope::new();
-            if let Ok(guard) = store.lock()
-                && let Ok(vars) = guard.load_all_variables() {
-                    for (name, value) in vars {
-                        scope.set(name, value);
-                    }
-                }
-            scope
-        } else {
-            Scope::new()
-        };
-
-        // Load cwd from state if available, or use config
-        let cwd = if let Some(ref store) = state {
-            let stored = store
-                .lock()
-                .ok()
-                .and_then(|guard| guard.get_cwd().ok())
-                .unwrap_or_default();
-            if stored.is_empty() || stored == "/" {
-                config.cwd
-            } else {
-                PathBuf::from(stored)
-            }
-        } else {
-            config.cwd
-        };
+        // Variables and CWD are in-memory only (history is persisted)
+        let scope = Scope::new();
+        let cwd = config.cwd;
 
         // Create execution context with VFS and tools for backend dispatch
         let mut exec_ctx = ExecContext::with_vfs_and_tools(vfs.clone(), tools.clone());
@@ -249,7 +223,7 @@ impl Kernel {
         // Pipeline runner
         let runner = PipelineRunner::new(tools.clone());
 
-        // Set up state store if persistent
+        // Set up state store if persistent (for history only)
         let state = if config.persist {
             let state_dir = state_paths::kernels_dir();
             std::fs::create_dir_all(&state_dir).ok();
@@ -261,35 +235,9 @@ impl Kernel {
             None
         };
 
-        // Load scope from state if available
-        let scope = if let Some(ref store) = state {
-            let mut scope = Scope::new();
-            if let Ok(guard) = store.lock()
-                && let Ok(vars) = guard.load_all_variables() {
-                    for (name, value) in vars {
-                        scope.set(name, value);
-                    }
-                }
-            scope
-        } else {
-            Scope::new()
-        };
-
-        // Load cwd from state if available, or use config
-        let cwd = if let Some(ref store) = state {
-            let stored = store
-                .lock()
-                .ok()
-                .and_then(|guard| guard.get_cwd().ok())
-                .unwrap_or_default();
-            if stored.is_empty() || stored == "/" {
-                config.cwd
-            } else {
-                PathBuf::from(stored)
-            }
-        } else {
-            config.cwd
-        };
+        // Variables and CWD are in-memory only (history is persisted)
+        let scope = Scope::new();
+        let cwd = config.cwd;
 
         // Create execution context with custom backend
         let mut exec_ctx = ExecContext::with_backend(backend);
@@ -319,7 +267,10 @@ impl Kernel {
     /// Execute kaish source code.
     ///
     /// Returns the result of the last statement executed.
+    /// Records execution to history if state persistence is enabled.
     pub async fn execute(&self, input: &str) -> Result<ExecResult> {
+        let start = std::time::Instant::now();
+
         let program = parse(input).map_err(|errors| {
             let msg = errors
                 .iter()
@@ -340,7 +291,9 @@ impl Kernel {
                 ControlFlow::Normal(r) => result = r,
                 ControlFlow::Exit { code } => {
                     // Exit terminates execution immediately
-                    return Ok(ExecResult::success(code.to_string()));
+                    let exit_result = ExecResult::success(code.to_string());
+                    self.record_history(input, &exit_result, start.elapsed().as_millis() as i64);
+                    return Ok(exit_result);
                 }
                 ControlFlow::Return { value } => {
                     // Return at top level just returns the value
@@ -353,7 +306,27 @@ impl Kernel {
             }
         }
 
+        // Record to history
+        self.record_history(input, &result, start.elapsed().as_millis() as i64);
+
         Ok(result)
+    }
+
+    /// Record a command execution to history.
+    fn record_history(&self, code: &str, result: &ExecResult, duration_ms: i64) {
+        if let Some(ref store) = self.state {
+            match store.lock() {
+                Ok(guard) => {
+                    let entry = HistoryEntry::from_exec(code, result, Some(duration_ms));
+                    if let Err(e) = guard.record_history(&entry) {
+                        tracing::warn!("Failed to record history: {}", e);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to lock state store for history: {}", e);
+                }
+            }
+        }
     }
 
     /// Execute a single statement, returning control flow information.
@@ -369,12 +342,6 @@ impl Kernel {
                     .context("failed to evaluate assignment")?;
                 scope.set(&assign.name, value.clone());
                 drop(scope);
-
-                // Persist variable
-                if let Some(ref store) = self.state
-                    && let Ok(guard) = store.lock() {
-                        guard.set_variable(&assign.name, &value).ok();
-                    }
 
                 // Assignments don't produce output (like sh)
                 Ok(ControlFlow::ok(ExecResult::success("")))
@@ -689,12 +656,6 @@ impl Kernel {
             *scope = ctx.scope.clone();
         }
 
-        // Persist cwd if changed
-        if let Some(ref store) = self.state
-            && let Ok(guard) = store.lock() {
-                guard.set_cwd(&ctx.cwd.to_string_lossy()).ok();
-            }
-
         Ok(result)
     }
 
@@ -752,13 +713,6 @@ impl Kernel {
             *scope = ctx.scope.clone();
         }
 
-        // Persist cwd if cd was called
-        if name == "cd" && result.ok()
-            && let Some(ref store) = self.state
-                && let Ok(guard) = store.lock() {
-                    guard.set_cwd(&ctx.cwd.to_string_lossy()).ok();
-                }
-
         Ok(result)
     }
 
@@ -804,11 +758,6 @@ impl Kernel {
     async fn update_last_result(&self, result: &ExecResult) {
         let mut scope = self.scope.write().await;
         scope.set_last_result(result.clone());
-
-        if let Some(ref store) = self.state
-            && let Ok(guard) = store.lock() {
-                guard.set_last_result(result).ok();
-            }
     }
 
     /// Execute a user-defined function with shared scope (sh-compatible).
@@ -1162,12 +1111,7 @@ impl Kernel {
     /// Set a variable value.
     pub async fn set_var(&self, name: &str, value: Value) {
         let mut scope = self.scope.write().await;
-        scope.set(name.to_string(), value.clone());
-
-        if let Some(ref store) = self.state
-            && let Ok(guard) = store.lock() {
-                guard.set_variable(name, &value).ok();
-            }
+        scope.set(name.to_string(), value);
     }
 
     /// List all variables.
@@ -1186,12 +1130,7 @@ impl Kernel {
     /// Set current working directory.
     pub async fn set_cwd(&self, path: PathBuf) {
         let mut ctx = self.exec_ctx.write().await;
-        ctx.set_cwd(path.clone());
-
-        if let Some(ref store) = self.state
-            && let Ok(guard) = store.lock() {
-                guard.set_cwd(&path.to_string_lossy()).ok();
-            }
+        ctx.set_cwd(path);
     }
 
     // --- Last Result ---
@@ -1226,6 +1165,9 @@ impl Kernel {
     // --- State ---
 
     /// Reset kernel to initial state.
+    ///
+    /// Clears in-memory variables and resets cwd to root.
+    /// History is not cleared (it persists across resets).
     pub async fn reset(&self) -> Result<()> {
         {
             let mut scope = self.scope.write().await;
@@ -1235,13 +1177,6 @@ impl Kernel {
             let mut ctx = self.exec_ctx.write().await;
             ctx.cwd = PathBuf::from("/");
         }
-
-        if let Some(ref store) = self.state {
-            let guard = store.lock().map_err(|e| anyhow::anyhow!("failed to lock state store: {}", e))?;
-            guard.delete_all_variables()?;
-            guard.set_cwd("/").ok();
-        }
-
         Ok(())
     }
 

@@ -39,7 +39,7 @@ enum StmtResult {
 }
 use kaish_kernel::parser::parse;
 use kaish_kernel::scheduler::{JobManager, PipelineRunner};
-use kaish_kernel::state::{StateStore, paths as state_paths};
+use kaish_kernel::state::{HistoryEntry, StateStore, paths as state_paths};
 use kaish_kernel::tools::{ExecContext, ToolArgs, ToolRegistry, register_builtins};
 use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
 
@@ -122,15 +122,8 @@ impl Repl {
         // Create tokio runtime for async tool execution
         let runtime = Runtime::new().context("Failed to create tokio runtime")?;
 
-        // Open or create state database and load persisted variables
-        let state = Self::init_state(&mut exec_ctx)?;
-
-        // Restore cwd from state if available
-        if let Some(ref store) = state
-            && let Ok(cwd) = store.get_cwd()
-                && cwd != "/" && !cwd.is_empty() {
-                    exec_ctx.set_cwd(PathBuf::from(&cwd));
-                }
+        // Open or create state database (for history only)
+        let state = Self::init_state()?;
 
         Ok(Self {
             show_ast: false,
@@ -143,8 +136,10 @@ impl Repl {
         })
     }
 
-    /// Initialize state storage and load persisted variables into exec_ctx.scope.
-    fn init_state(exec_ctx: &mut ExecContext) -> Result<Option<StateStore>> {
+    /// Initialize state storage for history persistence.
+    ///
+    /// Variables and CWD are kept in-memory only per session.
+    fn init_state() -> Result<Option<StateStore>> {
         let state_dir = state_paths::kernels_dir();
         let db_path = state_dir.join("repl.db");
 
@@ -156,14 +151,6 @@ impl Repl {
                 None
             }
         };
-
-        // Load variables into exec_ctx.scope
-        if let Some(ref store) = store
-            && let Ok(vars) = store.load_all_variables() {
-                for (name, value) in vars {
-                    exec_ctx.scope.set(name, value);
-                }
-            }
 
         Ok(store)
     }
@@ -199,6 +186,9 @@ impl Repl {
             return Ok(Some(format!("{:#?}", program)));
         }
 
+        // Track execution timing
+        let start = std::time::Instant::now();
+
         // Execute each statement
         let mut output = String::new();
         for stmt in program.statements {
@@ -215,10 +205,25 @@ impl Repl {
             }
         }
 
+        // Record to history
+        let duration_ms = start.elapsed().as_millis() as i64;
+        let last_result = self.exec_ctx.scope.last_result();
+        self.record_history(trimmed, &last_result, Some(duration_ms));
+
         if output.is_empty() {
             Ok(None)
         } else {
             Ok(Some(output))
+        }
+    }
+
+    /// Record a command execution to history.
+    fn record_history(&self, code: &str, result: &ExecResult, duration_ms: Option<i64>) {
+        if let Some(ref store) = self.state {
+            let entry = HistoryEntry::from_exec(code, result, duration_ms);
+            if let Err(e) = store.record_history(&entry) {
+                tracing::warn!("Failed to record history: {}", e);
+            }
         }
     }
 
@@ -228,11 +233,6 @@ impl Repl {
             Stmt::Assignment(assign) => {
                 let value = self.eval_expr(&assign.value)?;
                 self.exec_ctx.scope.set(&assign.name, value.clone());
-                // Persist to state store
-                if let Some(ref store) = self.state
-                    && let Err(e) = store.set_variable(&assign.name, &value) {
-                        tracing::warn!("Failed to persist variable {}: {}", assign.name, e);
-                    }
                 Ok(StmtResult::Output(Some(format!("{} = {}", assign.name, format_value(&value)))))
             }
             Stmt::Command(cmd) => {
@@ -517,12 +517,7 @@ impl Repl {
         if name == "cd" && result.ok() {
             let cwd_str = self.exec_ctx.cwd.to_string_lossy().to_string();
             // Update scope with new cwd for display
-            self.exec_ctx.scope.set("CWD", Value::String(cwd_str.clone()));
-            // Persist to state store
-            if let Some(ref store) = self.state
-                && let Err(e) = store.set_cwd(&cwd_str) {
-                    tracing::warn!("Failed to persist cwd: {}", e);
-                }
+            self.exec_ctx.scope.set("CWD", Value::String(cwd_str));
         }
 
         Ok(result)
@@ -886,13 +881,14 @@ impl Repl {
                 match &self.state {
                     Some(store) => {
                         let session_id = store.session_id().unwrap_or_else(|_| "unknown".into());
-                        let vars = store.list_variables().unwrap_or_default();
+                        let history_count = store.history_count().unwrap_or(0);
                         let db_path = state_paths::kernels_dir().join("repl.db");
                         Ok(Some(format!(
-                            "Session: {}\nDatabase: {}\nPersisted variables: {}\nState: active",
+                            "Session: {}\nDatabase: {}\nHistory entries: {}\nVariables (in-memory): {}",
                             session_id,
                             db_path.display(),
-                            vars.len()
+                            history_count,
+                            self.exec_ctx.scope.all().len()
                         )))
                     }
                     None => {
@@ -900,20 +896,10 @@ impl Repl {
                     }
                 }
             }
-            "/clear-state" => {
-                if let Some(ref store) = self.state {
-                    // Delete all variables from state
-                    if let Ok(vars) = store.list_variables() {
-                        for name in vars {
-                            let _ = store.delete_variable(&name);
-                        }
-                    }
-                    // Clear scope
-                    self.exec_ctx.scope = Scope::new();
-                    Ok(Some("State cleared".to_string()))
-                } else {
-                    Ok(Some("No state to clear (ephemeral session)".to_string()))
-                }
+            "/clear-state" | "/reset" => {
+                // Clear in-memory scope
+                self.exec_ctx.scope = Scope::new();
+                Ok(Some("Session reset (variables cleared)".to_string()))
             }
             _ => {
                 Ok(Some(format!("Unknown command: {}\nType /help for available commands.", command)))
