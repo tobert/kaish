@@ -3,6 +3,7 @@
 //! These tools are always available and provide core functionality.
 
 mod assert;
+mod awk;
 mod basename;
 mod cat;
 mod cd;
@@ -52,6 +53,7 @@ use super::ToolRegistry;
 /// Register all built-in tools with the registry.
 pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(assert::Assert);
+    registry.register(awk::Awk);
     registry.register(basename::Basename);
     registry.register(cat::Cat);
     registry.register(cd::Cd);
