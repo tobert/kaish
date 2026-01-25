@@ -466,7 +466,7 @@ fn lexer_flag_vs_number(#[case] input: &str, #[case] expected: &[&str]) {
 // =============================================================================
 
 #[rstest]
-#[case::set_assign("set X = 5", &["SET", "IDENT(X)", "EQ", "INT(5)"])]
+#[case::bash_assign("X=5", &["IDENT(X)", "EQ", "INT(5)"])]
 #[case::echo_string(r#"echo "hi""#, &["IDENT(echo)", "STRING(hi)"])]
 #[case::cmd_named_args("cmd a=1 b=2", &["IDENT(cmd)", "IDENT(a)", "EQ", "INT(1)", "IDENT(b)", "EQ", "INT(2)"])]
 #[case::pipe_chain("a | b | c", &["IDENT(a)", "PIPE", "IDENT(b)", "PIPE", "IDENT(c)"])]

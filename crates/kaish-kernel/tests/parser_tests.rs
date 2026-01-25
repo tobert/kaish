@@ -33,67 +33,67 @@ fn expect_parse_error(input: &str) {
 
 #[test]
 fn parser_assign_int() {
-    parse_and_snapshot("assign_int", "set X = 5");
+    parse_and_snapshot("assign_int", "X=5");
 }
 
 #[test]
 fn parser_assign_negative_int() {
-    parse_and_snapshot("assign_negative_int", "set X = -42");
+    parse_and_snapshot("assign_negative_int", "X=-42");
 }
 
 #[test]
 fn parser_assign_float() {
-    parse_and_snapshot("assign_float", "set PI = 3.14159");
+    parse_and_snapshot("assign_float", "PI=3.14159");
 }
 
 #[test]
 fn parser_assign_bool_true() {
-    parse_and_snapshot("assign_bool_true", "set FLAG = true");
+    parse_and_snapshot("assign_bool_true", "FLAG=true");
 }
 
 #[test]
 fn parser_assign_bool_false() {
-    parse_and_snapshot("assign_bool_false", "set FLAG = false");
+    parse_and_snapshot("assign_bool_false", "FLAG=false");
 }
 
 #[test]
 fn parser_assign_string() {
-    parse_and_snapshot("assign_string", r#"set NAME = "alice""#);
+    parse_and_snapshot("assign_string", r#"NAME="alice""#);
 }
 
 #[test]
 fn parser_assign_string_with_spaces() {
-    parse_and_snapshot("assign_string_with_spaces", r#"set MSG = "hello world""#);
+    parse_and_snapshot("assign_string_with_spaces", r#"MSG="hello world""#);
 }
 
 #[test]
 fn parser_assign_string_with_escapes() {
-    parse_and_snapshot("assign_string_with_escapes", r#"set MSG = "line\nbreak""#);
+    parse_and_snapshot("assign_string_with_escapes", r#"MSG="line\nbreak""#);
 }
 
 #[test]
 fn parser_assign_varref() {
-    parse_and_snapshot("assign_varref", "set Y = ${X}");
+    parse_and_snapshot("assign_varref", "Y=${X}");
 }
 
 #[test]
 fn parser_assign_simple_varref() {
-    parse_and_snapshot("assign_simple_varref", "set Y = $X");
+    parse_and_snapshot("assign_simple_varref", "Y=$X");
 }
 
 #[test]
 fn parser_assign_interpolated() {
-    parse_and_snapshot("assign_interpolated", r#"set MSG = "hello ${NAME}""#);
+    parse_and_snapshot("assign_interpolated", r#"MSG="hello ${NAME}""#);
 }
 
 #[test]
 fn parser_assign_interpolated_simple() {
-    parse_and_snapshot("assign_interpolated_simple", r#"set MSG = "hello $NAME""#);
+    parse_and_snapshot("assign_interpolated_simple", r#"MSG="hello $NAME""#);
 }
 
 #[test]
 fn parser_assign_single_quoted() {
-    parse_and_snapshot("assign_single_quoted", "set MSG = 'hello $NAME'");
+    parse_and_snapshot("assign_single_quoted", "MSG='hello $NAME'");
 }
 
 #[test]
@@ -503,11 +503,6 @@ fn parser_set_command_multiple_flags() {
 #[test]
 fn parser_set_command_no_args() {
     parse_and_snapshot("set_command_no_args", "set");
-}
-
-#[test]
-fn parser_set_assignment_legacy() {
-    parse_and_snapshot("set_assignment_legacy", "set X = 5");
 }
 
 #[test]

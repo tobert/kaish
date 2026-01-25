@@ -84,7 +84,7 @@ fn outputs_contain(outputs: &[String], expected: &[&str]) -> bool {
 #[test]
 fn scope_basic_variable() {
     let outputs = run_script(r#"
-        set X = 42
+        X=42
         echo ${X}
     "#);
     assert!(outputs_contain(&outputs, &["42"]));
@@ -93,8 +93,8 @@ fn scope_basic_variable() {
 #[test]
 fn scope_variable_shadowing_in_loop() {
     let outputs = run_script(r#"
-        set X = "outer"
-        for I in "inner"; do set X = ${I}; echo ${X}; done
+        X="outer"
+        for I in "inner"; do X=${I}; echo ${X}; done
         echo ${X}
     "#);
     // Note: Current behavior - X in loop is in inner frame, so outer X unchanged
@@ -107,7 +107,7 @@ fn scope_variable_shadowing_in_loop() {
 fn scope_json_as_string() {
     // Objects are now stored as JSON strings, processed with jq
     let outputs = run_script(r#"
-        set DATA = '{"user": {"name": "Alice"}}'
+        DATA='{"user": {"name": "Alice"}}'
         echo ${DATA}
     "#);
     let joined = outputs.join("\n");
@@ -139,7 +139,7 @@ fn scope_last_result_fields() {
 #[test]
 fn interpolation_basic() {
     let outputs = run_script(r#"
-        set NAME = "World"
+        NAME="World"
         echo "Hello ${NAME}"
     "#);
     assert!(outputs_contain(&outputs, &["Hello World"]));
@@ -148,7 +148,7 @@ fn interpolation_basic() {
 #[test]
 fn interpolation_empty_string() {
     let outputs = run_script(r#"
-        set EMPTY = ""
+        EMPTY=""
         echo "before${EMPTY}after"
     "#);
     assert!(outputs_contain(&outputs, &["beforeafter"]));
@@ -157,8 +157,8 @@ fn interpolation_empty_string() {
 #[test]
 fn interpolation_multiple_vars() {
     let outputs = run_script(r#"
-        set A = "one"
-        set B = "two"
+        A="one"
+        B="two"
         echo "${A} ${B}"
     "#);
     assert!(outputs_contain(&outputs, &["one two"]));
@@ -167,8 +167,8 @@ fn interpolation_multiple_vars() {
 #[test]
 fn interpolation_adjacent_no_space() {
     let outputs = run_script(r#"
-        set A = "one"
-        set B = "two"
+        A="one"
+        B="two"
         echo "${A}${B}"
     "#);
     assert!(outputs_contain(&outputs, &["onetwo"]));
@@ -178,7 +178,7 @@ fn interpolation_adjacent_no_space() {
 fn interpolation_json_string() {
     // Objects are now JSON strings
     let outputs = run_script(r#"
-        set OBJ = '{"inner": {"value": "nested"}}'
+        OBJ='{"inner": {"value": "nested"}}'
         echo "got: ${OBJ}"
     "#);
     let joined = outputs.join("\n");
@@ -189,7 +189,7 @@ fn interpolation_json_string() {
 fn interpolation_word_split() {
     // Arrays are now space-separated strings, use word splitting
     let outputs = run_script(r#"
-        set ITEMS = "zero one two"
+        ITEMS="zero one two"
         for I in ${ITEMS}; do echo ${I}; done
     "#);
     assert!(outputs_contain(&outputs, &["zero", "one", "two"]));
@@ -198,7 +198,7 @@ fn interpolation_word_split() {
 #[test]
 fn interpolation_number() {
     let outputs = run_script(r#"
-        set NUM = 42
+        NUM=42
         echo "num=${NUM}"
     "#);
     assert!(outputs_contain(&outputs, &["num=42"]));
@@ -207,7 +207,7 @@ fn interpolation_number() {
 #[test]
 fn interpolation_boolean() {
     let outputs = run_script(r#"
-        set FLAG = true
+        FLAG=true
         echo "flag=${FLAG}"
     "#);
     assert!(outputs_contain(&outputs, &["flag=true"]));
@@ -216,7 +216,7 @@ fn interpolation_boolean() {
 #[test]
 fn interpolation_null() {
     let outputs = run_script(r#"
-        set NOTHING = null
+        NOTHING=null
         echo "val=${NOTHING}"
     "#);
     assert!(outputs_contain(&outputs, &["val=null"]));
@@ -230,7 +230,7 @@ fn interpolation_null() {
 fn expr_equality() {
     // Shell-compatible: use [[ ]] for comparisons
     let outputs = run_script(r#"
-        set X = 5
+        X=5
         if [[ ${X} == 5 ]]; then echo "equal"; fi
     "#);
     assert!(outputs_contain(&outputs, &["equal"]));
@@ -239,7 +239,7 @@ fn expr_equality() {
 #[test]
 fn expr_inequality() {
     let outputs = run_script(r#"
-        set X = 5
+        X=5
         if [[ ${X} != 3 ]]; then echo "not equal"; fi
     "#);
     assert!(outputs_contain(&outputs, &["not equal"]));
@@ -294,8 +294,8 @@ fn expr_precedence_and_or() {
 fn expr_int_float_comparison() {
     // Shell-compatible: use [[ ]] for comparisons
     let outputs = run_script(r#"
-        set I = 5
-        set F = 5.0
+        I=5
+        F=5.0
         if [[ ${I} == ${F} ]]; then echo "int equals float"; fi
     "#);
     assert!(outputs_contain(&outputs, &["int equals float"]));
@@ -335,7 +335,7 @@ fn expr_truthiness_empty_string() {
 fn expr_truthiness_null() {
     // Shell-compatible: test zero value with explicit comparison
     let outputs = run_script(r#"
-        set ZERO = 0
+        ZERO=0
         if [[ ${ZERO} == 0 ]]; then echo "zero falsy"; fi
     "#);
     let joined = outputs.join("\n");
@@ -346,7 +346,7 @@ fn expr_truthiness_null() {
 fn expr_truthiness_empty_string_var() {
     // Shell-compatible: use [[ -z ]] to test empty string variable
     let outputs = run_script(r#"
-        set EMPTY = ""
+        EMPTY=""
         if [[ -z ${EMPTY} ]]; then echo "empty var falsy"; fi
     "#);
     assert!(outputs_contain(&outputs, &["empty var falsy"]));
@@ -356,7 +356,7 @@ fn expr_truthiness_empty_string_var() {
 fn expr_truthiness_non_empty_string() {
     // Shell-compatible: use [[ -n ]] to test non-empty string
     let outputs = run_script(r#"
-        set STR = "hello"
+        STR="hello"
         if [[ -n ${STR} ]]; then echo "string truthy"; fi
     "#);
     assert!(outputs_contain(&outputs, &["string truthy"]));
@@ -386,7 +386,7 @@ fn control_if_else() {
 fn control_nested_if() {
     // Shell-compatible: use [[ ]] for comparisons
     let outputs = run_script(r#"
-        set X = 5
+        X=5
         if [[ ${X} -gt 0 ]]; then
             if [[ ${X} -lt 10 ]]; then
                 echo "in range"
@@ -420,7 +420,7 @@ fn control_nested_loops() {
 fn control_empty_loop() {
     // Empty string produces no iterations
     let outputs = run_script(r#"
-        set EMPTY = ""
+        EMPTY=""
         for I in ${EMPTY}; do echo "never"; done
         echo "after"
     "#);
@@ -446,7 +446,7 @@ fn control_loop_with_conditional() {
 fn cmd_subst_basic() {
     // Command substitution captures stdout as a string
     let outputs = run_script(r#"
-        set R = $(echo "hello")
+        R=$(echo "hello")
         echo ${R}
     "#);
     let joined = outputs.join("\n");
@@ -480,7 +480,7 @@ fn error_undefined_variable() {
 #[test]
 fn error_invalid_path() {
     let outputs = run_script(r#"
-        set X = 42
+        X=42
         echo ${X.field}
     "#);
     let joined = outputs.join("\n");
@@ -491,7 +491,7 @@ fn error_invalid_path() {
 #[test]
 fn error_invalid_field_access() {
     let outputs = run_script(r#"
-        set NUM = 42
+        NUM=42
         echo ${NUM.field}
     "#);
     let joined = outputs.join("\n");
@@ -522,7 +522,7 @@ fn unicode_emoji() {
 #[test]
 fn unicode_in_variable() {
     let outputs = run_script(r#"
-        set GREETING = "こんにちは"
+        GREETING="こんにちは"
         echo ${GREETING}
     "#);
     assert!(outputs_contain(&outputs, &["こんにちは"]));
@@ -535,11 +535,11 @@ fn unicode_in_variable() {
 #[test]
 fn stress_many_variables() {
     let outputs = run_script(r#"
-        set V1 = 1
-        set V2 = 2
-        set V3 = 3
-        set V4 = 4
-        set V5 = 5
+        V1=1
+        V2=2
+        V3=3
+        V4=4
+        V5=5
         echo "${V1}${V2}${V3}${V4}${V5}"
     "#);
     assert!(outputs_contain(&outputs, &["12345"]));
@@ -549,7 +549,7 @@ fn stress_many_variables() {
 fn stress_json_string() {
     // Complex JSON stored as string
     let outputs = run_script(r#"
-        set D = '{"a": {"b": {"c": {"d": "deep"}}}}'
+        D='{"a": {"b": {"c": {"d": "deep"}}}}'
         echo ${D}
     "#);
     let joined = outputs.join("\n");
@@ -560,7 +560,7 @@ fn stress_json_string() {
 fn stress_many_items() {
     // POSIX word splitting with many items
     let outputs = run_script(r#"
-        set ITEMS = "1 2 3 4 5 6 7 8 9 10"
+        ITEMS="1 2 3 4 5 6 7 8 9 10"
         for I in ${ITEMS}; do echo ${I}; done
     "#);
     assert!(outputs_contain(&outputs, &["1", "5", "10"]));
@@ -585,8 +585,8 @@ fn stress_complex_condition() {
 #[test]
 fn introspect_vars_shows_set_variables() {
     let outputs = run_script(r#"
-        set X = 42
-        set NAME = "Alice"
+        X=42
+        NAME="Alice"
         vars
     "#);
     let joined = outputs.join("\n");
@@ -597,7 +597,7 @@ fn introspect_vars_shows_set_variables() {
 #[test]
 fn introspect_vars_json_format() {
     let outputs = run_script(r#"
-        set COUNT = 100
+        COUNT=100
         vars --json
     "#);
     let joined = outputs.join("\n");
@@ -669,7 +669,7 @@ fn introspect_mounts_json_format() {
 #[test]
 fn case_simple_match() {
     let outputs = run_script(r#"
-        set EXT = "rs"
+        EXT="rs"
         case ${EXT} in
             rs) echo "Rust" ;;
             py) echo "Python" ;;
@@ -681,7 +681,7 @@ fn case_simple_match() {
 #[test]
 fn case_wildcard_match() {
     let outputs = run_script(r#"
-        set FILE = "main.rs"
+        FILE="main.rs"
         case ${FILE} in
             *.py) echo "Python" ;;
             *.rs) echo "Rust" ;;
@@ -694,7 +694,7 @@ fn case_wildcard_match() {
 #[test]
 fn case_default_fallthrough() {
     let outputs = run_script(r#"
-        set FILE = "data.json"
+        FILE="data.json"
         case ${FILE} in
             *.py) echo "Python" ;;
             *.rs) echo "Rust" ;;
@@ -707,7 +707,7 @@ fn case_default_fallthrough() {
 #[test]
 fn case_no_match() {
     let outputs = run_script(r#"
-        set X = "nomatch"
+        X="nomatch"
         case ${X} in
             foo) echo "foo" ;;
             bar) echo "bar" ;;
@@ -724,7 +724,7 @@ fn case_no_match() {
 fn case_multiple_patterns() {
     // Test multiple patterns with | separator
     let outputs = run_script(r#"
-        set EXT = "ts"
+        EXT="ts"
         case ${EXT} in
             js|ts|jsx|tsx) echo "JavaScript family" ;;
             py|pyc|pyw) echo "Python family" ;;
@@ -737,7 +737,7 @@ fn case_multiple_patterns() {
 #[test]
 fn case_char_class() {
     let outputs = run_script(r#"
-        set CH = "B"
+        CH="B"
         case ${CH} in
             [a-z]) echo "lower" ;;
             [A-Z]) echo "upper" ;;
@@ -750,7 +750,7 @@ fn case_char_class() {
 #[test]
 fn case_question_mark() {
     let outputs = run_script(r#"
-        set CODE = "A1"
+        CODE="A1"
         case ${CODE} in
             ??) echo "two chars" ;;
             ???) echo "three chars" ;;
@@ -779,7 +779,7 @@ fn case_in_loop() {
 #[test]
 fn case_nested_control_flow() {
     let outputs = run_script(r#"
-        set X = "test"
+        X="test"
         case ${X} in
             test)
                 if true; then
@@ -794,7 +794,7 @@ fn case_nested_control_flow() {
 #[test]
 fn case_with_brace_expansion() {
     let outputs = run_script(r#"
-        set FILE = "code.ts"
+        FILE="code.ts"
         case ${FILE} in
             *.{js,ts}) echo "JavaScript family" ;;
             *.{c,cpp,h}) echo "C family" ;;
@@ -811,7 +811,7 @@ fn case_with_brace_expansion() {
 #[test]
 fn arithmetic_simple() {
     let outputs = run_script(r#"
-        set X = $((1 + 2))
+        X=$((1 + 2))
         echo ${X}
     "#);
     assert!(outputs_contain(&outputs, &["3"]));
@@ -820,9 +820,9 @@ fn arithmetic_simple() {
 #[test]
 fn arithmetic_with_variables() {
     let outputs = run_script(r#"
-        set A = 10
-        set B = 20
-        set C = $((A + B))
+        A=10
+        B=20
+        C=$((A + B))
         echo ${C}
     "#);
     assert!(outputs_contain(&outputs, &["30"]));
@@ -831,7 +831,7 @@ fn arithmetic_with_variables() {
 #[test]
 fn arithmetic_complex() {
     let outputs = run_script(r#"
-        set X = $((2 * (3 + 4) - 5))
+        X=$((2 * (3 + 4) - 5))
         echo ${X}
     "#);
     assert!(outputs_contain(&outputs, &["9"]));
@@ -840,7 +840,7 @@ fn arithmetic_complex() {
 #[test]
 fn arithmetic_negative() {
     let outputs = run_script(r#"
-        set X = $((-5 + 3))
+        X=$((-5 + 3))
         echo ${X}
     "#);
     assert!(outputs_contain(&outputs, &["-2"]));
@@ -849,7 +849,7 @@ fn arithmetic_negative() {
 #[test]
 fn arithmetic_modulo() {
     let outputs = run_script(r#"
-        set X = $((17 % 5))
+        X=$((17 % 5))
         echo ${X}
     "#);
     assert!(outputs_contain(&outputs, &["2"]));
@@ -858,8 +858,8 @@ fn arithmetic_modulo() {
 #[test]
 fn arithmetic_in_condition() {
     let outputs = run_script(r#"
-        set A = 5
-        set B = 3
+        A=5
+        B=3
         if [[ $((A + B)) -gt 5 ]]; then
             echo "sum is big"
         fi
@@ -870,9 +870,9 @@ fn arithmetic_in_condition() {
 #[test]
 fn arithmetic_in_loop() {
     let outputs = run_script(r#"
-        set SUM = 0
+        SUM=0
         for N in 1 2 3 4 5; do
-            set SUM = $((SUM + N))
+            SUM=$((SUM + N))
         done
         echo ${SUM}
     "#);
@@ -882,7 +882,7 @@ fn arithmetic_in_loop() {
 #[test]
 fn arithmetic_division() {
     let outputs = run_script(r#"
-        set X = $((100 / 4))
+        X=$((100 / 4))
         echo ${X}
     "#);
     assert!(outputs_contain(&outputs, &["25"]));
@@ -891,7 +891,7 @@ fn arithmetic_division() {
 #[test]
 fn arithmetic_precedence() {
     let outputs = run_script(r#"
-        set X = $((2 + 3 * 4))
+        X=$((2 + 3 * 4))
         echo ${X}
     "#);
     // Should be 14, not 20
@@ -901,8 +901,8 @@ fn arithmetic_precedence() {
 #[test]
 fn arithmetic_dollar_var() {
     let outputs = run_script(r#"
-        set N = 7
-        set X = $(($N * 2))
+        N=7
+        X=$(($N * 2))
         echo ${X}
     "#);
     assert!(outputs_contain(&outputs, &["14"]));
@@ -915,7 +915,7 @@ fn arithmetic_dollar_var() {
 #[test]
 fn cross_case_with_arithmetic() {
     let outputs = run_script(r#"
-        set N = $((2 + 3))
+        N=$((2 + 3))
         case ${N} in
             5) echo "five" ;;
             *) echo "other" ;;
@@ -928,7 +928,7 @@ fn cross_case_with_arithmetic() {
 fn cross_loop_with_arithmetic_and_case() {
     let outputs = run_script(r#"
         for I in 1 2 3; do
-            set DOUBLE = $((I * 2))
+            DOUBLE=$((I * 2))
             case ${DOUBLE} in
                 2) echo "one doubled" ;;
                 4) echo "two doubled" ;;
@@ -945,8 +945,8 @@ fn cross_loop_with_arithmetic_and_case() {
 #[test]
 fn cross_condition_with_arithmetic() {
     let outputs = run_script(r#"
-        set A = 10
-        set B = 5
+        A=10
+        B=5
         if [[ $((A - B)) -gt 3 ]]; then
             echo "difference is significant"
         else
@@ -959,8 +959,8 @@ fn cross_condition_with_arithmetic() {
 #[test]
 fn cross_nested_case_statements() {
     let outputs = run_script(r#"
-        set CATEGORY = "animal"
-        set TYPE = "dog"
+        CATEGORY="animal"
+        TYPE="dog"
         case ${CATEGORY} in
             animal)
                 case ${TYPE} in
@@ -977,11 +977,11 @@ fn cross_nested_case_statements() {
 #[test]
 fn cross_conditional_arithmetic() {
     let outputs = run_script(r#"
-        set X = 10
+        X=10
         if [[ $X -gt 5 ]]; then
-            set Y = $((X * 2))
+            Y=$((X * 2))
         else
-            set Y = $((X / 2))
+            Y=$((X / 2))
         fi
         echo ${Y}
     "#);
@@ -992,7 +992,7 @@ fn cross_conditional_arithmetic() {
 fn cross_case_in_if() {
     // Shell-compatible: use [[ ]] for comparisons, compare to "true" string
     let outputs = run_script(r#"
-        set FLAG = true
+        FLAG=true
         if [[ ${FLAG} == true ]]; then
             case "test.rs" in
                 *.rs) echo "rust in if" ;;
@@ -1017,7 +1017,7 @@ fn var_with_default_unset() {
 #[test]
 fn var_with_default_set() {
     let outputs = run_script(r#"
-        set DEFINED = "value"
+        DEFINED="value"
         echo "${DEFINED:-fallback}"
     "#);
     assert!(outputs_contain(&outputs, &["value"]));
@@ -1026,7 +1026,7 @@ fn var_with_default_set() {
 #[test]
 fn var_with_default_empty() {
     let outputs = run_script(r#"
-        set EMPTY = ""
+        EMPTY=""
         echo "${EMPTY:-fallback}"
     "#);
     assert!(outputs_contain(&outputs, &["fallback"]));
@@ -1035,7 +1035,7 @@ fn var_with_default_empty() {
 #[test]
 fn var_length() {
     let outputs = run_script(r#"
-        set MSG = "hello"
+        MSG="hello"
         echo "${#MSG}"
     "#);
     assert!(outputs_contain(&outputs, &["5"]));
@@ -1044,7 +1044,7 @@ fn var_length() {
 #[test]
 fn var_length_empty() {
     let outputs = run_script(r#"
-        set EMPTY = ""
+        EMPTY=""
         echo "${#EMPTY}"
     "#);
     assert!(outputs_contain(&outputs, &["0"]));
@@ -1057,10 +1057,10 @@ fn var_length_empty() {
 #[test]
 fn while_loop_with_counter() {
     let outputs = run_script(r#"
-        set I = 0
+        I=0
         while [[ $I -lt 3 ]]; do
             echo "iteration ${I}"
-            set I = $((I + 1))
+            I=$((I + 1))
         done
     "#);
     let joined = outputs.join("\n");
@@ -1108,7 +1108,7 @@ fn continue_in_loop() {
 #[test]
 fn elif_chain() {
     let outputs = run_script(r#"
-        set X = 2
+        X=2
         if [[ $X == 1 ]]; then
             echo "one"
         elif [[ $X == 2 ]]; then

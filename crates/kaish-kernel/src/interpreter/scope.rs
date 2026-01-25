@@ -104,6 +104,13 @@ impl Scope {
         self.positional = args;
     }
 
+    /// Save current positional parameters for later restoration.
+    ///
+    /// Returns (script_name, args) tuple that can be passed to set_positional.
+    pub fn save_positional(&self) -> (String, Vec<String>) {
+        (self.script_name.clone(), self.positional.clone())
+    }
+
     /// Get a positional parameter by index ($0-$9).
     ///
     /// $0 returns the script name, $1-$9 return arguments.

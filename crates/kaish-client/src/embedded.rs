@@ -29,7 +29,7 @@ use crate::traits::{ClientError, ClientResult, KernelClient};
 /// let kernel = Kernel::new(KernelConfig::transient())?;
 /// let client = EmbeddedClient::new(kernel);
 ///
-/// let result = client.execute("set X = 42").await?;
+/// let result = client.execute("X=42").await?;
 /// assert!(result.ok());
 ///
 /// let value = client.get_var("X").await?;
@@ -144,7 +144,7 @@ mod tests {
         let client = EmbeddedClient::transient().expect("failed to create client");
 
         // Set via execute
-        client.execute("set X = 42").await.expect("set failed");
+        client.execute("X=42").await.expect("set failed");
         let value = client.get_var("X").await.expect("get failed");
         assert_eq!(value, Some(Value::Int(42)));
 
@@ -175,7 +175,7 @@ mod tests {
     async fn test_embedded_reset() {
         let client = EmbeddedClient::transient().expect("failed to create client");
 
-        client.execute("set X = 1").await.expect("set failed");
+        client.execute("X=1").await.expect("set failed");
         assert!(client.get_var("X").await.expect("get failed").is_some());
 
         client.reset().await.expect("reset failed");

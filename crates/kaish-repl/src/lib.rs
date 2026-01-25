@@ -5,7 +5,7 @@
 //!
 //! - Parse input and display AST (`/ast` toggle)
 //! - Evaluate expressions with persistent scope (via ExecContext)
-//! - `set X = value` assignments
+//! - `X=value` assignments
 //! - Real tool execution via VFS
 //! - Pipeline execution (`a | b | c`)
 //! - Background jobs (`cmd &`) with `jobs` and `wait` commands
@@ -1060,7 +1060,7 @@ Built-in Tools:
   wait [job_id]     Wait for background jobs
 
 Language:
-  set X = value     Assign a variable
+  X=value     Assign a variable
   ${VAR}            Variable reference
   ${VAR.field}      Nested access
   ${?.ok}           Last result access

@@ -305,7 +305,7 @@ count_args a b c  # → Got 3 arguments: a b c
 
 Positional parameters: `$0` (function name), `$1`-`$9` (args), `$@` (all args), `$#` (count)
 
-Functions execute in **isolated scope** — they cannot access parent variables.
+Functions execute in **shared scope** (sh-compatible) — they can read and modify parent variables. Use `local` for function-local variables.
 
 ### Script Execution via PATH
 
@@ -316,13 +316,21 @@ Scripts with `.kai` extension can be called by name when in a `PATH` directory:
 write "/scripts/fetch.kai" 'echo "Fetching $1..."'
 
 # Add to PATH
-set PATH = "/scripts:/bin"
+PATH="/scripts:/bin"
 
 # Call by name (without .kai extension)
 fetch "example.com"  # → Fetching example.com...
 ```
 
-Scripts execute in isolated scope with positional parameters, just like functions.
+Scripts execute in **isolated scope** (like a subshell) — they cannot access or modify parent variables.
+
+### Scope Summary
+
+| Method | Scope | Can modify parent vars? |
+|--------|-------|------------------------|
+| `myfunc args` | shared | ✓ yes |
+| `source script.kai` | shared | ✓ yes |
+| `scriptname` (via PATH) | isolated | ✗ no |
 
 ---
 

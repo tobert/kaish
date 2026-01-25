@@ -258,7 +258,7 @@ where
             .map(|e| Stmt::Exit(e.map(Box::new)));
 
         // set command: `set -e`, `set +e`, `set` (no args), `set -o pipefail`
-        // This must come BEFORE assignment_parser to handle `set -e` vs `set X = value`
+        // This must come BEFORE assignment_parser to handle `set -e` vs `X=value`
         //
         // Strategy: Use lookahead to check what follows `set`:
         // - If followed by a flag (-e, --long, +e): parse as set command
@@ -377,23 +377,12 @@ where
     })
 }
 
-/// Assignment: `NAME=value` (bash-style) or `local NAME = value` (scoped) or `set NAME = value` (legacy)
+/// Assignment: `NAME=value` (bash-style) or `local NAME = value` (scoped)
 fn assignment_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Assignment, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    // Legacy: set NAME = value
-    let set_assignment = just(Token::Set)
-        .ignore_then(ident_parser())
-        .then_ignore(just(Token::Eq))
-        .then(expr_parser())
-        .map(|(name, value)| Assignment {
-            name,
-            value,
-            local: false,
-        });
-
     // local NAME = value (with spaces around =)
     let local_assignment = just(Token::Local)
         .ignore_then(ident_parser())
@@ -416,7 +405,7 @@ where
             local: false,
         });
 
-    choice((local_assignment, set_assignment, bash_assignment))
+    choice((local_assignment, bash_assignment))
         .labelled("assignment")
         .boxed()
 }
@@ -1302,7 +1291,7 @@ mod tests {
 
     #[test]
     fn parse_assignment() {
-        let result = parse("set X = 5");
+        let result = parse("X=5");
         assert!(result.is_ok());
         let program = result.expect("ok");
         assert!(matches!(&program.statements[0], Stmt::Assignment(_)));
@@ -1622,7 +1611,7 @@ mod tests {
     #[test]
     fn parse_nested_cmd_subst() {
         // Nested command substitution is supported
-        let result = parse("set X = $(echo $(date))").unwrap();
+        let result = parse("X=$(echo $(date))").unwrap();
         match &result.statements[0] {
             Stmt::Assignment(a) => {
                 assert_eq!(a.name, "X");
@@ -1647,7 +1636,7 @@ mod tests {
     #[test]
     fn parse_deeply_nested_cmd_subst() {
         // Three levels deep
-        let result = parse("set X = $(a $(b $(c)))").unwrap();
+        let result = parse("X=$(a $(b $(c)))").unwrap();
         match &result.statements[0] {
             Stmt::Assignment(a) => match &a.value {
                 Expr::CommandSubst(level1) => {
@@ -1677,7 +1666,7 @@ mod tests {
 
     #[test]
     fn value_int_preserved() {
-        let result = parse("set X = 42").unwrap();
+        let result = parse("X=42").unwrap();
         match &result.statements[0] {
             Stmt::Assignment(a) => {
                 assert_eq!(a.name, "X");
@@ -1692,7 +1681,7 @@ mod tests {
 
     #[test]
     fn value_negative_int_preserved() {
-        let result = parse("set X = -99").unwrap();
+        let result = parse("X=-99").unwrap();
         match &result.statements[0] {
             Stmt::Assignment(a) => match &a.value {
                 Expr::Literal(Value::Int(n)) => assert_eq!(*n, -99),
@@ -1704,7 +1693,7 @@ mod tests {
 
     #[test]
     fn value_float_preserved() {
-        let result = parse("set PI = 3.14").unwrap();
+        let result = parse("PI=3.14").unwrap();
         match &result.statements[0] {
             Stmt::Assignment(a) => match &a.value {
                 Expr::Literal(Value::Float(f)) => assert!((*f - 3.14).abs() < 0.001),
@@ -1756,7 +1745,7 @@ mod tests {
 
     #[test]
     fn value_assignment_name_preserved() {
-        let result = parse("set MY_VAR = 1").unwrap();
+        let result = parse("MY_VAR=1").unwrap();
         match &result.statements[0] {
             Stmt::Assignment(a) => assert_eq!(a.name, "MY_VAR"),
             other => panic!("expected assignment, got {:?}", other),
@@ -2107,7 +2096,7 @@ mod tests {
 
     #[test]
     fn parse_cmd_subst_simple() {
-        let result = parse("set X = $(echo)").unwrap();
+        let result = parse("X=$(echo)").unwrap();
         match &result.statements[0] {
             Stmt::Assignment(a) => {
                 assert_eq!(a.name, "X");
@@ -2125,7 +2114,7 @@ mod tests {
 
     #[test]
     fn parse_cmd_subst_with_args() {
-        let result = parse(r#"set X = $(fetch url="http://example.com")"#).unwrap();
+        let result = parse(r#"X=$(fetch url="http://example.com")"#).unwrap();
         match &result.statements[0] {
             Stmt::Assignment(a) => match &a.value {
                 Expr::CommandSubst(pipeline) => {
@@ -2144,7 +2133,7 @@ mod tests {
 
     #[test]
     fn parse_cmd_subst_pipeline() {
-        let result = parse("set X = $(cat file | grep pattern)").unwrap();
+        let result = parse("X=$(cat file | grep pattern)").unwrap();
         match &result.statements[0] {
             Stmt::Assignment(a) => match &a.value {
                 Expr::CommandSubst(pipeline) => {
@@ -2316,10 +2305,10 @@ mod tests {
     #[test]
     fn script_level1_linear() {
         let script = r#"
-set NAME = "kaish"
-set VERSION = 1
-set TIMEOUT = 30
-set ITEMS = "alpha beta gamma"
+NAME="kaish"
+VERSION=1
+TIMEOUT=30
+ITEMS="alpha beta gamma"
 
 echo "Starting ${NAME} v${VERSION}"
 cat "README.md" | grep pattern="install" | head count=5
@@ -2346,7 +2335,7 @@ echo "Items: ${ITEMS}"
     #[test]
     fn script_level2_branching() {
         let script = r#"
-set RESULT = $(validate "input.json")
+RESULT=$(validate "input.json")
 
 if [[ ${RESULT.ok} == true ]]; then
     echo "Validation passed"
@@ -2430,7 +2419,7 @@ fetch_all() {
     done
 }
 
-set USERS = "alice bob charlie"
+USERS="alice bob charlie"
 
 for USER in ${USERS}; do
     greet ${USER}
@@ -2495,7 +2484,7 @@ long-running-task &
     #[test]
     fn script_level4_complex_nesting() {
         let script = r#"
-set RESULT = $(cat "config.json" | jq query=".servers" | validate schema="server-schema.json")
+RESULT=$(cat "config.json" | jq query=".servers" | validate schema="server-schema.json")
 
 if ping host=${HOST} && [[ ${RESULT} == true ]]; then
     for SERVER in "prod-1 prod-2"; do
@@ -2556,9 +2545,9 @@ echo "quotes: \"nested\" here"
 echo "escapes: \n\t\r\\"
 echo "unicode: \u2764"
 
-set X = -99999
-set Y = 3.14159265358979
-set Z = -0.001
+X=-99999
+Y=3.14159265358979
+Z=-0.001
 
 cmd a=1 b="two" c=true d=false e=null
 
@@ -2661,8 +2650,8 @@ cmd < "input.txt"
 
     #[test]
     fn parse_set_assignment_vs_command() {
-        // set X = 5 should be assignment
-        let result = parse("set X = 5");
+        // X=5 should be assignment
+        let result = parse("X=5");
         assert!(result.is_ok());
         let program = result.unwrap();
         assert!(matches!(&program.statements[0], Stmt::Assignment(_)));

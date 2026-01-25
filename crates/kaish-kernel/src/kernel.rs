@@ -376,7 +376,8 @@ impl Kernel {
                         guard.set_variable(&assign.name, &value).ok();
                     }
 
-                Ok(ControlFlow::ok(ExecResult::success_data(value)))
+                // Assignments don't produce output (like sh)
+                Ok(ControlFlow::ok(ExecResult::success("")))
             }
             Stmt::Command(cmd) => {
                 let result = self.execute_command(&cmd.name, &cmd.args).await?;
@@ -565,7 +566,7 @@ impl Kernel {
                     }
                 }
 
-                // No match - return success with empty output (like bash)
+                // No match - return success with empty output (like sh)
                 Ok(ControlFlow::ok(ExecResult::success("")))
             }
             Stmt::Break(levels) => {
@@ -810,94 +811,96 @@ impl Kernel {
             }
     }
 
-    /// Execute a user-defined tool with strict parameter isolation.
+    /// Execute a user-defined function with shared scope (sh-compatible).
     ///
-    /// User-defined tools get a fresh scope with ONLY their parameters bound.
-    /// They cannot access parent scope variables.
+    /// Functions execute in the current scope and can read/modify parent variables.
+    /// Only positional parameters ($0, $1, etc.) are saved and restored.
     async fn execute_user_tool(&self, def: ToolDef, args: &[Arg]) -> Result<ExecResult> {
-        // 1. Build tool_args from AST args (using current scope for evaluation)
+        // 1. Build function args from AST args (using current scope for evaluation)
         let tool_args = {
             let scope = self.scope.read().await;
             let ctx = self.exec_ctx.read().await;
             self.build_args(args, &scope, &ctx)?
         };
 
-        // 2. Create fresh isolated scope
-        let mut isolated_scope = Scope::new();
-
-        // 3. Set up positional parameters ($0 = tool name, $1, $2, ... = positional args)
-        let positional_args: Vec<String> = tool_args.positional
-            .iter()
-            .map(value_to_string)
-            .collect();
-        isolated_scope.set_positional(&def.name, positional_args);
-
-        // 4. Bind params: named args, then positional, then defaults
-        for (pos, param) in def.params.iter().enumerate() {
-            let value = if let Some(val) = tool_args.named.get(&param.name) {
-                val.clone()
-            } else if let Some(val) = tool_args.positional.get(pos) {
-                val.clone()
-            } else if let Some(ref default_expr) = param.default {
-                let mut scope_clone = isolated_scope.clone();
-                eval_expr(default_expr, &mut scope_clone)
-                    .context(format!("failed to evaluate default for param '{}'", param.name))?
-            } else {
-                return Ok(ExecResult::failure(
-                    1,
-                    format!("{}: missing required parameter '{}'", def.name, param.name),
-                ));
-            };
-
-            isolated_scope.set(&param.name, value);
-        }
-
-        // 5. Save current scope and swap with isolated scope
-        let original_scope = {
+        // 2. Save current positional parameters and set new ones for this function
+        let saved_positional = {
             let mut scope = self.scope.write().await;
-            std::mem::replace(&mut *scope, isolated_scope)
+            let saved = scope.save_positional();
+
+            // Set up new positional parameters ($0 = function name, $1, $2, ... = args)
+            let positional_args: Vec<String> = tool_args.positional
+                .iter()
+                .map(value_to_string)
+                .collect();
+            scope.set_positional(&def.name, positional_args);
+
+            saved
         };
 
-        // 6. Execute body statements with control flow handling
-        let mut result = ExecResult::success("");
+        // 3. Execute body statements with control flow handling
+        // Accumulate output across statements (like sh)
+        let mut accumulated_out = String::new();
+        let mut accumulated_err = String::new();
+        let mut last_code = 0i64;
+        let mut last_data: Option<Value> = None;
+
         for stmt in &def.body {
             match self.execute_stmt_flow(stmt).await {
                 Ok(flow) => {
                     match flow {
-                        ControlFlow::Normal(r) => result = r,
+                        ControlFlow::Normal(r) => {
+                            accumulated_out.push_str(&r.out);
+                            accumulated_err.push_str(&r.err);
+                            last_code = r.code;
+                            last_data = r.data;
+                        }
                         ControlFlow::Return { value } => {
-                            // Return from this tool with the value
-                            result = value;
+                            // Return from this function with the value
+                            accumulated_out.push_str(&value.out);
+                            accumulated_err.push_str(&value.err);
+                            last_code = value.code;
+                            last_data = value.data;
                             break;
                         }
                         ControlFlow::Exit { code } => {
-                            // Exit propagates through - restore scope and return
+                            // Exit propagates through - restore positional params and return
                             let mut scope = self.scope.write().await;
-                            *scope = original_scope;
+                            scope.set_positional(saved_positional.0.clone(), saved_positional.1.clone());
                             return Ok(ExecResult::failure(code, "exit"));
                         }
                         ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
-                            // Break/continue outside a loop in a tool - treat as normal
-                            result = r;
+                            // Break/continue outside a loop - treat as normal
+                            accumulated_out.push_str(&r.out);
+                            accumulated_err.push_str(&r.err);
+                            last_code = r.code;
+                            last_data = r.data;
                         }
                     }
                 }
                 Err(e) => {
-                    // Restore original scope on error
+                    // Restore positional params on error
                     let mut scope = self.scope.write().await;
-                    *scope = original_scope;
+                    scope.set_positional(saved_positional.0.clone(), saved_positional.1.clone());
                     return Err(e);
                 }
             }
         }
 
-        // 7. Restore original scope
+        let result = ExecResult {
+            code: last_code,
+            out: accumulated_out,
+            err: accumulated_err,
+            data: last_data,
+        };
+
+        // 4. Restore original positional parameters
         {
             let mut scope = self.scope.write().await;
-            *scope = original_scope;
+            scope.set_positional(saved_positional.0, saved_positional.1);
         }
 
-        // 8. Return final result
+        // 5. Return final result
         Ok(result)
     }
 
@@ -1293,7 +1296,7 @@ mod tests {
     async fn test_kernel_set_var() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
-        kernel.execute("set X = 42").await.expect("set failed");
+        kernel.execute("X=42").await.expect("set failed");
 
         let value = kernel.get_var("X").await;
         assert_eq!(value, Some(Value::Int(42)));
@@ -1303,7 +1306,7 @@ mod tests {
     async fn test_kernel_var_expansion() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
-        kernel.execute("set NAME = \"world\"").await.expect("set failed");
+        kernel.execute("NAME=\"world\"").await.expect("set failed");
         let result = kernel.execute("echo \"hello ${NAME}\"").await.expect("echo failed");
 
         assert!(result.ok());
@@ -1335,7 +1338,7 @@ mod tests {
     async fn test_kernel_reset() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
-        kernel.execute("set X = 1").await.expect("set failed");
+        kernel.execute("X=1").await.expect("set failed");
         assert!(kernel.get_var("X").await.is_some());
 
         kernel.reset().await.expect("reset failed");
@@ -1357,8 +1360,8 @@ mod tests {
     async fn test_kernel_list_vars() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
-        kernel.execute("set A = 1").await.ok();
-        kernel.execute("set B = 2").await.ok();
+        kernel.execute("A=1").await.ok();
+        kernel.execute("B=2").await.ok();
 
         let vars = kernel.list_vars().await;
         assert!(vars.iter().any(|(n, v)| n == "A" && *v == Value::Int(1)));
@@ -1429,39 +1432,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_user_tool_isolation() {
+    async fn test_function_shared_scope() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
         // Set a variable in parent scope
         kernel
-            .execute(r#"set SECRET = "hidden""#)
+            .execute(r#"SECRET="hidden""#)
             .await
             .expect("set failed");
 
-        // Define a function that tries to access the parent variable
+        // Define a function that accesses and modifies parent variable
         kernel
-            .execute(r#"leak() { echo "${SECRET}" }"#)
+            .execute(r#"access_parent() {
+                echo "${SECRET}"
+                SECRET="modified"
+            }"#)
             .await
             .expect("function definition failed");
 
-        // Call the function - it should either fail or output empty (not "hidden")
-        // Strict isolation means SECRET is not accessible
-        let result = kernel.execute("leak").await;
+        // Call the function - it SHOULD see SECRET (shared scope like sh)
+        let result = kernel.execute("access_parent").await.expect("function call failed");
 
-        match result {
-            Ok(exec_result) => {
-                // If it succeeds, the output must not contain the secret
-                assert!(
-                    !exec_result.out.contains("hidden"),
-                    "SECRET leaked into function scope: {}",
-                    exec_result.out
-                );
-            }
-            Err(_) => {
-                // Error accessing undefined variable is also acceptable
-                // (confirms isolation)
-            }
-        }
+        // Function should have access to parent scope
+        assert!(
+            result.out.contains("hidden"),
+            "Function should access parent scope, got: {}",
+            result.out
+        );
+
+        // Function should have modified the parent variable
+        let secret = kernel.get_var("SECRET").await;
+        assert_eq!(
+            secret,
+            Some(Value::String("modified".into())),
+            "Function should modify parent scope"
+        );
     }
 
     #[tokio::test]
@@ -1500,14 +1505,14 @@ mod tests {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
         // Set a flag
-        kernel.execute(r#"set FLAG = "go""#).await.expect("set failed");
+        kernel.execute(r#"FLAG="go""#).await.expect("set failed");
 
         // Use string comparison as condition (shell-compatible [[ ]] syntax)
         // Note: Put echo last so we can check the output
         let result = kernel
             .execute(r#"
                 while [[ ${FLAG} == "go" ]]; do
-                    set FLAG = "stop"
+                    FLAG="stop"
                     echo "running"
                 done
             "#)
@@ -1527,13 +1532,13 @@ mod tests {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
         // Test > comparison (shell-compatible [[ ]] with -gt)
-        kernel.execute("set N = 5").await.expect("set failed");
+        kernel.execute("N=5").await.expect("set failed");
 
         // Note: Put echo last so we can check the output
         let result = kernel
             .execute(r#"
                 while [[ ${N} -gt 3 ]]; do
-                    set N = 3
+                    N=3
                     echo "N was greater"
                 done
             "#)
@@ -1550,9 +1555,9 @@ mod tests {
 
         let result = kernel
             .execute(r#"
-                set I = 0
+                I=0
                 while true; do
-                    set I = 1
+                    I=1
                     echo "before break"
                     break
                     echo "after break"
@@ -1580,16 +1585,16 @@ mod tests {
         // Shell-compatible: use [[ ]] for comparisons
         let result = kernel
             .execute(r#"
-                set STATE = "start"
-                set AFTER_CONTINUE = "no"
+                STATE="start"
+                AFTER_CONTINUE="no"
                 while [[ ${STATE} != "done" ]]; do
                     if [[ ${STATE} == "start" ]]; then
-                        set STATE = "middle"
+                        STATE="middle"
                         continue
-                        set AFTER_CONTINUE = "yes"
+                        AFTER_CONTINUE="yes"
                     fi
                     if [[ ${STATE} == "middle" ]]; then
-                        set STATE = "done"
+                        STATE="done"
                     fi
                 done
             "#)
@@ -1617,13 +1622,13 @@ mod tests {
         // - If break 2 fails, OUTER becomes 2 (set after for loop)
         let result = kernel
             .execute(r#"
-                set OUTER = 0
+                OUTER=0
                 while true; do
-                    set OUTER = 1
+                    OUTER=1
                     for X in "1 2"; do
                         break 2
                     done
-                    set OUTER = 2
+                    OUTER=2
                 done
             "#)
             .await
@@ -1633,7 +1638,7 @@ mod tests {
 
         // OUTER should be 1 (set before for loop), not 2 (would be set after for loop)
         let outer = kernel.get_var("OUTER").await;
-        assert_eq!(outer, Some(Value::Int(1)), "break 2 should have skipped set OUTER = 2");
+        assert_eq!(outer, Some(Value::Int(1)), "break 2 should have skipped OUTER=2");
     }
 
     #[tokio::test]
@@ -1694,9 +1699,9 @@ mod tests {
         // exit should stop further execution
         kernel
             .execute(r#"
-                set BEFORE = "yes"
+                BEFORE="yes"
                 exit 0
-                set AFTER = "yes"
+                AFTER="yes"
             "#)
             .await
             .expect("execution failed");
@@ -1733,9 +1738,9 @@ mod tests {
         // Run a sequence where the middle command fails
         kernel
             .execute(r#"
-                set STEP1 = "done"
+                STEP1="done"
                 false
-                set STEP2 = "done"
+                STEP2="done"
             "#)
             .await
             .expect("execution failed");
@@ -1759,9 +1764,9 @@ mod tests {
         // Now failure should NOT stop execution
         kernel
             .execute(r#"
-                set STEP1 = "done"
+                STEP1="done"
                 false
-                set STEP2 = "done"
+                STEP2="done"
             "#)
             .await
             .expect("execution failed");
@@ -1789,9 +1794,9 @@ mod tests {
         // -e should still be enabled
         kernel
             .execute(r#"
-                set BEFORE = "yes"
+                BEFORE="yes"
                 false
-                set AFTER = "yes"
+                AFTER="yes"
             "#)
             .await
             .ok();
@@ -1823,9 +1828,9 @@ mod tests {
         // Pipeline failure should trigger exit
         kernel
             .execute(r#"
-                set BEFORE = "yes"
+                BEFORE="yes"
                 false | cat
-                set AFTER = "yes"
+                AFTER="yes"
             "#)
             .await
             .ok();
@@ -1849,9 +1854,9 @@ mod tests {
         // because && explicitly handles the error
         kernel
             .execute(r#"
-                set RESULT = "initial"
-                false && set RESULT = "chained"
-                set RESULT = "continued"
+                RESULT="initial"
+                false && RESULT="chained"
+                RESULT="continued"
             "#)
             .await
             .ok();
@@ -1874,7 +1879,7 @@ mod tests {
 
         // Write a script to the VFS
         kernel
-            .execute(r#"write "/test.kai" 'set FOO = "bar"'"#)
+            .execute(r#"write "/test.kai" 'FOO="bar"'"#)
             .await
             .expect("write failed");
 
@@ -1897,7 +1902,7 @@ mod tests {
 
         // Write a script to the VFS
         kernel
-            .execute(r#"write "/vars.kai" 'set X = 42'"#)
+            .execute(r#"write "/vars.kai" 'X=42'"#)
             .await
             .expect("write failed");
 
@@ -1948,9 +1953,9 @@ mod tests {
 
         // Write a script with multiple statements
         kernel
-            .execute(r#"write "/multi.kai" 'set A = 1
-set B = 2
-set C = 3'"#)
+            .execute(r#"write "/multi.kai" 'A=1
+B=2
+C=3'"#)
             .await
             .expect("write failed");
 
@@ -2003,9 +2008,9 @@ set C = 3'"#)
 
         // Write a script that has a failure
         kernel
-            .execute(r#"write "/fail.kai" 'set BEFORE = "yes"
+            .execute(r#"write "/fail.kai" 'BEFORE="yes"
 false
-set AFTER = "yes"'"#)
+AFTER="yes"'"#)
             .await
             .expect("write failed");
 
@@ -2106,7 +2111,7 @@ set AFTER = "yes"'"#)
     async fn test_case_with_variable() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
-        kernel.execute(r#"set LANG = "rust""#).await.expect("set failed");
+        kernel.execute(r#"LANG="rust""#).await.expect("set failed");
 
         let result = kernel
             .execute(r#"
@@ -2313,36 +2318,40 @@ set AFTER = "yes"'"#)
     }
 
     #[tokio::test]
-    async fn test_shell_function_isolation() {
+    async fn test_shell_function_shared_scope() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
         // Set a variable in parent scope
         kernel
-            .execute(r#"set SECRET = "hidden""#)
+            .execute(r#"PARENT_VAR="visible""#)
             .await
             .expect("set failed");
 
-        // Define shell function that tries to access parent variable
+        // Define shell function that reads and writes parent variable
         kernel
-            .execute(r#"leak() { echo "${SECRET}" }"#)
+            .execute(r#"modify_parent() {
+                echo "saw: ${PARENT_VAR}"
+                PARENT_VAR="changed by function"
+            }"#)
             .await
             .expect("function definition failed");
 
-        // Call the function - it should NOT see SECRET
-        let result = kernel.execute("leak").await;
+        // Call the function - it SHOULD see PARENT_VAR (bash-compatible shared scope)
+        let result = kernel.execute("modify_parent").await.expect("function failed");
 
-        match result {
-            Ok(exec_result) => {
-                assert!(
-                    !exec_result.out.contains("hidden"),
-                    "SECRET leaked into shell function scope: {}",
-                    exec_result.out
-                );
-            }
-            Err(_) => {
-                // Error accessing undefined variable is also acceptable
-            }
-        }
+        assert!(
+            result.out.contains("visible"),
+            "Shell function should access parent scope, got: {}",
+            result.out
+        );
+
+        // Parent variable should be modified
+        let var = kernel.get_var("PARENT_VAR").await;
+        assert_eq!(
+            var,
+            Some(Value::String("changed by function".into())),
+            "Shell function should modify parent scope"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -2361,7 +2370,7 @@ set AFTER = "yes"'"#)
             .expect("write script failed");
 
         // Set PATH to /bin
-        kernel.execute(r#"set PATH = "/bin""#).await.expect("set PATH failed");
+        kernel.execute(r#"PATH="/bin""#).await.expect("set PATH failed");
 
         // Call script by name (without .kai extension)
         let result = kernel
@@ -2385,7 +2394,7 @@ set AFTER = "yes"'"#)
             .expect("write script failed");
 
         // Set PATH
-        kernel.execute(r#"set PATH = "/bin""#).await.expect("set PATH failed");
+        kernel.execute(r#"PATH="/bin""#).await.expect("set PATH failed");
 
         // Call script with arg
         let result = kernel
@@ -2402,7 +2411,7 @@ set AFTER = "yes"'"#)
         let kernel = Kernel::transient().expect("failed to create kernel");
 
         // Set empty PATH
-        kernel.execute(r#"set PATH = "/nonexistent""#).await.expect("set PATH failed");
+        kernel.execute(r#"PATH="/nonexistent""#).await.expect("set PATH failed");
 
         // Call non-existent script
         let result = kernel
@@ -2432,7 +2441,7 @@ set AFTER = "yes"'"#)
             .expect("write failed");
 
         // Set PATH with first before second
-        kernel.execute(r#"set PATH = "/first:/second""#).await.expect("set PATH failed");
+        kernel.execute(r#"PATH="/first:/second""#).await.expect("set PATH failed");
 
         // Should find first one
         let result = kernel
