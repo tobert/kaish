@@ -2,11 +2,12 @@
 
 use async_trait::async_trait;
 use regex::RegexBuilder;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::walker::{FileWalker, GlobPath, IncludeExclude, WalkOptions};
 
 /// Grep tool: search for patterns in text.
 pub struct Grep;
@@ -96,11 +97,31 @@ impl Tool for Grep {
                 Value::Bool(false),
                 "Match whole words only (-w)",
             ))
+            .param(ParamSchema::optional(
+                "recursive",
+                "bool",
+                Value::Bool(false),
+                "Search directories recursively (-r)",
+            ))
+            .param(ParamSchema::optional(
+                "include",
+                "string",
+                Value::Null,
+                "Include only files matching pattern (--include)",
+            ))
+            .param(ParamSchema::optional(
+                "exclude",
+                "string",
+                Value::Null,
+                "Exclude files matching pattern (--exclude)",
+            ))
             .example("Search for pattern in file", "grep pattern file.txt")
             .example("Case-insensitive search", "grep -i ERROR log.txt")
             .example("Show line numbers", "grep -n TODO *.rs")
             .example("Extract matched text only", "grep -o 'https://[^\"]*' file.html")
             .example("Context around matches", "grep -C 2 error log.txt")
+            .example("Recursive search", "grep -r TODO src/")
+            .example("With file filter", "grep -rn TODO . --include='*.rs'")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -117,6 +138,7 @@ impl Tool for Grep {
         let quiet = args.has_flag("quiet") || args.has_flag("q");
         let files_only = args.has_flag("files_with_matches") || args.has_flag("l");
         let word_regexp = args.has_flag("word_regexp") || args.has_flag("w");
+        let recursive = args.has_flag("recursive") || args.has_flag("r") || args.has_flag("R");
 
         // Get context values
         let context = args.get("context", usize::MAX).and_then(|v| match v {
@@ -159,7 +181,65 @@ impl Tool for Grep {
             Err(e) => return ExecResult::failure(1, format!("grep: invalid pattern: {}", e)),
         };
 
-        // Get input: from file or stdin
+        let grep_opts = GrepOptions {
+            show_line_numbers: line_number,
+            invert,
+            only_matching,
+            before_context,
+            after_context,
+            show_filename: false, // Will be set for multi-file
+        };
+
+        // Handle recursive search
+        if recursive {
+            let path = args
+                .get_string("path", 1)
+                .unwrap_or_else(|| ".".to_string());
+            let root = ctx.resolve_path(&path);
+
+            // Build include/exclude filter
+            let mut filter = IncludeExclude::new();
+            if let Some(Value::String(inc)) = args.get("include", usize::MAX) {
+                filter.include(inc);
+            }
+            if let Some(Value::String(exc)) = args.get("exclude", usize::MAX) {
+                filter.exclude(exc);
+            }
+
+            // Build glob pattern if include is specified
+            let glob = if let Some(Value::String(inc)) = args.get("include", usize::MAX) {
+                GlobPath::new(&format!("**/{}", inc)).ok()
+            } else {
+                GlobPath::new("**/*").ok()
+            };
+
+            let options = WalkOptions {
+                max_depth: None,
+                entry_types: crate::walker::EntryTypes::files_only(),
+                respect_gitignore: true,
+                include_hidden: false,
+                filter,
+            };
+
+            let walker = if let Some(g) = glob {
+                FileWalker::new(ctx.backend.as_ref(), &root)
+                    .with_pattern(g)
+                    .with_options(options)
+            } else {
+                FileWalker::new(ctx.backend.as_ref(), &root).with_options(options)
+            };
+
+            let files = match walker.collect().await {
+                Ok(f) => f,
+                Err(e) => return ExecResult::failure(1, format!("grep: {}", e)),
+            };
+
+            return self
+                .grep_multiple_files(ctx, &files, &root, &regex, &grep_opts, quiet, files_only, count_only)
+                .await;
+        }
+
+        // Single file or stdin search
         let (input, filename) = match args.get_string("path", 1) {
             Some(path) => {
                 let resolved = ctx.resolve_path(&path);
@@ -176,15 +256,7 @@ impl Tool for Grep {
             None => (ctx.take_stdin().unwrap_or_default(), None),
         };
 
-        let opts = GrepOptions {
-            show_line_numbers: line_number,
-            invert,
-            only_matching,
-            before_context,
-            after_context,
-        };
-
-        let (output, match_count) = grep_lines(&input, &regex, &opts);
+        let (output, match_count) = grep_lines(&input, &regex, &grep_opts, None);
 
         // Quiet mode: just return exit code
         if quiet {
@@ -218,20 +290,117 @@ impl Tool for Grep {
     }
 }
 
+impl Grep {
+    async fn grep_multiple_files(
+        &self,
+        ctx: &mut ExecContext,
+        files: &[PathBuf],
+        root: &Path,
+        regex: &regex::Regex,
+        base_opts: &GrepOptions,
+        quiet: bool,
+        files_only: bool,
+        count_only: bool,
+    ) -> ExecResult {
+        let mut total_output = String::new();
+        let mut total_matches = 0;
+        let mut files_with_matches = Vec::new();
+
+        let opts = GrepOptions {
+            show_filename: true,
+            ..*base_opts
+        };
+
+        for file_path in files {
+            let content = match ctx.backend.read(file_path, None).await {
+                Ok(data) => match String::from_utf8(data) {
+                    Ok(s) => s,
+                    Err(_) => continue, // Skip binary files
+                },
+                Err(_) => continue,
+            };
+
+            // Create relative filename for display
+            let display_name = file_path
+                .strip_prefix(root)
+                .unwrap_or(file_path)
+                .to_string_lossy()
+                .to_string();
+
+            let (output, match_count) = grep_lines(&content, regex, &opts, Some(&display_name));
+
+            if match_count > 0 {
+                total_matches += match_count;
+                files_with_matches.push(display_name.clone());
+
+                if !quiet && !files_only && !count_only {
+                    total_output.push_str(&output);
+                }
+            }
+        }
+
+        if quiet {
+            return if total_matches > 0 {
+                ExecResult::success("")
+            } else {
+                ExecResult::from_output(1, "", "")
+            };
+        }
+
+        if files_only {
+            return if files_with_matches.is_empty() {
+                ExecResult::from_output(1, "", "")
+            } else {
+                ExecResult::success(files_with_matches.join("\n") + "\n")
+            };
+        }
+
+        if count_only {
+            ExecResult::success(format!("{}\n", total_matches))
+        } else if total_matches == 0 {
+            ExecResult::from_output(1, total_output, "")
+        } else {
+            ExecResult::success(total_output)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 struct GrepOptions {
     show_line_numbers: bool,
     invert: bool,
+    show_filename: bool,
     only_matching: bool,
     before_context: Option<usize>,
     after_context: Option<usize>,
 }
 
 /// Search lines and return matching output and count.
-fn grep_lines(input: &str, regex: &regex::Regex, opts: &GrepOptions) -> (String, usize) {
+fn grep_lines(
+    input: &str,
+    regex: &regex::Regex,
+    opts: &GrepOptions,
+    filename: Option<&str>,
+) -> (String, usize) {
     let lines: Vec<&str> = input.lines().collect();
     let mut output = String::new();
     let mut match_count = 0;
     let mut printed = vec![false; lines.len()];
+
+    // Helper to format prefix
+    let prefix = |line_num: usize, sep: char| -> String {
+        let mut p = String::new();
+        if opts.show_filename {
+            if let Some(f) = filename {
+                p.push_str(f);
+                p.push(sep);
+            }
+        }
+        if opts.show_line_numbers {
+            p.push_str(&format!("{}{}", line_num + 1, sep));
+        }
+        p
+    };
 
     for (line_num, line) in lines.iter().enumerate() {
         let matches = regex.is_match(line);
@@ -245,12 +414,9 @@ fn grep_lines(input: &str, regex: &regex::Regex, opts: &GrepOptions) -> (String,
                 let start = line_num.saturating_sub(before);
                 for ctx_line in start..line_num {
                     if !printed[ctx_line] {
-                        if opts.show_line_numbers {
-                            output.push_str(&format!("{}-{}\n", ctx_line + 1, lines[ctx_line]));
-                        } else {
-                            output.push_str(lines[ctx_line]);
-                            output.push('\n');
-                        }
+                        output.push_str(&prefix(ctx_line, '-'));
+                        output.push_str(lines[ctx_line]);
+                        output.push('\n');
                         printed[ctx_line] = true;
                     }
                 }
@@ -261,16 +427,12 @@ fn grep_lines(input: &str, regex: &regex::Regex, opts: &GrepOptions) -> (String,
                 if opts.only_matching && !opts.invert {
                     // Print only matched parts
                     for m in regex.find_iter(line) {
-                        if opts.show_line_numbers {
-                            output.push_str(&format!("{}:{}\n", line_num + 1, m.as_str()));
-                        } else {
-                            output.push_str(m.as_str());
-                            output.push('\n');
-                        }
+                        output.push_str(&prefix(line_num, ':'));
+                        output.push_str(m.as_str());
+                        output.push('\n');
                     }
-                } else if opts.show_line_numbers {
-                    output.push_str(&format!("{}:{}\n", line_num + 1, line));
                 } else {
+                    output.push_str(&prefix(line_num, ':'));
                     output.push_str(line);
                     output.push('\n');
                 }
@@ -282,12 +444,9 @@ fn grep_lines(input: &str, regex: &regex::Regex, opts: &GrepOptions) -> (String,
                 let end = (line_num + after + 1).min(lines.len());
                 for ctx_line in (line_num + 1)..end {
                     if !printed[ctx_line] {
-                        if opts.show_line_numbers {
-                            output.push_str(&format!("{}-{}\n", ctx_line + 1, lines[ctx_line]));
-                        } else {
-                            output.push_str(lines[ctx_line]);
-                            output.push('\n');
-                        }
+                        output.push_str(&prefix(ctx_line, '-'));
+                        output.push_str(lines[ctx_line]);
+                        output.push('\n');
                         printed[ctx_line] = true;
                     }
                 }
@@ -543,5 +702,113 @@ mod tests {
         assert!(result.out.contains("line one"));
         assert!(result.out.contains("line two"));
         assert!(result.out.contains("line three"));
+    }
+
+    async fn make_recursive_ctx() -> ExecContext {
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+
+        mem.mkdir(Path::new("src")).await.unwrap();
+        mem.mkdir(Path::new("src/lib")).await.unwrap();
+
+        mem.write(Path::new("src/main.rs"), b"fn main() {\n    // TODO: implement\n}")
+            .await
+            .unwrap();
+        mem.write(Path::new("src/lib.rs"), b"// TODO: add modules\npub mod lib;")
+            .await
+            .unwrap();
+        mem.write(Path::new("src/lib/utils.rs"), b"pub fn util() {\n    // helper function\n}")
+            .await
+            .unwrap();
+        mem.write(Path::new("README.md"), b"# Project\nTODO: write docs")
+            .await
+            .unwrap();
+
+        vfs.mount("/", mem);
+        ExecContext::new(Arc::new(vfs))
+    }
+
+    #[tokio::test]
+    async fn test_grep_recursive() {
+        let mut ctx = make_recursive_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("TODO".into()));
+        args.positional.push(Value::String("/".into()));
+        args.flags.insert("r".to_string());
+
+        let result = Grep.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Should find TODO in multiple files
+        assert!(result.out.contains("TODO"));
+        assert!(result.out.contains("main.rs"));
+        assert!(result.out.contains("lib.rs"));
+        assert!(result.out.contains("README.md"));
+    }
+
+    #[tokio::test]
+    async fn test_grep_recursive_with_line_numbers() {
+        let mut ctx = make_recursive_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("TODO".into()));
+        args.positional.push(Value::String("/src".into()));
+        args.flags.insert("r".to_string());
+        args.flags.insert("n".to_string());
+
+        let result = Grep.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Should have filename:linenum:content format
+        assert!(result.out.contains(":"));
+    }
+
+    #[tokio::test]
+    async fn test_grep_recursive_include() {
+        let mut ctx = make_recursive_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("TODO".into()));
+        args.positional.push(Value::String("/".into()));
+        args.flags.insert("r".to_string());
+        args.named
+            .insert("include".to_string(), Value::String("*.rs".into()));
+
+        let result = Grep.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Should find TODO in .rs files but not README.md
+        assert!(result.out.contains("main.rs") || result.out.contains("lib.rs"));
+        assert!(!result.out.contains("README.md"));
+    }
+
+    #[tokio::test]
+    async fn test_grep_recursive_files_only() {
+        let mut ctx = make_recursive_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("TODO".into()));
+        args.positional.push(Value::String("/".into()));
+        args.flags.insert("r".to_string());
+        args.flags.insert("l".to_string());
+
+        let result = Grep.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Should only list filenames, not content
+        let lines: Vec<&str> = result.out.lines().collect();
+        assert!(lines.len() >= 2); // At least 2 files have TODO
+        // Each line should be a filename, not contain ":"
+        for line in &lines {
+            assert!(!line.contains("TODO"), "Output should only contain filenames");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_grep_recursive_uppercase_r() {
+        // -R should work the same as -r (muscle memory compatibility)
+        let mut ctx = make_recursive_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("TODO".into()));
+        args.positional.push(Value::String("/src".into()));
+        args.flags.insert("R".to_string());
+
+        let result = Grep.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains("TODO"));
+        assert!(result.out.contains("main.rs") || result.out.contains("lib.rs"));
     }
 }

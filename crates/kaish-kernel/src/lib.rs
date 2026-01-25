@@ -26,6 +26,7 @@ pub mod scheduler;
 pub mod state;
 pub mod tools;
 pub mod vfs;
+pub mod walker;
 
 pub use backend::{
     BackendError, BackendResult, EntryInfo, KernelBackend, LocalBackend, PatchOp, ReadRange,

@@ -53,6 +53,12 @@ echo "Length: ${#NAME}"      # string length
 # MCP tools look like builtins
 exa.web_search --query "rust parser combinators"
 
+# File finding with globstar
+files **/*.rs                           # find all Rust files
+files src/**/*.go --exclude='*_test.go' # exclude test files
+tree src/                               # compact: src/{main.rs,lib/{mod.rs,utils.rs}}
+grep -rn "TODO" src/                    # recursive search with line numbers
+
 # 散/集 (san/shū) — scatter/gather parallelism
 cat urls.txt | scatter as=URL limit=4 | process-url url=$URL | gather > results.json
 
@@ -355,7 +361,7 @@ Scripts execute in **isolated scope** (like a subshell) — they cannot access o
 
 | Tool | Description |
 |------|-------------|
-| `ls` | List directory |
+| `ls` | List directory (`-R` for recursive) |
 | `cat` | Read file |
 | `head` | First N lines |
 | `tail` | Last N lines |
@@ -367,6 +373,8 @@ Scripts execute in **isolated scope** (like a subshell) — they cannot access o
 | `rm` | Remove file |
 | `cp` | Copy |
 | `mv` | Move |
+| `files` | Find files with glob patterns (`files **/*.rs`) |
+| `tree` | Directory tree (compact brace notation by default) |
 
 ### Paths
 
@@ -381,7 +389,7 @@ Scripts execute in **isolated scope** (like a subshell) — they cannot access o
 
 | Tool | Description |
 |------|-------------|
-| `grep` | Search content |
+| `grep` | Search content (`-r`/`-R` recursive, `--include`/`--exclude`) |
 | `sed` | Stream editor for transformations |
 | `awk` | Pattern scanning and text processing |
 | `cut` | Extract fields/columns |

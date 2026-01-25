@@ -8,6 +8,7 @@ use crate::ast::Value;
 use crate::backend::EntryInfo;
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::walker::IgnoreFilter;
 
 /// Ls tool: list directory contents.
 pub struct Ls;
@@ -68,10 +69,17 @@ impl Tool for Ls {
                 Value::Bool(false),
                 "Sort by file size (-S)",
             ))
+            .param(ParamSchema::optional(
+                "recursive",
+                "bool",
+                Value::Bool(false),
+                "List subdirectories recursively (-R)",
+            ))
             .example("List current directory", "ls")
             .example("Show hidden files with details", "ls -la /path")
             .example("Sort by size, largest first", "ls -lS /path")
             .example("Human-readable sizes", "ls -lh /path")
+            .example("Recursive listing", "ls -R src/")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -86,56 +94,189 @@ impl Tool for Ls {
         let sort_time = args.has_flag("sort_time") || args.has_flag("t");
         let sort_size = args.has_flag("sort_size") || args.has_flag("S");
         let reverse = args.has_flag("reverse") || args.has_flag("r");
+        let recursive = args.has_flag("recursive") || args.has_flag("R");
 
-        match ctx.backend.list(Path::new(&resolved)).await {
+        let sort_opts = SortOptions {
+            by_time: sort_time,
+            by_size: sort_size,
+            reverse,
+        };
+
+        if recursive {
+            // Recursive listing
+            self.list_recursive(
+                ctx,
+                &resolved,
+                show_all,
+                long_format,
+                human_readable,
+                &sort_opts,
+            )
+            .await
+        } else {
+            // Single directory listing
+            self.list_single(
+                ctx,
+                &path,
+                &resolved,
+                show_all,
+                long_format,
+                human_readable,
+                &sort_opts,
+            )
+            .await
+        }
+    }
+}
+
+struct SortOptions {
+    by_time: bool,
+    by_size: bool,
+    reverse: bool,
+}
+
+impl Ls {
+    async fn list_single(
+        &self,
+        ctx: &mut ExecContext,
+        path: &str,
+        resolved: &Path,
+        show_all: bool,
+        long_format: bool,
+        human_readable: bool,
+        sort_opts: &SortOptions,
+    ) -> ExecResult {
+        match ctx.backend.list(resolved).await {
             Ok(entries) => {
-                // Filter hidden files (starting with .) unless -a is set
-                let mut filtered: Vec<_> = entries
-                    .into_iter()
-                    .filter(|e| show_all || !e.name.starts_with('.'))
-                    .collect();
-
-                // Sort entries
-                filtered.sort_by(|a, b| {
-                    let cmp = if sort_time {
-                        compare_by_time(a, b)
-                    } else if sort_size {
-                        compare_by_size(a, b)
-                    } else {
-                        a.name.cmp(&b.name)
-                    };
-                    if reverse {
-                        cmp.reverse()
-                    } else {
-                        cmp
-                    }
-                });
+                let filtered = filter_and_sort(entries, show_all, sort_opts);
 
                 if filtered.is_empty() {
                     return ExecResult::success("");
                 }
 
-                let lines: Vec<String> = if long_format {
-                    filtered
-                        .iter()
-                        .map(|e| {
-                            let type_char = if e.is_dir { 'd' } else { '-' };
-                            let size_str = if human_readable {
-                                format_human_size(e.size)
-                            } else {
-                                format!("{:>8}", e.size)
-                            };
-                            format!("{}  {}  {}", type_char, size_str, e.name)
-                        })
-                        .collect()
-                } else {
-                    filtered.iter().map(|e| e.name.clone()).collect()
-                };
-
+                let lines = format_entries(&filtered, long_format, human_readable);
                 ExecResult::success(lines.join("\n"))
             }
             Err(e) => ExecResult::failure(1, format!("ls: {}: {}", path, e)),
         }
+    }
+
+    async fn list_recursive(
+        &self,
+        ctx: &mut ExecContext,
+        root: &Path,
+        show_all: bool,
+        long_format: bool,
+        human_readable: bool,
+        sort_opts: &SortOptions,
+    ) -> ExecResult {
+        let mut output = String::new();
+        let mut dirs_to_visit: Vec<(String, String)> = vec![(
+            root.to_string_lossy().to_string(),
+            ".".to_string(),
+        )];
+
+        let ignore_filter = IgnoreFilter::with_defaults();
+
+        while let Some((dir_path, display_path)) = dirs_to_visit.pop() {
+            // List this directory
+            let entries = match ctx.backend.list(Path::new(&dir_path)).await {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            // Add header for this directory
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&display_path);
+            output.push_str(":\n");
+
+            let mut filtered = filter_and_sort(entries, show_all, sort_opts);
+
+            // Filter out ignored directories
+            filtered.retain(|e| {
+                if e.is_dir && !show_all {
+                    !ignore_filter.is_name_ignored(&e.name, true)
+                } else {
+                    true
+                }
+            });
+
+            // Collect subdirs for recursion (before formatting)
+            let subdirs: Vec<_> = filtered
+                .iter()
+                .filter(|e| e.is_dir)
+                .map(|e| {
+                    let child_path = format!("{}/{}", dir_path.trim_end_matches('/'), e.name);
+                    let child_display = if display_path == "." {
+                        e.name.clone()
+                    } else {
+                        format!("{}/{}", display_path, e.name)
+                    };
+                    (child_path, child_display)
+                })
+                .collect();
+
+            // Format and output entries
+            let lines = format_entries(&filtered, long_format, human_readable);
+            output.push_str(&lines.join("\n"));
+            if !lines.is_empty() {
+                output.push('\n');
+            }
+
+            // Add subdirs to visit (in reverse order for DFS)
+            for subdir in subdirs.into_iter().rev() {
+                dirs_to_visit.push(subdir);
+            }
+        }
+
+        ExecResult::success(output.trim_end().to_string())
+    }
+}
+
+/// Filter hidden files and sort entries.
+fn filter_and_sort(entries: Vec<EntryInfo>, show_all: bool, sort_opts: &SortOptions) -> Vec<EntryInfo> {
+    let mut filtered: Vec<_> = entries
+        .into_iter()
+        .filter(|e| show_all || !e.name.starts_with('.'))
+        .collect();
+
+    filtered.sort_by(|a, b| {
+        let cmp = if sort_opts.by_time {
+            compare_by_time(a, b)
+        } else if sort_opts.by_size {
+            compare_by_size(a, b)
+        } else {
+            a.name.cmp(&b.name)
+        };
+        if sort_opts.reverse {
+            cmp.reverse()
+        } else {
+            cmp
+        }
+    });
+
+    filtered
+}
+
+/// Format entries for output.
+fn format_entries(entries: &[EntryInfo], long_format: bool, human_readable: bool) -> Vec<String> {
+    if long_format {
+        entries
+            .iter()
+            .map(|e| {
+                let type_char = if e.is_dir { 'd' } else { '-' };
+                let size_str = if human_readable {
+                    format_human_size(e.size)
+                } else {
+                    format!("{:>8}", e.size)
+                };
+                format!("{}  {}  {}", type_char, size_str, e.name)
+            })
+            .collect()
+    } else {
+        entries.iter().map(|e| e.name.clone()).collect()
     }
 }
 
@@ -288,5 +429,39 @@ mod tests {
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.out.contains(".hidden"));
+    }
+
+    async fn make_ctx_with_subdirs() -> ExecContext {
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.mkdir(Path::new("src")).await.unwrap();
+        mem.mkdir(Path::new("src/lib")).await.unwrap();
+        mem.write(Path::new("src/main.rs"), b"main").await.unwrap();
+        mem.write(Path::new("src/lib/utils.rs"), b"utils")
+            .await
+            .unwrap();
+        mem.write(Path::new("README.md"), b"readme").await.unwrap();
+        vfs.mount("/", mem);
+        ExecContext::new(Arc::new(vfs))
+    }
+
+    #[tokio::test]
+    async fn test_ls_recursive() {
+        let mut ctx = make_ctx_with_subdirs().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/".into()));
+        args.flags.insert("R".to_string());
+
+        let result = Ls.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Should have directory headers
+        assert!(result.out.contains(".:"));
+        // Should show files in root
+        assert!(result.out.contains("README.md"));
+        assert!(result.out.contains("src"));
+        // Should show files in src
+        assert!(result.out.contains("main.rs"));
+        // Should show nested directories
+        assert!(result.out.contains("lib"));
     }
 }

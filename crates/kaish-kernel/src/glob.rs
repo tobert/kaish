@@ -40,7 +40,15 @@ pub fn glob_match(pattern: &str, input: &str) -> bool {
 ///
 /// `{a,b,c}` expands to multiple patterns. Supports nested braces.
 /// Returns a vector of all expanded patterns.
-fn expand_braces(pattern: &str) -> Vec<String> {
+///
+/// # Examples
+/// ```
+/// use kaish_kernel::glob::expand_braces;
+///
+/// assert_eq!(expand_braces("simple"), vec!["simple"]);
+/// assert_eq!(expand_braces("{a,b}"), vec!["a", "b"]);
+/// ```
+pub fn expand_braces(pattern: &str) -> Vec<String> {
     let chars: Vec<char> = pattern.chars().collect();
 
     // Find the first top-level brace group
