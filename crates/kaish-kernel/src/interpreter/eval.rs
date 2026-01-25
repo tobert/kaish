@@ -311,6 +311,18 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                     let value = self.eval_var_length(name)?;
                     result.push_str(&value_to_string(&value));
                 }
+                StringPart::Positional(n) => {
+                    let value = self.eval_positional(*n)?;
+                    result.push_str(&value_to_string(&value));
+                }
+                StringPart::AllArgs => {
+                    let value = self.eval_all_args()?;
+                    result.push_str(&value_to_string(&value));
+                }
+                StringPart::ArgCount => {
+                    let value = self.eval_arg_count()?;
+                    result.push_str(&value_to_string(&value));
+                }
             }
         }
         Ok(Value::String(result))

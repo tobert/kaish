@@ -720,7 +720,13 @@ impl Kernel {
         // Look up builtin tool
         let tool = match self.tools.get(name) {
             Some(t) => t,
-            None => return Ok(ExecResult::failure(127, format!("tool not found: {}", name))),
+            None => {
+                // Try executing as script from PATH before returning "tool not found"
+                if let Some(result) = self.try_execute_script(name, args).await? {
+                    return Ok(result);
+                }
+                return Ok(ExecResult::failure(127, format!("tool not found: {}", name)));
+            }
         };
 
         // Build arguments
@@ -994,6 +1000,145 @@ impl Kernel {
         }
 
         Ok(result)
+    }
+
+    /// Try to execute a script from PATH directories.
+    ///
+    /// Searches PATH for `{name}.kai` files and executes them in isolated scope
+    /// (like user-defined tools). Returns None if no script is found.
+    async fn try_execute_script(&self, name: &str, args: &[Arg]) -> Result<Option<ExecResult>> {
+        // Get PATH from scope (default to "/bin")
+        let path_value = {
+            let scope = self.scope.read().await;
+            scope
+                .get("PATH")
+                .map(|v| value_to_string(v))
+                .unwrap_or_else(|| "/bin".to_string())
+        };
+
+        // Search PATH directories for script
+        for dir in path_value.split(':') {
+            if dir.is_empty() {
+                continue;
+            }
+
+            // Build script path: {dir}/{name}.kai
+            let script_path = PathBuf::from(dir).join(format!("{}.kai", name));
+
+            // Check if script exists
+            let exists = {
+                let ctx = self.exec_ctx.read().await;
+                ctx.backend.exists(&script_path).await
+            };
+
+            if !exists {
+                continue;
+            }
+
+            // Read script content
+            let content = {
+                let ctx = self.exec_ctx.read().await;
+                match ctx.backend.read(&script_path, None).await {
+                    Ok(bytes) => match String::from_utf8(bytes) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return Ok(Some(ExecResult::failure(
+                                1,
+                                format!("{}: invalid UTF-8: {}", script_path.display(), e),
+                            )));
+                        }
+                    },
+                    Err(e) => {
+                        return Ok(Some(ExecResult::failure(
+                            1,
+                            format!("{}: {}", script_path.display(), e),
+                        )));
+                    }
+                }
+            };
+
+            // Parse the script
+            let program = match crate::parser::parse(&content) {
+                Ok(p) => p,
+                Err(errors) => {
+                    let msg = errors
+                        .iter()
+                        .map(|e| format!("{}:{}: {}", script_path.display(), e.span.start, e.message))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return Ok(Some(ExecResult::failure(1, msg)));
+                }
+            };
+
+            // Build tool_args from args
+            let tool_args = {
+                let scope = self.scope.read().await;
+                let ctx = self.exec_ctx.read().await;
+                self.build_args(args, &scope, &ctx)?
+            };
+
+            // Create isolated scope (like user tools)
+            let mut isolated_scope = Scope::new();
+
+            // Set up positional parameters ($0 = script name, $1, $2, ... = args)
+            let positional_args: Vec<String> = tool_args.positional
+                .iter()
+                .map(value_to_string)
+                .collect();
+            isolated_scope.set_positional(name, positional_args);
+
+            // Save current scope and swap with isolated scope
+            let original_scope = {
+                let mut scope = self.scope.write().await;
+                std::mem::replace(&mut *scope, isolated_scope)
+            };
+
+            // Execute script statements
+            let mut result = ExecResult::success("");
+            for stmt in program.statements {
+                if matches!(stmt, crate::ast::Stmt::Empty) {
+                    continue;
+                }
+
+                match self.execute_stmt_flow(&stmt).await {
+                    Ok(flow) => {
+                        match flow {
+                            ControlFlow::Normal(r) => result = r,
+                            ControlFlow::Return { value } => {
+                                result = value;
+                                break;
+                            }
+                            ControlFlow::Exit { code } => {
+                                // Restore scope and return
+                                let mut scope = self.scope.write().await;
+                                *scope = original_scope;
+                                return Ok(Some(ExecResult::failure(code, "exit")));
+                            }
+                            ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
+                                result = r;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Restore original scope on error
+                        let mut scope = self.scope.write().await;
+                        *scope = original_scope;
+                        return Err(e.context(format!("script: {}", script_path.display())));
+                    }
+                }
+            }
+
+            // Restore original scope
+            {
+                let mut scope = self.scope.write().await;
+                *scope = original_scope;
+            }
+
+            return Ok(Some(result));
+        }
+
+        // No script found
+        Ok(None)
     }
 
     // --- Variable Access ---
@@ -2098,5 +2243,241 @@ set AFTER = "yes"'"#)
 
         assert!(result.ok(), "read failed: {}", result.err);
         assert!(result.out.contains("John is 42"), "output: {}", result.out);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Shell-Style Function Tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_posix_function_with_positional_params() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Define POSIX-style function
+        kernel
+            .execute(r#"greet() { echo "Hello, $1!" }"#)
+            .await
+            .expect("function definition failed");
+
+        // Call the function
+        let result = kernel
+            .execute(r#"greet "Amy""#)
+            .await
+            .expect("function call failed");
+
+        assert!(result.ok(), "greet failed: {}", result.err);
+        assert_eq!(result.out.trim(), "Hello, Amy!");
+    }
+
+    #[tokio::test]
+    async fn test_posix_function_multiple_args() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Define function using $1 and $2
+        kernel
+            .execute(r#"add_greeting() { echo "$1 $2!" }"#)
+            .await
+            .expect("function definition failed");
+
+        // Call the function
+        let result = kernel
+            .execute(r#"add_greeting "Hello" "World""#)
+            .await
+            .expect("function call failed");
+
+        assert!(result.ok(), "function failed: {}", result.err);
+        assert_eq!(result.out.trim(), "Hello World!");
+    }
+
+    #[tokio::test]
+    async fn test_bash_function_with_positional_params() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Define bash-style function (function keyword, no parens)
+        kernel
+            .execute(r#"function greet { echo "Hi $1" }"#)
+            .await
+            .expect("function definition failed");
+
+        // Call the function
+        let result = kernel
+            .execute(r#"greet "Bob""#)
+            .await
+            .expect("function call failed");
+
+        assert!(result.ok(), "greet failed: {}", result.err);
+        assert_eq!(result.out.trim(), "Hi Bob");
+    }
+
+    #[tokio::test]
+    async fn test_shell_function_with_all_args() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Define function using $@ (all args)
+        kernel
+            .execute(r#"echo_all() { echo "args: $@" }"#)
+            .await
+            .expect("function definition failed");
+
+        // Call with multiple args
+        let result = kernel
+            .execute(r#"echo_all "a" "b" "c""#)
+            .await
+            .expect("function call failed");
+
+        assert!(result.ok(), "function failed: {}", result.err);
+        assert_eq!(result.out.trim(), "args: a b c");
+    }
+
+    #[tokio::test]
+    async fn test_shell_function_with_arg_count() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Define function using $# (arg count)
+        kernel
+            .execute(r#"count_args() { echo "count: $#" }"#)
+            .await
+            .expect("function definition failed");
+
+        // Call with three args
+        let result = kernel
+            .execute(r#"count_args "x" "y" "z""#)
+            .await
+            .expect("function call failed");
+
+        assert!(result.ok(), "function failed: {}", result.err);
+        assert_eq!(result.out.trim(), "count: 3");
+    }
+
+    #[tokio::test]
+    async fn test_shell_function_isolation() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Set a variable in parent scope
+        kernel
+            .execute(r#"set SECRET = "hidden""#)
+            .await
+            .expect("set failed");
+
+        // Define shell function that tries to access parent variable
+        kernel
+            .execute(r#"leak() { echo "${SECRET}" }"#)
+            .await
+            .expect("function definition failed");
+
+        // Call the function - it should NOT see SECRET
+        let result = kernel.execute("leak").await;
+
+        match result {
+            Ok(exec_result) => {
+                assert!(
+                    !exec_result.out.contains("hidden"),
+                    "SECRET leaked into shell function scope: {}",
+                    exec_result.out
+                );
+            }
+            Err(_) => {
+                // Error accessing undefined variable is also acceptable
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Script Execution via PATH Tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_script_execution_from_path() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Create /bin directory and script
+        kernel.execute(r#"mkdir "/bin""#).await.ok();
+        kernel
+            .execute(r#"write "/bin/hello.kai" 'echo "Hello from script!"'"#)
+            .await
+            .expect("write script failed");
+
+        // Set PATH to /bin
+        kernel.execute(r#"set PATH = "/bin""#).await.expect("set PATH failed");
+
+        // Call script by name (without .kai extension)
+        let result = kernel
+            .execute("hello")
+            .await
+            .expect("script execution failed");
+
+        assert!(result.ok(), "script failed: {}", result.err);
+        assert_eq!(result.out.trim(), "Hello from script!");
+    }
+
+    #[tokio::test]
+    async fn test_script_with_args() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Create script that uses positional params
+        kernel.execute(r#"mkdir "/bin""#).await.ok();
+        kernel
+            .execute(r#"write "/bin/greet.kai" 'echo "Hello, $1!"'"#)
+            .await
+            .expect("write script failed");
+
+        // Set PATH
+        kernel.execute(r#"set PATH = "/bin""#).await.expect("set PATH failed");
+
+        // Call script with arg
+        let result = kernel
+            .execute(r#"greet "World""#)
+            .await
+            .expect("script execution failed");
+
+        assert!(result.ok(), "script failed: {}", result.err);
+        assert_eq!(result.out.trim(), "Hello, World!");
+    }
+
+    #[tokio::test]
+    async fn test_script_not_found() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Set empty PATH
+        kernel.execute(r#"set PATH = "/nonexistent""#).await.expect("set PATH failed");
+
+        // Call non-existent script
+        let result = kernel
+            .execute("noscript")
+            .await
+            .expect("execution failed");
+
+        assert!(!result.ok(), "should fail with tool not found");
+        assert_eq!(result.code, 127);
+        assert!(result.err.contains("tool not found"));
+    }
+
+    #[tokio::test]
+    async fn test_script_path_search_order() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Create two directories with same-named script
+        kernel.execute(r#"mkdir "/first""#).await.ok();
+        kernel.execute(r#"mkdir "/second""#).await.ok();
+        kernel
+            .execute(r#"write "/first/test.kai" 'echo "from first"'"#)
+            .await
+            .expect("write failed");
+        kernel
+            .execute(r#"write "/second/test.kai" 'echo "from second"'"#)
+            .await
+            .expect("write failed");
+
+        // Set PATH with first before second
+        kernel.execute(r#"set PATH = "/first:/second""#).await.expect("set PATH failed");
+
+        // Should find first one
+        let result = kernel
+            .execute("test")
+            .await
+            .expect("script execution failed");
+
+        assert!(result.ok(), "script failed: {}", result.err);
+        assert_eq!(result.out.trim(), "from first");
     }
 }

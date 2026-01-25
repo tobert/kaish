@@ -310,6 +310,40 @@ fn parser_tool_default_values() {
     parse_and_snapshot("tool_default_values", "tool search query:string limit:int=10 offset:int=0 {\n    db-query q=${query} l=${limit} o=${offset}\n}");
 }
 
+// =============================================================================
+// SHELL-STYLE FUNCTIONS (no typed params, use $1, $2)
+// =============================================================================
+
+#[test]
+fn parser_posix_function_minimal() {
+    parse_and_snapshot("posix_function_minimal", "greet() {\n}");
+}
+
+#[test]
+fn parser_posix_function_with_body() {
+    parse_and_snapshot("posix_function_with_body", "greet() {\n    echo \"Hello, $1!\"\n}");
+}
+
+#[test]
+fn parser_posix_function_single_line() {
+    parse_and_snapshot("posix_function_single_line", "double() { echo $1 }");
+}
+
+#[test]
+fn parser_bash_function_minimal() {
+    parse_and_snapshot("bash_function_minimal", "function greet {\n}");
+}
+
+#[test]
+fn parser_bash_function_with_body() {
+    parse_and_snapshot("bash_function_with_body", "function greet {\n    echo \"Hello, $1!\"\n}");
+}
+
+#[test]
+fn parser_bash_function_single_line() {
+    parse_and_snapshot("bash_function_single_line", "function double { echo $1 }");
+}
+
 
 // =============================================================================
 // SCATTER/GATHER

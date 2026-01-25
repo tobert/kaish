@@ -87,6 +87,28 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
                     StringPart::Var(parse_varpath(&format!("${{{}}}", var_content)))
                 };
                 parts.push(part);
+            } else if chars.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                // Positional parameter $0-$9
+                if !current_text.is_empty() {
+                    parts.push(StringPart::Literal(std::mem::take(&mut current_text)));
+                }
+                let digit = chars.next().expect("peeked digit should exist");
+                let n = digit.to_digit(10).expect("is_ascii_digit guarantees valid digit") as usize;
+                parts.push(StringPart::Positional(n));
+            } else if chars.peek() == Some(&'@') {
+                // All arguments $@
+                if !current_text.is_empty() {
+                    parts.push(StringPart::Literal(std::mem::take(&mut current_text)));
+                }
+                chars.next(); // consume '@'
+                parts.push(StringPart::AllArgs);
+            } else if chars.peek() == Some(&'#') {
+                // Argument count $#
+                if !current_text.is_empty() {
+                    parts.push(StringPart::Literal(std::mem::take(&mut current_text)));
+                }
+                chars.next(); // consume '#'
+                parts.push(StringPart::ArgCount);
             } else if chars.peek().map(|c| c.is_ascii_alphabetic() || *c == '_').unwrap_or(false) {
                 // Simple variable reference $NAME
                 if !current_text.is_empty() {
@@ -301,6 +323,10 @@ where
             just(Token::Newline).to(Stmt::Empty),
             set_command,
             assignment_parser().map(Stmt::Assignment),
+            // Shell-style functions (no typed params, use $1, $2)
+            posix_function_parser(stmt.clone()).map(Stmt::ToolDef),  // name() { }
+            bash_function_parser(stmt.clone()).map(Stmt::ToolDef),   // function name { }
+            // Kaish-style tool/function with typed params
             tool_def_parser(stmt.clone()).map(Stmt::ToolDef),
             if_parser(stmt.clone()).map(Stmt::If),
             for_parser(stmt.clone()).map(Stmt::For),
@@ -394,6 +420,59 @@ where
 
     choice((local_assignment, set_assignment, bash_assignment))
         .labelled("assignment")
+        .boxed()
+}
+
+/// POSIX-style function: `name() { body }`
+///
+/// Produces a ToolDef with empty params - uses positional params ($1, $2, etc.)
+fn posix_function_parser<'tokens, I, S>(
+    stmt: S,
+) -> impl Parser<'tokens, I, ToolDef, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+    S: Parser<'tokens, I, Stmt, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
+{
+    ident_parser()
+        .then_ignore(just(Token::LParen))
+        .then_ignore(just(Token::RParen))
+        .then_ignore(just(Token::LBrace))
+        .then_ignore(just(Token::Newline).repeated())
+        .then(
+            stmt.repeated()
+                .collect::<Vec<_>>()
+                .map(|stmts| stmts.into_iter().filter(|s| !matches!(s, Stmt::Empty)).collect()),
+        )
+        .then_ignore(just(Token::Newline).repeated())
+        .then_ignore(just(Token::RBrace))
+        .map(|(name, body)| ToolDef { name, params: vec![], body })
+        .labelled("POSIX function")
+        .boxed()
+}
+
+/// Bash-style function: `function name { body }` (without parens)
+///
+/// Produces a ToolDef with empty params - uses positional params ($1, $2, etc.)
+fn bash_function_parser<'tokens, I, S>(
+    stmt: S,
+) -> impl Parser<'tokens, I, ToolDef, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+    S: Parser<'tokens, I, Stmt, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
+{
+    just(Token::Function)
+        .ignore_then(ident_parser())
+        .then_ignore(just(Token::LBrace))
+        .then_ignore(just(Token::Newline).repeated())
+        .then(
+            stmt.repeated()
+                .collect::<Vec<_>>()
+                .map(|stmts| stmts.into_iter().filter(|s| !matches!(s, Stmt::Empty)).collect()),
+        )
+        .then_ignore(just(Token::Newline).repeated())
+        .then_ignore(just(Token::RBrace))
+        .map(|(name, body)| ToolDef { name, params: vec![], body })
+        .labelled("bash function")
         .boxed()
 }
 

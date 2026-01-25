@@ -305,6 +305,43 @@ function greet name:string {
 # Default values with =
 ```
 
+### Shell-Style Functions
+
+Classic shell function syntax is also supported, using positional parameters:
+
+```bash
+# POSIX-style: name() { body }
+greet() {
+    echo "Hello, $1!"
+}
+greet "Amy"  # → Hello, Amy!
+
+# Bash-style: function name { body }
+function count_args {
+    echo "Got $# arguments: $@"
+}
+count_args a b c  # → Got 3 arguments: a b c
+```
+
+Positional parameters: `$0` (function name), `$1`-`$9` (args), `$@` (all args), `$#` (count)
+
+### Script Execution via PATH
+
+Scripts with `.kai` extension can be called by name when in a `PATH` directory:
+
+```bash
+# Create a script
+write "/scripts/fetch.kai" 'echo "Fetching $1..."'
+
+# Add to PATH
+set PATH = "/scripts:/bin"
+
+# Call by name (without .kai extension)
+fetch "example.com"  # → Fetching example.com...
+```
+
+Scripts execute in isolated scope with positional parameters, just like functions.
+
 ---
 
 ## Builtin Tools

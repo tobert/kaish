@@ -255,6 +255,9 @@ pub fn format_expr(expr: &Expr) -> String {
                         format!("(vardefault {} \"{}\")", name, default)
                     }
                     StringPart::VarLength(name) => format!("(varlength {})", name),
+                    StringPart::Positional(n) => format!("(positional {})", n),
+                    StringPart::AllArgs => "(allargs)".to_string(),
+                    StringPart::ArgCount => "(argcount)".to_string(),
                 })
                 .collect();
             format!("(interpolated {})", parts_str.join(" "))

@@ -318,6 +318,17 @@ fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> {
                         };
                         result.push_str(&len.to_string());
                     }
+                    crate::ast::StringPart::Positional(n) => {
+                        if let Some(s) = ctx.scope.get_positional(*n) {
+                            result.push_str(s);
+                        }
+                    }
+                    crate::ast::StringPart::AllArgs => {
+                        result.push_str(&ctx.scope.all_args().join(" "));
+                    }
+                    crate::ast::StringPart::ArgCount => {
+                        result.push_str(&ctx.scope.arg_count().to_string());
+                    }
                 }
             }
             Some(Value::String(result))

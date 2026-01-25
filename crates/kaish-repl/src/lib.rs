@@ -615,6 +615,17 @@ impl Repl {
                             };
                             result.push_str(&len.to_string());
                         }
+                        kaish_kernel::ast::StringPart::Positional(n) => {
+                            if let Some(s) = self.exec_ctx.scope.get_positional(*n) {
+                                result.push_str(s);
+                            }
+                        }
+                        kaish_kernel::ast::StringPart::AllArgs => {
+                            result.push_str(&self.exec_ctx.scope.all_args().join(" "));
+                        }
+                        kaish_kernel::ast::StringPart::ArgCount => {
+                            result.push_str(&self.exec_ctx.scope.arg_count().to_string());
+                        }
                     }
                 }
                 Ok(Value::String(result))

@@ -327,6 +327,12 @@ pub enum StringPart {
     VarWithDefault { name: String, default: String },
     /// Variable string length: `${#VAR}`
     VarLength(String),
+    /// Positional parameter: `$0`, `$1`, ..., `$9`
+    Positional(usize),
+    /// All arguments: `$@`
+    AllArgs,
+    /// Argument count: `$#`
+    ArgCount,
 }
 
 /// Binary operators.
