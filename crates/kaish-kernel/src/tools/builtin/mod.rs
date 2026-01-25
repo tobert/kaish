@@ -29,6 +29,7 @@ mod readlink;
 mod realpath;
 mod rm;
 mod scatter;
+mod sed;
 mod seq;
 mod set;
 mod sleep;
@@ -80,6 +81,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(realpath::Realpath);
     registry.register(rm::Rm);
     registry.register(scatter::Scatter);
+    registry.register(sed::Sed);
     registry.register(seq::Seq);
     registry.register(set::Set);
     registry.register(sleep::Sleep);
