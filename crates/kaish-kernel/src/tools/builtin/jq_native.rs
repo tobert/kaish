@@ -240,8 +240,8 @@ impl Tool for JqNative {
         let raw_output = args.has_flag("raw") || args.has_flag("r");
         let _compact = args.has_flag("compact") || args.has_flag("c");
 
-        // Get input: from path or stdin
-        let input = if let Some(path) = args.get_string("path", 999) {
+        // Get input: from path (named or positional[1]) or stdin
+        let input = if let Some(path) = args.get_string("path", 1) {
             if !path.is_empty() {
                 // Read from backend
                 let resolved = ctx.resolve_path(&path);
@@ -399,5 +399,152 @@ mod tests {
         let result = JqNative.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq failed: {}", result.err);
         assert_eq!(result.out.trim(), "42");
+    }
+
+    // ============================================================================
+    // Real-world model output compatibility tests
+    // Source: Claude Code session output, 2026-01-25
+    // These test standard jq invocation patterns that models generate
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_jq_positional_file_argument() {
+        // Real-world: jq '.result[]' /tmp/file.json
+        let mut ctx = make_ctx();
+        ctx.backend
+            .write(
+                Path::new("/tmp/data.json"),
+                br#"{"result": [1, 2, 3]}"#,
+                WriteMode::Overwrite,
+            )
+            .await
+            .unwrap();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String(".result[]".into()));
+        args.positional.push(Value::String("/tmp/data.json".into()));
+
+        let result = JqNative.execute(args, &mut ctx).await;
+        assert!(result.ok(), "jq positional file failed: {}", result.err);
+        assert_eq!(result.out.trim(), "1\n2\n3");
+    }
+
+    #[tokio::test]
+    async fn test_jq_select_with_positional_file() {
+        // Real-world: jq '[.[] | select(.active)] | length' file.json
+        let mut ctx = make_ctx();
+        ctx.backend
+            .write(
+                Path::new("/query.json"),
+                br#"[{"id": 1, "active": true}, {"id": 2, "active": false}, {"id": 3, "active": true}]"#,
+                WriteMode::Overwrite,
+            )
+            .await
+            .unwrap();
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("[.[] | select(.active)] | length".into()));
+        args.positional.push(Value::String("/query.json".into()));
+
+        let result = JqNative.execute(args, &mut ctx).await;
+        assert!(result.ok(), "jq select failed: {}", result.err);
+        assert_eq!(result.out.trim(), "2");
+    }
+
+    #[tokio::test]
+    async fn test_jq_type_check_positional_file() {
+        // Real-world: jq 'type' /tmp/file.json
+        let mut ctx = make_ctx();
+        ctx.backend
+            .write(Path::new("/check.json"), br#"[1, 2, 3]"#, WriteMode::Overwrite)
+            .await
+            .unwrap();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("type".into()));
+        args.positional.push(Value::String("/check.json".into()));
+
+        let result = JqNative.execute(args, &mut ctx).await;
+        assert!(result.ok(), "jq type check failed: {}", result.err);
+        assert_eq!(result.out.trim(), "\"array\"");
+    }
+
+    #[tokio::test]
+    async fn test_jq_index_access_positional_file() {
+        // Real-world: jq '.[0]' /tmp/file.json
+        let mut ctx = make_ctx();
+        ctx.backend
+            .write(
+                Path::new("/arr.json"),
+                br#"[{"name": "first"}, {"name": "second"}]"#,
+                WriteMode::Overwrite,
+            )
+            .await
+            .unwrap();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String(".[0]".into()));
+        args.positional.push(Value::String("/arr.json".into()));
+
+        let result = JqNative.execute(args, &mut ctx).await;
+        assert!(result.ok(), "jq index failed: {}", result.err);
+        assert!(result.out.contains("\"name\": \"first\""));
+    }
+
+    #[tokio::test]
+    async fn test_jq_raw_output_with_positional_file() {
+        // Real-world: jq -r '.name' /tmp/file.json
+        let mut ctx = make_ctx();
+        ctx.backend
+            .write(
+                Path::new("/person.json"),
+                br#"{"name": "Alice"}"#,
+                WriteMode::Overwrite,
+            )
+            .await
+            .unwrap();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String(".name".into()));
+        args.positional.push(Value::String("/person.json".into()));
+        args.flags.insert("r".to_string());
+
+        let result = JqNative.execute(args, &mut ctx).await;
+        assert!(result.ok(), "jq -r failed: {}", result.err);
+        assert_eq!(result.out.trim(), "Alice"); // No quotes with -r
+    }
+
+    #[tokio::test]
+    async fn test_jq_stdin_still_works() {
+        // Ensure stdin path still works when no file argument
+        let mut ctx = make_ctx();
+        ctx.set_stdin(r#"{"value": 42}"#.to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String(".value".into()));
+
+        let result = JqNative.execute(args, &mut ctx).await;
+        assert!(result.ok(), "jq stdin failed: {}", result.err);
+        assert_eq!(result.out.trim(), "42");
+    }
+
+    #[tokio::test]
+    async fn test_jq_named_path_still_works() {
+        // Ensure path= named argument still works
+        let mut ctx = make_ctx();
+        ctx.backend
+            .write(Path::new("/named.json"), br#"{"x": 99}"#, WriteMode::Overwrite)
+            .await
+            .unwrap();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String(".x".into()));
+        args.named
+            .insert("path".to_string(), Value::String("/named.json".into()));
+
+        let result = JqNative.execute(args, &mut ctx).await;
+        assert!(result.ok(), "jq path= failed: {}", result.err);
+        assert_eq!(result.out.trim(), "99");
     }
 }
