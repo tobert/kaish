@@ -149,6 +149,12 @@ tool >> file                    # append stdout
 tool < file                     # stdin from file
 tool 2> file                    # redirect stderr
 tool &> file                    # stdout + stderr
+
+# Here-docs
+cat <<EOF
+multi-line
+content here
+EOF
 ```
 
 ### Statement Chaining
@@ -438,7 +444,6 @@ These bash features are omitted because they're confusing, error-prone, or ambig
 | Arithmetic `$(( ))` | Use tools for math | SC2004 |
 | Shell brace expansion `echo {a,b,c}` | Tools support globs with braces internally | SC1083 |
 | Shell glob expansion `*.txt` | Tools handle their own patterns | SC2035 |
-| Here-docs `<<EOF` | Use files or strings | — |
 | Process substitution `<(cmd)` | Use temp files | — |
 | Backtick substitution `` `cmd` `` | Use `$(cmd)` | SC2006 |
 | Single bracket tests `[ ]` | Use `[[ ]]` | SC2039 |
