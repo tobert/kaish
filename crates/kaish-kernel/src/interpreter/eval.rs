@@ -477,6 +477,10 @@ fn is_truthy(value: &Value) -> bool {
 }
 
 /// Check if two values are equal.
+///
+/// Handles cross-type comparisons for shell compatibility:
+/// - String-to-Int: Try parsing the string as an integer
+/// - String-to-Float: Try parsing the string as a float
 fn values_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Null, Value::Null) => true,
@@ -487,6 +491,14 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             (*a as f64 - b).abs() < f64::EPSILON
         }
         (Value::String(a), Value::String(b)) => a == b,
+        // String-Int comparison: try to parse string as integer
+        (Value::String(s), Value::Int(n)) | (Value::Int(n), Value::String(s)) => {
+            s.parse::<i64>().map(|parsed| parsed == *n).unwrap_or(false)
+        }
+        // String-Float comparison: try to parse string as float
+        (Value::String(s), Value::Float(f)) | (Value::Float(f), Value::String(s)) => {
+            s.parse::<f64>().map(|parsed| (parsed - f).abs() < f64::EPSILON).unwrap_or(false)
+        }
         _ => false,
     }
 }

@@ -1,5 +1,0 @@
----
-source: crates/kaish-kernel/tests/parser_tests.rs
-expression: sexpr
----
-(tooldef noop () ())

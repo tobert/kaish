@@ -5,8 +5,8 @@
 
 use crate::ast::{
     Arg, Assignment, BinaryOp, CaseBranch, CaseStmt, Command, Expr, FileTestOp, ForLoop, IfStmt,
-    ParamDef, ParamType, Pipeline, Program, Redirect, RedirectKind, Stmt, StringPart, StringTestOp,
-    TestCmpOp, TestExpr, ToolDef, Value, VarPath, VarSegment, WhileLoop,
+    Pipeline, Program, Redirect, RedirectKind, Stmt, StringPart, StringTestOp, TestCmpOp, TestExpr,
+    ToolDef, Value, VarPath, VarSegment, WhileLoop,
 };
 use crate::lexer::{self, Token};
 use chumsky::{input::ValueInput, prelude::*};
@@ -323,11 +323,9 @@ where
             just(Token::Newline).to(Stmt::Empty),
             set_command,
             assignment_parser().map(Stmt::Assignment),
-            // Shell-style functions (no typed params, use $1, $2)
+            // Shell-style functions (use $1, $2 positional params)
             posix_function_parser(stmt.clone()).map(Stmt::ToolDef),  // name() { }
             bash_function_parser(stmt.clone()).map(Stmt::ToolDef),   // function name { }
-            // Kaish-style tool/function with typed params
-            tool_def_parser(stmt.clone()).map(Stmt::ToolDef),
             if_parser(stmt.clone()).map(Stmt::If),
             for_parser(stmt.clone()).map(Stmt::For),
             while_parser(stmt.clone()).map(Stmt::While),
@@ -474,65 +472,6 @@ where
         .map(|(name, body)| ToolDef { name, params: vec![], body })
         .labelled("bash function")
         .boxed()
-}
-
-/// Tool definition: `tool NAME params { body }` or `function NAME params { body }`
-fn tool_def_parser<'tokens, I, S>(
-    stmt: S,
-) -> impl Parser<'tokens, I, ToolDef, extra::Err<Rich<'tokens, Token, Span>>> + Clone
-where
-    I: ValueInput<'tokens, Token = Token, Span = Span>,
-    S: Parser<'tokens, I, Stmt, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
-{
-    choice((just(Token::Tool), just(Token::Function)))
-        .ignore_then(ident_parser())
-        .then(param_def_parser().repeated().collect::<Vec<_>>())
-        .then_ignore(just(Token::LBrace))
-        .then_ignore(just(Token::Newline).repeated())
-        .then(
-            stmt.repeated()
-                .collect::<Vec<_>>()
-                .map(|stmts| stmts.into_iter().filter(|s| !matches!(s, Stmt::Empty)).collect()),
-        )
-        .then_ignore(just(Token::Newline).repeated())
-        .then_ignore(just(Token::RBrace))
-        .map(|((name, params), body)| ToolDef { name, params, body })
-        .labelled("tool definition")
-        .boxed()
-}
-
-/// Parameter definition: `name: type [= default]`
-fn param_def_parser<'tokens, I>(
-) -> impl Parser<'tokens, I, ParamDef, extra::Err<Rich<'tokens, Token, Span>>> + Clone
-where
-    I: ValueInput<'tokens, Token = Token, Span = Span>,
-{
-    ident_parser()
-        .then_ignore(just(Token::Colon))
-        .then(type_parser())
-        .then(just(Token::Eq).ignore_then(expr_parser()).or_not())
-        .map(|((name, param_type), default)| ParamDef {
-            name,
-            param_type: Some(param_type),
-            default,
-        })
-        .labelled("parameter")
-        .boxed()
-}
-
-/// Type keyword parser.
-fn type_parser<'tokens, I>(
-) -> impl Parser<'tokens, I, ParamType, extra::Err<Rich<'tokens, Token, Span>>> + Clone
-where
-    I: ValueInput<'tokens, Token = Token, Span = Span>,
-{
-    select! {
-        Token::TypeString => ParamType::String,
-        Token::TypeInt => ParamType::Int,
-        Token::TypeFloat => ParamType::Float,
-        Token::TypeBool => ParamType::Bool,
-    }
-    .labelled("type")
 }
 
 /// If statement: `if COND; then STMTS [elif COND; then STMTS]* [else STMTS] fi`
@@ -1923,15 +1862,14 @@ mod tests {
     }
 
     #[test]
-    fn value_tool_def_name_preserved() {
-        let result = parse("tool greet name: string { echo }").unwrap();
+    fn value_function_def_name_preserved() {
+        let result = parse("greet() { echo }").unwrap();
         match &result.statements[0] {
             Stmt::ToolDef(t) => {
                 assert_eq!(t.name, "greet");
-                assert_eq!(t.params.len(), 1);
-                assert_eq!(t.params[0].name, "name");
+                assert!(t.params.is_empty());
             }
-            other => panic!("expected tool def, got {:?}", other),
+            other => panic!("expected function def, got {:?}", other),
         }
     }
 
@@ -2116,33 +2054,28 @@ mod tests {
     }
 
     #[test]
-    fn parse_empty_tool_body() {
-        let result = parse("tool empty { }").unwrap();
+    fn parse_empty_function_body() {
+        let result = parse("empty() { }").unwrap();
         match &result.statements[0] {
             Stmt::ToolDef(t) => {
                 assert_eq!(t.name, "empty");
-                assert_eq!(t.params.len(), 0);
-                assert_eq!(t.body.len(), 0);
+                assert!(t.params.is_empty());
+                assert!(t.body.is_empty());
             }
-            other => panic!("expected tool def, got {:?}", other),
+            other => panic!("expected function def, got {:?}", other),
         }
     }
 
     #[test]
-    fn parse_tool_with_default_param() {
-        let result = parse("tool greet name: string = \"World\" { echo }").unwrap();
+    fn parse_bash_style_function() {
+        let result = parse("function greet { echo hello }").unwrap();
         match &result.statements[0] {
             Stmt::ToolDef(t) => {
                 assert_eq!(t.name, "greet");
-                assert_eq!(t.params.len(), 1);
-                assert_eq!(t.params[0].name, "name");
-                assert!(t.params[0].default.is_some());
-                match &t.params[0].default {
-                    Some(Expr::Literal(Value::String(s))) => assert_eq!(s, "World"),
-                    other => panic!("expected string default, got {:?}", other),
-                }
+                assert!(t.params.is_empty());
+                assert_eq!(t.body.len(), 1);
             }
-            other => panic!("expected tool def, got {:?}", other),
+            other => panic!("expected function def, got {:?}", other),
         }
     }
 
@@ -2483,16 +2416,16 @@ fi
         }
     }
 
-    /// Level 3: Script with loops and tool definitions (shell-compatible syntax)
+    /// Level 3: Script with loops and function definitions
     #[test]
-    fn script_level3_loops_and_tools() {
+    fn script_level3_loops_and_functions() {
         let script = r#"
-tool greet name: string prefix: string = "Hello" {
-    echo "${prefix}, ${name}!"
+greet() {
+    echo "Hello, $1!"
 }
 
-tool fetch-all urls: string {
-    for URL in ${urls}; do
+fetch_all() {
+    for URL in $@; do
         fetch url=${URL}
     done
 }
@@ -2500,7 +2433,7 @@ tool fetch-all urls: string {
 set USERS = "alice bob charlie"
 
 for USER in ${USERS}; do
-    greet name=${USER}
+    greet ${USER}
     if [[ ${USER} == "bob" ]]; then
         echo "Found Bob!"
     fi
@@ -2515,27 +2448,23 @@ long-running-task &
 
         assert_eq!(stmts.len(), 5);
 
-        // First tool def
+        // First function def
         match stmts[0] {
             Stmt::ToolDef(t) => {
                 assert_eq!(t.name, "greet");
-                assert_eq!(t.params.len(), 2);
-                assert_eq!(t.params[0].name, "name");
-                assert!(t.params[0].default.is_none());
-                assert_eq!(t.params[1].name, "prefix");
-                assert!(t.params[1].default.is_some());
+                assert!(t.params.is_empty());
             }
-            other => panic!("expected tool def, got {:?}", other),
+            other => panic!("expected function def, got {:?}", other),
         }
 
-        // Second tool def with nested for loop
+        // Second function def with nested for loop
         match stmts[1] {
             Stmt::ToolDef(t) => {
-                assert_eq!(t.name, "fetch-all");
+                assert_eq!(t.name, "fetch_all");
                 assert_eq!(t.body.len(), 1);
                 assert!(matches!(&t.body[0], Stmt::For(_)));
             }
-            other => panic!("expected tool def, got {:?}", other),
+            other => panic!("expected function def, got {:?}", other),
         }
 
         // Assignment
@@ -2645,12 +2574,12 @@ for I in "a b c"; do
     echo ${I}
 done
 
-tool no-params {
+no_params() {
     echo "no params"
 }
 
-tool all-types a: string b: int c: float d: bool {
-    echo "typed"
+function all_args {
+    echo "args: $@"
 }
 
 a | b | c | d | e &

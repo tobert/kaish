@@ -1392,17 +1392,17 @@ mod tests {
     async fn test_user_defined_tool() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
-        // Define a tool
+        // Define a function
         kernel
-            .execute(r#"tool greet name:string { echo "Hello, ${name}!" }"#)
+            .execute(r#"greet() { echo "Hello, $1!" }"#)
             .await
-            .expect("tool definition failed");
+            .expect("function definition failed");
 
-        // Call the tool
+        // Call the function
         let result = kernel
-            .execute(r#"greet name="World""#)
+            .execute(r#"greet "World""#)
             .await
-            .expect("tool call failed");
+            .expect("function call failed");
 
         assert!(result.ok(), "greet failed: {}", result.err);
         assert_eq!(result.out.trim(), "Hello, World!");
@@ -1412,17 +1412,17 @@ mod tests {
     async fn test_user_tool_positional_args() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
-        // Define a tool with positional param
+        // Define a function with positional param
         kernel
-            .execute(r#"tool greet name:string { echo "Hi ${name}" }"#)
+            .execute(r#"greet() { echo "Hi $1" }"#)
             .await
-            .expect("tool definition failed");
+            .expect("function definition failed");
 
         // Call with positional argument
         let result = kernel
             .execute(r#"greet "Amy""#)
             .await
-            .expect("tool call failed");
+            .expect("function call failed");
 
         assert!(result.ok(), "greet failed: {}", result.err);
         assert_eq!(result.out.trim(), "Hi Amy");
@@ -1438,13 +1438,13 @@ mod tests {
             .await
             .expect("set failed");
 
-        // Define a tool that tries to access the parent variable
+        // Define a function that tries to access the parent variable
         kernel
-            .execute(r#"tool leak { echo "${SECRET}" }"#)
+            .execute(r#"leak() { echo "${SECRET}" }"#)
             .await
-            .expect("tool definition failed");
+            .expect("function definition failed");
 
-        // Call the tool - it should either fail or output empty (not "hidden")
+        // Call the function - it should either fail or output empty (not "hidden")
         // Strict isolation means SECRET is not accessible
         let result = kernel.execute("leak").await;
 
@@ -1453,7 +1453,7 @@ mod tests {
                 // If it succeeds, the output must not contain the secret
                 assert!(
                     !exec_result.out.contains("hidden"),
-                    "SECRET leaked into tool scope: {}",
+                    "SECRET leaked into function scope: {}",
                     exec_result.out
                 );
             }
@@ -1462,43 +1462,6 @@ mod tests {
                 // (confirms isolation)
             }
         }
-    }
-
-    #[tokio::test]
-    async fn test_user_tool_missing_param() {
-        let kernel = Kernel::transient().expect("failed to create kernel");
-
-        // Define a tool with required param
-        kernel
-            .execute(r#"tool greet name:string { echo "Hi ${name}" }"#)
-            .await
-            .expect("tool definition failed");
-
-        // Call without the required param
-        let result = kernel.execute("greet").await.expect("tool call failed");
-
-        assert!(!result.ok(), "should fail with missing param");
-        assert!(result.err.contains("missing required parameter"));
-    }
-
-    #[tokio::test]
-    async fn test_function_keyword_alias() {
-        let kernel = Kernel::transient().expect("failed to create kernel");
-
-        // Define using 'function' keyword (alias for 'tool')
-        kernel
-            .execute(r#"function greet name:string { echo "Hello, ${name}!" }"#)
-            .await
-            .expect("function definition failed");
-
-        // Call the function
-        let result = kernel
-            .execute(r#"greet name="World""#)
-            .await
-            .expect("function call failed");
-
-        assert!(result.ok(), "greet failed: {}", result.err);
-        assert_eq!(result.out.trim(), "Hello, World!");
     }
 
     #[tokio::test]
@@ -1677,22 +1640,22 @@ mod tests {
     async fn test_return_from_tool() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
-        // Define a tool that returns early (shell-compatible [[ ]] syntax)
+        // Define a function that returns early
         kernel
-            .execute(r#"tool early_return x:int {
-                if [[ ${x} == 1 ]]; then
+            .execute(r#"early_return() {
+                if [[ $1 == 1 ]]; then
                     return 42
                 fi
                 echo "not returned"
             }"#)
             .await
-            .expect("tool definition failed");
+            .expect("function definition failed");
 
-        // Call with x=1 should return 42
+        // Call with arg=1 should return 42
         let result = kernel
             .execute("early_return 1")
             .await
-            .expect("tool call failed");
+            .expect("function call failed");
 
         assert!(result.ok());
         // The return value should be in the data field
@@ -1703,22 +1666,22 @@ mod tests {
     async fn test_return_without_value() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
-        // Define a tool that returns without a value (shell-compatible [[ ]] syntax)
+        // Define a function that returns without a value
         kernel
-            .execute(r#"tool early_exit x:string {
-                if [[ ${x} == "stop" ]]; then
+            .execute(r#"early_exit() {
+                if [[ $1 == "stop" ]]; then
                     return
                 fi
                 echo "continued"
             }"#)
             .await
-            .expect("tool definition failed");
+            .expect("function definition failed");
 
-        // Call with x="stop" should return early
+        // Call with arg="stop" should return early
         let result = kernel
             .execute(r#"early_exit "stop""#)
             .await
-            .expect("tool call failed");
+            .expect("function call failed");
 
         assert!(result.ok());
         assert!(result.out.is_empty() || result.out.trim().is_empty());
@@ -2004,24 +1967,24 @@ set C = 3'"#)
     }
 
     #[tokio::test]
-    async fn test_source_can_define_tools() {
+    async fn test_source_can_define_functions() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
-        // Write a script that defines a tool
+        // Write a script that defines a function
         kernel
-            .execute(r#"write "/tools.kai" 'tool greet name:string {
-    echo "Hello, ${name}!"
+            .execute(r#"write "/functions.kai" 'greet() {
+    echo "Hello, $1!"
 }'"#)
             .await
             .expect("write failed");
 
         // Source it
         kernel
-            .execute(r#"source "/tools.kai""#)
+            .execute(r#"source "/functions.kai""#)
             .await
             .expect("source failed");
 
-        // Use the defined tool
+        // Use the defined function
         let result = kernel
             .execute(r#"greet "World""#)
             .await

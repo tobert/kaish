@@ -90,9 +90,6 @@ pub enum Token {
     #[token("local")]
     Local,
 
-    #[token("tool")]
-    Tool,
-
     #[token("if")]
     If,
 
@@ -509,7 +506,6 @@ impl fmt::Display for Token {
         match self {
             Token::Set => write!(f, "set"),
             Token::Local => write!(f, "local"),
-            Token::Tool => write!(f, "tool"),
             Token::If => write!(f, "if"),
             Token::Then => write!(f, "then"),
             Token::Else => write!(f, "else"),
@@ -601,7 +597,6 @@ impl Token {
             self,
             Token::Set
                 | Token::Local
-                | Token::Tool
                 | Token::If
                 | Token::Then
                 | Token::Else
@@ -634,7 +629,7 @@ impl Token {
     pub fn starts_statement(&self) -> bool {
         matches!(
             self,
-            Token::Set | Token::Local | Token::Tool | Token::Function | Token::If | Token::For | Token::Case | Token::Ident(_) | Token::LBracket
+            Token::Set | Token::Local | Token::Function | Token::If | Token::For | Token::Case | Token::Ident(_) | Token::LBracket
         )
     }
 
@@ -1136,7 +1131,6 @@ mod tests {
     #[test]
     fn keywords() {
         assert_eq!(lex("set"), vec![Token::Set]);
-        assert_eq!(lex("tool"), vec![Token::Tool]);
         assert_eq!(lex("if"), vec![Token::If]);
         assert_eq!(lex("then"), vec![Token::Then]);
         assert_eq!(lex("else"), vec![Token::Else]);

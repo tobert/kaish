@@ -17,7 +17,6 @@ fn format_token(token: &Token) -> String {
         // Keywords
         Token::Set => "SET".to_string(),
         Token::Local => "LOCAL".to_string(),
-        Token::Tool => "TOOL".to_string(),
         Token::If => "IF".to_string(),
         Token::Then => "THEN".to_string(),
         Token::Else => "ELSE".to_string(),
@@ -152,7 +151,6 @@ fn run_lexer_error_test(input: &str) {
 #[rstest]
 #[case::keyword_set("set", &["SET"])]
 #[case::keyword_local("local", &["LOCAL"])]
-#[case::keyword_tool("tool", &["TOOL"])]
 #[case::keyword_if("if", &["IF"])]
 #[case::keyword_then("then", &["THEN"])]
 #[case::keyword_else("else", &["ELSE"])]

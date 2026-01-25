@@ -1,5 +1,0 @@
----
-source: crates/kaish-kernel/tests/parser_tests.rs
-expression: sexpr
----
-(tooldef fetch ((param url string) (param timeout int) (param retries int)) ((cmd http-get (named url (varref url)) (named timeout (varref timeout)))))

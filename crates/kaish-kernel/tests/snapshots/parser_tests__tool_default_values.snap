@@ -1,5 +1,0 @@
----
-source: crates/kaish-kernel/tests/parser_tests.rs
-expression: sexpr
----
-(tooldef search ((param query string) (param limit int (int 10)) (param offset int (int 0))) ((cmd db-query (named q (varref query)) (named l (varref limit)) (named o (varref offset)))))

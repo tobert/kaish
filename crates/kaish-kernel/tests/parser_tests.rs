@@ -287,31 +287,7 @@ fn parser_while_command_with_args() {
 }
 
 // =============================================================================
-// TOOL DEFINITIONS
-// =============================================================================
-
-#[test]
-fn parser_tool_minimal() {
-    parse_and_snapshot("tool_minimal", "tool noop {\n}");
-}
-
-#[test]
-fn parser_tool_one_param() {
-    parse_and_snapshot("tool_one_param", "tool greet name:string {\n    echo \"hello ${name}\"\n}");
-}
-
-#[test]
-fn parser_tool_multiple_params() {
-    parse_and_snapshot("tool_multiple_params", "tool fetch url:string timeout:int retries:int {\n    http-get url=${url} timeout=${timeout}\n}");
-}
-
-#[test]
-fn parser_tool_default_values() {
-    parse_and_snapshot("tool_default_values", "tool search query:string limit:int=10 offset:int=0 {\n    db-query q=${query} l=${limit} o=${offset}\n}");
-}
-
-// =============================================================================
-// SHELL-STYLE FUNCTIONS (no typed params, use $1, $2)
+// SHELL-STYLE FUNCTIONS (use $1, $2 positional params)
 // =============================================================================
 
 #[test]

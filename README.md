@@ -285,29 +285,9 @@ VFS mounts are configured programmatically via the kernel API.
 
 ---
 
-## User-Defined Tools
+## Functions
 
-```bash
-# Define a tool with typed parameters
-tool process-item id:string verbose:bool=false {
-    if [[ $verbose == true ]]; then
-        echo "Processing: $id"
-    fi
-    # ... tool body
-}
-
-# Or use 'function' keyword (bash-compatible alias)
-function greet name:string {
-    echo "Hello, ${name}!"
-}
-
-# Type annotations: string, int, float, bool
-# Default values with =
-```
-
-### Shell-Style Functions
-
-Classic shell function syntax is also supported, using positional parameters:
+Shell-style functions using positional parameters:
 
 ```bash
 # POSIX-style: name() { body }
@@ -324,6 +304,8 @@ count_args a b c  # → Got 3 arguments: a b c
 ```
 
 Positional parameters: `$0` (function name), `$1`-`$9` (args), `$@` (all args), `$#` (count)
+
+Functions execute in **isolated scope** — they cannot access parent variables.
 
 ### Script Execution via PATH
 
