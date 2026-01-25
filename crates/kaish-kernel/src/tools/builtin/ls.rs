@@ -102,6 +102,15 @@ impl Tool for Ls {
             reverse,
         };
 
+        // Check if path is a file (not a directory)
+        // Real ls behavior: `ls file.txt` just outputs the filename
+        if let Ok(info) = ctx.backend.stat(Path::new(&resolved)).await {
+            if !info.is_dir {
+                // It's a file - just display it
+                return self.list_file(ctx, &path, &info, long_format, human_readable);
+            }
+        }
+
         if recursive {
             // Recursive listing
             self.list_recursive(
@@ -136,6 +145,30 @@ struct SortOptions {
 }
 
 impl Ls {
+    /// List a single file (not a directory).
+    /// Real `ls file.txt` just outputs the filename.
+    fn list_file(
+        &self,
+        _ctx: &mut ExecContext,
+        path: &str,
+        info: &crate::backend::EntryInfo,
+        long_format: bool,
+        human_readable: bool,
+    ) -> ExecResult {
+        let output = if long_format {
+            let type_char = '-'; // It's a file
+            let size_str = if human_readable {
+                format_human_size(info.size)
+            } else {
+                format!("{:>8}", info.size)
+            };
+            format!("{}  {}  {}", type_char, size_str, path)
+        } else {
+            path.to_string()
+        };
+        ExecResult::success(output)
+    }
+
     async fn list_single(
         &self,
         ctx: &mut ExecContext,

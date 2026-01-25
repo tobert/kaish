@@ -54,60 +54,142 @@ impl Tool for Wc {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        // Get input: from file or stdin
-        let (input, filename) = match args.get_string("path", 0) {
-            Some(path) => {
-                let resolved = ctx.resolve_path(&path);
-                match ctx.backend.read(Path::new(&resolved), None).await {
-                    Ok(data) => match String::from_utf8(data) {
-                        Ok(s) => (s, Some(path)),
-                        Err(_) => {
-                            return ExecResult::failure(1, format!("wc: {}: invalid UTF-8", path))
-                        }
-                    },
-                    Err(e) => return ExecResult::failure(1, format!("wc: {}: {}", path, e)),
-                }
-            }
-            None => (ctx.take_stdin().unwrap_or_default(), None),
-        };
-
         let lines_only = args.has_flag("lines") || args.has_flag("l");
         let words_only = args.has_flag("words") || args.has_flag("w");
         let chars_only = args.has_flag("chars") || args.has_flag("m");
         let bytes_only = args.has_flag("bytes") || args.has_flag("c");
-
-        let line_count = input.lines().count();
-        let word_count = input.split_whitespace().count();
-        let char_count = input.chars().count();
-        let byte_count = input.len();
-
-        // If any specific flag is set, show only those counts
         let show_all = !lines_only && !words_only && !chars_only && !bytes_only;
 
-        let mut parts = Vec::new();
+        // Collect all file paths from positional arguments
+        let paths: Vec<String> = args
+            .positional
+            .iter()
+            .filter_map(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
 
-        if show_all || lines_only {
-            parts.push(format!("{:>8}", line_count));
-        }
-        if show_all || words_only {
-            parts.push(format!("{:>8}", word_count));
-        }
-        if show_all || bytes_only {
-            parts.push(format!("{:>8}", byte_count));
-        }
-        if chars_only {
-            parts.push(format!("{:>8}", char_count));
+        // If no files, read from stdin
+        if paths.is_empty() {
+            let input = ctx.take_stdin().unwrap_or_default();
+            let output = format_counts(&input, None, lines_only, words_only, chars_only, bytes_only, show_all);
+            return ExecResult::success(output);
         }
 
-        let mut output = parts.join("");
-        if let Some(name) = filename {
-            output.push(' ');
-            output.push_str(&name);
-        }
-        output.push('\n');
+        // Process each file
+        let mut output_lines = Vec::new();
+        let mut total_lines = 0usize;
+        let mut total_words = 0usize;
+        let mut total_chars = 0usize;
+        let mut total_bytes = 0usize;
+        let mut had_error = false;
 
-        ExecResult::success(output)
+        for path in &paths {
+            let resolved = ctx.resolve_path(path);
+            match ctx.backend.read(Path::new(&resolved), None).await {
+                Ok(data) => match String::from_utf8(data) {
+                    Ok(input) => {
+                        let lc = input.lines().count();
+                        let wc = input.split_whitespace().count();
+                        let cc = input.chars().count();
+                        let bc = input.len();
+
+                        total_lines += lc;
+                        total_words += wc;
+                        total_chars += cc;
+                        total_bytes += bc;
+
+                        let line = format_counts_raw(
+                            lc, wc, cc, bc,
+                            Some(path.as_str()),
+                            lines_only, words_only, chars_only, bytes_only, show_all,
+                        );
+                        output_lines.push(line);
+                    }
+                    Err(_) => {
+                        output_lines.push(format!("wc: {}: invalid UTF-8", path));
+                        had_error = true;
+                    }
+                },
+                Err(e) => {
+                    output_lines.push(format!("wc: {}: {}", path, e));
+                    had_error = true;
+                }
+            }
+        }
+
+        // Add total line if multiple files
+        if paths.len() > 1 {
+            let total_line = format_counts_raw(
+                total_lines, total_words, total_chars, total_bytes,
+                Some("total"),
+                lines_only, words_only, chars_only, bytes_only, show_all,
+            );
+            output_lines.push(total_line);
+        }
+
+        let output = output_lines.join("\n") + "\n";
+
+        if had_error {
+            ExecResult::failure(1, output)
+        } else {
+            ExecResult::success(output)
+        }
     }
+}
+
+/// Format counts for a single input (used for stdin).
+fn format_counts(
+    input: &str,
+    filename: Option<&str>,
+    lines_only: bool,
+    words_only: bool,
+    chars_only: bool,
+    bytes_only: bool,
+    show_all: bool,
+) -> String {
+    let lc = input.lines().count();
+    let wc = input.split_whitespace().count();
+    let cc = input.chars().count();
+    let bc = input.len();
+    format_counts_raw(lc, wc, cc, bc, filename, lines_only, words_only, chars_only, bytes_only, show_all) + "\n"
+}
+
+/// Format counts from raw values.
+fn format_counts_raw(
+    line_count: usize,
+    word_count: usize,
+    char_count: usize,
+    byte_count: usize,
+    filename: Option<&str>,
+    lines_only: bool,
+    words_only: bool,
+    chars_only: bool,
+    bytes_only: bool,
+    show_all: bool,
+) -> String {
+    let mut parts = Vec::new();
+
+    if show_all || lines_only {
+        parts.push(format!("{:>8}", line_count));
+    }
+    if show_all || words_only {
+        parts.push(format!("{:>8}", word_count));
+    }
+    if show_all || bytes_only {
+        parts.push(format!("{:>8}", byte_count));
+    }
+    if chars_only {
+        parts.push(format!("{:>8}", char_count));
+    }
+
+    let mut output = parts.join("");
+    if let Some(name) = filename {
+        output.push(' ');
+        output.push_str(name);
+    }
+    output
 }
 
 #[cfg(test)]
