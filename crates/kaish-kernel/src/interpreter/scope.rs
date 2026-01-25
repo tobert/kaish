@@ -5,7 +5,7 @@
 //! - The special `$?` variable tracking the last command result
 //! - Path resolution for nested access (`${VAR.field[0]}`)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Value, VarPath, VarSegment};
 
@@ -19,6 +19,8 @@ use super::result::ExecResult;
 pub struct Scope {
     /// Stack of variable frames. Last element is the innermost scope.
     frames: Vec<HashMap<String, Value>>,
+    /// Variables marked for export to child processes.
+    exported: HashSet<String>,
     /// The result of the last command execution.
     last_result: ExecResult,
     /// Script or tool name ($0).
@@ -34,6 +36,7 @@ impl Scope {
     pub fn new() -> Self {
         Self {
             frames: vec![HashMap::new()],
+            exported: HashSet::new(),
             last_result: ExecResult::default(),
             script_name: String::new(),
             positional: Vec::new(),
@@ -144,6 +147,51 @@ impl Scope {
     /// Set error-exit mode (set -e / set +e).
     pub fn set_error_exit(&mut self, enabled: bool) {
         self.error_exit = enabled;
+    }
+
+    /// Mark a variable as exported (visible to child processes).
+    ///
+    /// The variable doesn't need to exist yet; it will be exported when set.
+    pub fn export(&mut self, name: impl Into<String>) {
+        self.exported.insert(name.into());
+    }
+
+    /// Check if a variable is marked for export.
+    pub fn is_exported(&self, name: &str) -> bool {
+        self.exported.contains(name)
+    }
+
+    /// Set a variable and mark it as exported.
+    pub fn set_exported(&mut self, name: impl Into<String>, value: Value) {
+        let name = name.into();
+        self.set(&name, value);
+        self.export(name);
+    }
+
+    /// Unmark a variable from export.
+    pub fn unexport(&mut self, name: &str) {
+        self.exported.remove(name);
+    }
+
+    /// Get all exported variables with their values.
+    ///
+    /// Only returns variables that exist and are marked for export.
+    pub fn exported_vars(&self) -> Vec<(String, Value)> {
+        let mut result = Vec::new();
+        for name in &self.exported {
+            if let Some(value) = self.get(name) {
+                result.push((name.clone(), value.clone()));
+            }
+        }
+        result.sort_by(|(a, _), (b, _)| a.cmp(b));
+        result
+    }
+
+    /// Get all exported variable names.
+    pub fn exported_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.exported.iter().map(|s| s.as_str()).collect();
+        names.sort();
+        names
     }
 
     /// Resolve a variable path like `${VAR}` or `${?.field}`.
@@ -421,5 +469,61 @@ mod tests {
         scope.set_positional("test", vec!["one".into(), "two".into()]);
 
         assert_eq!(scope.arg_count(), 2);
+    }
+
+    #[test]
+    fn export_marks_variable() {
+        let mut scope = Scope::new();
+        scope.set("X", Value::Int(42));
+
+        assert!(!scope.is_exported("X"));
+        scope.export("X");
+        assert!(scope.is_exported("X"));
+    }
+
+    #[test]
+    fn set_exported_sets_and_exports() {
+        let mut scope = Scope::new();
+        scope.set_exported("PATH", Value::String("/usr/bin".into()));
+
+        assert!(scope.is_exported("PATH"));
+        assert_eq!(scope.get("PATH"), Some(&Value::String("/usr/bin".into())));
+    }
+
+    #[test]
+    fn unexport_removes_export_marker() {
+        let mut scope = Scope::new();
+        scope.set_exported("VAR", Value::Int(1));
+        assert!(scope.is_exported("VAR"));
+
+        scope.unexport("VAR");
+        assert!(!scope.is_exported("VAR"));
+        // Variable still exists, just not exported
+        assert!(scope.get("VAR").is_some());
+    }
+
+    #[test]
+    fn exported_vars_returns_only_exported_with_values() {
+        let mut scope = Scope::new();
+        scope.set_exported("A", Value::Int(1));
+        scope.set_exported("B", Value::Int(2));
+        scope.set("C", Value::Int(3)); // Not exported
+        scope.export("D"); // Exported but no value
+
+        let exported = scope.exported_vars();
+        assert_eq!(exported.len(), 2);
+        assert_eq!(exported[0], ("A".to_string(), Value::Int(1)));
+        assert_eq!(exported[1], ("B".to_string(), Value::Int(2)));
+    }
+
+    #[test]
+    fn exported_names_returns_sorted_names() {
+        let mut scope = Scope::new();
+        scope.export("Z");
+        scope.export("A");
+        scope.export("M");
+
+        let names = scope.exported_names();
+        assert_eq!(names, vec!["A", "M", "Z"]);
     }
 }
