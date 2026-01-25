@@ -68,7 +68,7 @@ statement_chain = base_statement , { ( "&&" | "||" ) , base_statement } ;
 
 base_statement = set_command                          (* set -e, set +e *)
                | assignment                           (* NAME=value, local NAME=value *)
-               | tool_def
+               | function_def
                | if_stmt
                | for_stmt
                | while_stmt
@@ -85,20 +85,20 @@ base_statement = set_command                          (* set -e, set +e *)
  *   set -e           → command (flag follows 'set')
  *   set +e           → command (plus-flag follows 'set')
  *   set              → command (nothing follows, or && || ; newline)
- *   set X = value    → assignment (IDENT follows 'set')
  *)
 set_command = "set" , { flag_arg | IDENT } ;         (* set -e -u, set +e *)
 
 (* === Statements === *)
 
-(* Assignment - bash-style *)
+(* Assignment - sh-style *)
 assignment  = IDENT , "=" , value                    (* NAME="value" - no spaces *)
             | "local" , IDENT , "=" , value          (* local NAME = value - spaces OK *)
-            | "set" , IDENT , "=" , value            (* set NAME = value - legacy form *)
             ;
 
-tool_def    = ( "tool" | "function" ) , IDENT , { param_def } , "{" , { statement } , "}" ;
-param_def   = IDENT , ":" , TYPE , [ "=" , literal ] ;
+(* Function definitions - sh-style *)
+function_def = IDENT , "(" , ")" , "{" , { statement } , "}"     (* name() { body } - POSIX *)
+             | "function" , IDENT , "{" , { statement } , "}"    (* function name { body } - bash *)
+             ;
 
 if_stmt     = "if" , condition , ";" , "then" , { statement } ,
               { "elif" , condition , ";" , "then" , { statement } } ,
@@ -284,21 +284,19 @@ LINECONT    = "\" , [ " " | "\t" ] , NEWLINE ;       (* line continuation *)
 set -e                 # command (flag follows)
 set +e                 # command (plus-flag follows)
 set                    # command (terminator follows)
-set X = 5              # assignment (IDENT '=' follows)
+X=5                    # assignment (IDENT at start of line)
 ```
 
-**Resolution:** Parser uses 1-token lookahead after `set`:
-- If flag (`-x`, `+x`) → parse as command
-- If terminator (newline, `;`, `&&`, `||`, EOF) → parse as command with no args
-- If IDENT followed by `=` → parse as assignment
+**Resolution:** `set` is only a command for shell options. Assignments use sh-style `VAR=value` syntax.
 
-### Resolved Ambiguity 2: Tool Body vs Brace in Arguments
+### Resolved Ambiguity 2: Function Body vs Brace in Arguments
 
 ```bash
-tool foo { ... }           # after 'tool IDENT', brace = body
+foo() { ... }              # after 'IDENT ()', brace = function body
+function foo { ... }       # after 'function IDENT', brace = function body
 ```
 
-**Resolution:** `{` after `tool IDENT` starts a tool body.
+**Resolution:** `{` after `IDENT ()` or `function IDENT` starts a function body.
 
 ### Resolved Ambiguity 3: Named Args vs Positional
 

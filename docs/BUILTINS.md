@@ -8,7 +8,7 @@ This document details what each builtin supports and what's intentionally missin
 
 - **Predictable over powerful** — no dark corners or surprising behavior
 - **Composable** — missing features can often be achieved by piping to another tool
-- **Agent-friendly** — simpler tools are easier for AI to use correctly
+- **Agent-friendly** — familiar tools are easier for AI to use correctly
 - **ERE everywhere** — all regex uses Extended Regular Expressions (like `egrep`), never BRE
 
 ---
@@ -30,7 +30,7 @@ Pattern scanning and text processing language.
 | **I/O** | `print`, `printf` | `getline`, output redirection `>`, `>>`, `|` |
 | **Numeric** | — | `sin`, `cos`, `atan2`, `exp`, `log`, `sqrt`, `rand`, `srand` |
 
-**Why no user-defined functions?** Use kaish tools instead — they're typed, documented, and reusable across scripts.
+**Why no user-defined functions?** Use kaish functions instead.
 
 **Why no getline?** Complex control flow that's error-prone. Read files with `cat` and pipe to awk, or process multiple files separately in kaish.
 
@@ -90,6 +90,8 @@ Search file contents for patterns.
 | **Input** | Files, stdin | `-r` (recursive), `-z` (null separator) |
 
 **Why no recursive?** Use `find` or shell globbing: `grep pattern $(find . -name "*.txt")`
+
+TODO: possibly add recursive, or at least provide a much better tool than find
 
 ```bash
 grep "error" log.txt                         # basic search
@@ -230,7 +232,7 @@ These are intentionally minimal — they read files and output content.
 
 | Tool | Scope | Key Omissions | Rationale |
 |------|-------|---------------|-----------|
-| **awk** | 80% | User functions, getline, output redir | Use kaish tools, pipes |
+| **awk** | 80% | User functions, getline, output redir | Use kaish functions, pipes |
 | **sed** | 70% | Hold space, branching, in-place | Use awk for complex cases |
 | **grep** | 80% | Recursive, Perl regex | Use find, shell globs |
 | **cut** | 90% | Byte mode, complement | Rarely needed |

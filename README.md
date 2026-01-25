@@ -56,10 +56,11 @@ exa.web_search --query "rust parser combinators"
 # 散/集 (san/shū) — scatter/gather parallelism
 cat urls.txt | scatter as=URL limit=4 | process-url url=$URL | gather > results.json
 
-# User-defined tools
-tool greet name:string {
-    echo "Hello, ${name}!"
+# Functions
+greet() {
+    echo "Hello, $1!"
 }
+greet "World"  # → Hello, World!
 ```
 
 ---
