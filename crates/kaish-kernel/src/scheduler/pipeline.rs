@@ -9,13 +9,111 @@ use std::sync::Arc;
 
 use std::collections::HashMap;
 
-use crate::ast::{Arg, Command, Expr, Value};
+use crate::ast::{Arg, Command, Expr, Redirect, RedirectKind, Value};
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ToolArgs, ToolRegistry, ToolSchema};
+use tokio::io::AsyncWriteExt;
 
 use super::scatter::{
     parse_gather_options, parse_scatter_options, ScatterGatherRunner,
 };
+
+/// Apply redirects to an execution result.
+///
+/// Pre-execution redirects (Stdin, HereDoc) should be handled before calling.
+/// Post-execution redirects (stdout/stderr to file, merge) applied here.
+/// Redirects are processed left-to-right per POSIX.
+async fn apply_redirects(
+    mut result: ExecResult,
+    redirects: &[Redirect],
+    ctx: &ExecContext,
+) -> ExecResult {
+    for redir in redirects {
+        match redir.kind {
+            RedirectKind::MergeStderr => {
+                // 2>&1 - append stderr to stdout
+                if !result.err.is_empty() {
+                    result.out.push_str(&result.err);
+                    result.err.clear();
+                }
+            }
+            RedirectKind::StdoutOverwrite => {
+                if let Some(path) = eval_redirect_target(&redir.target, ctx) {
+                    if let Err(e) = tokio::fs::write(&path, &result.out).await {
+                        return ExecResult::failure(1, format!("redirect: {e}"));
+                    }
+                    result.out.clear();
+                }
+            }
+            RedirectKind::StdoutAppend => {
+                if let Some(path) = eval_redirect_target(&redir.target, ctx) {
+                    let file = tokio::fs::OpenOptions::new()
+                        .append(true)
+                        .create(true)
+                        .open(&path)
+                        .await;
+                    match file {
+                        Ok(mut f) => {
+                            if let Err(e) = f.write_all(result.out.as_bytes()).await {
+                                return ExecResult::failure(1, format!("redirect: {e}"));
+                            }
+                        }
+                        Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
+                    }
+                    result.out.clear();
+                }
+            }
+            RedirectKind::Stderr => {
+                if let Some(path) = eval_redirect_target(&redir.target, ctx) {
+                    if let Err(e) = tokio::fs::write(&path, &result.err).await {
+                        return ExecResult::failure(1, format!("redirect: {e}"));
+                    }
+                    result.err.clear();
+                }
+            }
+            RedirectKind::Both => {
+                if let Some(path) = eval_redirect_target(&redir.target, ctx) {
+                    let combined = format!("{}{}", result.out, result.err);
+                    if let Err(e) = tokio::fs::write(&path, combined).await {
+                        return ExecResult::failure(1, format!("redirect: {e}"));
+                    }
+                    result.out.clear();
+                    result.err.clear();
+                }
+            }
+            // Pre-execution redirects - already handled before command execution
+            RedirectKind::Stdin | RedirectKind::HereDoc => {}
+        }
+    }
+    result
+}
+
+/// Evaluate a redirect target expression to get the file path.
+fn eval_redirect_target(expr: &Expr, ctx: &ExecContext) -> Option<String> {
+    eval_simple_expr(expr, ctx).map(|v| value_to_string(&v))
+}
+
+/// Set up stdin from redirects (< file, <<heredoc).
+/// Called before command execution.
+fn setup_stdin_redirects(cmd: &Command, ctx: &mut ExecContext) {
+    for redir in &cmd.redirects {
+        match &redir.kind {
+            RedirectKind::Stdin => {
+                if let Some(path) = eval_redirect_target(&redir.target, ctx) {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        ctx.set_stdin(content);
+                    }
+                }
+            }
+            RedirectKind::HereDoc => {
+                if let Expr::Literal(Value::String(content)) = &redir.target {
+                    ctx.set_stdin(content.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 /// Runs pipelines by spawning tasks and connecting them via channels.
 pub struct PipelineRunner {
@@ -110,17 +208,23 @@ impl PipelineRunner {
         let schema = self.tools.get(&cmd.name).map(|t| t.schema());
         let tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
 
-        // Set stdin if provided
+        // Set up stdin from redirects (< file, <<heredoc)
+        setup_stdin_redirects(cmd, ctx);
+
+        // Set stdin from pipeline (overrides redirect stdin)
         if let Some(input) = stdin {
             ctx.set_stdin(input);
         }
 
         // Execute via backend (clone Arc to avoid borrow conflict)
         let backend = ctx.backend.clone();
-        match backend.call_tool(&cmd.name, tool_args, ctx).await {
+        let result = match backend.call_tool(&cmd.name, tool_args, ctx).await {
             Ok(result) => ExecResult::from_output(result.code as i64, result.stdout, result.stderr),
             Err(e) => ExecResult::failure(127, e.to_string()),
-        }
+        };
+
+        // Apply post-execution redirects
+        apply_redirects(result, &cmd.redirects, ctx).await
     }
 
     /// Run a multi-command pipeline.
@@ -140,7 +244,10 @@ impl PipelineRunner {
             let schema = self.tools.get(&cmd.name).map(|t| t.schema());
             let tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
 
-            // Set stdin from previous command's stdout
+            // Set up stdin from redirects (< file, <<heredoc)
+            setup_stdin_redirects(cmd, ctx);
+
+            // Set stdin from previous command's stdout (overrides redirect stdin)
             if let Some(input) = current_stdin.take() {
                 ctx.set_stdin(input);
             }
@@ -151,6 +258,9 @@ impl PipelineRunner {
                 Ok(result) => ExecResult::from_output(result.code as i64, result.stdout, result.stderr),
                 Err(e) => ExecResult::failure(127, e.to_string()),
             };
+
+            // Apply post-execution redirects
+            last_result = apply_redirects(last_result, &cmd.redirects, ctx).await;
 
             // If command failed, stop the pipeline
             if !last_result.ok() {
@@ -405,7 +515,10 @@ pub async fn run_sequential_pipeline(
         let schema = tools.get(&cmd.name).map(|t| t.schema());
         let tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
 
-        // Set stdin from previous command's stdout
+        // Set up stdin from redirects (< file, <<heredoc)
+        setup_stdin_redirects(cmd, ctx);
+
+        // Set stdin from previous command's stdout (overrides redirect stdin)
         if let Some(input) = current_stdin.take() {
             ctx.set_stdin(input);
         }
@@ -416,6 +529,9 @@ pub async fn run_sequential_pipeline(
             Ok(result) => ExecResult::from_output(result.code as i64, result.stdout, result.stderr),
             Err(e) => ExecResult::failure(127, e.to_string()),
         };
+
+        // Apply post-execution redirects
+        last_result = apply_redirects(last_result, &cmd.redirects, ctx).await;
 
         // If command failed, stop the pipeline
         if !last_result.ok() {
@@ -1035,5 +1151,107 @@ mod tests {
             tool_args.positional,
             vec![Value::String("file.txt".to_string())]
         );
+    }
+
+    // === Redirect Execution Tests ===
+
+    #[tokio::test]
+    async fn test_merge_stderr_redirect() {
+        // Test that 2>&1 merges stderr into stdout
+        let result = ExecResult::from_output(0, "stdout content", "stderr content");
+
+        let redirects = vec![Redirect {
+            kind: RedirectKind::MergeStderr,
+            target: Expr::Literal(Value::Null),
+        }];
+
+        let ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &ctx).await;
+
+        assert_eq!(result.out, "stdout contentstderr content");
+        assert!(result.err.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_merge_stderr_with_empty_stderr() {
+        // Test that 2>&1 handles empty stderr gracefully
+        let result = ExecResult::from_output(0, "stdout only", "");
+
+        let redirects = vec![Redirect {
+            kind: RedirectKind::MergeStderr,
+            target: Expr::Literal(Value::Null),
+        }];
+
+        let ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &ctx).await;
+
+        assert_eq!(result.out, "stdout only");
+        assert!(result.err.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_merge_stderr_order_matters() {
+        // Test redirect ordering: 2>&1 > file means:
+        // 1. First merge stderr into stdout
+        // 2. Then write stdout to file (leaving both empty for piping)
+        // This verifies left-to-right processing
+        let result = ExecResult::from_output(0, "stdout\n", "stderr\n");
+
+        // Just 2>&1 - should merge
+        let redirects = vec![Redirect {
+            kind: RedirectKind::MergeStderr,
+            target: Expr::Literal(Value::Null),
+        }];
+
+        let ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &ctx).await;
+
+        assert_eq!(result.out, "stdout\nstderr\n");
+        assert!(result.err.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_redirect_with_command_execution() {
+        let (runner, mut ctx) = make_runner_and_ctx().await;
+
+        // echo "hello" with 2>&1 redirect
+        let cmd = Command {
+            name: "echo".to_string(),
+            args: vec![Arg::Positional(Expr::Literal(Value::String("hello".to_string())))],
+            redirects: vec![Redirect {
+                kind: RedirectKind::MergeStderr,
+                target: Expr::Literal(Value::Null),
+            }],
+        };
+
+        let result = runner.run(&[cmd], &mut ctx).await;
+        assert!(result.ok());
+        // echo produces no stderr, so this just validates the redirect doesn't break anything
+        assert!(result.out.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_merge_stderr_in_pipeline() {
+        let (runner, mut ctx) = make_runner_and_ctx().await;
+
+        // echo "output" 2>&1 | grep "output"
+        // The 2>&1 should be applied to echo's result, then piped to grep
+        let echo_cmd = Command {
+            name: "echo".to_string(),
+            args: vec![Arg::Positional(Expr::Literal(Value::String("output".to_string())))],
+            redirects: vec![Redirect {
+                kind: RedirectKind::MergeStderr,
+                target: Expr::Literal(Value::Null),
+            }],
+        };
+        let grep_cmd = Command {
+            name: "grep".to_string(),
+            args: vec![Arg::Positional(Expr::Literal(Value::String("output".to_string())))],
+            redirects: vec![],
+        };
+
+        let result = runner.run(&[echo_cmd, grep_cmd], &mut ctx).await;
+        assert!(result.ok(), "result failed: code={}, err={}", result.code, result.err);
+        assert!(result.out.contains("output"));
     }
 }

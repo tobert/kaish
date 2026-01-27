@@ -105,6 +105,7 @@ fn format_redirect(redir: &Redirect) -> String {
         RedirectKind::HereDoc => "<<",
         RedirectKind::Stderr => "2>",
         RedirectKind::Both => "&>",
+        RedirectKind::MergeStderr => "2>&1",
     };
     format!("(redir {} {})", kind, format_expr(&redir.target))
 }

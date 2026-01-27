@@ -53,6 +53,7 @@ fn format_token(token: &Token) -> String {
         Token::GtEq => "GEQ".to_string(),
         Token::LtEq => "LEQ".to_string(),
         Token::GtGt => "REDIR_APPEND".to_string(),
+        Token::StderrToStdout => "REDIR_MERGE".to_string(),
         Token::Stderr => "REDIR_ERR".to_string(),
         Token::Both => "REDIR_BOTH".to_string(),
         Token::HereDocStart => "HEREDOC_START".to_string(),
@@ -343,6 +344,9 @@ fn lexer_operators(#[case] input: &str, #[case] expected: &[&str]) {
 #[case::redir_append(">>", &["REDIR_APPEND"])]
 #[case::redir_err("2>", &["REDIR_ERR"])]
 #[case::redir_both("&>", &["REDIR_BOTH"])]
+#[case::redir_merge("2>&1", &["REDIR_MERGE"])]
+#[case::redir_merge_in_cmd("cmd 2>&1", &["IDENT(cmd)", "REDIR_MERGE"])]
+#[case::redir_merge_pipe("cmd 2>&1 | cat", &["IDENT(cmd)", "REDIR_MERGE", "PIPE", "IDENT(cat)"])]
 fn lexer_redirects(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }

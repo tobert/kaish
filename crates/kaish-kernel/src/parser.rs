@@ -876,7 +876,7 @@ where
     .boxed()
 }
 
-/// Redirect: `> file`, `>> file`, `< file`, `<< heredoc`, `2> file`, `&> file`
+/// Redirect: `> file`, `>> file`, `< file`, `<< heredoc`, `2> file`, `&> file`, `2>&1`
 fn redirect_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Redirect, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
@@ -901,7 +901,15 @@ where
             target: Expr::Literal(Value::String(content)),
         });
 
-    choice((heredoc_redirect, regular_redirect))
+    // Merge stderr to stdout: 2>&1 (no target needed - implicit)
+    let merge_stderr_redirect = just(Token::StderrToStdout)
+        .map(|_| Redirect {
+            kind: RedirectKind::MergeStderr,
+            // Target is unused for MergeStderr, but we need something
+            target: Expr::Literal(Value::Null),
+        });
+
+    choice((heredoc_redirect, merge_stderr_redirect, regular_redirect))
         .labelled("redirect")
         .boxed()
 }

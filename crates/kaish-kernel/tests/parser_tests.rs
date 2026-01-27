@@ -191,6 +191,8 @@ fn parser_pipe_three() {
 #[case::redirect_both("cmd &> /tmp/all")]
 #[case::redirect_multiple("cmd < /in > /out 2> /err")]
 #[case::redirect_in_pipeline("a | b > /out")]
+#[case::redirect_merge_stderr("cmd 2>&1")]
+#[case::redirect_merge_pipe("cmd 2>&1 | tee /tmp/log")]
 fn parser_redirects(#[case] input: &str) {
     let name = format!("redirect_{}", input.chars().take(20).filter(|c| c.is_alphanumeric()).collect::<String>());
     parse_and_snapshot(&name, input);

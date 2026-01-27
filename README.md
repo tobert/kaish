@@ -1,23 +1,10 @@
 # kaish (会sh)
 
-```
-会 (kai) = meeting, gathering, coming together
-kaish = kai + sh = the gathering shell
-        ksh vibes, "ai" in the middle 👀
-```
+kaish is an embeddable 80/20 implementation of a POSIX shell and core utils.
 
-A Bourne-lite shell for MCP tool orchestration. Part of the [Kaijutsu](https://github.com/tobert/kaijutsu) (会術) project — the art of gathering.
+The kai in kaish is 会, which is kanji for a meeting, gathering, or coming together in Japanese.
 
-## Philosophy
-
-**80% of a POSIX shell, 100% unambiguous.**
-
-- **Bourne-lite** — familiar syntax, no surprises
-- **MCP tools as commands** — external tools appear as shell commands with CLI-style args
-- **Predictable over powerful** — if bash has a confusing edge case, kaish doesn't have that feature
-- **ShellCheck-clean** — the Bourne subset passes `shellcheck --enable=all`
-- **Agent-friendly** — easy to generate, parse, validate
-- **Fail fast** — ambiguity is an error, not a guess
+Part of the [Kaijutsu](https://github.com/tobert/kaijutsu) (会術) project — the art of gathering.
 
 ## Quick Tour
 
@@ -59,14 +46,17 @@ files src/**/*.go --exclude='*_test.go' # exclude test files
 tree src/                               # compact: src/{main.rs,lib/{mod.rs,utils.rs}}
 grep -rn "TODO" src/                    # recursive search with line numbers
 
-# 散/集 (san/shū) — scatter/gather parallelism
-cat urls.txt | scatter as=URL limit=4 | process-url url=$URL | gather > results.json
-
 # Functions
 greet() {
     echo "Hello, $1!"
 }
 greet "World"  # → Hello, World!
+
+# 散/集 (san/shū) — scatter/gather parallelism
+# These are built in alternatives to xargs
+# Experimental, might change or be removed
+cat urls.txt | scatter as=URL limit=4 | curl $URL | gather > results.json
+
 ```
 
 ---
@@ -149,6 +139,8 @@ tool >> file                    # append stdout
 tool < file                     # stdin from file
 tool 2> file                    # redirect stderr
 tool &> file                    # stdout + stderr
+tool 2>&1                       # merge stderr into stdout
+cmd 2>&1 | tee log.txt          # capture both streams
 
 # Here-docs
 cat <<EOF
@@ -290,7 +282,7 @@ wait %1 %2                      # wait for specific
 
 ---
 
-## 散・集 (San/Shū) — Scatter/Gather
+## 散・集 (San/Shū) — Scatter/Gather (experimental)
 
 Fan-out parallelism made easy:
 
@@ -308,7 +300,7 @@ cat big_list.txt \
 
 ## Virtual Filesystem
 
-Paths resolve through VFS abstraction:
+VFS mounts are configured programmatically via the kernel API. The router uses longest-prefix matching to resolve paths to the correct backend.
 
 ```
 /                  → kernel root (current working directory)
@@ -317,13 +309,12 @@ Paths resolve through VFS abstraction:
 /git/              → git repository introspection (status, log, diff, blame)
 ```
 
-VFS mounts are configured programmatically via the kernel API. The router uses longest-prefix matching to resolve paths to the correct backend.
-
 ---
 
 ## MCP Tool Integration
 
-External MCP servers register their tools with the kernel. Tools appear as shell commands with **schema-driven CLI translation** — use familiar `--flag value` syntax:
+External MCP servers can register their tools with the kernel. Tools appear as shell
+commands with **schema-driven CLI translation** — use familiar `--flag value` syntax:
 
 ```bash
 # MCP tools use server:tool naming convention
@@ -529,7 +520,6 @@ These bash features are omitted because they're confusing, error-prone, or ambig
 | Backtick substitution `` `cmd` `` | Use `$(cmd)` | SC2006 |
 | Single bracket tests `[ ]` | Use `[[ ]]` | SC2039 |
 | Aliases, `eval` | Explicit is better | SC2091 |
-| `2>&1` fd duplication | Use `&>` for combined output | SC2069 |
 
 ---
 

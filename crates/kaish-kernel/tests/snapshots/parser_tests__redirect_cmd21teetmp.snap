@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(pipeline (cmd cmd (redir 2>&1 (null))) (cmd tee (pos (string "/tmp/log"))))
