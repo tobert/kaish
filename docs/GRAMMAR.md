@@ -152,6 +152,7 @@ value       = literal
             | var_ref
             | param_expansion
             | cmd_subst
+            | arith_expr
             | string
             ;
 
@@ -161,6 +162,14 @@ literal     = INT
             ;
 
 cmd_subst   = "$(" , pipeline , ")" ;
+
+(* Arithmetic expressions *)
+arith_expr  = "$((" , arith_term , "))" ;
+arith_term  = arith_factor , { ( "+" | "-" ) , arith_factor } ;
+arith_factor = arith_unary , { ( "*" | "/" | "%" ) , arith_unary } ;
+arith_unary = [ "-" | "+" ] , arith_power ;
+arith_power = arith_primary , [ "^" , arith_unary ] ;      (* right-associative *)
+arith_primary = INT | IDENT | "(" , arith_term , ")" ;
 
 (* Variable references *)
 var_ref     = "${" , var_path , "}"                  (* ${VAR}, ${VAR.field}, ${VAR[0]} *)
@@ -340,9 +349,12 @@ echo $?                    # prints: 0 (success) or 1-255 (failure)
 if [[ $? -eq 0 ]]; then
     echo "success"
 fi
+
+# Can use in arithmetic
+total=$(($? + 1))
 ```
 
-**Note:** Unlike the original design, `$?` is a simple integer, not a structured object. Use tool-specific output capture for structured results.
+**Note:** `$?` is a simple integer. Use tool-specific output capture for structured results.
 
 ---
 
@@ -388,6 +400,8 @@ fi
 │ flag          │ --force            │ LongFlag(force)           │
 │ param_exp     │ ${X:-default}      │ VarWithDefault(X, "...")  │
 │ var_length    │ ${#X}              │ VarLength(X)              │
+│ arithmetic    │ $((5 + 3))         │ Arith(Add(Int(5),Int(3))) │
+│ arithmetic    │ $((X * 2))         │ Arith(Mul(Var(X),Int(2))) │
 │ while         │ while true; do...  │ While(Cmd(true), [...])   │
 │ test          │ [[ -f x ]]         │ Test(FileTest(IsFile, x)) │
 └─────────────────────────────────────────────────────────────────┘
@@ -414,6 +428,9 @@ Golden file tests: script + expected stdout/stderr/exit code.
 │ false || echo "yes"              │ stdout: yes                 │
 │ X=${X:-default}; echo $X         │ stdout: default             │
 │ X="hello"; echo ${#X}            │ stdout: 5                   │
+│ echo $((5 + 3))                  │ stdout: 8                   │
+│ X=10; echo $((X * 2))            │ stdout: 20                  │
+│ echo $((2 ^ 3))                  │ stdout: 8                   │
 │ set -e; false; echo "not here"   │ exit: 1 (never echoes)      │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -429,6 +446,8 @@ Golden file tests: script + expected stdout/stderr/exit code.
 │ cmd foo = bar        │ "unexpected '='"                         │
 │ break 0              │ "break level must be positive"           │
 │ [[ ]]                │ "empty test expression"                  │
+│ $((5 / 0))           │ "division by zero"                       │
+│ $((5 +))             │ "expected operand"                       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 

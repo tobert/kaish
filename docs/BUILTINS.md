@@ -87,11 +87,8 @@ Search file contents for patterns.
 | **Matching** | ERE patterns, `-i` (case-insensitive), `-v` (invert) | BRE, Perl regex `-P` |
 | **Output** | `-l` (files only), `-c` (count), `-n` (line numbers) | `-o` (only matching), `--color` |
 | **Context** | `-A`, `-B`, `-C` (after/before/context lines) | — |
-| **Input** | Files, stdin | `-r` (recursive), `-z` (null separator) |
-
-**Why no recursive?** Use `find` or shell globbing: `grep pattern $(find . -name "*.txt")`
-
-TODO: possibly add recursive, or at least provide a much better tool than find
+| **Input** | Files, stdin, `-r`/`-R` (recursive) | `-z` (null separator) |
+| **Filtering** | `--include`, `--exclude` (glob patterns for recursive) | — |
 
 ```bash
 grep "error" log.txt                         # basic search
@@ -99,6 +96,8 @@ grep -i "error" log.txt                      # case-insensitive
 grep -v "debug" log.txt                      # invert match
 grep -c "pattern" file.txt                   # count matches
 grep -n "TODO" *.rs                          # with line numbers
+grep -rn "TODO" src/                         # recursive with line numbers
+grep -r "pattern" . --include="*.rs"         # recursive, Rust files only
 ```
 
 ---
@@ -234,12 +233,12 @@ These are intentionally minimal — they read files and output content.
 |------|-------|---------------|-----------|
 | **awk** | 80% | User functions, getline, output redir | Use kaish functions, pipes |
 | **sed** | 70% | Hold space, branching, in-place | Use awk for complex cases |
-| **grep** | 80% | Recursive, Perl regex | Use find, shell globs |
+| **grep** | 90% | Perl regex, `-o` only-matching | ERE is enough |
 | **cut** | 90% | Byte mode, complement | Rarely needed |
 | **tr** | 85% | Complement | Use sed for complex cases |
 | **sort** | 80% | Version sort, stable | Specialized needs |
 | **uniq** | 80% | Case-insensitive, field skip | Pre-process with awk |
-| **jq** | 40% | Programming features | Use full jq if needed |
+| **jq** | 60% | Programming features | Native jaq impl covers common cases |
 
 ---
 

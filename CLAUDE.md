@@ -94,7 +94,7 @@ Co-Authored-By: Claude <claude@anthropic.com>
 The 核 (kaku/kernel) is the unit of execution. Multiple frontends connect to the same kernel:
 
 ```
-Frontends (REPL, Script Runner, MCP Server, Embedded)
+Frontends (REPL, Script Runner, Embedded)
     ↓ KernelClient trait
         ├── EmbeddedClient (direct in-process)
         └── IpcClient (Unix socket + Cap'n Proto RPC)
@@ -102,9 +102,10 @@ Frontends (REPL, Script Runner, MCP Server, Embedded)
 Kernel (核)
     ├── Lexer (logos)
     ├── Parser (chumsky)
+    ├── Validator (pre-execution checks)
     ├── Interpreter (tokio async)
-    ├── Tool Registry (builtins + MCP)
-    ├── VFS Router (mount points)
+    ├── Tool Registry (56 builtins + MCP)
+    ├── VFS Router (local, memory, git backends)
     ├── Job Scheduler (background jobs, scatter/gather)
     └── SQLite State (persistence)
 ```
@@ -114,11 +115,12 @@ Kernel (核)
 ```
 crates/
 ├── kaish-schema/    # Cap'n Proto codegen from schema/kaish.capnp
-├── kaish-kernel/    # Core: lexer, parser, interpreter, tools, VFS
+├── kaish-kernel/    # Core: lexer, parser, interpreter, tools, VFS, validator
 ├── kaish-client/    # Client implementations (embedded, IPC)
-├── kaish-repl/      # Interactive REPL with rustyline
-└── kaish-mcp/       # MCP server frontend
+└── kaish-repl/      # Interactive REPL with rustyline
 ```
+
+**Note:** MCP server frontend (kaish-mcp) is planned but not yet implemented. The kernel includes MCP *client* integration for consuming external MCP tools.
 
 
 ## Language Key Points
@@ -143,22 +145,24 @@ crates/
 
 - 散/集 (scatter/gather) for parallel execution
 - User-defined tools with typed parameters
-- MCP tool integration
-- VFS mounts
-- Export scripts as MCP servers
+- MCP tool integration (client-side, consuming external tools)
+- VFS mounts with multiple backends (local, memory, git)
+- Pre-execution validation
+- Full arithmetic expressions `$((expr))`
 
 ### What's Intentionally Missing
 
-Arithmetic `$(( ))`, process substitution `<(cmd)`, backticks, aliases, `eval`
+Process substitution `<(cmd)`, backticks, aliases, `eval`, shell-level glob expansion
 
 ## Testing Strategy
 
 Uses **rstest** for parameterized tests and **insta** for snapshot testing.
 
 Test files in `crates/kaish-kernel/tests/`:
-- `lexer_tests.rs` — rstest parameterized lexer tests
-- `parser_tests.rs` — insta snapshot tests for AST output
-- `eval_tests.rs` — rstest eval tests
+- `lexer_tests.rs` — rstest parameterized lexer tests (94 tests)
+- `parser_tests.rs` — insta snapshot tests for AST output (101 tests)
+- `validation_tests.rs` — pre-execution validation tests
+- `realworld_builtin_tests.rs` — integration tests from real usage
 - `snapshots/*.snap` — insta snapshot files for parser tests
 
 Snapshot workflow:
@@ -175,6 +179,7 @@ cargo insta accept         # Accept all pending snapshots
 | `README.md` | Language reference, syntax, builtins, ShellCheck alignment |
 | `docs/GRAMMAR.md` | EBNF grammar, ambiguity analysis |
 | `docs/ARCHITECTURE.md` | Kernel design, crate structure, protocols |
+| `docs/BUILTINS.md` | Tool compatibility and implementation notes |
 | `docs/kanji.md` | Kanji vocabulary for the project |
 
 ## Schema Files

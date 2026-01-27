@@ -3,22 +3,22 @@
 ## 核 (Kaku) — Kernel-First Design
 
 The core insight: **the 核 (kaku/kernel) is the unit of execution**, not the REPL or script.
-Frontends (REPL, script runner, MCP server) connect to kernels.
+Frontends (REPL, script runner, embedded clients) connect to kernels.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          Frontends                                  │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────────────────────┐ │
-│  │  REPL   │  │ Script  │  │   MCP   │  │     Kaijutsu /          │ │
-│  │         │  │ Runner  │  │ Server  │  │     Embedded            │ │
-│  └────┬────┘  └────┬────┘  └────┬────┘  └───────────┬─────────────┘ │
-└───────┼────────────┼────────────┼───────────────────┼───────────────┘
-        │            │            │                   │
-        │      KernelClient (trait)                   │
-        │   (direct / IPC / HTTP / embedded)          │
-        └────────────┴─────┬──────┴───────────────────┘
-                           │
-                           ▼
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────────┐  │
+│  │    REPL     │  │   Script    │  │     Kaijutsu / Embedded     │  │
+│  │             │  │   Runner    │  │                             │  │
+│  └──────┬──────┘  └──────┬──────┘  └─────────────┬───────────────┘  │
+└─────────┼────────────────┼───────────────────────┼──────────────────┘
+          │                │                       │
+          │      KernelClient (trait)              │
+          │   (direct / IPC / embedded)            │
+          └────────────────┴───────┬───────────────┘
+                                   │
+                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    会sh 核 (Kaku) — Kernel                          │
 │  ┌────────────────────────────────────────────────────────────────┐ │
@@ -68,81 +68,104 @@ Frontends (REPL, script runner, MCP server) connect to kernels.
 kaish/
 ├── Cargo.toml
 ├── schema/
-│   └── kaish.capnp             # Cap'n Proto schema (source of truth)
+│   ├── kaish.capnp             # Cap'n Proto schema (kernel protocol)
+│   └── state.sql               # SQLite schema (state persistence)
 │
 ├── crates/
 │   ├── kaish-schema/           # Generated Cap'n Proto code
 │   │   ├── Cargo.toml
 │   │   ├── build.rs            # capnpc code generation
-│   │   └── src/
-│   │       └── lib.rs          # Re-exports generated types
+│   │   └── src/lib.rs          # Re-exports generated types
 │   │
-│   ├── kaish-kernel/           # Core kernel (the heart)
+│   ├── kaish-kernel/           # Core kernel (~13,000 lines)
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs          # Kernel public API
 │   │       ├── kernel.rs       # Kernel state & lifecycle
-│   │       ├── lexer/
+│   │       ├── lexer.rs        # Token definitions (logos, 1,300+ lines)
+│   │       ├── parser.rs       # AST generation (chumsky, 1,100+ lines)
+│   │       ├── arithmetic.rs   # Arithmetic expression evaluation (400+ lines)
+│   │       ├── glob.rs         # Glob pattern engine (350+ lines)
+│   │       │
+│   │       ├── ast/            # AST types
 │   │       │   ├── mod.rs
-│   │       │   └── tokens.rs   # Token definitions (logos)
-│   │       ├── parser/
-│   │       │   ├── mod.rs
-│   │       │   ├── ast.rs      # AST types
-│   │       │   └── error.rs    # Parse errors with spans
-│   │       ├── interpreter/
+│   │       │   ├── types.rs    # Statement, Expression, Value types
+│   │       │   └── sexpr.rs    # S-expression formatter for tests
+│   │       │
+│   │       ├── interpreter/    # Expression & statement evaluation (2,500+ lines)
 │   │       │   ├── mod.rs
 │   │       │   ├── eval.rs     # Expression evaluation
-│   │       │   ├── exec.rs     # Command execution
-│   │       │   └── result.rs   # The $? result type
-│   │       ├── tools/
+│   │       │   ├── scope.rs    # Variable scoping
+│   │       │   ├── result.rs   # ExecResult type
+│   │       │   └── control_flow.rs  # break/continue/return handling
+│   │       │
+│   │       ├── tools/          # Tool registry & 56 builtins
 │   │       │   ├── mod.rs
 │   │       │   ├── registry.rs # Tool lookup & dispatch
-│   │       │   ├── builtin/    # Built-in tools
-│   │       │   └── mcp.rs      # MCP client wrapper
-│   │       ├── vfs/
+│   │       │   ├── traits.rs   # Tool trait definition
+│   │       │   ├── context.rs  # Execution context
+│   │       │   ├── mcp.rs      # MCP client wrapper
+│   │       │   └── builtin/    # Built-in tools (echo, ls, grep, jq, etc.)
+│   │       │
+│   │       ├── validator/      # Pre-execution validation (1,200+ lines)
+│   │       │   ├── mod.rs
+│   │       │   └── walker.rs   # AST walker for validation
+│   │       │
+│   │       ├── vfs/            # Virtual filesystem (2,200+ lines)
 │   │       │   ├── mod.rs
 │   │       │   ├── traits.rs   # Filesystem trait
 │   │       │   ├── memory.rs   # In-memory (/scratch)
 │   │       │   ├── local.rs    # Local filesystem
+│   │       │   ├── git.rs      # Git repository introspection
 │   │       │   └── router.rs   # Mount point routing
-│   │       └── scheduler/
+│   │       │
+│   │       ├── scheduler/      # Job scheduling (1,200+ lines)
+│   │       │   ├── mod.rs
+│   │       │   ├── pipeline.rs # Pipeline execution
+│   │       │   ├── jobs.rs     # Background job management
+│   │       │   └── scatter_gather.rs  # Parallel fan-out/collection
+│   │       │
+│   │       ├── backend/        # File operations abstraction (1,600+ lines)
+│   │       │   ├── mod.rs
+│   │       │   └── local.rs    # Local filesystem operations
+│   │       │
+│   │       ├── walker/         # File traversal & globbing (1,000+ lines)
+│   │       │   ├── mod.rs
+│   │       │   ├── glob_path.rs
+│   │       │   ├── filter.rs
+│   │       │   └── ignore.rs   # .gitignore support
+│   │       │
+│   │       ├── state/          # SQLite persistence (820 lines)
+│   │       │   └── mod.rs      # History, checkpoints, metadata
+│   │       │
+│   │       └── mcp/            # MCP client integration (400+ lines)
 │   │           ├── mod.rs
-│   │           ├── job.rs      # Job state & handles
-│   │           ├── scatter.rs  # Scatter implementation (会!)
-│   │           └── gather.rs   # Gather implementation
+│   │           └── client.rs   # External MCP server connection
 │   │
-│   ├── kaish-client/           # Client trait + implementations
+│   ├── kaish-client/           # Client trait + implementations (~585 lines)
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── traits.rs       # KernelClient trait
 │   │       ├── embedded.rs     # Direct in-process kernel
-│   │       └── ipc.rs          # Unix socket connection
+│   │       └── ipc.rs          # Unix socket + Cap'n Proto RPC
 │   │
-│   ├── kaish-repl/             # Interactive REPL frontend
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── readline.rs     # Line editing (rustyline)
-│   │       ├── completer.rs    # Tab completion
-│   │       └── expansion.rs    # YAML→JSON expansion on Tab
-│   │
-│   └── kaish-mcp/              # MCP server frontend
+│   └── kaish-repl/             # Interactive REPL frontend (~1,900 lines)
 │       ├── Cargo.toml
 │       └── src/
-│           ├── lib.rs
-│           ├── server.rs       # MCP protocol handler
-│           └── export.rs       # Tool def → MCP schema
+│           ├── lib.rs          # Main REPL loop (rustyline)
+│           ├── main.rs         # CLI entry point
+│           └── format.rs       # Output formatting & hints
 │
-├── src/
-│   └── main.rs                 # CLI binary (kaish command)
-│
-└── tests/
-    ├── lexer_tests.rs
-    ├── parser_tests.rs
-    └── integration/
-        └── *.kai           # Script-based tests
+└── tests/                      # (in crates/kaish-kernel/tests/)
+    ├── lexer_tests.rs          # 94 parameterized lexer tests
+    ├── parser_tests.rs         # 101 snapshot tests for AST
+    ├── validation_tests.rs     # Pre-execution validation tests
+    ├── realworld_builtin_tests.rs  # Integration tests
+    └── snapshots/              # Insta snapshot files
 ```
+
+**Note:** `kaish-mcp` (MCP server frontend to export kaish tools as MCP) is planned but not yet implemented. The kernel includes MCP *client* integration for consuming external MCP tools.
 
 ## 核 Architecture
 
@@ -553,9 +576,11 @@ fn run_script(path: &str) -> Result<()> {
 
 The shebang (`#!/usr/bin/env kaish`) is handled by the OS — it invokes our binary with the script path. We skip line 1 if it starts with `#!`.
 
-## MCP Server Mode: The Prestige
+## MCP Server Mode: The Prestige (Planned)
 
-When running `kaish serve tools.kai`:
+> **Status:** This feature is planned but not yet implemented. The `kaish-mcp` crate does not exist yet.
+
+The vision: `kaish serve tools.kai` would:
 
 1. Parse the script, extract all `tool` definitions
 2. Build MCP tool schemas from the `ParamDef`s
@@ -563,6 +588,7 @@ When running `kaish serve tools.kai`:
 4. On tool call: instantiate a shell, execute the tool body
 
 ```rust
+// Planned implementation
 async fn serve_script(path: &str) -> Result<()> {
     let source = std::fs::read_to_string(path)?;
     let ast = parse(&source)?;
@@ -586,8 +612,8 @@ async fn serve_script(path: &str) -> Result<()> {
 }
 ```
 
-This means Claude Code can call tools defined in kaish scripts.
-**User-defined tools become first-class MCP tools.**
+This would allow Claude Code to call tools defined in kaish scripts.
+**User-defined tools would become first-class MCP tools.**
 
 ## Parser: logos + chumsky
 

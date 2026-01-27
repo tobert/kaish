@@ -242,6 +242,29 @@ echo "Current time: $NOW"
 RESULT=$(cat file.json | jq ".name")
 ```
 
+### Arithmetic
+
+```bash
+# Arithmetic expansion with $((expression))
+X=$((5 + 3))                    # X = 8
+Y=$((X * 2))                    # Y = 16
+Z=$((10 / 3))                   # Z = 3 (integer division)
+
+# Supported operators (by precedence, highest first)
+result=$((2 ^ 3))               # exponentiation: 8
+result=$((10 % 3))              # modulo: 1
+result=$((5 * 4 / 2))           # multiply, divide: 10
+result=$((10 - 3 + 2))          # add, subtract: 9
+result=$((-5))                  # unary minus: -5
+result=$(((2 + 3) * 4))         # parentheses: 20
+
+# Variables in arithmetic
+A=10
+B=3
+echo $((A + B))                 # 13
+echo $((A * B + 1))             # 31
+```
+
 ### Error Handling
 
 ```bash
@@ -288,13 +311,13 @@ cat big_list.txt \
 Paths resolve through VFS abstraction:
 
 ```
-/bin/              → available tools
-/src/              → mounted local paths
-/scratch/          → in-memory temp storage
-/mcp/<server>/     → MCP server resources
+/                  → kernel root (current working directory)
+/scratch/          → in-memory ephemeral storage
+/mnt/<name>/       → mounted local paths
+/git/              → git repository introspection (status, log, diff, blame)
 ```
 
-VFS mounts are configured programmatically via the kernel API.
+VFS mounts are configured programmatically via the kernel API. The router uses longest-prefix matching to resolve paths to the correct backend.
 
 ---
 
@@ -360,7 +383,13 @@ Scripts execute in **isolated scope** (like a subshell) — they cannot access o
 | `pwd` | Print working directory |
 | `set` | Set shell options (`set -e`) |
 | `unset` | Unset variables |
+| `export` | Export variables to environment |
+| `env` | Access environment variables |
+| `source`/`.` | Load and execute scripts |
 | `exec` | Execute external command |
+| `true` | Exit with code 0 |
+| `false` | Exit with code 1 |
+| `test`/`[` | POSIX conditional expressions |
 | `help` | Tool documentation |
 
 ### Files & Directories
@@ -376,10 +405,12 @@ Scripts execute in **isolated scope** (like a subshell) — they cannot access o
 | `touch` | Create file / update timestamp |
 | `stat` | File metadata |
 | `mkdir` | Create directory |
-| `rm` | Remove file |
-| `cp` | Copy |
-| `mv` | Move |
+| `rm` | Remove file/directory |
+| `cp` | Copy files |
+| `mv` | Move/rename files |
+| `mktemp` | Create temp file or directory |
 | `files` | Find files with glob patterns (`files **/*.rs`) |
+| `find` | Find files with predicates (`-name`, `-type`, `-mtime`) |
 | `tree` | Directory tree (compact brace notation by default) |
 
 ### Paths
@@ -387,9 +418,10 @@ Scripts execute in **isolated scope** (like a subshell) — they cannot access o
 | Tool | Description |
 |------|-------------|
 | `basename` | Strip directory from path |
-| `dirname` | Strip filename from path |
+| `dirname` | Get directory part of path |
 | `realpath` | Resolve to absolute path |
 | `readlink` | Read symlink target |
+| `which` | Find command in PATH |
 
 ### Text Processing
 
@@ -403,7 +435,9 @@ Scripts execute in **isolated scope** (like a subshell) — they cannot access o
 | `sort` | Sort lines |
 | `uniq` | Filter duplicate lines |
 | `wc` | Count lines/words/chars |
-| `jq` | JSON query |
+| `diff` | Compare files (context/unified diff output) |
+| `patch` | Apply diff patches |
+| `jq` | JSON query (native implementation via jaq) |
 
 ### Utilities
 
@@ -423,6 +457,12 @@ Scripts execute in **isolated scope** (like a subshell) — they cannot access o
 | `scatter` | 散 — Parallel fan-out |
 | `gather` | 集 — Collect parallel results |
 
+### Git
+
+| Tool | Description |
+|------|-------------|
+| `git` | Git operations via git2 (status, log, diff, blame) |
+
 ### Introspection
 
 | Tool | Description |
@@ -432,6 +472,8 @@ Scripts execute in **isolated scope** (like a subshell) — they cannot access o
 | `mounts` | List VFS mounts |
 | `history` | Show execution history |
 | `checkpoints` | List checkpoints |
+| `introspect` | Tool schema introspection |
+| `validate` | Pre-execution script validation |
 
 ---
 
@@ -441,7 +483,6 @@ These bash features are omitted because they're confusing, error-prone, or ambig
 
 | Feature | Reason | ShellCheck |
 |---------|--------|------------|
-| Arithmetic `$(( ))` | Use tools for math | SC2004 |
 | Shell brace expansion `echo {a,b,c}` | Tools support globs with braces internally | SC1083 |
 | Shell glob expansion `*.txt` | Tools handle their own patterns | SC2035 |
 | Process substitution `<(cmd)` | Use temp files | — |
@@ -486,8 +527,10 @@ Features that ShellCheck warns about (word splitting, glob expansion, backticks)
 | **Floats** | Integer only | Native `3.14` | MCP tools return JSON with floats |
 | **Booleans** | Exit codes | Native `true`/`false` | JSON interop, clearer conditions |
 | **Typed params** | None | `name:string` | Tool definitions with validation |
+| **Arithmetic** | `$(( ))` | `$((expr))` with `^` for exponent | Full arithmetic with proper precedence |
 | **Scatter/gather** | None | `散/集` | Built-in parallelism |
-| **VFS** | None | `/mcp/`, `/scratch/` | Unified resource access |
+| **VFS** | None | `/scratch/`, `/mnt/`, `/git/` | Unified resource access |
+| **Pre-validation** | None | `validate` builtin | Catch errors before execution |
 | **Strict validation** | Guesses | Rejects `TRUE`, `yes`, `123abc` | Agent-friendly, fail-fast |
 
 ---
