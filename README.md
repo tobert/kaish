@@ -13,7 +13,7 @@ sh, dropping several features that are easy to make mistakes with.
 **kaish eliminates entire classes of bugs at the language level:**
 
 - No word splitting — `$VAR` is always one value
-- No glob expansion — tools handle globbing internally
+- No glob expansion — tools handle globbing or use glob() builtin
 - No backticks — only `$(cmd)` substitution
 - Strict booleans — `TRUE` and `yes` are errors, not truthy
 - ShellCheck-clean — the Bourne subset passes `shellcheck --enable=all`
