@@ -1,12 +1,11 @@
-//! XDG Base Directory paths for kaish state.
+//! XDG Base Directory paths for kaish.
 //!
 //! All runtime files follow XDG Base Directory Specification:
 //!
 //! | Purpose | XDG Variable | Default | kaish Path |
 //! |---------|--------------|---------|------------|
 //! | Sockets | `$XDG_RUNTIME_DIR` | `/run/user/$UID` | `$XDG_RUNTIME_DIR/kaish/*.sock` |
-//! | State DB | `$XDG_DATA_HOME` | `~/.local/share` | `$XDG_DATA_HOME/kaish/kernels/*.db` |
-//! | Blobs | `$XDG_DATA_HOME` | `~/.local/share` | `$XDG_DATA_HOME/kaish/blobs/` |
+//! | Data | `$XDG_DATA_HOME` | `~/.local/share` | `$XDG_DATA_HOME/kaish/` |
 //! | Config | `$XDG_CONFIG_HOME` | `~/.config` | `$XDG_CONFIG_HOME/kaish/config.toml` |
 //! | Cache | `$XDG_CACHE_HOME` | `~/.cache` | `$XDG_CACHE_HOME/kaish/` |
 
@@ -64,16 +63,9 @@ pub fn cache_dir() -> PathBuf {
         .join("kaish")
 }
 
-/// Get the kernels database directory.
-///
-/// Each kernel gets its own SQLite database at `data_dir()/kernels/{id}.db`.
+/// Get the kernels directory.
 pub fn kernels_dir() -> PathBuf {
     data_dir().join("kernels")
-}
-
-/// Get the blobs directory for large value storage.
-pub fn blobs_dir() -> PathBuf {
-    data_dir().join("blobs")
 }
 
 /// Fallback home directory when BaseDirs fails.
@@ -101,13 +93,5 @@ mod tests {
         let data = data_dir();
         assert!(kernels.starts_with(&data));
         assert!(kernels.ends_with("kernels"));
-    }
-
-    #[test]
-    fn blobs_dir_is_under_data() {
-        let blobs = blobs_dir();
-        let data = data_dir();
-        assert!(blobs.starts_with(&data));
-        assert!(blobs.ends_with("blobs"));
     }
 }

@@ -29,7 +29,7 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 use kaish_schema::kernel;
 
 use crate::kernel::Kernel;
-use crate::state::paths as state_paths;
+use crate::paths as state_paths;
 
 /// RPC server wrapper around a Kernel.
 ///

@@ -173,8 +173,8 @@ fn run_serve(args: &[String]) -> Result<ExitCode> {
         }
     }
 
-    // Create kernel with persistence
-    let config = KernelConfig::persistent(&kernel_name);
+    // Create kernel
+    let config = KernelConfig::named(&kernel_name);
     let kernel = Kernel::new(config)
         .context("Failed to create kernel")?;
 

@@ -80,7 +80,7 @@ impl IpcClient {
     ///
     /// Uses `$XDG_RUNTIME_DIR/kaish/default.sock`
     pub async fn connect_default() -> ClientResult<Self> {
-        let socket_path = kaish_kernel::state::paths::runtime_dir().join("default.sock");
+        let socket_path = kaish_kernel::paths::runtime_dir().join("default.sock");
         Self::connect(&socket_path).await
     }
 }

@@ -10,7 +10,7 @@
 //! - **Tools**: Tool trait, registry, and builtin commands
 //! - **Scheduler**: Pipeline execution and background job management
 //! - **MCP**: Model Context Protocol client for external tools
-//! - **State**: SQLite-backed persistence for kernel state
+//! - **Paths**: XDG-compliant path helpers
 
 pub mod arithmetic;
 pub mod ast;
@@ -21,9 +21,9 @@ pub mod kernel;
 pub mod lexer;
 pub mod mcp;
 pub mod parser;
+pub mod paths;
 pub mod rpc;
 pub mod scheduler;
-pub mod state;
 pub mod validator;
 pub mod tools;
 pub mod vfs;

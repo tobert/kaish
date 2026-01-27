@@ -85,8 +85,6 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(grep::Grep);
     registry.register(head::Head);
     registry.register(help::Help);
-    registry.register(introspect::Checkpoints);
-    registry.register(introspect::History);
     registry.register(introspect::Mounts);
     registry.register(introspect::Tools);
     registry.register(jobs::Jobs);

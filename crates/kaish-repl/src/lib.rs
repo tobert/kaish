@@ -10,9 +10,8 @@
 //! - Pipeline execution (`a | b | c`)
 //! - Background jobs (`cmd &`) with `jobs` and `wait` commands
 //! - MCP tool integration via pre-configured ToolRegistry
-//! - SQLite-backed session persistence
-//! - Introspection builtins: `vars`, `tools`, `mounts`, `history`, `checkpoints`
-//! - Meta-commands: `/help`, `/quit`, `/ast`, `/scope`, `/cwd`, `/jobs`, `/tools`, `/state`
+//! - Introspection builtins: `vars`, `tools`, `mounts`
+//! - Meta-commands: `/help`, `/quit`, `/ast`, `/scope`, `/cwd`, `/jobs`, `/tools`
 //! - Smart output formatting with DisplayHints for human vs. model audiences
 
 pub mod format;
@@ -42,7 +41,6 @@ enum StmtResult {
 }
 use kaish_kernel::parser::parse;
 use kaish_kernel::scheduler::{JobManager, PipelineRunner};
-use kaish_kernel::state::{HistoryEntry, StateStore, paths as state_paths};
 use kaish_kernel::tools::{ExecContext, ToolArgs, ToolRegistry, register_builtins};
 use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
 
@@ -54,8 +52,6 @@ pub struct Repl {
     runtime: Runtime,
     pipeline_runner: PipelineRunner,
     job_manager: Arc<JobManager>,
-    /// SQLite-backed state persistence (None for ephemeral sessions).
-    state: Option<StateStore>,
 }
 
 impl Repl {
@@ -125,9 +121,6 @@ impl Repl {
         // Create tokio runtime for async tool execution
         let runtime = Runtime::new().context("Failed to create tokio runtime")?;
 
-        // Open or create state database (for history only)
-        let state = Self::init_state()?;
-
         Ok(Self {
             show_ast: false,
             tools,
@@ -135,27 +128,7 @@ impl Repl {
             runtime,
             pipeline_runner,
             job_manager,
-            state,
         })
-    }
-
-    /// Initialize state storage for history persistence.
-    ///
-    /// Variables and CWD are kept in-memory only per session.
-    fn init_state() -> Result<Option<StateStore>> {
-        let state_dir = state_paths::kernels_dir();
-        let db_path = state_dir.join("repl.db");
-
-        // Try to open/create state database
-        let store = match StateStore::open(&db_path) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                tracing::warn!("Could not open state database at {}: {}", db_path.display(), e);
-                None
-            }
-        };
-
-        Ok(store)
     }
 
     /// Process a single line of input.
@@ -189,9 +162,6 @@ impl Repl {
             return Ok(Some(format!("{:#?}", program)));
         }
 
-        // Track execution timing
-        let start = std::time::Instant::now();
-
         // Execute each statement
         let mut output = String::new();
         for stmt in program.statements {
@@ -208,25 +178,10 @@ impl Repl {
             }
         }
 
-        // Record to history
-        let duration_ms = start.elapsed().as_millis() as i64;
-        let last_result = self.exec_ctx.scope.last_result();
-        self.record_history(trimmed, &last_result, Some(duration_ms));
-
         if output.is_empty() {
             Ok(None)
         } else {
             Ok(Some(output))
-        }
-    }
-
-    /// Record a command execution to history.
-    fn record_history(&self, code: &str, result: &ExecResult, duration_ms: Option<i64>) {
-        if let Some(ref store) = self.state {
-            let entry = HistoryEntry::from_exec(code, result, duration_ms);
-            if let Err(e) = store.record_history(&entry) {
-                tracing::warn!("Failed to record history: {}", e);
-            }
         }
     }
 
@@ -881,23 +836,10 @@ impl Repl {
                 }
             }
             "/state" | "/session" => {
-                match &self.state {
-                    Some(store) => {
-                        let session_id = store.session_id().unwrap_or_else(|_| "unknown".into());
-                        let history_count = store.history_count().unwrap_or(0);
-                        let db_path = state_paths::kernels_dir().join("repl.db");
-                        Ok(Some(format!(
-                            "Session: {}\nDatabase: {}\nHistory entries: {}\nVariables (in-memory): {}",
-                            session_id,
-                            db_path.display(),
-                            history_count,
-                            self.exec_ctx.scope.all().len()
-                        )))
-                    }
-                    None => {
-                        Ok(Some("State: ephemeral (no persistence)".to_string()))
-                    }
-                }
+                Ok(Some(format!(
+                    "State persistence disabled\nVariables (in-memory): {}",
+                    self.exec_ctx.scope.all().len()
+                )))
             }
             "/clear-state" | "/reset" => {
                 // Clear in-memory scope
@@ -1033,7 +975,7 @@ fn result_to_value(result: &ExecResult) -> Value {
     Value::String(result.out.trim_end().to_string())
 }
 
-const HELP_TEXT: &str = r#"会sh — kaish REPL (Layer 10: State & Persistence)
+const HELP_TEXT: &str = r#"会sh — kaish REPL
 
 Meta Commands:
   /help, /h, /?     Show this help
@@ -1044,8 +986,8 @@ Meta Commands:
   /cwd              Show current working directory
   /tools            List available tools
   /jobs             List background jobs
-  /state, /session  Show session/state info
-  /clear-state      Clear all persisted state
+  /state, /session  Show session info
+  /clear-state      Clear in-memory state
 
 Built-in Tools:
   echo [args...]    Print arguments
@@ -1100,14 +1042,6 @@ pub fn run() -> Result<()> {
     }
 
     let mut repl = Repl::new()?;
-
-    // Show state status
-    if repl.state.is_some() {
-        let vars = repl.exec_ctx.scope.all_names();
-        if !vars.is_empty() {
-            println!("Restored {} variables from previous session.", vars.len());
-        }
-    }
     println!();
 
     loop {

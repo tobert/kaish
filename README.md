@@ -501,9 +501,6 @@ Scripts execute in **isolated scope** (like a subshell) — they cannot access o
 | `vars` | List variables |
 | `tools` | List available tools |
 | `mounts` | List VFS mounts |
-| `history` | Show execution history |
-| `checkpoints` | List checkpoints |
-| `introspect` | Tool schema introspection |
 | `validate` | Pre-execution script validation |
 
 ---
@@ -596,8 +593,6 @@ The 核 (kaku/kernel) is the unit of execution. Frontends connect via:
 - **Embedded** — direct in-process (for Kaijutsu)
 - **IPC** — Unix sockets with Cap'n Proto RPC
 
-State is persisted in SQLite (WAL mode) for crash recovery.
-
 ## Documentation
 
 - [Formal Grammar](docs/GRAMMAR.md) — EBNF, ambiguity analysis
@@ -607,7 +602,6 @@ State is persisted in SQLite (WAL mode) for crash recovery.
 ## Schema
 
 - [`schema/kaish.capnp`](schema/kaish.capnp) — Cap'n Proto schema (kernel protocol, types)
-- [`schema/state.sql`](schema/state.sql) — SQLite schema (kernel state persistence)
 
 ## License
 

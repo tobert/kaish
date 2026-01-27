@@ -44,8 +44,7 @@ jaq-json = { workspace = true }
 # MCP client (L8)
 rmcp = { workspace = true }
 
-# State persistence (L10)
-rusqlite = { workspace = true }
+# XDG paths
 directories = { workspace = true }
 
 # RPC server (L10: Kernel)

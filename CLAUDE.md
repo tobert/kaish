@@ -104,10 +104,9 @@ Kernel (核)
     ├── Parser (chumsky)
     ├── Validator (pre-execution checks)
     ├── Interpreter (tokio async)
-    ├── Tool Registry (56 builtins + MCP)
+    ├── Tool Registry (54 builtins + MCP)
     ├── VFS Router (local, memory, git backends)
-    ├── Job Scheduler (background jobs, scatter/gather)
-    └── SQLite State (persistence)
+    └── Job Scheduler (background jobs, scatter/gather)
 ```
 
 ### Crate Structure
@@ -185,4 +184,3 @@ cargo insta accept         # Accept all pending snapshots
 ## Schema Files
 
 - `schema/kaish.capnp` — Cap'n Proto schema (kernel protocol, types)
-- `schema/state.sql` — SQLite schema (kernel state persistence)

@@ -68,8 +68,7 @@ Frontends (REPL, script runner, embedded clients) connect to kernels.
 kaish/
 ├── Cargo.toml
 ├── schema/
-│   ├── kaish.capnp             # Cap'n Proto schema (kernel protocol)
-│   └── state.sql               # SQLite schema (state persistence)
+│   └── kaish.capnp             # Cap'n Proto schema (kernel protocol)
 │
 ├── crates/
 │   ├── kaish-schema/           # Generated Cap'n Proto code
@@ -135,8 +134,7 @@ kaish/
 │   │       │   ├── filter.rs
 │   │       │   └── ignore.rs   # .gitignore support
 │   │       │
-│   │       ├── state/          # SQLite persistence (820 lines)
-│   │       │   └── mod.rs      # History, checkpoints, metadata
+│   │       ├── paths.rs        # XDG path helpers
 │   │       │
 │   │       └── mcp/            # MCP client integration (400+ lines)
 │   │           ├── mod.rs
@@ -282,7 +280,7 @@ kernel.register_mcp("exa", exa_client);
 let client = EmbeddedClient::new(kernel);
 let result = client.execute("ls /workspace").await?;
 
-// === REPL with persistent kernel ===
+// === REPL with kernel ===
 let client = IpcClient::connect("/tmp/kaish.sock")?;
 // Kernel process manages its own lifecycle
 
@@ -296,97 +294,6 @@ let kernel = Kernel::new();
 let client = EmbeddedClient::new(kernel);
 let script = fs::read_to_string("script.kai")?;
 client.execute(&script).await?;
-```
-
-## State Storage (SQLite)
-
-Kernel state is persisted in SQLite. Why SQLite?
-
-| Feature | Benefit |
-|---------|---------|
-| ACID transactions | Atomic updates, no corrupt state |
-| WAL mode | Crash recovery, concurrent reads |
-| Incremental updates | Change one variable, not full snapshot |
-| Query without full load | "List tools" doesn't load all vars |
-| Blob storage | Large values stored efficiently |
-| Battle-tested | 20+ years of reliability |
-
-Build time: ~20-30s extra on cold build (compiles bundled SQLite), cached after.
-
-### Schema Overview
-
-```sql
--- Core tables
-variables     -- name, value_type, value_small/value_blob
-tools         -- name, source, params_json
-mounts        -- path, backend_type, config_json, read_only
-mcp_servers   -- name, transport_type, config_json
-
--- Runtime state
-last_result   -- $? (code, ok, err, stdout, stderr, data)
-cwd           -- current working directory
-
--- Metadata
-meta          -- schema_version, session_id, created_at
-```
-
-See `schema/state.sql` for full DDL.
-
-### Usage
-
-```rust
-// Kernel owns the SQLite connection
-pub struct Kernel {
-    db: rusqlite::Connection,  // In WAL mode
-    // ...
-}
-
-// Set a variable (incremental, not full snapshot)
-kernel.set_var("X", Value::Int(42))?;
-// Executes: INSERT OR REPLACE INTO variables ...
-
-// Get a variable
-let val = kernel.get_var("X")?;
-// Executes: SELECT value_type, value_small FROM variables WHERE name = ?
-
-// Export full state (for transfer/backup)
-let json = kernel.export_state_json()?;
-// Uses the state_export view
-
-// Clone state to new kernel
-let state = kernel_a.export_state()?;
-kernel_b.import_state(state)?;
-```
-
-### Large Values (Blobs)
-
-Values > 1KB are stored as blobs and streamed:
-
-```rust
-// Small value: stored inline
-kernel.set_var("small", Value::String("hello".into()))?;
-
-// Large value: stored as blob, returns reference
-let blob_id = kernel.write_blob(large_data, "application/octet-stream")?;
-kernel.set_var("large", Value::Blob(BlobRef { id: blob_id, ... }))?;
-
-// Reading large value streams it
-let stream = kernel.read_blob(&blob_id)?;
-while let Some(chunk) = stream.next().await? {
-    // process chunk
-}
-```
-
-### State File Location
-
-```
-~/.local/share/kaish/
-├── kernels/
-│   ├── default.db           # Default kernel state
-│   ├── project-foo.db       # Named kernel
-│   └── session-abc123.db    # Ephemeral session
-└── blobs/
-    └── <sha256-prefix>/     # Blob storage (content-addressed)
 ```
 
 ## 核 Discovery (Socket Files)

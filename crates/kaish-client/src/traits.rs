@@ -49,10 +49,6 @@ pub enum ClientError {
 ///
 /// Both `EmbeddedClient` and `IpcClient` implement this trait,
 /// allowing code to work with either client type.
-///
-/// Note: This trait doesn't require `Send + Sync` because the underlying
-/// `Kernel` contains `rusqlite::Connection` which isn't thread-safe.
-/// For multi-threaded use, wrap the client in appropriate synchronization.
 #[async_trait(?Send)]
 pub trait KernelClient {
     /// Execute kaish source code.

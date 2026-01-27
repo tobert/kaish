@@ -1,12 +1,11 @@
 //! Execution context for tools.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::backend::{KernelBackend, LocalBackend};
 use crate::interpreter::Scope;
 use crate::scheduler::JobManager;
-use crate::state::StateStore;
 use crate::tools::ToolRegistry;
 use crate::vfs::VfsRouter;
 
@@ -56,9 +55,6 @@ pub struct ExecContext {
     pub tools: Option<Arc<ToolRegistry>>,
     /// Job manager for background jobs (optional).
     pub job_manager: Option<Arc<JobManager>>,
-    /// State store for history and checkpoints (optional).
-    /// Wrapped in Mutex because rusqlite Connection is not Sync.
-    pub state_store: Option<Arc<Mutex<StateStore>>>,
 }
 
 impl ExecContext {
@@ -76,7 +72,6 @@ impl ExecContext {
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
-            state_store: None,
         }
     }
 
@@ -94,7 +89,6 @@ impl ExecContext {
             tool_schemas: Vec::new(),
             tools: Some(tools),
             job_manager: None,
-            state_store: None,
         }
     }
 
@@ -109,7 +103,6 @@ impl ExecContext {
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
-            state_store: None,
         }
     }
 
@@ -124,7 +117,6 @@ impl ExecContext {
             tool_schemas: Vec::new(),
             tools: Some(tools),
             job_manager: None,
-            state_store: None,
         }
     }
 
@@ -142,7 +134,6 @@ impl ExecContext {
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
-            state_store: None,
         }
     }
 
@@ -157,7 +148,6 @@ impl ExecContext {
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
-            state_store: None,
         }
     }
 

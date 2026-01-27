@@ -5,7 +5,6 @@
 //! - Tool registry (builtins, user tools, MCP)
 //! - VFS router (mount points)
 //! - Job manager (background jobs)
-//! - State store (SQLite persistence)
 //!
 //! # Architecture
 //!
@@ -17,16 +16,15 @@
 //! │  │  (variables) │  │   (builtins, │  │  (mount points)  │  │
 //! │  │              │  │    MCP, user)│  │                  │  │
 //! │  └──────────────┘  └──────────────┘  └──────────────────┘  │
-//! │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
-//! │  │  JobManager  │  │  StateStore  │  │  ExecResult ($?) │  │
-//! │  │ (background) │  │  (SQLite)    │  │                  │  │
-//! │  └──────────────┘  └──────────────┘  └──────────────────┘  │
+//! │  ┌──────────────────────────────┐  ┌──────────────────┐    │
+//! │  │  JobManager (background)     │  │  ExecResult ($?) │    │
+//! │  └──────────────────────────────┘  └──────────────────┘    │
 //! └────────────────────────────────────────────────────────────┘
 //! ```
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::sync::RwLock;
@@ -37,7 +35,6 @@ use crate::glob::glob_match;
 use crate::interpreter::{eval_expr, expand_tilde, value_to_string, ControlFlow, DisplayHint, ExecResult, Scope};
 use crate::parser::parse;
 use crate::scheduler::{JobManager, PipelineRunner};
-use crate::state::{paths as state_paths, HistoryEntry, StateStore};
 use crate::tools::{register_builtins, ExecContext, ToolArgs, ToolRegistry};
 use crate::validator::{Severity, Validator};
 use crate::vfs::{LocalFs, MemoryFs, VfsRouter};
@@ -45,10 +42,8 @@ use crate::vfs::{LocalFs, MemoryFs, VfsRouter};
 /// Configuration for kernel initialization.
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
-    /// Name of this kernel (used for state file naming).
+    /// Name of this kernel (for identification).
     pub name: String,
-    /// Whether to persist state to SQLite.
-    pub persist: bool,
     /// Whether to mount the local filesystem at /mnt/local.
     pub mount_local: bool,
     /// Root path for local filesystem mount.
@@ -67,7 +62,6 @@ impl Default for KernelConfig {
     fn default() -> Self {
         Self {
             name: "default".to_string(),
-            persist: true,
             mount_local: true,
             local_root: None,
             cwd: PathBuf::from("/"),
@@ -77,11 +71,10 @@ impl Default for KernelConfig {
 }
 
 impl KernelConfig {
-    /// Create a transient (non-persistent) kernel config.
+    /// Create a transient kernel config.
     pub fn transient() -> Self {
         Self {
             name: "transient".to_string(),
-            persist: false,
             mount_local: true,
             local_root: None,
             cwd: PathBuf::from("/"),
@@ -89,11 +82,10 @@ impl KernelConfig {
         }
     }
 
-    /// Create a persistent kernel config with the given name.
-    pub fn persistent(name: &str) -> Self {
+    /// Create a kernel config with the given name.
+    pub fn named(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            persist: true,
             mount_local: true,
             local_root: None,
             cwd: PathBuf::from("/"),
@@ -113,7 +105,7 @@ impl KernelConfig {
 /// This is the primary interface for running kaish commands. It owns all
 /// the runtime state: variables, tools, VFS, jobs, and persistence.
 pub struct Kernel {
-    /// Kernel name (for state file).
+    /// Kernel name.
     name: String,
     /// Variable scope.
     scope: RwLock<Scope>,
@@ -129,9 +121,6 @@ pub struct Kernel {
     runner: PipelineRunner,
     /// Execution context (cwd, stdin, etc.).
     exec_ctx: RwLock<ExecContext>,
-    /// Persistent state store (optional).
-    /// Wrapped in Mutex because rusqlite Connection is not Sync.
-    state: Option<Arc<Mutex<StateStore>>>,
     /// Whether to skip pre-execution validation.
     skip_validation: bool,
 }
@@ -168,19 +157,6 @@ impl Kernel {
         // Pipeline runner
         let runner = PipelineRunner::new(tools.clone());
 
-        // Set up state store if persistent (for history only)
-        let state = if config.persist {
-            let state_dir = state_paths::kernels_dir();
-            std::fs::create_dir_all(&state_dir).ok();
-            let db_path = state_dir.join(format!("{}.db", config.name));
-            StateStore::open(&db_path)
-                .ok()
-                .map(|store| Arc::new(Mutex::new(store)))
-        } else {
-            None
-        };
-
-        // Variables and CWD are in-memory only (history is persisted)
         let scope = Scope::new();
         let cwd = config.cwd;
 
@@ -189,7 +165,6 @@ impl Kernel {
         exec_ctx.set_cwd(cwd);
         exec_ctx.set_job_manager(jobs.clone());
         exec_ctx.set_tool_schemas(tools.schemas());
-        exec_ctx.state_store = state.clone();
 
         Ok(Self {
             name: config.name,
@@ -200,7 +175,6 @@ impl Kernel {
             jobs,
             runner,
             exec_ctx: RwLock::new(exec_ctx),
-            state,
             skip_validation: config.skip_validation,
         })
     }
@@ -242,19 +216,6 @@ impl Kernel {
         // Pipeline runner
         let runner = PipelineRunner::new(tools.clone());
 
-        // Set up state store if persistent (for history only)
-        let state = if config.persist {
-            let state_dir = state_paths::kernels_dir();
-            std::fs::create_dir_all(&state_dir).ok();
-            let db_path = state_dir.join(format!("{}.db", config.name));
-            StateStore::open(&db_path)
-                .ok()
-                .map(|store| Arc::new(Mutex::new(store)))
-        } else {
-            None
-        };
-
-        // Variables and CWD are in-memory only (history is persisted)
         let scope = Scope::new();
         let cwd = config.cwd;
 
@@ -264,7 +225,6 @@ impl Kernel {
         exec_ctx.set_job_manager(jobs.clone());
         exec_ctx.set_tool_schemas(tools.schemas());
         exec_ctx.set_tools(tools.clone());
-        exec_ctx.state_store = state.clone();
 
         Ok(Self {
             name: config.name,
@@ -275,7 +235,6 @@ impl Kernel {
             jobs,
             runner,
             exec_ctx: RwLock::new(exec_ctx),
-            state,
             skip_validation: config.skip_validation,
         })
     }
@@ -288,9 +247,7 @@ impl Kernel {
     /// Execute kaish source code.
     ///
     /// Returns the result of the last statement executed.
-    /// Records execution to history if state persistence is enabled.
     pub async fn execute(&self, input: &str) -> Result<ExecResult> {
-        let start = std::time::Instant::now();
 
         let program = parse(input).map_err(|errors| {
             let msg = errors
@@ -340,7 +297,6 @@ impl Kernel {
                 ControlFlow::Exit { code } => {
                     // Exit terminates execution immediately
                     let exit_result = ExecResult::success(code.to_string());
-                    self.record_history(input, &exit_result, start.elapsed().as_millis() as i64);
                     return Ok(exit_result);
                 }
                 ControlFlow::Return { value } => {
@@ -354,27 +310,7 @@ impl Kernel {
             }
         }
 
-        // Record to history
-        self.record_history(input, &result, start.elapsed().as_millis() as i64);
-
         Ok(result)
-    }
-
-    /// Record a command execution to history.
-    fn record_history(&self, code: &str, result: &ExecResult, duration_ms: i64) {
-        if let Some(ref store) = self.state {
-            match store.lock() {
-                Ok(guard) => {
-                    let entry = HistoryEntry::from_exec(code, result, Some(duration_ms));
-                    if let Err(e) = guard.record_history(&entry) {
-                        tracing::warn!("Failed to record history: {}", e);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to lock state store for history: {}", e);
-                }
-            }
-        }
     }
 
     /// Execute a single statement, returning control flow information.
