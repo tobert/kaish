@@ -13,7 +13,7 @@ A Bourne-lite shell for MCP tool orchestration. Part of the [Kaijutsu](https://g
 **80% of a POSIX shell, 100% unambiguous.**
 
 - **Bourne-lite** — familiar syntax, no surprises
-- **Everything is a tool** — builtins and MCP tools use identical syntax
+- **MCP tools as commands** — external tools appear as shell commands with CLI-style args
 - **Predictable over powerful** — if bash has a confusing edge case, kaish doesn't have that feature
 - **ShellCheck-clean** — the Bourne subset passes `shellcheck --enable=all`
 - **Agent-friendly** — easy to generate, parse, validate
@@ -50,8 +50,8 @@ done
 NAME=${NAME:-"default"}      # default value
 echo "Length: ${#NAME}"      # string length
 
-# MCP tools look like builtins
-exa.web_search --query "rust parser combinators"
+# MCP tools look like CLI commands (schema-driven translation)
+exa:web_search --query "rust parser combinators"
 
 # File finding with globstar
 files **/*.rs                           # find all Rust files
@@ -318,6 +318,46 @@ Paths resolve through VFS abstraction:
 ```
 
 VFS mounts are configured programmatically via the kernel API. The router uses longest-prefix matching to resolve paths to the correct backend.
+
+---
+
+## MCP Tool Integration
+
+External MCP servers register their tools with the kernel. Tools appear as shell commands with **schema-driven CLI translation** — use familiar `--flag value` syntax:
+
+```bash
+# MCP tools use server:tool naming convention
+exa:web_search --query "kaish shell language"
+filesystem:read_file --path /etc/hosts
+
+# Schema-aware: --flag consumes next arg as value (non-bool params)
+github:create_issue --repo tobert/kaish --title "Bug report" --body "Details"
+
+# Or use named args directly
+exa:web_search query="rust async" limit=5
+
+# Boolean flags work too
+myserver:deploy --verbose --dry-run
+
+# Pipe MCP tool output like any command
+exa:web_search --query "rust" | jq '.results[0].url'
+```
+
+**How it works:**
+- MCP servers are registered at kernel startup
+- Each tool is prefixed with its server name: `{server}:{tool}`
+- Tool schemas are introspected to enable CLI-style argument parsing
+- JSON responses flow through pipes like any other output
+- Tools appear alongside builtins in `tools` listing
+
+**Argument translation (schema-driven):**
+| Shell syntax | MCP parameter | Notes |
+|--------------|---------------|-------|
+| `--query "foo"` | `{"query": "foo"}` | Non-bool schema type → consumes next positional |
+| `--limit 10` | `{"limit": 10}` | Type preserved from schema |
+| `--verbose` | `{"verbose": true}` | Bool schema type → boolean flag |
+| `key="value"` | `{"key": "value"}` | Named arg syntax always works |
+| `count=42` | `{"count": 42}` | Type inference from value |
 
 ---
 
