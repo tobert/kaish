@@ -399,6 +399,14 @@ pub trait KernelBackend: Send + Sync {
 
     /// List all mount points.
     fn mounts(&self) -> Vec<MountInfo>;
+
+    /// Resolve a VFS path to a real filesystem path.
+    ///
+    /// Returns `Some(path)` if the VFS path maps to a real filesystem (like LocalFs),
+    /// or `None` if the path is in a virtual filesystem (like MemoryFs).
+    ///
+    /// This is needed for tools like `git` that must use real paths with external libraries.
+    fn resolve_real_path(&self, path: &Path) -> Option<std::path::PathBuf>;
 }
 
 #[cfg(test)]

@@ -72,4 +72,15 @@ pub trait Filesystem: Send + Sync {
     async fn exists(&self, path: &Path) -> bool {
         self.stat(path).await.is_ok()
     }
+
+    /// Get the real filesystem path for a VFS path.
+    ///
+    /// Returns `Some(path)` for backends backed by the real filesystem (like LocalFs),
+    /// or `None` for virtual backends (like MemoryFs).
+    ///
+    /// This is needed for tools like `git` that must use real paths with external libraries.
+    fn real_path(&self, path: &Path) -> Option<std::path::PathBuf> {
+        let _ = path;
+        None
+    }
 }

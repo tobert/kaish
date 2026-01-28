@@ -92,6 +92,17 @@ impl VfsRouter {
         }
     }
 
+    /// Resolve a VFS path to a real filesystem path.
+    ///
+    /// Returns `Some(path)` if the VFS path maps to a real filesystem (like LocalFs),
+    /// or `None` if the path is in a virtual filesystem (like MemoryFs).
+    ///
+    /// This is needed for tools like `git` that must use real paths with external libraries.
+    pub fn resolve_real_path(&self, path: &Path) -> Option<PathBuf> {
+        let (fs, relative) = self.find_mount(path).ok()?;
+        fs.real_path(&relative)
+    }
+
     /// Find the mount point for a given path.
     ///
     /// Returns the mount and the path relative to that mount.

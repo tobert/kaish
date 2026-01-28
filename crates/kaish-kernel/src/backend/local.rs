@@ -446,6 +446,10 @@ impl KernelBackend for LocalBackend {
     fn mounts(&self) -> Vec<MountInfo> {
         self.vfs.list_mounts()
     }
+
+    fn resolve_real_path(&self, path: &Path) -> Option<std::path::PathBuf> {
+        self.vfs.resolve_real_path(path)
+    }
 }
 
 impl std::fmt::Debug for LocalBackend {

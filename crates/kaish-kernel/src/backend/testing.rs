@@ -105,4 +105,8 @@ impl KernelBackend for MockBackend {
     fn mounts(&self) -> Vec<MountInfo> {
         Vec::new()
     }
+
+    fn resolve_real_path(&self, _path: &Path) -> Option<std::path::PathBuf> {
+        None
+    }
 }

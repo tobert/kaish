@@ -83,16 +83,27 @@ impl Tool for Git {
 
 /// Initialize a new git repository.
 async fn git_init(args: &[String], ctx: &ExecContext) -> ExecResult {
-    let path = if args.is_empty() {
+    let vfs_path = if args.is_empty() {
         ctx.cwd.clone()
     } else {
         ctx.resolve_path(&args[0])
     };
 
-    match GitVfs::init(&path) {
+    // Resolve VFS path to real filesystem path
+    let real_path = match ctx.backend.resolve_real_path(&vfs_path) {
+        Some(p) => p,
+        None => {
+            return ExecResult::failure(
+                1,
+                format!("git init: {} is not on a real filesystem", vfs_path.display()),
+            )
+        }
+    };
+
+    match GitVfs::init(&real_path) {
         Ok(_) => ExecResult::success(format!(
             "Initialized empty Git repository in {}",
-            path.display()
+            vfs_path.display()
         )),
         Err(e) => ExecResult::failure(1, format!("git init: {}", e)),
     }
@@ -105,7 +116,7 @@ async fn git_clone(args: &[String], ctx: &ExecContext) -> ExecResult {
     }
 
     let url = &args[0];
-    let dest = if args.len() > 1 {
+    let vfs_dest = if args.len() > 1 {
         ctx.resolve_path(&args[1])
     } else {
         // Extract repo name from URL
@@ -118,8 +129,26 @@ async fn git_clone(args: &[String], ctx: &ExecContext) -> ExecResult {
         ctx.resolve_path(name)
     };
 
-    match GitVfs::clone(url, &dest) {
-        Ok(_) => ExecResult::success(format!("Cloning into '{}'...\ndone.", dest.display())),
+    // Resolve VFS path to real filesystem path
+    // For clone, the destination doesn't exist yet, so resolve the parent
+    let parent = vfs_dest.parent().unwrap_or(&vfs_dest);
+    let real_parent = match ctx.backend.resolve_real_path(parent) {
+        Some(p) => p,
+        None => {
+            return ExecResult::failure(
+                1,
+                format!("git clone: {} is not on a real filesystem", parent.display()),
+            )
+        }
+    };
+    let real_dest = if let Some(name) = vfs_dest.file_name() {
+        real_parent.join(name)
+    } else {
+        real_parent
+    };
+
+    match GitVfs::clone(url, &real_dest) {
+        Ok(_) => ExecResult::success(format!("Cloning into '{}'...\ndone.", vfs_dest.display())),
         Err(e) => ExecResult::failure(1, format!("git clone: {}", e)),
     }
 }
@@ -388,7 +417,18 @@ async fn git_checkout(args: &[String], ctx: &ExecContext) -> ExecResult {
 
 /// Open the git repository in the current working directory.
 fn open_repo(ctx: &ExecContext) -> Result<GitVfs, ExecResult> {
-    GitVfs::open(&ctx.cwd).map_err(|e| {
+    // Resolve VFS path to real filesystem path
+    let real_path = ctx.backend.resolve_real_path(&ctx.cwd).ok_or_else(|| {
+        ExecResult::failure(
+            128,
+            format!(
+                "fatal: not a git repository: {} is not on a real filesystem",
+                ctx.cwd.display()
+            ),
+        )
+    })?;
+
+    GitVfs::open(&real_path).map_err(|e| {
         ExecResult::failure(
             128,
             format!("fatal: not a git repository: {}", e),
@@ -439,12 +479,14 @@ mod tests {
         }
 
         // Create context with real filesystem at the git repo
+        // Mount the temp dir at VFS root "/"
         let mut vfs = VfsRouter::new();
         let local = crate::vfs::LocalFs::new(&dir);
         vfs.mount("/", local);
 
         let mut ctx = ExecContext::new(Arc::new(vfs));
-        ctx.cwd = dir.clone();
+        // Set CWD to VFS root "/" (which maps to the temp dir)
+        ctx.cwd = std::path::PathBuf::from("/");
 
         (ctx, dir)
     }

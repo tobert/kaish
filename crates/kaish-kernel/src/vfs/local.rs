@@ -184,6 +184,10 @@ impl Filesystem for LocalFs {
     fn read_only(&self) -> bool {
         self.read_only
     }
+
+    fn real_path(&self, path: &Path) -> Option<PathBuf> {
+        self.resolve(path).ok()
+    }
 }
 
 #[cfg(test)]
