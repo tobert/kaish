@@ -112,20 +112,20 @@ github:list_issues --repo="foo/bar" | jq '.[] | .title'
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        Frontends                            │
-│   REPL  ·  Script Runner  ·  Kaijutsu / Embedded           │
+│    REPL  ·  Script Runner  ·  Kaijutsu / Embedded           │
 └────────────────────────────┬────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                   会sh 核 (Kernel)                          │
 │                                                             │
-│  Lexer (logos) → Parser (chumsky) → Interpreter (tokio)    │
+│   Lexer (logos) → Parser (chumsky) → Interpreter (tokio)    │
 │                                                             │
-│  ┌─────────────┐ ┌─────────────┐ ┌───────────────────────┐ │
-│  │  Variables  │ │    Tools    │ │    VFS Router         │ │
-│  │  & Scope    │ │  (54 built- │ │  /mnt, /scratch, /git │ │
-│  │             │ │   in + MCP) │ │                       │ │
-│  └─────────────┘ └─────────────┘ └───────────────────────┘ │
+│  ┌─────────────┐ ┌─────────────┐ ┌───────────────────────┐  │
+│  │  Variables  │ │    Tools    │ │    VFS Router         │  │
+│  │  & Scope    │ │  (54 built- │ │  /mnt, /scratch, /git │  │
+│  │             │ │   in + MCP) │ │                       │  │
+│  └─────────────┘ └─────────────┘ └───────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
