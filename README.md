@@ -117,7 +117,7 @@ github:list_issues --repo="foo/bar" | jq '.[] | .title'
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                   会sh 核 (Kernel)                          │
+│                        会sh kernel                          │
 │                                                             │
 │   Lexer (logos) → Parser (chumsky) → Interpreter (tokio)    │
 │                                                             │
