@@ -20,9 +20,9 @@ use serde::{Deserialize, Serialize};
 
 use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
 
-use crate::config::McpServerConfig;
-use crate::execute::{self, ExecuteParams};
-use crate::resources::{self, parse_resource_uri, ResourceContent};
+use super::config::McpServerConfig;
+use super::execute::{self, ExecuteParams};
+use super::resources::{self, parse_resource_uri, ResourceContent};
 
 /// The kaish MCP server handler.
 #[derive(Clone)]

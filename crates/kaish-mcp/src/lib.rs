@@ -1,9 +1,10 @@
 //! MCP (Model Context Protocol) integration for kaish.
 //!
-//! This crate provides MCP client functionality, allowing kaish to
-//! discover and call tools exposed by external MCP servers.
+//! This crate provides both MCP client and server functionality:
+//! - **Client**: Connect to external MCP servers and discover/call their tools
+//! - **Server**: Expose kaish as an MCP server for clients like Claude Code
 //!
-//! # Architecture
+//! # Client Architecture
 //!
 //! ```text
 //! kaish ToolRegistry
@@ -12,7 +13,7 @@
 //!                     └── MCP Server (stdio child process)
 //! ```
 //!
-//! # Usage
+//! # Client Usage
 //!
 //! ```ignore
 //! use kaish_mcp::{McpClient, McpConfig, McpTransport, register_mcp_tools};
@@ -33,9 +34,22 @@
 //! let client = Arc::new(client);
 //! register_mcp_tools(&client, &mut registry).await?;
 //! ```
+//!
+//! # Server Usage
+//!
+//! ```ignore
+//! use kaish_mcp::server::{KaishServerHandler, McpServerConfig};
+//! use rmcp::transport::io::stdio;
+//! use rmcp::service::ServiceExt;
+//!
+//! let config = McpServerConfig::load()?;
+//! let handler = KaishServerHandler::new(config)?;
+//! handler.serve(stdio()).await?;
+//! ```
 
 pub mod client;
 pub mod config;
+pub mod server;
 pub mod wrapper;
 
 use std::sync::Arc;
@@ -46,6 +60,7 @@ use kaish_kernel::tools::ToolRegistry;
 
 pub use client::{shared_client, stdio_client, McpClient};
 pub use config::{McpConfig, McpTransport};
+pub use server::{KaishServerHandler, McpServerConfig};
 pub use wrapper::McpToolWrapper;
 
 /// Register all tools from an MCP client into a ToolRegistry.

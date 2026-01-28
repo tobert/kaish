@@ -23,14 +23,14 @@ use rmcp::service::ServiceExt;
 use rmcp::transport::io::stdio;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use kaish_mcp_server::{KaishServerHandler, McpServerConfig};
+use kaish_mcp::server::{KaishServerHandler, McpServerConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing (logs to stderr)
     tracing_subscriber::registry()
         .with(fmt::layer().with_writer(std::io::stderr))
-        .with(EnvFilter::from_default_env().add_directive("kaish_mcp_server=info".parse()?))
+        .with(EnvFilter::from_default_env().add_directive("kaish_mcp=info".parse()?))
         .init();
 
     tracing::info!("Starting kaish MCP server");

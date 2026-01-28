@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use kaish_kernel::{Kernel, KernelConfig};
 use serde::{Deserialize, Serialize};
 
-use crate::config::ExternalServerConfig;
+use super::config::ExternalServerConfig;
 
 /// Parameters for the execute tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]

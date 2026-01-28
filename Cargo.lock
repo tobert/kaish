@@ -856,27 +856,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "insta",
- "kaish-kernel",
- "rmcp",
- "rstest",
- "serde",
- "serde_json",
- "thiserror 2.0.17",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "kaish-mcp-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
  "base64",
  "directories",
+ "insta",
  "kaish-kernel",
- "kaish-mcp",
  "rmcp",
  "rstest",
  "serde",

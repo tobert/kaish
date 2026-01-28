@@ -1,7 +1,7 @@
-//! kaish-mcp-server: Expose kaish as an MCP server.
+//! MCP server functionality for kaish.
 //!
-//! This crate provides an MCP server that exposes kaish shell execution
-//! capabilities to MCP clients like Claude Code.
+//! This module exposes kaish as an MCP server, allowing MCP clients
+//! like Claude Code to execute kaish scripts.
 //!
 //! # Features
 //!
@@ -12,7 +12,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use kaish_mcp_server::{KaishServerHandler, McpServerConfig};
+//! use kaish_mcp::server::{KaishServerHandler, McpServerConfig};
 //! use rmcp::transport::io::stdio;
 //! use rmcp::service::ServiceExt;
 //!
