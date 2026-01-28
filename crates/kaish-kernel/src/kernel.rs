@@ -293,7 +293,7 @@ impl Kernel {
             }
             let flow = self.execute_stmt_flow(&stmt).await?;
             match flow {
-                ControlFlow::Normal(r) => result = r,
+                ControlFlow::Normal(r) => accumulate_result(&mut result, &r),
                 ControlFlow::Exit { code } => {
                     // Exit terminates execution immediately
                     let exit_result = ExecResult::success(code.to_string());
@@ -410,7 +410,7 @@ impl Kernel {
                     for stmt in &for_loop.body {
                         let mut flow = self.execute_stmt_flow(stmt).await?;
                         match &mut flow {
-                            ControlFlow::Normal(r) => result = r.clone(),
+                            ControlFlow::Normal(r) => accumulate_result(&mut result, r),
                             ControlFlow::Break { .. } => {
                                 if flow.decrement_level() {
                                     // Break handled at this level
@@ -464,7 +464,7 @@ impl Kernel {
                     for stmt in &while_loop.body {
                         let mut flow = self.execute_stmt_flow(stmt).await?;
                         match &mut flow {
-                            ControlFlow::Normal(r) => result = r.clone(),
+                            ControlFlow::Normal(r) => accumulate_result(&mut result, r),
                             ControlFlow::Break { .. } => {
                                 if flow.decrement_level() {
                                     // Break handled at this level
@@ -558,16 +558,22 @@ impl Kernel {
                 // cmd1 && cmd2 - run cmd2 only if cmd1 succeeds (exit code 0)
                 let left_flow = self.execute_stmt_flow(left).await?;
                 match left_flow {
-                    ControlFlow::Normal(ref left_result) => {
-                        self.update_last_result(left_result).await;
+                    ControlFlow::Normal(left_result) => {
+                        self.update_last_result(&left_result).await;
                         if left_result.ok() {
                             let right_flow = self.execute_stmt_flow(right).await?;
-                            if let ControlFlow::Normal(ref right_result) = right_flow {
-                                self.update_last_result(right_result).await;
+                            match right_flow {
+                                ControlFlow::Normal(right_result) => {
+                                    self.update_last_result(&right_result).await;
+                                    // Combine left and right output
+                                    let mut combined = left_result;
+                                    accumulate_result(&mut combined, &right_result);
+                                    Ok(ControlFlow::ok(combined))
+                                }
+                                other => Ok(other), // Propagate non-normal flow
                             }
-                            Ok(right_flow)
                         } else {
-                            Ok(left_flow)
+                            Ok(ControlFlow::ok(left_result))
                         }
                     }
                     _ => Ok(left_flow), // Propagate non-normal flow
@@ -577,16 +583,22 @@ impl Kernel {
                 // cmd1 || cmd2 - run cmd2 only if cmd1 fails (non-zero exit code)
                 let left_flow = self.execute_stmt_flow(left).await?;
                 match left_flow {
-                    ControlFlow::Normal(ref left_result) => {
-                        self.update_last_result(left_result).await;
+                    ControlFlow::Normal(left_result) => {
+                        self.update_last_result(&left_result).await;
                         if !left_result.ok() {
                             let right_flow = self.execute_stmt_flow(right).await?;
-                            if let ControlFlow::Normal(ref right_result) = right_flow {
-                                self.update_last_result(right_result).await;
+                            match right_flow {
+                                ControlFlow::Normal(right_result) => {
+                                    self.update_last_result(&right_result).await;
+                                    // Combine left and right output
+                                    let mut combined = left_result;
+                                    accumulate_result(&mut combined, &right_result);
+                                    Ok(ControlFlow::ok(combined))
+                                }
+                                other => Ok(other), // Propagate non-normal flow
                             }
-                            Ok(right_flow)
                         } else {
-                            Ok(left_flow)
+                            Ok(ControlFlow::ok(left_result))
                         }
                     }
                     _ => Ok(left_flow), // Propagate non-normal flow
@@ -619,13 +631,13 @@ impl Kernel {
             return Ok(ExecResult::success(""));
         }
 
-        // For single command, execute directly
-        if pipeline.commands.len() == 1 {
+        // For single command without redirects, execute directly for efficiency
+        if pipeline.commands.len() == 1 && pipeline.commands[0].redirects.is_empty() {
             let cmd = &pipeline.commands[0];
             return self.execute_command(&cmd.name, &cmd.args).await;
         }
 
-        // Multi-command pipeline uses the runner
+        // Pipeline with redirects or multiple commands uses the runner
         let mut ctx = self.exec_ctx.write().await;
         {
             let scope = self.scope.read().await;
@@ -1173,6 +1185,24 @@ impl Kernel {
     }
 }
 
+/// Accumulate output from one result into another.
+///
+/// This appends stdout and stderr (with newlines as separators) and updates
+/// the exit code to match the new result. Used to preserve output from
+/// multiple statements, loop iterations, and command chains.
+fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
+    if !accumulated.out.is_empty() && !new.out.is_empty() {
+        accumulated.out.push('\n');
+    }
+    accumulated.out.push_str(&new.out);
+    if !accumulated.err.is_empty() && !new.err.is_empty() {
+        accumulated.err.push('\n');
+    }
+    accumulated.err.push_str(&new.err);
+    accumulated.code = new.code;
+    accumulated.data = new.data.clone();
+}
+
 /// Check if a value is truthy.
 fn is_truthy(value: &Value) -> bool {
     match value {
@@ -1210,6 +1240,64 @@ mod tests {
         let result = kernel.execute("echo hello").await.expect("execution failed");
         assert!(result.ok());
         assert_eq!(result.out.trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_multiple_statements_accumulate_output() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        let result = kernel
+            .execute("echo one\necho two\necho three")
+            .await
+            .expect("execution failed");
+        assert!(result.ok());
+        // Should have all three outputs separated by newlines
+        assert!(result.out.contains("one"), "missing 'one': {}", result.out);
+        assert!(result.out.contains("two"), "missing 'two': {}", result.out);
+        assert!(result.out.contains("three"), "missing 'three': {}", result.out);
+    }
+
+    #[tokio::test]
+    async fn test_and_chain_accumulates_output() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        let result = kernel
+            .execute("echo first && echo second")
+            .await
+            .expect("execution failed");
+        assert!(result.ok());
+        assert!(result.out.contains("first"), "missing 'first': {}", result.out);
+        assert!(result.out.contains("second"), "missing 'second': {}", result.out);
+    }
+
+    #[tokio::test]
+    async fn test_for_loop_accumulates_output() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        let result = kernel
+            .execute(r#"for X in a b c; do echo "item: ${X}"; done"#)
+            .await
+            .expect("execution failed");
+        assert!(result.ok());
+        assert!(result.out.contains("item: a"), "missing 'item: a': {}", result.out);
+        assert!(result.out.contains("item: b"), "missing 'item: b': {}", result.out);
+        assert!(result.out.contains("item: c"), "missing 'item: c': {}", result.out);
+    }
+
+    #[tokio::test]
+    async fn test_while_loop_accumulates_output() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        let result = kernel
+            .execute(r#"
+                N=3
+                while [[ ${N} -gt 0 ]]; do
+                    echo "N=${N}"
+                    N=$((N - 1))
+                done
+            "#)
+            .await
+            .expect("execution failed");
+        assert!(result.ok());
+        assert!(result.out.contains("N=3"), "missing 'N=3': {}", result.out);
+        assert!(result.out.contains("N=2"), "missing 'N=2': {}", result.out);
+        assert!(result.out.contains("N=1"), "missing 'N=1': {}", result.out);
     }
 
     #[tokio::test]
@@ -2100,6 +2188,81 @@ AFTER="yes"'"#)
 
         assert!(result.ok());
         assert_eq!(result.out.trim(), "yes-like");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Cat Stdin Tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_cat_from_pipeline() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        let result = kernel
+            .execute(r#"echo "piped text" | cat"#)
+            .await
+            .expect("cat pipeline failed");
+
+        assert!(result.ok(), "cat failed: {}", result.err);
+        assert_eq!(result.out.trim(), "piped text");
+    }
+
+    #[tokio::test]
+    async fn test_cat_from_pipeline_multiline() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        let result = kernel
+            .execute(r#"echo "line1\nline2" | cat -n"#)
+            .await
+            .expect("cat pipeline failed");
+
+        assert!(result.ok(), "cat failed: {}", result.err);
+        assert!(result.out.contains("1\t"), "output: {}", result.out);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Heredoc Tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_heredoc_basic() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        let result = kernel
+            .execute("cat <<EOF\nhello\nEOF")
+            .await
+            .expect("heredoc failed");
+
+        assert!(result.ok(), "cat with heredoc failed: {}", result.err);
+        assert_eq!(result.out.trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_arithmetic_in_string() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        let result = kernel
+            .execute(r#"echo "result: $((1 + 2))""#)
+            .await
+            .expect("arithmetic in string failed");
+
+        assert!(result.ok(), "echo failed: {}", result.err);
+        assert_eq!(result.out.trim(), "result: 3");
+    }
+
+    #[tokio::test]
+    async fn test_heredoc_multiline() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        let result = kernel
+            .execute("cat <<EOF\nline1\nline2\nline3\nEOF")
+            .await
+            .expect("heredoc failed");
+
+        assert!(result.ok(), "cat with heredoc failed: {}", result.err);
+        assert!(result.out.contains("line1"), "output: {}", result.out);
+        assert!(result.out.contains("line2"), "output: {}", result.out);
+        assert!(result.out.contains("line3"), "output: {}", result.out);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
