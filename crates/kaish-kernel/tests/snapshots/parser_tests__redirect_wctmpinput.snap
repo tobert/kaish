@@ -2,4 +2,4 @@
 source: crates/kaish-kernel/tests/parser_tests.rs
 expression: sexpr
 ---
-(cmd wc (redir < (string "/tmp/input")))
+(pipeline (cmd wc (redir < (string "/tmp/input"))))

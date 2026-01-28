@@ -2,4 +2,4 @@
 source: crates/kaish-kernel/tests/parser_tests.rs
 expression: sexpr
 ---
-(cmd risky-cmd (redir 2> (string "/tmp/err")))
+(pipeline (cmd risky-cmd (redir 2> (string "/tmp/err"))))

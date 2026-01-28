@@ -77,6 +77,13 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
                 let part = if let Some(name) = var_content.strip_prefix('#') {
                     // Variable length: ${#VAR}
                     StringPart::VarLength(name.to_string())
+                } else if var_content.starts_with("__ARITH:") && var_content.ends_with("__") {
+                    // Arithmetic expression: ${__ARITH:expr__}
+                    let expr = var_content
+                        .strip_prefix("__ARITH:")
+                        .and_then(|s| s.strip_suffix("__"))
+                        .unwrap_or("");
+                    StringPart::Arithmetic(expr.to_string())
                 } else if let Some(colon_idx) = var_content.find(":-") {
                     // Variable with default: ${VAR:-default}
                     let name = var_content[..colon_idx].to_string();
@@ -337,12 +344,17 @@ where
             test_expr_stmt_parser().map(Stmt::Test),
             // Note: 'true' and 'false' are handled by command_parser/pipeline_parser
             pipeline_parser().map(|p| {
-                // Unwrap single-command pipelines without background
+                // Unwrap single-command pipelines without background and without redirects
                 if p.commands.len() == 1 && !p.background {
-                    // Safe: we just checked len == 1
-                    match p.commands.into_iter().next() {
-                        Some(cmd) => Stmt::Command(cmd),
-                        None => Stmt::Empty, // unreachable but safe
+                    // Only unwrap if no redirects - redirects require pipeline processing
+                    if p.commands[0].redirects.is_empty() {
+                        // Safe: we just checked len == 1
+                        match p.commands.into_iter().next() {
+                            Some(cmd) => Stmt::Command(cmd),
+                            None => Stmt::Empty, // unreachable but safe
+                        }
+                    } else {
+                        Stmt::Pipeline(p)
                     }
                 } else {
                     Stmt::Pipeline(p)
@@ -1522,12 +1534,15 @@ mod tests {
         let result = parse("cmd > file");
         assert!(result.is_ok());
         let program = result.expect("ok");
+        // Commands with redirects stay as Pipeline, not Command
         match &program.statements[0] {
-            Stmt::Command(cmd) => {
+            Stmt::Pipeline(p) => {
+                assert_eq!(p.commands.len(), 1);
+                let cmd = &p.commands[0];
                 assert_eq!(cmd.redirects.len(), 1);
                 assert!(matches!(cmd.redirects[0].kind, RedirectKind::StdoutOverwrite));
             }
-            _ => panic!("expected Command"),
+            _ => panic!("expected Pipeline"),
         }
     }
 
@@ -2335,7 +2350,7 @@ echo "Items: ${ITEMS}"
         assert!(matches!(stmts[3], Stmt::Assignment(_)));  // set ITEMS
         assert!(matches!(stmts[4], Stmt::Command(_)));     // echo "Starting..."
         assert!(matches!(stmts[5], Stmt::Pipeline(_)));    // cat | grep | head
-        assert!(matches!(stmts[6], Stmt::Command(_)));     // fetch (with redirect)
+        assert!(matches!(stmts[6], Stmt::Pipeline(_)));    // fetch (with redirect - Pipeline since it has redirects)
         assert!(matches!(stmts[7], Stmt::Command(_)));     // echo "Items: ${ITEMS}"
     }
 
