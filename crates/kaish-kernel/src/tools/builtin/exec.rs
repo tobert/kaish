@@ -125,8 +125,18 @@ impl Tool for Exec {
 
         // Set working directory if specified
         if let Some(ref dir) = cwd {
-            let resolved_cwd = ctx.resolve_path(dir);
-            cmd.current_dir(&resolved_cwd);
+            let vfs_cwd = ctx.resolve_path(dir);
+            // Resolve VFS path to real filesystem path
+            let real_cwd = match ctx.backend.resolve_real_path(&vfs_cwd) {
+                Some(p) => p,
+                None => {
+                    return ExecResult::failure(
+                        1,
+                        format!("exec: cwd '{}' is not on a real filesystem", vfs_cwd.display()),
+                    )
+                }
+            };
+            cmd.current_dir(&real_cwd);
         }
 
         if clear_env {
@@ -383,7 +393,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_with_cwd() {
-        let mut ctx = make_ctx();
+        // Need LocalFs for real path resolution (exec cwd requires real filesystem)
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        vfs.mount("/tmp", crate::vfs::LocalFs::new("/tmp"));
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
         let mut args = ToolArgs::new();
         args.named
             .insert("command".to_string(), Value::String("pwd".into()));
@@ -391,9 +406,9 @@ mod tests {
             .insert("cwd".to_string(), Value::String("/tmp".into()));
 
         let result = Exec.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        // Output should contain /tmp (or its resolved path)
-        assert!(result.out.contains("/tmp") || result.out.contains("tmp"));
+        assert!(result.ok(), "exec failed: {}", result.err);
+        // Output should contain /tmp (or its resolved path like /private/tmp on macOS)
+        assert!(result.out.contains("tmp"), "expected tmp in output: {}", result.out);
     }
 
     #[tokio::test]
