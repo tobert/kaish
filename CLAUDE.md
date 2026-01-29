@@ -8,7 +8,7 @@ This file provides guidance to models when working with in this repository.
 
 Part of the [Kaijutsu](https://github.com/tobert/kaijutsu) project.
 
-**Status**: Implementation complete through L14. All build layers are implemented.
+**Status**: Core implementation complete. Lexer, parser, interpreter, 54 builtins, MCP client/server, VFS.
 
 ## Philosophy
 
@@ -120,7 +120,7 @@ crates/
 └── kaish-repl/      # Interactive REPL with rustyline
 ```
 
-**Note:** MCP *server* functionality (exporting kaish tools as MCP) is planned for a future phase. The `kaish-mcp` crate currently provides MCP *client* integration for consuming external MCP tools.
+**Note:** The `kaish-mcp` crate provides both MCP server (exposing kaish's execute tool) and MCP client (consuming external MCP tools) functionality.
 
 
 ## Language Key Points
@@ -176,7 +176,8 @@ cargo insta accept         # Accept all pending snapshots
 
 | File | Purpose |
 |------|---------|
-| `README.md` | Language reference, syntax, builtins, ShellCheck alignment |
+| `README.md` | Project overview, quick tour, MCP integration |
+| `docs/LANGUAGE.md` | Complete language reference with examples |
 | `docs/GRAMMAR.md` | EBNF grammar, ambiguity analysis |
 | `docs/ARCHITECTURE.md` | Kernel design, crate structure, protocols |
 | `docs/BUILTINS.md` | Tool compatibility and implementation notes |
