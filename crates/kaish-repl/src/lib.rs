@@ -39,6 +39,15 @@ enum StmtResult {
     /// Continue to next iteration with remaining levels to skip
     Continue(usize),
 }
+
+/// Result from meta-command handling.
+#[derive(Debug)]
+enum MetaResult {
+    /// Continue with optional output
+    Continue(Option<String>),
+    /// Exit the REPL (caller should save history and exit)
+    Exit,
+}
 use kaish_kernel::parser::parse;
 use kaish_kernel::scheduler::{JobManager, PipelineRunner};
 use kaish_kernel::tools::{ExecContext, ToolArgs, ToolRegistry, register_builtins};
@@ -132,17 +141,25 @@ impl Repl {
     }
 
     /// Process a single line of input.
+    /// Returns Ok(None) for normal output, Ok(Some(output)) for output to display,
+    /// or Err with ProcessResult::Exit to signal the REPL should exit.
     pub fn process_line(&mut self, line: &str) -> Result<Option<String>> {
         let trimmed = line.trim();
 
         // Handle meta-commands (both /cmd and cmd forms for common ones)
         if trimmed.starts_with('/') {
-            return self.handle_meta_command(trimmed);
+            return match self.handle_meta_command(trimmed) {
+                MetaResult::Continue(output) => Ok(output),
+                MetaResult::Exit => Err(anyhow::anyhow!("__REPL_EXIT__")),
+            };
         }
 
         // Also support shell-style meta-commands without slash
-        if let Some(result) = self.try_shell_style_command(trimmed) {
-            return result;
+        if let Some(meta_result) = self.try_shell_style_command(trimmed) {
+            return match meta_result {
+                MetaResult::Continue(output) => Ok(output),
+                MetaResult::Exit => Err(anyhow::anyhow!("__REPL_EXIT__")),
+            };
         }
 
         // Skip empty lines
@@ -590,9 +607,11 @@ impl Repl {
                                 result.push_str(&value.to_string());
                             }
                         }
-                        kaish_kernel::ast::StringPart::CommandSubst(_) => {
-                            // Command substitution requires async - skip in sync REPL context
-                            // The full evaluation happens via execute_pipeline
+                        kaish_kernel::ast::StringPart::CommandSubst(pipeline) => {
+                            // Execute the pipeline and capture its output
+                            let exec_result = self.execute_pipeline(pipeline)?;
+                            // Use stdout as the substitution value, with trailing newline stripped
+                            result.push_str(exec_result.out.trim_end_matches('\n'));
                         }
                         kaish_kernel::ast::StringPart::LastExitCode => {
                             result.push_str(&self.exec_ctx.scope.last_result().code.to_string());
@@ -878,8 +897,11 @@ impl Repl {
                         result.push_str(&value.to_string());
                     }
                 }
-                kaish_kernel::ast::StringPart::CommandSubst(_) => {
-                    // Command substitution skipped in sync context
+                kaish_kernel::ast::StringPart::CommandSubst(pipeline) => {
+                    // Execute the pipeline and capture its output
+                    let exec_result = self.execute_pipeline(pipeline)?;
+                    // Use stdout as the substitution value, with trailing newline stripped
+                    result.push_str(exec_result.out.trim_end_matches('\n'));
                 }
                 kaish_kernel::ast::StringPart::LastExitCode => {
                     result.push_str(&self.exec_ctx.scope.last_result().code.to_string());
@@ -893,25 +915,25 @@ impl Repl {
     }
 
     /// Handle a meta-command (starts with /).
-    fn handle_meta_command(&mut self, cmd: &str) -> Result<Option<String>> {
+    fn handle_meta_command(&mut self, cmd: &str) -> MetaResult {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
         let command = parts.first().copied().unwrap_or("");
 
         match command {
             "/quit" | "/q" | "/exit" => {
-                std::process::exit(0);
+                MetaResult::Exit
             }
             "/help" | "/h" | "/?" => {
-                Ok(Some(HELP_TEXT.to_string()))
+                MetaResult::Continue(Some(HELP_TEXT.to_string()))
             }
             "/ast" => {
                 self.show_ast = !self.show_ast;
-                Ok(Some(format!("AST mode: {}", if self.show_ast { "ON" } else { "OFF" })))
+                MetaResult::Continue(Some(format!("AST mode: {}", if self.show_ast { "ON" } else { "OFF" })))
             }
             "/scope" | "/vars" => {
                 let names = self.exec_ctx.scope.all_names();
                 if names.is_empty() {
-                    Ok(Some("(no variables set)".to_string()))
+                    MetaResult::Continue(Some("(no variables set)".to_string()))
                 } else {
                     let mut output = String::from("Variables:\n");
                     for name in names {
@@ -919,34 +941,34 @@ impl Repl {
                             output.push_str(&format!("  {} = {}\n", name, format_value(value)));
                         }
                     }
-                    Ok(Some(output.trim_end().to_string()))
+                    MetaResult::Continue(Some(output.trim_end().to_string()))
                 }
             }
             "/result" | "/$?" => {
                 let result = self.exec_ctx.scope.last_result();
-                Ok(Some(format_result(result)))
+                MetaResult::Continue(Some(format_result(result)))
             }
             "/cwd" => {
-                Ok(Some(self.exec_ctx.cwd.to_string_lossy().to_string()))
+                MetaResult::Continue(Some(self.exec_ctx.cwd.to_string_lossy().to_string()))
             }
             "/tools" => {
                 let names = self.tools.names();
-                Ok(Some(format!("Available tools: {}", names.join(", "))))
+                MetaResult::Continue(Some(format!("Available tools: {}", names.join(", "))))
             }
             "/jobs" => {
                 let jobs = self.runtime.block_on(self.job_manager.list());
                 if jobs.is_empty() {
-                    Ok(Some("(no background jobs)".to_string()))
+                    MetaResult::Continue(Some("(no background jobs)".to_string()))
                 } else {
                     let mut output = String::from("Background jobs:\n");
                     for job in jobs {
                         output.push_str(&format!("  [{}] {} {}\n", job.id, job.status, job.command));
                     }
-                    Ok(Some(output.trim_end().to_string()))
+                    MetaResult::Continue(Some(output.trim_end().to_string()))
                 }
             }
             "/state" | "/session" => {
-                Ok(Some(format!(
+                MetaResult::Continue(Some(format!(
                     "State persistence disabled\nVariables (in-memory): {}",
                     self.exec_ctx.scope.all().len()
                 )))
@@ -954,10 +976,10 @@ impl Repl {
             "/clear-state" | "/reset" => {
                 // Clear in-memory scope
                 self.exec_ctx.scope = Scope::new();
-                Ok(Some("Session reset (variables cleared)".to_string()))
+                MetaResult::Continue(Some("Session reset (variables cleared)".to_string()))
             }
             _ => {
-                Ok(Some(format!("Unknown command: {}\nType /help or help for available commands.", command)))
+                MetaResult::Continue(Some(format!("Unknown command: {}\nType /help or help for available commands.", command)))
             }
         }
     }
@@ -967,7 +989,7 @@ impl Repl {
     ///
     /// Note: We only intercept commands that don't have builtin tool equivalents.
     /// For example, `vars` is a real builtin tool, so we don't intercept it.
-    fn try_shell_style_command(&mut self, cmd: &str) -> Option<Result<Option<String>>> {
+    fn try_shell_style_command(&mut self, cmd: &str) -> Option<MetaResult> {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
         let command = parts.first().copied().unwrap_or("");
 
@@ -1155,6 +1177,20 @@ Examples:
   wait                       # Wait for all jobs
 "#;
 
+/// Save REPL history to disk.
+fn save_history(rl: &mut Editor<(), DefaultHistory>, history_path: &Option<PathBuf>) {
+    if let Some(path) = history_path {
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!("Failed to create history directory: {}", e);
+            }
+        }
+        if let Err(e) = rl.save_history(path) {
+            tracing::warn!("Failed to save history: {}", e);
+        }
+    }
+}
+
 /// Run the REPL.
 pub fn run() -> Result<()> {
     println!("会sh — kaish v{}", env!("CARGO_PKG_VERSION"));
@@ -1167,7 +1203,13 @@ pub fn run() -> Result<()> {
     let history_path = dirs::data_dir()
         .map(|p| p.join("kaish").join("history.txt"));
     if let Some(ref path) = history_path {
-        let _ = rl.load_history(path);
+        if let Err(e) = rl.load_history(path) {
+            // Only log if it's not a "file not found" error (expected on first run)
+            let is_not_found = matches!(&e, ReadlineError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound);
+            if !is_not_found {
+                tracing::warn!("Failed to load history: {}", e);
+            }
+        }
     }
 
     let mut repl = Repl::new()?;
@@ -1178,11 +1220,18 @@ pub fn run() -> Result<()> {
 
         match rl.readline(prompt) {
             Ok(line) => {
-                let _ = rl.add_history_entry(line.as_str());
+                if let Err(e) = rl.add_history_entry(line.as_str()) {
+                    tracing::warn!("Failed to add history entry: {}", e);
+                }
 
                 match repl.process_line(&line) {
                     Ok(Some(output)) => println!("{}", output),
                     Ok(None) => {}
+                    Err(e) if e.to_string() == "__REPL_EXIT__" => {
+                        // User requested exit - save history and break
+                        save_history(&mut rl, &history_path);
+                        return Ok(());
+                    }
                     Err(e) => eprintln!("Error: {}", e),
                 }
             }
@@ -1202,12 +1251,7 @@ pub fn run() -> Result<()> {
     }
 
     // Save history
-    if let Some(ref path) = history_path {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = rl.save_history(path);
-    }
+    save_history(&mut rl, &history_path);
 
     Ok(())
 }
@@ -1230,7 +1274,12 @@ pub fn run_with_client(
     let history_path = dirs::data_dir()
         .map(|p| p.join("kaish").join("history.txt"));
     if let Some(ref path) = history_path {
-        let _ = rl.load_history(path);
+        if let Err(e) = rl.load_history(path) {
+            let is_not_found = matches!(&e, ReadlineError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound);
+            if !is_not_found {
+                tracing::warn!("Failed to load history: {}", e);
+            }
+        }
     }
 
     loop {
@@ -1238,11 +1287,14 @@ pub fn run_with_client(
 
         match rl.readline(prompt) {
             Ok(line) => {
-                let _ = rl.add_history_entry(line.as_str());
+                if let Err(e) = rl.add_history_entry(line.as_str()) {
+                    tracing::warn!("Failed to add history entry: {}", e);
+                }
                 let trimmed = line.trim();
 
                 // Handle local meta-commands
                 if trimmed == "/quit" || trimmed == "/q" || trimmed == "/exit" {
+                    save_history(&mut rl, &history_path);
                     break;
                 }
 
@@ -1288,6 +1340,7 @@ pub fn run_with_client(
                     match local.block_on(rt, client.shutdown()) {
                         Ok(()) => {
                             println!("Kernel shutdown requested.");
+                            save_history(&mut rl, &history_path);
                             break;
                         }
                         Err(e) => eprintln!("Shutdown failed: {e}"),
@@ -1342,12 +1395,7 @@ pub fn run_with_client(
     }
 
     // Save history
-    if let Some(ref path) = history_path {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = rl.save_history(path);
-    }
+    save_history(&mut rl, &history_path);
 
     Ok(())
 }
