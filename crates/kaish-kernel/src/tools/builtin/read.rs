@@ -47,7 +47,11 @@ impl Tool for Read {
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         let raw_mode = args.has_flag("r") || args.has_flag("raw");
-        let _prompt = args.named.get("prompt").or_else(|| args.named.get("p"));
+
+        // Get prompt if provided (-p "prompt")
+        let prompt = args
+            .get_string("prompt", usize::MAX)
+            .or_else(|| args.get_string("p", usize::MAX));
 
         // Get variable names from positional arguments
         let var_names: Vec<String> = args
@@ -63,12 +67,21 @@ impl Tool for Read {
             return ExecResult::failure(1, "read: missing variable name");
         }
 
+        // If prompt is provided, output it to stderr
+        // (In a real interactive shell this would display before reading)
+        let prompt_output = prompt.as_deref().unwrap_or("");
+
         // Get input from stdin
         let input = match ctx.take_stdin() {
             Some(s) => s,
             None => {
                 // No stdin provided - return failure (no data to read)
-                return ExecResult::failure(1, "read: no input available");
+                // Include the prompt in the error so it's visible
+                let mut result = ExecResult::failure(1, "read: no input available");
+                if !prompt_output.is_empty() {
+                    result.err = format!("{}{}", prompt_output, result.err);
+                }
+                return result;
             }
         };
 
@@ -106,7 +119,12 @@ impl Tool for Read {
             }
         }
 
-        ExecResult::success("")
+        // Include prompt in stderr output (for visibility to caller)
+        let mut result = ExecResult::success("");
+        if !prompt_output.is_empty() {
+            result.err = prompt_output.to_string();
+        }
+        result
     }
 }
 

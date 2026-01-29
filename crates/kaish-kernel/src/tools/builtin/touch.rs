@@ -32,8 +32,15 @@ impl Tool for Touch {
 
         // Check if file exists
         if ctx.backend.exists(path).await {
-            // File exists, update timestamp (in VFS this is a no-op)
-            // Real filesystem would update mtime
+            // File exists, update timestamp
+            // Try to use real filesystem path if available
+            if let Some(real_path) = ctx.backend.resolve_real_path(path) {
+                // Update mtime to current time
+                if let Err(e) = update_mtime(&real_path) {
+                    return ExecResult::failure(1, format!("touch: {}: {}", path_str, e));
+                }
+            }
+            // For virtual filesystems (MemoryFs), this is a no-op
             ExecResult::success("")
         } else {
             // Create empty file
@@ -43,6 +50,19 @@ impl Tool for Touch {
             }
         }
     }
+}
+
+/// Update modification time of a file to the current time.
+///
+/// Uses File::set_modified() which calls futimens/utimensat on Unix.
+fn update_mtime(path: &Path) -> std::io::Result<()> {
+    use std::time::SystemTime;
+
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?;
+
+    file.set_modified(SystemTime::now())
 }
 
 #[cfg(test)]

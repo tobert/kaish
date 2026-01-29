@@ -242,11 +242,20 @@ async fn evaluate_unary(op: &str, arg: &str, ctx: &ExecContext) -> Result<bool, 
                 Err(_) => Ok(false),
             }
         }
-        "-r" | "-w" | "-x" => {
-            // For now, treat readable/writable/executable as "exists"
-            // (proper permission checking is platform-specific)
+        "-r" => {
+            // Check if file is readable
             let path = ctx.resolve_path(arg);
-            Ok(ctx.backend.exists(Path::new(&path)).await)
+            check_readable(Path::new(&path))
+        }
+        "-w" => {
+            // Check if file is writable
+            let path = ctx.resolve_path(arg);
+            check_writable(Path::new(&path))
+        }
+        "-x" => {
+            // Check if file is executable
+            let path = ctx.resolve_path(arg);
+            check_executable(Path::new(&path))
         }
         "-s" => {
             // File exists and has size > 0
@@ -321,6 +330,56 @@ async fn evaluate_binary(
 fn parse_int(s: &str) -> Result<i64, String> {
     s.parse::<i64>()
         .map_err(|_| format!("invalid integer: {}", s))
+}
+
+/// Check if a path is readable by the current process.
+fn check_readable(path: &Path) -> Result<bool, String> {
+    // First check if file exists
+    if !path.exists() {
+        return Ok(false);
+    }
+    // Try to open for reading
+    Ok(std::fs::File::open(path).is_ok())
+}
+
+/// Check if a path is writable by the current process.
+fn check_writable(path: &Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    // Try to open for writing (append mode to avoid truncating)
+    Ok(std::fs::OpenOptions::new()
+        .write(true)
+        .append(true)
+        .open(path)
+        .is_ok())
+}
+
+/// Check if a path is executable.
+fn check_executable(path: &Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match path.metadata() {
+            Ok(metadata) => {
+                let mode = metadata.permissions().mode();
+                // Check if any execute bit is set
+                Ok(mode & 0o111 != 0)
+            }
+            Err(_) => Ok(false),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // On non-Unix platforms, check file extension
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("exe") | Some("bat") | Some("cmd") | Some("com") => Ok(true),
+            _ => Ok(false),
+        }
+    }
 }
 
 #[cfg(test)]

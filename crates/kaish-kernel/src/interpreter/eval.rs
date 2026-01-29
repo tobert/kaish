@@ -494,6 +494,8 @@ pub fn value_to_bool(value: &Value) -> bool {
 ///
 /// - `~` alone → `$HOME`
 /// - `~/path` → `$HOME/path`
+/// - `~user` → user's home directory (Unix only, reads /etc/passwd)
+/// - `~user/path` → user's home directory + path
 /// - Other strings are returned unchanged.
 pub fn expand_tilde(s: &str) -> String {
     if s == "~" {
@@ -503,9 +505,55 @@ pub fn expand_tilde(s: &str) -> String {
             Ok(home) => format!("{}{}", home, &s[1..]),
             Err(_) => s.to_string(),
         }
+    } else if s.starts_with('~') {
+        // Try ~user expansion
+        expand_tilde_user(s)
     } else {
         s.to_string()
     }
+}
+
+/// Expand ~user to the user's home directory by reading /etc/passwd.
+#[cfg(unix)]
+fn expand_tilde_user(s: &str) -> String {
+    // Extract username from ~user or ~user/path
+    let (username, rest) = if let Some(slash_pos) = s[1..].find('/') {
+        (&s[1..slash_pos + 1], &s[slash_pos + 1..])
+    } else {
+        (&s[1..], "")
+    };
+
+    if username.is_empty() {
+        return s.to_string();
+    }
+
+    // Look up user's home directory by reading /etc/passwd
+    // Format: username:x:uid:gid:gecos:home:shell
+    let passwd = match std::fs::read_to_string("/etc/passwd") {
+        Ok(content) => content,
+        Err(_) => return s.to_string(),
+    };
+
+    for line in passwd.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() >= 6 && fields[0] == username {
+            let home_dir = fields[5];
+            return if rest.is_empty() {
+                home_dir.to_string()
+            } else {
+                format!("{}{}", home_dir, rest)
+            };
+        }
+    }
+
+    // User not found, return unchanged
+    s.to_string()
+}
+
+#[cfg(not(unix))]
+fn expand_tilde_user(s: &str) -> String {
+    // ~user expansion not supported on non-Unix
+    s.to_string()
 }
 
 /// Convert a Value to its string representation, with tilde expansion for paths.
@@ -1229,8 +1277,32 @@ mod tests {
         // These should not be expanded
         assert_eq!(expand_tilde("/home/user"), "/home/user");
         assert_eq!(expand_tilde("foo~bar"), "foo~bar");
-        assert_eq!(expand_tilde("~user"), "~user"); // ~user is not supported
         assert_eq!(expand_tilde(""), "");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn expand_tilde_user() {
+        // Test ~root expansion (root user exists on all Unix systems)
+        let expanded = expand_tilde("~root");
+        // root's home is typically /root or /var/root (macOS)
+        assert!(
+            expanded == "/root" || expanded == "/var/root",
+            "expected /root or /var/root, got: {}",
+            expanded
+        );
+
+        // Test ~root/subpath
+        let expanded_path = expand_tilde("~root/subdir");
+        assert!(
+            expanded_path == "/root/subdir" || expanded_path == "/var/root/subdir",
+            "expected /root/subdir or /var/root/subdir, got: {}",
+            expanded_path
+        );
+
+        // Nonexistent user should remain unchanged
+        let nonexistent = expand_tilde("~nonexistent_user_12345");
+        assert_eq!(nonexistent, "~nonexistent_user_12345");
     }
 
     #[test]

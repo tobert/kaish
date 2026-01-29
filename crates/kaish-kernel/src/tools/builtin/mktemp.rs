@@ -129,26 +129,49 @@ fn expand_template(template: &str) -> String {
 fn random_suffix(len: usize) -> String {
     const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 
-    // Use time + counter as entropy source
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let counter = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+    // Try to get system randomness, fall back to time-based entropy
+    let mut entropy = get_system_entropy(len);
+    if entropy.len() < len {
+        // Fallback: use time + counter as entropy source
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let mut state = now as u64 ^ (counter << 32) ^ (counter >> 32);
 
-    // Simple hash combining time and counter
-    let mut state = now as u64 ^ (counter << 32) ^ (counter >> 32);
-
-    (0..len)
-        .map(|_| {
-            // Simple xorshift for randomness
+        entropy.clear();
+        for _ in 0..len {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
-            let idx = (state as usize) % CHARS.len();
-            CHARS[idx] as char
-        })
+            entropy.push(state as u8);
+        }
+    }
+
+    entropy
+        .iter()
+        .map(|b| CHARS[(*b as usize) % CHARS.len()] as char)
         .collect()
+}
+
+/// Get system-provided random bytes.
+#[cfg(unix)]
+fn get_system_entropy(len: usize) -> Vec<u8> {
+    use std::io::Read;
+
+    let mut buf = vec![0u8; len];
+    if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
+        if file.read_exact(&mut buf).is_ok() {
+            return buf;
+        }
+    }
+    Vec::new() // Return empty on failure, triggering fallback
+}
+
+#[cfg(not(unix))]
+fn get_system_entropy(_len: usize) -> Vec<u8> {
+    Vec::new() // Use fallback on non-Unix
 }
 
 #[cfg(test)]
