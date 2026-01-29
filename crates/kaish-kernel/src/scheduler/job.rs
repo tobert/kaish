@@ -3,6 +3,7 @@
 //! Provides the `JobManager` for tracking background jobs started with `&`.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -51,6 +52,8 @@ pub struct JobInfo {
     pub command: String,
     /// Current status.
     pub status: JobStatus,
+    /// Path to output file (if available).
+    pub output_file: Option<PathBuf>,
 }
 
 /// A background job.
@@ -65,6 +68,8 @@ pub struct Job {
     result_rx: Option<oneshot::Receiver<ExecResult>>,
     /// Cached result after completion.
     result: Option<ExecResult>,
+    /// Path to output file (captures stdout/stderr after completion).
+    output_file: Option<PathBuf>,
 }
 
 impl Job {
@@ -76,6 +81,7 @@ impl Job {
             handle: Some(handle),
             result_rx: None,
             result: None,
+            output_file: None,
         }
     }
 
@@ -87,7 +93,13 @@ impl Job {
             handle: None,
             result_rx: Some(rx),
             result: None,
+            output_file: None,
         }
+    }
+
+    /// Get the output file path (if available).
+    pub fn output_file(&self) -> Option<&PathBuf> {
+        self.output_file.as_ref()
     }
 
     /// Check if the job has completed.
@@ -105,6 +117,8 @@ impl Job {
     }
 
     /// Wait for the job to complete and return its result.
+    ///
+    /// On completion, the job's output is written to a temp file for later retrieval.
     pub async fn wait(&mut self) -> ExecResult {
         if let Some(result) = self.result.take() {
             self.result = Some(result.clone());
@@ -126,8 +140,60 @@ impl Job {
             self.result.clone().unwrap_or_else(|| ExecResult::failure(1, "no result"))
         };
 
+        // Write output to temp file for later retrieval
+        if self.output_file.is_none() {
+            if let Some(path) = self.write_output_file(&result) {
+                self.output_file = Some(path);
+            }
+        }
+
         self.result = Some(result.clone());
         result
+    }
+
+    /// Write job output to a temp file.
+    fn write_output_file(&self, result: &ExecResult) -> Option<PathBuf> {
+        // Only write if there's output to capture
+        if result.out.is_empty() && result.err.is_empty() {
+            return None;
+        }
+
+        let tmp_dir = std::env::temp_dir().join("kaish").join("jobs");
+        if std::fs::create_dir_all(&tmp_dir).is_err() {
+            tracing::warn!("Failed to create job output directory");
+            return None;
+        }
+
+        let filename = format!("job_{}.txt", self.id.0);
+        let path = tmp_dir.join(filename);
+
+        let mut content = String::new();
+        content.push_str(&format!("# Job {}: {}\n", self.id, self.command));
+        content.push_str(&format!("# Status: {}\n\n", if result.ok() { "Done" } else { "Failed" }));
+
+        if !result.out.is_empty() {
+            content.push_str("## STDOUT\n");
+            content.push_str(&result.out);
+            if !result.out.ends_with('\n') {
+                content.push('\n');
+            }
+        }
+
+        if !result.err.is_empty() {
+            content.push_str("\n## STDERR\n");
+            content.push_str(&result.err);
+            if !result.err.ends_with('\n') {
+                content.push('\n');
+            }
+        }
+
+        match std::fs::write(&path, content) {
+            Ok(()) => Some(path),
+            Err(e) => {
+                tracing::warn!("Failed to write job output file: {}", e);
+                None
+            }
+        }
     }
 
     /// Get the result if completed, without waiting.
@@ -220,6 +286,7 @@ impl JobManager {
                 id: job.id,
                 command: job.command.clone(),
                 status: job.status(),
+                output_file: job.output_file.clone(),
             })
             .collect()
     }
@@ -249,6 +316,7 @@ impl JobManager {
             id: job.id,
             command: job.command.clone(),
             status: job.status(),
+            output_file: job.output_file.clone(),
         })
     }
 }
