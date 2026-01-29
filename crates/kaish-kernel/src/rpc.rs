@@ -149,6 +149,9 @@ impl kernel::Server for KernelImpl {
             result_builder.set_stdout(exec_result.out.as_bytes());
             result_builder.set_stderr(b"");
 
+            // Set display hint
+            set_display_hint(&mut result_builder, &exec_result.hint);
+
             // Set data if present
             if let Some(data) = &exec_result.data {
                 set_value(&mut result_builder.reborrow().init_data(), data);
@@ -303,6 +306,83 @@ impl kernel::Server for KernelImpl {
         })
     }
 
+    // --- Working Directory ---
+
+    /// Get the current working directory.
+    fn get_cwd(
+        &mut self,
+        _params: kernel::GetCwdParams,
+        mut results: kernel::GetCwdResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        let kernel = self.kernel.clone();
+
+        capnp::capability::Promise::from_future(async move {
+            let cwd = kernel.cwd().await;
+            results.get().set_path(&cwd.to_string_lossy());
+            Ok(())
+        })
+    }
+
+    /// Set the current working directory.
+    fn set_cwd(
+        &mut self,
+        params: kernel::SetCwdParams,
+        mut results: kernel::SetCwdResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        let kernel = self.kernel.clone();
+
+        let path = match params.get() {
+            Ok(p) => match p.get_path() {
+                Ok(s) => match s.to_str() {
+                    Ok(s) => s.to_string(),
+                    Err(e) => return capnp::capability::Promise::err(capnp::Error::failed(format!("invalid utf8: {}", e))),
+                },
+                Err(e) => return capnp::capability::Promise::err(e),
+            },
+            Err(e) => return capnp::capability::Promise::err(e),
+        };
+
+        capnp::capability::Promise::from_future(async move {
+            kernel.set_cwd(std::path::PathBuf::from(&path)).await;
+            let mut r = results.get();
+            r.set_success(true);
+            r.set_error("");
+            Ok(())
+        })
+    }
+
+    // --- Last Result ---
+
+    /// Get the last execution result ($?).
+    fn get_last_result(
+        &mut self,
+        _params: kernel::GetLastResultParams,
+        mut results: kernel::GetLastResultResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        let kernel = self.kernel.clone();
+
+        capnp::capability::Promise::from_future(async move {
+            let exec_result = kernel.last_result().await;
+
+            let mut result_builder = results.get().init_result();
+            result_builder.set_code(exec_result.code as i32);
+            result_builder.set_ok(exec_result.ok());
+            result_builder.set_err(&exec_result.err);
+            result_builder.set_stdout(exec_result.out.as_bytes());
+            result_builder.set_stderr(b"");
+
+            // Set display hint
+            set_display_hint(&mut result_builder, &exec_result.hint);
+
+            // Set data if present
+            if let Some(data) = &exec_result.data {
+                set_value(&mut result_builder.reborrow().init_data(), data);
+            }
+
+            Ok(())
+        })
+    }
+
     // --- Placeholder implementations for remaining methods ---
 
     fn execute_streaming(
@@ -442,6 +522,7 @@ impl kernel::Server for KernelImpl {
 
 use kaish_schema::value;
 use crate::ast::Value;
+use crate::interpreter::DisplayHint;
 
 /// Convert a kaish Value to a Cap'n Proto Value.
 fn set_value(builder: &mut value::Builder<'_>, value: &Value) {
@@ -452,6 +533,25 @@ fn set_value(builder: &mut value::Builder<'_>, value: &Value) {
         Value::Float(f) => builder.set_float(*f),
         Value::String(s) => builder.set_string(s),
     }
+}
+
+/// Convert a kaish DisplayHint to a Cap'n Proto DisplayHint.
+///
+/// The schema has a simplified enum (text, json, table, silent) while the kernel
+/// has richer struct variants. We map:
+/// - None → text
+/// - Formatted → text (pre-rendered)
+/// - Table → table
+/// - Tree → text (rendered tree)
+fn set_display_hint(builder: &mut kaish_schema::exec_result::Builder<'_>, hint: &DisplayHint) {
+    use kaish_schema::kaish_capnp::DisplayHint as SchemaHint;
+    let schema_hint = match hint {
+        DisplayHint::None => SchemaHint::Text,
+        DisplayHint::Formatted { .. } => SchemaHint::Text,
+        DisplayHint::Table { .. } => SchemaHint::Table,
+        DisplayHint::Tree { .. } => SchemaHint::Text,
+    };
+    builder.set_hint(schema_hint);
 }
 
 /// Read a kaish Value from a Cap'n Proto Value.

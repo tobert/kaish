@@ -103,7 +103,7 @@ impl KernelClient for IpcClient {
             } else {
                 None
             },
-            hint: DisplayHint::default(),
+            hint: read_display_hint(&result)?,
         })
     }
 
@@ -151,22 +151,40 @@ impl KernelClient for IpcClient {
     }
 
     async fn cwd(&self) -> ClientResult<String> {
-        // CWD isn't directly exposed in the RPC interface yet
-        // Execute pwd to get it
-        let result = self.execute("pwd").await?;
-        Ok(result.out.trim().to_string())
+        let request = self.client.get_cwd_request();
+        let response = request.send().promise.await?;
+        let path = response.get()?.get_path()?.to_str()?;
+        Ok(path.to_string())
     }
 
     async fn set_cwd(&self, path: &str) -> ClientResult<()> {
-        // Use cd command
-        self.execute(&format!("cd {}", path)).await?;
+        let mut request = self.client.set_cwd_request();
+        request.get().set_path(path);
+        let response = request.send().promise.await?;
+        let result = response.get()?;
+        if !result.get_success() {
+            let error = result.get_error()?.to_str()?;
+            return Err(ClientError::Execution(error.to_string()));
+        }
         Ok(())
     }
 
     async fn last_result(&self) -> ClientResult<ExecResult> {
-        // Execute a no-op to get $?
-        // This is a workaround since last_result isn't in the RPC interface
-        self.execute("true").await
+        let request = self.client.get_last_result_request();
+        let response = request.send().promise.await?;
+        let result = response.get()?.get_result()?;
+
+        Ok(ExecResult {
+            code: result.get_code() as i64,
+            out: String::from_utf8_lossy(result.get_stdout()?).to_string(),
+            err: result.get_err()?.to_str()?.to_string(),
+            data: if result.has_data() {
+                Some(read_value(&result.get_data()?)?)
+            } else {
+                None
+            },
+            hint: read_display_hint(&result)?,
+        })
     }
 
     async fn reset(&self) -> ClientResult<()> {
@@ -251,6 +269,25 @@ fn read_value(reader: &value::Reader<'_>) -> ClientResult<Value> {
         Which::Blob(_) => {
             Err(ClientError::Rpc(capnp::Error::failed("blob values not supported".into())))
         }
+    }
+}
+
+/// Read display hint from an ExecResult.
+///
+/// Maps the schema's simplified enum back to the kernel's enum.
+/// Since the schema only has hint types (not the full data), we map:
+/// - text → DisplayHint::None
+/// - json → DisplayHint::None (data is in the data field)
+/// - table → DisplayHint::None (we don't have the table structure)
+/// - silent → DisplayHint::None
+fn read_display_hint(result: &kaish_schema::exec_result::Reader<'_>) -> ClientResult<DisplayHint> {
+    use kaish_schema::kaish_capnp::DisplayHint as SchemaHint;
+    match result.get_hint() {
+        Ok(SchemaHint::Text) => Ok(DisplayHint::None),
+        Ok(SchemaHint::Json) => Ok(DisplayHint::None),
+        Ok(SchemaHint::Table) => Ok(DisplayHint::None),
+        Ok(SchemaHint::Silent) => Ok(DisplayHint::None),
+        Err(_) => Ok(DisplayHint::None), // Default to None for unknown values
     }
 }
 

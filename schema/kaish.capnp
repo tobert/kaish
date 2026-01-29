@@ -82,6 +82,15 @@ struct ExecResult {
   stdout @3 :Data;    # Raw bytes
   stderr @4 :Data;    # Raw bytes
   data @5 :Value;     # Parsed JSON if applicable
+  hint @6 :DisplayHint;  # How output should be displayed
+}
+
+# Hint for how to display execution output.
+enum DisplayHint {
+  text @0;      # Plain text (default)
+  json @1;      # Formatted JSON
+  table @2;     # Tabular data
+  silent @3;    # No output (side effect only)
 }
 
 # ============================================================
@@ -178,6 +187,13 @@ interface Kernel {
   getVar @2 (name :Text) -> (value :Value);
   setVar @3 (name :Text, value :Value) -> ();
   listVars @4 () -> (vars :List(KeyValue));
+
+  # --- Working Directory ---
+  getCwd @21 () -> (path :Text);
+  setCwd @22 (path :Text) -> (success :Bool, error :Text);
+
+  # --- Last Result ---
+  getLastResult @23 () -> (result :ExecResult);
 
   # --- Tools ---
   listTools @5 () -> (tools :List(ToolInfo));
