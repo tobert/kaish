@@ -8,7 +8,7 @@ use rmcp::service::{RoleClient, RunningService, ServiceExt};
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use rmcp::ClientHandler;
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use crate::config::{McpConfig, McpTransport};
 
@@ -21,16 +21,21 @@ struct MinimalClientHandler;
 
 impl ClientHandler for MinimalClientHandler {}
 
+/// Type alias for the service wrapped in Arc for concurrent access.
+type SharedService = Arc<RunningService<RoleClient, MinimalClientHandler>>;
+
 /// Client for communicating with an MCP server.
 ///
 /// Wraps rmcp's RunningService to provide tool discovery and invocation.
+/// The service is wrapped in Arc to allow concurrent tool calls without
+/// holding the lock during async operations.
 pub struct McpClient {
     /// Server name for identification.
     name: String,
-    /// The underlying rmcp running service.
-    service: Mutex<Option<RunningService<RoleClient, MinimalClientHandler>>>,
+    /// The underlying rmcp running service, wrapped in Arc for sharing.
+    service: RwLock<Option<SharedService>>,
     /// Cached tool list.
-    tools: Mutex<Option<Vec<McpTool>>>,
+    tools: RwLock<Option<Vec<McpTool>>>,
     /// Transport config (for reconnection).
     config: McpConfig,
 }
@@ -40,8 +45,8 @@ impl McpClient {
     pub fn new(config: McpConfig) -> Self {
         Self {
             name: config.name.clone(),
-            service: Mutex::new(None),
-            tools: Mutex::new(None),
+            service: RwLock::new(None),
+            tools: RwLock::new(None),
             config,
         }
     }
@@ -75,62 +80,76 @@ impl McpClient {
             }
         };
 
-        *self.service.lock().await = Some(service);
+        *self.service.write().await = Some(Arc::new(service));
         Ok(())
     }
 
     /// Disconnect from the MCP server.
     pub async fn disconnect(&self) -> Result<()> {
-        if let Some(service) = self.service.lock().await.take() {
-            service
-                .cancel()
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to cancel service: {}", e))?;
+        if let Some(service) = self.service.write().await.take() {
+            // Try to unwrap the Arc - if we're the only owner, cancel it.
+            // If there are other references, they'll complete their calls.
+            if let Ok(service) = Arc::try_unwrap(service) {
+                service
+                    .cancel()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to cancel service: {}", e))?;
+            }
         }
-        *self.tools.lock().await = None;
+        *self.tools.write().await = None;
         Ok(())
     }
 
     /// Check if connected.
     pub async fn is_connected(&self) -> bool {
-        self.service.lock().await.is_some()
+        self.service.read().await.is_some()
     }
 
     /// List available tools from the MCP server.
     pub async fn list_tools(&self) -> Result<Vec<McpTool>> {
         // Return cached tools if available
-        if let Some(tools) = self.tools.lock().await.as_ref() {
+        if let Some(tools) = self.tools.read().await.as_ref() {
             return Ok(tools.clone());
         }
 
-        let tools = {
-            let service = self.service.lock().await;
-            let service = service
-                .as_ref()
-                .context("Not connected to MCP server")?;
+        // Get Arc clone of the service, releasing the lock immediately.
+        let service = self
+            .service
+            .read()
+            .await
+            .as_ref()
+            .context("Not connected to MCP server")?
+            .clone();
 
-            service
-                .list_all_tools()
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to list tools: {}", e))?
-        };
+        let tools = service
+            .list_all_tools()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list tools: {}", e))?;
 
         // Cache the tools
-        *self.tools.lock().await = Some(tools.clone());
+        *self.tools.write().await = Some(tools.clone());
 
         Ok(tools)
     }
 
     /// Call a tool on the MCP server.
+    ///
+    /// Tool calls can run concurrently - we clone the Arc and release
+    /// the lock before awaiting the call.
     pub async fn call_tool(
         &self,
         name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<CallToolResult> {
-        let service = self.service.lock().await;
-        let service = service
+        // Get Arc clone of the service, releasing the lock immediately.
+        // This allows concurrent tool calls instead of serializing them.
+        let service = self
+            .service
+            .read()
+            .await
             .as_ref()
-            .context("Not connected to MCP server")?;
+            .context("Not connected to MCP server")?
+            .clone();
 
         let result = service
             .call_tool(CallToolRequestParam {
@@ -146,10 +165,13 @@ impl McpClient {
 
     /// Get peer (server) information.
     pub async fn peer_info(&self) -> Result<String> {
-        let service = self.service.lock().await;
-        let service = service
+        let service = self
+            .service
+            .read()
+            .await
             .as_ref()
-            .context("Not connected to MCP server")?;
+            .context("Not connected to MCP server")?
+            .clone();
 
         let info = service.peer_info();
         Ok(format!("{:?}", info))

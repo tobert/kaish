@@ -294,8 +294,7 @@ pub enum TestCmpOp {
 /// A literal value.
 ///
 /// Note: Arrays and objects are intentionally not supported. JSON data from
-/// MCP tools is stored as strings and processed with `jq`. For complex data
-/// manipulation, use Rhai integration.
+/// MCP tools is stored as strings and processed with `jq`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Null,

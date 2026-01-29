@@ -5,8 +5,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use kaish_kernel::vfs::{Filesystem, VfsRouter};
+
+/// Maximum file size for read_resource (16 MB).
+/// Prevents OOM when agents request very large files.
+const MAX_RESOURCE_SIZE: u64 = 16 * 1024 * 1024;
 
 
 /// Parse a kaish://vfs/ URI into a VFS path.
@@ -83,6 +87,8 @@ pub async fn list_resources(
 }
 
 /// Read a resource from the VFS.
+///
+/// Returns an error if the file exceeds `MAX_RESOURCE_SIZE` (16 MB) to prevent OOM.
 pub async fn read_resource(
     vfs: &Arc<VfsRouter>,
     path: &Path,
@@ -103,6 +109,15 @@ pub async fn read_resource(
             text: listing.join("\n"),
             mime_type: "text/plain".to_string(),
         });
+    }
+
+    // Check file size before reading to prevent OOM
+    if metadata.size > MAX_RESOURCE_SIZE {
+        bail!(
+            "File too large: {} bytes exceeds limit of {} bytes",
+            metadata.size,
+            MAX_RESOURCE_SIZE
+        );
     }
 
     // Read file content

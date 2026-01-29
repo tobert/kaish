@@ -8,7 +8,7 @@
 //! - Integer literals
 //!
 //! Does NOT support:
-//! - Floating point (use Rhai for that)
+//! - Floating point (pipe to `jq` for float math)
 //! - Bitwise operations (shell-ism we're skipping)
 //! - Assignment within expressions (confusing)
 

@@ -45,11 +45,15 @@ impl KaishServerHandler {
         vfs.mount("/", MemoryFs::new());
         vfs.mount("/tmp", MemoryFs::new());
 
-        // Mount local filesystem
-        let home = std::env::var("HOME")
+        // Mount local filesystem at user's home directory.
+        // If HOME is not set, use a safe temp directory instead of exposing root.
+        let local_root = std::env::var("HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/"));
-        vfs.mount("/mnt/local", LocalFs::new(home));
+            .unwrap_or_else(|_| {
+                tracing::warn!("HOME not set, mounting temp directory for /mnt/local");
+                std::env::temp_dir()
+            });
+        vfs.mount("/mnt/local", LocalFs::new(local_root));
 
         Ok(Self {
             config,

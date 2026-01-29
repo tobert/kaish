@@ -130,6 +130,11 @@ pub async fn execute(
     // The default tokio worker stack (2MB) isn't enough for deep recursion
     // on large inputs (100KB+ strings). We use 16MB which should handle
     // most realistic inputs.
+    //
+    // PERF: This spawns a thread + runtime per request. If this becomes a
+    // bottleneck, refactor to use a persistent LocalSet worker thread with
+    // an mpsc channel for dispatching work. The thread-per-request approach
+    // is simpler and works around kaish_kernel returning !Send futures.
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     std::thread::Builder::new()
