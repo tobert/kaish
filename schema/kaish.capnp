@@ -181,37 +181,31 @@ interface Kernel {
 
   # --- Tools ---
   listTools @5 () -> (tools :List(ToolInfo));
-  getToolSchema @6 (name :Text) -> (schema :ToolSchema);
-  callTool @7 (name :Text, args :List(KeyValue)) -> (result :ExecResult);
-
-  # --- Jobs ---
-  listJobs @8 () -> (jobs :List(JobInfo));
-  cancelJob @9 (id :UInt64) -> (success :Bool);
-  waitJob @10 (id :UInt64) -> (result :ExecResult);
+  callTool @6 (name :Text, args :List(KeyValue)) -> (result :ExecResult);
 
   # --- VFS ---
-  mount @11 (config :MountConfig) -> ();
-  unmount @12 (path :Text) -> ();
-  listMounts @13 () -> (mounts :List(MountConfig));
+  mount @7 (config :MountConfig) -> ();
+  unmount @8 (path :Text) -> ();
+  listMounts @9 () -> (mounts :List(MountConfig));
 
   # --- MCP ---
-  registerMcp @14 (config :McpServerConfig) -> ();
-  unregisterMcp @15 (name :Text) -> ();
-  listMcpServers @16 () -> (servers :List(McpServerConfig));
+  registerMcp @10 (config :McpServerConfig) -> ();
+  unregisterMcp @11 (name :Text) -> ();
+  listMcpServers @12 () -> (servers :List(McpServerConfig));
 
   # --- State ---
-  snapshot @17 () -> (state :KernelState);
-  restore @18 (state :KernelState) -> ();
-  reset @19 () -> ();  # Clear all state
+  snapshot @13 () -> (state :KernelState);
+  restore @14 (state :KernelState) -> ();
+  reset @15 () -> ();  # Clear all state
 
   # --- Blobs ---
-  readBlob @20 (id :Text) -> (stream :BlobStream);
-  writeBlob @21 (contentType :Text, size :UInt64) -> (id :Text, stream :BlobSink);
-  deleteBlob @22 (id :Text) -> (success :Bool);
+  readBlob @16 (id :Text) -> (stream :BlobStream);
+  writeBlob @17 (contentType :Text, size :UInt64) -> (id :Text, stream :BlobSink);
+  deleteBlob @18 (id :Text) -> (success :Bool);
 
   # --- Lifecycle ---
-  ping @23 () -> (pong :Text);
-  shutdown @24 () -> ();
+  ping @19 () -> (pong :Text);
+  shutdown @20 () -> ();
 }
 
 # For writing blobs
@@ -250,30 +244,4 @@ enum ToolSource {
   builtin @0;
   user @1;
   mcp @2;
-}
-
-struct ToolSchema {
-  name @0 :Text;
-  description @1 :Text;
-  params @2 :List(ParamDef);
-  returns @3 :Text;  # Return type description
-}
-
-# ============================================================
-# Job Info
-# ============================================================
-
-struct JobInfo {
-  id @0 :UInt64;
-  command @1 :Text;
-  status @2 :JobStatus;
-  startTime @3 :Int64;
-  pid @4 :Int32;  # If applicable
-}
-
-enum JobStatus {
-  running @0;
-  completed @1;
-  failed @2;
-  cancelled @3;
 }

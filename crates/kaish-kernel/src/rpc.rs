@@ -315,16 +315,6 @@ impl kernel::Server for KernelImpl {
         ))
     }
 
-    fn get_tool_schema(
-        &mut self,
-        _params: kernel::GetToolSchemaParams,
-        _results: kernel::GetToolSchemaResults,
-    ) -> capnp::capability::Promise<(), capnp::Error> {
-        capnp::capability::Promise::err(capnp::Error::unimplemented(
-            "get_tool_schema not yet implemented".into(),
-        ))
-    }
-
     fn call_tool(
         &mut self,
         _params: kernel::CallToolParams,
@@ -332,36 +322,6 @@ impl kernel::Server for KernelImpl {
     ) -> capnp::capability::Promise<(), capnp::Error> {
         capnp::capability::Promise::err(capnp::Error::unimplemented(
             "call_tool not yet implemented".into(),
-        ))
-    }
-
-    fn list_jobs(
-        &mut self,
-        _params: kernel::ListJobsParams,
-        _results: kernel::ListJobsResults,
-    ) -> capnp::capability::Promise<(), capnp::Error> {
-        capnp::capability::Promise::err(capnp::Error::unimplemented(
-            "list_jobs not yet implemented".into(),
-        ))
-    }
-
-    fn cancel_job(
-        &mut self,
-        _params: kernel::CancelJobParams,
-        _results: kernel::CancelJobResults,
-    ) -> capnp::capability::Promise<(), capnp::Error> {
-        capnp::capability::Promise::err(capnp::Error::unimplemented(
-            "cancel_job not yet implemented".into(),
-        ))
-    }
-
-    fn wait_job(
-        &mut self,
-        _params: kernel::WaitJobParams,
-        _results: kernel::WaitJobResults,
-    ) -> capnp::capability::Promise<(), capnp::Error> {
-        capnp::capability::Promise::err(capnp::Error::unimplemented(
-            "wait_job not yet implemented".into(),
         ))
     }
 
