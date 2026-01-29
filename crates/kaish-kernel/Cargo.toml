@@ -44,6 +44,9 @@ jaq-json = { workspace = true }
 # XDG paths
 directories = { workspace = true }
 
+# Process information (Linux)
+procfs = { workspace = true }
+
 # RPC server (L10: Kernel)
 capnp = { workspace = true }
 capnp-rpc = { workspace = true }

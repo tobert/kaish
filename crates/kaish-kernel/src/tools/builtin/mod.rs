@@ -32,6 +32,7 @@ mod mkdir;
 mod mktemp;
 mod mv;
 mod printf;
+mod ps;
 mod pwd;
 mod read;
 mod readlink;
@@ -95,6 +96,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(mv::Mv);
     registry.register(patch::Patch);
     registry.register(printf::Printf);
+    registry.register(ps::Ps);
     registry.register(pwd::Pwd);
     registry.register(read::Read);
     registry.register(readlink::Readlink);
