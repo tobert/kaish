@@ -15,6 +15,72 @@
 
 use logos::{Logos, Span};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Global counter for generating unique markers across all tokenize calls.
+static MARKER_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Maximum nesting depth for parentheses in arithmetic expressions.
+/// Prevents stack overflow from pathologically nested inputs like $((((((...
+const MAX_PAREN_DEPTH: usize = 256;
+
+/// Tracks a text replacement for span correction.
+/// When preprocessing replaces text (like `$((1+2))` with a marker),
+/// we need to adjust subsequent spans to account for the length change.
+#[derive(Debug, Clone)]
+struct SpanReplacement {
+    /// Position in the preprocessed text where the marker starts.
+    preprocessed_pos: usize,
+    /// Length of the marker in preprocessed text.
+    marker_len: usize,
+    /// Length of the original text that was replaced.
+    original_len: usize,
+}
+
+/// Corrects a span from preprocessed-text coordinates back to original-text coordinates.
+fn correct_span(span: Span, replacements: &[SpanReplacement]) -> Span {
+    let mut start_adjustment: isize = 0;
+    let mut end_adjustment: isize = 0;
+
+    for r in replacements {
+        // Calculate the length difference (positive = original was longer, negative = marker is longer)
+        let delta = r.original_len as isize - r.marker_len as isize;
+
+        // If the span starts after this replacement, adjust the start
+        if span.start > r.preprocessed_pos + r.marker_len {
+            start_adjustment += delta;
+        } else if span.start > r.preprocessed_pos {
+            // Span starts inside the marker - map to original position
+            // (this shouldn't happen often, but handle it gracefully)
+            start_adjustment += delta;
+        }
+
+        // If the span ends after this replacement, adjust the end
+        if span.end > r.preprocessed_pos + r.marker_len {
+            end_adjustment += delta;
+        } else if span.end > r.preprocessed_pos {
+            // Span ends inside the marker - map to end of original
+            end_adjustment += delta;
+        }
+    }
+
+    let new_start = (span.start as isize + start_adjustment).max(0) as usize;
+    let new_end = (span.end as isize + end_adjustment).max(new_start as isize) as usize;
+    new_start..new_end
+}
+
+/// Generate a unique marker ID that's extremely unlikely to collide with user code.
+/// Uses a combination of timestamp, counter, and process ID.
+fn unique_marker_id() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let counter = MARKER_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    format!("{:x}_{:x}_{:x}", timestamp, counter, pid)
+}
 
 /// A token with its span in the source text.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,6 +109,8 @@ pub enum LexerError {
     InvalidNumberIdent(String),
     InvalidFloatNoLeading,
     InvalidFloatNoTrailing,
+    /// Nesting depth exceeded (too many nested parentheses in arithmetic).
+    NestingTooDeep,
 }
 
 impl fmt::Display for LexerError {
@@ -65,6 +133,7 @@ impl fmt::Display for LexerError {
             }
             LexerError::InvalidFloatNoLeading => write!(f, "float must have leading digit"),
             LexerError::InvalidFloatNoTrailing => write!(f, "float must have trailing digit"),
+            LexerError::NestingTooDeep => write!(f, "nesting depth exceeded (max {})", MAX_PAREN_DEPTH),
         }
     }
 }
@@ -677,83 +746,119 @@ impl Token {
     }
 }
 
+/// Result of preprocessing arithmetic expressions.
+struct ArithmeticPreprocessResult {
+    /// Preprocessed source with markers replacing $((expr)).
+    text: String,
+    /// Vector of (marker, expression_content) pairs.
+    arithmetics: Vec<(String, String)>,
+    /// Span replacements for correcting token positions.
+    replacements: Vec<SpanReplacement>,
+}
+
 /// Preprocess arithmetic expressions in source code.
 ///
 /// Finds `$((expr))` patterns and replaces them with markers.
-/// Returns the preprocessed source and a vector of (marker, content) pairs.
+/// Returns the preprocessed source, arithmetic contents, and span replacement info.
 ///
 /// Example:
 ///   `X=$((1 + 2))`
 /// Becomes:
-///   `X=__ARITH_0__`
-/// With arithmetic[0] = ("__ARITH_0__", "1 + 2")
-fn preprocess_arithmetic(source: &str) -> (String, Vec<(String, String)>) {
+///   `X=__KAISH_ARITH_{id}__`
+/// With arithmetics[0] = ("__KAISH_ARITH_{id}__", "1 + 2")
+///
+/// # Errors
+/// Returns `LexerError::NestingTooDeep` if parentheses are nested beyond MAX_PAREN_DEPTH.
+fn preprocess_arithmetic(source: &str) -> Result<ArithmeticPreprocessResult, LexerError> {
     let mut result = String::with_capacity(source.len());
     let mut arithmetics: Vec<(String, String)> = Vec::new();
-    let mut chars = source.chars().peekable();
-    let mut arith_count = 0;
+    let mut replacements: Vec<SpanReplacement> = Vec::new();
+    let mut source_pos: usize = 0;
+    let chars_vec: Vec<char> = source.chars().collect();
+    let mut i = 0;
 
-    while let Some(ch) = chars.next() {
+    while i < chars_vec.len() {
+        let ch = chars_vec[i];
+
         // Look for $(( (potential arithmetic)
-        if ch == '$' && chars.peek() == Some(&'(') {
-            // Peek ahead to see if it's $((
-            let mut peek_chars = chars.clone();
-            peek_chars.next(); // consume first (
-            if peek_chars.peek() == Some(&'(') {
-                // This is arithmetic $((
-                chars.next(); // consume first (
-                chars.next(); // consume second (
+        if ch == '$' && i + 2 < chars_vec.len() && chars_vec[i + 1] == '(' && chars_vec[i + 2] == '(' {
+            let arith_start_pos = result.len();
+            let original_start = source_pos;
 
-                // Collect expression until matching ))
-                let mut expr = String::new();
-                let mut paren_depth = 0;
+            // Skip $((
+            i += 3;
+            source_pos += 3;
 
-                loop {
-                    match chars.next() {
-                        Some('(') => {
-                            paren_depth += 1;
-                            expr.push('(');
+            // Collect expression until matching ))
+            let mut expr = String::new();
+            let mut paren_depth: usize = 0;
+
+            while i < chars_vec.len() {
+                let c = chars_vec[i];
+                match c {
+                    '(' => {
+                        paren_depth += 1;
+                        if paren_depth > MAX_PAREN_DEPTH {
+                            return Err(LexerError::NestingTooDeep);
                         }
-                        Some(')') => {
-                            if paren_depth > 0 {
-                                paren_depth -= 1;
-                                expr.push(')');
-                            } else {
-                                // Check for second )
-                                if chars.peek() == Some(&')') {
-                                    chars.next(); // consume second )
-                                    break;
-                                } else {
-                                    // Single ) inside - keep going
-                                    expr.push(')');
-                                }
-                            }
-                        }
-                        Some(c) => expr.push(c),
-                        None => {
-                            // EOF without closing ))
+                        expr.push('(');
+                        i += 1;
+                        source_pos += c.len_utf8();
+                    }
+                    ')' => {
+                        if paren_depth > 0 {
+                            paren_depth -= 1;
+                            expr.push(')');
+                            i += 1;
+                            source_pos += 1;
+                        } else if i + 1 < chars_vec.len() && chars_vec[i + 1] == ')' {
+                            // Found closing ))
+                            i += 2;
+                            source_pos += 2;
                             break;
+                        } else {
+                            // Single ) inside - keep going
+                            expr.push(')');
+                            i += 1;
+                            source_pos += 1;
                         }
                     }
+                    _ => {
+                        expr.push(c);
+                        i += 1;
+                        source_pos += c.len_utf8();
+                    }
                 }
-
-                // Create a marker for this arithmetic
-                let marker = format!("__ARITH_{}__", arith_count);
-                arith_count += 1;
-                arithmetics.push((marker.clone(), expr));
-
-                // Output marker
-                result.push_str(&marker);
-            } else {
-                // This is command substitution $( - output normally
-                result.push(ch);
             }
+
+            // Calculate original length: from $$(( to ))
+            let original_len = source_pos - original_start;
+
+            // Create a unique marker for this arithmetic (collision-resistant)
+            let marker = format!("__KAISH_ARITH_{}__", unique_marker_id());
+            let marker_len = marker.len();
+
+            // Record the replacement for span correction
+            replacements.push(SpanReplacement {
+                preprocessed_pos: arith_start_pos,
+                marker_len,
+                original_len,
+            });
+
+            arithmetics.push((marker.clone(), expr));
+            result.push_str(&marker);
         } else {
             result.push(ch);
+            i += 1;
+            source_pos += ch.len_utf8();
         }
     }
 
-    (result, arithmetics)
+    Ok(ArithmeticPreprocessResult {
+        text: result,
+        arithmetics,
+        replacements,
+    })
 }
 
 /// Preprocess here-docs in source code.
@@ -770,7 +875,6 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String)>) {
     let mut result = String::with_capacity(source.len());
     let mut heredocs: Vec<(String, String)> = Vec::new();
     let mut chars = source.chars().peekable();
-    let mut heredoc_count = 0;
 
     while let Some(ch) = chars.next() {
         // Look for << (potential here-doc)
@@ -906,9 +1010,8 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String)>) {
             // Remove trailing newline from content (we'll add it when needed)
             let content = content.trim_end_matches('\n').to_string();
 
-            // Create a marker for this here-doc
-            let marker = format!("__HEREDOC_{}__", heredoc_count);
-            heredoc_count += 1;
+            // Create a unique marker for this here-doc (collision-resistant)
+            let marker = format!("__KAISH_HEREDOC_{}__", unique_marker_id());
             heredocs.push((marker.clone(), content));
 
             // Output << and marker
@@ -933,25 +1036,31 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String)>) {
 /// - Here-docs: `<<EOF\nhello\nEOF` becomes `HereDocStart` + `HereDoc("hello")`
 pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerError>>> {
     // Preprocess arithmetic first (before heredocs because heredoc content might contain $((
-    let (preprocessed, arithmetics) = preprocess_arithmetic(source);
+    let arith_result = preprocess_arithmetic(source)
+        .map_err(|e| vec![Spanned::new(e, 0..source.len())])?;
 
-    // Then preprocess here-docs
-    let (preprocessed, heredocs) = preprocess_heredocs(&preprocessed);
+    // Then preprocess here-docs (heredoc span tracking is not implemented for simplicity)
+    let (preprocessed, heredocs) = preprocess_heredocs(&arith_result.text);
+
+    // Combine replacements for span correction (arithmetic only for now)
+    let span_replacements = arith_result.replacements;
 
     let lexer = Token::lexer(&preprocessed);
     let mut tokens = Vec::new();
     let mut errors = Vec::new();
 
     for (result, span) in lexer.spanned() {
+        // Correct the span from preprocessed coordinates to original coordinates
+        let corrected_span = correct_span(span, &span_replacements);
         match result {
             Ok(token) => {
                 // Skip comments and line continuations - they're not needed for parsing
                 if !matches!(token, Token::Comment | Token::LineContinuation) {
-                    tokens.push(Spanned::new(token, span));
+                    tokens.push(Spanned::new(token, corrected_span));
                 }
             }
             Err(err) => {
-                errors.push(Spanned::new(err, span));
+                errors.push(Spanned::new(err, corrected_span));
             }
         }
     }
@@ -965,21 +1074,21 @@ pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerEr
     let mut i = 0;
 
     while i < tokens.len() {
-        // Check for arithmetic marker
+        // Check for arithmetic marker (unique format: __KAISH_ARITH_{id}__)
         if let Token::Ident(ref name) = tokens[i].token
-            && name.starts_with("__ARITH_") && name.ends_with("__")
-                && let Some((_, expr)) = arithmetics.iter().find(|(marker, _)| marker == name) {
+            && name.starts_with("__KAISH_ARITH_") && name.ends_with("__")
+                && let Some((_, expr)) = arith_result.arithmetics.iter().find(|(marker, _)| marker == name) {
                     final_tokens.push(Spanned::new(Token::Arithmetic(expr.clone()), tokens[i].span.clone()));
                     i += 1;
                     continue;
                 }
 
-        // Check for heredoc
+        // Check for heredoc (unique format: __KAISH_HEREDOC_{id}__)
         if matches!(tokens[i].token, Token::HereDocStart) {
             // Check if next token is a heredoc marker
             if i + 1 < tokens.len()
                 && let Token::Ident(ref name) = tokens[i + 1].token
-                    && name.starts_with("__HEREDOC_") && name.ends_with("__") {
+                    && name.starts_with("__KAISH_HEREDOC_") && name.ends_with("__") {
                         // Find the corresponding content
                         if let Some((_, content)) = heredocs.iter().find(|(marker, _)| marker == name) {
                             final_tokens.push(Spanned::new(Token::HereDocStart, tokens[i].span.clone()));
@@ -994,7 +1103,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerEr
         let token = if let Token::String(ref s) = tokens[i].token {
             // Check if string contains any arithmetic markers
             let mut new_content = s.clone();
-            for (marker, expr) in &arithmetics {
+            for (marker, expr) in &arith_result.arithmetics {
                 if new_content.contains(marker) {
                     // Replace marker with the special format that parse_interpolated_string can detect
                     // Use ${__ARITH:expr__} format so it gets parsed as StringPart::Arithmetic
@@ -1061,9 +1170,9 @@ pub fn parse_string_literal(source: &str) -> Result<String, LexerError> {
                 Some('r') => result.push('\r'),
                 Some('\\') => result.push('\\'),
                 Some('"') => result.push('"'),
-                // Use a marker for escaped dollar that won't be re-interpreted
-                // parse_interpolated_string will convert __ESCAPED_DOLLAR__ back to $
-                Some('$') => result.push_str("__ESCAPED_DOLLAR__"),
+                // Use a unique marker for escaped dollar that won't be re-interpreted
+                // parse_interpolated_string will convert this back to $
+                Some('$') => result.push_str("__KAISH_ESCAPED_DOLLAR__"),
                 Some('u') => {
                     // Unicode escape: \uXXXX
                     let mut hex = String::with_capacity(4);
@@ -1481,14 +1590,14 @@ mod tests {
     #[test]
     fn parse_string_with_escaped_dollar() {
         // \$ produces a marker that parse_interpolated_string will convert to $
-        // The marker __ESCAPED_DOLLAR__ is used to prevent re-interpretation
+        // The marker __KAISH_ESCAPED_DOLLAR__ is used to prevent re-interpretation
         assert_eq!(
             parse_string_literal(r#""\$VAR""#).expect("ok"),
-            "__ESCAPED_DOLLAR__VAR"
+            "__KAISH_ESCAPED_DOLLAR__VAR"
         );
         assert_eq!(
             parse_string_literal(r#""cost: \$100""#).expect("ok"),
-            "cost: __ESCAPED_DOLLAR__100"
+            "cost: __KAISH_ESCAPED_DOLLAR__100"
         );
     }
 
@@ -2127,5 +2236,26 @@ mod tests {
             Token::Ident("hello".to_string()),
             Token::RParen,
         ]);
+    }
+
+    #[test]
+    fn arithmetic_nesting_limit() {
+        // Create deeply nested parens that exceed MAX_PAREN_DEPTH (256)
+        let open_parens = "(".repeat(300);
+        let close_parens = ")".repeat(300);
+        let source = format!("$(({}1{}))", open_parens, close_parens);
+        let result = tokenize(&source);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].token, LexerError::NestingTooDeep);
+    }
+
+    #[test]
+    fn arithmetic_nesting_within_limit() {
+        // Nesting within limit should work
+        let source = "$((((1 + 2) * 3)))";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![Token::Arithmetic("((1 + 2) * 3)".to_string())]);
     }
 }

@@ -126,8 +126,8 @@ fn stmt_to_pipeline(stmt: Stmt) -> Option<Pipeline> {
 
 fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
     // First, replace escaped dollar markers with a temporary placeholder
-    // The lexer uses __ESCAPED_DOLLAR__ for \$ to prevent re-interpretation
-    let s = s.replace("__ESCAPED_DOLLAR__", "\x00DOLLAR\x00");
+    // The lexer uses __KAISH_ESCAPED_DOLLAR__ for \$ to prevent re-interpretation
+    let s = s.replace("__KAISH_ESCAPED_DOLLAR__", "\x00DOLLAR\x00");
 
     let mut parts = Vec::new();
     let mut current_text = String::new();
@@ -1454,7 +1454,7 @@ where
     }
     .map(|s| {
         // Check if string contains interpolation markers (${} or $NAME) or escaped dollars
-        if s.contains('$') || s.contains("__ESCAPED_DOLLAR__") {
+        if s.contains('$') || s.contains("__KAISH_ESCAPED_DOLLAR__") {
             // Parse interpolated parts
             let parts = parse_interpolated_string(&s);
             if parts.len() == 1
