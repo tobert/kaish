@@ -118,8 +118,16 @@ mkdir /tmp/work && cd /tmp/work && echo "ready"
 [[ $NUM -lt 10 ]]               # less than
 [[ $NUM -ge 5 ]]                # greater or equal
 [[ $NUM -le 10 ]]               # less or equal
-[[ $filename =~ "\.rs$" ]]      # regex match
+[[ $filename =~ "\.rs$" ]]      # regex match (quotes allowed, unlike bash)
 [[ $input !~ "^[0-9]+$" ]]      # regex not match
+
+# Compound expressions (with short-circuit evaluation)
+[[ -f file && -d dir ]]         # logical AND
+[[ -z "$VAR" || -n "$DEFAULT" ]] # logical OR
+[[ ! -f /tmp/lock ]]            # logical NOT
+
+# Precedence: ! (highest) > && > ||
+[[ ! -f a || -d b && -e c ]]    # parsed as: (! -f a) || ((-d b) && (-e c))
 ```
 
 Note: `[ ]` (single brackets) is not supported — use `[[ ]]` for all tests.
@@ -175,6 +183,8 @@ RESULT=$(cat file.json | jq ".name")
 
 ## Arithmetic
 
+Arithmetic expansion is **integer-only**. Floats exist as a data type (for JSON interop) but `$(( ))` operates on integers.
+
 ```bash
 # Arithmetic expansion with $((expression))
 X=$((5 + 3))                    # X = 8
@@ -182,18 +192,30 @@ Y=$((X * 2))                    # Y = 16
 Z=$((10 / 3))                   # Z = 3 (integer division)
 
 # Supported operators (by precedence, highest first)
-result=$((2 ^ 3))               # exponentiation: 8
+result=$((-5))                  # unary minus: -5
 result=$((10 % 3))              # modulo: 1
 result=$((5 * 4 / 2))           # multiply, divide: 10
 result=$((10 - 3 + 2))          # add, subtract: 9
-result=$((-5))                  # unary minus: -5
 result=$(((2 + 3) * 4))         # parentheses: 20
+
+# Comparison operators (return 1 for true, 0 for false)
+echo $((5 > 3))                 # 1
+echo $((3 >= 3))                # 1
+echo $((5 == 5))                # 1
+echo $((5 != 3))                # 1
+echo $((3 < 5))                 # 1
+echo $((3 <= 3))                # 1
+
+# Comparisons have lowest precedence (arithmetic first)
+echo $(( (2 + 3) > 4 ))         # 1 (5 > 4)
+echo $((10 / 2 == 5))           # 1 (5 == 5)
 
 # Variables in arithmetic
 A=10
 B=3
 echo $((A + B))                 # 13
 echo $((A * B + 1))             # 31
+echo $((A > B))                 # 1
 ```
 
 ## Error Handling
@@ -360,7 +382,7 @@ Features that ShellCheck warns about (word splitting, glob expansion, backticks)
 | **Floats** | Integer only | Native `3.14` | MCP tools return JSON with floats |
 | **Booleans** | Exit codes | Native `true`/`false` | JSON interop, clearer conditions |
 | **Typed params** | None | `name:string` | Tool definitions with validation |
-| **Arithmetic** | `$(( ))` | `$((expr))` with `^` for exponent | Full arithmetic with proper precedence |
+| **Arithmetic** | `$(( ))` | `$((expr))` with comparisons | Integer arithmetic + `>`, `<`, `==` returning 1/0 |
 | **Scatter/gather** | None | `散/集` | Built-in parallelism |
 | **VFS** | None | `/scratch/`, `/mnt/`, `/git/` | Unified resource access |
 | **Pre-validation** | None | `validate` builtin | Catch errors before execution |
