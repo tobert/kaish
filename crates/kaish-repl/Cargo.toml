@@ -25,8 +25,8 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-# Paths
-dirs = "6"
+# XDG paths
+directories = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }

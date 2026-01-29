@@ -1197,8 +1197,8 @@ pub fn run() -> Result<()> {
         .context("Failed to create editor")?;
 
     // Load history if it exists
-    let history_path = dirs::data_dir()
-        .map(|p| p.join("kaish").join("history.txt"));
+    let history_path = directories::BaseDirs::new()
+        .map(|b| b.data_dir().join("kaish").join("history.txt"));
     if let Some(ref path) = history_path {
         if let Err(e) = rl.load_history(path) {
             // Only log if it's not a "file not found" error (expected on first run)
@@ -1268,8 +1268,8 @@ pub fn run_with_client(
         .context("Failed to create editor")?;
 
     // Load history
-    let history_path = dirs::data_dir()
-        .map(|p| p.join("kaish").join("history.txt"));
+    let history_path = directories::BaseDirs::new()
+        .map(|b| b.data_dir().join("kaish").join("history.txt"));
     if let Some(ref path) = history_path {
         if let Err(e) = rl.load_history(path) {
             let is_not_found = matches!(&e, ReadlineError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound);
