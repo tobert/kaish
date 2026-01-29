@@ -260,6 +260,8 @@ pub fn format_expr(expr: &Expr) -> String {
                     StringPart::AllArgs => "(allargs)".to_string(),
                     StringPart::ArgCount => "(argcount)".to_string(),
                     StringPart::Arithmetic(expr) => format!("(arith \"{}\")", expr),
+                    StringPart::LastExitCode => "(last-exit-code)".to_string(),
+                    StringPart::CurrentPid => "(current-pid)".to_string(),
                 })
                 .collect();
             format!("(interpolated {})", parts_str.join(" "))
@@ -292,6 +294,8 @@ pub fn format_expr(expr: &Expr) -> String {
         }
         Expr::Arithmetic(expr_str) => format!("(arithmetic \"{}\")", expr_str),
         Expr::Command(cmd) => format_command(cmd),
+        Expr::LastExitCode => "(last-exit-code)".to_string(),
+        Expr::CurrentPid => "(current-pid)".to_string(),
     }
 }
 

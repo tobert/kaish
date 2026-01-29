@@ -113,7 +113,19 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             Expr::VarWithDefault { name, default } => self.eval_var_with_default(name, default),
             Expr::Arithmetic(expr_str) => self.eval_arithmetic(expr_str),
             Expr::Command(cmd) => self.eval_command(cmd),
+            Expr::LastExitCode => self.eval_last_exit_code(),
+            Expr::CurrentPid => self.eval_current_pid(),
         }
+    }
+
+    /// Evaluate last exit code ($?).
+    fn eval_last_exit_code(&self) -> EvalResult<Value> {
+        Ok(Value::Int(self.scope.last_result().code))
+    }
+
+    /// Evaluate current shell PID ($$).
+    fn eval_current_pid(&self) -> EvalResult<Value> {
+        Ok(Value::Int(self.scope.pid() as i64))
     }
 
     /// Evaluate a command as a condition (exit code determines truthiness).
@@ -298,10 +310,10 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             match part {
                 StringPart::Literal(s) => result.push_str(s),
                 StringPart::Var(path) => {
-                    let value = self.scope.resolve_path(path).ok_or_else(|| {
-                        EvalError::InvalidPath(format_path(path))
-                    })?;
-                    result.push_str(&value_to_string(&value));
+                    // Unset variables expand to empty string (bash-compatible)
+                    if let Some(value) = self.scope.resolve_path(path) {
+                        result.push_str(&value_to_string(&value));
+                    }
                 }
                 StringPart::VarWithDefault { name, default } => {
                     let value = self.eval_var_with_default(name, default)?;
@@ -327,6 +339,12 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                     // Parse and evaluate the arithmetic expression
                     let value = self.eval_arithmetic_string(expr)?;
                     result.push_str(&value_to_string(&value));
+                }
+                StringPart::LastExitCode => {
+                    result.push_str(&self.scope.last_result().code.to_string());
+                }
+                StringPart::CurrentPid => {
+                    result.push_str(&self.scope.pid().to_string());
                 }
             }
         }
@@ -1330,5 +1348,34 @@ mod tests {
         };
         let result = eval_expr(&expr, &mut scope).unwrap();
         assert_eq!(result, Value::Int(42));
+    }
+
+    #[test]
+    fn eval_unset_variable_is_empty() {
+        let mut scope = Scope::new();
+        let parts = vec![
+            StringPart::Literal("prefix:".into()),
+            StringPart::Var(VarPath::simple("UNSET")),
+            StringPart::Literal(":suffix".into()),
+        ];
+        let expr = Expr::Interpolated(parts);
+        let result = eval_expr(&expr, &mut scope).unwrap();
+        assert_eq!(result, Value::String("prefix::suffix".into()));
+    }
+
+    #[test]
+    fn eval_unset_variable_multiple() {
+        let mut scope = Scope::new();
+        scope.set("SET", Value::String("hello".into()));
+        let parts = vec![
+            StringPart::Var(VarPath::simple("UNSET1")),
+            StringPart::Literal("-".into()),
+            StringPart::Var(VarPath::simple("SET")),
+            StringPart::Literal("-".into()),
+            StringPart::Var(VarPath::simple("UNSET2")),
+        ];
+        let expr = Expr::Interpolated(parts);
+        let result = eval_expr(&expr, &mut scope).unwrap();
+        assert_eq!(result, Value::String("-hello-".into()));
     }
 }

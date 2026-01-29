@@ -218,6 +218,10 @@ pub enum Expr {
     Arithmetic(String),
     /// Command as condition: `if grep -q pattern file; then` - exit code determines truthiness
     Command(Command),
+    /// Last exit code: `$?`
+    LastExitCode,
+    /// Current shell PID: `$$`
+    CurrentPid,
 }
 
 /// Test expression for `[[ ... ]]` conditionals.
@@ -337,6 +341,10 @@ pub enum StringPart {
     ArgCount,
     /// Arithmetic expansion: `$((expr))`
     Arithmetic(String),
+    /// Last exit code: `$?`
+    LastExitCode,
+    /// Current shell PID: `$$`
+    CurrentPid,
 }
 
 /// Binary operators.

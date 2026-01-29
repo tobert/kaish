@@ -100,6 +100,8 @@ fn format_token(token: &Token) -> String {
         Token::Positional(n) => format!("POSITIONAL({})", n),
         Token::AllArgs => "ALLARGS".to_string(),
         Token::ArgCount => "ARGCOUNT".to_string(),
+        Token::LastExitCode => "LASTEXITCODE".to_string(),
+        Token::CurrentPid => "CURRENTPID".to_string(),
         Token::VarLength(s) => format!("VARLENGTH({})", s),
         Token::Int(n) => format!("INT({})", n),
         Token::Float(n) => {
@@ -493,5 +495,31 @@ fn lexer_combined_sequences(#[case] input: &str, #[case] expected: &[&str]) {
 #[case::set_multi_flags("set -e -u", &["SET", "SHORTFLAG(e)", "SHORTFLAG(u)"])]
 #[case::cmd_doubledash_flag("cmd -- -flag", &["IDENT(cmd)", "DOUBLEDASH", "SHORTFLAG(flag)"])]
 fn lexer_flag_sequences(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+// =============================================================================
+// Special Variables
+// =============================================================================
+
+#[rstest]
+#[case::positional_0("$0", &["POSITIONAL(0)"])]
+#[case::positional_1("$1", &["POSITIONAL(1)"])]
+#[case::positional_9("$9", &["POSITIONAL(9)"])]
+#[case::all_args("$@", &["ALLARGS"])]
+#[case::arg_count("$#", &["ARGCOUNT"])]
+#[case::last_exit_code("$?", &["LASTEXITCODE"])]
+#[case::current_pid("$$", &["CURRENTPID"])]
+#[case::var_length("${#NAME}", &["VARLENGTH(NAME)"])]
+fn lexer_special_variables(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+#[rstest]
+#[case::echo_exit_code("echo $?", &["IDENT(echo)", "LASTEXITCODE"])]
+#[case::echo_pid("echo $$", &["IDENT(echo)", "CURRENTPID"])]
+#[case::echo_all_args("echo $@", &["IDENT(echo)", "ALLARGS"])]
+#[case::echo_arg_count("echo $#", &["IDENT(echo)", "ARGCOUNT"])]
+fn lexer_special_variables_in_context(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }

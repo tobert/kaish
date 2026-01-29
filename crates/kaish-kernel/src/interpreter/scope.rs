@@ -29,6 +29,8 @@ pub struct Scope {
     positional: Vec<String>,
     /// Error exit mode (set -e): exit on any command failure.
     error_exit: bool,
+    /// Current process ID ($$), captured at scope creation.
+    pid: u32,
 }
 
 impl Scope {
@@ -41,7 +43,13 @@ impl Scope {
             script_name: String::new(),
             positional: Vec::new(),
             error_exit: false,
+            pid: std::process::id(),
         }
+    }
+
+    /// Get the process ID ($$).
+    pub fn pid(&self) -> u32 {
+        self.pid
     }
 
     /// Push a new scope frame (for entering a loop, tool call, etc.)

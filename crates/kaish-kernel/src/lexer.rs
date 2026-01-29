@@ -328,6 +328,14 @@ pub enum Token {
     #[token("$#")]
     ArgCount,
 
+    /// Last exit code: `$?`
+    #[token("$?")]
+    LastExitCode,
+
+    /// Current shell PID: `$$`
+    #[token("$$")]
+    CurrentPid,
+
     /// Variable string length: `${#VAR}`
     #[regex(r"\$\{#[a-zA-Z_][a-zA-Z0-9_]*\}", lex_var_length)]
     VarLength(String),
@@ -578,6 +586,8 @@ impl fmt::Display for Token {
             Token::Positional(n) => write!(f, "${}", n),
             Token::AllArgs => write!(f, "$@"),
             Token::ArgCount => write!(f, "$#"),
+            Token::LastExitCode => write!(f, "$?"),
+            Token::CurrentPid => write!(f, "$$"),
             Token::VarLength(v) => write!(f, "${{#{}}}", v),
             Token::Int(n) => write!(f, "INT({})", n),
             Token::Float(n) => write!(f, "FLOAT({})", n),
@@ -653,6 +663,8 @@ impl Token {
                 | Token::SimpleVarRef(_)
                 | Token::CmdSubstStart
                 | Token::Path(_)
+                | Token::LastExitCode
+                | Token::CurrentPid
         )
     }
 }
@@ -1041,6 +1053,9 @@ pub fn parse_string_literal(source: &str) -> Result<String, LexerError> {
                 Some('r') => result.push('\r'),
                 Some('\\') => result.push('\\'),
                 Some('"') => result.push('"'),
+                // Use a marker for escaped dollar that won't be re-interpreted
+                // parse_interpolated_string will convert __ESCAPED_DOLLAR__ back to $
+                Some('$') => result.push_str("__ESCAPED_DOLLAR__"),
                 Some('u') => {
                     // Unicode escape: \uXXXX
                     let mut hex = String::with_capacity(4);
@@ -1452,6 +1467,20 @@ mod tests {
         assert_eq!(
             parse_string_literal(r#""emoji \u2764""#).expect("ok"),
             "emoji ❤"
+        );
+    }
+
+    #[test]
+    fn parse_string_with_escaped_dollar() {
+        // \$ produces a marker that parse_interpolated_string will convert to $
+        // The marker __ESCAPED_DOLLAR__ is used to prevent re-interpretation
+        assert_eq!(
+            parse_string_literal(r#""\$VAR""#).expect("ok"),
+            "__ESCAPED_DOLLAR__VAR"
+        );
+        assert_eq!(
+            parse_string_literal(r#""cost: \$100""#).expect("ok"),
+            "cost: __ESCAPED_DOLLAR__100"
         );
     }
 

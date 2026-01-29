@@ -48,12 +48,29 @@ fn parse_varpath(raw: &str) -> VarPath {
 
 /// Parse an interpolated string like "Hello ${NAME}!" or "Hello $NAME!" into parts.
 fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
+    // First, replace escaped dollar markers with a temporary placeholder
+    // The lexer uses __ESCAPED_DOLLAR__ for \$ to prevent re-interpretation
+    let s = s.replace("__ESCAPED_DOLLAR__", "\x00DOLLAR\x00");
+
     let mut parts = Vec::new();
     let mut current_text = String::new();
     let mut chars = s.chars().peekable();
 
     while let Some(ch) = chars.next() {
-        if ch == '$' {
+        if ch == '\x00' {
+            // This is our escaped dollar marker - skip "DOLLAR" and the closing \x00
+            let mut marker = String::new();
+            while let Some(&c) = chars.peek() {
+                if c == '\x00' {
+                    chars.next(); // consume closing marker
+                    break;
+                }
+                marker.push(chars.next().unwrap());
+            }
+            if marker == "DOLLAR" {
+                current_text.push('$');
+            }
+        } else if ch == '$' {
             // Check for braced variable ${...} or simple $NAME
             if chars.peek() == Some(&'{') {
                 // Braced variable reference ${...}
@@ -116,6 +133,20 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
                 }
                 chars.next(); // consume '#'
                 parts.push(StringPart::ArgCount);
+            } else if chars.peek() == Some(&'?') {
+                // Last exit code $?
+                if !current_text.is_empty() {
+                    parts.push(StringPart::Literal(std::mem::take(&mut current_text)));
+                }
+                chars.next(); // consume '?'
+                parts.push(StringPart::LastExitCode);
+            } else if chars.peek() == Some(&'$') {
+                // Current PID $$
+                if !current_text.is_empty() {
+                    parts.push(StringPart::Literal(std::mem::take(&mut current_text)));
+                }
+                chars.next(); // consume second '$'
+                parts.push(StringPart::CurrentPid);
             } else if chars.peek().map(|c| c.is_ascii_alphabetic() || *c == '_').unwrap_or(false) {
                 // Simple variable reference $NAME
                 if !current_text.is_empty() {
@@ -953,7 +984,7 @@ where
         Token::ShortFlag(s) if s == "n" => StringTestOp::IsNonEmpty,
     };
 
-    // Comparison operators: ==, !=, =~, !~, >, <, >=, <=, -gt, -lt, -ge, -le
+    // Comparison operators: ==, !=, =~, !~, >, <, >=, <=, -gt, -lt, -ge, -le, -eq, -ne
     let cmp_op = choice((
         just(Token::EqEq).to(TestCmpOp::Eq),
         just(Token::NotEq).to(TestCmpOp::NotEq),
@@ -963,6 +994,8 @@ where
         just(Token::Lt).to(TestCmpOp::Lt),
         just(Token::GtEq).to(TestCmpOp::GtEq),
         just(Token::LtEq).to(TestCmpOp::LtEq),
+        select! { Token::ShortFlag(s) if s == "eq" => TestCmpOp::Eq },
+        select! { Token::ShortFlag(s) if s == "ne" => TestCmpOp::NotEq },
         select! { Token::ShortFlag(s) if s == "gt" => TestCmpOp::Gt },
         select! { Token::ShortFlag(s) if s == "lt" => TestCmpOp::Lt },
         select! { Token::ShortFlag(s) if s == "ge" => TestCmpOp::GtEq },
@@ -1078,12 +1111,14 @@ fn primary_expr_parser<'tokens, I>(
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    // Positional parameters: $0-$9, $@, $#, ${#VAR}
+    // Positional parameters: $0-$9, $@, $#, ${#VAR}, $?, $$
     let positional = select! {
         Token::Positional(n) => Expr::Positional(n),
         Token::AllArgs => Expr::AllArgs,
         Token::ArgCount => Expr::ArgCount,
         Token::VarLength(name) => Expr::VarLength(name),
+        Token::LastExitCode => Expr::LastExitCode,
+        Token::CurrentPid => Expr::CurrentPid,
     };
 
     // Arithmetic expression: $((expr)) - preprocessed into Arithmetic token
@@ -1206,8 +1241,8 @@ where
         Token::String(s) => s,
     }
     .map(|s| {
-        // Check if string contains interpolation markers (${} or $NAME)
-        if s.contains('$') {
+        // Check if string contains interpolation markers (${} or $NAME) or escaped dollars
+        if s.contains('$') || s.contains("__ESCAPED_DOLLAR__") {
             // Parse interpolated parts
             let parts = parse_interpolated_string(&s);
             if parts.len() == 1

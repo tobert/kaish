@@ -29,7 +29,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 
-use crate::ast::{Arg, Stmt, ToolDef, Value};
+use crate::ast::{Arg, Expr, Stmt, StringPart, ToolDef, Value, BinaryOp};
 use crate::backend::KernelBackend;
 use crate::glob::glob_match;
 use crate::interpreter::{eval_expr, expand_tilde, value_to_string, ControlFlow, DisplayHint, ExecResult, Scope};
@@ -321,9 +321,10 @@ impl Kernel {
         Box::pin(async move {
         match stmt {
             Stmt::Assignment(assign) => {
-                let mut scope = self.scope.write().await;
-                let value = eval_expr(&assign.value, &mut scope)
+                // Use async evaluator to support command substitution
+                let value = self.eval_expr_async(&assign.value).await
                     .context("failed to evaluate assignment")?;
+                let mut scope = self.scope.write().await;
                 scope.set(&assign.name, value.clone());
                 drop(scope);
 
@@ -748,6 +749,185 @@ impl Kernel {
         }
 
         Ok(tool_args)
+    }
+
+    /// Async expression evaluator that supports command substitution.
+    ///
+    /// This is used for contexts where expressions may contain `$(...)` command
+    /// substitution. Unlike the sync `eval_expr`, this can execute pipelines.
+    fn eval_expr_async<'a>(&'a self, expr: &'a Expr) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + 'a>> {
+        Box::pin(async move {
+        match expr {
+            Expr::Literal(value) => Ok(value.clone()),
+            Expr::VarRef(path) => {
+                let scope = self.scope.read().await;
+                scope.resolve_path(path)
+                    .ok_or_else(|| anyhow::anyhow!("undefined variable"))
+            }
+            Expr::Interpolated(parts) => {
+                let mut result = String::new();
+                for part in parts {
+                    result.push_str(&self.eval_string_part_async(part).await?);
+                }
+                Ok(Value::String(result))
+            }
+            Expr::BinaryOp { left, op, right } => {
+                match op {
+                    BinaryOp::And => {
+                        let left_val = self.eval_expr_async(left).await?;
+                        if !is_truthy(&left_val) {
+                            return Ok(left_val);
+                        }
+                        self.eval_expr_async(right).await
+                    }
+                    BinaryOp::Or => {
+                        let left_val = self.eval_expr_async(left).await?;
+                        if is_truthy(&left_val) {
+                            return Ok(left_val);
+                        }
+                        self.eval_expr_async(right).await
+                    }
+                    _ => {
+                        // For other operators, fall back to sync eval
+                        let mut scope = self.scope.write().await;
+                        eval_expr(expr, &mut scope).map_err(|e| anyhow::anyhow!("{}", e))
+                    }
+                }
+            }
+            Expr::CommandSubst(pipeline) => {
+                // Execute the pipeline and return stdout as the value
+                let result = self.execute_pipeline(pipeline).await?;
+                self.update_last_result(&result).await;
+                Ok(Value::String(result.out.trim_end().to_string()))
+            }
+            Expr::Test(test_expr) => {
+                // For test expressions, use the sync evaluator
+                let expr = Expr::Test(test_expr.clone());
+                let mut scope = self.scope.write().await;
+                eval_expr(&expr, &mut scope).map_err(|e| anyhow::anyhow!("{}", e))
+            }
+            Expr::Positional(n) => {
+                let scope = self.scope.read().await;
+                match scope.get_positional(*n) {
+                    Some(s) => Ok(Value::String(s.to_string())),
+                    None => Ok(Value::String(String::new())),
+                }
+            }
+            Expr::AllArgs => {
+                let scope = self.scope.read().await;
+                Ok(Value::String(scope.all_args().join(" ")))
+            }
+            Expr::ArgCount => {
+                let scope = self.scope.read().await;
+                Ok(Value::Int(scope.arg_count() as i64))
+            }
+            Expr::VarLength(name) => {
+                let scope = self.scope.read().await;
+                match scope.get(name) {
+                    Some(value) => Ok(Value::Int(value_to_string(value).len() as i64)),
+                    None => Ok(Value::Int(0)),
+                }
+            }
+            Expr::VarWithDefault { name, default } => {
+                let scope = self.scope.read().await;
+                match scope.get(name) {
+                    Some(value) => {
+                        let s = value_to_string(value);
+                        if s.is_empty() {
+                            Ok(Value::String(default.clone()))
+                        } else {
+                            Ok(value.clone())
+                        }
+                    }
+                    None => Ok(Value::String(default.clone())),
+                }
+            }
+            Expr::Arithmetic(expr_str) => {
+                let scope = self.scope.read().await;
+                crate::arithmetic::eval_arithmetic(expr_str, &scope)
+                    .map(Value::Int)
+                    .map_err(|e| anyhow::anyhow!("arithmetic error: {}", e))
+            }
+            Expr::Command(cmd) => {
+                // Execute command and return boolean based on exit code
+                let result = self.execute_command(&cmd.name, &cmd.args).await?;
+                Ok(Value::Bool(result.code == 0))
+            }
+            Expr::LastExitCode => {
+                let scope = self.scope.read().await;
+                Ok(Value::Int(scope.last_result().code))
+            }
+            Expr::CurrentPid => {
+                let scope = self.scope.read().await;
+                Ok(Value::Int(scope.pid() as i64))
+            }
+        }
+        })
+    }
+
+    /// Async helper to evaluate a StringPart.
+    async fn eval_string_part_async(&self, part: &StringPart) -> Result<String> {
+        match part {
+            StringPart::Literal(s) => Ok(s.clone()),
+            StringPart::Var(path) => {
+                let scope = self.scope.read().await;
+                match scope.resolve_path(path) {
+                    Some(value) => Ok(value_to_string(&value)),
+                    None => Ok(String::new()), // Unset vars expand to empty
+                }
+            }
+            StringPart::VarWithDefault { name, default } => {
+                let scope = self.scope.read().await;
+                match scope.get(name) {
+                    Some(value) => {
+                        let s = value_to_string(value);
+                        if s.is_empty() {
+                            Ok(default.clone())
+                        } else {
+                            Ok(s)
+                        }
+                    }
+                    None => Ok(default.clone()),
+                }
+            }
+            StringPart::VarLength(name) => {
+                let scope = self.scope.read().await;
+                match scope.get(name) {
+                    Some(value) => Ok(value_to_string(value).len().to_string()),
+                    None => Ok("0".to_string()),
+                }
+            }
+            StringPart::Positional(n) => {
+                let scope = self.scope.read().await;
+                match scope.get_positional(*n) {
+                    Some(s) => Ok(s.to_string()),
+                    None => Ok(String::new()),
+                }
+            }
+            StringPart::AllArgs => {
+                let scope = self.scope.read().await;
+                Ok(scope.all_args().join(" "))
+            }
+            StringPart::ArgCount => {
+                let scope = self.scope.read().await;
+                Ok(scope.arg_count().to_string())
+            }
+            StringPart::Arithmetic(expr) => {
+                let scope = self.scope.read().await;
+                match crate::arithmetic::eval_arithmetic(expr, &scope) {
+                    Ok(value) => Ok(value.to_string()),
+                    Err(_) => Ok(String::new()),
+                }
+            }
+            StringPart::LastExitCode => {
+                let scope = self.scope.read().await;
+                Ok(scope.last_result().code.to_string())
+            }
+            StringPart::CurrentPid => {
+                let scope = self.scope.read().await;
+                Ok(scope.pid().to_string())
+            }
+        }
     }
 
     /// Update the last result in scope.
@@ -2536,4 +2716,118 @@ AFTER="yes"'"#)
         assert!(result.ok(), "script failed: {}", result.err);
         assert_eq!(result.out.trim(), "from first");
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Special Variable Tests ($?, $$, unset vars)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_last_exit_code_success() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // true exits with 0
+        let result = kernel.execute("true; echo $?").await.expect("execution failed");
+        assert!(result.out.contains("0"), "expected 0, got: {}", result.out);
+    }
+
+    #[tokio::test]
+    async fn test_last_exit_code_failure() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // false exits with 1
+        let result = kernel.execute("false; echo $?").await.expect("execution failed");
+        assert!(result.out.contains("1"), "expected 1, got: {}", result.out);
+    }
+
+    #[tokio::test]
+    async fn test_current_pid() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        let result = kernel.execute("echo $$").await.expect("execution failed");
+        // PID should be a positive number
+        let pid: u32 = result.out.trim().parse().expect("PID should be a number");
+        assert!(pid > 0, "PID should be positive");
+    }
+
+    #[tokio::test]
+    async fn test_unset_variable_expands_to_empty() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Unset variable in interpolation should be empty
+        let result = kernel.execute(r#"echo "prefix:${UNSET_VAR}:suffix""#).await.expect("execution failed");
+        assert_eq!(result.out.trim(), "prefix::suffix");
+    }
+
+    #[tokio::test]
+    async fn test_eq_ne_operators() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Test -eq operator
+        let result = kernel.execute(r#"if [[ 5 -eq 5 ]]; then echo "eq works"; fi"#).await.expect("execution failed");
+        assert_eq!(result.out.trim(), "eq works");
+
+        // Test -ne operator
+        let result = kernel.execute(r#"if [[ 5 -ne 3 ]]; then echo "ne works"; fi"#).await.expect("execution failed");
+        assert_eq!(result.out.trim(), "ne works");
+
+        // Test -eq with different values
+        let result = kernel.execute(r#"if [[ 5 -eq 3 ]]; then echo "wrong"; else echo "correct"; fi"#).await.expect("execution failed");
+        assert_eq!(result.out.trim(), "correct");
+    }
+
+    #[tokio::test]
+    async fn test_escaped_dollar_in_string() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // \$ should produce literal $
+        let result = kernel.execute(r#"echo "\$100""#).await.expect("execution failed");
+        assert_eq!(result.out.trim(), "$100");
+    }
+
+    #[tokio::test]
+    async fn test_special_vars_in_interpolation() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Test $? in string interpolation
+        let result = kernel.execute(r#"true; echo "exit: $?""#).await.expect("execution failed");
+        assert_eq!(result.out.trim(), "exit: 0");
+
+        // Test $$ in string interpolation
+        let result = kernel.execute(r#"echo "pid: $$""#).await.expect("execution failed");
+        assert!(result.out.starts_with("pid: "), "unexpected output: {}", result.out);
+        let pid_part = result.out.trim().strip_prefix("pid: ").unwrap();
+        let _pid: u32 = pid_part.parse().expect("PID in string should be a number");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Command Substitution Tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_command_subst_assignment() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Command substitution in assignment
+        let result = kernel.execute(r#"X=$(echo hello); echo "$X""#).await.expect("execution failed");
+        assert_eq!(result.out.trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_command_subst_with_args() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Command substitution with string argument
+        let result = kernel.execute(r#"X=$(echo "a b c"); echo "$X""#).await.expect("execution failed");
+        assert_eq!(result.out.trim(), "a b c");
+    }
+
+    #[tokio::test]
+    async fn test_command_subst_nested_vars() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Variables inside command substitution
+        let result = kernel.execute(r#"Y=world; X=$(echo "hello $Y"); echo "$X""#).await.expect("execution failed");
+        assert_eq!(result.out.trim(), "hello world");
+    }
+
 }

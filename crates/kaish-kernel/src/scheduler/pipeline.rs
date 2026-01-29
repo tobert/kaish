@@ -449,6 +449,12 @@ fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> {
                             result.push_str(&value.to_string());
                         }
                     }
+                    crate::ast::StringPart::LastExitCode => {
+                        result.push_str(&ctx.scope.last_result().code.to_string());
+                    }
+                    crate::ast::StringPart::CurrentPid => {
+                        result.push_str(&ctx.scope.pid().to_string());
+                    }
                 }
             }
             Some(Value::String(result))

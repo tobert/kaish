@@ -585,6 +585,12 @@ impl Repl {
                                 result.push_str(&value.to_string());
                             }
                         }
+                        kaish_kernel::ast::StringPart::LastExitCode => {
+                            result.push_str(&self.exec_ctx.scope.last_result().code.to_string());
+                        }
+                        kaish_kernel::ast::StringPart::CurrentPid => {
+                            result.push_str(&self.exec_ctx.scope.pid().to_string());
+                        }
                     }
                 }
                 Ok(Value::String(result))
@@ -780,6 +786,12 @@ impl Repl {
                 // Execute command and check exit code for truthiness
                 let result = self.execute_command(&cmd.name, &cmd.args)?;
                 Ok(Value::Bool(result.code == 0))
+            }
+            Expr::LastExitCode => {
+                Ok(Value::Int(self.exec_ctx.scope.last_result().code))
+            }
+            Expr::CurrentPid => {
+                Ok(Value::Int(self.exec_ctx.scope.pid() as i64))
             }
         }
     }

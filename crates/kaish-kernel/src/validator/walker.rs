@@ -334,6 +334,7 @@ impl<'a> Validator<'a> {
                 // Arithmetic parsing is done at runtime
             }
             Expr::Command(cmd) => self.validate_command(cmd),
+            Expr::LastExitCode | Expr::CurrentPid => {}
         }
     }
 
@@ -353,6 +354,7 @@ impl<'a> Validator<'a> {
             StringPart::VarLength(name) => self.check_var_defined(name),
             StringPart::Positional(_) | StringPart::AllArgs | StringPart::ArgCount => {}
             StringPart::Arithmetic(_) => {} // Arithmetic expressions are validated at eval time
+            StringPart::LastExitCode | StringPart::CurrentPid => {}
         }
     }
 
