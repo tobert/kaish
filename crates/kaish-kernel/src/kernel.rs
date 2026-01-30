@@ -136,6 +136,10 @@ impl Kernel {
         // Mount scratch space
         vfs.mount("/tmp", MemoryFs::new());
 
+        // Mount virtual namespace for blobs and other synthetic resources
+        // Blobs are stored at /v/blobs/{id}
+        vfs.mount("/v", MemoryFs::new());
+
         // Mount local filesystem at /mnt/local if configured
         if config.mount_local {
             let root = config.local_root.unwrap_or_else(|| {
