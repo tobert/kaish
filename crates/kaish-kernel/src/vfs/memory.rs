@@ -15,6 +15,7 @@ use tokio::sync::RwLock;
 enum Entry {
     File { data: Vec<u8>, modified: SystemTime },
     Directory { modified: SystemTime },
+    Symlink { target: PathBuf, modified: SystemTime },
 }
 
 /// In-memory filesystem.
@@ -95,6 +96,12 @@ impl Filesystem for MemoryFs {
                 io::ErrorKind::IsADirectory,
                 format!("is a directory: {}", path.display()),
             )),
+            Some(Entry::Symlink { target, .. }) => {
+                // Clone target before dropping lock to follow the symlink
+                let target = target.clone();
+                drop(entries);
+                self.read(&target).await
+            }
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("not found: {}", path.display()),
@@ -141,6 +148,12 @@ impl Filesystem for MemoryFs {
                     format!("not a directory: {}", path.display()),
                 ))
             }
+            Some(Entry::Symlink { .. }) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotADirectory,
+                    format!("not a directory: {}", path.display()),
+                ))
+            }
             None if normalized.as_os_str().is_empty() => {
                 // Root directory
             }
@@ -164,14 +177,16 @@ impl Filesystem for MemoryFs {
             if let Some(parent) = entry_path.parent()
                 && parent == prefix && entry_path != &normalized
                     && let Some(name) = entry_path.file_name() {
-                        let (entry_type, size) = match entry {
-                            Entry::File { data, .. } => (EntryType::File, data.len() as u64),
-                            Entry::Directory { .. } => (EntryType::Directory, 0),
+                        let (entry_type, size, symlink_target) = match entry {
+                            Entry::File { data, .. } => (EntryType::File, data.len() as u64, None),
+                            Entry::Directory { .. } => (EntryType::Directory, 0, None),
+                            Entry::Symlink { target, .. } => (EntryType::Symlink, 0, Some(target.clone())),
                         };
                         result.push(DirEntry {
                             name: name.to_string_lossy().into_owned(),
                             entry_type,
                             size,
+                            symlink_target,
                         });
                     }
         }
@@ -183,6 +198,74 @@ impl Filesystem for MemoryFs {
 
     async fn stat(&self, path: &Path) -> io::Result<Metadata> {
         let normalized = Self::normalize(path);
+
+        // Handle root directory
+        if normalized.as_os_str().is_empty() {
+            return Ok(Metadata {
+                is_dir: true,
+                is_file: false,
+                is_symlink: false,
+                size: 0,
+                modified: Some(SystemTime::now()),
+            });
+        }
+
+        // First, check what kind of entry this is
+        let entry_info: Option<(Metadata, Option<PathBuf>)> = {
+            let entries = self.entries.read().await;
+            match entries.get(&normalized) {
+                Some(Entry::File { data, modified }) => Some((
+                    Metadata {
+                        is_dir: false,
+                        is_file: true,
+                        is_symlink: false,
+                        size: data.len() as u64,
+                        modified: Some(*modified),
+                    },
+                    None, // No symlink target to follow
+                )),
+                Some(Entry::Directory { modified }) => Some((
+                    Metadata {
+                        is_dir: true,
+                        is_file: false,
+                        is_symlink: false,
+                        size: 0,
+                        modified: Some(*modified),
+                    },
+                    None,
+                )),
+                Some(Entry::Symlink { target, .. }) => {
+                    // Need to follow symlink - save the target
+                    Some((
+                        Metadata {
+                            is_dir: false,
+                            is_file: false,
+                            is_symlink: false,
+                            size: 0,
+                            modified: None, // Will be overwritten by target
+                        },
+                        Some(target.clone()),
+                    ))
+                }
+                None => None,
+            }
+        };
+
+        match entry_info {
+            Some((meta, None)) => Ok(meta),
+            Some((_, Some(target))) => {
+                // Follow the symlink
+                self.stat(&target).await
+            }
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("not found: {}", path.display()),
+            )),
+        }
+    }
+
+    async fn lstat(&self, path: &Path) -> io::Result<Metadata> {
+        let normalized = Self::normalize(path);
         let entries = self.entries.read().await;
 
         // Handle root directory
@@ -190,6 +273,7 @@ impl Filesystem for MemoryFs {
             return Ok(Metadata {
                 is_dir: true,
                 is_file: false,
+                is_symlink: false,
                 size: 0,
                 modified: Some(SystemTime::now()),
             });
@@ -199,12 +283,21 @@ impl Filesystem for MemoryFs {
             Some(Entry::File { data, modified }) => Ok(Metadata {
                 is_dir: false,
                 is_file: true,
+                is_symlink: false,
                 size: data.len() as u64,
                 modified: Some(*modified),
             }),
             Some(Entry::Directory { modified }) => Ok(Metadata {
                 is_dir: true,
                 is_file: false,
+                is_symlink: false,
+                size: 0,
+                modified: Some(*modified),
+            }),
+            Some(Entry::Symlink { modified, .. }) => Ok(Metadata {
+                is_dir: false,
+                is_file: false,
+                is_symlink: true,
                 size: 0,
                 modified: Some(*modified),
             }),
@@ -213,6 +306,49 @@ impl Filesystem for MemoryFs {
                 format!("not found: {}", path.display()),
             )),
         }
+    }
+
+    async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
+        let normalized = Self::normalize(path);
+        let entries = self.entries.read().await;
+
+        match entries.get(&normalized) {
+            Some(Entry::Symlink { target, .. }) => Ok(target.clone()),
+            Some(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("not a symbolic link: {}", path.display()),
+            )),
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("not found: {}", path.display()),
+            )),
+        }
+    }
+
+    async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
+        let normalized = Self::normalize(link);
+
+        // Ensure parent directories exist
+        self.ensure_parents(&normalized).await?;
+
+        let mut entries = self.entries.write().await;
+
+        // Check if something already exists at this path
+        if entries.contains_key(&normalized) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("file exists: {}", link.display()),
+            ));
+        }
+
+        entries.insert(
+            normalized,
+            Entry::Symlink {
+                target: target.to_path_buf(),
+                modified: SystemTime::now(),
+            },
+        );
+        Ok(())
     }
 
     async fn mkdir(&self, path: &Path) -> io::Result<()> {
@@ -227,7 +363,7 @@ impl Filesystem for MemoryFs {
         if let Some(existing) = entries.get(&normalized) {
             return match existing {
                 Entry::Directory { .. } => Ok(()), // Already exists, fine
-                Entry::File { .. } => Err(io::Error::new(
+                Entry::File { .. } | Entry::Symlink { .. } => Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     format!("file exists: {}", path.display()),
                 )),
@@ -529,5 +665,257 @@ mod tests {
         let result = fs.rename(Path::new("nonexistent"), Path::new("dest")).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    // --- Symlink tests ---
+
+    #[tokio::test]
+    async fn test_symlink_create_and_read_link() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("target.txt"), b"content").await.unwrap();
+        fs.symlink(Path::new("target.txt"), Path::new("link.txt")).await.unwrap();
+
+        // read_link returns the raw target
+        let target = fs.read_link(Path::new("link.txt")).await.unwrap();
+        assert_eq!(target, Path::new("target.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_symlink_read_follows_link() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("target.txt"), b"hello from target").await.unwrap();
+        fs.symlink(Path::new("target.txt"), Path::new("link.txt")).await.unwrap();
+
+        // Reading through symlink should return target's content
+        let data = fs.read(Path::new("link.txt")).await.unwrap();
+        assert_eq!(data, b"hello from target");
+    }
+
+    #[tokio::test]
+    async fn test_symlink_stat_follows_link() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("target.txt"), b"12345").await.unwrap();
+        fs.symlink(Path::new("target.txt"), Path::new("link.txt")).await.unwrap();
+
+        // stat follows symlinks - should report file metadata
+        let meta = fs.stat(Path::new("link.txt")).await.unwrap();
+        assert!(meta.is_file);
+        assert!(!meta.is_symlink);
+        assert_eq!(meta.size, 5);
+    }
+
+    #[tokio::test]
+    async fn test_symlink_lstat_returns_symlink_info() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("target.txt"), b"content").await.unwrap();
+        fs.symlink(Path::new("target.txt"), Path::new("link.txt")).await.unwrap();
+
+        // lstat does not follow symlinks
+        let meta = fs.lstat(Path::new("link.txt")).await.unwrap();
+        assert!(meta.is_symlink);
+        assert!(!meta.is_file);
+        assert!(!meta.is_dir);
+    }
+
+    #[tokio::test]
+    async fn test_symlink_in_list() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("file.txt"), b"content").await.unwrap();
+        fs.symlink(Path::new("file.txt"), Path::new("link.txt")).await.unwrap();
+        fs.mkdir(Path::new("dir")).await.unwrap();
+
+        let entries = fs.list(Path::new("")).await.unwrap();
+        assert_eq!(entries.len(), 3);
+
+        // Find the symlink entry
+        let link_entry = entries.iter().find(|e| e.name == "link.txt").unwrap();
+        assert_eq!(link_entry.entry_type, EntryType::Symlink);
+        assert_eq!(link_entry.symlink_target, Some(PathBuf::from("file.txt")));
+    }
+
+    #[tokio::test]
+    async fn test_symlink_broken_link() {
+        let fs = MemoryFs::new();
+        // Create symlink to non-existent target
+        fs.symlink(Path::new("nonexistent.txt"), Path::new("broken.txt")).await.unwrap();
+
+        // read_link still works
+        let target = fs.read_link(Path::new("broken.txt")).await.unwrap();
+        assert_eq!(target, Path::new("nonexistent.txt"));
+
+        // lstat works (the symlink exists)
+        let meta = fs.lstat(Path::new("broken.txt")).await.unwrap();
+        assert!(meta.is_symlink);
+
+        // stat fails (target doesn't exist)
+        let result = fs.stat(Path::new("broken.txt")).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+
+        // read fails (target doesn't exist)
+        let result = fs.read(Path::new("broken.txt")).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_symlink_read_link_on_non_symlink_fails() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("file.txt"), b"content").await.unwrap();
+
+        let result = fs.read_link(Path::new("file.txt")).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn test_symlink_already_exists() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("existing.txt"), b"content").await.unwrap();
+
+        // Can't create symlink over existing file
+        let result = fs.symlink(Path::new("target"), Path::new("existing.txt")).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    // --- Edge case tests ---
+
+    #[tokio::test]
+    async fn test_symlink_chain() {
+        // a -> b -> c -> file.txt
+        let fs = MemoryFs::new();
+        fs.write(Path::new("file.txt"), b"end of chain").await.unwrap();
+        fs.symlink(Path::new("file.txt"), Path::new("c")).await.unwrap();
+        fs.symlink(Path::new("c"), Path::new("b")).await.unwrap();
+        fs.symlink(Path::new("b"), Path::new("a")).await.unwrap();
+
+        // Reading through chain should work
+        let data = fs.read(Path::new("a")).await.unwrap();
+        assert_eq!(data, b"end of chain");
+
+        // stat through chain should report file
+        let meta = fs.stat(Path::new("a")).await.unwrap();
+        assert!(meta.is_file);
+    }
+
+    #[tokio::test]
+    async fn test_symlink_to_directory() {
+        let fs = MemoryFs::new();
+        fs.mkdir(Path::new("realdir")).await.unwrap();
+        fs.write(Path::new("realdir/file.txt"), b"inside dir").await.unwrap();
+        fs.symlink(Path::new("realdir"), Path::new("linkdir")).await.unwrap();
+
+        // stat follows symlink - should see directory
+        let meta = fs.stat(Path::new("linkdir")).await.unwrap();
+        assert!(meta.is_dir);
+
+        // Note: listing through symlink requires following in list(),
+        // which we don't currently support (symlink to dir returns NotADirectory)
+    }
+
+    #[tokio::test]
+    async fn test_symlink_relative_path_stored_as_is() {
+        let fs = MemoryFs::new();
+        fs.mkdir(Path::new("subdir")).await.unwrap();
+        fs.write(Path::new("subdir/target.txt"), b"content").await.unwrap();
+
+        // Store a relative path in the symlink
+        fs.symlink(Path::new("../subdir/target.txt"), Path::new("subdir/link.txt")).await.unwrap();
+
+        // read_link returns the path as stored
+        let target = fs.read_link(Path::new("subdir/link.txt")).await.unwrap();
+        assert_eq!(target.to_string_lossy(), "../subdir/target.txt");
+    }
+
+    #[tokio::test]
+    async fn test_symlink_absolute_path() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("target.txt"), b"content").await.unwrap();
+
+        // Store absolute path
+        fs.symlink(Path::new("/target.txt"), Path::new("link.txt")).await.unwrap();
+
+        let target = fs.read_link(Path::new("link.txt")).await.unwrap();
+        assert_eq!(target.to_string_lossy(), "/target.txt");
+
+        // Following should work (normalize strips leading /)
+        let data = fs.read(Path::new("link.txt")).await.unwrap();
+        assert_eq!(data, b"content");
+    }
+
+    #[tokio::test]
+    async fn test_symlink_remove() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("target.txt"), b"content").await.unwrap();
+        fs.symlink(Path::new("target.txt"), Path::new("link.txt")).await.unwrap();
+
+        // Remove symlink (not the target)
+        fs.remove(Path::new("link.txt")).await.unwrap();
+
+        // Symlink gone
+        assert!(!fs.exists(Path::new("link.txt")).await);
+
+        // Target still exists
+        assert!(fs.exists(Path::new("target.txt")).await);
+    }
+
+    #[tokio::test]
+    async fn test_symlink_overwrite_target_content() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("target.txt"), b"original").await.unwrap();
+        fs.symlink(Path::new("target.txt"), Path::new("link.txt")).await.unwrap();
+
+        // Modify target
+        fs.write(Path::new("target.txt"), b"modified").await.unwrap();
+
+        // Reading through link shows new content
+        let data = fs.read(Path::new("link.txt")).await.unwrap();
+        assert_eq!(data, b"modified");
+    }
+
+    #[tokio::test]
+    async fn test_symlink_empty_name() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("target.txt"), b"content").await.unwrap();
+
+        // Symlink with empty path components in target
+        fs.symlink(Path::new("./target.txt"), Path::new("link.txt")).await.unwrap();
+
+        let target = fs.read_link(Path::new("link.txt")).await.unwrap();
+        assert_eq!(target.to_string_lossy(), "./target.txt");
+    }
+
+    #[tokio::test]
+    async fn test_symlink_nested_creation() {
+        let fs = MemoryFs::new();
+        // Symlink in non-existent directory should create parents
+        fs.symlink(Path::new("target"), Path::new("a/b/c/link")).await.unwrap();
+
+        // Parents created
+        let meta = fs.stat(Path::new("a/b")).await.unwrap();
+        assert!(meta.is_dir);
+
+        // Symlink exists (lstat)
+        let meta = fs.lstat(Path::new("a/b/c/link")).await.unwrap();
+        assert!(meta.is_symlink);
+    }
+
+    #[tokio::test]
+    async fn test_symlink_read_link_not_found() {
+        let fs = MemoryFs::new();
+
+        let result = fs.read_link(Path::new("nonexistent")).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_symlink_read_link_on_directory() {
+        let fs = MemoryFs::new();
+        fs.mkdir(Path::new("dir")).await.unwrap();
+
+        let result = fs.read_link(Path::new("dir")).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
     }
 }

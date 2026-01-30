@@ -308,17 +308,20 @@ impl KernelBackend for LocalBackend {
         Ok(entries
             .into_iter()
             .map(|e| {
-                let (is_dir, is_file) = match e.entry_type {
-                    EntryType::Directory => (true, false),
-                    EntryType::File => (false, true),
+                let (is_dir, is_file, is_symlink) = match e.entry_type {
+                    EntryType::Directory => (true, false, false),
+                    EntryType::File => (false, true, false),
+                    EntryType::Symlink => (false, false, true),
                 };
                 EntryInfo {
                     name: e.name,
                     is_dir,
                     is_file,
+                    is_symlink,
                     size: e.size,
                     modified: None, // VFS DirEntry doesn't include modified time
                     permissions: None,
+                    symlink_target: e.symlink_target,
                 }
             })
             .collect())
@@ -338,9 +341,11 @@ impl KernelBackend for LocalBackend {
                 .unwrap_or_else(|| "/".to_string()),
             is_dir: meta.is_dir,
             is_file: meta.is_file,
+            is_symlink: meta.is_symlink,
             size: meta.size,
             modified,
             permissions: None,
+            symlink_target: None, // stat follows symlinks
         })
     }
 
@@ -377,6 +382,19 @@ impl KernelBackend for LocalBackend {
 
     async fn exists(&self, path: &Path) -> bool {
         self.vfs.exists(path).await
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Symlink Operations
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    async fn read_link(&self, path: &Path) -> BackendResult<std::path::PathBuf> {
+        Ok(self.vfs.read_link(path).await?)
+    }
+
+    async fn symlink(&self, target: &Path, link: &Path) -> BackendResult<()> {
+        self.vfs.symlink(target, link).await?;
+        Ok(())
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -470,6 +488,7 @@ impl std::fmt::Debug for LocalBackend {
 mod tests {
     use super::*;
     use crate::vfs::MemoryFs;
+    use std::path::PathBuf;
 
     async fn make_backend() -> LocalBackend {
         let mut vfs = VfsRouter::new();
@@ -756,5 +775,24 @@ mod tests {
         assert!(!backend.read_only());
         let mounts = backend.mounts();
         assert!(!mounts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_includes_symlinks() {
+        use crate::vfs::Filesystem;
+
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(Path::new("target.txt"), b"content").await.unwrap();
+        mem.symlink(Path::new("target.txt"), Path::new("link.txt")).await.unwrap();
+        vfs.mount("/", mem);
+        let backend = LocalBackend::new(Arc::new(vfs));
+
+        let entries = backend.list(Path::new("/")).await.unwrap();
+        println!("Entries: {:?}", entries);
+
+        let link_entry = entries.iter().find(|e| e.name == "link.txt").unwrap();
+        assert!(link_entry.is_symlink, "link.txt should be a symlink");
+        assert_eq!(link_entry.symlink_target, Some(PathBuf::from("target.txt")));
     }
 }

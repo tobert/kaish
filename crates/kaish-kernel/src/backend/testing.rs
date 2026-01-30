@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::{
-    BackendResult, EntryInfo, KernelBackend, PatchOp, ReadRange, ToolInfo, ToolResult, WriteMode,
+    BackendError, BackendResult, EntryInfo, KernelBackend, PatchOp, ReadRange, ToolInfo, ToolResult, WriteMode,
 };
 use crate::tools::{ExecContext, ToolArgs};
 use crate::vfs::MountInfo;
@@ -112,5 +112,13 @@ impl KernelBackend for MockBackend {
 
     fn resolve_real_path(&self, _path: &Path) -> Option<std::path::PathBuf> {
         None
+    }
+
+    async fn read_link(&self, _path: &Path) -> BackendResult<std::path::PathBuf> {
+        Err(BackendError::InvalidOperation("mock backend does not support symlinks".to_string()))
+    }
+
+    async fn symlink(&self, _target: &Path, _link: &Path) -> BackendResult<()> {
+        Err(BackendError::InvalidOperation("mock backend does not support symlinks".to_string()))
     }
 }

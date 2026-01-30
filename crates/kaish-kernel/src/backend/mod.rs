@@ -32,7 +32,7 @@ pub use testing::MockBackend;
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::interpreter::{value_to_json, ExecResult};
@@ -205,12 +205,16 @@ pub struct EntryInfo {
     pub is_dir: bool,
     /// True if this is a file.
     pub is_file: bool,
+    /// True if this is a symbolic link.
+    pub is_symlink: bool,
     /// Size in bytes.
     pub size: u64,
     /// Last modification time (Unix timestamp in seconds).
     pub modified: Option<u64>,
     /// Unix permissions (e.g., 0o644).
     pub permissions: Option<u32>,
+    /// For symlinks, the target path.
+    pub symlink_target: Option<std::path::PathBuf>,
 }
 
 impl EntryInfo {
@@ -220,9 +224,11 @@ impl EntryInfo {
             name: name.into(),
             is_dir: true,
             is_file: false,
+            is_symlink: false,
             size: 0,
             modified: None,
             permissions: None,
+            symlink_target: None,
         }
     }
 
@@ -232,9 +238,25 @@ impl EntryInfo {
             name: name.into(),
             is_dir: false,
             is_file: true,
+            is_symlink: false,
             size,
             modified: None,
             permissions: None,
+            symlink_target: None,
+        }
+    }
+
+    /// Create a new symlink entry.
+    pub fn symlink(name: impl Into<String>, target: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            name: name.into(),
+            is_dir: false,
+            is_file: false,
+            is_symlink: true,
+            size: 0,
+            modified: None,
+            permissions: None,
+            symlink_target: Some(target.into()),
         }
     }
 }
@@ -370,6 +392,20 @@ pub trait KernelBackend: Send + Sync {
 
     /// Check if a path exists.
     async fn exists(&self, path: &Path) -> bool;
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Symlink Operations
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Read the target of a symbolic link.
+    ///
+    /// Returns the path the symlink points to without following it.
+    async fn read_link(&self, path: &Path) -> BackendResult<PathBuf>;
+
+    /// Create a symbolic link.
+    ///
+    /// Creates a symlink at `link` pointing to `target`.
+    async fn symlink(&self, target: &Path, link: &Path) -> BackendResult<()>;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Tool Dispatch

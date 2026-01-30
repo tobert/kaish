@@ -27,6 +27,7 @@ mod help;
 mod introspect;
 mod jobs;
 mod jq_native;
+mod ln;
 mod ls;
 mod mkdir;
 mod mktemp;
@@ -90,6 +91,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(introspect::Tools);
     registry.register(jobs::Jobs);
     registry.register(jq_native::JqNative);
+    registry.register(ln::Ln);
     registry.register(ls::Ls);
     registry.register(mkdir::Mkdir);
     registry.register(mktemp::Mktemp);

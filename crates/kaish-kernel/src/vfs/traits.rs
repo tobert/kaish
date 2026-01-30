@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// Metadata about a file or directory.
@@ -12,6 +12,8 @@ pub struct Metadata {
     pub is_dir: bool,
     /// True if this is a file.
     pub is_file: bool,
+    /// True if this is a symbolic link.
+    pub is_symlink: bool,
     /// Size in bytes (0 for directories).
     pub size: u64,
     /// Last modification time, if available.
@@ -23,6 +25,7 @@ pub struct Metadata {
 pub enum EntryType {
     File,
     Directory,
+    Symlink,
 }
 
 /// A directory entry returned by `list`.
@@ -34,6 +37,8 @@ pub struct DirEntry {
     pub entry_type: EntryType,
     /// Size in bytes (0 for directories).
     pub size: u64,
+    /// For symlinks, the target path.
+    pub symlink_target: Option<PathBuf>,
 }
 
 /// Abstract filesystem interface.
@@ -104,8 +109,40 @@ pub trait Filesystem: Send + Sync {
     /// or `None` for virtual backends (like MemoryFs).
     ///
     /// This is needed for tools like `git` that must use real paths with external libraries.
-    fn real_path(&self, path: &Path) -> Option<std::path::PathBuf> {
+    fn real_path(&self, path: &Path) -> Option<PathBuf> {
         let _ = path;
         None
+    }
+
+    /// Read the target of a symbolic link without following it.
+    ///
+    /// Returns the path the symlink points to. Use `stat` to follow symlinks.
+    async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "symlinks not supported by this filesystem",
+        ))
+    }
+
+    /// Create a symbolic link.
+    ///
+    /// Creates a symlink at `link` pointing to `target`. The target path
+    /// is stored as-is (may be relative or absolute).
+    async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
+        let _ = (target, link);
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "symlinks not supported by this filesystem",
+        ))
+    }
+
+    /// Get metadata for a path without following symlinks.
+    ///
+    /// Unlike `stat`, this returns metadata about the symlink itself,
+    /// not the target it points to.
+    async fn lstat(&self, path: &Path) -> io::Result<Metadata> {
+        // Default: same as stat (for backends that don't support symlinks)
+        self.stat(path).await
     }
 }

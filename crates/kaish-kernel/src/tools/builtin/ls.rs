@@ -198,20 +198,43 @@ impl Ls {
                     filtered
                         .iter()
                         .map(|e| {
-                            let type_char = if e.is_dir { "d" } else { "-" };
+                            let type_char = if e.is_symlink {
+                                "l"
+                            } else if e.is_dir {
+                                "d"
+                            } else {
+                                "-"
+                            };
                             let size_str = if human_readable {
                                 format_human_size(e.size)
                             } else {
                                 format!("{:>8}", e.size)
                             };
-                            vec![e.name.clone(), type_char.to_string(), size_str]
+                            // For symlinks, show "name -> target"
+                            let name_display = if e.is_symlink {
+                                if let Some(target) = &e.symlink_target {
+                                    format!("{} -> {}", e.name, target.display())
+                                } else {
+                                    format!("{}@", e.name)
+                                }
+                            } else {
+                                e.name.clone()
+                            };
+                            vec![name_display, type_char.to_string(), size_str]
                         })
                         .collect()
                 } else {
-                    // Single column - just names
+                    // Single column - just names (with @ suffix for symlinks)
                     filtered
                         .iter()
-                        .map(|e| vec![e.name.clone()])
+                        .map(|e| {
+                            let name_display = if e.is_symlink {
+                                format!("{}@", e.name)
+                            } else {
+                                e.name.clone()
+                            };
+                            vec![name_display]
+                        })
                         .collect()
                 };
 
@@ -330,7 +353,9 @@ fn filter_and_sort(entries: Vec<EntryInfo>, show_all: bool, sort_opts: &SortOpti
 
 /// Convert EntryInfo to EntryType for coloring.
 fn entry_info_to_type(entry: &EntryInfo) -> EntryType {
-    if entry.is_dir {
+    if entry.is_symlink {
+        EntryType::Symlink
+    } else if entry.is_dir {
         EntryType::Directory
     } else if entry.permissions.map(|p| p & 0o111 != 0).unwrap_or(false) {
         // Has execute permission
@@ -346,17 +371,40 @@ fn format_entries(entries: &[EntryInfo], long_format: bool, human_readable: bool
         entries
             .iter()
             .map(|e| {
-                let type_char = if e.is_dir { 'd' } else { '-' };
+                let type_char = if e.is_symlink {
+                    'l'
+                } else if e.is_dir {
+                    'd'
+                } else {
+                    '-'
+                };
                 let size_str = if human_readable {
                     format_human_size(e.size)
                 } else {
                     format!("{:>8}", e.size)
                 };
-                format!("{}  {}  {}", type_char, size_str, e.name)
+                // For symlinks, show the target
+                let name_display = if e.is_symlink {
+                    if let Some(target) = &e.symlink_target {
+                        format!("{} -> {}", e.name, target.display())
+                    } else {
+                        format!("{}@", e.name)
+                    }
+                } else {
+                    e.name.clone()
+                };
+                format!("{}  {}  {}", type_char, size_str, name_display)
             })
             .collect()
     } else {
-        entries.iter().map(|e| e.name.clone()).collect()
+        // In non-long format, add @ suffix for symlinks (like ls -F)
+        entries.iter().map(|e| {
+            if e.is_symlink {
+                format!("{}@", e.name)
+            } else {
+                e.name.clone()
+            }
+        }).collect()
     }
 }
 
@@ -577,5 +625,83 @@ mod tests {
         let mut entry = EntryInfo::file("data.txt", 100);
         entry.permissions = Some(0o644); // rw-r--r--
         assert_eq!(entry_info_to_type(&entry), EntryType::File);
+    }
+
+    #[test]
+    fn test_entry_info_to_type_symlink() {
+        let mut entry = EntryInfo::file("link.txt", 0);
+        entry.is_symlink = true;
+        entry.symlink_target = Some(std::path::PathBuf::from("target.txt"));
+        assert_eq!(entry_info_to_type(&entry), EntryType::Symlink);
+    }
+
+    async fn make_ctx_with_symlinks() -> ExecContext {
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(Path::new("target.txt"), b"content").await.unwrap();
+        mem.mkdir(Path::new("targetdir")).await.unwrap();
+        mem.symlink(Path::new("target.txt"), Path::new("link.txt"))
+            .await
+            .unwrap();
+        mem.symlink(Path::new("targetdir"), Path::new("linkdir"))
+            .await
+            .unwrap();
+        mem.symlink(Path::new("nonexistent"), Path::new("broken"))
+            .await
+            .unwrap();
+        vfs.mount("/", mem);
+        ExecContext::new(Arc::new(vfs))
+    }
+
+    #[tokio::test]
+    async fn test_ls_shows_symlinks() {
+        let mut ctx = make_ctx_with_symlinks().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/".into()));
+
+        let result = Ls.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Should show symlinks with @ suffix in short format
+        assert!(result.out.contains("link.txt@"), "output was: {}", result.out);
+        assert!(result.out.contains("linkdir@"), "output was: {}", result.out);
+        assert!(result.out.contains("broken@"), "output was: {}", result.out);
+    }
+
+    #[tokio::test]
+    async fn test_ls_long_shows_symlink_targets() {
+        let mut ctx = make_ctx_with_symlinks().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/".into()));
+        args.named.insert("long".to_string(), Value::Bool(true));
+
+        let result = Ls.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Long format shows "name -> target"
+        assert!(result.out.contains("link.txt -> target.txt"));
+        assert!(result.out.contains("linkdir -> targetdir"));
+        assert!(result.out.contains("broken -> nonexistent"));
+        // Should have 'l' type character in table hint
+        use crate::interpreter::DisplayHint;
+        match &result.hint {
+            DisplayHint::Table { rows, .. } => {
+                // Find a row that has 'l' as the type
+                let has_symlink_type = rows.iter().any(|r| r.get(1) == Some(&"l".to_string()));
+                assert!(has_symlink_type, "Expected 'l' type character for symlinks");
+            }
+            _ => panic!("Expected Table hint for long format"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ls_symlink_in_recursive() {
+        let mut ctx = make_ctx_with_symlinks().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/".into()));
+        args.flags.insert("R".to_string());
+
+        let result = Ls.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Symlinks should appear with @ suffix
+        assert!(result.out.contains("link.txt@"));
     }
 }

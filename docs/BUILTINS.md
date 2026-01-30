@@ -108,9 +108,11 @@ Extract fields or character ranges from lines.
 
 | Category | Supported | Deliberately Omitted |
 |----------|-----------|---------------------|
-| **Modes** | `-f` (fields), `-c` (characters) | `-b` (bytes) |
+| **Modes** | `-f` (fields), `-c` (characters) | `-b` (bytes), multiple files |
 | **Options** | `-d` (delimiter) | `--complement`, `--output-delimiter` |
 | **Ranges** | `N`, `N-M`, `N-`, `-M` | — |
+
+**Note:** `cut` processes a single file or stdin. Multiple file arguments are not supported (only the first file is used).
 
 ```bash
 cut -f1 -d: /etc/passwd                      # first field, colon delimiter
@@ -217,6 +219,29 @@ jq '.items[]' /path/to/file.json                        # read from file
 
 ## Files & I/O
 
+### ln / readlink
+
+Symbolic link tools.
+
+| Tool | Supported | Deliberately Omitted |
+|------|-----------|---------------------|
+| `ln` | `-s` (symbolic), `-f` (force) | Hard links |
+| `readlink` | Raw symlink target, `-f` (canonicalize) | `-e`, `-m` (canonicalize modes) |
+
+**Why no hard links?** The VFS abstraction doesn't support hard links. Use symlinks instead.
+
+**Note:** `ls` shows symlinks with an `@` suffix (short format) and `name -> target` (long format), similar to `ls -F`.
+
+```bash
+ln -s /path/to/target link_name     # create symlink
+ln -sf target.txt link.txt          # force replace existing link
+readlink link.txt                   # show symlink target
+readlink -f ../some/./path          # canonicalize path
+ls -la /path                        # shows: link.txt -> target.txt
+```
+
+---
+
 ### cat / head / tail
 
 File content output tools.
@@ -224,10 +249,12 @@ File content output tools.
 | Tool | Supported | Deliberately Omitted |
 |------|-----------|---------------------|
 | `cat` | Read and concatenate files, `-n` (line numbers) | `-s` (squeeze blank), `-A` (show all) |
-| `head` | `-n` (lines), `-c` (chars) | — |
-| `tail` | `-n` (lines), `-c` (chars) | `-f` (follow) |
+| `head` | `-n` (lines), `-c` (chars) | Multiple files |
+| `tail` | `-n` (lines), `-c` (chars) | `-f` (follow), multiple files |
 
 **Note:** `-c` counts UTF-8 characters, not bytes (deliberate simplification for Unicode correctness).
+
+**Note:** `head` and `tail` process a single file or stdin. Multiple file arguments are not supported (only the first file is used).
 
 **Why no `tail -f`?** Use a dedicated log-watching tool or MCP integration for real-time streams.
 

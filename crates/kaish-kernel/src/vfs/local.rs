@@ -134,17 +134,25 @@ impl Filesystem for LocalFs {
         let mut dir = fs::read_dir(&full_path).await?;
 
         while let Some(entry) = dir.next_entry().await? {
-            let metadata = entry.metadata().await?;
-            let entry_type = if metadata.is_dir() {
-                EntryType::Directory
+            // Use symlink_metadata to detect symlinks without following them
+            let metadata = fs::symlink_metadata(entry.path()).await?;
+            let file_type = metadata.file_type();
+
+            let (entry_type, symlink_target) = if file_type.is_symlink() {
+                // Read the symlink target
+                let target = fs::read_link(entry.path()).await.ok();
+                (EntryType::Symlink, target)
+            } else if file_type.is_dir() {
+                (EntryType::Directory, None)
             } else {
-                EntryType::File
+                (EntryType::File, None)
             };
 
             entries.push(DirEntry {
                 name: entry.file_name().to_string_lossy().into_owned(),
                 entry_type,
                 size: metadata.len(),
+                symlink_target,
             });
         }
 
@@ -154,14 +162,61 @@ impl Filesystem for LocalFs {
 
     async fn stat(&self, path: &Path) -> io::Result<Metadata> {
         let full_path = self.resolve(path)?;
+        // stat follows symlinks
         let meta = fs::metadata(&full_path).await?;
 
         Ok(Metadata {
             is_dir: meta.is_dir(),
             is_file: meta.is_file(),
+            is_symlink: false, // stat follows symlinks, so the target is never a symlink
             size: meta.len(),
             modified: meta.modified().ok(),
         })
+    }
+
+    async fn lstat(&self, path: &Path) -> io::Result<Metadata> {
+        // lstat doesn't follow symlinks - we need to avoid canonicalizing the path
+        let path = path.strip_prefix("/").unwrap_or(path);
+        let full_path = self.root.join(path);
+
+        // Use symlink_metadata which doesn't follow symlinks
+        let meta = fs::symlink_metadata(&full_path).await?;
+
+        Ok(Metadata {
+            is_dir: meta.is_dir(),
+            is_file: meta.is_file(),
+            is_symlink: meta.file_type().is_symlink(),
+            size: meta.len(),
+            modified: meta.modified().ok(),
+        })
+    }
+
+    async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
+        let path = path.strip_prefix("/").unwrap_or(path);
+        let full_path = self.root.join(path);
+        fs::read_link(&full_path).await
+    }
+
+    async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
+        self.check_writable()?;
+        let path = link.strip_prefix("/").unwrap_or(link);
+        let link_path = self.root.join(path);
+
+        // Ensure parent directory exists
+        if let Some(parent) = link_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        #[cfg(unix)]
+        {
+            tokio::fs::symlink(target, &link_path).await
+        }
+        #[cfg(windows)]
+        {
+            // Windows needs to know if target is a file or directory
+            // Default to file symlink; for directories use symlink_dir
+            tokio::fs::symlink_file(target, &link_path).await
+        }
     }
 
     async fn mkdir(&self, path: &Path) -> io::Result<()> {

@@ -73,6 +73,13 @@ pub async fn list_resources(
                 let mime = guess_mime_type(&entry.name);
                 (None, Some(mime))
             }
+            kaish_kernel::vfs::EntryType::Symlink => {
+                let target = entry.symlink_target
+                    .as_ref()
+                    .map(|t| format!(" -> {}", t.display()))
+                    .unwrap_or_default();
+                (Some(format!("Symlink{}", target)), Some("inode/symlink".to_string()))
+            }
         };
 
         resources.push(ResourceInfo {

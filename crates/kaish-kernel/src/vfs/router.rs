@@ -196,6 +196,7 @@ impl Filesystem for VfsRouter {
             return Ok(Metadata {
                 is_dir: true,
                 is_file: false,
+                is_symlink: false,
                 size: 0,
                 modified: None,
             });
@@ -207,6 +208,7 @@ impl Filesystem for VfsRouter {
             return Ok(Metadata {
                 is_dir: true,
                 is_file: false,
+                is_symlink: false,
                 size: 0,
                 modified: None,
             });
@@ -214,6 +216,45 @@ impl Filesystem for VfsRouter {
 
         let (fs, relative) = self.find_mount(path)?;
         fs.stat(&relative).await
+    }
+
+    async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
+        let (fs, relative) = self.find_mount(path)?;
+        fs.read_link(&relative).await
+    }
+
+    async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
+        let (fs, relative) = self.find_mount(link)?;
+        fs.symlink(target, &relative).await
+    }
+
+    async fn lstat(&self, path: &Path) -> io::Result<Metadata> {
+        // Special case: root always exists
+        let path_str = path.to_string_lossy();
+        if path_str.is_empty() || path_str == "/" {
+            return Ok(Metadata {
+                is_dir: true,
+                is_file: false,
+                is_symlink: false,
+                size: 0,
+                modified: None,
+            });
+        }
+
+        // Check if path is a mount point itself
+        let normalized = Self::normalize_mount_path(path.to_path_buf());
+        if self.mounts.contains_key(&normalized) {
+            return Ok(Metadata {
+                is_dir: true,
+                is_file: false,
+                is_symlink: false,
+                size: 0,
+                modified: None,
+            });
+        }
+
+        let (fs, relative) = self.find_mount(path)?;
+        fs.lstat(&relative).await
     }
 
     async fn mkdir(&self, path: &Path) -> io::Result<()> {
@@ -278,6 +319,7 @@ impl VfsRouter {
                         name: first_component.to_string(),
                         entry_type: EntryType::Directory,
                         size: 0,
+                        symlink_target: None,
                     });
                 }
             }
