@@ -298,4 +298,21 @@ mod tests {
         let lines: Vec<&str> = result.out.lines().collect();
         assert_eq!(lines.len(), 3);
     }
+
+    #[tokio::test]
+    async fn test_head_single_file_only() {
+        // 80/20 design: only first positional argument is used.
+        // Extra file arguments are silently ignored.
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/lines.txt".into()));
+        args.positional.push(Value::String("/short.txt".into())); // ignored
+
+        let result = Head.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Should only read from first file (lines.txt has "line 1", "line 2", etc.)
+        let lines: Vec<&str> = result.out.lines().collect();
+        assert_eq!(lines.len(), 10);
+        assert_eq!(lines[0], "line 1");
+    }
 }

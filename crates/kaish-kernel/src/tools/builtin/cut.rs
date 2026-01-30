@@ -388,4 +388,24 @@ mod tests {
         assert!(result.ok());
         assert_eq!(result.out.trim(), "a,c,d,e,g");
     }
+
+    #[tokio::test]
+    async fn test_cut_single_file_only() {
+        // 80/20 design: only first positional argument is used.
+        // Extra file arguments are silently ignored.
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/csv.txt".into()));
+        args.positional.push(Value::String("/tsv.txt".into())); // ignored
+        args.named
+            .insert("delimiter".to_string(), Value::String(",".into()));
+        args.named
+            .insert("fields".to_string(), Value::String("1".into()));
+
+        let result = Cut.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Should only read from first file (csv.txt has "alice,25,engineer" etc.)
+        let lines: Vec<&str> = result.out.lines().collect();
+        assert_eq!(lines, vec!["alice", "bob"]);
+    }
 }
