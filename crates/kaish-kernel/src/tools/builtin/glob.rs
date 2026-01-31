@@ -96,8 +96,17 @@ impl Tool for Glob {
             Err(e) => return ExecResult::failure(1, format!("glob: invalid pattern: {}", e)),
         };
 
-        // Start from current working directory
-        let root = ctx.resolve_path(".");
+        // Determine the root directory for walking:
+        // If pattern is anchored (/foo/bar), start from /
+        // Otherwise, start from current directory
+        //
+        // Note: We could optimize by using static_prefix, but that requires
+        // stripping the prefix from the pattern too. For now, keep it simple.
+        let root = if glob.is_anchored() {
+            ctx.resolve_path("/")
+        } else {
+            ctx.resolve_path(".")
+        };
 
         // Parse options
         let max_depth = args.get("depth", usize::MAX).and_then(|v| match v {

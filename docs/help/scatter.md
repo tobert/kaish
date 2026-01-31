@@ -21,34 +21,33 @@ input | scatter as=VAR limit=N | process $VAR | gather
 
 ## Examples
 
-### Process URLs in Parallel
+### Process Files in Parallel
 
 ```bash
-cat urls.txt | scatter as=URL limit=8 | fetch $URL | gather > results.json
+glob "*.json" | scatter as=FILE limit=4 | jq ".name" $FILE | gather
 ```
 
-### Parallel File Processing
+### Parallel Computation
 
 ```bash
-glob "*.json" | scatter as=FILE limit=4 | jq '.name' $FILE | gather
+seq 1 20 | scatter as=N limit=4 | echo "result: $((N * N))" | gather
 ```
 
 ### With Progress
 
 ```bash
-cat big_list.txt \
-    | scatter as=ID limit=4 \
-    | slow-operation id=$ID \
+seq 1 100 \
+    | scatter as=N limit=4 \
+    | sleep 0.1 && echo "done $N" \
     | gather progress=true
 ```
 
-### Transform Records
+### Transform Data
 
 ```bash
-cat records.json \
-    | jq -c '.[]' \
-    | scatter as=RECORD limit=8 \
-    | process-record data=$RECORD \
+seq 1 10 \
+    | scatter as=N limit=4 \
+    | echo "{\"id\": $N, \"square\": $((N * N))}" \
     | gather \
     | jq -s '.'
 ```

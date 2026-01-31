@@ -40,7 +40,7 @@ if [[ -f config.json ]]; then
 fi
 
 # Parallel processing
-cat urls.txt | scatter as=URL limit=4 | fetch $URL | gather
+seq 1 10 | scatter as=N limit=4 | echo "processing $N" | gather
 ```
 
 ## Key Differences from Bash
