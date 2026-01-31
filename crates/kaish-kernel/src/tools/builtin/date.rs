@@ -65,8 +65,10 @@ impl Tool for Date {
             }
         } else {
             // Custom format or default
+            // Strip leading + for Unix date compatibility (date +%s -> date %s)
             let format = args
                 .get_string("format", 0)
+                .map(|s| s.strip_prefix('+').unwrap_or(&s).to_string())
                 .unwrap_or_else(|| "%Y-%m-%d %H:%M:%S".to_string());
 
             if use_utc {
