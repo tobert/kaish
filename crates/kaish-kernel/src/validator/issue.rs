@@ -57,6 +57,8 @@ pub enum IssueCode {
     ExtraPositionalArgs,
     /// Bare scalar variable in for loop (no word splitting in kaish).
     ForLoopScalarVar,
+    /// Unquoted glob pattern that won't expand (kaish has no implicit globbing).
+    ShellGlobPattern,
 }
 
 impl IssueCode {
@@ -80,6 +82,7 @@ impl IssueCode {
             IssueCode::RecursiveWithoutFlag => "W004",
             IssueCode::ExtraPositionalArgs => "W005",
             IssueCode::ForLoopScalarVar => "E012",
+            IssueCode::ShellGlobPattern => "E013",
         }
     }
 
@@ -95,7 +98,8 @@ impl IssueCode {
             | IssueCode::ReturnOutsideFunction
             | IssueCode::InvalidCount
             | IssueCode::DiffNeedsTwoFiles
-            | IssueCode::ForLoopScalarVar => Severity::Error,
+            | IssueCode::ForLoopScalarVar
+            | IssueCode::ShellGlobPattern => Severity::Error,
 
             // These are warnings because context matters:
             // - MissingRequiredArg: might be provided by pipeline stdin or environment

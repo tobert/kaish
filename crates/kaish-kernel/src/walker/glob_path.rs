@@ -142,6 +142,25 @@ impl GlobPath {
         self.anchored
     }
 
+    /// Check if the pattern contains a globstar (`**`).
+    ///
+    /// Patterns with globstar require recursive directory traversal.
+    /// Patterns without globstar only match at a fixed depth.
+    pub fn has_globstar(&self) -> bool {
+        self.segments.iter().any(|s| matches!(s, PathSegment::Globstar))
+    }
+
+    /// Get the depth of the pattern (number of path components).
+    ///
+    /// Returns `None` if the pattern contains globstar (variable depth).
+    pub fn fixed_depth(&self) -> Option<usize> {
+        if self.has_globstar() {
+            None
+        } else {
+            Some(self.segments.len())
+        }
+    }
+
     /// Check if a string is a literal (no wildcards).
     fn is_literal(s: &str) -> bool {
         !s.contains('*') && !s.contains('?') && !s.contains('[') && !s.contains('{')
@@ -335,6 +354,28 @@ mod tests {
     #[test]
     fn test_empty_pattern() {
         assert!(matches!(GlobPath::new(""), Err(PatternError::Empty)));
+    }
+
+    #[test]
+    fn test_has_globstar() {
+        assert!(GlobPath::new("**/*.rs").unwrap().has_globstar());
+        assert!(GlobPath::new("src/**").unwrap().has_globstar());
+        assert!(GlobPath::new("a/**/z").unwrap().has_globstar());
+        assert!(!GlobPath::new("*.rs").unwrap().has_globstar());
+        assert!(!GlobPath::new("src/*.rs").unwrap().has_globstar());
+        assert!(!GlobPath::new("src/lib/main.rs").unwrap().has_globstar());
+    }
+
+    #[test]
+    fn test_fixed_depth() {
+        // Non-recursive patterns have fixed depth
+        assert_eq!(GlobPath::new("*.rs").unwrap().fixed_depth(), Some(1));
+        assert_eq!(GlobPath::new("src/*.rs").unwrap().fixed_depth(), Some(2));
+        assert_eq!(GlobPath::new("a/b/c.txt").unwrap().fixed_depth(), Some(3));
+
+        // Recursive patterns have no fixed depth
+        assert_eq!(GlobPath::new("**/*.rs").unwrap().fixed_depth(), None);
+        assert_eq!(GlobPath::new("src/**").unwrap().fixed_depth(), None);
     }
 
     #[test]

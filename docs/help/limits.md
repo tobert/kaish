@@ -23,6 +23,7 @@ These bash features are omitted by design:
 ## Validator
 
 - **Lexical scoping** — Static analysis with ShellCheck-like strictness. May warn about variables defined at runtime if not lexically visible. This is intentional.
+- **Glob pattern detection** — E013 blocks execution when glob patterns like `"*.txt"` are passed to file-operating commands (ls, cat, rm, etc.). Use `glob "pattern"` for explicit expansion.
 
 ## Builtins
 

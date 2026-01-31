@@ -114,6 +114,28 @@ impl<'a> Validator<'a> {
             self.validate_arg(arg);
         }
 
+        // Check for shell glob patterns in arguments (unless command expects patterns)
+        if !command_expects_pattern_or_text(&cmd.name) {
+            for arg in &cmd.args {
+                if let Arg::Positional(expr) = arg {
+                    if let Some(pattern) = self.extract_unquoted_glob_pattern(expr) {
+                        self.issues.push(
+                            ValidationIssue::error(
+                                IssueCode::ShellGlobPattern,
+                                format!(
+                                    "glob pattern '{}' won't expand (kaish has no implicit globbing)",
+                                    pattern
+                                ),
+                            )
+                            .with_suggestion(
+                                "use: glob \"pattern\" | xargs cmd  OR  for f in $(glob \"pattern\")",
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
         // If we have a schema, validate args against it
         if let Some(tool) = self.registry.get(&cmd.name) {
             let tool_args = build_tool_args_for_validation(&cmd.args);
@@ -202,6 +224,26 @@ impl<'a> Validator<'a> {
 
         self.scope.pop_frame();
         self.loop_depth -= 1;
+    }
+
+    /// Extract glob pattern from unquoted literal expressions.
+    ///
+    /// Returns `Some(pattern)` if the expression is an unquoted literal that
+    /// looks like a shell glob pattern (e.g., `*.txt`, `file?.log`).
+    fn extract_unquoted_glob_pattern(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Literal(Value::String(s)) if looks_like_shell_glob(s) => Some(s.clone()),
+            // Interpolated strings that are just a literal (parser may produce these)
+            Expr::Interpolated(parts) if parts.len() == 1 => {
+                if let StringPart::Literal(s) = &parts[0] {
+                    if looks_like_shell_glob(s) {
+                        return Some(s.clone());
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     /// Check if an expression is a bare scalar variable reference.
@@ -452,6 +494,42 @@ fn is_static_command_name(name: &str) -> bool {
     !name.starts_with('$') && !name.contains("$(")
 }
 
+/// Check if a string looks like a shell glob pattern.
+///
+/// Detects: `*`, `?`, `[x]`, `[a-z]`, etc. when they appear in what looks
+/// like a filename pattern.
+fn looks_like_shell_glob(s: &str) -> bool {
+    // Skip if it looks like a regex anchor or common non-glob uses
+    if s.starts_with('^') || s.ends_with('$') {
+        return false;
+    }
+
+    let has_star = s.contains('*');
+    let has_question = s.contains('?') && !s.contains("??"); // ?? is often intentional
+    let has_bracket = s.contains('[') && s.contains(']');
+
+    // Must look like a filename pattern (has extension or path separator)
+    let looks_like_path = s.contains('.') || s.contains('/');
+
+    (has_star || has_question || has_bracket) && looks_like_path
+}
+
+/// Check if a command expects pattern arguments or text (not filenames).
+///
+/// Returns true for commands where glob-like patterns in arguments are
+/// intentional and shouldn't trigger validation warnings.
+fn command_expects_pattern_or_text(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        // Pattern-based commands
+        "grep" | "egrep" | "fgrep" | "sed" | "awk" | "find" | "glob" | "regex"
+        // Text output commands - anything is valid text
+        | "echo" | "printf"
+        // JSON/text processing
+        | "jq"
+    )
+}
+
 /// Check if a command is a special built-in that we don't validate.
 fn is_special_command(name: &str) -> bool {
     matches!(
@@ -681,5 +759,112 @@ mod tests {
         assert!(!issues
             .iter()
             .any(|i| i.code == IssueCode::PossiblyUndefinedVariable));
+    }
+
+    #[test]
+    fn looks_like_shell_glob_detects_star() {
+        assert!(looks_like_shell_glob("*.txt"));
+        assert!(looks_like_shell_glob("src/*.rs"));
+        assert!(looks_like_shell_glob("**/*.json"));
+    }
+
+    #[test]
+    fn looks_like_shell_glob_detects_question() {
+        assert!(looks_like_shell_glob("file?.log"));
+        assert!(looks_like_shell_glob("test?.txt"));
+    }
+
+    #[test]
+    fn looks_like_shell_glob_detects_brackets() {
+        assert!(looks_like_shell_glob("[abc].txt"));
+        assert!(looks_like_shell_glob("[a-z].log"));
+        assert!(looks_like_shell_glob("file[0-9].rs"));
+    }
+
+    #[test]
+    fn looks_like_shell_glob_rejects_non_patterns() {
+        // No wildcard chars
+        assert!(!looks_like_shell_glob("readme.txt"));
+        assert!(!looks_like_shell_glob("src/main.rs"));
+        // Has wildcard but no extension/path (not filename-like)
+        assert!(!looks_like_shell_glob("hello*world"));
+        // Regex anchors (not globs)
+        assert!(!looks_like_shell_glob("^start"));
+        assert!(!looks_like_shell_glob("end$"));
+    }
+
+    #[test]
+    fn command_expects_pattern_or_text_returns_true() {
+        assert!(command_expects_pattern_or_text("grep"));
+        assert!(command_expects_pattern_or_text("echo"));
+        assert!(command_expects_pattern_or_text("find"));
+        assert!(command_expects_pattern_or_text("glob"));
+    }
+
+    #[test]
+    fn command_expects_pattern_or_text_returns_false() {
+        assert!(!command_expects_pattern_or_text("ls"));
+        assert!(!command_expects_pattern_or_text("cat"));
+        assert!(!command_expects_pattern_or_text("rm"));
+        assert!(!command_expects_pattern_or_text("cp"));
+    }
+
+    #[test]
+    fn validates_glob_pattern_in_ls() {
+        let (registry, user_tools) = make_validator();
+        let validator = Validator::new(&registry, &user_tools);
+
+        let program = Program {
+            statements: vec![Stmt::Command(Command {
+                name: "ls".to_string(),
+                args: vec![Arg::Positional(Expr::Literal(Value::String(
+                    "*.txt".to_string(),
+                )))],
+                redirects: vec![],
+            })],
+        };
+
+        let issues = validator.validate(&program);
+        assert!(issues.iter().any(|i| i.code == IssueCode::ShellGlobPattern));
+    }
+
+    #[test]
+    fn allows_glob_pattern_in_grep() {
+        let (registry, user_tools) = make_validator();
+        let validator = Validator::new(&registry, &user_tools);
+
+        let program = Program {
+            statements: vec![Stmt::Command(Command {
+                name: "grep".to_string(),
+                args: vec![Arg::Positional(Expr::Literal(Value::String(
+                    "func.*test".to_string(),
+                )))],
+                redirects: vec![],
+            })],
+        };
+
+        let issues = validator.validate(&program);
+        // grep expects patterns, so should NOT warn
+        assert!(!issues.iter().any(|i| i.code == IssueCode::ShellGlobPattern));
+    }
+
+    #[test]
+    fn allows_glob_pattern_in_echo() {
+        let (registry, user_tools) = make_validator();
+        let validator = Validator::new(&registry, &user_tools);
+
+        let program = Program {
+            statements: vec![Stmt::Command(Command {
+                name: "echo".to_string(),
+                args: vec![Arg::Positional(Expr::Literal(Value::String(
+                    "*.txt".to_string(),
+                )))],
+                redirects: vec![],
+            })],
+        };
+
+        let issues = validator.validate(&program);
+        // echo is text output, so should NOT warn
+        assert!(!issues.iter().any(|i| i.code == IssueCode::ShellGlobPattern));
     }
 }

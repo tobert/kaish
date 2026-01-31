@@ -216,8 +216,28 @@ impl<'a> FileWalker<'a> {
                         current_filter.clone()
                     };
 
-                    // Queue directory for recursion with its filter
-                    stack.push((full_path.clone(), depth + 1, child_filter));
+                    // Only recurse if the pattern requires it:
+                    // - No pattern: recurse freely
+                    // - Pattern with globstar (**): needs recursive search
+                    // - Pattern with fixed depth: only recurse if we haven't reached required depth
+                    let should_recurse = match &self.pattern {
+                        None => true,
+                        Some(pat) => {
+                            if pat.has_globstar() {
+                                true
+                            } else if let Some(fixed) = pat.fixed_depth() {
+                                // depth is 0-indexed, fixed_depth counts segments
+                                // e.g., "*.rs" has depth 1, so we don't recurse past depth 0
+                                depth + 1 < fixed
+                            } else {
+                                true
+                            }
+                        }
+                    };
+
+                    if should_recurse {
+                        stack.push((full_path.clone(), depth + 1, child_filter));
+                    }
 
                     // Yield directory if wanted
                     if self.options.entry_types.dirs && self.matches_pattern(&full_path) {

@@ -273,3 +273,251 @@ async fn validation_passes_for_valid_seq() {
     assert!(exec.ok(), "valid seq should execute successfully");
     assert!(exec.out.contains("1") && exec.out.contains("9"));
 }
+
+// ============================================================================
+// Tests for shell glob pattern detection (E013)
+// ============================================================================
+
+#[tokio::test]
+async fn validation_blocks_glob_pattern_ls_star() {
+    let kernel = make_kernel().await;
+    // `ls *.txt` is rejected at parse time - bare * is not valid syntax
+    // This is by design: kaish has no implicit globbing
+    let result = kernel.execute("ls *.txt").await;
+
+    assert!(result.is_err(), "bare glob pattern should fail");
+    // Parser rejects it before validation can see it
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("parse error") || err.contains("*"),
+        "error should be a parse error: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn validation_blocks_glob_pattern_ls_quoted() {
+    let kernel = make_kernel().await;
+    // Quoted glob passed to ls is caught by validator
+    let result = kernel.execute("ls \"*.txt\"").await;
+
+    assert!(result.is_err(), "quoted glob to ls should fail validation");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("glob") || err.contains("E013"),
+        "error should mention glob or E013: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn validation_blocks_glob_pattern_rm_bak() {
+    let kernel = make_kernel().await;
+    let result = kernel.execute("rm *.bak").await;
+
+    assert!(result.is_err(), "glob pattern should fail validation");
+}
+
+#[tokio::test]
+async fn validation_blocks_glob_pattern_question_mark() {
+    let kernel = make_kernel().await;
+    // file?.log is a glob pattern with ? wildcard
+    let result = kernel.execute("cat file?.log").await;
+
+    assert!(result.is_err(), "glob pattern with ? should fail validation");
+}
+
+#[tokio::test]
+async fn validation_blocks_glob_pattern_with_path() {
+    let kernel = make_kernel().await;
+    // src/*.rs includes path and wildcard
+    let result = kernel.execute("cp src/*.rs dest/").await;
+
+    assert!(result.is_err(), "glob pattern in path should fail validation");
+}
+
+#[tokio::test]
+async fn validation_blocks_glob_pattern_bracket() {
+    let kernel = make_kernel().await;
+    // [abc].txt is a character class glob
+    let result = kernel.execute("echo [abc].txt").await;
+
+    assert!(result.is_err(), "bracket glob pattern should fail validation");
+}
+
+#[tokio::test]
+async fn validation_allows_glob_builtin() {
+    let kernel = make_kernel().await;
+    // The `glob` builtin correctly takes pattern arguments
+    let result = kernel.execute("glob \"*.txt\"").await;
+
+    // Should pass validation (runtime may return empty list)
+    assert!(result.is_ok(), "glob builtin should pass validation");
+}
+
+#[tokio::test]
+async fn validation_allows_grep_pattern() {
+    let kernel = make_kernel().await;
+    // grep takes regex patterns, not file globs
+    let result = kernel.execute("echo 'func_test' | grep 'func.*test'").await;
+
+    assert!(result.is_ok(), "grep pattern should pass validation");
+    let exec = result.unwrap();
+    assert!(exec.ok(), "grep should execute successfully");
+}
+
+#[tokio::test]
+async fn validation_allows_find_pattern() {
+    let kernel = make_kernel().await;
+    // find takes -name patterns internally (must be quoted)
+    let result = kernel.execute("find . -name \"*.rs\"").await;
+
+    // Should pass validation (find handles its own patterns)
+    assert!(result.is_ok(), "find with pattern should pass validation");
+}
+
+#[tokio::test]
+async fn validation_allows_quoted_glob_pattern() {
+    let kernel = make_kernel().await;
+    // Quoted patterns are passed literally to commands
+    let result = kernel.execute("echo \"*.txt\"").await;
+
+    assert!(result.is_ok(), "quoted pattern should pass validation");
+    let exec = result.unwrap();
+    assert!(exec.ok(), "quoted pattern should execute");
+    assert!(exec.out.contains("*.txt"), "pattern should be literal");
+}
+
+#[tokio::test]
+async fn validation_allows_correct_glob_usage() {
+    let kernel = make_kernel().await;
+    // Correct way: use glob builtin and iterate results
+    let result = kernel.execute(r#"
+        for f in $(glob "*.nonexistent"); do
+            echo $f
+        done
+    "#).await;
+
+    assert!(result.is_ok(), "correct glob usage should pass validation");
+}
+
+// ============================================================================
+// Additional glob pattern edge cases
+// ============================================================================
+
+#[tokio::test]
+async fn validation_blocks_glob_double_star() {
+    let kernel = make_kernel().await;
+    // Double star glob pattern
+    let result = kernel.execute("cat \"**/*.rs\"").await;
+
+    assert!(result.is_err(), "double star glob should fail validation");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("E013"), "error should be E013: {}", err);
+}
+
+#[tokio::test]
+async fn validation_blocks_glob_in_mv() {
+    let kernel = make_kernel().await;
+    let result = kernel.execute("mv \"*.old\" backup/").await;
+
+    assert!(result.is_err(), "glob in mv should fail validation");
+}
+
+#[tokio::test]
+async fn validation_blocks_glob_in_head() {
+    let kernel = make_kernel().await;
+    let result = kernel.execute("head \"config*.yaml\"").await;
+
+    assert!(result.is_err(), "glob in head should fail validation");
+}
+
+#[tokio::test]
+async fn validation_blocks_glob_in_tail() {
+    let kernel = make_kernel().await;
+    let result = kernel.execute("tail \"log?.txt\"").await;
+
+    assert!(result.is_err(), "glob with ? in tail should fail validation");
+}
+
+#[tokio::test]
+async fn validation_blocks_glob_character_class() {
+    let kernel = make_kernel().await;
+    // Character range glob [a-z]
+    let result = kernel.execute("cat \"file[a-z].txt\"").await;
+
+    assert!(result.is_err(), "character class glob should fail validation");
+}
+
+#[tokio::test]
+async fn validation_allows_sed_pattern() {
+    let kernel = make_kernel().await;
+    // sed patterns look like globs but are regex
+    let result = kernel.execute("echo 'test' | sed 's/*.txt/replaced/'").await;
+
+    assert!(result.is_ok(), "sed pattern should pass validation");
+}
+
+#[tokio::test]
+async fn validation_allows_awk_pattern() {
+    let kernel = make_kernel().await;
+    // awk patterns
+    let result = kernel.execute("echo 'test' | awk '/.*\\.txt/ {print}'").await;
+
+    assert!(result.is_ok(), "awk pattern should pass validation");
+}
+
+#[tokio::test]
+async fn validation_allows_jq_pattern() {
+    let kernel = make_kernel().await;
+    // jq filter with glob-like syntax
+    let result = kernel.execute("echo '{}' | jq '.files[].name'").await;
+
+    assert!(result.is_ok(), "jq filter should pass validation");
+}
+
+#[tokio::test]
+async fn validation_blocks_glob_in_pipeline_first() {
+    let kernel = make_kernel().await;
+    // Glob in first command of pipeline
+    let result = kernel.execute("cat \"*.log\" | grep error").await;
+
+    assert!(result.is_err(), "glob in pipeline should fail validation");
+}
+
+#[tokio::test]
+async fn validation_allows_glob_in_pipeline_grep() {
+    let kernel = make_kernel().await;
+    // Pattern in grep (second command) is fine
+    let result = kernel.execute("echo 'test.txt' | grep '.*\\.txt'").await;
+
+    assert!(result.is_ok(), "grep pattern in pipeline should pass");
+}
+
+#[tokio::test]
+async fn validation_blocks_glob_with_path_prefix() {
+    let kernel = make_kernel().await;
+    // Glob with directory prefix
+    let result = kernel.execute("ls \"/tmp/*.log\"").await;
+
+    assert!(result.is_err(), "glob with path prefix should fail validation");
+}
+
+#[tokio::test]
+async fn validation_allows_literal_asterisk_filename() {
+    let kernel = make_kernel().await;
+    // A file literally named "star" without extension - not a glob
+    let result = kernel.execute("cat \"notes\"").await;
+
+    // Should pass validation (no glob chars, will fail at runtime if file doesn't exist)
+    assert!(result.is_ok(), "literal filename should pass validation");
+}
+
+#[tokio::test]
+async fn validation_allows_printf_pattern() {
+    let kernel = make_kernel().await;
+    // printf is text output
+    let result = kernel.execute("printf '%s\\n' \"*.txt\"").await;
+
+    assert!(result.is_ok(), "printf with pattern should pass validation");
+}
