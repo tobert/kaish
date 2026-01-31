@@ -34,3 +34,16 @@ pub use backend::{
 };
 pub use kernel::{Kernel, KernelConfig};
 pub use rpc::KernelRpcServer;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Embedding Conveniences
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Git types (for embedders that want direct GitVfs access)
+pub use vfs::{FileStatus, GitVfs, LogEntry, StatusSummary};
+
+// XDG path primitives (embedders compose their own paths)
+pub use paths::{home_dir, xdg_cache_home, xdg_config_home, xdg_data_home, xdg_runtime_dir};
+
+// Tilde expansion utility
+pub use interpreter::expand_tilde;
