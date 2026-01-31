@@ -42,6 +42,7 @@ mod rm;
 mod scatter;
 mod sed;
 mod seq;
+mod split;
 mod set;
 mod sleep;
 mod sort;
@@ -108,6 +109,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(sed::Sed);
     registry.register(seq::Seq);
     registry.register(set::Set);
+    registry.register(split::Split);
     registry.register(sleep::Sleep);
     registry.register(sort::Sort);
     registry.register(stat::Stat);
