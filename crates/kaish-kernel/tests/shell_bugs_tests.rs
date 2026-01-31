@@ -257,16 +257,47 @@ async fn test_deeply_nested_command_substitution() {
 }
 
 // ============================================================================
-// Bug 6: Command substitution in for loops fails
+// Behavior: No implicit word splitting in for loops
 // ============================================================================
+// kaish does NOT split strings on whitespace. Use `split` for explicit splitting
+// or use builtins that return arrays (seq, glob, find).
 
 #[tokio::test]
-async fn test_command_subst_in_for_loop() {
+async fn test_command_subst_no_implicit_split() {
+    // In kaish, $(echo "a b c") returns ONE string, not three words
     let kernel = Kernel::transient().unwrap();
     let result = kernel
         .execute(
             r#"
 for x in $(echo "a b c"); do
+    echo "item: $x"
+done
+"#,
+        )
+        .await
+        .unwrap();
+    // Should iterate ONCE with the whole string
+    assert!(
+        result.out.contains("item: a b c"),
+        "Should have whole string: {}",
+        result.out
+    );
+    // Should NOT have separate items
+    assert!(
+        !result.out.contains("item: a\n"),
+        "Should NOT split: {}",
+        result.out
+    );
+}
+
+#[tokio::test]
+async fn test_command_subst_with_explicit_split() {
+    // Use split for explicit word splitting
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute(
+            r#"
+for x in $(split "a b c"); do
     echo "item: $x"
 done
 "#,
@@ -291,12 +322,13 @@ done
 }
 
 #[tokio::test]
-async fn test_command_subst_in_for_loop_with_pipeline() {
+async fn test_for_loop_with_seq_returns_array() {
+    // seq returns a JSON array, which iterates properly
     let kernel = Kernel::transient().unwrap();
     let result = kernel
         .execute(
             r#"
-for num in $(echo "1 2 3"); do
+for num in $(seq 1 3); do
     echo "number $num"
 done
 "#,

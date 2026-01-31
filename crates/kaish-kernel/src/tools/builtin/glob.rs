@@ -174,34 +174,36 @@ impl Tool for Glob {
             Err(e) => return ExecResult::failure(1, format!("glob: {}", e)),
         };
 
-        // Format output
-        if json_output {
-            let json_paths: Vec<String> = paths
-                .iter()
-                .map(|p| {
-                    // Make paths relative to root if possible
-                    p.strip_prefix(&root)
-                        .unwrap_or(p)
-                        .to_string_lossy()
-                        .to_string()
-                })
-                .collect();
-            let json = serde_json::to_string(&json_paths).unwrap_or_else(|_| "[]".to_string());
-            ExecResult::success(json)
+        // Build path strings (relative to root)
+        let path_strings: Vec<String> = paths
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&root)
+                    .unwrap_or(p)
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
+        // Build JSON array for structured iteration
+        let json_array: Vec<serde_json::Value> = path_strings
+            .iter()
+            .map(|s| serde_json::Value::String(s.clone()))
+            .collect();
+
+        // Format text output
+        let sep = if null_sep { '\0' } else { '\n' };
+        let output = if json_output {
+            serde_json::to_string(&path_strings).unwrap_or_else(|_| "[]".to_string())
         } else {
-            let sep = if null_sep { '\0' } else { '\n' };
-            let output: String = paths
-                .iter()
-                .map(|p| {
-                    p.strip_prefix(&root)
-                        .unwrap_or(p)
-                        .to_string_lossy()
-                        .to_string()
-                })
-                .collect::<Vec<_>>()
-                .join(&sep.to_string());
-            ExecResult::success(output)
-        }
+            path_strings.join(&sep.to_string())
+        };
+
+        // Return both text output and structured data
+        ExecResult::success_with_data(
+            output,
+            Value::Json(serde_json::Value::Array(json_array)),
+        )
     }
 }
 

@@ -139,7 +139,11 @@ impl Tool for Seq {
         }
 
         if numbers.is_empty() {
-            return ExecResult::success("");
+            // Return empty array as structured data
+            return ExecResult::success_with_data(
+                String::new(),
+                Value::Json(serde_json::Value::Array(vec![])),
+            );
         }
 
         // Format output
@@ -174,7 +178,24 @@ impl Tool for Seq {
         let mut output = formatted.join(&separator);
         output.push('\n');
 
-        ExecResult::success(output)
+        // Build JSON array of numbers for structured iteration
+        let json_array: Vec<serde_json::Value> = numbers
+            .iter()
+            .map(|n| {
+                if is_integer {
+                    serde_json::Value::Number((*n as i64).into())
+                } else {
+                    serde_json::Number::from_f64(*n)
+                        .map(serde_json::Value::Number)
+                        .unwrap_or(serde_json::Value::Null)
+                }
+            })
+            .collect();
+
+        ExecResult::success_with_data(
+            output,
+            Value::Json(serde_json::Value::Array(json_array)),
+        )
     }
 }
 

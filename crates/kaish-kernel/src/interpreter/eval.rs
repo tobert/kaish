@@ -678,9 +678,15 @@ fn type_name(value: &Value) -> &'static str {
 
 /// Convert an ExecResult to a Value for command substitution return.
 ///
-/// Returns the stdout (trimmed) as a string, which is bash-compatible behavior.
+/// Prefers structured data if available (for iteration in for loops),
+/// otherwise returns stdout (trimmed) as a string.
 /// Access to other result fields (code, err, etc.) is via ${?.field}.
 fn result_to_value(result: &ExecResult) -> Value {
+    // Prefer structured data if available (enables `for i in $(cmd)` iteration)
+    if let Some(data) = &result.data {
+        return data.clone();
+    }
+    // Otherwise return stdout as single string (NO implicit splitting)
     Value::String(result.out.trim_end().to_string())
 }
 

@@ -38,5 +38,5 @@ mod scope;
 
 pub use control_flow::ControlFlow;
 pub use eval::{eval_expr, expand_tilde, value_to_bool, value_to_string, value_to_string_with_tilde, EvalError, EvalResult, Evaluator, Executor, NoOpExecutor};
-pub use result::{value_to_json, DisplayHint, EntryType, ExecResult};
+pub use result::{json_to_value, value_to_json, DisplayHint, EntryType, ExecResult};
 pub use scope::Scope;

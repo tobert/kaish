@@ -129,6 +129,24 @@ impl ExecResult {
         }
     }
 
+    /// Create a successful result with both text output and structured data.
+    ///
+    /// Use this when a command should have:
+    /// - Text output for pipes and traditional shell usage
+    /// - Structured data for iteration and programmatic access
+    ///
+    /// The data field takes precedence for command substitution in contexts
+    /// like `for i in $(cmd)` where the structured data can be iterated.
+    pub fn success_with_data(out: impl Into<String>, data: Value) -> Self {
+        Self {
+            code: 0,
+            out: out.into(),
+            err: String::new(),
+            data: Some(data),
+            hint: DisplayHint::default(),
+        }
+    }
+
     /// Create a failed result with an error message.
     pub fn failure(code: i64, err: impl Into<String>) -> Self {
         Self {
@@ -292,7 +310,7 @@ impl Default for ExecResult {
 ///
 /// Primitives are mapped to their corresponding Value variants.
 /// Arrays and objects are preserved as `Value::Json` - use `jq` to query them.
-fn json_to_value(json: serde_json::Value) -> Value {
+pub fn json_to_value(json: serde_json::Value) -> Value {
     match json {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(b),

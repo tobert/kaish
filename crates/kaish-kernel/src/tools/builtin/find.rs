@@ -151,8 +151,8 @@ impl Tool for Find {
             }
         };
 
-        // Apply post-filters (mtime, size)
-        let mut output = String::new();
+        // Apply post-filters (mtime, size) and collect results
+        let mut path_strings: Vec<String> = Vec::new();
         let now_secs = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -191,16 +191,23 @@ impl Tool for Find {
                 }
             }
 
-            output.push_str(&path.to_string_lossy());
-            output.push('\n');
+            path_strings.push(path.to_string_lossy().to_string());
         }
 
-        // Trim trailing newline
-        if output.ends_with('\n') {
-            output.pop();
-        }
+        // Build text output (newline-separated)
+        let output = path_strings.join("\n");
 
-        ExecResult::success(output)
+        // Build JSON array for structured iteration
+        let json_array: Vec<serde_json::Value> = path_strings
+            .iter()
+            .map(|s| serde_json::Value::String(s.clone()))
+            .collect();
+
+        // Return both text output and structured data
+        ExecResult::success_with_data(
+            output,
+            Value::Json(serde_json::Value::Array(json_array)),
+        )
     }
 }
 

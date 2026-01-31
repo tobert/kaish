@@ -32,7 +32,7 @@ use tokio::sync::RwLock;
 use crate::ast::{Arg, Expr, Stmt, StringPart, ToolDef, Value, BinaryOp};
 use crate::backend::KernelBackend;
 use crate::glob::glob_match;
-use crate::interpreter::{eval_expr, expand_tilde, value_to_string, ControlFlow, DisplayHint, ExecResult, Scope};
+use crate::interpreter::{eval_expr, expand_tilde, json_to_value, value_to_string, ControlFlow, DisplayHint, ExecResult, Scope};
 use crate::parser::parse;
 use crate::scheduler::{JobManager, PipelineRunner};
 use crate::tools::{register_builtins, ExecContext, ToolArgs, ToolRegistry};
@@ -389,17 +389,26 @@ impl Kernel {
                 Ok(flow)
             }
             Stmt::For(for_loop) => {
-                // Evaluate all items and collect words for iteration
-                // Use async evaluator to support command substitution like $(echo "a b c")
-                let mut words: Vec<String> = Vec::new();
+                // Evaluate all items and collect values for iteration
+                // Use async evaluator to support command substitution like $(seq 1 5)
+                let mut items: Vec<Value> = Vec::new();
                 for item_expr in &for_loop.items {
                     let item = self.eval_expr_async(item_expr).await?;
-                    // POSIX-style: word-split string values
+                    // NO implicit word splitting - arrays iterate, strings stay whole
                     match &item {
-                        Value::String(s) => {
-                            words.extend(s.split_whitespace().map(String::from));
+                        // JSON arrays iterate over elements
+                        Value::Json(serde_json::Value::Array(arr)) => {
+                            for elem in arr {
+                                items.push(json_to_value(elem.clone()));
+                            }
                         }
-                        _ => words.push(value_to_string(&item)),
+                        // Strings are ONE value - no splitting!
+                        // Use $(split "$VAR") for explicit splitting
+                        Value::String(_) => {
+                            items.push(item);
+                        }
+                        // Other values as-is
+                        _ => items.push(item),
                     }
                 }
 
@@ -409,10 +418,10 @@ impl Kernel {
                     scope.push_frame();
                 }
 
-                'outer: for word in words {
+                'outer: for item in items {
                     {
                         let mut scope = self.scope.write().await;
-                        scope.set(&for_loop.variable, Value::String(word));
+                        scope.set(&for_loop.variable, item);
                     }
                     for stmt in &for_loop.body {
                         let mut flow = self.execute_stmt_flow(stmt).await?;
@@ -808,10 +817,16 @@ impl Kernel {
                 }
             }
             Expr::CommandSubst(pipeline) => {
-                // Execute the pipeline and return stdout as the value
+                // Execute the pipeline and return structured data if available
                 let result = self.execute_pipeline(pipeline).await?;
                 self.update_last_result(&result).await;
-                Ok(Value::String(result.out.trim_end().to_string()))
+                // Prefer structured data (enables `for i in $(cmd)` iteration)
+                if let Some(data) = &result.data {
+                    Ok(data.clone())
+                } else {
+                    // Otherwise return stdout as single string (NO implicit splitting)
+                    Ok(Value::String(result.out.trim_end().to_string()))
+                }
             }
             Expr::Test(test_expr) => {
                 // For test expressions, use the sync evaluator
