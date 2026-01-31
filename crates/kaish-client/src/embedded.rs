@@ -223,8 +223,10 @@ mod tests {
     async fn test_embedded_cwd() {
         let client = EmbeddedClient::transient().expect("failed to create client");
 
+        // Transient kernel uses sandboxed mode with cwd=$HOME
         let cwd = client.cwd().await.expect("cwd failed");
-        assert_eq!(cwd, "/");
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        assert_eq!(cwd, home);
 
         client.set_cwd("/tmp").await.expect("set_cwd failed");
         let cwd = client.cwd().await.expect("cwd failed");

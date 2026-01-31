@@ -99,25 +99,24 @@ impl Repl {
     /// let repl = Repl::with_tools(root, tools)?;
     /// ```
     pub fn with_tools(root: PathBuf, tools: ToolRegistry) -> Result<Self> {
-        // Build the VFS
+        // Build the VFS in passthrough mode — native paths work directly
+        // This gives users full filesystem access, appropriate for a human-operated REPL.
         let mut vfs = VfsRouter::new();
 
-        // Mount the real filesystem at /mnt/local
-        let local_fs = LocalFs::new(root.clone());
-        vfs.mount("/mnt/local", local_fs);
+        // Mount the real filesystem at root — /home/user/project just works
+        vfs.mount("/", LocalFs::new(PathBuf::from("/")));
 
-        // Mount a memory fs at /scratch for ephemeral data
+        // Mount memory for blobs and scratch
+        vfs.mount("/v", MemoryFs::new());
         vfs.mount("/scratch", MemoryFs::new());
-
-        // Mount root as memory fs (for now)
-        vfs.mount("/", MemoryFs::new());
 
         // Wrap tools in Arc
         let tools = Arc::new(tools);
 
         // Create execution context with VFS and tools for backend dispatch
+        // Use the actual cwd as passed in (from std::env::current_dir())
         let mut exec_ctx = ExecContext::with_vfs_and_tools(Arc::new(vfs), tools.clone());
-        exec_ctx.set_cwd(PathBuf::from("/mnt/local"));
+        exec_ctx.set_cwd(root.clone());
         exec_ctx.set_tool_schemas(tools.schemas());
 
         // Create job manager and add to context

@@ -2,25 +2,54 @@
 
 The VFS provides unified resource access across different backends.
 
-## Mount Points
+## Mount Modes
+
+kaish supports different VFS configurations depending on the use case:
+
+### Passthrough Mode (REPL)
+
+For human-operated REPL sessions, native paths work directly:
 
 ```
-/              kernel root (current working directory)
-/scratch/      in-memory ephemeral storage
-/tmp/          in-memory temporary storage
-/mnt/local/    user's home directory ($HOME)
-/git/          git repository introspection
+/                native filesystem root
+/v/              memory storage for blobs
+/scratch/        ephemeral in-memory storage
 ```
 
-## /mnt/local — Local Filesystem
-
-Maps to the user's `$HOME` directory. This is where you'll find your projects, config files, etc.
-
+Example:
 ```bash
-ls /mnt/local                    # list home directory
-cat /mnt/local/.bashrc           # read a file
-ls /mnt/local/src/myproject      # navigate subdirectories
+ls /home/atobey/src/kaish     # works directly
+cat /etc/passwd                # works
+pwd                            # shows actual cwd
 ```
+
+### Sandboxed Mode (MCP)
+
+For agent/MCP use, paths look native but access is restricted to `$HOME`:
+
+```
+/                memory root (catches paths outside sandbox)
+/home/user/      user's home directory (sandboxed)
+/tmp/            in-memory temporary storage
+/v/              memory storage for blobs
+/scratch/        ephemeral in-memory storage
+```
+
+Example:
+```bash
+ls /home/atobey/src/kaish     # works (within $HOME)
+cat /etc/passwd                # fails (outside sandbox)
+pwd                            # /home/atobey
+```
+
+The sandbox can be restricted further (e.g., to `~/src`) via configuration.
+
+## Path Conventions
+
+- Absolute paths start with `/`
+- Paths are Unix-style (forward slashes)
+- In passthrough mode, all paths work
+- In sandboxed mode, only paths under the sandbox root work
 
 ## /scratch — Ephemeral Memory
 
@@ -28,7 +57,7 @@ In-memory storage for temporary data. Fast, but lost when session ends.
 
 ```bash
 echo "temp data" > /scratch/cache.txt
-cat /scratch/cache.txt           # read it back
+cat /scratch/cache.txt         # read it back
 ```
 
 ## /tmp — Temporary Storage
@@ -40,31 +69,34 @@ write /tmp/temp.json '{"key": "value"}'
 jq '.key' /tmp/temp.json
 ```
 
+## /v — Virtual Namespace
+
+Memory storage for blobs and other synthetic resources.
+
+```bash
+# Blobs are stored at /v/blobs/{id}
+ls /v/blobs/
+```
+
 ## /git — Repository Introspection
 
 Read-only access to git metadata for the current working directory.
 
 ```bash
-cat /git/status                  # git status output
-cat /git/log                     # recent commits
-cat /git/diff                    # current diff
-cat /git/blame/path/to/file.rs  # blame for specific file
+cat /git/status                # git status output
+cat /git/log                   # recent commits
+cat /git/diff                  # current diff
+cat /git/blame/path/to/file.rs # blame for specific file
 ```
 
-## Path Conventions
-
-- Absolute paths start with `/`
-- Paths are Unix-style (forward slashes)
-- The kernel root `/` is the current working directory
-- Use `/mnt/local` to access user's home directory
-
-## Example Session
+## Example Session (MCP/Sandboxed)
 
 ```bash
-# Start in /mnt/local by default
-pwd                              # /mnt/local
+# Start in $HOME by default
+pwd                            # /home/atobey
 
-# Work with local files
+# Work with local files using native paths
+cd /home/atobey/src/kaish
 ls src/
 cat src/main.rs | head -20
 
@@ -73,10 +105,28 @@ ls src/*.rs | write /scratch/rust_files.txt
 
 # Check git status
 cat /git/status
+
+# This fails - outside sandbox
+cat /etc/passwd                # error: not found
 ```
 
-## Notes
+## Example Session (REPL/Passthrough)
 
-- The VFS is per-session; changes to `/scratch` don't persist
-- `/mnt/local` provides real filesystem access
-- File operations use VFS paths, not native OS paths
+```bash
+# Native paths work directly
+pwd                            # /home/atobey/src/kaish
+ls src/
+cat /etc/passwd                # full filesystem access
+```
+
+## Security Implications
+
+| Mode | Access | Use Case |
+|------|--------|----------|
+| Passthrough | Full filesystem | Human-operated REPL |
+| Sandboxed | `$HOME` only (or subset) | Agents, MCP servers |
+| NoLocal | Memory only | Tests, isolation |
+
+**Passthrough mode** gives full filesystem access — appropriate for human users who trust their own commands.
+
+**Sandboxed mode** restricts access to the user's home directory (or a configured subset). Paths look native but `/etc/passwd` is not accessible.

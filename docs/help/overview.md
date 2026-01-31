@@ -21,8 +21,8 @@ help <tool>     Detailed tool help (e.g., help grep)
 ## Quick Examples
 
 ```bash
-# Pipes and filters
-ls /mnt/local | grep "\.rs$" | head -5
+# Pipes and filters (MCP uses /l for local files)
+ls /l | grep "\.rs$" | head -5
 
 # Iteration with glob
 for f in $(glob "*.json"); do

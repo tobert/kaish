@@ -39,22 +39,28 @@ pub struct KaishServerHandler {
 impl KaishServerHandler {
     /// Create a new handler with the given configuration.
     pub fn new(config: McpServerConfig) -> anyhow::Result<Self> {
-        // Create a VFS for resource access
+        // Create a VFS for resource access in sandboxed mode.
+        // Paths appear native (e.g., /home/user/...) but access is restricted.
         let mut vfs = VfsRouter::new();
 
-        // Mount memory at root
+        // Mount memory at root for safety (catches paths outside sandbox)
         vfs.mount("/", MemoryFs::new());
-        vfs.mount("/tmp", MemoryFs::new());
+        vfs.mount("/v", MemoryFs::new());
+        vfs.mount("/scratch", MemoryFs::new());
 
-        // Mount local filesystem at user's home directory.
-        // If HOME is not set, use a safe temp directory instead of exposing root.
+        // Real /tmp for interop with other processes
+        vfs.mount("/tmp", LocalFs::new(PathBuf::from("/tmp")));
+
+        // Mount local filesystem at its real path for transparent access.
+        // If HOME is not set, use a safe temp directory.
         let local_root = std::env::var("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
-                tracing::warn!("HOME not set, mounting temp directory for /mnt/local");
+                tracing::warn!("HOME not set, mounting temp directory");
                 std::env::temp_dir()
             });
-        vfs.mount("/mnt/local", LocalFs::new(local_root));
+        let mount_point = local_root.to_string_lossy().to_string();
+        vfs.mount(&mount_point, LocalFs::new(local_root));
 
         Ok(Self {
             config,
@@ -71,8 +77,8 @@ pub struct ExecuteInput {
     #[schemars(description = "Kaish script or command to execute")]
     pub script: String,
 
-    /// Initial working directory (VFS path, default: /mnt/local).
-    #[schemars(description = "Initial working directory (VFS path, default: /mnt/local)")]
+    /// Initial working directory (default: $HOME).
+    #[schemars(description = "Initial working directory (default: $HOME)")]
     pub cwd: Option<String>,
 
     /// Environment variables to set.
@@ -100,7 +106,7 @@ impl KaishServerHandler {
     ///
     /// Each call runs in a fresh, isolated environment. Supports restricted/modified
     /// Bourne syntax plus kaish extensions (scatter/gather, typed params, MCP tool calls).
-    #[tool(description = "Execute kaish shell scripts. Fresh isolated environment per call.\n\nSupports: pipes, redirects, here-docs, if/for/while, functions, 54 builtins (grep, jq, git, find, sed, awk, cat, ls, etc.), ${VAR:-default}, $((arithmetic)), scatter/gather parallelism.\n\nNOT supported: process substitution <(), backticks, eval, aliases, implicit word splitting.\n\nPaths: /mnt/local = $HOME, /scratch/ = ephemeral memory. Use 'help' tool for details.")]
+    #[tool(description = "Execute kaish shell scripts. Fresh isolated environment per call.\n\nSupports: pipes, redirects, here-docs, if/for/while, functions, 54 builtins (grep, jq, git, find, sed, awk, cat, ls, etc.), ${VAR:-default}, $((arithmetic)), scatter/gather parallelism.\n\nNOT supported: process substitution <(), backticks, eval, aliases, implicit word splitting.\n\nPaths: Native paths work within $HOME (e.g., /home/user/src/project). /scratch/ = ephemeral memory. Use 'help' tool for details.")]
     async fn execute(&self, input: Parameters<ExecuteInput>) -> Result<CallToolResult, McpError> {
         let params = ExecuteParams {
             script: input.0.script,
@@ -142,14 +148,9 @@ impl KaishServerHandler {
         // For builtins topic, we need tool schemas from a temporary kernel
         let content = if matches!(topic, HelpTopic::Builtins) || matches!(topic, HelpTopic::Tool(_))
         {
-            // Create a temporary kernel to get tool schemas
-            let config = kaish_kernel::KernelConfig {
-                name: "help".to_string(),
-                mount_local: false,
-                local_root: None,
-                cwd: PathBuf::from("/"),
-                skip_validation: true,
-            };
+            // Create a temporary kernel to get tool schemas (isolated, no local fs needed)
+            let config = kaish_kernel::KernelConfig::isolated()
+                .with_skip_validation(true);
             let kernel = kaish_kernel::Kernel::new(config)
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
             let schemas = kernel.tool_schemas();

@@ -133,7 +133,7 @@ mod tests {
 
         let result = Help.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("Mount Points"));
+        assert!(result.out.contains("Mount Modes"));
     }
 
     #[tokio::test]

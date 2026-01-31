@@ -18,7 +18,7 @@ pub struct ExecuteParams {
     /// The kaish script or command to execute.
     pub script: String,
 
-    /// Initial working directory (VFS path, default: /mnt/local).
+    /// Initial working directory (default: $HOME).
     #[serde(default)]
     pub cwd: Option<String>,
 
@@ -165,18 +165,12 @@ pub async fn execute(
             let result = rt.block_on(async move {
                 let timeout = Duration::from_millis(timeout_ms);
 
-                // Create a fresh kernel
-                let cwd = params
-                    .cwd
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("/mnt/local"));
-
-                let config = KernelConfig {
-                    name: "mcp-execute".to_string(),
-                    mount_local: true,
-                    local_root: None,
-                    cwd,
-                    skip_validation: false,
+                // Create a fresh kernel in sandboxed MCP mode
+                // Default cwd is $HOME (from KernelConfig::mcp())
+                let config = if let Some(cwd) = params.cwd {
+                    KernelConfig::mcp().with_cwd(PathBuf::from(cwd))
+                } else {
+                    KernelConfig::mcp()
                 };
 
                 let kernel = Kernel::new(config).context("Failed to create kernel")?;

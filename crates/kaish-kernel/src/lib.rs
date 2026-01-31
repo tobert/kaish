@@ -32,7 +32,7 @@ pub use backend::{
     BackendError, BackendResult, EntryInfo, KernelBackend, LocalBackend, PatchOp, ReadRange,
     ToolInfo, ToolResult, WriteMode,
 };
-pub use kernel::{Kernel, KernelConfig};
+pub use kernel::{Kernel, KernelConfig, VfsMountMode};
 pub use rpc::KernelRpcServer;
 
 // ═══════════════════════════════════════════════════════════════════════════

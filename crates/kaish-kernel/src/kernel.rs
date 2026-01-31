@@ -39,58 +39,211 @@ use crate::tools::{register_builtins, ExecContext, ToolArgs, ToolRegistry};
 use crate::validator::{Severity, Validator};
 use crate::vfs::{LocalFs, MemoryFs, VfsRouter};
 
+/// VFS mount mode determines how the local filesystem is exposed.
+///
+/// Different modes trade off convenience vs. security:
+/// - `Passthrough` gives native path access (best for human REPL use)
+/// - `Sandboxed` restricts access to a subtree (safer for agents)
+/// - `NoLocal` provides complete isolation (tests, pure memory mode)
+#[derive(Debug, Clone)]
+pub enum VfsMountMode {
+    /// LocalFs at "/" — native paths work directly.
+    ///
+    /// Full filesystem access. Use for human-operated REPL sessions where
+    /// native paths like `/home/user/project` should just work.
+    ///
+    /// Mounts:
+    /// - `/` → LocalFs("/")
+    /// - `/v` → MemoryFs (blob storage)
+    /// - `/scratch` → MemoryFs (ephemeral)
+    Passthrough,
+
+    /// Transparent sandbox — paths look native but access is restricted.
+    ///
+    /// The local filesystem is mounted at its real path (e.g., `/home/user`),
+    /// so `/home/user/src/project` just works. But paths outside the sandbox
+    /// root are not accessible.
+    ///
+    /// Mounts:
+    /// - `/` → MemoryFs (catches paths outside sandbox)
+    /// - `{root}` → LocalFs(root)  (e.g., `/home/user` → LocalFs)
+    /// - `/tmp` → MemoryFs
+    /// - `/v` → MemoryFs (blob storage)
+    /// - `/scratch` → MemoryFs
+    Sandboxed {
+        /// Root path for local filesystem. Defaults to `$HOME`.
+        /// Can be restricted further, e.g., `~/src`.
+        root: Option<PathBuf>,
+    },
+
+    /// No local filesystem. Memory only.
+    ///
+    /// Complete isolation — no access to the host filesystem.
+    /// Useful for tests or pure sandboxed execution.
+    ///
+    /// Mounts:
+    /// - `/` → MemoryFs
+    /// - `/tmp` → MemoryFs
+    /// - `/v` → MemoryFs
+    /// - `/scratch` → MemoryFs
+    NoLocal,
+}
+
+impl Default for VfsMountMode {
+    fn default() -> Self {
+        VfsMountMode::Sandboxed { root: None }
+    }
+}
+
 /// Configuration for kernel initialization.
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
     /// Name of this kernel (for identification).
     pub name: String,
-    /// Whether to mount the local filesystem at /mnt/local.
-    pub mount_local: bool,
-    /// Root path for local filesystem mount.
-    pub local_root: Option<PathBuf>,
-    /// Initial working directory.
+
+    /// VFS mount mode — controls how local filesystem is exposed.
+    pub vfs_mode: VfsMountMode,
+
+    /// Initial working directory (VFS path).
     pub cwd: PathBuf,
+
     /// Whether to skip pre-execution validation.
     ///
     /// When false (default), scripts are validated before execution to catch
     /// errors early. Set to true to skip validation for performance or to
     /// allow dynamic/external commands.
     pub skip_validation: bool,
+
+    // Deprecated fields — kept for backwards compatibility
+    #[doc(hidden)]
+    #[deprecated(since = "0.2.0", note = "use vfs_mode instead")]
+    pub mount_local: bool,
+    #[doc(hidden)]
+    #[deprecated(since = "0.2.0", note = "use vfs_mode instead")]
+    pub local_root: Option<PathBuf>,
 }
 
+/// Get the default sandbox root ($HOME).
+fn default_sandbox_root() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/"))
+}
+
+#[allow(deprecated)]
 impl Default for KernelConfig {
     fn default() -> Self {
+        let home = default_sandbox_root();
         Self {
             name: "default".to_string(),
+            vfs_mode: VfsMountMode::Sandboxed { root: None },
+            cwd: home,
+            skip_validation: false,
+            // Deprecated compat
             mount_local: true,
             local_root: None,
-            cwd: PathBuf::from("/"),
-            skip_validation: false,
         }
     }
 }
 
+#[allow(deprecated)]
 impl KernelConfig {
-    /// Create a transient kernel config.
+    /// Create a transient kernel config (sandboxed, for temporary use).
     pub fn transient() -> Self {
+        let home = default_sandbox_root();
         Self {
             name: "transient".to_string(),
+            vfs_mode: VfsMountMode::Sandboxed { root: None },
+            cwd: home,
+            skip_validation: false,
             mount_local: true,
             local_root: None,
-            cwd: PathBuf::from("/"),
-            skip_validation: false,
         }
     }
 
-    /// Create a kernel config with the given name.
+    /// Create a kernel config with the given name (sandboxed by default).
     pub fn named(name: &str) -> Self {
+        let home = default_sandbox_root();
         Self {
             name: name.to_string(),
+            vfs_mode: VfsMountMode::Sandboxed { root: None },
+            cwd: home,
+            skip_validation: false,
             mount_local: true,
             local_root: None,
+        }
+    }
+
+    /// Create a REPL config with passthrough filesystem access.
+    ///
+    /// Native paths like `/home/user/project` work directly.
+    /// The cwd is set to the actual current working directory.
+    pub fn repl() -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        Self {
+            name: "repl".to_string(),
+            vfs_mode: VfsMountMode::Passthrough,
+            cwd,
+            skip_validation: false,
+            mount_local: false, // Not used in passthrough
+            local_root: None,
+        }
+    }
+
+    /// Create an MCP server config with sandboxed filesystem access.
+    ///
+    /// Local filesystem is accessible at its real path (e.g., `/home/user`),
+    /// but sandboxed to `$HOME`. Paths outside the sandbox are not accessible.
+    pub fn mcp() -> Self {
+        let home = default_sandbox_root();
+        Self {
+            name: "mcp".to_string(),
+            vfs_mode: VfsMountMode::Sandboxed { root: None },
+            cwd: home,
+            skip_validation: false,
+            mount_local: true,
+            local_root: None,
+        }
+    }
+
+    /// Create an MCP server config with a custom sandbox root.
+    ///
+    /// Use this to restrict access to a subdirectory like `~/src`.
+    pub fn mcp_with_root(root: PathBuf) -> Self {
+        Self {
+            name: "mcp".to_string(),
+            vfs_mode: VfsMountMode::Sandboxed { root: Some(root.clone()) },
+            cwd: root,
+            skip_validation: false,
+            mount_local: true,
+            local_root: None,
+        }
+    }
+
+    /// Create a config with no local filesystem (memory only).
+    ///
+    /// Useful for tests or pure sandboxed execution.
+    pub fn isolated() -> Self {
+        Self {
+            name: "isolated".to_string(),
+            vfs_mode: VfsMountMode::NoLocal,
             cwd: PathBuf::from("/"),
             skip_validation: false,
+            mount_local: false,
+            local_root: None,
         }
+    }
+
+    /// Set the VFS mount mode.
+    pub fn with_vfs_mode(mut self, mode: VfsMountMode) -> Self {
+        self.vfs_mode = mode;
+        self
+    }
+
+    /// Set the initial working directory.
+    pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
+        self.cwd = cwd;
+        self
     }
 
     /// Skip pre-execution validation.
@@ -127,29 +280,9 @@ pub struct Kernel {
 
 impl Kernel {
     /// Create a new kernel with the given configuration.
+    #[allow(deprecated)]
     pub fn new(config: KernelConfig) -> Result<Self> {
-        let mut vfs = VfsRouter::new();
-
-        // Mount memory at root for now
-        vfs.mount("/", MemoryFs::new());
-
-        // Mount scratch space
-        vfs.mount("/tmp", MemoryFs::new());
-
-        // Mount virtual namespace for blobs and other synthetic resources
-        // Blobs are stored at /v/blobs/{id}
-        vfs.mount("/v", MemoryFs::new());
-
-        // Mount local filesystem at /mnt/local if configured
-        if config.mount_local {
-            let root = config.local_root.unwrap_or_else(|| {
-                std::env::var("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| PathBuf::from("/"))
-            });
-            vfs.mount("/mnt/local", LocalFs::new(root));
-        }
-
+        let vfs = Self::setup_vfs(&config);
         let vfs = Arc::new(vfs);
         let jobs = Arc::new(JobManager::new());
 
@@ -183,6 +316,65 @@ impl Kernel {
         })
     }
 
+    /// Set up VFS based on mount mode.
+    #[allow(deprecated)]
+    fn setup_vfs(config: &KernelConfig) -> VfsRouter {
+        let mut vfs = VfsRouter::new();
+
+        match &config.vfs_mode {
+            VfsMountMode::Passthrough => {
+                // LocalFs at "/" — native paths work directly
+                vfs.mount("/", LocalFs::new(PathBuf::from("/")));
+                // Memory for blobs and scratch
+                vfs.mount("/v", MemoryFs::new());
+                vfs.mount("/scratch", MemoryFs::new());
+            }
+            VfsMountMode::Sandboxed { root } => {
+                // Memory at root for safety (catches paths outside sandbox)
+                vfs.mount("/", MemoryFs::new());
+                vfs.mount("/v", MemoryFs::new());
+                vfs.mount("/scratch", MemoryFs::new());
+
+                // Real /tmp for interop with other processes
+                vfs.mount("/tmp", LocalFs::new(PathBuf::from("/tmp")));
+
+                // Resolve the sandbox root (defaults to $HOME)
+                let local_root = root.clone().unwrap_or_else(|| {
+                    std::env::var("HOME")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|_| PathBuf::from("/"))
+                });
+
+                // Mount at the real path for transparent access
+                // e.g., /home/atobey → LocalFs("/home/atobey")
+                // so /home/atobey/src/kaish just works
+                let mount_point = local_root.to_string_lossy().to_string();
+                vfs.mount(&mount_point, LocalFs::new(local_root));
+            }
+            VfsMountMode::NoLocal => {
+                // Pure memory mode — no local filesystem
+                vfs.mount("/", MemoryFs::new());
+                vfs.mount("/tmp", MemoryFs::new());
+                vfs.mount("/v", MemoryFs::new());
+                vfs.mount("/scratch", MemoryFs::new());
+            }
+        }
+
+        // Legacy support: if mount_local is true but vfs_mode is NoLocal,
+        // the deprecated fields take precedence for backwards compatibility.
+        // This handles old code that only sets mount_local/local_root.
+        if matches!(config.vfs_mode, VfsMountMode::NoLocal) && config.mount_local {
+            let root = config.local_root.clone().unwrap_or_else(|| {
+                std::env::var("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("/"))
+            });
+            vfs.mount("/mnt/local", LocalFs::new(root));
+        }
+
+        vfs
+    }
+
     /// Create a transient kernel (no persistence).
     pub fn transient() -> Result<Self> {
         Self::new(KernelConfig::transient())
@@ -198,18 +390,7 @@ impl Kernel {
     /// the `vfs()` method, but it won't be used for execution context operations.
     pub fn with_backend(backend: Arc<dyn KernelBackend>, config: KernelConfig) -> Result<Self> {
         // Create VFS for compatibility (but exec_ctx will use the provided backend)
-        let mut vfs = VfsRouter::new();
-        vfs.mount("/", MemoryFs::new());
-        vfs.mount("/tmp", MemoryFs::new());
-        if config.mount_local {
-            let root = config.local_root.unwrap_or_else(|| {
-                std::env::var("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| PathBuf::from("/"))
-            });
-            vfs.mount("/mnt/local", LocalFs::new(root));
-        }
-        let vfs = Arc::new(vfs);
+        let vfs = Arc::new(Self::setup_vfs(&config));
         let jobs = Arc::new(JobManager::new());
 
         // Set up tools
@@ -1591,8 +1772,12 @@ mod tests {
     async fn test_kernel_cwd() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
+        // Transient kernel uses sandboxed mode with cwd=$HOME
         let cwd = kernel.cwd().await;
-        assert_eq!(cwd, PathBuf::from("/"));
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/"));
+        assert_eq!(cwd, home);
 
         kernel.set_cwd(PathBuf::from("/tmp")).await;
         assert_eq!(kernel.cwd().await, PathBuf::from("/tmp"));
