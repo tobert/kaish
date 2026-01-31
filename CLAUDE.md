@@ -4,7 +4,7 @@ This file provides guidance to models when working with in this repository.
 
 ## Project Overview
 
-**kaish** (会sh — "the gathering shell") is an 80/20 implementation of `sh` for MCP tool orchestration.
+**kaish** (会sh — "the gathering shell") is a predictable shell for MCP tool orchestration.
 
 Part of the [Kaijutsu](https://github.com/tobert/kaijutsu) project.
 
@@ -179,6 +179,24 @@ cargo insta accept         # Accept all pending snapshots
 | `README.md` | Project overview, quick tour, MCP integration |
 | `docs/LANGUAGE.md` | Complete language reference with examples |
 | `docs/BUILTINS.md` | Tool compatibility and implementation notes |
+| `docs/help/*.md` | MCP help system content (agent-facing) |
+
+### Help System
+
+The `docs/help/` directory contains markdown files that are embedded at compile time
+into the kernel and exposed via the MCP `help` tool. These are concise reference cards
+for LLM agents using kaish.
+
+**Files:**
+- `overview.md` — What kaish is, topic list, quick examples
+- `syntax.md` — Variables, quoting, pipes, control flow
+- `vfs.md` — Virtual filesystem mounts and paths
+- `scatter.md` — Parallel processing (散/集)
+- `limits.md` — Known limitations and workarounds
+
+**Keep in sync:** When adding builtins or changing syntax, update the relevant help files.
+The builtin list in `help builtins` is generated dynamically from tool schemas, but
+`syntax.md` and `limits.md` need manual updates.
 
 ## Schema Files
 

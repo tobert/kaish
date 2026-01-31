@@ -15,6 +15,7 @@ pub mod arithmetic;
 pub mod ast;
 pub mod backend;
 pub mod glob;
+pub mod help;
 pub mod interpreter;
 pub mod kernel;
 pub mod lexer;
@@ -22,8 +23,8 @@ pub mod parser;
 pub mod paths;
 pub mod rpc;
 pub mod scheduler;
-pub mod validator;
 pub mod tools;
+pub mod validator;
 pub mod vfs;
 pub mod walker;
 

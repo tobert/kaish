@@ -5,9 +5,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rmcp::handler::server::wrapper::Parameters;
-use rmcp::ErrorData as McpError;
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     Annotated, CallToolResult, Content, Implementation, ListResourcesResult, PaginatedRequestParam,
     ProtocolVersion, RawResource, ReadResourceRequestParam, ReadResourceResult, ResourceContents,
@@ -15,9 +14,11 @@ use rmcp::model::{
 };
 use rmcp::schemars::{self, JsonSchema};
 use rmcp::service::{RequestContext, RoleServer};
+use rmcp::ErrorData as McpError;
 use rmcp::{tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 
+use kaish_kernel::help::{get_help, HelpTopic};
 use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
 
 use super::config::McpServerConfig;
@@ -83,13 +84,23 @@ pub struct ExecuteInput {
     pub timeout_ms: Option<u64>,
 }
 
+/// Help tool input schema.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct HelpInput {
+    /// Help topic or tool name.
+    #[schemars(
+        description = "Topic: 'overview', 'syntax', 'builtins', 'vfs', 'scatter', 'limits', or a tool name"
+    )]
+    pub topic: Option<String>,
+}
+
 #[tool_router]
 impl KaishServerHandler {
     /// Execute kaish shell scripts.
     ///
-    /// Each call runs in a fresh, isolated environment. Supports Bourne-compatible
-    /// syntax plus kaish extensions (scatter/gather, typed params, MCP tool calls).
-    #[tool(description = "Execute kaish shell scripts. Each call runs in a fresh, isolated environment. Supports Bourne-compatible syntax plus kaish extensions (scatter/gather, typed params, MCP tool calls).")]
+    /// Each call runs in a fresh, isolated environment. Supports restricted/modified
+    /// Bourne syntax plus kaish extensions (scatter/gather, typed params, MCP tool calls).
+    #[tool(description = "Execute kaish shell scripts. Fresh isolated environment per call.\n\nSupports: pipes, redirects, here-docs, if/for/while, functions, 54 builtins (grep, jq, git, find, sed, awk, cat, ls, etc.), ${VAR:-default}, $((arithmetic)), scatter/gather parallelism.\n\nNOT supported: process substitution <(), backticks, eval, aliases, implicit word splitting.\n\nPaths: /mnt/local = $HOME, /scratch/ = ephemeral memory. Use 'help' tool for details.")]
     async fn execute(&self, input: Parameters<ExecuteInput>) -> Result<CallToolResult, McpError> {
         let params = ExecuteParams {
             script: input.0.script,
@@ -98,9 +109,10 @@ impl KaishServerHandler {
             timeout_ms: input.0.timeout_ms,
         };
 
-        let result = execute::execute(params, &self.config.mcp_servers, self.config.default_timeout_ms)
-            .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let result =
+            execute::execute(params, &self.config.mcp_servers, self.config.default_timeout_ms)
+                .await
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         // Format the result as JSON for structured output
         let result_json = serde_json::to_string_pretty(&result)
@@ -118,6 +130,36 @@ impl KaishServerHandler {
             })
         }
     }
+
+    /// Get help for kaish syntax, builtins, VFS, and capabilities.
+    #[tool(
+        description = "Get help for kaish syntax, builtins, VFS, and capabilities. Call without topic for overview."
+    )]
+    async fn help(&self, input: Parameters<HelpInput>) -> Result<CallToolResult, McpError> {
+        let topic_str = input.0.topic.as_deref().unwrap_or("overview");
+        let topic = HelpTopic::from_str(topic_str);
+
+        // For builtins topic, we need tool schemas from a temporary kernel
+        let content = if matches!(topic, HelpTopic::Builtins) || matches!(topic, HelpTopic::Tool(_))
+        {
+            // Create a temporary kernel to get tool schemas
+            let config = kaish_kernel::KernelConfig {
+                name: "help".to_string(),
+                mount_local: false,
+                local_root: None,
+                cwd: PathBuf::from("/"),
+                skip_validation: true,
+            };
+            let kernel = kaish_kernel::Kernel::new(config)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            let schemas = kernel.tool_schemas();
+            get_help(&topic, &schemas)
+        } else {
+            get_help(&topic, &[])
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(content)]))
+    }
 }
 
 #[tool_handler]
@@ -131,8 +173,14 @@ impl rmcp::ServerHandler for KaishServerHandler {
                 .build(),
             server_info: Implementation::from_build_env(),
             instructions: Some(
-                "kaish is an 80/20 shell implementation for MCP tool orchestration. \
-                 Use the execute tool to run shell scripts with Bourne-compatible syntax."
+                "kaish (会sh) — Predictable shell for MCP tool orchestration.\n\n\
+                 Bourne-like syntax without the gotchas (no word splitting, no glob expansion, \
+                 no backticks). Strict validation catches errors before execution. \
+                 54 builtins run in-process; use `exec` for external commands.\n\n\
+                 Tools:\n\
+                 • execute — Run shell scripts (pipes, redirects, 54 builtins, loops, functions)\n\
+                 • help — Discover syntax, builtins, VFS mounts, capabilities\n\n\
+                 Use 'help' first to learn what's available."
                     .to_string(),
             ),
         }
@@ -217,6 +265,7 @@ impl rmcp::ServerHandler for KaishServerHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::model::RawContent;
 
     #[test]
     fn test_handler_creation() {
@@ -233,5 +282,62 @@ mod tests {
         let handler = KaishServerHandler::new(config).expect("handler creation failed");
         let info = handler.get_info();
         assert!(info.instructions.is_some());
+        let instructions = info.instructions.unwrap();
+        assert!(instructions.contains("execute"));
+        assert!(instructions.contains("help"));
+    }
+
+    #[tokio::test]
+    async fn test_help_overview() {
+        let config = McpServerConfig::default();
+        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+
+        let input = Parameters(HelpInput { topic: None });
+        let result = handler.help(input).await.expect("help failed");
+
+        assert!(!result.is_error.unwrap_or(false));
+        assert!(!result.content.is_empty());
+
+        // Check that the overview content is returned
+        if let RawContent::Text(text) = &result.content[0].raw {
+            assert!(text.text.contains("kaish"));
+            assert!(text.text.contains("help syntax"));
+        } else {
+            panic!("Expected text content");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_help_syntax() {
+        let config = McpServerConfig::default();
+        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+
+        let input = Parameters(HelpInput {
+            topic: Some("syntax".to_string()),
+        });
+        let result = handler.help(input).await.expect("help failed");
+
+        assert!(!result.is_error.unwrap_or(false));
+        if let RawContent::Text(text) = &result.content[0].raw {
+            assert!(text.text.contains("Variables"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_help_builtins() {
+        let config = McpServerConfig::default();
+        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+
+        let input = Parameters(HelpInput {
+            topic: Some("builtins".to_string()),
+        });
+        let result = handler.help(input).await.expect("help failed");
+
+        assert!(!result.is_error.unwrap_or(false));
+        if let RawContent::Text(text) = &result.content[0].raw {
+            // Should list actual builtins from the kernel
+            assert!(text.text.contains("echo"));
+            assert!(text.text.contains("grep"));
+        }
     }
 }
