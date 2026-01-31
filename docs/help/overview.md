@@ -44,6 +44,12 @@ if [[ -f config.json ]]; then
     jq ".settings" config.json
 fi
 
+# Background jobs with live observability
+cargo build &             # [1] Running cargo build  /v/jobs/1/
+cat /v/jobs/1/stdout      # check progress
+cat /v/jobs/1/status      # running | done:0 | failed:N
+jobs --cleanup            # remove completed jobs
+
 # Parallel processing
 seq 1 10 | scatter as=N limit=4 | echo "processing $N" | gather
 ```

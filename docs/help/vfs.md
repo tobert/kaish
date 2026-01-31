@@ -78,6 +78,38 @@ Memory storage for blobs and other synthetic resources.
 ls /v/blobs/
 ```
 
+### /v/jobs — Job Observability
+
+Live access to background job state. Each job gets a directory:
+
+```
+/v/jobs/
+└── {job_id}/
+    ├── stdout   ← live output stream (ring buffer, 10MB max)
+    ├── stderr   ← live error stream
+    ├── status   ← "running" | "done:0" | "failed:N"
+    └── command  ← the original command string
+```
+
+Example:
+```bash
+# Start background job
+cargo build &
+# [1] Running cargo build  /v/jobs/1/
+
+# Check progress
+cat /v/jobs/1/status    # running
+cat /v/jobs/1/stdout    # build output so far
+
+# After completion
+cat /v/jobs/1/status    # done:0
+
+# Cleanup completed jobs
+jobs --cleanup
+```
+
+Output streams use bounded ring buffers (10MB default). If a job produces more output, the oldest data is evicted — the pipe never blocks and memory stays bounded.
+
 ## /git — Repository Introspection
 
 Read-only access to git metadata for the current working directory.
