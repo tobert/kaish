@@ -42,6 +42,10 @@ pub use rpc::KernelRpcServer;
 // Git types (for embedders that want direct GitVfs access)
 pub use vfs::{FileStatus, GitVfs, LogEntry, StatusSummary, WorktreeInfo};
 
+// Job observability (for embedders capturing command output)
+pub use scheduler::{BoundedStream, StreamStats, DEFAULT_STREAM_MAX_SIZE, drain_to_stream};
+pub use vfs::JobFs;
+
 // XDG path primitives (embedders compose their own paths)
 pub use paths::{home_dir, xdg_cache_home, xdg_config_home, xdg_data_home, xdg_runtime_dir};
 

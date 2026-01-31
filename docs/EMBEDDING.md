@@ -247,6 +247,13 @@ The `kaish_kernel` crate exports these types at the crate root for convenience:
 - `LogEntry` — A commit in the log
 - `WorktreeInfo` — Information about a worktree
 
+### Job Observability
+- `BoundedStream` — Ring-buffer stream for capturing command output (10MB default)
+- `StreamStats` — Statistics about a bounded stream
+- `drain_to_stream()` — Drain async reader into bounded stream
+- `DEFAULT_STREAM_MAX_SIZE` — Default max size constant (10MB)
+- `JobFs` — VFS backend for observing job state at `/v/jobs`
+
 ### Path Primitives
 - `home_dir()` — User's home directory
 - `xdg_data_home()` — XDG data directory
@@ -275,6 +282,82 @@ let config = KernelConfig {
     // Skip pre-execution validation (for performance)
     skip_validation: false,
 };
+```
+
+## Job Output Capture
+
+kaish provides bounded streams for capturing command output without OOM risk.
+
+### BoundedStream for Custom Output Capture
+
+Use `BoundedStream` when you need to capture process output with memory bounds:
+
+```rust
+use kaish_kernel::{BoundedStream, drain_to_stream, DEFAULT_STREAM_MAX_SIZE};
+use std::sync::Arc;
+use tokio::process::Command;
+
+async fn capture_with_bounds() -> anyhow::Result<String> {
+    let mut child = Command::new("some-chatty-command")
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+
+    // Create bounded stream (10MB max, oldest data evicted on overflow)
+    let stream = Arc::new(BoundedStream::new(DEFAULT_STREAM_MAX_SIZE));
+
+    // Drain stdout into the bounded stream
+    if let Some(stdout) = child.stdout.take() {
+        let stream_clone = stream.clone();
+        tokio::spawn(async move {
+            drain_to_stream(stdout, stream_clone).await;
+        });
+    }
+
+    child.wait().await?;
+
+    // Read captured output (safe even if process wrote gigabytes)
+    Ok(stream.read_string().await)
+}
+```
+
+### JobFs for Background Job Observability
+
+The kernel automatically mounts `JobFs` at `/v/jobs`, exposing background job state:
+
+```
+/v/jobs/
+├── 1/
+│   ├── stdout    # Captured stdout (bounded)
+│   ├── stderr    # Captured stderr (bounded)
+│   └── status    # "running", "completed:0", or "failed:1"
+├── 2/
+│   └── ...
+```
+
+Access job output via shell or VFS:
+
+```bash
+# In kaish scripts
+sleep 10 &              # Starts job 1
+jobs                    # Shows: [1] running  /v/jobs/1/
+cat /v/jobs/1/status    # "running"
+
+# After completion
+cat /v/jobs/1/stdout    # Job's stdout
+cat /v/jobs/1/stderr    # Job's stderr
+```
+
+Or programmatically via the kernel's VFS:
+
+```rust
+let kernel = Kernel::new(KernelConfig::default())?;
+
+// Run background job
+kernel.execute("long_running_command &").await?;
+
+// Later, check job output via VFS
+let stdout = kernel.vfs().read("/v/jobs/1/stdout").await?;
+let status = kernel.vfs().read("/v/jobs/1/status").await?;
 ```
 
 ## Best Practices

@@ -63,7 +63,7 @@ seq 1 10 | scatter as=N limit=4 | echo "processing $N" | gather
 | **Bourne-compatible** | Variables, pipes, control flow, functions — familiar syntax |
 | **54 builtins** | grep, jq, git, find, sed, awk, diff, patch, and more |
 | **Strict validation** | Errors caught before execution with clear messages |
-| **Virtual filesystem** | Unified access: `/mnt/local` (home), `/scratch` (memory), `/git` |
+| **Virtual filesystem** | Unified access: `/mnt/local` (home), `/scratch` (memory), `/v/jobs` (observability) |
 | **Scatter/gather** | Built-in parallelism with 散/集 |
 
 See [Language Reference](docs/LANGUAGE.md) for complete syntax and [Builtins](docs/BUILTINS.md) for all 54 tools.

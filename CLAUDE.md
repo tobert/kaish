@@ -146,7 +146,7 @@ crates/
 - 散/集 (scatter/gather) for parallel execution
 - User-defined tools with typed parameters
 - MCP tool integration (client-side, consuming external tools)
-- VFS mounts with multiple backends (local, memory, git)
+- VFS mounts with multiple backends (local, memory, git, jobs)
 - Pre-execution validation
 - Full arithmetic expressions `$((expr))`
 
@@ -163,6 +163,7 @@ Test files in `crates/kaish-kernel/tests/`:
 - `parser_tests.rs` — insta snapshot tests for AST output (101 tests)
 - `validation_tests.rs` — pre-execution validation tests
 - `realworld_builtin_tests.rs` — integration tests from real usage
+- `job_stream_tests.rs` — BoundedStream and JobFs integration tests
 - `snapshots/*.snap` — insta snapshot files for parser tests
 
 Snapshot workflow:
