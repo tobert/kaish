@@ -205,7 +205,10 @@ impl Tool for Exec {
 }
 
 /// Resolve a command name in PATH.
-fn resolve_in_path(name: &str, path_var: &str) -> Option<String> {
+///
+/// Searches each directory in `path_var` (colon-separated) for an executable
+/// named `name`. Returns the full path if found.
+pub fn resolve_in_path(name: &str, path_var: &str) -> Option<String> {
     for dir in path_var.split(':') {
         if dir.is_empty() {
             continue;

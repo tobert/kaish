@@ -1329,6 +1329,13 @@ where
     }
     .map(|s| Expr::Literal(Value::String(s.to_string())));
 
+    // Bare words starting with + or - (e.g., date +%s, cat -)
+    let plus_minus_bare = select! {
+        Token::PlusBare(s) => Expr::Literal(Value::String(s)),
+        Token::MinusBare(s) => Expr::Literal(Value::String(s)),
+        Token::MinusAlone => Expr::Literal(Value::String("-".to_string())),
+    };
+
     recursive(|expr| {
         choice((
             positional,
@@ -1341,6 +1348,8 @@ where
             ident_parser().map(|s| Expr::Literal(Value::String(s))),
             // Absolute paths become string literals
             path_parser().map(|s| Expr::Literal(Value::String(s))),
+            // Bare words starting with + or - (date +%s, cat -)
+            plus_minus_bare,
             // Keywords can be used as barewords in argument position
             keyword_as_bareword,
         ))

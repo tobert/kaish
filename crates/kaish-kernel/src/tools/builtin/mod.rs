@@ -16,6 +16,7 @@ mod patch;
 mod echo;
 mod env;
 mod exec;
+pub use exec::resolve_in_path;
 mod export;
 mod glob;
 mod find;

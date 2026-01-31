@@ -371,6 +371,23 @@ pub enum Token {
     #[token("--")]
     DoubleDash,
 
+    /// Bare word starting with + followed by non-letter: `+%s`, `+%Y-%m-%d`
+    /// For date format strings and similar. Lower priority than PlusFlag.
+    #[regex(r"\+[^a-zA-Z\s][^\s]*", lex_plus_bare, priority = 2)]
+    PlusBare(String),
+
+    /// Bare word starting with - followed by non-letter/digit/dash: `-%`, etc.
+    /// For rare cases. Lower priority than ShortFlag, Int, and DoubleDash.
+    /// Excludes - after first - to avoid matching --name patterns.
+    #[regex(r"-[^a-zA-Z0-9\s\-][^\s]*", lex_minus_bare, priority = 1)]
+    MinusBare(String),
+
+    /// Standalone - (stdin indicator for cat -, diff - -, etc.)
+    /// Only matches when followed by whitespace or end.
+    /// This is handled specially in the parser as a positional arg.
+    #[token("-")]
+    MinusAlone,
+
     // ═══════════════════════════════════════════════════════════════════
     // Literals (with values)
     // ═══════════════════════════════════════════════════════════════════
@@ -608,8 +625,11 @@ impl Token {
             // Paths
             Token::Path(_) => TokenCategory::Path,
 
-            // Commands/identifiers
-            Token::Ident(_) => TokenCategory::Command,
+            // Commands/identifiers (and bare words)
+            Token::Ident(_)
+            | Token::PlusBare(_)
+            | Token::MinusBare(_)
+            | Token::MinusAlone => TokenCategory::Command,
 
             // Errors
             Token::InvalidNumberIdent
@@ -723,6 +743,16 @@ fn lex_plus_flag(lex: &mut logos::Lexer<Token>) -> String {
     lex.slice()[1..].to_string()
 }
 
+/// Lex a plus bare word: `+%s` → `+%s` (keep the full string)
+fn lex_plus_bare(lex: &mut logos::Lexer<Token>) -> String {
+    lex.slice().to_string()
+}
+
+/// Lex a minus bare word: `-%` → `-%` (keep the full string)
+fn lex_minus_bare(lex: &mut logos::Lexer<Token>) -> String {
+    lex.slice().to_string()
+}
+
 /// Lex an absolute path: `/tmp/out` → `/tmp/out`
 fn lex_path(lex: &mut logos::Lexer<Token>) -> String {
     lex.slice().to_string()
@@ -796,6 +826,9 @@ impl fmt::Display for Token {
             Token::ShortFlag(s) => write!(f, "-{}", s),
             Token::PlusFlag(s) => write!(f, "+{}", s),
             Token::DoubleDash => write!(f, "--"),
+            Token::PlusBare(s) => write!(f, "{}", s),
+            Token::MinusBare(s) => write!(f, "{}", s),
+            Token::MinusAlone => write!(f, "-"),
             Token::String(s) => write!(f, "STRING({:?})", s),
             Token::SingleString(s) => write!(f, "SINGLESTRING({:?})", s),
             Token::HereDoc(s) => write!(f, "HEREDOC({:?})", s),
@@ -2207,13 +2240,32 @@ mod tests {
     }
 
     #[test]
-    fn single_dash_is_ident() {
-        // Single dash alone - lexer treats this as error or special
-        // In most shells, - means stdin, but our lexer may error
-        // Let's see what happens
-        let result = tokenize("-");
-        // A lone dash doesn't match any pattern, should error
-        assert!(result.is_err() || result.unwrap().iter().any(|s| matches!(s.token, Token::ShortFlag(_))));
+    fn single_dash_is_minus_alone() {
+        // Single dash alone - now handled as MinusAlone for `cat -` stdin indicator
+        let result = tokenize("-").expect("should lex");
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0].token, Token::MinusAlone));
+    }
+
+    #[test]
+    fn plus_bare_for_date_format() {
+        // `date +%s` - the +%s should be PlusBare
+        let result = tokenize("+%s").expect("should lex");
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0].token, Token::PlusBare(ref s) if s == "+%s"));
+
+        // `date +%Y-%m-%d` - format string with dashes
+        let result = tokenize("+%Y-%m-%d").expect("should lex");
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0].token, Token::PlusBare(ref s) if s == "+%Y-%m-%d"));
+    }
+
+    #[test]
+    fn plus_flag_still_works() {
+        // `set +e` - should still be PlusFlag
+        let result = tokenize("+e").expect("should lex");
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0].token, Token::PlusFlag(ref s) if s == "e"));
     }
 
     #[test]

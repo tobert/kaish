@@ -92,6 +92,10 @@ fn format_token(token: &Token) -> String {
         Token::ShortFlag(s) => format!("SHORTFLAG({})", s),
         Token::PlusFlag(s) => format!("PLUSFLAG({})", s),
         Token::DoubleDash => "DOUBLEDASH".to_string(),
+        // Bare words starting with + or -
+        Token::PlusBare(s) => format!("PLUSBARE({})", s),
+        Token::MinusBare(s) => format!("MINUSBARE({})", s),
+        Token::MinusAlone => "MINUSALONE".to_string(),
 
         // Literals
         Token::String(s) => format!("STRING({})", escape_for_display(s)),
@@ -449,11 +453,20 @@ fn lexer_double_dash(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
 
+// Note: Single dash "-" is now valid as MinusAlone (for cat - stdin indicator)
+// Triple dash "---" is DoubleDash + MinusAlone
 #[rstest]
-#[case::triple_dash("---")]
-#[case::single_dash("-")]
-fn lexer_flag_errors(#[case] input: &str) {
-    run_lexer_error_test(input);
+#[case::single_dash("-", &["MINUSALONE"])]
+#[case::triple_dash("---", &["DOUBLEDASH", "MINUSALONE"])]
+fn lexer_dash_variants(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+#[rstest]
+#[case::date_format("+%s", &["PLUSBARE(+%s)"])]
+#[case::date_format_complex("+%Y-%m-%d", &["PLUSBARE(+%Y-%m-%d)"])]
+fn lexer_plus_bare(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
 }
 
 // =============================================================================
