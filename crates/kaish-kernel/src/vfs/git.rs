@@ -481,13 +481,20 @@ impl GitVfs {
     /// Add a new worktree.
     ///
     /// Creates a new worktree at `path` with the given `name`.
-    /// If `branch` is provided, checks out that branch; otherwise creates
-    /// a new branch with the worktree name.
+    ///
+    /// The `committish` parameter accepts:
+    /// - Local branch names (`feature`, `main`)
+    /// - Remote tracking branches (`origin/main`)
+    /// - Commit SHAs (`abc1234`)
+    /// - Tags (`v1.0.0`)
+    /// - Any git revision (`HEAD~3`)
+    ///
+    /// If `committish` is None, creates a new branch with the worktree name.
     pub fn worktree_add(
         &self,
         name: &str,
         path: &Path,
-        branch: Option<&str>,
+        committish: Option<&str>,
     ) -> Result<WorktreeInfo, GitError> {
         let repo = self.repo.lock().map_err(|_| {
             GitError::from_str("failed to acquire repository lock")
@@ -495,14 +502,47 @@ impl GitVfs {
 
         let mut opts = WorktreeAddOptions::new();
 
-        // If a branch is specified, find it and set reference
-        let branch_ref;
-        if let Some(branch_name) = branch {
-            if let Ok(br) = repo.find_branch(branch_name, git2::BranchType::Local) {
-                branch_ref = Some(br.into_reference());
-                opts.reference(branch_ref.as_ref());
+        // If a committish is specified, resolve it
+        let resolved_ref;
+        if let Some(target) = committish {
+            // Try as local branch first
+            if let Ok(br) = repo.find_branch(target, git2::BranchType::Local) {
+                resolved_ref = Some(br.into_reference());
+                opts.reference(resolved_ref.as_ref());
             }
-            // If branch doesn't exist, git2 will create one with the worktree name
+            // Try as remote tracking branch (e.g., "origin/main")
+            else if let Ok(br) = repo.find_branch(target, git2::BranchType::Remote) {
+                resolved_ref = Some(br.into_reference());
+                opts.reference(resolved_ref.as_ref());
+            }
+            // Try as any other reference (tag, commit, HEAD~N, etc.)
+            else if let Ok(obj) = repo.revparse_single(target) {
+                // For non-branch references, we create the worktree first,
+                // then checkout the specific commit (detached HEAD)
+                let wt = repo.worktree(name, path, None)?;
+
+                // Open the worktree as a repository and checkout the commit
+                let wt_repo = Repository::open_from_worktree(&wt)?;
+                let commit = obj.peel_to_commit()?;
+                wt_repo.set_head_detached(commit.id())?;
+
+                let mut checkout_opts = git2::build::CheckoutBuilder::new();
+                checkout_opts.force();
+                wt_repo.checkout_head(Some(&mut checkout_opts))?;
+
+                return Ok(WorktreeInfo {
+                    name: Some(name.to_string()),
+                    path: wt.path().to_path_buf(),
+                    head: Some(commit.id().to_string()[..7].to_string()),
+                    locked: false,
+                    prunable: false,
+                });
+            } else {
+                return Err(GitError::from_str(&format!(
+                    "cannot resolve '{}': not a branch, tag, or commit",
+                    target
+                )));
+            }
         }
 
         let wt = repo.worktree(name, path, Some(&opts))?;
@@ -911,5 +951,273 @@ mod tests {
             Some(("John Doe".to_string(), "john@example.com".to_string()))
         );
         assert_eq!(parse_author("invalid"), None);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Worktree Tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_worktrees_lists_main() {
+        let (git_fs, dir) = setup_repo().await;
+
+        // Create initial commit (required for worktrees)
+        git_fs
+            .write(Path::new("README.md"), b"# Test")
+            .await
+            .unwrap();
+        git_fs.add(&["README.md"]).unwrap();
+        git_fs.commit("Initial commit", None).unwrap();
+
+        // List worktrees - should have main worktree
+        let worktrees = git_fs.worktrees().unwrap();
+        assert_eq!(worktrees.len(), 1);
+        assert!(worktrees[0].name.is_none()); // Main worktree has no name
+        assert!(worktrees[0].head.is_some()); // Should have a branch
+
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_worktree_add_with_new_branch() {
+        let (git_fs, dir) = setup_repo().await;
+
+        // Create initial commit
+        git_fs
+            .write(Path::new("README.md"), b"# Test")
+            .await
+            .unwrap();
+        git_fs.add(&["README.md"]).unwrap();
+        git_fs.commit("Initial commit", None).unwrap();
+
+        // Create worktree path
+        let wt_path = dir.parent().unwrap().join("test-wt-new");
+
+        // Add worktree (no branch specified = new branch)
+        let info = git_fs.worktree_add("test-wt", &wt_path, None).unwrap();
+        assert_eq!(info.name, Some("test-wt".to_string()));
+        assert!(info.path.exists());
+
+        // List should now show 2 worktrees
+        let worktrees = git_fs.worktrees().unwrap();
+        assert_eq!(worktrees.len(), 2);
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&wt_path).await;
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_worktree_add_with_existing_branch() {
+        let (git_fs, dir) = setup_repo().await;
+
+        // Create initial commit
+        git_fs
+            .write(Path::new("README.md"), b"# Test")
+            .await
+            .unwrap();
+        git_fs.add(&["README.md"]).unwrap();
+        git_fs.commit("Initial commit", None).unwrap();
+
+        // Create a branch
+        git_fs.create_branch("feature").unwrap();
+
+        // Create worktree for existing branch
+        let wt_path = dir.parent().unwrap().join("test-wt-branch");
+        let info = git_fs.worktree_add("wt-feature", &wt_path, Some("feature")).unwrap();
+
+        assert_eq!(info.name, Some("wt-feature".to_string()));
+        assert!(info.path.exists());
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&wt_path).await;
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_worktree_add_with_commit() {
+        let (git_fs, dir) = setup_repo().await;
+
+        // Create initial commit
+        git_fs
+            .write(Path::new("README.md"), b"# Test")
+            .await
+            .unwrap();
+        git_fs.add(&["README.md"]).unwrap();
+        let oid = git_fs.commit("Initial commit", None).unwrap();
+
+        // Create second commit
+        git_fs
+            .write(Path::new("README.md"), b"# Updated")
+            .await
+            .unwrap();
+        git_fs.add(&["README.md"]).unwrap();
+        git_fs.commit("Second commit", None).unwrap();
+
+        // Create worktree at specific commit (first commit)
+        let wt_path = dir.parent().unwrap().join("test-wt-commit");
+        let short_oid = &oid.to_string()[..7];
+        let info = git_fs.worktree_add("wt-commit", &wt_path, Some(short_oid)).unwrap();
+
+        assert_eq!(info.name, Some("wt-commit".to_string()));
+        assert!(info.path.exists());
+        // HEAD should be the short commit id (detached)
+        assert!(info.head.is_some());
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&wt_path).await;
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_worktree_add_invalid_ref() {
+        let (git_fs, dir) = setup_repo().await;
+
+        // Create initial commit
+        git_fs
+            .write(Path::new("README.md"), b"# Test")
+            .await
+            .unwrap();
+        git_fs.add(&["README.md"]).unwrap();
+        git_fs.commit("Initial commit", None).unwrap();
+
+        // Try to create worktree with invalid ref
+        let wt_path = dir.parent().unwrap().join("test-wt-invalid");
+        let result = git_fs.worktree_add("wt-bad", &wt_path, Some("nonexistent-branch"));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message().contains("cannot resolve"));
+
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_worktree_lock_unlock() {
+        let (git_fs, dir) = setup_repo().await;
+
+        // Create initial commit
+        git_fs
+            .write(Path::new("README.md"), b"# Test")
+            .await
+            .unwrap();
+        git_fs.add(&["README.md"]).unwrap();
+        git_fs.commit("Initial commit", None).unwrap();
+
+        // Create worktree
+        let wt_path = dir.parent().unwrap().join("test-wt-lock");
+        git_fs.worktree_add("wt-lock", &wt_path, None).unwrap();
+
+        // Lock it
+        git_fs.worktree_lock("wt-lock", Some("testing")).unwrap();
+
+        // Verify locked in list
+        let worktrees = git_fs.worktrees().unwrap();
+        let locked_wt = worktrees.iter().find(|w| w.name.as_deref() == Some("wt-lock"));
+        assert!(locked_wt.is_some());
+        assert!(locked_wt.unwrap().locked);
+
+        // Unlock it
+        git_fs.worktree_unlock("wt-lock").unwrap();
+
+        // Verify unlocked
+        let worktrees = git_fs.worktrees().unwrap();
+        let unlocked_wt = worktrees.iter().find(|w| w.name.as_deref() == Some("wt-lock"));
+        assert!(!unlocked_wt.unwrap().locked);
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&wt_path).await;
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_worktree_remove() {
+        let (git_fs, dir) = setup_repo().await;
+
+        // Create initial commit
+        git_fs
+            .write(Path::new("README.md"), b"# Test")
+            .await
+            .unwrap();
+        git_fs.add(&["README.md"]).unwrap();
+        git_fs.commit("Initial commit", None).unwrap();
+
+        // Create worktree
+        let wt_path = dir.parent().unwrap().join("test-wt-remove");
+        git_fs.worktree_add("wt-remove", &wt_path, None).unwrap();
+
+        // Verify it exists
+        assert_eq!(git_fs.worktrees().unwrap().len(), 2);
+
+        // Remove it (force because it's valid)
+        git_fs.worktree_remove("wt-remove", true).unwrap();
+
+        // Verify removed from list
+        assert_eq!(git_fs.worktrees().unwrap().len(), 1);
+
+        // Cleanup (path may or may not exist after remove)
+        let _ = fs::remove_dir_all(&wt_path).await;
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_worktree_remove_locked_fails() {
+        let (git_fs, dir) = setup_repo().await;
+
+        // Create initial commit
+        git_fs
+            .write(Path::new("README.md"), b"# Test")
+            .await
+            .unwrap();
+        git_fs.add(&["README.md"]).unwrap();
+        git_fs.commit("Initial commit", None).unwrap();
+
+        // Create and lock worktree
+        let wt_path = dir.parent().unwrap().join("test-wt-locked-rm");
+        git_fs.worktree_add("wt-locked", &wt_path, None).unwrap();
+        git_fs.worktree_lock("wt-locked", None).unwrap();
+
+        // Try to remove - should fail
+        let result = git_fs.worktree_remove("wt-locked", false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message().contains("locked"));
+
+        // Cleanup
+        git_fs.worktree_unlock("wt-locked").unwrap();
+        git_fs.worktree_remove("wt-locked", true).unwrap();
+        let _ = fs::remove_dir_all(&wt_path).await;
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_worktree_prune() {
+        let (git_fs, dir) = setup_repo().await;
+
+        // Create initial commit
+        git_fs
+            .write(Path::new("README.md"), b"# Test")
+            .await
+            .unwrap();
+        git_fs.add(&["README.md"]).unwrap();
+        git_fs.commit("Initial commit", None).unwrap();
+
+        // Create worktree
+        let wt_path = dir.parent().unwrap().join("test-wt-prune");
+        git_fs.worktree_add("wt-prune", &wt_path, None).unwrap();
+
+        // Verify 2 worktrees
+        assert_eq!(git_fs.worktrees().unwrap().len(), 2);
+
+        // Manually delete the worktree directory (simulating stale state)
+        fs::remove_dir_all(&wt_path).await.unwrap();
+
+        // Prune should clean up the stale entry
+        let pruned = git_fs.worktree_prune().unwrap();
+        assert_eq!(pruned, 1);
+
+        // Should be back to 1 worktree
+        assert_eq!(git_fs.worktrees().unwrap().len(), 1);
+
+        cleanup(&dir).await;
     }
 }
