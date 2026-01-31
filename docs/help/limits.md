@@ -39,6 +39,26 @@ These bash features are omitted by design:
 - **Scatter results in completion order** — 散 returns results as jobs complete, not in input order.
 - **No command substitution in redirect targets** — `cmd > $(...)` not supported. Evaluate the path first.
 
+## External Commands
+
+External commands (via PATH fallback) have constraints:
+
+| Limitation | Reason | Workaround |
+|------------|--------|------------|
+| No PTY/TTY | Commands run with piped I/O | Use builtins or non-interactive modes |
+| Output captured | Not streamed, may be truncated | Large output: redirect to file |
+| Virtual cwd fails | `/scratch/` isn't real filesystem | `cd` to real directory first |
+
+```bash
+# This works (real cwd)
+cd /home/user
+cargo build
+
+# This fails (virtual cwd)
+cd /scratch
+cargo build  # Error: cannot run external from virtual directory
+```
+
 ## RPC/IPC
 
 - **`spawn_local` requires LocalSet** — IPC clients use tokio's `spawn_local` and must run within a `LocalSet`.

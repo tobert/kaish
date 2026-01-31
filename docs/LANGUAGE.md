@@ -346,6 +346,36 @@ fetch "example.com"  # → Fetching example.com...
 
 Scripts execute in **isolated scope** (like a subshell) — they cannot access or modify parent variables.
 
+### External Commands
+
+When a command is not a builtin or user-defined tool, kaish searches `PATH` for an executable:
+
+```bash
+# External commands work transparently
+cargo build --release
+git status
+npm install
+
+# Pipelines work with external commands
+cat file.txt | sort | uniq         # builtin | external | external
+cargo test 2>&1 | grep FAILED      # external | builtin
+
+# Format strings work (+ and - followed by non-letter are bare words)
+date +%s                           # unix timestamp
+date +%Y-%m-%d                     # formatted date
+```
+
+**How it works:**
+1. Kaish parses the command (handling quotes, variables, flags)
+2. If no builtin matches, kaish searches `PATH` for the executable
+3. Arguments are passed as a clean argv array (no shell re-parsing)
+4. stdin/stdout flow correctly through pipelines
+
+**Constraints:**
+- External commands require a real filesystem working directory (not `/scratch/`)
+- No PTY/TTY support — interactive tools like `vim` won't work
+- Output is captured (not streamed) — large outputs may be truncated
+
 ### Scope Summary
 
 | Method | Scope | Can modify parent vars? |
@@ -353,6 +383,7 @@ Scripts execute in **isolated scope** (like a subshell) — they cannot access o
 | `myfunc args` | shared | ✓ yes |
 | `source script.kai` | shared | ✓ yes |
 | `scriptname` (via PATH) | isolated | ✗ no |
+| `cargo build` (external) | isolated | ✗ no |
 
 ## 散・集 (San/Shū) — Scatter/Gather *(experimental)*
 

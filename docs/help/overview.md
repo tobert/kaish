@@ -5,7 +5,7 @@ Predictable shell for MCP tool orchestration.
 - **Bourne-like syntax** — familiar, but no implicit word splitting, glob expansion, or backticks
 - **Strict validation** — catches errors before execution, not at runtime
 - **Clear errors** — fails fast with useful messages, never guesses
-- **Builtin-first** — 54 builtins run in-process; external commands available via `exec`
+- **Builtin-first** — 54 builtins run in-process; external commands available via PATH fallback
 
 ## Topics
 
@@ -21,8 +21,13 @@ help <tool>     Detailed tool help (e.g., help grep)
 ## Quick Examples
 
 ```bash
-# Pipes and filters (MCP uses /l for local files)
-ls /l | grep "\.rs$" | head -5
+# External commands work transparently
+cargo build --release
+git status
+date +%Y-%m-%d
+
+# Pipes and filters
+ls /l | grep "\.rs$" | head lines=5
 
 # Iteration with glob
 for f in $(glob "*.json"); do
