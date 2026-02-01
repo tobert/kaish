@@ -52,7 +52,9 @@ impl LocalBackend {
     }
 
     /// Apply a single patch operation to file content.
-    fn apply_patch_op(content: &mut String, op: &PatchOp) -> BackendResult<()> {
+    ///
+    /// This is public for use by VirtualOverlayBackend.
+    pub fn apply_patch_op(content: &mut String, op: &PatchOp) -> BackendResult<()> {
         match op {
             PatchOp::Insert { offset, content: insert_content } => {
                 if *offset > content.len() {
@@ -203,7 +205,9 @@ impl LocalBackend {
     }
 
     /// Apply range filter to file content.
-    fn apply_read_range(content: &[u8], range: &ReadRange) -> Vec<u8> {
+    ///
+    /// This is public for use by VirtualOverlayBackend.
+    pub fn apply_read_range(content: &[u8], range: &ReadRange) -> Vec<u8> {
         // Handle byte-based range
         if range.offset.is_some() || range.limit.is_some() {
             let offset = range.offset.unwrap_or(0) as usize;

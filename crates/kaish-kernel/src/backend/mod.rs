@@ -21,8 +21,10 @@
 //! ```
 
 mod local;
+mod overlay;
 
 pub use local::LocalBackend;
+pub use overlay::VirtualOverlayBackend;
 
 #[cfg(test)]
 pub mod testing;

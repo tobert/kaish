@@ -433,6 +433,78 @@ impl Kernel {
         })
     }
 
+    /// Create a kernel with a custom backend and automatic `/v/*` path support.
+    ///
+    /// This is the recommended constructor for embedders who want their custom backend
+    /// to also support kaish's virtual filesystems (like `/v/jobs` for job observability).
+    ///
+    /// Paths are routed as follows:
+    /// - `/v/*` → Internal VFS (JobFs at `/v/jobs`, MemoryFs at `/v/blobs`, etc.)
+    /// - Everything else → Your custom backend
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let my_backend: Arc<dyn KernelBackend> = Arc::new(MyBackend::new());
+    /// let kernel = Kernel::with_backend_and_virtual_paths(my_backend, config)?;
+    ///
+    /// // Now agents can use /v/jobs to monitor background commands
+    /// kernel.execute("cargo build &").await?;
+    /// kernel.execute("cat /v/jobs/1/stdout").await?;
+    /// ```
+    pub fn with_backend_and_virtual_paths(
+        backend: Arc<dyn KernelBackend>,
+        config: KernelConfig,
+    ) -> Result<Self> {
+        use crate::backend::VirtualOverlayBackend;
+
+        // Create VFS with virtual filesystems
+        let mut vfs = VfsRouter::new();
+        let jobs = Arc::new(JobManager::new());
+
+        // Mount JobFs for job observability
+        vfs.mount("/v/jobs", JobFs::new(jobs.clone()));
+        // Mount MemoryFs for blob storage
+        vfs.mount("/v/blobs", MemoryFs::new());
+        // Mount MemoryFs for scratch space
+        vfs.mount("/v/scratch", MemoryFs::new());
+
+        let vfs = Arc::new(vfs);
+
+        // Wrap the backend with virtual overlay
+        let overlay: Arc<dyn KernelBackend> = Arc::new(VirtualOverlayBackend::new(backend, vfs.clone()));
+
+        // Set up tools
+        let mut tools = ToolRegistry::new();
+        register_builtins(&mut tools);
+        let tools = Arc::new(tools);
+
+        // Pipeline runner
+        let runner = PipelineRunner::new(tools.clone());
+
+        let scope = Scope::new();
+        let cwd = config.cwd;
+
+        // Create execution context with the overlay backend
+        let mut exec_ctx = ExecContext::with_backend(overlay);
+        exec_ctx.set_cwd(cwd);
+        exec_ctx.set_job_manager(jobs.clone());
+        exec_ctx.set_tool_schemas(tools.schemas());
+        exec_ctx.set_tools(tools.clone());
+
+        Ok(Self {
+            name: config.name,
+            scope: RwLock::new(scope),
+            tools,
+            user_tools: RwLock::new(HashMap::new()),
+            vfs,
+            jobs,
+            runner,
+            exec_ctx: RwLock::new(exec_ctx),
+            skip_validation: config.skip_validation,
+        })
+    }
+
     /// Get the kernel name.
     pub fn name(&self) -> &str {
         &self.name

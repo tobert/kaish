@@ -30,7 +30,7 @@ pub mod walker;
 
 pub use backend::{
     BackendError, BackendResult, EntryInfo, KernelBackend, LocalBackend, PatchOp, ReadRange,
-    ToolInfo, ToolResult, WriteMode,
+    ToolInfo, ToolResult, VirtualOverlayBackend, WriteMode,
 };
 pub use kernel::{Kernel, KernelConfig, VfsMountMode};
 pub use rpc::KernelRpcServer;
@@ -38,6 +38,23 @@ pub use rpc::KernelRpcServer;
 // ═══════════════════════════════════════════════════════════════════════════
 // Embedding Conveniences
 // ═══════════════════════════════════════════════════════════════════════════
+
+// Backend with /v/* support for embedders
+//
+// Use `VirtualOverlayBackend` to wrap your custom backend and get automatic
+// support for `/v/*` paths (job observability, blob storage, etc.):
+//
+// ```ignore
+// let my_backend = Arc::new(MyBackend::new());
+// let overlay = VirtualOverlayBackend::new(my_backend, vfs);
+// let kernel = Kernel::with_backend(Arc::new(overlay), config)?;
+// ```
+//
+// Or use the convenience constructor:
+//
+// ```ignore
+// let kernel = Kernel::with_backend_and_virtual_paths(my_backend, config)?;
+// ```
 
 // Git types (for embedders that want direct GitVfs access)
 pub use vfs::{FileStatus, GitVfs, LogEntry, StatusSummary, WorktreeInfo};
