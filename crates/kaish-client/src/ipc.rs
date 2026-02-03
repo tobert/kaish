@@ -16,8 +16,8 @@ use tokio::net::UnixStream;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use kaish_kernel::ast::Value;
-use kaish_kernel::interpreter::ExecResult;
-use kaish_schema::kernel;
+use kaish_kernel::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
+use kaish_schema::{kernel, output_data, output_node};
 
 use crate::traits::{ClientError, ClientResult, KernelClient};
 
@@ -103,7 +103,11 @@ impl KernelClient for IpcClient {
             } else {
                 None
             },
-            output: None, // TODO: deserialize OutputData from wire
+            output: if result.has_output() {
+                Some(read_output_data(&result.get_output()?)?)
+            } else {
+                None
+            },
         })
     }
 
@@ -183,7 +187,11 @@ impl KernelClient for IpcClient {
             } else {
                 None
             },
-            output: None, // TODO: deserialize OutputData from wire
+            output: if result.has_output() {
+                Some(read_output_data(&result.get_output()?)?)
+            } else {
+                None
+            },
         })
     }
 
@@ -427,4 +435,83 @@ fn value_to_json(value: &Value) -> serde_json::Value {
             serde_json::Value::Object(map)
         }
     }
+}
+
+// ============================================================
+// OutputData Conversion Helpers
+// ============================================================
+
+/// Read an OutputData from a Cap'n Proto OutputData.
+fn read_output_data(reader: &output_data::Reader<'_>) -> ClientResult<OutputData> {
+    // Read headers if present
+    let headers = if reader.has_headers() {
+        let headers_reader = reader.get_headers()?;
+        let mut headers = Vec::with_capacity(headers_reader.len() as usize);
+        for header in headers_reader.iter() {
+            headers.push(header?.to_str()?.to_string());
+        }
+        Some(headers)
+    } else {
+        None
+    };
+
+    // Read root nodes
+    let root_reader = reader.get_root()?;
+    let mut root = Vec::with_capacity(root_reader.len() as usize);
+    for node_reader in root_reader.iter() {
+        root.push(read_output_node(&node_reader)?);
+    }
+
+    Ok(OutputData { headers, root })
+}
+
+/// Read an OutputNode from a Cap'n Proto OutputNode (recursive).
+fn read_output_node(reader: &output_node::Reader<'_>) -> ClientResult<OutputNode> {
+    use kaish_schema::kaish_capnp::EntryType as SchemaEntryType;
+
+    let name = reader.get_name()?.to_str()?.to_string();
+
+    let entry_type = match reader.get_entry_type()? {
+        SchemaEntryType::Text => EntryType::Text,
+        SchemaEntryType::File => EntryType::File,
+        SchemaEntryType::Directory => EntryType::Directory,
+        SchemaEntryType::Executable => EntryType::Executable,
+        SchemaEntryType::Symlink => EntryType::Symlink,
+    };
+
+    let text = if reader.has_text() {
+        Some(reader.get_text()?.to_str()?.to_string())
+    } else {
+        None
+    };
+
+    let cells = if reader.has_cells() {
+        let cells_reader = reader.get_cells()?;
+        let mut cells = Vec::with_capacity(cells_reader.len() as usize);
+        for cell in cells_reader.iter() {
+            cells.push(cell?.to_str()?.to_string());
+        }
+        cells
+    } else {
+        Vec::new()
+    };
+
+    let children = if reader.has_children() {
+        let children_reader = reader.get_children()?;
+        let mut children = Vec::with_capacity(children_reader.len() as usize);
+        for child_reader in children_reader.iter() {
+            children.push(read_output_node(&child_reader)?);
+        }
+        children
+    } else {
+        Vec::new()
+    };
+
+    Ok(OutputNode {
+        name,
+        entry_type,
+        text,
+        cells,
+        children,
+    })
 }
