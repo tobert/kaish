@@ -21,13 +21,6 @@ pub fn format_output(result: &ExecResult, context: OutputContext) -> String {
             // No hint - use raw output as-is
             result.out.clone()
         }
-        DisplayHint::Formatted { user, model } => {
-            // Pre-rendered output - choose based on context
-            match context {
-                OutputContext::Interactive => user.clone(),
-                OutputContext::Piped | OutputContext::Model | OutputContext::Script => model.clone(),
-            }
-        }
         DisplayHint::Table {
             headers,
             rows,
@@ -255,20 +248,6 @@ mod tests {
         let result = ExecResult::success("hello world");
         let output = format_output(&result, OutputContext::Interactive);
         assert_eq!(output, "hello world");
-    }
-
-    #[test]
-    fn test_format_output_formatted_interactive() {
-        let result = ExecResult::success_formatted("pretty", "compact");
-        let output = format_output(&result, OutputContext::Interactive);
-        assert_eq!(output, "pretty");
-    }
-
-    #[test]
-    fn test_format_output_formatted_piped() {
-        let result = ExecResult::success_formatted("pretty", "compact");
-        let output = format_output(&result, OutputContext::Piped);
-        assert_eq!(output, "compact");
     }
 
     #[test]

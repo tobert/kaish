@@ -857,17 +857,15 @@ fn set_json_value(mut builder: value::Builder<'_>, json: &serde_json::Value) {
 
 /// Convert a kaish DisplayHint to a Cap'n Proto DisplayHint.
 ///
-/// The schema has a simplified enum (text, json, table, silent) while the kernel
-/// has richer struct variants. We map:
+/// The schema has a simplified enum (text, table) while the kernel has richer
+/// struct variants. We map:
 /// - None → text
-/// - Formatted → text (pre-rendered)
 /// - Table → table
 /// - Tree → text (rendered tree)
 fn set_display_hint(builder: &mut kaish_schema::exec_result::Builder<'_>, hint: &DisplayHint) {
     use kaish_schema::kaish_capnp::DisplayHint as SchemaHint;
     let schema_hint = match hint {
         DisplayHint::None => SchemaHint::Text,
-        DisplayHint::Formatted { .. } => SchemaHint::Text,
         DisplayHint::Table { .. } => SchemaHint::Table,
         DisplayHint::Tree { .. } => SchemaHint::Text,
     };

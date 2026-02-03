@@ -20,7 +20,6 @@
 //! for different audiences (humans vs. models):
 //!
 //! - `DisplayHint::None` — Use raw `out` as-is
-//! - `DisplayHint::Formatted` — Pre-rendered output for both audiences
 //! - `DisplayHint::Table` — Tabular data, REPL handles column layout
 //! - `DisplayHint::Tree` — Tree structure, REPL chooses format style
 
@@ -36,14 +35,6 @@ pub enum DisplayHint {
     /// No special formatting - use raw `out` as-is.
     #[default]
     None,
-
-    /// Pre-rendered output for both audiences.
-    Formatted {
-        /// Pretty format for humans (TTY).
-        user: String,
-        /// Compact format for models/piping.
-        model: String,
-    },
 
     /// Tabular data - REPL handles column layout.
     Table {
@@ -172,25 +163,6 @@ impl ExecResult {
             err: stderr.into(),
             data,
             hint: DisplayHint::default(),
-        }
-    }
-
-    /// Create a successful result with dual display formats.
-    ///
-    /// Use this when the tool can pre-render output for both audiences:
-    /// - `user` — Pretty format for interactive TTY (colors, columns)
-    /// - `model` — Compact format for models/piping (token-efficient)
-    pub fn success_formatted(user: impl Into<String>, model: impl Into<String>) -> Self {
-        let model_str = model.into();
-        Self {
-            code: 0,
-            out: model_str.clone(), // Use model format as canonical output for pipes
-            err: String::new(),
-            data: None,
-            hint: DisplayHint::Formatted {
-                user: user.into(),
-                model: model_str,
-            },
         }
     }
 
@@ -447,21 +419,6 @@ mod tests {
     fn default_hint_is_none() {
         let result = ExecResult::success("test");
         assert_eq!(result.hint, DisplayHint::None);
-    }
-
-    #[test]
-    fn success_formatted_sets_hint() {
-        let result = ExecResult::success_formatted("pretty output", "compact");
-        assert!(result.ok());
-        // Canonical output is the model format
-        assert_eq!(result.out, "compact");
-        match result.hint {
-            DisplayHint::Formatted { user, model } => {
-                assert_eq!(user, "pretty output");
-                assert_eq!(model, "compact");
-            }
-            _ => panic!("Expected Formatted hint"),
-        }
     }
 
     #[test]

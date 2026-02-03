@@ -408,16 +408,12 @@ fn read_value(reader: &value::Reader<'_>) -> ClientResult<Value> {
 /// Maps the schema's simplified enum back to the kernel's enum.
 /// Since the schema only has hint types (not the full data), we map:
 /// - text → DisplayHint::None
-/// - json → DisplayHint::None (data is in the data field)
-/// - table → DisplayHint::None (we don't have the table structure)
-/// - silent → DisplayHint::None
+/// - table → DisplayHint::None (we don't have the table structure over the wire)
 fn read_display_hint(result: &kaish_schema::exec_result::Reader<'_>) -> ClientResult<DisplayHint> {
     use kaish_schema::kaish_capnp::DisplayHint as SchemaHint;
     match result.get_hint() {
         Ok(SchemaHint::Text) => Ok(DisplayHint::None),
-        Ok(SchemaHint::Json) => Ok(DisplayHint::None),
         Ok(SchemaHint::Table) => Ok(DisplayHint::None),
-        Ok(SchemaHint::Silent) => Ok(DisplayHint::None),
         Err(_) => Ok(DisplayHint::None), // Default to None for unknown values
     }
 }
