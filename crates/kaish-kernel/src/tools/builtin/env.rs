@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use tokio::process::Command;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Env tool: print environment or run command with modified environment.
@@ -132,20 +132,24 @@ impl Tool for Env {
 
 /// Print current environment variables.
 fn print_env(ctx: &ExecContext, null_sep: bool) -> ExecResult {
+    // Build sorted list of vars
+    let mut vars: Vec<_> = ctx.scope.exported_vars().into_iter().collect();
+    vars.sort_by(|(a, _), (b, _)| a.cmp(b));
+
     let sep = if null_sep { '\0' } else { '\n' };
     let mut output = String::new();
 
-    for (name, value) in ctx.scope.exported_vars() {
+    for (name, value) in vars {
         let value_str = value_to_string(&value);
         output.push_str(&format!("{}={}{}", name, value_str, sep));
     }
 
+    // Remove trailing separator for consistency (unless null-sep)
     if !null_sep && !output.is_empty() {
-        // Remove trailing newline for consistency
         output.pop();
     }
 
-    ExecResult::success(output)
+    ExecResult::with_output(OutputData::text(output))
 }
 
 /// Print environment with overrides applied.
@@ -156,9 +160,6 @@ fn print_env_with_overrides(
     clear: bool,
     null_sep: bool,
 ) -> ExecResult {
-    let sep = if null_sep { '\0' } else { '\n' };
-    let mut output = String::new();
-
     // Start with existing exports unless clearing
     let mut env: std::collections::HashMap<String, String> = if clear {
         std::collections::HashMap::new()
@@ -180,19 +181,23 @@ fn print_env_with_overrides(
         env.insert(name.clone(), value.clone());
     }
 
-    // Sort and output
+    // Sort pairs
     let mut pairs: Vec<_> = env.into_iter().collect();
     pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    let sep = if null_sep { '\0' } else { '\n' };
+    let mut output = String::new();
 
     for (name, value) in pairs {
         output.push_str(&format!("{}={}{}", name, value, sep));
     }
 
+    // Remove trailing separator for consistency (unless null-sep)
     if !null_sep && !output.is_empty() {
         output.pop();
     }
 
-    ExecResult::success(output)
+    ExecResult::with_output(OutputData::text(output))
 }
 
 /// Execute a command with modified environment.

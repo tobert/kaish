@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
 
 /// Cat tool: read and output file contents.
@@ -40,9 +40,9 @@ impl Tool for Cat {
                         .map(|(i, line)| format!("{:6}\t{}", i + 1, line))
                         .collect::<Vec<_>>()
                         .join("\n");
-                    return ExecResult::success(numbered);
+                    return ExecResult::with_output(OutputData::text(numbered));
                 }
-                return ExecResult::success(stdin);
+                return ExecResult::with_output(OutputData::text(stdin));
             }
             return ExecResult::failure(1, "cat: missing path argument");
         }
@@ -82,7 +82,7 @@ impl Tool for Cat {
             }
         }
 
-        ExecResult::success(all_content)
+        ExecResult::with_output(OutputData::text(all_content))
     }
 }
 

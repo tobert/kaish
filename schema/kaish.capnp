@@ -95,7 +95,38 @@ enum ToolSource {
 }
 
 # ============================================================
-# 4. Execution Results
+# 4. Structured Output (Tree-of-Tables Model)
+# ============================================================
+# Unified structured output model where builtins return data
+# and frontends handle all rendering.
+
+# Entry type for rendering hints (colors, icons).
+enum EntryType {
+  text @0;        # Generic text content
+  file @1;        # Regular file
+  directory @2;   # Directory
+  executable @3;  # Executable file
+  symlink @4;     # Symbolic link
+}
+
+# A node in the output tree.
+# Nodes can carry text, tabular cells, and nested children.
+struct OutputNode {
+  name @0 :Text;                  # Primary identifier (filename, key, label)
+  entryType @1 :EntryType;        # Rendering hint (colors, icons)
+  text @2 :Text;                  # Text content (for echo, cat, exec)
+  cells @3 :List(Text);           # Additional columns (for ls -l, ps, env)
+  children @4 :List(OutputNode);  # Child nodes (for tree, find)
+}
+
+# Structured output data from a command.
+struct OutputData {
+  headers @0 :List(Text);         # Column headers (optional)
+  root @1 :List(OutputNode);      # Top-level nodes
+}
+
+# ============================================================
+# 5. Execution Results
 # ============================================================
 # Structured result from command execution.
 
@@ -106,21 +137,12 @@ struct ExecResult {
   stdout @3 :Data;    # Raw bytes
   stderr @4 :Data;    # Raw bytes
   data @5 :Value;     # Parsed JSON if applicable
-  hint @6 :DisplayHint;  # How output should be displayed
-}
-
-# Hint for how to display execution output.
-# The kernel has richer Rust-side types (Table with rows, Tree with structure),
-# but over the wire we just indicate the category. The client handles rendering.
-enum DisplayHint {
-  text @0;      # Plain text (default)
-  table @1;     # Tabular data (client formats columns)
-  # Note: json @1 and silent @3 were removed - never used in practice.
-  # The kernel Rust code uses Table/Tree structs which map to 'table' or 'text'.
+  reserved6 @6 :Void; # Was hint, removed in structured output migration
+  output @7 :OutputData; # Structured output (unified model)
 }
 
 # ============================================================
-# 5. VFS Configuration
+# 6. VFS Configuration
 # ============================================================
 # Virtual filesystem mount configuration.
 
@@ -148,7 +170,7 @@ struct McpResourceConfig {
 }
 
 # ============================================================
-# 6. MCP Server Configuration
+# 7. MCP Server Configuration
 # ============================================================
 # Configuration for connecting to external MCP servers.
 
@@ -182,7 +204,7 @@ struct SseTransport {
 }
 
 # ============================================================
-# 7. State Management
+# 8. State Management
 # ============================================================
 # Kernel state for serialization (snapshot/restore).
 #
@@ -208,7 +230,7 @@ struct KernelState {
 }
 
 # ============================================================
-# 8. Kernel Protocol (RPC Interface)
+# 9. Kernel Protocol (RPC Interface)
 # ============================================================
 # The main interface for communicating with a kaish kernel.
 #

@@ -14,54 +14,28 @@
 //! This differs from traditional shells where `$?` is just an integer exit code.
 //! In kaish, we capture the full context: exit code, stdout, parsed data, and errors.
 //!
-//! # Display Hints
+//! # Structured Output (Tree-of-Tables Model)
 //!
-//! Commands can return display hints to indicate how output should be formatted
-//! for different audiences (humans vs. models):
+//! The unified output model uses `OutputData` containing a tree of `OutputNode`s:
 //!
-//! - `DisplayHint::None` — Use raw `out` as-is
-//! - `DisplayHint::Table` — Tabular data, REPL handles column layout
-//! - `DisplayHint::Tree` — Tree structure, REPL chooses format style
+//! - **Builtins**: Pure data producers returning `OutputData`
+//! - **Frontends**: Handle all rendering (REPL, MCP, kaijutsu)
 
 use crate::ast::Value;
 
-/// Display hint for command output.
+// ============================================================
+// Structured Output (Tree-of-Tables Model)
+// ============================================================
+
+/// Entry type for rendering hints (colors, icons).
 ///
-/// Tools can specify how their output should be formatted for different audiences:
-/// - **Humans** → Pretty columns, colors, traditional tree
-/// - **Models** → Token-efficient compact formats (brace notation, JSON)
-#[derive(Debug, Clone, Default, PartialEq)]
-pub enum DisplayHint {
-    /// No special formatting - use raw `out` as-is.
-    #[default]
-    None,
-
-    /// Tabular data - REPL handles column layout.
-    Table {
-        /// Optional column headers.
-        headers: Option<Vec<String>>,
-        /// Table rows (each row is a vector of cell values).
-        rows: Vec<Vec<String>>,
-        /// Entry metadata for coloring (is_dir, is_executable, etc.).
-        entry_types: Option<Vec<EntryType>>,
-    },
-
-    /// Tree structure - REPL chooses traditional vs compact.
-    Tree {
-        /// Root directory name.
-        root: String,
-        /// Tree structure as JSON for flexible rendering.
-        structure: serde_json::Value,
-        /// Pre-rendered traditional format (for human display).
-        traditional: String,
-        /// Pre-rendered compact format (for model/piped display).
-        compact: String,
-    },
-}
-
-/// Entry type for colorizing file listings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// This unified enum is used by both the new OutputNode system
+/// and the legacy DisplayHint::Table for backward compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EntryType {
+    /// Generic text content.
+    #[default]
+    Text,
     /// Regular file.
     File,
     /// Directory.
@@ -70,6 +44,248 @@ pub enum EntryType {
     Executable,
     /// Symbolic link.
     Symlink,
+}
+
+/// A node in the output tree.
+///
+/// Nodes can carry text, tabular cells, and nested children.
+/// This is the building block for all structured output.
+///
+/// # Examples
+///
+/// Simple text output (echo):
+/// ```
+/// # use kaish_kernel::interpreter::OutputNode;
+/// let node = OutputNode::text("hello world");
+/// ```
+///
+/// File listing (ls):
+/// ```
+/// # use kaish_kernel::interpreter::{OutputNode, EntryType};
+/// let node = OutputNode::new("file.txt").with_entry_type(EntryType::File);
+/// ```
+///
+/// Table row (ls -l):
+/// ```
+/// # use kaish_kernel::interpreter::{OutputNode, EntryType};
+/// let node = OutputNode::new("file.txt")
+///     .with_cells(vec!["drwxr-xr-x".into(), "4096".into()])
+///     .with_entry_type(EntryType::Directory);
+/// ```
+///
+/// Tree node with children:
+/// ```
+/// # use kaish_kernel::interpreter::{OutputNode, EntryType};
+/// let child = OutputNode::new("main.rs").with_entry_type(EntryType::File);
+/// let parent = OutputNode::new("src")
+///     .with_entry_type(EntryType::Directory)
+///     .with_children(vec![child]);
+/// ```
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct OutputNode {
+    /// Primary identifier (filename, key, label).
+    pub name: String,
+    /// Rendering hint (colors, icons).
+    pub entry_type: EntryType,
+    /// Text content (for echo, cat, exec).
+    pub text: Option<String>,
+    /// Additional columns (for ls -l, ps, env).
+    pub cells: Vec<String>,
+    /// Child nodes (for tree, find).
+    pub children: Vec<OutputNode>,
+}
+
+impl OutputNode {
+    /// Create a new node with a name.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Create a text-only node (for echo, cat, etc.).
+    pub fn text(content: impl Into<String>) -> Self {
+        Self {
+            text: Some(content.into()),
+            ..Default::default()
+        }
+    }
+
+    /// Set the entry type for rendering hints.
+    pub fn with_entry_type(mut self, entry_type: EntryType) -> Self {
+        self.entry_type = entry_type;
+        self
+    }
+
+    /// Set additional columns for tabular output.
+    pub fn with_cells(mut self, cells: Vec<String>) -> Self {
+        self.cells = cells;
+        self
+    }
+
+    /// Set child nodes for tree output.
+    pub fn with_children(mut self, children: Vec<OutputNode>) -> Self {
+        self.children = children;
+        self
+    }
+
+    /// Set text content.
+    pub fn with_text(mut self, text: impl Into<String>) -> Self {
+        self.text = Some(text.into());
+        self
+    }
+
+    /// Check if this is a text-only node.
+    pub fn is_text_only(&self) -> bool {
+        self.text.is_some() && self.name.is_empty() && self.cells.is_empty() && self.children.is_empty()
+    }
+
+    /// Check if this node has children.
+    pub fn has_children(&self) -> bool {
+        !self.children.is_empty()
+    }
+
+    /// Get the display name, potentially with text content.
+    pub fn display_name(&self) -> &str {
+        if self.name.is_empty() {
+            self.text.as_deref().unwrap_or("")
+        } else {
+            &self.name
+        }
+    }
+}
+
+/// Structured output data from a command.
+///
+/// This is the top-level structure for command output.
+/// It contains optional column headers and a list of root nodes.
+///
+/// # Rendering Rules
+///
+/// | Structure | Interactive | Piped/Model |
+/// |-----------|-------------|-------------|
+/// | Single node with `text` | Print text | Print text |
+/// | Flat nodes, `name` only | Multi-column, colored | One per line |
+/// | Flat nodes with `cells` | Aligned table | TSV or names only |
+/// | Nested `children` | Box-drawing tree | Brace notation |
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct OutputData {
+    /// Column headers (optional, for table output).
+    pub headers: Option<Vec<String>>,
+    /// Top-level nodes.
+    pub root: Vec<OutputNode>,
+}
+
+impl OutputData {
+    /// Create new empty output data.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create output data with a single text node.
+    ///
+    /// This is the simplest form for commands like `echo`.
+    pub fn text(content: impl Into<String>) -> Self {
+        Self {
+            headers: None,
+            root: vec![OutputNode::text(content)],
+        }
+    }
+
+    /// Create output data with named nodes (for ls, etc.).
+    pub fn nodes(nodes: Vec<OutputNode>) -> Self {
+        Self {
+            headers: None,
+            root: nodes,
+        }
+    }
+
+    /// Create output data with headers and nodes (for ls -l, ps, etc.).
+    pub fn table(headers: Vec<String>, nodes: Vec<OutputNode>) -> Self {
+        Self {
+            headers: Some(headers),
+            root: nodes,
+        }
+    }
+
+    /// Set column headers.
+    pub fn with_headers(mut self, headers: Vec<String>) -> Self {
+        self.headers = Some(headers);
+        self
+    }
+
+    /// Check if this output is simple text (single text-only node).
+    pub fn is_simple_text(&self) -> bool {
+        self.root.len() == 1 && self.root[0].is_text_only()
+    }
+
+    /// Check if this output is a flat list (no nested children).
+    pub fn is_flat(&self) -> bool {
+        self.root.iter().all(|n| !n.has_children())
+    }
+
+    /// Check if this output has tabular data (nodes with cells).
+    pub fn is_tabular(&self) -> bool {
+        self.root.iter().any(|n| !n.cells.is_empty())
+    }
+
+    /// Get the text content if this is simple text output.
+    pub fn as_text(&self) -> Option<&str> {
+        if self.is_simple_text() {
+            self.root[0].text.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// Convert to canonical string output (for pipes).
+    ///
+    /// This produces a simple string representation suitable for
+    /// piping to other commands:
+    /// - Text nodes: their text content
+    /// - Named nodes: names joined by newlines
+    /// - Tabular nodes (name + cells): TSV format (name\tcell1\tcell2...)
+    /// - Nested nodes: brace notation
+    pub fn to_canonical_string(&self) -> String {
+        if let Some(text) = self.as_text() {
+            return text.to_string();
+        }
+
+        // For flat lists (with or without cells), output one line per node
+        if self.is_flat() {
+            return self.root.iter()
+                .map(|n| {
+                    if n.cells.is_empty() {
+                        n.display_name().to_string()
+                    } else {
+                        // For tabular data, use TSV format
+                        let mut parts = vec![n.display_name().to_string()];
+                        parts.extend(n.cells.iter().cloned());
+                        parts.join("\t")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+
+        // For trees, use brace notation
+        fn format_node(node: &OutputNode) -> String {
+            if node.children.is_empty() {
+                node.name.clone()
+            } else {
+                let children: Vec<String> = node.children.iter()
+                    .map(format_node)
+                    .collect();
+                format!("{}/{{{}}}", node.name, children.join(","))
+            }
+        }
+
+        self.root.iter()
+            .map(|n| format_node(n))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 /// The result of executing a command or pipeline.
@@ -90,8 +306,8 @@ pub struct ExecResult {
     pub err: String,
     /// Parsed JSON data from stdout, if stdout was valid JSON.
     pub data: Option<Value>,
-    /// Display hint for formatting output.
-    pub hint: DisplayHint,
+    /// Structured output data for rendering.
+    pub output: Option<OutputData>,
 }
 
 impl ExecResult {
@@ -104,7 +320,23 @@ impl ExecResult {
             out,
             err: String::new(),
             data,
-            hint: DisplayHint::default(),
+            output: None,
+        }
+    }
+
+    /// Create a successful result with structured output data.
+    ///
+    /// This is the preferred constructor for new code. The `OutputData`
+    /// provides a unified model for all output types.
+    pub fn with_output(output: OutputData) -> Self {
+        let out = output.to_canonical_string();
+        let data = Self::try_parse_json(&out);
+        Self {
+            code: 0,
+            out,
+            err: String::new(),
+            data,
+            output: Some(output),
         }
     }
 
@@ -116,7 +348,7 @@ impl ExecResult {
             out,
             err: String::new(),
             data: Some(data),
-            hint: DisplayHint::default(),
+            output: None,
         }
     }
 
@@ -134,7 +366,7 @@ impl ExecResult {
             out: out.into(),
             err: String::new(),
             data: Some(data),
-            hint: DisplayHint::default(),
+            output: None,
         }
     }
 
@@ -145,7 +377,7 @@ impl ExecResult {
             out: String::new(),
             err: err.into(),
             data: None,
-            hint: DisplayHint::default(),
+            output: None,
         }
     }
 
@@ -162,84 +394,7 @@ impl ExecResult {
             out,
             err: stderr.into(),
             data,
-            hint: DisplayHint::default(),
-        }
-    }
-
-    /// Create a successful result with table data for smart column layout.
-    ///
-    /// The REPL will format this as columns for TTY or one-per-line for piped output.
-    pub fn success_table(
-        rows: Vec<Vec<String>>,
-        entry_types: Option<Vec<EntryType>>,
-    ) -> Self {
-        // Build canonical output (one entry per line, first column only)
-        let out = rows.iter()
-            .filter_map(|row| row.first())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n");
-        Self {
-            code: 0,
-            out,
-            err: String::new(),
-            data: None,
-            hint: DisplayHint::Table {
-                headers: None,
-                rows,
-                entry_types,
-            },
-        }
-    }
-
-    /// Create a successful result with table data including headers.
-    pub fn success_table_with_headers(
-        headers: Vec<String>,
-        rows: Vec<Vec<String>>,
-        entry_types: Option<Vec<EntryType>>,
-    ) -> Self {
-        // Build canonical output (one entry per line, first column only)
-        let out = rows.iter()
-            .filter_map(|row| row.first())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n");
-        Self {
-            code: 0,
-            out,
-            err: String::new(),
-            data: None,
-            hint: DisplayHint::Table {
-                headers: Some(headers),
-                rows,
-                entry_types,
-            },
-        }
-    }
-
-    /// Create a successful result with tree structure for format selection.
-    ///
-    /// - `root` — Root directory name
-    /// - `structure` — Tree as JSON for flexible rendering
-    /// - `traditional` — Pre-rendered traditional format with box-drawing
-    /// - `compact` — Pre-rendered compact brace notation
-    pub fn success_tree(
-        root: String,
-        structure: serde_json::Value,
-        traditional: String,
-        compact: String,
-    ) -> Self {
-        Self {
-            code: 0,
-            out: compact.clone(), // Use compact format as canonical for pipes
-            err: String::new(),
-            data: None,
-            hint: DisplayHint::Tree {
-                root,
-                structure,
-                traditional,
-                compact,
-            },
+            output: None,
         }
     }
 
@@ -413,97 +568,11 @@ mod tests {
         assert_eq!(result.data, Some(value));
     }
 
-    // --- Tests for DisplayHint and new constructors ---
-
-    #[test]
-    fn default_hint_is_none() {
-        let result = ExecResult::success("test");
-        assert_eq!(result.hint, DisplayHint::None);
-    }
-
-    #[test]
-    fn success_table_sets_hint() {
-        let rows = vec![
-            vec!["file1.txt".to_string()],
-            vec!["file2.txt".to_string()],
-        ];
-        let types = vec![EntryType::File, EntryType::Directory];
-        let result = ExecResult::success_table(rows.clone(), Some(types.clone()));
-
-        assert!(result.ok());
-        // Canonical output is names joined by newlines
-        assert_eq!(result.out, "file1.txt\nfile2.txt");
-        match result.hint {
-            DisplayHint::Table { headers, rows: r, entry_types } => {
-                assert!(headers.is_none());
-                assert_eq!(r.len(), 2);
-                assert_eq!(entry_types, Some(types));
-            }
-            _ => panic!("Expected Table hint"),
-        }
-    }
-
-    #[test]
-    fn success_table_with_headers_sets_hint() {
-        let headers = vec!["Name".to_string(), "Size".to_string()];
-        let rows = vec![
-            vec!["foo.rs".to_string(), "1024".to_string()],
-            vec!["bar.rs".to_string(), "2048".to_string()],
-        ];
-        let result = ExecResult::success_table_with_headers(
-            headers.clone(),
-            rows.clone(),
-            None,
-        );
-
-        assert!(result.ok());
-        // Canonical output uses first column
-        assert_eq!(result.out, "foo.rs\nbar.rs");
-        match result.hint {
-            DisplayHint::Table { headers: h, rows: r, entry_types } => {
-                assert_eq!(h, Some(headers));
-                assert_eq!(r.len(), 2);
-                assert!(entry_types.is_none());
-            }
-            _ => panic!("Expected Table hint"),
-        }
-    }
-
-    #[test]
-    fn success_tree_sets_hint() {
-        let structure = serde_json::json!({"src": {"main.rs": null}});
-        let result = ExecResult::success_tree(
-            "myproject".to_string(),
-            structure.clone(),
-            "myproject/\n└── src/\n    └── main.rs".to_string(),
-            "myproject/{src/{main.rs}}".to_string(),
-        );
-
-        assert!(result.ok());
-        // Canonical output is compact format
-        assert_eq!(result.out, "myproject/{src/{main.rs}}");
-        match result.hint {
-            DisplayHint::Tree { root, structure: s, traditional, compact } => {
-                assert_eq!(root, "myproject");
-                assert_eq!(s, structure);
-                assert!(traditional.contains("└──"));
-                assert!(compact.contains("{"));
-            }
-            _ => panic!("Expected Tree hint"),
-        }
-    }
-
     #[test]
     fn entry_type_variants() {
         // Just verify the enum variants exist and are distinct
         assert_ne!(EntryType::File, EntryType::Directory);
         assert_ne!(EntryType::Directory, EntryType::Executable);
         assert_ne!(EntryType::Executable, EntryType::Symlink);
-    }
-
-    #[test]
-    fn display_hint_default_is_none() {
-        let hint: DisplayHint = Default::default();
-        assert_eq!(hint, DisplayHint::None);
     }
 }

@@ -344,12 +344,14 @@ impl kernel::Server for KernelImpl {
             result_builder.set_stdout(exec_result.out.as_bytes());
             result_builder.set_stderr(b"");
 
-            // Set display hint
-            set_display_hint(&mut result_builder, &exec_result.hint);
-
             // Set data if present
             if let Some(data) = &exec_result.data {
                 set_value(&mut result_builder.reborrow().init_data(), data);
+            }
+
+            // Set structured output data
+            if let Some(ref output) = exec_result.output {
+                set_output_data(&mut result_builder.reborrow().init_output(), output);
             }
 
             Ok(())
@@ -566,12 +568,14 @@ impl kernel::Server for KernelImpl {
             result_builder.set_stdout(exec_result.out.as_bytes());
             result_builder.set_stderr(b"");
 
-            // Set display hint
-            set_display_hint(&mut result_builder, &exec_result.hint);
-
             // Set data if present
             if let Some(data) = &exec_result.data {
                 set_value(&mut result_builder.reborrow().init_data(), data);
+            }
+
+            // Set structured output data
+            if let Some(ref output) = exec_result.output {
+                set_output_data(&mut result_builder.reborrow().init_output(), output);
             }
 
             Ok(())
@@ -796,8 +800,9 @@ impl kernel::Server for KernelImpl {
 // ============================================================
 
 use kaish_schema::value;
+use kaish_schema::{output_data, output_node};
 use crate::ast::Value;
-use crate::interpreter::DisplayHint;
+use crate::interpreter::{EntryType, OutputData, OutputNode};
 
 /// Convert a kaish Value to a Cap'n Proto Value.
 fn set_value(builder: &mut value::Builder<'_>, value: &Value) {
@@ -855,21 +860,60 @@ fn set_json_value(mut builder: value::Builder<'_>, json: &serde_json::Value) {
     }
 }
 
-/// Convert a kaish DisplayHint to a Cap'n Proto DisplayHint.
-///
-/// The schema has a simplified enum (text, table) while the kernel has richer
-/// struct variants. We map:
-/// - None → text
-/// - Table → table
-/// - Tree → text (rendered tree)
-fn set_display_hint(builder: &mut kaish_schema::exec_result::Builder<'_>, hint: &DisplayHint) {
-    use kaish_schema::kaish_capnp::DisplayHint as SchemaHint;
-    let schema_hint = match hint {
-        DisplayHint::None => SchemaHint::Text,
-        DisplayHint::Table { .. } => SchemaHint::Table,
-        DisplayHint::Tree { .. } => SchemaHint::Text,
+/// Convert a kaish OutputData to Cap'n Proto OutputData.
+fn set_output_data(builder: &mut output_data::Builder<'_>, output: &OutputData) {
+    // Set headers if present
+    if let Some(ref headers) = output.headers {
+        let mut headers_builder = builder.reborrow().init_headers(headers.len() as u32);
+        for (i, header) in headers.iter().enumerate() {
+            headers_builder.set(i as u32, header);
+        }
+    }
+
+    // Set root nodes
+    let mut root_builder = builder.reborrow().init_root(output.root.len() as u32);
+    for (i, node) in output.root.iter().enumerate() {
+        let mut node_builder = root_builder.reborrow().get(i as u32);
+        set_output_node(&mut node_builder, node);
+    }
+}
+
+/// Convert a kaish OutputNode to Cap'n Proto OutputNode.
+fn set_output_node(builder: &mut output_node::Builder<'_>, node: &OutputNode) {
+    builder.set_name(&node.name);
+
+    // Set entry type
+    use kaish_schema::kaish_capnp::EntryType as SchemaEntryType;
+    let entry_type = match node.entry_type {
+        EntryType::Text => SchemaEntryType::Text,
+        EntryType::File => SchemaEntryType::File,
+        EntryType::Directory => SchemaEntryType::Directory,
+        EntryType::Executable => SchemaEntryType::Executable,
+        EntryType::Symlink => SchemaEntryType::Symlink,
     };
-    builder.set_hint(schema_hint);
+    builder.set_entry_type(entry_type);
+
+    // Set text if present
+    if let Some(ref text) = node.text {
+        builder.set_text(text);
+    }
+
+    // Set cells
+    if !node.cells.is_empty() {
+        let mut cells_builder = builder.reborrow().init_cells(node.cells.len() as u32);
+        for (i, cell) in node.cells.iter().enumerate() {
+            cells_builder.set(i as u32, cell);
+        }
+    }
+
+    // Set children recursively
+    if !node.children.is_empty() {
+        let mut children_builder = builder.reborrow().init_children(node.children.len() as u32);
+        for (i, child) in node.children.iter().enumerate() {
+            let mut child_builder = children_builder.reborrow().get(i as u32);
+            set_output_node(&mut child_builder, child);
+        }
+    }
 }
 
 /// Read a kaish Value from a Cap'n Proto Value.

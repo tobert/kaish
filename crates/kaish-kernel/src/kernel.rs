@@ -32,7 +32,7 @@ use tokio::sync::RwLock;
 use crate::ast::{Arg, Expr, Stmt, StringPart, ToolDef, Value, BinaryOp};
 use crate::backend::KernelBackend;
 use crate::glob::glob_match;
-use crate::interpreter::{eval_expr, expand_tilde, json_to_value, value_to_string, ControlFlow, DisplayHint, ExecResult, Scope};
+use crate::interpreter::{eval_expr, expand_tilde, json_to_value, value_to_string, ControlFlow, ExecResult, Scope};
 use crate::parser::parse;
 use crate::scheduler::{drain_to_stream, BoundedStream, JobManager, PipelineRunner, DEFAULT_STREAM_MAX_SIZE};
 use crate::tools::{register_builtins, resolve_in_path, ExecContext, ToolArgs, ToolRegistry};
@@ -818,7 +818,7 @@ impl Kernel {
                         out: String::new(),
                         err: String::new(),
                         data: None,
-                        hint: DisplayHint::default(),
+                        output: None,
                     }
                 } else {
                     ExecResult::success("")
@@ -1518,7 +1518,7 @@ impl Kernel {
             out: accumulated_out,
             err: accumulated_err,
             data: last_data,
-            hint: DisplayHint::default(),
+            output: None,
         };
 
         // 4. Pop scope frame and restore original positional parameters

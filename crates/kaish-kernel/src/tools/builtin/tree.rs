@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 use crate::walker::IgnoreFilter;
 
@@ -93,43 +93,6 @@ impl TreeNode {
         }
     }
 
-    fn format_compact(&self) -> String {
-        let children: Vec<_> = self.children.iter().collect();
-
-        if children.is_empty() {
-            return String::new();
-        }
-
-        if children.len() == 1 {
-            let (name, node) = &children[0];
-            let child_content = node.format_compact();
-            if child_content.is_empty() {
-                name.to_string()
-            } else if node.children.len() == 1 && node.is_dir {
-                // Single chain: a/b/c
-                format!("{}/{}", name, child_content)
-            } else {
-                format!("{}/{{{}}}", name, child_content)
-            }
-        } else {
-            // Multiple children: {a,b,c}
-            let parts: Vec<String> = children
-                .iter()
-                .map(|(name, node)| {
-                    let child_content = node.format_compact();
-                    if child_content.is_empty() {
-                        name.to_string()
-                    } else if node.children.len() == 1 && node.is_dir {
-                        format!("{}/{}", name, child_content)
-                    } else {
-                        format!("{}/{{{}}}", name, child_content)
-                    }
-                })
-                .collect();
-            parts.join(",")
-        }
-    }
-
     fn to_json(&self) -> serde_json::Value {
         if self.children.is_empty() {
             serde_json::Value::Null
@@ -140,6 +103,24 @@ impl TreeNode {
             }
             serde_json::Value::Object(map)
         }
+    }
+
+    /// Convert TreeNode to OutputNode for the structured output model.
+    fn to_output_node(&self, name: &str) -> OutputNode {
+        let entry_type = if self.is_dir {
+            EntryType::Directory
+        } else {
+            EntryType::File
+        };
+
+        let children: Vec<OutputNode> = self.children
+            .iter()
+            .map(|(child_name, child_node)| child_node.to_output_node(child_name))
+            .collect();
+
+        OutputNode::new(name)
+            .with_entry_type(entry_type)
+            .with_children(children)
     }
 }
 
@@ -324,27 +305,18 @@ impl Tool for Tree {
             return ExecResult::success(output.trim_end().to_string());
         }
 
-        // Default: return Tree hint with both formats pre-rendered
-        // Generate traditional format
-        let mut traditional_output = format!("{}/\n", root_name);
-        tree.format_traditional("", false, &mut traditional_output);
-        let traditional_str = traditional_output.trim_end().to_string();
+        // Default: return structured OutputData with tree structure
+        // Build the root node with children from tree
+        let root_node = OutputNode::new(&root_name)
+            .with_entry_type(EntryType::Directory)
+            .with_children(
+                tree.children
+                    .iter()
+                    .map(|(name, node)| node.to_output_node(name))
+                    .collect()
+            );
 
-        // Generate compact format
-        let content = tree.format_compact();
-        let compact_str = if content.is_empty() {
-            format!("{}/", root_name)
-        } else {
-            format!("{}/{{{}}}", root_name, content)
-        };
-
-        // Return with Tree hint for smart formatting
-        ExecResult::success_tree(
-            root_name,
-            tree.to_json(),
-            traditional_str,
-            compact_str,
-        )
+        ExecResult::with_output(OutputData::nodes(vec![root_node]))
     }
 }
 
@@ -384,10 +356,11 @@ mod tests {
 
         let result = Tree.execute(args, &mut ctx).await;
         assert!(result.ok());
-        // Compact format is now default, uses braces
-        assert!(result.out.contains("src/"));
-        // Should contain brace notation
-        assert!(result.out.contains('{') || result.out.contains(','));
+        // Default format now returns structured OutputData
+        // Canonical output uses brace notation for nested children
+        assert!(result.out.contains("src"));
+        // Should have structured output
+        assert!(result.output.is_some());
     }
 
     #[tokio::test]
@@ -450,9 +423,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tree_returns_tree_hint() {
-        use crate::interpreter::DisplayHint;
-
+    async fn test_tree_returns_output_data() {
         let mut ctx = make_ctx().await;
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("/src".into()));
@@ -460,25 +431,21 @@ mod tests {
         let result = Tree.execute(args, &mut ctx).await;
         assert!(result.ok());
 
-        // Default tree (no flags) should return Tree hint
-        match &result.hint {
-            DisplayHint::Tree { root, structure, traditional, compact } => {
-                assert_eq!(root, "src");
-                // Structure should be valid JSON
-                assert!(structure.is_object() || structure.is_null());
-                // Traditional should have box-drawing characters
-                assert!(traditional.contains("├") || traditional.contains("└") || traditional.contains("src/"));
-                // Compact should use brace notation
-                assert!(compact.contains("{") || compact.contains("src/"));
+        // Default tree (no flags) should return OutputData with nested structure
+        match &result.output {
+            Some(output) => {
+                assert!(!output.root.is_empty());
+                // Root node should be "src"
+                assert_eq!(output.root[0].name, "src");
+                // Should have children (the tree content)
+                assert!(!output.root[0].children.is_empty());
             }
-            _ => panic!("Expected Tree hint for default tree output, got {:?}", result.hint),
+            None => panic!("Expected OutputData for default tree output"),
         }
     }
 
     #[tokio::test]
-    async fn test_tree_explicit_flag_returns_no_hint() {
-        use crate::interpreter::DisplayHint;
-
+    async fn test_tree_explicit_flag_returns_text() {
         let mut ctx = make_ctx().await;
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("/src".into()));
@@ -487,7 +454,8 @@ mod tests {
         let result = Tree.execute(args, &mut ctx).await;
         assert!(result.ok());
 
-        // Explicit format flags should return None hint (plain text)
-        assert_eq!(result.hint, DisplayHint::None);
+        // Explicit format flags should return plain text output
+        // (output is still Some but it's simple text, not a tree structure)
+        assert!(result.out.contains("├") || result.out.contains("└"));
     }
 }

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::backend::EntryInfo;
-use crate::interpreter::{EntryType, ExecResult};
+use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 use crate::walker::IgnoreFilter;
 
@@ -184,20 +184,29 @@ impl Ls {
                 let filtered = filter_and_sort(entries, show_all, sort_opts);
 
                 if filtered.is_empty() {
-                    return ExecResult::success("");
+                    return ExecResult::with_output(OutputData::new());
                 }
 
-                // Build table data and entry types for coloring
-                let entry_types: Vec<EntryType> = filtered
+                // Build OutputNodes for each entry
+                let nodes: Vec<OutputNode> = filtered
                     .iter()
-                    .map(entry_info_to_type)
-                    .collect();
+                    .map(|e| {
+                        let entry_type = entry_info_to_type(e);
+                        let name_display = if e.is_symlink {
+                            if long_format {
+                                if let Some(target) = &e.symlink_target {
+                                    format!("{} -> {}", e.name, target.display())
+                                } else {
+                                    format!("{}@", e.name)
+                                }
+                            } else {
+                                format!("{}@", e.name)
+                            }
+                        } else {
+                            e.name.clone()
+                        };
 
-                let rows: Vec<Vec<String>> = if long_format {
-                    // Name first (for canonical output), then type and size
-                    filtered
-                        .iter()
-                        .map(|e| {
+                        if long_format {
                             let type_char = if e.is_symlink {
                                 "l"
                             } else if e.is_dir {
@@ -210,43 +219,26 @@ impl Ls {
                             } else {
                                 format!("{:>8}", e.size)
                             };
-                            // For symlinks, show "name -> target"
-                            let name_display = if e.is_symlink {
-                                if let Some(target) = &e.symlink_target {
-                                    format!("{} -> {}", e.name, target.display())
-                                } else {
-                                    format!("{}@", e.name)
-                                }
-                            } else {
-                                e.name.clone()
-                            };
-                            vec![name_display, type_char.to_string(), size_str]
-                        })
-                        .collect()
-                } else {
-                    // Single column - just names (with @ suffix for symlinks)
-                    filtered
-                        .iter()
-                        .map(|e| {
-                            let name_display = if e.is_symlink {
-                                format!("{}@", e.name)
-                            } else {
-                                e.name.clone()
-                            };
-                            vec![name_display]
-                        })
-                        .collect()
-                };
+                            OutputNode::new(name_display)
+                                .with_cells(vec![type_char.to_string(), size_str])
+                                .with_entry_type(entry_type)
+                        } else {
+                            OutputNode::new(name_display)
+                                .with_entry_type(entry_type)
+                        }
+                    })
+                    .collect();
 
-                if long_format {
-                    ExecResult::success_table_with_headers(
+                let output = if long_format {
+                    OutputData::table(
                         vec!["Name".to_string(), "Type".to_string(), "Size".to_string()],
-                        rows,
-                        Some(entry_types),
+                        nodes,
                     )
                 } else {
-                    ExecResult::success_table(rows, Some(entry_types))
-                }
+                    OutputData::nodes(nodes)
+                };
+
+                ExecResult::with_output(output)
             }
             Err(e) => ExecResult::failure(1, format!("ls: {}: {}", path, e)),
         }
@@ -484,16 +476,15 @@ mod tests {
         // Canonical output contains names (first column)
         assert!(result.out.contains("subdir"));
         assert!(result.out.contains("file1.txt"));
-        // Check the hint has table data
-        use crate::interpreter::DisplayHint;
-        match &result.hint {
-            DisplayHint::Table { rows, headers, .. } => {
-                assert!(headers.is_some());
-                assert!(!rows.is_empty());
-                // Rows have name, type, size columns
-                assert!(rows.iter().any(|r| r.len() == 3));
+        // Check the output has table data
+        match &result.output {
+            Some(output) => {
+                assert!(output.headers.is_some());
+                assert!(!output.root.is_empty());
+                // Nodes have name + 2 cells (type and size)
+                assert!(output.root.iter().any(|n| n.cells.len() == 2));
             }
-            _ => panic!("Expected Table hint for long format"),
+            None => panic!("Expected OutputData for long format"),
         }
     }
 
@@ -680,15 +671,14 @@ mod tests {
         assert!(result.out.contains("link.txt -> target.txt"));
         assert!(result.out.contains("linkdir -> targetdir"));
         assert!(result.out.contains("broken -> nonexistent"));
-        // Should have 'l' type character in table hint
-        use crate::interpreter::DisplayHint;
-        match &result.hint {
-            DisplayHint::Table { rows, .. } => {
-                // Find a row that has 'l' as the type
-                let has_symlink_type = rows.iter().any(|r| r.get(1) == Some(&"l".to_string()));
+        // Should have 'l' type character in output nodes
+        match &result.output {
+            Some(output) => {
+                // Find a node that has 'l' as the type in cells
+                let has_symlink_type = output.root.iter().any(|n| n.cells.get(0) == Some(&"l".to_string()));
                 assert!(has_symlink_type, "Expected 'l' type character for symlinks");
             }
-            _ => panic!("Expected Table hint for long format"),
+            None => panic!("Expected OutputData for long format"),
         }
     }
 

@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
 
 /// Echo tool: prints arguments to stdout.
@@ -48,7 +48,8 @@ impl Tool for Echo {
             output.push('\n');
         }
 
-        ExecResult::success(output)
+        // Use the new OutputData model for structured output
+        ExecResult::with_output(OutputData::text(output))
     }
 }
 

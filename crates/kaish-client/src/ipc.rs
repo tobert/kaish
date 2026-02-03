@@ -16,7 +16,7 @@ use tokio::net::UnixStream;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use kaish_kernel::ast::Value;
-use kaish_kernel::interpreter::{DisplayHint, ExecResult};
+use kaish_kernel::interpreter::ExecResult;
 use kaish_schema::kernel;
 
 use crate::traits::{ClientError, ClientResult, KernelClient};
@@ -103,7 +103,7 @@ impl KernelClient for IpcClient {
             } else {
                 None
             },
-            hint: read_display_hint(&result)?,
+            output: None, // TODO: deserialize OutputData from wire
         })
     }
 
@@ -183,7 +183,7 @@ impl KernelClient for IpcClient {
             } else {
                 None
             },
-            hint: read_display_hint(&result)?,
+            output: None, // TODO: deserialize OutputData from wire
         })
     }
 
@@ -400,21 +400,6 @@ fn read_value(reader: &value::Reader<'_>) -> ClientResult<Value> {
             }
             Ok(Value::String(serde_json::Value::Object(map).to_string()))
         }
-    }
-}
-
-/// Read display hint from an ExecResult.
-///
-/// Maps the schema's simplified enum back to the kernel's enum.
-/// Since the schema only has hint types (not the full data), we map:
-/// - text → DisplayHint::None
-/// - table → DisplayHint::None (we don't have the table structure over the wire)
-fn read_display_hint(result: &kaish_schema::exec_result::Reader<'_>) -> ClientResult<DisplayHint> {
-    use kaish_schema::kaish_capnp::DisplayHint as SchemaHint;
-    match result.get_hint() {
-        Ok(SchemaHint::Text) => Ok(DisplayHint::None),
-        Ok(SchemaHint::Table) => Ok(DisplayHint::None),
-        Err(_) => Ok(DisplayHint::None), // Default to None for unknown values
     }
 }
 

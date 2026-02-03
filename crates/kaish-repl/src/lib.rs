@@ -4,7 +4,7 @@
 //! It handles:
 //! - Meta-commands: `/help`, `/quit`, `/ast`, `/scope`, `/cwd`, `/jobs`, `/tools`
 //! - Command execution via the Kernel
-//! - Result formatting with DisplayHints
+//! - Result formatting with OutputData
 //! - Command history via rustyline
 
 pub mod format;
@@ -248,12 +248,10 @@ fn format_value(value: &Value) -> String {
 
 /// Format an ExecResult for display.
 ///
-/// Uses display hints when available, otherwise falls back to status+output format.
+/// Uses OutputData when available, otherwise falls back to status+output format.
 fn format_result(result: &ExecResult) -> String {
-    use kaish_kernel::interpreter::DisplayHint;
-
-    // If there's a display hint, use the formatter
-    if !matches!(result.hint, DisplayHint::None) {
+    // If there's structured output, use the formatter
+    if result.output.is_some() {
         let context = format::detect_context();
         let formatted = format::format_output(result, context);
 
@@ -264,7 +262,7 @@ fn format_result(result: &ExecResult) -> String {
         return formatted;
     }
 
-    // No display hint - use classic status format
+    // No structured output - use classic status format
     let status = if result.ok() { "✓" } else { "✗" };
     let mut output = format!("{} code={}", status, result.code);
 
