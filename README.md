@@ -62,6 +62,7 @@ seq 1 10 | scatter as=N limit=4 | echo "processing $N" | gather
 |---------|-------------|
 | **Bourne-compatible** | Variables, pipes, control flow, functions — familiar syntax |
 | **54 builtins** | grep, jq, git, find, sed, awk, diff, patch, and more |
+| **Structured data** | Commands return typed arrays — `for i in $(seq 1 5)` iterates 5 values, not word-split text |
 | **Strict validation** | Errors caught before execution with clear messages |
 | **Virtual filesystem** | Unified access: `/mnt/local` (home), `/scratch` (memory), `/v/jobs` (observability) |
 | **Scatter/gather** | Built-in parallelism with 散/集 |
