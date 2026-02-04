@@ -11,7 +11,7 @@ commonly-used parts of sh while eliminating entire classes of bugs at the langua
 
 - **No implicit word splitting** — `$VAR` is always one value, never split on spaces
 - **No glob expansion** — tools handle their own patterns, or use `glob` builtin
-- **Structured iteration** — `for i in $(seq 1 5)` works because `seq` returns a JSON array
+- **Structured iteration** — `for i in $(seq 1 5)` works via structured data, not word splitting
 - **Explicit splitting** — use `split "$VAR"` when you actually need word splitting
 - **No backticks** — only `$(cmd)` substitution
 - **Strict booleans** — `TRUE` and `yes` are errors, not truthy
@@ -38,11 +38,11 @@ for item in one two three; do      # literal items
     echo "Processing: $item"
 done
 
-for i in $(seq 1 3); do            # seq returns array
+for i in $(seq 1 3); do            # structured data iteration
     echo "Count: $i"
 done
 
-for file in $(glob "*.txt"); do    # glob returns array
+for file in $(glob "*.txt"); do    # structured data iteration
     echo "Found: $file"
 done
 
