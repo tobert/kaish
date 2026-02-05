@@ -73,6 +73,9 @@ directories = "5"
 # Process information (Linux)
 procfs = "0.17"
 
+# Token counting (BPE tokenization)
+tiktoken-rs = "0.9"
+
 # Testing
 proptest = "1"
 rstest = "0.23"

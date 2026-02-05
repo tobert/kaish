@@ -41,6 +41,9 @@ jaq-core = { workspace = true }
 jaq-std = { workspace = true }
 jaq-json = { workspace = true }
 
+# Token counting (BPE tokenization)
+tiktoken-rs = { workspace = true }
+
 # XDG paths
 directories = { workspace = true }
 

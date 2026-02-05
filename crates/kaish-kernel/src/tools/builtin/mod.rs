@@ -51,6 +51,7 @@ mod stat;
 mod tail;
 mod tee;
 mod test_builtin;
+mod tokens;
 mod touch;
 mod tr;
 mod tree;
@@ -118,6 +119,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(tee::Tee);
     registry.register(test_builtin::Test);
     registry.register(test_builtin::Bracket);
+    registry.register(tokens::Tokens);
     registry.register(touch::Touch);
     registry.register(tr::Tr);
     registry.register(tree::Tree);
