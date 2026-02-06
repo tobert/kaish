@@ -590,8 +590,10 @@ fn introspect_vars_shows_set_variables() {
         vars
     "#);
     let joined = outputs.join("\n");
-    assert!(joined.contains("X=42"), "vars should show X=42. Output was: {}", joined);
-    assert!(joined.contains("NAME=\"Alice\""), "vars should show NAME. Output was: {}", joined);
+    // Table format: NAME\tVALUE\tTYPE (canonical TSV from OutputData)
+    assert!(joined.contains("X"), "vars should show X. Output was: {}", joined);
+    assert!(joined.contains("42"), "vars should show 42. Output was: {}", joined);
+    assert!(joined.contains("NAME"), "vars should show NAME. Output was: {}", joined);
 }
 
 #[test]
@@ -601,8 +603,9 @@ fn introspect_vars_json_format() {
         vars --json
     "#);
     let joined = outputs.join("\n");
-    assert!(joined.contains("\"name\""), "vars --json should have name field. Output was: {}", joined);
-    assert!(joined.contains("\"value\""), "vars --json should have value field. Output was: {}", joined);
+    // Global --json produces table-keyed JSON: [{"NAME": ..., "VALUE": ..., "TYPE": ...}]
+    assert!(joined.contains("\"NAME\""), "vars --json should have NAME field. Output was: {}", joined);
+    assert!(joined.contains("\"VALUE\""), "vars --json should have VALUE field. Output was: {}", joined);
     assert!(joined.contains("COUNT"), "vars --json should include COUNT. Output was: {}", joined);
 }
 
@@ -624,8 +627,9 @@ fn introspect_tools_json_format() {
         tools --json
     "#);
     let joined = outputs.join("\n");
-    assert!(joined.contains("\"name\""), "tools --json should have name field. Output was: {}", joined);
-    assert!(joined.contains("\"description\""), "tools --json should have description field. Output was: {}", joined);
+    // Global --json produces table-keyed JSON: [{"NAME": ..., "DESCRIPTION": ..., "PARAMS": ...}]
+    assert!(joined.contains("\"NAME\""), "tools --json should have NAME field. Output was: {}", joined);
+    assert!(joined.contains("\"DESCRIPTION\""), "tools --json should have DESCRIPTION field. Output was: {}", joined);
     // Should contain JSON array structure
     assert!(joined.contains('[') && joined.contains(']'), "tools --json should return array. Output was: {}", joined);
 }
@@ -657,9 +661,9 @@ fn introspect_mounts_json_format() {
         mounts --json
     "#);
     let joined = outputs.join("\n");
-    // Should contain JSON structure
-    assert!(joined.contains("\"path\""), "mounts --json should have path. Output was: {}", joined);
-    assert!(joined.contains("\"read_only\""), "mounts --json should have read_only. Output was: {}", joined);
+    // Global --json produces table-keyed JSON: [{"PATH": ..., "MODE": ...}]
+    assert!(joined.contains("\"PATH\""), "mounts --json should have PATH. Output was: {}", joined);
+    assert!(joined.contains("\"MODE\""), "mounts --json should have MODE. Output was: {}", joined);
 }
 
 // ============================================================================

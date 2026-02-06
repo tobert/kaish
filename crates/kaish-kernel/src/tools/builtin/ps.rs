@@ -49,10 +49,6 @@ impl Tool for Ps {
                 ParamSchema::optional("user", "string", Value::Null, "Filter by username (-u)")
                     .with_aliases(["-u", "--user"]),
             )
-            .param(
-                ParamSchema::optional("json", "bool", Value::Bool(false), "Output as JSON array (--json)")
-                    .with_aliases(["--json"]),
-            )
             .example("Current user's processes", "ps")
             .example("All processes", "ps -a")
             .example("Specific PID", "ps pid=1234 -a")
@@ -64,7 +60,6 @@ impl Tool for Ps {
 
     async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
         let show_all = args.has_flag("all") || args.has_flag("a");
-        let json_output = args.has_flag("json");
 
         let filter_pid = args
             .get("pid", usize::MAX)
@@ -187,15 +182,7 @@ impl Tool for Ps {
         // Sort by PID
         processes.sort_by_key(|p| p.pid);
 
-        let result = format_table(&processes);
-        if json_output
-            && let Some(ref output) = result.output
-        {
-            let json = serde_json::to_string_pretty(&output.to_json())
-                .unwrap_or_else(|_| "[]".to_string());
-            return ExecResult::success(json);
-        }
-        result
+        format_table(&processes)
     }
 }
 
@@ -373,13 +360,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ps_json() {
+    async fn test_ps_json_via_global_flag() {
+        use crate::interpreter::{apply_output_format, OutputFormat};
+
         let mut ctx = make_ctx();
-        let mut args = ToolArgs::new();
-        args.flags.insert("json".to_string());
+        let args = ToolArgs::new();
 
         let result = Ps.execute(args, &mut ctx).await;
         assert!(result.ok());
+
+        // Simulate global --json (handled by kernel)
+        let result = apply_output_format(result, OutputFormat::Json);
 
         // Should be valid JSON array of objects with table headers as keys
         let parsed: serde_json::Value = serde_json::from_str(&result.out).expect("valid JSON");
@@ -404,14 +395,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ps_json_all() {
+    async fn test_ps_json_all_via_global_flag() {
+        use crate::interpreter::{apply_output_format, OutputFormat};
+
         let mut ctx = make_ctx();
         let mut args = ToolArgs::new();
         args.flags.insert("a".to_string());
-        args.flags.insert("json".to_string());
 
         let result = Ps.execute(args, &mut ctx).await;
         assert!(result.ok());
+
+        // Simulate global --json (handled by kernel)
+        let result = apply_output_format(result, OutputFormat::Json);
 
         let parsed: serde_json::Value = serde_json::from_str(&result.out).expect("valid JSON");
         let procs = parsed.as_array().expect("should be an array");

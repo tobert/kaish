@@ -4,8 +4,7 @@
 
 use async_trait::async_trait;
 
-use crate::ast::Value;
-use crate::interpreter::{value_to_json, ExecResult, OutputData};
+use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 // ============================================================================
@@ -26,117 +25,59 @@ impl Tool for Tools {
             .param(ParamSchema::optional(
                 "name",
                 "string",
-                Value::Null,
+                crate::ast::Value::Null,
                 "Show detailed schema for a specific tool",
-            ))
-            .param(ParamSchema::optional(
-                "json",
-                "bool",
-                Value::Bool(false),
-                "Output as JSON",
             ))
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        let json_output = args.has_flag("json");
         let tool_name = args.get_string("name", 0);
 
         if let Some(name) = tool_name {
-            format_tool_detail(&ctx.tool_schemas, &name, json_output)
+            format_tool_detail(&ctx.tool_schemas, &name)
         } else {
-            format_tool_list(&ctx.tool_schemas, json_output)
+            format_tool_list(&ctx.tool_schemas)
         }
     }
 }
 
-fn format_tool_list(schemas: &[ToolSchema], json_output: bool) -> ExecResult {
-    if json_output {
-        let json_tools: Vec<serde_json::Value> = schemas
-            .iter()
-            .map(|s| {
-                let params: Vec<serde_json::Value> = s
-                    .params
-                    .iter()
-                    .map(|p| {
-                        serde_json::json!({
-                            "name": p.name,
-                            "type": p.param_type,
-                            "required": p.required,
-                            "description": p.description
-                        })
-                    })
-                    .collect();
+fn format_tool_list(schemas: &[ToolSchema]) -> ExecResult {
+    let headers = vec![
+        "NAME".to_string(),
+        "DESCRIPTION".to_string(),
+        "PARAMS".to_string(),
+    ];
 
-                serde_json::json!({
-                    "name": s.name,
-                    "description": s.description,
-                    "params": params
-                })
-            })
-            .collect();
+    let nodes: Vec<OutputNode> = schemas
+        .iter()
+        .map(|s| {
+            let param_count = s.params.len().to_string();
+            OutputNode::new(&s.name).with_cells(vec![s.description.clone(), param_count])
+        })
+        .collect();
 
-        match serde_json::to_string_pretty(&json_tools) {
-            Ok(json_str) => ExecResult::with_output(OutputData::text(json_str)),
-            Err(e) => ExecResult::failure(1, format!("failed to serialize tools: {}", e)),
-        }
-    } else {
-        let mut output = String::new();
-        for schema in schemas {
-            output.push_str(&format!("{:<16} {}\n", schema.name, schema.description));
-        }
-        ExecResult::with_output(OutputData::text(output))
-    }
+    ExecResult::with_output(OutputData::table(headers, nodes))
 }
 
-fn format_tool_detail(schemas: &[ToolSchema], name: &str, json_output: bool) -> ExecResult {
+fn format_tool_detail(schemas: &[ToolSchema], name: &str) -> ExecResult {
     let schema = schemas.iter().find(|s| s.name == name);
 
     match schema {
         Some(s) => {
-            if json_output {
-                let params: Vec<serde_json::Value> = s
-                    .params
-                    .iter()
-                    .map(|p| {
-                        let mut obj = serde_json::json!({
-                            "name": p.name,
-                            "type": p.param_type,
-                            "required": p.required,
-                            "description": p.description
-                        });
-                        if let Some(ref default) = p.default {
-                            obj["default"] = value_to_json(default);
-                        }
-                        obj
-                    })
-                    .collect();
+            let mut output = format!("{}\n{}\n\n", s.name, s.description);
 
-                let json_obj = serde_json::json!({
-                    "name": s.name,
-                    "description": s.description,
-                    "params": params
-                });
-
-                match serde_json::to_string_pretty(&json_obj) {
-                    Ok(json_str) => ExecResult::with_output(OutputData::text(json_str)),
-                    Err(e) => ExecResult::failure(1, format!("failed to serialize tool: {}", e)),
+            if !s.params.is_empty() {
+                output.push_str("Parameters:\n");
+                for p in &s.params {
+                    let required = if p.required { "(required)" } else { "(optional)" };
+                    output.push_str(&format!(
+                        "  {} : {} {}\n    {}\n",
+                        p.name, p.param_type, required, p.description
+                    ));
                 }
-            } else {
-                let mut output = format!("{}\n{}\n\n", s.name, s.description);
-
-                if !s.params.is_empty() {
-                    output.push_str("Parameters:\n");
-                    for p in &s.params {
-                        let required = if p.required { "(required)" } else { "(optional)" };
-                        output.push_str(&format!(
-                            "  {} : {} {}\n    {}\n",
-                            p.name, p.param_type, required, p.description
-                        ));
-                    }
-                }
-
-                ExecResult::with_output(OutputData::text(output))
             }
+
+            ExecResult::with_output(OutputData::text(output))
         }
         None => ExecResult::failure(1, format!("tool not found: {}", name)),
     }
@@ -157,47 +98,33 @@ impl Tool for Mounts {
 
     fn schema(&self) -> ToolSchema {
         ToolSchema::new("mounts", "List VFS mount points")
-            .param(ParamSchema::optional(
-                "json",
-                "bool",
-                Value::Bool(false),
-                "Output as JSON",
-            ))
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        let json_output = args.has_flag("json");
+    async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         let mounts = ctx.backend.mounts();
 
-        if json_output {
-            let json_mounts: Vec<serde_json::Value> = mounts
-                .iter()
-                .map(|m| {
-                    serde_json::json!({
-                        "path": m.path.to_string_lossy(),
-                        "read_only": m.read_only
-                    })
-                })
-                .collect();
+        let headers = vec![
+            "PATH".to_string(),
+            "MODE".to_string(),
+        ];
 
-            match serde_json::to_string_pretty(&json_mounts) {
-                Ok(json_str) => ExecResult::with_output(OutputData::text(json_str)),
-                Err(e) => ExecResult::failure(1, format!("failed to serialize mounts: {}", e)),
-            }
-        } else {
-            let mut output = String::new();
-            for mount in mounts {
-                let mode = if mount.read_only { "ro" } else { "rw" };
-                output.push_str(&format!("{} ({})\n", mount.path.display(), mode));
-            }
-            ExecResult::with_output(OutputData::text(output))
-        }
+        let nodes: Vec<OutputNode> = mounts
+            .iter()
+            .map(|m| {
+                let mode = if m.read_only { "ro" } else { "rw" };
+                OutputNode::new(m.path.to_string_lossy()).with_cells(vec![mode.to_string()])
+            })
+            .collect();
+
+        ExecResult::with_output(OutputData::table(headers, nodes))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
+    use crate::interpreter::{apply_output_format, OutputFormat};
     use crate::tools::ToolSchema as TS;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
@@ -227,19 +154,24 @@ mod tests {
         assert!(result.ok());
         assert!(result.out.contains("echo"));
         assert!(result.out.contains("cat"));
+        // Should have structured OutputData with table headers
+        let output = result.output.as_ref().expect("should have OutputData");
+        assert!(output.headers.is_some());
     }
 
     #[tokio::test]
-    async fn test_tools_list_json() {
+    async fn test_tools_list_json_via_global_flag() {
         let mut ctx = make_ctx();
-        let mut args = ToolArgs::new();
-        args.flags.insert("json".to_string());
+        let args = ToolArgs::new();
 
         let result = Tools.execute(args, &mut ctx).await;
         assert!(result.ok());
 
+        // Simulate global --json (handled by kernel)
+        let result = apply_output_format(result, OutputFormat::Json);
         let data: Vec<serde_json::Value> = serde_json::from_str(&result.out).expect("valid JSON");
         assert_eq!(data.len(), 2);
+        assert!(data[0].get("NAME").is_some());
     }
 
     #[tokio::test]
@@ -282,20 +214,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mounts_list_json() {
+    async fn test_mounts_list_json_via_global_flag() {
         let mut ctx = make_ctx();
-        let mut args = ToolArgs::new();
-        args.flags.insert("json".to_string());
+        let args = ToolArgs::new();
 
         let result = Mounts.execute(args, &mut ctx).await;
         assert!(result.ok());
 
+        // Simulate global --json (handled by kernel)
+        let result = apply_output_format(result, OutputFormat::Json);
         let data: Vec<serde_json::Value> = serde_json::from_str(&result.out).expect("valid JSON");
         assert!(!data.is_empty());
 
         let paths: Vec<&str> = data
             .iter()
-            .filter_map(|v| v.get("path").and_then(|p| p.as_str()))
+            .filter_map(|v| v.get("PATH").and_then(|p| p.as_str()))
             .collect();
         assert!(paths.contains(&"/"));
         assert!(paths.contains(&"/tmp"));

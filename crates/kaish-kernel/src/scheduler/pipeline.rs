@@ -11,8 +11,8 @@ use std::collections::HashMap;
 
 use crate::arithmetic;
 use crate::ast::{Arg, Command, Expr, Redirect, RedirectKind, Value};
-use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ToolArgs, ToolRegistry, ToolSchema};
+use crate::interpreter::{apply_output_format, ExecResult};
+use crate::tools::{extract_output_format, ExecContext, ToolArgs, ToolRegistry, ToolSchema};
 use tokio::io::AsyncWriteExt;
 
 use super::scatter::{
@@ -214,7 +214,8 @@ impl PipelineRunner {
 
         // Build tool args with schema-aware parsing
         let schema = self.tools.get(&cmd.name).map(|t| t.schema());
-        let tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
+        let mut tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
+        let output_format = extract_output_format(&mut tool_args, schema.as_ref());
 
         // Set up stdin from redirects (< file, <<heredoc)
         setup_stdin_redirects(cmd, ctx);
@@ -227,8 +228,20 @@ impl PipelineRunner {
         // Execute via backend (clone Arc to avoid borrow conflict)
         let backend = ctx.backend.clone();
         let result = match backend.call_tool(&cmd.name, tool_args, ctx).await {
-            Ok(result) => ExecResult::from_output(result.code as i64, result.stdout, result.stderr),
+            Ok(tool_result) => {
+                let mut exec = ExecResult::from_output(
+                    tool_result.code as i64, tool_result.stdout, tool_result.stderr,
+                );
+                exec.output = tool_result.output;
+                exec
+            }
             Err(e) => ExecResult::failure(127, e.to_string()),
+        };
+
+        // Apply output format transform
+        let result = match output_format {
+            Some(format) => apply_output_format(result, format),
+            None => result,
         };
 
         // Apply post-execution redirects
@@ -251,7 +264,8 @@ impl PipelineRunner {
         for (i, cmd) in commands.iter().enumerate() {
             // Build tool args with schema-aware parsing
             let schema = self.tools.get(&cmd.name).map(|t| t.schema());
-            let tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
+            let mut tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
+            let output_format = extract_output_format(&mut tool_args, schema.as_ref());
 
             // Set up stdin from redirects (< file, <<heredoc)
             setup_stdin_redirects(cmd, ctx);
@@ -265,8 +279,20 @@ impl PipelineRunner {
             // Execute via backend (clone Arc to avoid borrow conflict)
             let backend = ctx.backend.clone();
             last_result = match backend.call_tool(&cmd.name, tool_args, ctx).await {
-                Ok(result) => ExecResult::from_output(result.code as i64, result.stdout, result.stderr),
+                Ok(tool_result) => {
+                    let mut exec = ExecResult::from_output(
+                        tool_result.code as i64, tool_result.stdout, tool_result.stderr,
+                    );
+                    exec.output = tool_result.output;
+                    exec
+                }
                 Err(e) => ExecResult::failure(127, e.to_string()),
+            };
+
+            // Apply output format transform
+            last_result = match output_format {
+                Some(format) => apply_output_format(last_result, format),
+                None => last_result,
             };
 
             // Apply post-execution redirects
@@ -605,7 +631,8 @@ pub async fn run_sequential_pipeline(
 
         // Build tool args with schema-aware parsing
         let schema = tools.get(&cmd.name).map(|t| t.schema());
-        let tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
+        let mut tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
+        let output_format = extract_output_format(&mut tool_args, schema.as_ref());
 
         // Set up stdin from redirects (< file, <<heredoc)
         setup_stdin_redirects(cmd, ctx);
@@ -619,8 +646,20 @@ pub async fn run_sequential_pipeline(
         // Execute via backend (clone Arc to avoid borrow conflict)
         let backend = ctx.backend.clone();
         last_result = match backend.call_tool(&cmd.name, tool_args, ctx).await {
-            Ok(result) => ExecResult::from_output(result.code as i64, result.stdout, result.stderr),
+            Ok(tool_result) => {
+                let mut exec = ExecResult::from_output(
+                    tool_result.code as i64, tool_result.stdout, tool_result.stderr,
+                );
+                exec.output = tool_result.output;
+                exec
+            }
             Err(e) => ExecResult::failure(127, e.to_string()),
+        };
+
+        // Apply output format transform
+        last_result = match output_format {
+            Some(format) => apply_output_format(last_result, format),
+            None => last_result,
         };
 
         // Apply post-execution redirects

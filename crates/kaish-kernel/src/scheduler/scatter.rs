@@ -284,11 +284,6 @@ pub fn parse_gather_options(args: &crate::tools::ToolArgs) -> GatherOptions {
         opts.format = fmt.clone();
     }
 
-    // Also check for json flag
-    if args.has_flag("json") {
-        opts.format = "json".to_string();
-    }
-
     opts
 }
 
@@ -402,7 +397,7 @@ mod tests {
 
         let mut args = ToolArgs::new();
         args.named.insert("first".to_string(), Value::Int(5));
-        args.flags.insert("json".to_string());
+        args.named.insert("format".to_string(), Value::String("json".to_string()));
 
         let opts = parse_gather_options(&args);
         assert_eq!(opts.first, 5);

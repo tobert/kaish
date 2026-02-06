@@ -50,15 +50,11 @@ impl Tool for Tokens {
                 )
                 .with_aliases(["-v"]),
             )
-            .param(
-                ParamSchema::optional("json", "bool", Value::Bool(false), "JSON output (-j)")
-                    .with_aliases(["-j"]),
-            )
             .example("Count tokens (default: cl100k)", "tokens \"Hello, Kaijutsu! 会術\"")
             .example("From stdin", "cat file.txt | tokens")
             .example("Verbose (show token IDs)", "tokens -v \"Hello\"")
             .example("Different encoding", "tokens -e o200k \"Hello\"")
-            .example("JSON output", "tokens -j \"Hello world\"")
+            .example("JSON output", "tokens --json \"Hello world\"")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -104,16 +100,7 @@ impl Tool for Tokens {
         let count = token_ids.len();
 
         // Output format
-        let json_output = args.has_flag("json") || args.has_flag("j");
         let verbose = args.has_flag("verbose") || args.has_flag("v");
-
-        if json_output {
-            let json = serde_json::json!({
-                "count": count,
-                "ids": token_ids
-            });
-            return ExecResult::success_data(Value::Json(json));
-        }
 
         if verbose {
             return ExecResult::with_output(OutputData::text(format!("count: {}\nids: {:?}", count, token_ids)));
@@ -182,19 +169,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tokens_json() {
+    async fn test_tokens_json_via_global_flag() {
+        use crate::interpreter::{apply_output_format, OutputFormat};
+
         let mut ctx = make_ctx().await;
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("Hello".into()));
-        args.flags.insert("j".to_string());
 
         let result = Tokens.execute(args, &mut ctx).await;
         assert!(result.ok());
 
-        // Parse the JSON output
+        // Simulate global --json (handled by kernel)
+        let result = apply_output_format(result, OutputFormat::Json);
+        // tokens returns simple text (count), so --json wraps it as a JSON string
         let json: serde_json::Value = serde_json::from_str(&result.out).expect("valid JSON");
-        assert!(json.get("count").is_some());
-        assert!(json.get("ids").is_some());
+        assert!(json.is_string());
     }
 
     #[tokio::test]

@@ -139,12 +139,6 @@ impl Tool for Tree {
                 "Flat indent format (--flat)",
             ))
             .param(ParamSchema::optional(
-                "json",
-                "bool",
-                Value::Bool(false),
-                "JSON output (-j)",
-            ))
-            .param(ParamSchema::optional(
                 "files_only",
                 "bool",
                 Value::Bool(false),
@@ -165,7 +159,7 @@ impl Tool for Tree {
             .example("Compact notation (default)", "tree src/")
             .example("Traditional tree", "tree --traditional src/")
             .example("Flat indent", "tree --flat src/")
-            .example("JSON output", "tree -j src/")
+            .example("JSON output", "tree --json src/")
             .example("Limited depth", "tree -L 2 src/")
     }
 
@@ -194,7 +188,6 @@ impl Tool for Tree {
 
         let traditional = args.has_flag("traditional");
         let flat = args.has_flag("flat");
-        let json_output = args.has_flag("json") || args.has_flag("j");
         let files_only = args.has_flag("files_only") || args.has_flag("f");
         let show_hidden = args.has_flag("all") || args.has_flag("a");
         let no_ignore = args.has_flag("no_ignore") || args.has_flag("no-ignore");
@@ -290,15 +283,7 @@ impl Tool for Tree {
                     .collect()
             );
 
-        let output_data = OutputData::nodes(vec![root_node]);
-
-        if json_output {
-            let json = serde_json::to_string(&output_data.to_json())
-                .unwrap_or_else(|_| "{}".to_string());
-            return ExecResult::success(json);
-        }
-
-        ExecResult::with_output(output_data)
+        ExecResult::with_output(OutputData::nodes(vec![root_node]))
     }
 }
 
@@ -377,14 +362,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tree_json() {
+    async fn test_tree_json_via_global_flag() {
+        use crate::interpreter::{apply_output_format, OutputFormat};
+
         let mut ctx = make_ctx().await;
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("/src".into()));
-        args.flags.insert("j".to_string());
 
         let result = Tree.execute(args, &mut ctx).await;
         assert!(result.ok());
+        assert!(result.output.is_some());
+
+        // Simulate global --json (handled by kernel)
+        let result = apply_output_format(result, OutputFormat::Json);
         assert!(result.out.starts_with('{'));
         assert!(result.out.ends_with('}'));
     }

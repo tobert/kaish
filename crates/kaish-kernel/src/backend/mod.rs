@@ -37,7 +37,7 @@ use serde_json::Value as JsonValue;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-use crate::interpreter::{value_to_json, ExecResult};
+use crate::interpreter::{value_to_json, ExecResult, OutputData};
 use crate::tools::{ExecContext, ToolArgs, ToolSchema};
 use crate::vfs::MountInfo;
 
@@ -274,6 +274,8 @@ pub struct ToolResult {
     pub stderr: String,
     /// Structured data (if any).
     pub data: Option<JsonValue>,
+    /// Structured output data for rendering (preserved from ExecResult).
+    pub output: Option<OutputData>,
 }
 
 impl ToolResult {
@@ -284,6 +286,7 @@ impl ToolResult {
             stdout: stdout.into(),
             stderr: String::new(),
             data: None,
+            output: None,
         }
     }
 
@@ -294,6 +297,7 @@ impl ToolResult {
             stdout: String::new(),
             stderr: stderr.into(),
             data: None,
+            output: None,
         }
     }
 
@@ -304,6 +308,7 @@ impl ToolResult {
             stdout: stdout.into(),
             stderr: String::new(),
             data: Some(data),
+            output: None,
         }
     }
 
@@ -326,6 +331,7 @@ impl From<ExecResult> for ToolResult {
             stdout: exec.out,
             stderr: exec.err,
             data,
+            output: exec.output,
         }
     }
 }

@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gather_json_flag() {
+    async fn test_gather_format_json() {
         use crate::vfs::{MemoryFs, VfsRouter};
         use std::sync::Arc;
 
@@ -164,7 +164,7 @@ mod tests {
         ctx.set_stdin("a\nb".to_string());
 
         let mut args = ToolArgs::new();
-        args.flags.insert("json".to_string());
+        args.named.insert("format".to_string(), Value::String("json".to_string()));
 
         let result = Gather.execute(args, &mut ctx).await;
         assert!(result.ok());

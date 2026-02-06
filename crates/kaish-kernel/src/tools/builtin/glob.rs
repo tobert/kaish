@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 use crate::walker::{EntryTypes, FileWalker, GlobPath, IncludeExclude, WalkOptions};
 
@@ -52,12 +52,6 @@ impl Tool for Glob {
                 "bool",
                 Value::Bool(false),
                 "Null-separated output (-0)",
-            ))
-            .param(ParamSchema::optional(
-                "json",
-                "bool",
-                Value::Bool(false),
-                "JSON array output (-j)",
             ))
             .param(ParamSchema::optional(
                 "include",
@@ -127,7 +121,6 @@ impl Tool for Glob {
         let no_ignore = args.has_flag("no_ignore") || args.has_flag("no-ignore");
         let include_hidden = args.has_flag("hidden") || args.has_flag("a");
         let null_sep = args.has_flag("null") || args.has_flag("0");
-        let json_output = args.has_flag("json") || args.has_flag("j");
 
         // Entry types
         let entry_types = match args.get_string("type", usize::MAX).as_deref() {
@@ -183,36 +176,31 @@ impl Tool for Glob {
             Err(e) => return ExecResult::failure(1, format!("glob: {}", e)),
         };
 
-        // Build path strings (relative to root)
-        let path_strings: Vec<String> = paths
+        // Build OutputNodes for each matched path (relative to root)
+        let nodes: Vec<OutputNode> = paths
             .iter()
             .map(|p| {
-                p.strip_prefix(&root)
-                    .unwrap_or(p)
-                    .to_string_lossy()
-                    .to_string()
+                let rel = p.strip_prefix(&root).unwrap_or(p);
+                let name = rel.to_string_lossy().to_string();
+                let entry_type = if p.extension().is_none() && name.ends_with('/') {
+                    EntryType::Directory
+                } else {
+                    EntryType::File
+                };
+                OutputNode::new(name).with_entry_type(entry_type)
             })
             .collect();
 
-        // Build JSON array for structured iteration
-        let json_array: Vec<serde_json::Value> = path_strings
-            .iter()
-            .map(|s| serde_json::Value::String(s.clone()))
-            .collect();
+        // Null-separated mode returns plain text for xargs compatibility
+        if null_sep {
+            let output: String = nodes.iter()
+                .map(|n| n.name.as_str())
+                .collect::<Vec<_>>()
+                .join("\0");
+            return ExecResult::success(output);
+        }
 
-        // Format text output
-        let sep = if null_sep { '\0' } else { '\n' };
-        let output = if json_output {
-            serde_json::to_string(&path_strings).unwrap_or_else(|_| "[]".to_string())
-        } else {
-            path_strings.join(&sep.to_string())
-        };
-
-        // Return both text output and structured data
-        ExecResult::success_with_data(
-            output,
-            Value::Json(serde_json::Value::Array(json_array)),
-        )
+        ExecResult::with_output(OutputData::nodes(nodes))
     }
 }
 
@@ -278,14 +266,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_glob_json() {
+    async fn test_glob_json_via_global_flag() {
+        use crate::interpreter::{apply_output_format, OutputFormat};
+
         let mut ctx = make_ctx().await;
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("**/*.rs".into()));
-        args.flags.insert("j".to_string());
 
         let result = Glob.execute(args, &mut ctx).await;
         assert!(result.ok());
+        // Should have structured OutputData
+        assert!(result.output.is_some());
+
+        // Simulate global --json (handled by kernel)
+        let result = apply_output_format(result, OutputFormat::Json);
         assert!(result.out.starts_with('['));
         assert!(result.out.ends_with(']'));
     }

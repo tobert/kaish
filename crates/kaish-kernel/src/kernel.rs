@@ -32,10 +32,10 @@ use tokio::sync::RwLock;
 use crate::ast::{Arg, Expr, Stmt, StringPart, ToolDef, Value, BinaryOp};
 use crate::backend::{BackendError, KernelBackend};
 use crate::glob::glob_match;
-use crate::interpreter::{eval_expr, expand_tilde, json_to_value, value_to_string, ControlFlow, ExecResult, Scope};
+use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value, value_to_string, ControlFlow, ExecResult, Scope};
 use crate::parser::parse;
 use crate::scheduler::{drain_to_stream, BoundedStream, JobManager, PipelineRunner, DEFAULT_STREAM_MAX_SIZE};
-use crate::tools::{register_builtins, resolve_in_path, ExecContext, ToolArgs, ToolRegistry};
+use crate::tools::{extract_output_format, register_builtins, resolve_in_path, ExecContext, ToolArgs, ToolRegistry};
 use crate::validator::{Severity, Validator};
 use crate::vfs::{JobFs, LocalFs, MemoryFs, VfsRouter};
 
@@ -1128,12 +1128,14 @@ impl Kernel {
                 }
                 let backend = ctx.backend.clone();
                 match backend.call_tool(name, tool_args, &mut ctx).await {
-                    Ok(result) => {
+                    Ok(tool_result) => {
                         let mut scope = self.scope.write().await;
                         *scope = ctx.scope.clone();
-                        return Ok(ExecResult::from_output(
-                            result.code as i64, result.stdout, result.stderr,
-                        ));
+                        let mut exec = ExecResult::from_output(
+                            tool_result.code as i64, tool_result.stdout, tool_result.stderr,
+                        );
+                        exec.output = tool_result.output;
+                        return Ok(exec);
                     }
                     Err(BackendError::ToolNotFound(_)) => {
                         // Fall through to "command not found"
@@ -1148,7 +1150,8 @@ impl Kernel {
         };
 
         // Build arguments (async to support command substitution)
-        let tool_args = self.build_args_async(args).await?;
+        let mut tool_args = self.build_args_async(args).await?;
+        let output_format = extract_output_format(&mut tool_args, Some(&tool.schema()));
 
         // Execute
         let mut ctx = self.exec_ctx.write().await;
@@ -1164,6 +1167,11 @@ impl Kernel {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
         }
+
+        let result = match output_format {
+            Some(format) => apply_output_format(result, format),
+            None => result,
+        };
 
         Ok(result)
     }
