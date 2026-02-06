@@ -22,6 +22,7 @@
 //! - **Frontends**: Handle all rendering (REPL, MCP, kaijutsu)
 
 use crate::ast::Value;
+use serde::Serialize;
 
 // ============================================================
 // Structured Output (Tree-of-Tables Model)
@@ -31,7 +32,8 @@ use crate::ast::Value;
 ///
 /// This unified enum is used by both the new OutputNode system
 /// and the legacy DisplayHint::Table for backward compatibility.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum EntryType {
     /// Generic text content.
     #[default]
@@ -81,7 +83,7 @@ pub enum EntryType {
 ///     .with_entry_type(EntryType::Directory)
 ///     .with_children(vec![child]);
 /// ```
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
 pub struct OutputNode {
     /// Primary identifier (filename, key, label).
     pub name: String,
@@ -169,7 +171,7 @@ impl OutputNode {
 /// | Flat nodes, `name` only | Multi-column, colored | One per line |
 /// | Flat nodes with `cells` | Aligned table | TSV or names only |
 /// | Nested `children` | Box-drawing tree | Brace notation |
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
 pub struct OutputData {
     /// Column headers (optional, for table output).
     pub headers: Option<Vec<String>>,
@@ -285,6 +287,72 @@ impl OutputData {
             .map(format_node)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Serialize to a JSON value for `--json` flag handling.
+    ///
+    /// Bare data, no envelope — optimized for `jq` patterns.
+    ///
+    /// | Structure | JSON |
+    /// |-----------|------|
+    /// | Simple text | `"hello world"` |
+    /// | Flat list (names only) | `["file1", "file2"]` |
+    /// | Table (headers + cells) | `[{"col1": "v1", ...}, ...]` |
+    /// | Tree (nested children) | `{"dir": {"file": null}}` |
+    pub fn to_json(&self) -> serde_json::Value {
+        // Simple text → JSON string
+        if let Some(text) = self.as_text() {
+            return serde_json::Value::String(text.to_string());
+        }
+
+        // Table → array of objects keyed by headers
+        if let Some(ref headers) = self.headers {
+            let rows: Vec<serde_json::Value> = self.root.iter().map(|node| {
+                let mut map = serde_json::Map::new();
+                // First header maps to node.name
+                if let Some(first) = headers.first() {
+                    map.insert(first.clone(), serde_json::Value::String(node.name.clone()));
+                }
+                // Remaining headers map to cells
+                for (header, cell) in headers.iter().skip(1).zip(node.cells.iter()) {
+                    map.insert(header.clone(), serde_json::Value::String(cell.clone()));
+                }
+                serde_json::Value::Object(map)
+            }).collect();
+            return serde_json::Value::Array(rows);
+        }
+
+        // Tree → nested object
+        if !self.is_flat() {
+            fn node_to_json(node: &OutputNode) -> serde_json::Value {
+                if node.children.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    let mut map = serde_json::Map::new();
+                    for child in &node.children {
+                        map.insert(child.name.clone(), node_to_json(child));
+                    }
+                    serde_json::Value::Object(map)
+                }
+            }
+
+            // Single root node → its children as the top-level object
+            if self.root.len() == 1 {
+                return node_to_json(&self.root[0]);
+            }
+            // Multiple root nodes → object with each root as a key
+            let mut map = serde_json::Map::new();
+            for node in &self.root {
+                map.insert(node.name.clone(), node_to_json(node));
+            }
+            return serde_json::Value::Object(map);
+        }
+
+        // Flat list → array of strings
+        let items: Vec<serde_json::Value> = self.root.iter()
+            .map(|n| serde_json::Value::String(n.display_name().to_string()))
+            .collect();
+        serde_json::Value::Array(items)
     }
 }
 
@@ -574,5 +642,76 @@ mod tests {
         assert_ne!(EntryType::File, EntryType::Directory);
         assert_ne!(EntryType::Directory, EntryType::Executable);
         assert_ne!(EntryType::Executable, EntryType::Symlink);
+    }
+
+    #[test]
+    fn to_json_simple_text() {
+        let output = OutputData::text("hello world");
+        assert_eq!(output.to_json(), serde_json::json!("hello world"));
+    }
+
+    #[test]
+    fn to_json_flat_list() {
+        let output = OutputData::nodes(vec![
+            OutputNode::new("file1"),
+            OutputNode::new("file2"),
+            OutputNode::new("file3"),
+        ]);
+        assert_eq!(output.to_json(), serde_json::json!(["file1", "file2", "file3"]));
+    }
+
+    #[test]
+    fn to_json_table() {
+        let output = OutputData::table(
+            vec!["NAME".into(), "SIZE".into(), "TYPE".into()],
+            vec![
+                OutputNode::new("foo.rs").with_cells(vec!["1024".into(), "file".into()]),
+                OutputNode::new("bar/").with_cells(vec!["4096".into(), "dir".into()]),
+            ],
+        );
+        assert_eq!(output.to_json(), serde_json::json!([
+            {"NAME": "foo.rs", "SIZE": "1024", "TYPE": "file"},
+            {"NAME": "bar/", "SIZE": "4096", "TYPE": "dir"},
+        ]));
+    }
+
+    #[test]
+    fn to_json_tree() {
+        let child1 = OutputNode::new("main.rs").with_entry_type(EntryType::File);
+        let child2 = OutputNode::new("utils.rs").with_entry_type(EntryType::File);
+        let subdir = OutputNode::new("lib")
+            .with_entry_type(EntryType::Directory)
+            .with_children(vec![child2]);
+        let root = OutputNode::new("src")
+            .with_entry_type(EntryType::Directory)
+            .with_children(vec![child1, subdir]);
+
+        let output = OutputData::nodes(vec![root]);
+        assert_eq!(output.to_json(), serde_json::json!({
+            "main.rs": null,
+            "lib": {"utils.rs": null},
+        }));
+    }
+
+    #[test]
+    fn to_json_tree_multiple_roots() {
+        let root1 = OutputNode::new("src")
+            .with_entry_type(EntryType::Directory)
+            .with_children(vec![OutputNode::new("main.rs")]);
+        let root2 = OutputNode::new("docs")
+            .with_entry_type(EntryType::Directory)
+            .with_children(vec![OutputNode::new("README.md")]);
+
+        let output = OutputData::nodes(vec![root1, root2]);
+        assert_eq!(output.to_json(), serde_json::json!({
+            "src": {"main.rs": null},
+            "docs": {"README.md": null},
+        }));
+    }
+
+    #[test]
+    fn to_json_empty() {
+        let output = OutputData::new();
+        assert_eq!(output.to_json(), serde_json::json!([]));
     }
 }

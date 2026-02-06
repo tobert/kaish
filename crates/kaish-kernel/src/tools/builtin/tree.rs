@@ -87,18 +87,6 @@ impl TreeNode {
         }
     }
 
-    fn to_json(&self) -> serde_json::Value {
-        if self.children.is_empty() {
-            serde_json::Value::Null
-        } else {
-            let mut map = serde_json::Map::new();
-            for (name, node) in &self.children {
-                map.insert(name.clone(), node.to_json());
-            }
-            serde_json::Value::Object(map)
-        }
-    }
-
     /// Convert TreeNode to OutputNode for the structured output model.
     fn to_output_node(&self, name: &str) -> OutputNode {
         let entry_type = if self.is_dir {
@@ -279,12 +267,7 @@ impl Tool for Tree {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| ".".to_string());
 
-        // Handle explicit format requests
-        if json_output {
-            let output = serde_json::to_string(&tree.to_json()).unwrap_or_else(|_| "{}".to_string());
-            return ExecResult::success(output);
-        }
-
+        // Handle explicit text format requests
         if flat {
             let mut output = format!("{}/\n", root_name);
             tree.format_flat(1, &mut output);
@@ -297,8 +280,7 @@ impl Tool for Tree {
             return ExecResult::success(output.trim_end().to_string());
         }
 
-        // Default: return structured OutputData with tree structure
-        // Build the root node with children from tree
+        // Build structured OutputData with tree structure
         let root_node = OutputNode::new(&root_name)
             .with_entry_type(EntryType::Directory)
             .with_children(
@@ -308,7 +290,15 @@ impl Tool for Tree {
                     .collect()
             );
 
-        ExecResult::with_output(OutputData::nodes(vec![root_node]))
+        let output_data = OutputData::nodes(vec![root_node]);
+
+        if json_output {
+            let json = serde_json::to_string(&output_data.to_json())
+                .unwrap_or_else(|_| "{}".to_string());
+            return ExecResult::success(json);
+        }
+
+        ExecResult::with_output(output_data)
     }
 }
 

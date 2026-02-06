@@ -4,7 +4,6 @@
 //! Covers the common 80% use case while being pipeline-friendly with `--json`.
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::ast::Value;
@@ -12,7 +11,7 @@ use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Process information for output.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 struct ProcessInfo {
     pid: i32,
     ppid: i32,
@@ -188,14 +187,15 @@ impl Tool for Ps {
         // Sort by PID
         processes.sort_by_key(|p| p.pid);
 
-        if json_output {
-            match serde_json::to_string_pretty(&processes) {
-                Ok(json) => ExecResult::success(format!("{}\n", json)),
-                Err(e) => ExecResult::failure(1, format!("ps: JSON serialization failed: {}", e)),
-            }
-        } else {
-            format_table(&processes)
+        let result = format_table(&processes);
+        if json_output
+            && let Some(ref output) = result.output
+        {
+            let json = serde_json::to_string_pretty(&output.to_json())
+                .unwrap_or_else(|_| "[]".to_string());
+            return ExecResult::success(json);
         }
+        result
     }
 }
 
@@ -381,9 +381,14 @@ mod tests {
         let result = Ps.execute(args, &mut ctx).await;
         assert!(result.ok());
 
-        // Should be valid JSON
-        let parsed: Result<Vec<ProcessInfo>, _> = serde_json::from_str(&result.out);
-        assert!(parsed.is_ok());
+        // Should be valid JSON array of objects with table headers as keys
+        let parsed: serde_json::Value = serde_json::from_str(&result.out).expect("valid JSON");
+        let arr = parsed.as_array().expect("should be an array");
+        assert!(!arr.is_empty());
+        // Each entry should have PID and COMMAND keys (table headers)
+        let first = arr[0].as_object().expect("should be an object");
+        assert!(first.contains_key("PID"));
+        assert!(first.contains_key("COMMAND"));
     }
 
     #[tokio::test]
@@ -408,17 +413,22 @@ mod tests {
         let result = Ps.execute(args, &mut ctx).await;
         assert!(result.ok());
 
-        let parsed: Result<Vec<ProcessInfo>, _> = serde_json::from_str(&result.out);
-        assert!(parsed.is_ok());
-
-        let procs = parsed.expect("valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&result.out).expect("valid JSON");
+        let procs = parsed.as_array().expect("should be an array");
         // Should have multiple processes
         assert!(!procs.is_empty());
 
-        // Each process should have expected fields
-        for p in &procs {
-            assert!(p.pid > 0);
-            assert!(!p.command.is_empty());
+        // Each process should have all table headers as keys
+        for p in procs {
+            let obj = p.as_object().expect("each entry should be an object");
+            assert!(obj.contains_key("PID"));
+            assert!(obj.contains_key("USER"));
+            assert!(obj.contains_key("COMMAND"));
+            // PID should be a non-empty string (all values are strings from OutputData)
+            let pid = obj["PID"].as_str().expect("PID should be a string");
+            assert!(!pid.is_empty());
+            let cmd = obj["COMMAND"].as_str().expect("COMMAND should be a string");
+            assert!(!cmd.is_empty());
         }
     }
 
