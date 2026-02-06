@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use tiktoken_rs::{cl100k_base, o200k_base, p50k_base};
 
 use crate::ast::Value;
-use crate::interpreter::{ExecResult, OutputData};
+use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Helper to extract string from Value.
@@ -99,14 +99,39 @@ impl Tool for Tokens {
         let token_ids = bpe.encode_with_special_tokens(&text);
         let count = token_ids.len();
 
-        // Output format
+        // Build structured output: full table of token IDs.
+        // Default pipe output is just the count (for `cat file | tokens`),
+        // but --json gets the full table via OutputData.
         let verbose = args.has_flag("verbose") || args.has_flag("v");
 
         if verbose {
-            return ExecResult::with_output(OutputData::text(format!("count: {}\nids: {:?}", count, token_ids)));
+            let mut lines = format!("count: {}\nids: [", count);
+            for (i, id) in token_ids.iter().enumerate() {
+                if i > 0 { lines.push_str(", "); }
+                lines.push_str(&id.to_string());
+            }
+            lines.push(']');
+            return ExecResult::with_output(OutputData::text(lines));
         }
 
-        ExecResult::with_output(OutputData::text(count.to_string()))
+        let nodes: Vec<OutputNode> = token_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| OutputNode::new(i.to_string()).with_cells(vec![id.to_string()]))
+            .collect();
+        let table = OutputData::table(
+            vec!["INDEX".to_string(), "ID".to_string()],
+            nodes,
+        );
+
+        // Pipe output is just the count; structured data carries the full table
+        ExecResult {
+            code: 0,
+            out: count.to_string(),
+            err: String::new(),
+            data: None,
+            output: Some(table),
+        }
     }
 }
 
@@ -178,12 +203,19 @@ mod tests {
 
         let result = Tokens.execute(args, &mut ctx).await;
         assert!(result.ok());
+        // Default pipe output is just the count
+        assert_eq!(result.out.trim(), "1");
+        // But OutputData carries the full table
+        assert!(result.output.is_some());
 
         // Simulate global --json (handled by kernel)
         let result = apply_output_format(result, OutputFormat::Json);
-        // tokens returns simple text (count), so --json wraps it as a JSON string
         let json: serde_json::Value = serde_json::from_str(&result.out).expect("valid JSON");
-        assert!(json.is_string());
+        // Should be an array of {INDEX, ID} objects
+        let arr = json.as_array().expect("should be array");
+        assert_eq!(arr.len(), 1); // "Hello" is 1 token in cl100k
+        assert!(arr[0].get("INDEX").is_some());
+        assert!(arr[0].get("ID").is_some());
     }
 
     #[tokio::test]
