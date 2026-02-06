@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Printf tool: formatted output.
@@ -112,7 +112,7 @@ impl Tool for Printf {
             }
         }
 
-        ExecResult::success(output)
+        ExecResult::with_output(OutputData::text(output))
     }
 }
 

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Uniq tool: report or filter out repeated adjacent lines.
@@ -78,7 +78,7 @@ impl Tool for Uniq {
 
         let lines: Vec<&str> = input.lines().collect();
         if lines.is_empty() {
-            return ExecResult::success("");
+            return ExecResult::with_output(OutputData::text(""));
         }
 
         // Group consecutive identical lines
@@ -128,9 +128,9 @@ impl Tool for Uniq {
         };
 
         if output.is_empty() {
-            ExecResult::success("")
+            ExecResult::with_output(OutputData::text(""))
         } else {
-            ExecResult::success(format!("{}\n", output.join("\n")))
+            ExecResult::with_output(OutputData::text(format!("{}\n", output.join("\n"))))
         }
     }
 }

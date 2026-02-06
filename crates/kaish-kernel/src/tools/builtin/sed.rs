@@ -8,7 +8,7 @@ use regex::{Regex, RegexBuilder};
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Sed tool: stream editor for text transformations.
@@ -97,7 +97,7 @@ impl Tool for Sed {
 
         // Execute
         let output = execute_sed(&input, &parsed, quiet);
-        ExecResult::success(output)
+        ExecResult::with_output(OutputData::text(output))
     }
 }
 

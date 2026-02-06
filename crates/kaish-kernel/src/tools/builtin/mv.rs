@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
 use crate::backend::{BackendError, KernelBackend, WriteMode};
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Mv tool: move/rename files and directories.
@@ -45,7 +45,7 @@ impl Tool for Mv {
         let dst_path = ctx.resolve_path(&dest);
 
         match move_path(&*ctx.backend, &src_path, &dst_path, no_clobber).await {
-            Ok(()) => ExecResult::success(""),
+            Ok(()) => ExecResult::with_output(OutputData::text("")),
             Err(e) => ExecResult::failure(1, format!("mv: {}", e)),
         }
     }

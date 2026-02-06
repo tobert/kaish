@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
 use crate::backend::{BackendError, KernelBackend};
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
 
 /// Rm tool: remove files and directories.
@@ -45,7 +45,7 @@ impl Tool for Rm {
         let resolved = ctx.resolve_path(&path);
 
         match remove_path(&*ctx.backend, Path::new(&resolved), recursive, force).await {
-            Ok(()) => ExecResult::success(""),
+            Ok(()) => ExecResult::with_output(OutputData::text("")),
             Err(e) => ExecResult::failure(1, format!("rm: {}: {}", path, e)),
         }
     }

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::backend::WriteMode;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
 
 /// Write tool: write content to a file.
@@ -47,7 +47,7 @@ impl Tool for Write {
         let resolved = ctx.resolve_path(&path);
 
         match ctx.backend.write(Path::new(&resolved), content.as_bytes(), WriteMode::Overwrite).await {
-            Ok(()) => ExecResult::success(format!("Wrote {} bytes to {}", content.len(), path)),
+            Ok(()) => ExecResult::with_output(OutputData::text(format!("Wrote {} bytes to {}", content.len(), path))),
             Err(e) => ExecResult::failure(1, format!("write: {}: {}", path, e)),
         }
     }

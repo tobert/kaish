@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Sort tool: sort lines of text files or stdin.
@@ -115,9 +115,9 @@ impl Tool for Sort {
         }
 
         if lines.is_empty() {
-            ExecResult::success("")
+            ExecResult::with_output(OutputData::text(""))
         } else {
-            ExecResult::success(format!("{}\n", lines.join("\n")))
+            ExecResult::with_output(OutputData::text(format!("{}\n", lines.join("\n"))))
         }
     }
 }

@@ -15,7 +15,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::backend::PatchOp;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Patch tool: applies unified diffs to files.
@@ -148,7 +148,7 @@ impl Tool for Patch {
             output.push_str(&format!("{} changes applied\n", total_applied));
         }
 
-        ExecResult::success(output.trim_end())
+        ExecResult::with_output(OutputData::text(output.trim_end()))
     }
 }
 

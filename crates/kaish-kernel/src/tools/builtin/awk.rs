@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Awk tool: pattern-directed scanning and processing.
@@ -112,7 +112,7 @@ impl Tool for Awk {
 
         // Execute
         match runtime.execute(&ast, &input) {
-            Ok(output) => ExecResult::success(output),
+            Ok(output) => ExecResult::with_output(OutputData::text(output)),
             Err(e) => ExecResult::failure(1, format!("awk: {}", e)),
         }
     }

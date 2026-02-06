@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Ln tool: create symbolic links.
@@ -69,7 +69,7 @@ impl Tool for Ln {
         // Create the symlink
         // Note: target is stored as-is (can be relative or absolute)
         match ctx.backend.symlink(Path::new(&target), Path::new(&link_path)).await {
-            Ok(()) => ExecResult::success(""),
+            Ok(()) => ExecResult::with_output(OutputData::text("")),
             Err(e) => ExecResult::failure(1, format!("ln: failed to create symbolic link '{}': {}", link_name, e)),
         }
     }

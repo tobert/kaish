@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Tr tool: translate, squeeze, or delete characters.
@@ -83,7 +83,7 @@ impl Tool for Tr {
             return ExecResult::failure(1, "tr: SET2 required for translation");
         };
 
-        ExecResult::success(output)
+        ExecResult::with_output(OutputData::text(output))
     }
 }
 

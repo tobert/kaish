@@ -14,7 +14,7 @@ use similar::{ChangeTag, TextDiff};
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Diff tool: compares two files line by line.
@@ -103,7 +103,7 @@ impl Tool for Diff {
 
         // Quick check if files are identical
         if content1 == content2 {
-            return ExecResult::success("");
+            return ExecResult::with_output(OutputData::text(""));
         }
 
         // Quiet mode: just report difference
