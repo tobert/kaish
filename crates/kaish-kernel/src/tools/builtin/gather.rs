@@ -15,7 +15,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::scheduler::{parse_gather_options, GatherOptions};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
@@ -56,14 +56,14 @@ impl Tool for Gather {
         let input = ctx.take_stdin().unwrap_or_default();
 
         if input.is_empty() {
-            return ExecResult::success("");
+            return ExecResult::with_output(OutputData::text(""));
         }
 
         // In standalone mode (not in a scatter/gather pipeline),
         // format the input according to options
         let output = format_output(&input, &opts);
 
-        ExecResult::success(output)
+        ExecResult::with_output(OutputData::text(output))
     }
 }
 

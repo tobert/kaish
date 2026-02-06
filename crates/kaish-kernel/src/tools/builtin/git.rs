@@ -22,7 +22,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 use crate::vfs::GitVfs;
 
@@ -106,10 +106,10 @@ async fn git_init(args: &[String], ctx: &ExecContext) -> ExecResult {
     };
 
     match GitVfs::init(&real_path) {
-        Ok(_) => ExecResult::success(format!(
+        Ok(_) => ExecResult::with_output(OutputData::text(format!(
             "Initialized empty Git repository in {}",
             vfs_path.display()
-        )),
+        ))),
         Err(e) => ExecResult::failure(1, format!("git init: {}", e)),
     }
 }
@@ -153,7 +153,7 @@ async fn git_clone(args: &[String], ctx: &ExecContext) -> ExecResult {
     };
 
     match GitVfs::clone(url, &real_dest) {
-        Ok(_) => ExecResult::success(format!("Cloning into '{}'...\ndone.", vfs_dest.display())),
+        Ok(_) => ExecResult::with_output(OutputData::text(format!("Cloning into '{}'...\ndone.", vfs_dest.display()))),
         Err(e) => ExecResult::failure(1, format!("git clone: {}", e)),
     }
 }
@@ -172,9 +172,9 @@ async fn git_status(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
         Ok(statuses) => {
             if statuses.is_empty() {
                 if porcelain {
-                    return ExecResult::success("");
+                    return ExecResult::with_output(OutputData::text(""));
                 }
-                return ExecResult::success("nothing to commit, working tree clean");
+                return ExecResult::with_output(OutputData::text("nothing to commit, working tree clean"));
             }
 
             let mut output = String::new();
@@ -236,7 +236,7 @@ async fn git_status(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
                 }
             }
 
-            ExecResult::success(output.trim_end())
+            ExecResult::with_output(OutputData::text(output.trim_end()))
         }
         Err(e) => ExecResult::failure(1, format!("git status: {}", e)),
     }
@@ -257,7 +257,7 @@ async fn git_add(args: &[String], ctx: &ExecContext) -> ExecResult {
     let pathspecs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
     match git.add(&pathspecs) {
-        Ok(()) => ExecResult::success(""),
+        Ok(()) => ExecResult::with_output(OutputData::text("")),
         Err(e) => ExecResult::failure(1, format!("git add: {}", e)),
     }
 }
@@ -285,7 +285,7 @@ async fn git_commit(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
     match git.commit(&message, author.as_deref()) {
         Ok(oid) => {
             let short = &oid.to_string()[..7];
-            ExecResult::success(format!("[{short}] {message}"))
+            ExecResult::with_output(OutputData::text(format!("[{short}] {message}")))
         }
         Err(e) => ExecResult::failure(1, format!("git commit: {}", e)),
     }
@@ -313,7 +313,7 @@ async fn git_log(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
     match git.log(count) {
         Ok(entries) => {
             if entries.is_empty() {
-                return ExecResult::success("No commits yet");
+                return ExecResult::with_output(OutputData::text("No commits yet"));
             }
 
             let mut output = String::new();
@@ -332,7 +332,7 @@ async fn git_log(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
                 }
             }
 
-            ExecResult::success(output.trim_end())
+            ExecResult::with_output(OutputData::text(output.trim_end()))
         }
         Err(e) => ExecResult::failure(1, format!("git log: {}", e)),
     }
@@ -346,7 +346,7 @@ async fn git_diff(ctx: &ExecContext) -> ExecResult {
     };
 
     match git.diff() {
-        Ok(diff) => ExecResult::success(diff.trim_end()),
+        Ok(diff) => ExecResult::with_output(OutputData::text(diff.trim_end())),
         Err(e) => ExecResult::failure(1, format!("git diff: {}", e)),
     }
 }
@@ -369,12 +369,12 @@ async fn git_branch(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
                 if args.has_flag("b") {
                     match git.checkout(&name) {
                         Ok(()) => {
-                            return ExecResult::success(format!("Switched to a new branch '{}'", name))
+                            return ExecResult::with_output(OutputData::text(format!("Switched to a new branch '{}'", name)))
                         }
                         Err(e) => return ExecResult::failure(1, format!("git checkout: {}", e)),
                     }
                 }
-                ExecResult::success(format!("Branch '{}' created", name))
+                ExecResult::with_output(OutputData::text(format!("Branch '{}' created", name)))
             }
             Err(e) => ExecResult::failure(1, format!("git branch: {}", e)),
         }
@@ -394,7 +394,7 @@ async fn git_branch(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
                     output.push_str(&format!("{}{}\n", marker, branch));
                 }
 
-                ExecResult::success(output.trim_end())
+                ExecResult::with_output(OutputData::text(output.trim_end()))
             }
             Err(e) => ExecResult::failure(1, format!("git branch: {}", e)),
         }
@@ -415,7 +415,7 @@ async fn git_checkout(args: &[String], ctx: &ExecContext) -> ExecResult {
     let target = &args[0];
 
     match git.checkout(target) {
-        Ok(()) => ExecResult::success(format!("Switched to '{}'", target)),
+        Ok(()) => ExecResult::with_output(OutputData::text(format!("Switched to '{}'", target))),
         Err(e) => ExecResult::failure(1, format!("git checkout: {}", e)),
     }
 }
@@ -464,7 +464,7 @@ fn worktree_list(git: &GitVfs) -> ExecResult {
                     lock_marker
                 ));
             }
-            ExecResult::success(output.trim_end())
+            ExecResult::with_output(OutputData::text(output.trim_end()))
         }
         Err(e) => ExecResult::failure(1, format!("git worktree list: {}", e)),
     }
@@ -515,11 +515,11 @@ fn worktree_add(git: &GitVfs, args: &[String], ctx: &ExecContext) -> ExecResult 
     match git.worktree_add(name, &real_path, branch) {
         Ok(info) => {
             let branch_msg = info.head.as_deref().unwrap_or(name);
-            ExecResult::success(format!(
+            ExecResult::with_output(OutputData::text(format!(
                 "Preparing worktree (new branch '{}')\nHEAD is now at {}",
                 branch_msg,
                 info.path.display()
-            ))
+            )))
         }
         Err(e) => ExecResult::failure(1, format!("git worktree add: {}", e)),
     }
@@ -535,7 +535,7 @@ fn worktree_remove(git: &GitVfs, args: &[String], tool_args: &ToolArgs) -> ExecR
     let force = tool_args.has_flag("f") || tool_args.has_flag("force");
 
     match git.worktree_remove(name, force) {
-        Ok(()) => ExecResult::success(format!("Removed worktree '{}'", name)),
+        Ok(()) => ExecResult::with_output(OutputData::text(format!("Removed worktree '{}'", name))),
         Err(e) => ExecResult::failure(1, format!("git worktree remove: {}", e)),
     }
 }
@@ -550,7 +550,7 @@ fn worktree_lock(git: &GitVfs, args: &[String], tool_args: &ToolArgs) -> ExecRes
     let reason = tool_args.get_string("reason", usize::MAX);
 
     match git.worktree_lock(name, reason.as_deref()) {
-        Ok(()) => ExecResult::success(format!("Locked worktree '{}'", name)),
+        Ok(()) => ExecResult::with_output(OutputData::text(format!("Locked worktree '{}'", name))),
         Err(e) => ExecResult::failure(1, format!("git worktree lock: {}", e)),
     }
 }
@@ -564,7 +564,7 @@ fn worktree_unlock(git: &GitVfs, args: &[String]) -> ExecResult {
     let name = &args[0];
 
     match git.worktree_unlock(name) {
-        Ok(()) => ExecResult::success(format!("Unlocked worktree '{}'", name)),
+        Ok(()) => ExecResult::with_output(OutputData::text(format!("Unlocked worktree '{}'", name))),
         Err(e) => ExecResult::failure(1, format!("git worktree unlock: {}", e)),
     }
 }
@@ -574,9 +574,9 @@ fn worktree_prune(git: &GitVfs) -> ExecResult {
     match git.worktree_prune() {
         Ok(count) => {
             if count == 0 {
-                ExecResult::success("Nothing to prune")
+                ExecResult::with_output(OutputData::text("Nothing to prune"))
             } else {
-                ExecResult::success(format!("Pruned {} stale worktree(s)", count))
+                ExecResult::with_output(OutputData::text(format!("Pruned {} stale worktree(s)", count)))
             }
         }
         Err(e) => ExecResult::failure(1, format!("git worktree prune: {}", e)),

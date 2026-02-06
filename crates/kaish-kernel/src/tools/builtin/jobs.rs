@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Jobs tool: list and manage background jobs.
@@ -28,7 +28,7 @@ impl Tool for Jobs {
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         let manager = match &ctx.job_manager {
             Some(m) => m,
-            None => return ExecResult::success("(no job manager)"),
+            None => return ExecResult::with_output(OutputData::text("(no job manager)")),
         };
 
         // Handle --cleanup flag
@@ -37,13 +37,13 @@ impl Tool for Jobs {
             manager.cleanup().await;
             let after = manager.list().await.len();
             let removed = before - after;
-            return ExecResult::success(format!("Cleaned up {} completed job(s)\n", removed));
+            return ExecResult::with_output(OutputData::text(format!("Cleaned up {} completed job(s)\n", removed)));
         }
 
         let jobs = manager.list().await;
 
         if jobs.is_empty() {
-            return ExecResult::success("(no jobs)\n");
+            return ExecResult::with_output(OutputData::text("(no jobs)\n"));
         }
 
         let mut output = String::new();
@@ -55,7 +55,7 @@ impl Tool for Jobs {
             ));
         }
 
-        ExecResult::success(output)
+        ExecResult::with_output(OutputData::text(output))
     }
 }
 

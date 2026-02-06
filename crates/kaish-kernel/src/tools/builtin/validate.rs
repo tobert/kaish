@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::ast::{ToolDef, Value};
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::parser::parse;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 use crate::validator::{Severity, Validator};
@@ -113,7 +113,7 @@ impl Tool for Validate {
 
         if quiet {
             if errors.is_empty() {
-                return ExecResult::success("");
+                return ExecResult::with_output(OutputData::text(""));
             } else {
                 return ExecResult::failure(1, "");
             }
@@ -136,10 +136,10 @@ impl Tool for Validate {
             if !quiet {
                 output = format!("{}: valid\n", label);
             }
-            ExecResult::success(output)
+            ExecResult::with_output(OutputData::text(output))
         } else if errors.is_empty() {
             // Only warnings
-            ExecResult::success(output)
+            ExecResult::with_output(OutputData::text(output))
         } else {
             ExecResult::failure(1, output)
         }

@@ -23,7 +23,7 @@ use jaq_core::{load, compile, Ctx, RcIter};
 use jaq_json::Val;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Native jq tool using jaq (pure Rust jq implementation).
@@ -322,7 +322,7 @@ impl Tool for JqNative {
 
         // Execute filter with the JSON input
         match execute_filter_json(&filter, input_json, raw_output) {
-            Ok(output) => ExecResult::success(output),
+            Ok(output) => ExecResult::with_output(OutputData::text(output)),
             Err(e) => ExecResult::failure(1, e),
         }
     }

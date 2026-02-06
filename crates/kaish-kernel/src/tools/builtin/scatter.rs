@@ -14,7 +14,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::scheduler::parse_scatter_options;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
@@ -56,7 +56,7 @@ impl Tool for Scatter {
         let items = split_items(&input);
 
         if items.is_empty() {
-            return ExecResult::success("");
+            return ExecResult::with_output(OutputData::text(""));
         }
 
         // In standalone mode (not in a scatter/gather pipeline),
@@ -69,7 +69,7 @@ impl Tool for Scatter {
             items.join("\n")
         );
 
-        ExecResult::success(output)
+        ExecResult::with_output(OutputData::text(output))
     }
 }
 

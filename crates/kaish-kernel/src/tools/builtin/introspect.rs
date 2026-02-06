@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::{value_to_json, ExecResult};
+use crate::interpreter::{value_to_json, ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 // ============================================================================
@@ -76,7 +76,7 @@ fn format_tool_list(schemas: &[ToolSchema], json_output: bool) -> ExecResult {
             .collect();
 
         match serde_json::to_string_pretty(&json_tools) {
-            Ok(json_str) => ExecResult::success(json_str),
+            Ok(json_str) => ExecResult::with_output(OutputData::text(json_str)),
             Err(e) => ExecResult::failure(1, format!("failed to serialize tools: {}", e)),
         }
     } else {
@@ -84,7 +84,7 @@ fn format_tool_list(schemas: &[ToolSchema], json_output: bool) -> ExecResult {
         for schema in schemas {
             output.push_str(&format!("{:<16} {}\n", schema.name, schema.description));
         }
-        ExecResult::success(output)
+        ExecResult::with_output(OutputData::text(output))
     }
 }
 
@@ -118,7 +118,7 @@ fn format_tool_detail(schemas: &[ToolSchema], name: &str, json_output: bool) -> 
                 });
 
                 match serde_json::to_string_pretty(&json_obj) {
-                    Ok(json_str) => ExecResult::success(json_str),
+                    Ok(json_str) => ExecResult::with_output(OutputData::text(json_str)),
                     Err(e) => ExecResult::failure(1, format!("failed to serialize tool: {}", e)),
                 }
             } else {
@@ -135,7 +135,7 @@ fn format_tool_detail(schemas: &[ToolSchema], name: &str, json_output: bool) -> 
                     }
                 }
 
-                ExecResult::success(output)
+                ExecResult::with_output(OutputData::text(output))
             }
         }
         None => ExecResult::failure(1, format!("tool not found: {}", name)),
@@ -181,7 +181,7 @@ impl Tool for Mounts {
                 .collect();
 
             match serde_json::to_string_pretty(&json_mounts) {
-                Ok(json_str) => ExecResult::success(json_str),
+                Ok(json_str) => ExecResult::with_output(OutputData::text(json_str)),
                 Err(e) => ExecResult::failure(1, format!("failed to serialize mounts: {}", e)),
             }
         } else {
@@ -190,7 +190,7 @@ impl Tool for Mounts {
                 let mode = if mount.read_only { "ro" } else { "rw" };
                 output.push_str(&format!("{} ({})\n", mount.path.display(), mode));
             }
-            ExecResult::success(output)
+            ExecResult::with_output(OutputData::text(output))
         }
     }
 }

@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema};
 
 /// True builtin: always succeeds (exit code 0).
@@ -25,7 +25,7 @@ impl Tool for True {
     }
 
     async fn execute(&self, _args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
-        ExecResult::success("")
+        ExecResult::with_output(OutputData::text(""))
     }
 }
 

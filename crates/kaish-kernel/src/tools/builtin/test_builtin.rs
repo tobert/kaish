@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Test tool: evaluates conditional expressions.
@@ -110,7 +110,7 @@ async fn evaluate_test(args: ToolArgs, ctx: &mut ExecContext, bracket_mode: bool
     let result = evaluate_expression(&tokens, ctx).await;
 
     match result {
-        Ok(true) => ExecResult::success(""),
+        Ok(true) => ExecResult::with_output(OutputData::text("")),
         Ok(false) => ExecResult::from_output(1, "", ""),
         Err(e) => ExecResult::failure(2, format!("test: {}", e)),
     }

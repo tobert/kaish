@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::{value_to_json, ExecResult};
+use crate::interpreter::{value_to_json, ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Vars tool: lists all variables in the current scope.
@@ -46,7 +46,7 @@ fn format_plain(vars: &[(String, Value)]) -> ExecResult {
         output.push_str(&format!("{}={}\n", name, value_str));
     }
 
-    ExecResult::success(output)
+    ExecResult::with_output(OutputData::text(output))
 }
 
 /// Format a value for plain text output.
@@ -75,7 +75,7 @@ fn format_json(vars: &[(String, Value)]) -> ExecResult {
         .collect();
 
     match serde_json::to_string_pretty(&json_vars) {
-        Ok(json_str) => ExecResult::success(json_str),
+        Ok(json_str) => ExecResult::with_output(OutputData::text(json_str)),
         Err(e) => ExecResult::failure(1, format!("failed to serialize variables: {}", e)),
     }
 }
