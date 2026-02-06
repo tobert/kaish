@@ -179,7 +179,7 @@ cargo insta accept         # Accept all pending snapshots
 |------|---------|
 | `README.md` | Project overview, quick tour, MCP integration |
 | `docs/LANGUAGE.md` | Complete language reference with examples |
-| `docs/BUILTINS.md` | Tool compatibility and implementation notes |
+| `README.md#builtins` | Builtin philosophy, design principles, reference table |
 | `docs/help/*.md` | MCP help system content (agent-facing) |
 
 ### Help System

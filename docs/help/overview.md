@@ -74,4 +74,5 @@ github:create_issue --repo tobert/kaish --title "Bug"
 ## See Also
 
 - LANGUAGE.md — Full language reference
-- BUILTINS.md — Detailed builtin documentation
+- `help builtins` — List all builtins
+- `help <tool>` — Detailed help for any tool

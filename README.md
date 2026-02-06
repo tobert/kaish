@@ -67,7 +67,36 @@ seq 1 10 | scatter as=N limit=4 | echo "processing $N" | gather
 | **Virtual filesystem** | Unified access: `/mnt/local` (home), `/scratch` (memory), `/v/jobs` (observability) |
 | **Scatter/gather** | Built-in parallelism with 散/集 |
 
-See [Language Reference](docs/LANGUAGE.md) for complete syntax and [Builtins](docs/BUILTINS.md) for all 66 tools.
+See [Language Reference](docs/LANGUAGE.md) for complete syntax. Use `help builtins` or `help <tool>` for per-tool docs.
+
+---
+
+## Builtins
+
+kaish ships 66 builtins that run in-process — no subprocesses, no PATH lookups, no platform
+variance. They exist because agents need tools they can verify: a `grep` that behaves identically
+everywhere, a `jq` that always uses the same filter syntax, an `awk` that never surprises.
+
+**Design principles:**
+
+- **Verifiable** — each builtin has a schema (params, types, examples) exposed via `help <tool>`.
+  Agents can introspect before calling.
+- **Convention-following** — flags and behavior match the patterns deeply embedded in training data
+  and decades of existing scripts. `grep -rn`, `sed 's/old/new/g'`, `awk '{print $1}'` all work
+  as expected.
+- **80/20** — implement the features used 80% of the time, deliberately omit the 20% that add
+  complexity without proportional value. Missing features compose via pipes.
+- **ERE everywhere** — all regex uses Extended Regular Expressions. No BRE/ERE confusion.
+
+| Category | Tools |
+|----------|-------|
+| **Text** | awk, cut, grep, head, sed, sort, split, tail, tr, uniq, wc |
+| **Files** | basename, cat, cd, chmod, cp, dirname, find, glob, ln, ls, mkdir, mktemp, mv, pwd, read, readlink, realpath, rm, stat, tee, touch, tree, write |
+| **JSON** | jq |
+| **Git** | git (init, clone, status, add, commit, log, diff, branch, checkout, worktree) |
+| **System** | date, echo, env, exec, export, help, hostname, jobs, kill, printf, ps, seq, set, sleep, test/\[\[, tokens, uname, unset, validate, vars, wait, which |
+| **Parallel** | scatter, gather |
+| **Meta** | assert, diff, false, mounts, patch, tools, true |
 
 ---
 
@@ -77,7 +106,7 @@ kaish is built as a set of crates that can be used independently:
 
 ### kaish-kernel
 
-The core execution engine. Lexer, parser, interpreter, 66 builtins, VFS.
+The core execution engine. Lexer, parser, interpreter, builtins, VFS.
 
 ```rust
 use kaish_kernel::{Kernel, KernelConfig};
@@ -124,7 +153,7 @@ Add to your MCP client configuration:
 **`execute`** — Run kaish scripts in a fresh, isolated environment.
 
 ```
-Supports: pipes, redirects, here-docs, if/for/while, functions, 66 builtins,
+Supports: pipes, redirects, here-docs, if/for/while, functions, builtins,
 ${VAR:-default}, $((arithmetic)), scatter/gather parallelism.
 
 NOT supported: process substitution <(), backticks, eval, aliases.
@@ -175,11 +204,7 @@ github:list_issues --repo="foo/bar" | jq '.[] | .title'
 
 ## Installation
 
-```bash
-cargo install kaish
-```
-
-Or build from source:
+Build from source:
 
 ```bash
 git clone https://github.com/tobert/kaish
