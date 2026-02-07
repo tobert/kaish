@@ -3,23 +3,44 @@
 //! This REPL provides an interactive interface to the kaish kernel.
 //! It handles:
 //! - Meta-commands: `/help`, `/quit`, `/ast`, `/scope`, `/cwd`, `/jobs`, `/tools`
+//! - Multi-line input via keyword/quote balancing (if/for/while → fi/done)
+//! - Tab completion for commands, variables, and paths
 //! - Command execution via the Kernel
 //! - Result formatting with OutputData
 //! - Command history via rustyline
 
 pub mod format;
 
+use std::borrow::Cow;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::{Hint, Hinter};
 use rustyline::history::DefaultHistory;
-use rustyline::Editor;
+use rustyline::validate::{ValidationContext, ValidationResult, Validator};
+use rustyline::{Editor, Helper};
 use tokio::runtime::Runtime;
 
 use kaish_kernel::ast::Value;
 use kaish_kernel::interpreter::ExecResult;
 use kaish_kernel::{Kernel, KernelConfig};
+
+// ── Process result ──────────────────────────────────────────────────
+
+/// Result from processing a line of input.
+#[derive(Debug)]
+pub enum ProcessResult {
+    /// Output to display to the user.
+    Output(String),
+    /// No output (empty line, etc.).
+    Empty,
+    /// Exit the REPL.
+    Exit,
+}
 
 /// Result from meta-command handling.
 #[derive(Debug)]
@@ -30,9 +51,375 @@ enum MetaResult {
     Exit,
 }
 
+// ── KaishHelper ─────────────────────────────────────────────────────
+
+/// Rustyline helper providing validation, completion, highlighting, and hints.
+struct KaishHelper {
+    kernel: Arc<Kernel>,
+    handle: tokio::runtime::Handle,
+    path_completer: FilenameCompleter,
+}
+
+impl KaishHelper {
+    fn new(kernel: Arc<Kernel>, handle: tokio::runtime::Handle) -> Self {
+        Self {
+            kernel,
+            handle,
+            path_completer: FilenameCompleter::new(),
+        }
+    }
+
+    /// Determine if the input is incomplete (needs more lines).
+    ///
+    /// Uses a heuristic approach: count keyword depth (if/for/while increment,
+    /// fi/done/esac decrement), check for unclosed quotes, and trailing backslash.
+    fn is_incomplete(&self, input: &str) -> bool {
+        // Trailing backslash = line continuation
+        if input.trim_end().ends_with('\\') {
+            return true;
+        }
+
+        let mut depth: i32 = 0;
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+
+        for line in input.lines() {
+            let mut chars = line.chars().peekable();
+
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '\\' if !in_single_quote => {
+                        // Skip escaped character
+                        chars.next();
+                    }
+                    '\'' if !in_double_quote => {
+                        in_single_quote = !in_single_quote;
+                    }
+                    '"' if !in_single_quote => {
+                        in_double_quote = !in_double_quote;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Unclosed quotes
+        if in_single_quote || in_double_quote {
+            return true;
+        }
+
+        // Count keyword depth from words (outside quotes)
+        for word in shell_words(input) {
+            match word.as_str() {
+                "if" | "for" | "while" | "case" => depth += 1,
+                "fi" | "done" | "esac" => depth -= 1,
+                "then" | "else" | "elif" => {
+                    // These don't change depth, they're part of an if block
+                }
+                _ => {}
+            }
+        }
+
+        depth > 0
+    }
+}
+
+/// Extract "words" from shell input, skipping quoted content.
+/// Only used for keyword counting — doesn't need to be a full tokenizer.
+fn shell_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_comment = false;
+    let mut prev_was_backslash = false;
+
+    for ch in input.chars() {
+        // Comments run to end of line
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            continue;
+        }
+
+        if prev_was_backslash {
+            prev_was_backslash = false;
+            if !in_single_quote {
+                current.push(ch);
+                continue;
+            }
+        }
+
+        match ch {
+            '\\' if !in_single_quote => {
+                prev_was_backslash = true;
+            }
+            '\'' if !in_double_quote => {
+                in_single_quote = !in_single_quote;
+            }
+            '"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+            }
+            '#' if !in_single_quote && !in_double_quote => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+                in_comment = true;
+            }
+            _ if ch.is_whitespace() && !in_single_quote && !in_double_quote => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            ';' if !in_single_quote && !in_double_quote => {
+                // Semicolons split words too (e.g. "if true; then")
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            _ => {
+                current.push(ch);
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        words.push(current);
+    }
+
+    words
+}
+
+// ── Completion context ──────────────────────────────────────────────
+
+/// What kind of completion to offer based on cursor context.
+enum CompletionContext {
+    /// Start of line, after |, ;, &&, || → complete command names
+    Command,
+    /// After $ or within ${ → complete variable names
+    Variable,
+    /// Everything else → complete file paths
+    Path,
+}
+
+/// Characters that delimit words for completion purposes.
+fn is_word_delimiter(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '|' | ';' | '(' | ')')
+}
+
+/// Detect the completion context by scanning backwards from cursor position.
+fn detect_completion_context(line: &str, pos: usize) -> CompletionContext {
+    let before = &line[..pos];
+
+    // Check for variable completion: look for $ before cursor
+    // Walk backwards to find if we're in a $VAR or ${VAR context
+    // But NOT $( which is command substitution
+    let bytes = before.as_bytes();
+    let mut i = pos;
+    while i > 0 {
+        i -= 1;
+        let b = bytes[i];
+        if b == b'$' {
+            // $( is command substitution, not variable
+            if i + 1 < pos && bytes[i + 1] == b'(' {
+                break;
+            }
+            return CompletionContext::Variable;
+        }
+        if b == b'{' && i > 0 && bytes[i - 1] == b'$' {
+            return CompletionContext::Variable;
+        }
+        // Stop scanning if we hit a non-identifier character
+        if !b.is_ascii_alphanumeric() && b != b'_' && b != b'{' {
+            break;
+        }
+    }
+
+    // Check for command position: start of line, or after pipe/semicolon/logical operators/$(
+    let trimmed = before.trim();
+    if trimmed.is_empty()
+        || trimmed.ends_with('|')
+        || trimmed.ends_with(';')
+        || trimmed.ends_with("&&")
+        || trimmed.ends_with("||")
+        || trimmed.ends_with("$(")
+    {
+        return CompletionContext::Command;
+    }
+
+    // Find start of current "word" (using delimiters that include parentheses)
+    let word_start = before.rfind(is_word_delimiter);
+    match word_start {
+        None => CompletionContext::Command, // First word on the line
+        Some(idx) => {
+            // Check what's before the word
+            let prefix = before[..=idx].trim();
+            if prefix.is_empty()
+                || prefix.ends_with('|')
+                || prefix.ends_with(';')
+                || prefix.ends_with("&&")
+                || prefix.ends_with("||")
+                || prefix.ends_with("$(")
+                || prefix.ends_with("then")
+                || prefix.ends_with("else")
+                || prefix.ends_with("do")
+            {
+                CompletionContext::Command
+            } else {
+                CompletionContext::Path
+            }
+        }
+    }
+}
+
+// ── Rustyline trait impls ───────────────────────────────────────────
+
+impl Completer for KaishHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        match detect_completion_context(line, pos) {
+            CompletionContext::Command => {
+                // Find the prefix being typed
+                let before = &line[..pos];
+                let word_start = before
+                    .rfind(is_word_delimiter)
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                let prefix = &line[word_start..pos];
+
+                let mut candidates = Vec::new();
+
+                // Tool/builtin names
+                for schema in self.kernel.tool_schemas() {
+                    if schema.name.starts_with(prefix) {
+                        candidates.push(Pair {
+                            display: schema.name.clone(),
+                            replacement: schema.name.clone(),
+                        });
+                    }
+                }
+
+                // Meta-commands when line starts with /
+                if prefix.starts_with('/') {
+                    for cmd in META_COMMANDS {
+                        if cmd.starts_with(prefix) {
+                            candidates.push(Pair {
+                                display: cmd.to_string(),
+                                replacement: cmd.to_string(),
+                            });
+                        }
+                    }
+                }
+
+                candidates.sort_by(|a, b| a.display.cmp(&b.display));
+
+                Ok((word_start, candidates))
+            }
+
+            CompletionContext::Variable => {
+                // Find where the variable name starts (after $ or ${)
+                let before = &line[..pos];
+                let (var_start, prefix) = if let Some(brace_pos) = before.rfind("${") {
+                    let name_start = brace_pos + 2;
+                    (brace_pos, &line[name_start..pos])
+                } else if let Some(dollar_pos) = before.rfind('$') {
+                    let name_start = dollar_pos + 1;
+                    (dollar_pos, &line[name_start..pos])
+                } else {
+                    return Ok((pos, vec![]));
+                };
+
+                // list_vars is async, use block_on
+                let vars = self.handle.block_on(self.kernel.list_vars());
+
+                let mut candidates: Vec<Pair> = vars
+                    .into_iter()
+                    .filter(|(name, _)| name.starts_with(prefix))
+                    .map(|(name, _)| {
+                        // Reconstruct the full $VAR or ${VAR} replacement
+                        let (display, replacement) = if before.contains("${") {
+                            (name.clone(), format!("${{{name}}}"))
+                        } else {
+                            (name.clone(), format!("${name}"))
+                        };
+                        Pair {
+                            display,
+                            replacement,
+                        }
+                    })
+                    .collect();
+
+                candidates.sort_by(|a, b| a.display.cmp(&b.display));
+
+                Ok((var_start, candidates))
+            }
+
+            CompletionContext::Path => self.path_completer.complete(line, pos, ctx),
+        }
+    }
+}
+
+impl Validator for KaishHelper {
+    fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
+        let input = ctx.input();
+        if input.trim().is_empty() {
+            return Ok(ValidationResult::Valid(None));
+        }
+        if self.is_incomplete(input) {
+            Ok(ValidationResult::Incomplete)
+        } else {
+            Ok(ValidationResult::Valid(None))
+        }
+    }
+}
+
+impl Highlighter for KaishHelper {
+    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+        Cow::Borrowed(hint)
+    }
+}
+
+/// No-op hint type — we don't provide inline hints yet.
+struct NoHint;
+impl Hint for NoHint {
+    fn display(&self) -> &str {
+        ""
+    }
+    fn completion(&self) -> Option<&str> {
+        None
+    }
+}
+
+impl Hinter for KaishHelper {
+    type Hint = NoHint;
+
+    fn hint(&self, _line: &str, _pos: usize, _ctx: &rustyline::Context<'_>) -> Option<NoHint> {
+        None
+    }
+}
+
+impl Helper for KaishHelper {}
+
+// ── Meta-commands ───────────────────────────────────────────────────
+
+/// All meta-commands available for tab completion.
+const META_COMMANDS: &[&str] = &[
+    "/help", "/quit", "/q", "/exit", "/ast", "/scope", "/vars", "/result",
+    "/cwd", "/tools", "/jobs", "/state", "/session", "/reset",
+];
+
+// ── REPL core ───────────────────────────────────────────────────────
+
 /// REPL configuration and state.
 pub struct Repl {
-    kernel: Kernel,
+    kernel: Arc<Kernel>,
     runtime: Runtime,
     show_ast: bool,
 }
@@ -40,17 +427,12 @@ pub struct Repl {
 impl Repl {
     /// Create a new REPL instance with passthrough filesystem access.
     pub fn new() -> Result<Self> {
-        // Use REPL config for passthrough filesystem access
-        // This gives full filesystem access, appropriate for a human-operated REPL
-        // Skip validation to allow experimentation with bash-like syntax
-        let config = KernelConfig::repl().with_skip_validation(true);
+        let config = KernelConfig::repl();
         let kernel = Kernel::new(config).context("Failed to create kernel")?;
-
-        // Create tokio runtime for async kernel execution
         let runtime = Runtime::new().context("Failed to create tokio runtime")?;
 
         Ok(Self {
-            kernel,
+            kernel: Arc::new(kernel),
             runtime,
             show_ast: false,
         })
@@ -62,68 +444,55 @@ impl Repl {
         let runtime = Runtime::new().context("Failed to create tokio runtime")?;
 
         Ok(Self {
-            kernel,
+            kernel: Arc::new(kernel),
             runtime,
             show_ast: false,
         })
     }
 
-    /// Create a new REPL with MCP tools pre-registered.
-    ///
-    /// This allows MCP tools to be available in the REPL.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use kaish_kernel::{Kernel, KernelConfig};
-    /// use kaish_kernel::tools::ToolRegistry;
-    ///
-    /// // Create kernel with custom config
-    /// let config = KernelConfig::repl();
-    /// let repl = Repl::with_config(config)?;
-    /// ```
+    /// Create a new REPL rooted at the given path.
     pub fn with_root(root: PathBuf) -> Result<Self> {
         let config = KernelConfig::repl().with_cwd(root);
         Self::with_config(config)
     }
 
     /// Process a single line of input.
-    /// Returns Ok(None) for empty input, Ok(Some(output)) for output to display,
-    /// or Err with ProcessResult::Exit to signal the REPL should exit.
-    pub fn process_line(&mut self, line: &str) -> Result<Option<String>> {
+    pub fn process_line(&mut self, line: &str) -> ProcessResult {
         let trimmed = line.trim();
 
         // Handle meta-commands (both /cmd and cmd forms for common ones)
         if trimmed.starts_with('/') {
             return match self.handle_meta_command(trimmed) {
-                MetaResult::Continue(output) => Ok(output),
-                MetaResult::Exit => Err(anyhow::anyhow!("__REPL_EXIT__")),
+                MetaResult::Continue(Some(output)) => ProcessResult::Output(output),
+                MetaResult::Continue(None) => ProcessResult::Empty,
+                MetaResult::Exit => ProcessResult::Exit,
             };
         }
 
         // Also support shell-style meta-commands without slash
         if let Some(meta_result) = self.try_shell_style_command(trimmed) {
             return match meta_result {
-                MetaResult::Continue(output) => Ok(output),
-                MetaResult::Exit => Err(anyhow::anyhow!("__REPL_EXIT__")),
+                MetaResult::Continue(Some(output)) => ProcessResult::Output(output),
+                MetaResult::Continue(None) => ProcessResult::Empty,
+                MetaResult::Exit => ProcessResult::Exit,
             };
         }
 
         // Skip empty lines
         if trimmed.is_empty() {
-            return Ok(None);
+            return ProcessResult::Empty;
         }
 
         // Show AST if enabled
         if self.show_ast {
             match kaish_kernel::parser::parse(trimmed) {
-                Ok(program) => return Ok(Some(format!("{:#?}", program))),
+                Ok(program) => return ProcessResult::Output(format!("{:#?}", program)),
                 Err(errors) => {
                     let mut msg = String::from("Parse error:\n");
                     for err in errors {
                         msg.push_str(&format!("  {err}\n"));
                     }
-                    return Ok(Some(msg));
+                    return ProcessResult::Output(msg);
                 }
             }
         }
@@ -132,8 +501,8 @@ impl Repl {
         let result = self.runtime.block_on(self.kernel.execute(trimmed));
 
         match result {
-            Ok(exec_result) => Ok(Some(format_result(&exec_result))),
-            Err(e) => Ok(Some(format!("Error: {}", e))),
+            Ok(exec_result) => ProcessResult::Output(format_result(&exec_result)),
+            Err(e) => ProcessResult::Output(format!("Error: {}", e)),
         }
     }
 
@@ -198,7 +567,6 @@ impl Repl {
                 )))
             }
             "/clear-state" | "/reset" => {
-                // Reset the kernel
                 if let Err(e) = self.runtime.block_on(self.kernel.reset()) {
                     MetaResult::Continue(Some(format!("Reset failed: {}", e)))
                 } else {
@@ -233,6 +601,8 @@ impl Default for Repl {
         Self::new().expect("Failed to create REPL")
     }
 }
+
+// ── Formatting ──────────────────────────────────────────────────────
 
 /// Format a Value for display (with quotes on strings).
 fn format_value(value: &Value) -> String {
@@ -282,6 +652,8 @@ fn format_result(result: &ExecResult) -> String {
     output
 }
 
+// ── Help text ───────────────────────────────────────────────────────
+
 const HELP_TEXT: &str = r#"会sh — kaish REPL
 
 Meta Commands (use with or without /):
@@ -330,17 +702,18 @@ Language:
   if cond; then ... fi
   for X in arr; do ... done
 
-Examples:
-  ls                         # List current directory
-  cat file.txt | grep hello  # Pipeline: search in file
-  echo hello | grep ell      # Pipeline: filter text
-  sleep 5 &                  # Background job
-  cargo build                # External command
-  date +%s                   # Date format string
+Multi-line:
+  Unclosed if/for/while blocks and quoted strings
+  automatically continue on the next line.
+
+Tab Completion:
+  <Tab>             Complete commands, variables ($), or paths
 "#;
 
+// ── History ─────────────────────────────────────────────────────────
+
 /// Save REPL history to disk.
-fn save_history(rl: &mut Editor<(), DefaultHistory>, history_path: &Option<PathBuf>) {
+fn save_history(rl: &mut Editor<KaishHelper, DefaultHistory>, history_path: &Option<PathBuf>) {
     if let Some(path) = history_path {
         if let Some(parent) = path.parent()
             && let Err(e) = std::fs::create_dir_all(parent) {
@@ -352,27 +725,38 @@ fn save_history(rl: &mut Editor<(), DefaultHistory>, history_path: &Option<PathB
     }
 }
 
-/// Run the REPL.
-pub fn run() -> Result<()> {
-    println!("会sh — kaish v{}", env!("CARGO_PKG_VERSION"));
-    println!("Type /help for commands, /quit to exit.");
-
-    let mut rl: Editor<(), DefaultHistory> =
-        Editor::new().context("Failed to create editor")?;
-
-    // Load history if it exists
+/// Load REPL history from disk.
+fn load_history(rl: &mut Editor<KaishHelper, DefaultHistory>) -> Option<PathBuf> {
     let history_path = directories::BaseDirs::new()
         .map(|b| b.data_dir().join("kaish").join("history.txt"));
     if let Some(ref path) = history_path
         && let Err(e) = rl.load_history(path) {
-            // Only log if it's not a "file not found" error (expected on first run)
             let is_not_found = matches!(&e, ReadlineError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound);
             if !is_not_found {
                 tracing::warn!("Failed to load history: {}", e);
             }
         }
+    history_path
+}
+
+// ── Entry points ────────────────────────────────────────────────────
+
+/// Run the REPL.
+pub fn run() -> Result<()> {
+    println!("会sh — kaish v{}", env!("CARGO_PKG_VERSION"));
+    println!("Type /help for commands, /quit to exit.");
 
     let mut repl = Repl::new()?;
+
+    // Build the helper with a kernel reference and runtime handle
+    let helper = KaishHelper::new(repl.kernel.clone(), repl.runtime.handle().clone());
+
+    let mut rl: Editor<KaishHelper, DefaultHistory> =
+        Editor::new().context("Failed to create editor")?;
+    rl.set_helper(Some(helper));
+
+    let history_path = load_history(&mut rl);
+
     println!();
 
     loop {
@@ -385,14 +769,12 @@ pub fn run() -> Result<()> {
                 }
 
                 match repl.process_line(&line) {
-                    Ok(Some(output)) => println!("{}", output),
-                    Ok(None) => {}
-                    Err(e) if e.to_string() == "__REPL_EXIT__" => {
-                        // User requested exit - save history and break
+                    ProcessResult::Output(output) => println!("{}", output),
+                    ProcessResult::Empty => {}
+                    ProcessResult::Exit => {
                         save_history(&mut rl, &history_path);
                         return Ok(());
                     }
-                    Err(e) => eprintln!("Error: {}", e),
                 }
             }
             Err(ReadlineError::Interrupted) => {
@@ -410,7 +792,6 @@ pub fn run() -> Result<()> {
         }
     }
 
-    // Save history
     save_history(&mut rl, &history_path);
 
     Ok(())
@@ -427,13 +808,19 @@ pub fn run_with_client(
 ) -> Result<()> {
     use kaish_client::KernelClient;
 
-    let mut rl: Editor<(), DefaultHistory> =
-        Editor::new().context("Failed to create editor")?;
+    // Connected mode uses a simple helper with path completion only
+    let simple_helper = SimpleHelper {
+        path_completer: FilenameCompleter::new(),
+    };
 
-    // Load history
+    let mut rl: Editor<SimpleHelper, DefaultHistory> =
+        Editor::new().context("Failed to create editor")?;
+    rl.set_helper(Some(simple_helper));
+
     let history_path = directories::BaseDirs::new()
         .map(|b| b.data_dir().join("kaish").join("history.txt"));
     if let Some(ref path) = history_path {
+        // Ignore load errors on connected mode
         let _ = rl.load_history(path);
     }
 
@@ -450,18 +837,15 @@ pub fn run_with_client(
 
                 let trimmed = line.trim();
 
-                // Handle local meta-commands
-                if trimmed == "/quit" || trimmed == "/q" || trimmed == "quit" || trimmed == "exit"
-                {
-                    break;
-                }
-                if trimmed == "/help" || trimmed == "/?" || trimmed == "help" {
-                    println!("{}", HELP_TEXT);
-                    continue;
-                }
-
-                if trimmed.is_empty() {
-                    continue;
+                // Handle meta-commands locally
+                match trimmed {
+                    "/quit" | "/q" | "/exit" | "quit" | "exit" => break,
+                    "/help" | "/?" | "help" => {
+                        println!("{}", HELP_TEXT);
+                        continue;
+                    }
+                    "" => continue,
+                    _ => {}
                 }
 
                 // Send to remote kernel
@@ -492,7 +876,211 @@ pub fn run_with_client(
     }
 
     // Save history
-    save_history(&mut rl, &history_path);
+    if let Some(ref path) = history_path {
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!("Failed to create history directory: {}", e);
+            }
+        if let Err(e) = rl.save_history(path) {
+            tracing::warn!("Failed to save history: {}", e);
+        }
+    }
 
     Ok(())
+}
+
+// ── SimpleHelper (for connected mode) ───────────────────────────────
+
+/// Minimal helper for connected REPL — path completion only.
+struct SimpleHelper {
+    path_completer: FilenameCompleter,
+}
+
+impl Completer for SimpleHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        self.path_completer.complete(line, pos, ctx)
+    }
+}
+
+impl Highlighter for SimpleHelper {}
+impl Validator for SimpleHelper {}
+
+impl Hinter for SimpleHelper {
+    type Hint = NoHint;
+
+    fn hint(&self, _line: &str, _pos: usize, _ctx: &rustyline::Context<'_>) -> Option<NoHint> {
+        None
+    }
+}
+
+impl Helper for SimpleHelper {}
+
+// ── Tests ───────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shell_words_simple() {
+        assert_eq!(shell_words("echo hello world"), vec!["echo", "hello", "world"]);
+    }
+
+    #[test]
+    fn test_shell_words_semicolons() {
+        assert_eq!(shell_words("if true; then"), vec!["if", "true", "then"]);
+    }
+
+    #[test]
+    fn test_shell_words_quoted() {
+        // Quoted content is a single word (spaces preserved inside)
+        assert_eq!(shell_words("echo \"hello world\""), vec!["echo", "hello world"]);
+    }
+
+    #[test]
+    fn test_shell_words_single_quoted() {
+        // Keywords inside quotes are not counted
+        assert_eq!(shell_words("echo 'if then fi'"), vec!["echo", "if then fi"]);
+    }
+
+    #[test]
+    fn test_is_incomplete_if_block() {
+        let helper = make_test_helper();
+        assert!(helper.is_incomplete("if true; then"));
+        assert!(helper.is_incomplete("if true; then\n  echo hello"));
+        assert!(!helper.is_incomplete("if true; then\n  echo hello\nfi"));
+    }
+
+    #[test]
+    fn test_is_incomplete_for_loop() {
+        let helper = make_test_helper();
+        assert!(helper.is_incomplete("for x in 1 2 3; do"));
+        assert!(!helper.is_incomplete("for x in 1 2 3; do\n  echo $x\ndone"));
+    }
+
+    #[test]
+    fn test_is_incomplete_unclosed_single_quote() {
+        let helper = make_test_helper();
+        assert!(helper.is_incomplete("echo 'hello"));
+        assert!(!helper.is_incomplete("echo 'hello'"));
+    }
+
+    #[test]
+    fn test_is_incomplete_unclosed_double_quote() {
+        let helper = make_test_helper();
+        assert!(helper.is_incomplete("echo \"hello"));
+        assert!(!helper.is_incomplete("echo \"hello\""));
+    }
+
+    #[test]
+    fn test_is_incomplete_backslash_continuation() {
+        let helper = make_test_helper();
+        assert!(helper.is_incomplete("echo hello \\"));
+        assert!(!helper.is_incomplete("echo hello"));
+    }
+
+    #[test]
+    fn test_is_incomplete_while_loop() {
+        let helper = make_test_helper();
+        assert!(helper.is_incomplete("while true; do"));
+        assert!(!helper.is_incomplete("while true; do\n  echo loop\ndone"));
+    }
+
+    #[test]
+    fn test_is_incomplete_nested() {
+        let helper = make_test_helper();
+        assert!(helper.is_incomplete("if true; then\n  for x in 1 2; do"));
+        assert!(helper.is_incomplete("if true; then\n  for x in 1 2; do\n    echo $x\n  done"));
+        assert!(!helper.is_incomplete("if true; then\n  for x in 1 2; do\n    echo $x\n  done\nfi"));
+    }
+
+    #[test]
+    fn test_is_incomplete_empty() {
+        let helper = make_test_helper();
+        assert!(!helper.is_incomplete(""));
+        assert!(!helper.is_incomplete("echo hello"));
+    }
+
+    #[test]
+    fn test_detect_context_command_start() {
+        assert!(matches!(
+            detect_completion_context("", 0),
+            CompletionContext::Command
+        ));
+        assert!(matches!(
+            detect_completion_context("ec", 2),
+            CompletionContext::Command
+        ));
+    }
+
+    #[test]
+    fn test_detect_context_after_pipe() {
+        assert!(matches!(
+            detect_completion_context("echo hello | gr", 15),
+            CompletionContext::Command
+        ));
+    }
+
+    #[test]
+    fn test_detect_context_variable() {
+        assert!(matches!(
+            detect_completion_context("echo $HO", 8),
+            CompletionContext::Variable
+        ));
+        assert!(matches!(
+            detect_completion_context("echo ${HO", 9),
+            CompletionContext::Variable
+        ));
+    }
+
+    #[test]
+    fn test_detect_context_path() {
+        assert!(matches!(
+            detect_completion_context("cat /etc/hos", 12),
+            CompletionContext::Path
+        ));
+    }
+
+    #[test]
+    fn test_detect_context_command_substitution() {
+        // $(cmd should complete commands, not variables
+        assert!(matches!(
+            detect_completion_context("echo $(ca", 9),
+            CompletionContext::Command
+        ));
+        assert!(matches!(
+            detect_completion_context("X=$(ec", 6),
+            CompletionContext::Command
+        ));
+    }
+
+    #[test]
+    fn test_shell_words_comments() {
+        // Keywords in comments should be ignored
+        assert_eq!(shell_words("# if this happens"), Vec::<String>::new());
+        assert_eq!(shell_words("echo hello # if comment"), vec!["echo", "hello"]);
+    }
+
+    #[test]
+    fn test_is_incomplete_comment_with_keyword() {
+        let helper = make_test_helper();
+        // Comments containing keywords should NOT make input incomplete
+        assert!(!helper.is_incomplete("# if this happens"));
+        assert!(!helper.is_incomplete("echo hello # if we do this"));
+    }
+
+    /// Create a test helper (kernel is not used for is_incomplete).
+    fn make_test_helper() -> KaishHelper {
+        let config = KernelConfig::transient();
+        let kernel = Kernel::new(config).expect("test kernel");
+        let rt = Runtime::new().expect("test runtime");
+        KaishHelper::new(Arc::new(kernel), rt.handle().clone())
+    }
 }

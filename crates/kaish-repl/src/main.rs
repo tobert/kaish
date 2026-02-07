@@ -2,6 +2,7 @@
 //!
 //! Usage:
 //!   kaish                      # Interactive REPL
+//!   kaish -c <command>         # Execute command and exit
 //!   kaish script.kai           # Run a script
 //!   kaish serve [--socket=X]   # Start RPC server
 //!   kaish --connect <socket>   # REPL connected to remote kernel
@@ -50,6 +51,12 @@ fn run() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
 
+        Some("-c") => {
+            let cmd = args.get(2)
+                .context("-c requires a command argument")?;
+            run_command(cmd)
+        }
+
         Some("serve") => {
             run_serve(&args[2..])
         }
@@ -83,11 +90,13 @@ fn print_help() {
 
 Usage:
   kaish                        Interactive REPL
+  kaish -c <command>           Execute command and exit
   kaish <script.kai>           Run a script file
   kaish serve [OPTIONS]        Start RPC server
   kaish --connect <socket>     REPL connected to remote kernel
 
 Options:
+  -c <command>                 Execute command string and exit
   -h, --help                   Show this help
   -V, --version                Show version
 
@@ -97,6 +106,7 @@ Serve Options:
 
 Examples:
   kaish                        # Start interactive REPL
+  kaish -c 'echo hello'       # Run a command
   kaish deploy.kai             # Run a deployment script
   kaish serve                  # Start kernel server
   kaish --connect /tmp/k.sock  # Connect REPL to running kernel
@@ -139,6 +149,35 @@ fn run_script(path: &str) -> Result<ExitCode> {
     }
 
     // Return exit code
+    if result.ok() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::from(result.code as u8))
+    }
+}
+
+/// Execute a command string and exit.
+fn run_command(cmd: &str) -> Result<ExitCode> {
+    use kaish_client::{EmbeddedClient, KernelClient};
+    use kaish_kernel::{Kernel, KernelConfig};
+
+    // Use REPL config for full filesystem access (users expect -c to behave like interactive)
+    let config = KernelConfig::repl();
+    let kernel = Kernel::new(config)
+        .context("Failed to create kernel")?;
+
+    let client = EmbeddedClient::new(kernel);
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let result = rt.block_on(client.execute(cmd))?;
+
+    if !result.out.is_empty() {
+        print!("{}", result.out);
+    }
+    if !result.err.is_empty() {
+        eprint!("{}", result.err);
+    }
+
     if result.ok() {
         Ok(ExitCode::SUCCESS)
     } else {

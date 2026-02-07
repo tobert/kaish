@@ -2,7 +2,7 @@
 //!
 //! These tests run scripts through the REPL and verify behavior.
 
-use kaish_repl::Repl;
+use kaish_repl::{ProcessResult, Repl};
 
 /// Helper to run multiple lines through a REPL and collect outputs.
 ///
@@ -51,9 +51,9 @@ fn run_script(script: &str) -> Vec<String> {
         // If we're at top level (depth 0), process the block
         if block_depth == 0 && !current_block.is_empty() {
             match repl.process_line(&current_block) {
-                Ok(Some(output)) => outputs.push(output),
-                Ok(None) => {}
-                Err(e) => outputs.push(format!("ERROR: {}", e)),
+                ProcessResult::Output(output) => outputs.push(output),
+                ProcessResult::Empty => {}
+                ProcessResult::Exit => break,
             }
             current_block.clear();
         }
@@ -62,9 +62,9 @@ fn run_script(script: &str) -> Vec<String> {
     // Process any remaining content
     if !current_block.is_empty() {
         match repl.process_line(&current_block) {
-            Ok(Some(output)) => outputs.push(output),
-            Ok(None) => {}
-            Err(e) => outputs.push(format!("ERROR: {}", e)),
+            ProcessResult::Output(output) => outputs.push(output),
+            ProcessResult::Empty => {}
+            ProcessResult::Exit => {}
         }
     }
 
@@ -187,10 +187,10 @@ fn interpolation_json_string() {
 
 #[test]
 fn interpolation_word_split() {
-    // Arrays are now space-separated strings, use word splitting
+    // Explicit split required — kaish has no implicit word splitting
     let outputs = run_script(r#"
         ITEMS="zero one two"
-        for I in ${ITEMS}; do echo ${I}; done
+        for I in $(split ${ITEMS}); do echo ${I}; done
     "#);
     assert!(outputs_contain(&outputs, &["zero", "one", "two"]));
 }
@@ -558,10 +558,10 @@ fn stress_json_string() {
 
 #[test]
 fn stress_many_items() {
-    // POSIX word splitting with many items
+    // Explicit split — kaish has no implicit word splitting
     let outputs = run_script(r#"
         ITEMS="1 2 3 4 5 6 7 8 9 10"
-        for I in ${ITEMS}; do echo ${I}; done
+        for I in $(split ${ITEMS}); do echo ${I}; done
     "#);
     assert!(outputs_contain(&outputs, &["1", "5", "10"]));
 }

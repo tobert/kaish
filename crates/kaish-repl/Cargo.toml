@@ -31,9 +31,6 @@ directories = { workspace = true }
 # Async runtime
 tokio = { workspace = true }
 
-# Regex for =~ operator
-regex = { workspace = true }
-
 # Terminal colors and sizing
 owo-colors = "4"
 terminal_size = "0.4"

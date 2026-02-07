@@ -930,7 +930,6 @@ dependencies = [
  "kaish-client",
  "kaish-kernel",
  "owo-colors",
- "regex",
  "rustyline",
  "serde_json",
  "terminal_size",
