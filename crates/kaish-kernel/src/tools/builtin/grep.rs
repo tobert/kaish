@@ -239,6 +239,7 @@ impl Tool for Grep {
                 respect_gitignore: true,
                 include_hidden: false,
                 filter,
+                ..WalkOptions::default()
             };
 
             let fs = BackendWalkerFs(ctx.backend.as_ref());

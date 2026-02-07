@@ -164,6 +164,7 @@ impl Tool for Glob {
             respect_gitignore: !no_ignore,
             include_hidden,
             filter,
+            ..WalkOptions::default()
         };
 
         // Create walker

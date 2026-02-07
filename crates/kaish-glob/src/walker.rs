@@ -2,9 +2,11 @@
 //!
 //! Provides recursive directory traversal with filtering support.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use crate::{WalkerDirEntry, WalkerFs};
+use crate::{WalkerDirEntry, WalkerError, WalkerFs};
 use crate::glob_path::GlobPath;
 use crate::ignore::IgnoreFilter;
 use crate::filter::IncludeExclude;
@@ -44,8 +46,13 @@ impl EntryTypes {
     }
 }
 
+/// Callback invoked when a non-fatal error occurs during walking.
+///
+/// Receives the path where the error occurred and the error itself.
+/// This allows callers to log or collect errors without aborting the walk.
+pub type ErrorCallback = Arc<dyn Fn(&Path, &WalkerError) + Send + Sync>;
+
 /// Options for file walking.
-#[derive(Debug, Clone)]
 pub struct WalkOptions {
     /// Maximum depth to recurse (None = unlimited).
     pub max_depth: Option<usize>,
@@ -57,6 +64,35 @@ pub struct WalkOptions {
     pub include_hidden: bool,
     /// Include/exclude filters.
     pub filter: IncludeExclude,
+    /// Optional callback for non-fatal errors (unreadable dirs, bad .gitignore).
+    /// Default `None` silently skips errors (preserving original behavior).
+    pub on_error: Option<ErrorCallback>,
+}
+
+impl fmt::Debug for WalkOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WalkOptions")
+            .field("max_depth", &self.max_depth)
+            .field("entry_types", &self.entry_types)
+            .field("respect_gitignore", &self.respect_gitignore)
+            .field("include_hidden", &self.include_hidden)
+            .field("filter", &self.filter)
+            .field("on_error", &self.on_error.as_ref().map(|_| "..."))
+            .finish()
+    }
+}
+
+impl Clone for WalkOptions {
+    fn clone(&self) -> Self {
+        Self {
+            max_depth: self.max_depth,
+            entry_types: self.entry_types,
+            respect_gitignore: self.respect_gitignore,
+            include_hidden: self.include_hidden,
+            filter: self.filter.clone(),
+            on_error: self.on_error.clone(),
+        }
+    }
 }
 
 impl Default for WalkOptions {
@@ -67,6 +103,7 @@ impl Default for WalkOptions {
             respect_gitignore: true,
             include_hidden: false,
             filter: IncludeExclude::new(),
+            on_error: None,
         }
     }
 }
@@ -132,12 +169,16 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
 
             // Try to load .gitignore from root
             let gitignore_path = self.root.join(".gitignore");
-            if self.fs.exists(&gitignore_path).await
-                && let Ok(gitignore) =
-                    IgnoreFilter::from_gitignore(&gitignore_path, self.fs).await
-                {
-                    filter.merge(&gitignore);
+            if self.fs.exists(&gitignore_path).await {
+                match IgnoreFilter::from_gitignore(&gitignore_path, self.fs).await {
+                    Ok(gitignore) => filter.merge(&gitignore),
+                    Err(err) => {
+                        if let Some(ref cb) = self.options.on_error {
+                            cb(&gitignore_path, &err);
+                        }
+                    }
                 }
+            }
             Some(filter)
         } else {
             self.ignore_filter.take()
@@ -157,12 +198,31 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
             // List directory contents
             let entries = match self.fs.list_dir(&dir).await {
                 Ok(entries) => entries,
-                Err(_) => continue, // Silently skip unreadable dirs
+                Err(err) => {
+                    if let Some(ref cb) = self.options.on_error {
+                        cb(&dir, &err);
+                    }
+                    continue;
+                }
             };
 
-            for entry in entries {
-                let entry_name = entry.name().to_string();
-                let entry_is_dir = entry.is_dir();
+            // Sort entries by name for deterministic traversal order
+            let mut entries: Vec<_> = entries
+                .into_iter()
+                .map(|e| {
+                    let name = e.name().to_string();
+                    let is_dir = e.is_dir();
+                    let is_symlink = e.is_symlink();
+                    (name, is_dir, is_symlink)
+                })
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+            // Collect directories to push in reverse order so alphabetically-first
+            // directories are popped first from the LIFO stack.
+            let mut dirs_to_push = Vec::new();
+
+            for (entry_name, entry_is_dir, _entry_is_symlink) in entries {
                 let full_path = dir.join(&entry_name);
 
                 // Check hidden files
@@ -200,14 +260,20 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
                     let child_filter = if self.options.respect_gitignore {
                         let gitignore_path = full_path.join(".gitignore");
                         if self.fs.exists(&gitignore_path).await {
-                            if let Ok(nested_gitignore) =
-                                IgnoreFilter::from_gitignore(&gitignore_path, self.fs).await
-                            {
-                                // Merge with parent filter
-                                current_filter.as_ref().map(|f| f.merged_with(&nested_gitignore))
-                                    .or(Some(nested_gitignore))
-                            } else {
-                                current_filter.clone()
+                            match IgnoreFilter::from_gitignore(&gitignore_path, self.fs).await {
+                                Ok(nested_gitignore) => {
+                                    // Merge with parent filter
+                                    current_filter
+                                        .as_ref()
+                                        .map(|f| f.merged_with(&nested_gitignore))
+                                        .or(Some(nested_gitignore))
+                                }
+                                Err(err) => {
+                                    if let Some(ref cb) = self.options.on_error {
+                                        cb(&gitignore_path, &err);
+                                    }
+                                    current_filter.clone()
+                                }
                             }
                         } else {
                             current_filter.clone()
@@ -231,7 +297,7 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
                     };
 
                     if should_recurse {
-                        stack.push((full_path.clone(), depth + 1, child_filter));
+                        dirs_to_push.push((full_path.clone(), depth + 1, child_filter));
                     }
 
                     // Yield directory if wanted
@@ -245,6 +311,11 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
                     }
                 }
             }
+
+            // Push directories in reverse order so alphabetically-first dirs
+            // are popped first from the LIFO stack.
+            dirs_to_push.reverse();
+            stack.extend(dirs_to_push);
         }
 
         Ok(results)
@@ -571,5 +642,108 @@ mod tests {
 
         assert!(!files.iter().any(|p| p.ends_with("ignored.log")));
         assert!(!files.iter().any(|p| p.ends_with("local_ignore.txt")));
+    }
+
+    #[tokio::test]
+    async fn test_walk_error_callback() {
+        use std::sync::Mutex;
+
+        /// Filesystem that returns errors for specific directories.
+        struct ErrorFs {
+            inner: MemoryFs,
+            error_paths: Vec<PathBuf>,
+        }
+
+        #[async_trait::async_trait]
+        impl WalkerFs for ErrorFs {
+            type DirEntry = MemEntry;
+
+            async fn list_dir(&self, path: &Path) -> Result<Vec<MemEntry>, WalkerError> {
+                if self.error_paths.iter().any(|p| p == path) {
+                    return Err(WalkerError::PermissionDenied(path.display().to_string()));
+                }
+                self.inner.list_dir(path).await
+            }
+
+            async fn read_file(&self, path: &Path) -> Result<Vec<u8>, WalkerError> {
+                self.inner.read_file(path).await
+            }
+
+            async fn is_dir(&self, path: &Path) -> bool {
+                self.inner.is_dir(path).await
+            }
+
+            async fn exists(&self, path: &Path) -> bool {
+                self.inner.exists(path).await
+            }
+        }
+
+        let inner = MemoryFs::new();
+        inner.add_dir("/readable").await;
+        inner.add_dir("/forbidden").await;
+        inner.add_file("/readable/ok.txt", b"ok").await;
+        inner.add_file("/forbidden/secret.txt", b"secret").await;
+
+        let fs = ErrorFs {
+            inner,
+            error_paths: vec![PathBuf::from("/forbidden")],
+        };
+
+        let errors: Arc<Mutex<Vec<(PathBuf, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let errors_cb = errors.clone();
+
+        let walker = FileWalker::new(&fs, "/").with_options(WalkOptions {
+            respect_gitignore: false,
+            include_hidden: true,
+            on_error: Some(Arc::new(move |path, err| {
+                errors_cb.lock().unwrap().push((path.to_path_buf(), err.to_string()));
+            })),
+            ..Default::default()
+        });
+
+        let files = walker.collect().await.unwrap();
+
+        assert!(files.iter().any(|p| p.ends_with("ok.txt")));
+        assert!(!files.iter().any(|p| p.ends_with("secret.txt")));
+
+        let errors = errors.lock().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, PathBuf::from("/forbidden"));
+        assert!(errors[0].1.contains("permission denied"));
+    }
+
+    #[tokio::test]
+    async fn test_walk_deterministic_order() {
+        let fs = MemoryFs::new();
+
+        // Add directories and files in non-alphabetical order
+        fs.add_dir("/charlie").await;
+        fs.add_dir("/alpha").await;
+        fs.add_dir("/bravo").await;
+        fs.add_file("/charlie/c.txt", b"c").await;
+        fs.add_file("/alpha/a.txt", b"a").await;
+        fs.add_file("/bravo/b.txt", b"b").await;
+
+        let walker = FileWalker::new(&fs, "/").with_options(WalkOptions {
+            respect_gitignore: false,
+            ..Default::default()
+        });
+
+        let files = walker.collect().await.unwrap();
+
+        // Results should be in alphabetical traversal order:
+        // alpha/a.txt, bravo/b.txt, charlie/c.txt
+        assert_eq!(files.len(), 3);
+        assert!(files[0].ends_with("alpha/a.txt"));
+        assert!(files[1].ends_with("bravo/b.txt"));
+        assert!(files[2].ends_with("charlie/c.txt"));
+
+        // Run again to verify determinism
+        let walker2 = FileWalker::new(&fs, "/").with_options(WalkOptions {
+            respect_gitignore: false,
+            ..Default::default()
+        });
+        let files2 = walker2.collect().await.unwrap();
+        assert_eq!(files, files2);
     }
 }
