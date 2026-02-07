@@ -32,7 +32,7 @@ use async_trait::async_trait;
 use regex::Regex;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Split tool: split a string into an array.
@@ -138,20 +138,22 @@ impl Tool for Split {
             }
         };
 
-        // Build JSON array
+        // Build OutputData nodes for each part
+        let nodes: Vec<OutputNode> = parts
+            .iter()
+            .map(|s| OutputNode::new(*s))
+            .collect();
+
+        // Build JSON array for iteration via $(split ...)
         let json_array: Vec<serde_json::Value> = parts
             .iter()
             .map(|s| serde_json::Value::String((*s).to_string()))
             .collect();
 
-        // Build text output (newline-separated for pipes)
-        let output = parts.join("\n");
-
-        // Return both text output and structured data
-        ExecResult::success_with_data(
-            output,
-            Value::Json(serde_json::Value::Array(json_array)),
-        )
+        let mut result = ExecResult::with_output(OutputData::nodes(nodes));
+        // Preserve data for `for i in $(split ...)` iteration
+        result.data = Some(Value::Json(serde_json::Value::Array(json_array)));
+        result
     }
 }
 

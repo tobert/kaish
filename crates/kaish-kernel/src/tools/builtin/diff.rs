@@ -108,11 +108,10 @@ impl Tool for Diff {
 
         // Quiet mode: just report difference
         if quiet {
-            return ExecResult::from_output(
-                1,
-                format!("Files {} and {} differ\n", file1, file2),
-                String::new(),
-            );
+            let text = format!("Files {} and {} differ\n", file1, file2);
+            let mut result = ExecResult::from_output(1, text.clone(), String::new());
+            result.output = Some(OutputData::text(text));
+            return result;
         }
 
         // Generate diff using similar's built-in unified format
@@ -129,8 +128,10 @@ impl Tool for Diff {
                 .to_string()
         };
 
-        // Exit code 1 if files differ
-        ExecResult::from_output(1, output, String::new())
+        // Exit code 1 if files differ (POSIX convention)
+        let mut result = ExecResult::from_output(1, output.clone(), String::new());
+        result.output = Some(OutputData::text(output));
+        result
     }
 }
 

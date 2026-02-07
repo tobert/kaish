@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::{ExecResult, OutputData};
+use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Jobs tool: list and manage background jobs.
@@ -46,16 +46,34 @@ impl Tool for Jobs {
             return ExecResult::with_output(OutputData::text("(no jobs)\n"));
         }
 
-        let mut output = String::new();
+        let nodes: Vec<OutputNode> = jobs.iter().map(|job| {
+            OutputNode::new(job.id.to_string())
+                .with_cells(vec![
+                    job.status.to_string(),
+                    job.command.clone(),
+                    format!("/v/jobs/{}/", job.id),
+                ])
+        }).collect();
+
+        let headers = vec![
+            "ID".to_string(),
+            "Status".to_string(),
+            "Command".to_string(),
+            "Path".to_string(),
+        ];
+
+        let output = OutputData::table(headers, nodes);
+        let mut result = ExecResult::with_output(output);
+        // Override canonical output with traditional jobs format
+        let mut text = String::new();
         for job in jobs {
-            // Format: [id] Status command  /v/jobs/id/
-            output.push_str(&format!(
+            text.push_str(&format!(
                 "[{}] {} {}  /v/jobs/{}/\n",
                 job.id, job.status, job.command, job.id
             ));
         }
-
-        ExecResult::with_output(OutputData::text(output))
+        result.out = text;
+        result
     }
 }
 

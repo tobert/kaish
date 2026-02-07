@@ -264,13 +264,13 @@ impl Tool for Tree {
         if flat {
             let mut output = format!("{}/\n", root_name);
             tree.format_flat(1, &mut output);
-            return ExecResult::success(output.trim_end().to_string());
+            return ExecResult::with_output(OutputData::text(output.trim_end()));
         }
 
         if traditional {
             let mut output = format!("{}/\n", root_name);
             tree.format_traditional("", false, &mut output);
-            return ExecResult::success(output.trim_end().to_string());
+            return ExecResult::with_output(OutputData::text(output.trim_end()));
         }
 
         // Build structured OutputData with tree structure

@@ -370,11 +370,12 @@ pub enum OutputFormat {
 }
 
 /// Transform an ExecResult into the requested output format.
-pub fn apply_output_format(result: ExecResult, format: OutputFormat) -> ExecResult {
-    if !result.ok() {
-        return result;
-    }
-    if result.out.is_empty() && result.output.is_none() {
+///
+/// Serializes regardless of exit code — commands like `diff` (exit 1 = files differ)
+/// and `grep` (exit 1 = no matches) use non-zero exits for semantic meaning,
+/// not errors. The `--json` contract must hold for all exit codes.
+pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> ExecResult {
+    if result.output.is_none() && result.out.is_empty() {
         return result;
     }
     match format {
@@ -382,14 +383,13 @@ pub fn apply_output_format(result: ExecResult, format: OutputFormat) -> ExecResu
             let json_str = if let Some(ref output) = result.output {
                 serde_json::to_string_pretty(&output.to_json())
                     .unwrap_or_else(|_| "null".to_string())
-            } else if result.out.is_empty() {
-                return result;
             } else {
                 // Text-only: wrap as JSON string
                 serde_json::to_string(&result.out)
                     .unwrap_or_else(|_| "null".to_string())
             };
-            ExecResult::success(json_str)
+            result.out = json_str;
+            result
         }
         OutputFormat::Toon => {
             // Stub: falls through unchanged until to_toon() is implemented

@@ -154,18 +154,31 @@ impl Ls {
         long_format: bool,
         human_readable: bool,
     ) -> ExecResult {
-        let output = if long_format {
-            let type_char = '-'; // It's a file
+        let entry_type = entry_info_to_type(info);
+        let node = if long_format {
+            let type_char = if info.is_symlink { "l" } else { "-" };
             let size_str = if human_readable {
                 format_human_size(info.size)
             } else {
                 format!("{:>8}", info.size)
             };
-            format!("{}  {}  {}", type_char, size_str, path)
+            OutputNode::new(path)
+                .with_cells(vec![type_char.to_string(), size_str])
+                .with_entry_type(entry_type)
         } else {
-            path.to_string()
+            OutputNode::new(path).with_entry_type(entry_type)
         };
-        ExecResult::success(output)
+
+        let output = if long_format {
+            OutputData::table(
+                vec!["Name".to_string(), "Type".to_string(), "Size".to_string()],
+                vec![node],
+            )
+        } else {
+            OutputData::nodes(vec![node])
+        };
+
+        ExecResult::with_output(output)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -253,7 +266,8 @@ impl Ls {
         human_readable: bool,
         sort_opts: &SortOptions,
     ) -> ExecResult {
-        let mut output = String::new();
+        let mut text_output = String::new();
+        let mut dir_nodes: Vec<OutputNode> = Vec::new();
         let mut dirs_to_visit: Vec<(String, String)> = vec![(
             root.to_string_lossy().to_string(),
             ".".to_string(),
@@ -268,12 +282,12 @@ impl Ls {
                 Err(_) => continue,
             };
 
-            // Add header for this directory
-            if !output.is_empty() {
-                output.push('\n');
+            // Add header for this directory (text output)
+            if !text_output.is_empty() {
+                text_output.push('\n');
             }
-            output.push_str(&display_path);
-            output.push_str(":\n");
+            text_output.push_str(&display_path);
+            text_output.push_str(":\n");
 
             let mut filtered = filter_and_sort(entries, show_all, sort_opts);
 
@@ -301,11 +315,36 @@ impl Ls {
                 })
                 .collect();
 
-            // Format and output entries
+            // Build OutputNodes for this directory's entries
+            let child_nodes: Vec<OutputNode> = filtered.iter().map(|e| {
+                let entry_type = entry_info_to_type(e);
+                let name = e.name.clone();
+                if long_format {
+                    let type_char = if e.is_symlink { "l" } else if e.is_dir { "d" } else { "-" };
+                    let size_str = if human_readable {
+                        format_human_size(e.size)
+                    } else {
+                        format!("{:>8}", e.size)
+                    };
+                    OutputNode::new(name)
+                        .with_cells(vec![type_char.to_string(), size_str])
+                        .with_entry_type(entry_type)
+                } else {
+                    OutputNode::new(name).with_entry_type(entry_type)
+                }
+            }).collect();
+
+            dir_nodes.push(
+                OutputNode::new(&display_path)
+                    .with_entry_type(EntryType::Directory)
+                    .with_children(child_nodes)
+            );
+
+            // Format and output entries (text)
             let lines = format_entries(&filtered, long_format, human_readable);
-            output.push_str(&lines.join("\n"));
+            text_output.push_str(&lines.join("\n"));
             if !lines.is_empty() {
-                output.push('\n');
+                text_output.push('\n');
             }
 
             // Add subdirs to visit (in reverse order for DFS)
@@ -314,7 +353,11 @@ impl Ls {
             }
         }
 
-        ExecResult::success(output.trim_end().to_string())
+        let output = OutputData::nodes(dir_nodes);
+        let mut result = ExecResult::with_output(output);
+        // Override canonical output with traditional ls -R text format
+        result.out = text_output.trim_end().to_string();
+        result
     }
 }
 

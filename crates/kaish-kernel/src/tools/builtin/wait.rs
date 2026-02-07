@@ -74,7 +74,9 @@ impl Tool for Wait {
             }
 
             if any_failed {
-                ExecResult::from_output(1, output, "")
+                let mut result = ExecResult::from_output(1, output.clone(), "");
+                result.output = Some(OutputData::text(output));
+                result
             } else {
                 ExecResult::with_output(OutputData::text(output))
             }
