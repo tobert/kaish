@@ -2,6 +2,7 @@
 //!
 //! Provides recursive directory traversal with filtering support.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -64,6 +65,10 @@ pub struct WalkOptions {
     pub include_hidden: bool,
     /// Include/exclude filters.
     pub filter: IncludeExclude,
+    /// Follow symbolic links into directories (default `false`).
+    /// When false, symlink directories are yielded as files rather than recursed.
+    /// When true, cycle detection prevents infinite loops.
+    pub follow_symlinks: bool,
     /// Optional callback for non-fatal errors (unreadable dirs, bad .gitignore).
     /// Default `None` silently skips errors (preserving original behavior).
     pub on_error: Option<ErrorCallback>,
@@ -77,6 +82,7 @@ impl fmt::Debug for WalkOptions {
             .field("respect_gitignore", &self.respect_gitignore)
             .field("include_hidden", &self.include_hidden)
             .field("filter", &self.filter)
+            .field("follow_symlinks", &self.follow_symlinks)
             .field("on_error", &self.on_error.as_ref().map(|_| "..."))
             .finish()
     }
@@ -90,6 +96,7 @@ impl Clone for WalkOptions {
             respect_gitignore: self.respect_gitignore,
             include_hidden: self.include_hidden,
             filter: self.filter.clone(),
+            follow_symlinks: self.follow_symlinks,
             on_error: self.on_error.clone(),
         }
     }
@@ -103,6 +110,7 @@ impl Default for WalkOptions {
             respect_gitignore: true,
             include_hidden: false,
             filter: IncludeExclude::new(),
+            follow_symlinks: false,
             on_error: None,
         }
     }
@@ -185,6 +193,11 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
         };
 
         let mut results = Vec::new();
+        // Track visited directories for symlink cycle detection (only when following symlinks)
+        let mut visited_dirs: HashSet<PathBuf> = HashSet::new();
+        if self.options.follow_symlinks {
+            visited_dirs.insert(self.root.clone());
+        }
         // Stack carries: (directory, depth, ignore_filter for this dir)
         let mut stack = vec![(self.root.clone(), 0usize, base_filter.clone())];
 
@@ -222,7 +235,7 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
             // directories are popped first from the LIFO stack.
             let mut dirs_to_push = Vec::new();
 
-            for (entry_name, entry_is_dir, _entry_is_symlink) in entries {
+            for (entry_name, entry_is_dir, entry_is_symlink) in entries {
                 let full_path = dir.join(&entry_name);
 
                 // Check hidden files
@@ -256,6 +269,30 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
                 }
 
                 if entry_is_dir {
+                    // Symlink directory handling
+                    if entry_is_symlink && !self.options.follow_symlinks {
+                        // Don't recurse into symlink dirs — yield as a file entry
+                        if self.options.entry_types.files && self.matches_pattern(&full_path) {
+                            results.push(full_path);
+                        }
+                        continue;
+                    }
+
+                    // Cycle detection when following symlinks
+                    if entry_is_symlink && self.options.follow_symlinks {
+                        let canonical = self.fs.canonicalize(&full_path).await;
+                        if !visited_dirs.insert(canonical) {
+                            // Already visited this real directory — symlink cycle
+                            if let Some(ref cb) = self.options.on_error {
+                                cb(
+                                    &full_path,
+                                    &WalkerError::SymlinkCycle(full_path.display().to_string()),
+                                );
+                            }
+                            continue;
+                        }
+                    }
+
                     // Check for nested .gitignore in this directory
                     let child_filter = if self.options.respect_gitignore {
                         let gitignore_path = full_path.join(".gitignore");
@@ -351,19 +388,24 @@ mod tests {
     struct MemEntry {
         name: String,
         is_dir: bool,
+        is_symlink: bool,
     }
 
     impl WalkerDirEntry for MemEntry {
         fn name(&self) -> &str { &self.name }
         fn is_dir(&self) -> bool { self.is_dir }
         fn is_file(&self) -> bool { !self.is_dir }
-        fn is_symlink(&self) -> bool { false }
+        fn is_symlink(&self) -> bool { self.is_symlink }
     }
 
     /// In-memory filesystem for testing the walker.
+    ///
+    /// Supports files, directories, and symbolic links (directory symlinks).
     struct MemoryFs {
         files: Arc<RwLock<HashMap<PathBuf, Vec<u8>>>>,
         dirs: Arc<RwLock<std::collections::HashSet<PathBuf>>>,
+        /// Symlink path → target path (for directory symlinks)
+        symlinks: Arc<RwLock<HashMap<PathBuf, PathBuf>>>,
     }
 
     impl MemoryFs {
@@ -373,6 +415,7 @@ mod tests {
             Self {
                 files: Arc::new(RwLock::new(HashMap::new())),
                 dirs: Arc::new(RwLock::new(dirs)),
+                symlinks: Arc::new(RwLock::new(HashMap::new())),
             }
         }
 
@@ -387,6 +430,34 @@ mod tests {
 
         async fn add_dir(&self, path: &str) {
             self.ensure_dirs(&PathBuf::from(path)).await;
+        }
+
+        /// Add a directory symlink: `link` points to `target`.
+        /// The symlink appears as a directory entry and is listed under its parent.
+        async fn add_dir_symlink(&self, link: &str, target: &str) {
+            let link_path = PathBuf::from(link);
+            let target_path = PathBuf::from(target);
+            // Ensure parent of link exists
+            if let Some(parent) = link_path.parent() {
+                self.ensure_dirs(parent).await;
+            }
+            // Register as a directory so it appears in listings
+            self.dirs.write().await.insert(link_path.clone());
+            self.symlinks.write().await.insert(link_path, target_path);
+        }
+
+        /// Resolve symlinks in a path by checking each prefix component.
+        /// This mimics how a real filesystem resolves intermediate symlinks.
+        fn resolve_path(path: &Path, symlinks: &HashMap<PathBuf, PathBuf>) -> PathBuf {
+            let mut resolved = PathBuf::new();
+            for component in path.components() {
+                resolved.push(component);
+                // Check if the current prefix is a symlink and resolve it
+                if let Some(target) = symlinks.get(&resolved) {
+                    resolved = target.clone();
+                }
+            }
+            resolved
         }
 
         async fn ensure_dirs(&self, path: &Path) {
@@ -404,6 +475,11 @@ mod tests {
         type DirEntry = MemEntry;
 
         async fn list_dir(&self, path: &Path) -> Result<Vec<MemEntry>, WalkerError> {
+            let symlinks = self.symlinks.read().await;
+
+            // Resolve symlinks in the path: check each prefix to see if it's a symlink
+            let resolved = Self::resolve_path(path, &symlinks);
+
             let files = self.files.read().await;
             let dirs = self.dirs.read().await;
 
@@ -413,11 +489,15 @@ mod tests {
             // Find files directly under this dir
             for file_path in files.keys() {
                 if let Some(parent) = file_path.parent() {
-                    if parent == path {
+                    if parent == resolved {
                         if let Some(name) = file_path.file_name() {
                             let name_str = name.to_string_lossy().to_string();
                             if seen.insert(name_str.clone()) {
-                                entries.push(MemEntry { name: name_str, is_dir: false });
+                                entries.push(MemEntry {
+                                    name: name_str,
+                                    is_dir: false,
+                                    is_symlink: false,
+                                });
                             }
                         }
                     }
@@ -427,11 +507,16 @@ mod tests {
             // Find subdirs directly under this dir
             for dir_path in dirs.iter() {
                 if let Some(parent) = dir_path.parent() {
-                    if parent == path && dir_path != path {
+                    if parent == resolved && dir_path != &resolved {
                         if let Some(name) = dir_path.file_name() {
                             let name_str = name.to_string_lossy().to_string();
                             if seen.insert(name_str.clone()) {
-                                entries.push(MemEntry { name: name_str, is_dir: true });
+                                let is_symlink = symlinks.contains_key(dir_path);
+                                entries.push(MemEntry {
+                                    name: name_str,
+                                    is_dir: true,
+                                    is_symlink,
+                                });
                             }
                         }
                     }
@@ -455,6 +540,11 @@ mod tests {
         async fn exists(&self, path: &Path) -> bool {
             self.files.read().await.contains_key(path)
                 || self.dirs.read().await.contains(path)
+        }
+
+        async fn canonicalize(&self, path: &Path) -> PathBuf {
+            let symlinks = self.symlinks.read().await;
+            Self::resolve_path(path, &symlinks)
         }
     }
 
@@ -745,5 +835,95 @@ mod tests {
         });
         let files2 = walker2.collect().await.unwrap();
         assert_eq!(files, files2);
+    }
+
+    #[tokio::test]
+    async fn test_symlinks_not_followed_by_default() {
+        let fs = MemoryFs::new();
+
+        fs.add_dir("/real").await;
+        fs.add_file("/real/data.txt", b"data").await;
+        // /link → /real (symlink directory)
+        fs.add_dir_symlink("/link", "/real").await;
+
+        let walker = FileWalker::new(&fs, "/").with_options(WalkOptions {
+            respect_gitignore: false,
+            // follow_symlinks defaults to false
+            ..Default::default()
+        });
+
+        let files = walker.collect().await.unwrap();
+
+        // /real/data.txt should be found
+        assert!(files.iter().any(|p| p.ends_with("real/data.txt")));
+        // /link should be yielded as a file entry (not recursed)
+        assert!(files.iter().any(|p| p.ends_with("link")));
+        // Should NOT find files under /link/ since we don't follow
+        assert!(!files.iter().any(|p| p.to_string_lossy().contains("link/data")));
+    }
+
+    #[tokio::test]
+    async fn test_symlinks_followed() {
+        let fs = MemoryFs::new();
+
+        fs.add_dir("/real").await;
+        fs.add_file("/real/data.txt", b"data").await;
+        // /link → /real
+        fs.add_dir_symlink("/link", "/real").await;
+
+        let walker = FileWalker::new(&fs, "/").with_options(WalkOptions {
+            respect_gitignore: false,
+            follow_symlinks: true,
+            ..Default::default()
+        });
+
+        let files = walker.collect().await.unwrap();
+
+        // Both the real path and symlinked path should have data.txt
+        assert!(files.iter().any(|p| p.ends_with("real/data.txt")));
+        assert!(files.iter().any(|p| p.ends_with("link/data.txt")));
+    }
+
+    #[tokio::test]
+    async fn test_symlink_cycle_detection() {
+        use std::sync::Mutex;
+
+        let fs = MemoryFs::new();
+
+        // Create a cycle: /a → /b, /b → /a
+        fs.add_dir("/a").await;
+        fs.add_dir("/b").await;
+        fs.add_file("/a/file_a.txt", b"a").await;
+        fs.add_file("/b/file_b.txt", b"b").await;
+        // /a/link_to_b → /b, /b/link_to_a → /a
+        fs.add_dir_symlink("/a/link_to_b", "/b").await;
+        fs.add_dir_symlink("/b/link_to_a", "/a").await;
+
+        let errors: Arc<Mutex<Vec<(PathBuf, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let errors_cb = errors.clone();
+
+        let walker = FileWalker::new(&fs, "/").with_options(WalkOptions {
+            respect_gitignore: false,
+            follow_symlinks: true,
+            on_error: Some(Arc::new(move |path, err| {
+                errors_cb.lock().unwrap().push((path.to_path_buf(), err.to_string()));
+            })),
+            ..Default::default()
+        });
+
+        let files = walker.collect().await.unwrap();
+
+        // Real files should be found
+        assert!(files.iter().any(|p| p.ends_with("file_a.txt")));
+        assert!(files.iter().any(|p| p.ends_with("file_b.txt")));
+
+        // Cycle should be detected and reported
+        let errors = errors.lock().unwrap();
+        assert!(
+            errors.iter().any(|(_, msg)| msg.contains("symlink cycle")),
+            "expected symlink cycle error, got: {errors:?}"
+        );
+
+        // Walk should terminate (not infinite loop) — the fact we got here proves it
     }
 }

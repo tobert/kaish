@@ -23,7 +23,7 @@ pub use ignore::IgnoreFilter;
 pub use walker::{EntryTypes, ErrorCallback, FileWalker, WalkOptions};
 
 use async_trait::async_trait;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// Errors from filesystem operations within the walker.
@@ -35,6 +35,8 @@ pub enum WalkerError {
     PermissionDenied(String),
     #[error("io error: {0}")]
     Io(String),
+    #[error("symlink cycle detected: {0}")]
+    SymlinkCycle(String),
 }
 
 /// Minimal read-only filesystem abstraction for the walker.
@@ -49,7 +51,10 @@ pub trait WalkerFs: Send + Sync {
     /// List the entries in a directory.
     async fn list_dir(&self, path: &Path) -> Result<Vec<Self::DirEntry>, WalkerError>;
 
-    /// Read the full contents of a file.
+    /// Read the full contents of a file into memory.
+    ///
+    /// Currently used for loading `.gitignore` files. Implementations SHOULD
+    /// impose a reasonable size limit to prevent accidental multi-gigabyte reads.
     async fn read_file(&self, path: &Path) -> Result<Vec<u8>, WalkerError>;
 
     /// Check if a path is a directory.
@@ -57,6 +62,15 @@ pub trait WalkerFs: Send + Sync {
 
     /// Check if a path exists.
     async fn exists(&self, path: &Path) -> bool;
+
+    /// Return the canonical (resolved) path, following symlinks.
+    ///
+    /// Used by `FileWalker` for symlink cycle detection when `follow_symlinks`
+    /// is enabled. Implementations that support symlinks should resolve the path
+    /// to its real location. The default returns the path unchanged.
+    async fn canonicalize(&self, path: &Path) -> PathBuf {
+        path.to_path_buf()
+    }
 }
 
 /// A single entry returned by `WalkerFs::list_dir`.
