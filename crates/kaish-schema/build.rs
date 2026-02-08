@@ -1,14 +1,19 @@
 //! Build script for Cap'n Proto schema compilation.
 //!
-//! Compiles schema/kaish.capnp into Rust types at build time.
+//! When the `codegen` feature is enabled, compiles schema/kaish.capnp into
+//! Rust types at build time (requires the `capnp` CLI tool).
+//!
+//! Without `codegen`, the vendored src/kaish_capnp.rs is used directly —
+//! no external tools needed.
 
-#[allow(clippy::expect_used)]
 fn main() {
-    println!("cargo::rerun-if-changed=schema/kaish.capnp");
-
-    capnpc::CompilerCommand::new()
-        .src_prefix("schema")
-        .file("schema/kaish.capnp")
-        .run()
-        .expect("capnp schema compilation failed");
+    #[cfg(feature = "codegen")]
+    {
+        #[allow(clippy::expect_used)]
+        capnpc::CompilerCommand::new()
+            .src_prefix("schema")
+            .file("schema/kaish.capnp")
+            .run()
+            .expect("capnp schema compilation failed");
+    }
 }

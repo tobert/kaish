@@ -13,8 +13,11 @@ readme = "../../README.md"
 [dependencies]
 capnp = { workspace = true }
 
+[features]
+codegen = ["dep:capnpc"]
+
 [build-dependencies]
-capnpc = { workspace = true }
+capnpc = { workspace = true, optional = true }
 
 [lints]
 workspace = true

@@ -42,6 +42,24 @@ cargo tarpaulin --out Html --output-dir coverage/  # Coverage
 cargo +nightly fuzz run parser -- -max_len=4096    # Fuzz (nightly)
 ```
 
+### Cap'n Proto Schema
+
+The kaish-schema crate vendors pre-generated Rust code from `schema/kaish.capnp`.
+Users don't need the `capnp` CLI tool — `cargo install kaish` just works.
+
+After editing `schema/kaish.capnp`, regenerate the vendored code:
+
+```bash
+cargo build -p kaish-schema --features codegen
+cp target/debug/build/kaish-schema-*/out/kaish_capnp.rs \
+   crates/kaish-schema/src/kaish_capnp.rs
+```
+
+This requires the `capnp` CLI tool:
+- Arch: `pacman -S capnproto`
+- Debian/Ubuntu: `apt install capnproto`
+- macOS: `brew install capnp`
+
 If Cap'n Proto schema changes don't trigger rebuilds:
 ```bash
 cargo clean -p kaish-schema && cargo build -p kaish-schema
