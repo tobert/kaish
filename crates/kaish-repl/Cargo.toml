@@ -6,14 +6,16 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "kaish"
 path = "src/main.rs"
 
 [dependencies]
-kaish-kernel = { path = "../kaish-kernel" }
-kaish-client = { path = "../kaish-client" }
+kaish-kernel = { path = "../kaish-kernel", version = "0.1.0" }
+kaish-client = { path = "../kaish-client", version = "0.1.0" }
 
 # Line editing
 rustyline = { workspace = true }

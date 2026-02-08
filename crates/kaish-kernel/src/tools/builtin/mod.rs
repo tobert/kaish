@@ -35,6 +35,7 @@ mod mkdir;
 mod mktemp;
 mod mv;
 mod printf;
+#[cfg(target_os = "linux")]
 mod ps;
 mod pwd;
 mod read;
@@ -104,6 +105,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(mv::Mv);
     registry.register(patch::Patch);
     registry.register(printf::Printf);
+    #[cfg(target_os = "linux")]
     registry.register(ps::Ps);
     registry.register(pwd::Pwd);
     registry.register(read::Read);

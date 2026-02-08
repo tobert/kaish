@@ -6,13 +6,15 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "kaish-mcp"
 path = "src/main.rs"
 
 [dependencies]
-kaish-kernel = { path = "../kaish-kernel" }
+kaish-kernel = { path = "../kaish-kernel", version = "0.1.0" }
 rmcp = { version = "0.13", default-features = true, features = ["client", "transport-child-process", "server", "transport-io", "macros"] }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

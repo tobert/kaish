@@ -225,8 +225,9 @@ dependencies = [
 
 [[package]]
 name = "chumsky"
-version = "0.13.0"
-source = "git+https://github.com/zesterer/chumsky.git?rev=b3c17795#b3c17795043870b5ea701cf1ac0727371d1e29be"
+version = "1.0.0-alpha.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e82d74e6c83060ec269fe9e0d408d6de4a1645d525f9a0bbbb841ba4efd91ac"
 dependencies = [
  "hashbrown 0.15.5",
  "regex-automata 0.3.9",
@@ -420,9 +421,9 @@ checksum = "f449e6c6c08c865631d4890cfacf252b3d396c9bcc83adb6623cdb02a8336c41"
 
 [[package]]
 name = "flate2"
-version = "1.1.8"
+version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b375d6465b98090a5f25b1c7703f3859783755aa9a80433b36e0379a3ec2f369"
+checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",

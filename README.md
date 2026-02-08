@@ -204,7 +204,11 @@ github:list_issues --repo="foo/bar" | jq '.[] | .title'
 
 ## Installation
 
-Build from source:
+```bash
+cargo install kaish
+```
+
+Or build from source:
 
 ```bash
 git clone https://github.com/tobert/kaish

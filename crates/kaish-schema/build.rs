@@ -4,11 +4,11 @@
 
 #[allow(clippy::expect_used)]
 fn main() {
-    println!("cargo::rerun-if-changed=../../schema/kaish.capnp");
+    println!("cargo::rerun-if-changed=schema/kaish.capnp");
 
     capnpc::CompilerCommand::new()
-        .src_prefix("../../schema")
-        .file("../../schema/kaish.capnp")
+        .src_prefix("schema")
+        .file("schema/kaish.capnp")
         .run()
         .expect("capnp schema compilation failed");
 }

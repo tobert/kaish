@@ -15,6 +15,9 @@ edition = "2024"
 authors = ["Amy Tobey <tobert@gmail.com>"]
 license = "MIT"
 repository = "https://github.com/tobert/kaish"
+keywords = ["shell", "mcp", "ai", "agent", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
 
 [workspace.dependencies]
 # Async runtime
@@ -42,7 +45,7 @@ tokio-util = { version = "0.7", features = ["compat"] }
 
 # Lexer/Parser (L1-L2)
 logos = "0.15"
-chumsky = { git = "https://github.com/zesterer/chumsky.git", rev = "b3c17795" }
+chumsky = "1.0.0-alpha.8"
 ariadne = "0.5"
 
 # REPL (L4)

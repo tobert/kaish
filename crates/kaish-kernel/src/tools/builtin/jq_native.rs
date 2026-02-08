@@ -73,16 +73,6 @@ fn compile_filter(filter_str: &str) -> Result<Filter, String> {
     Ok(filter)
 }
 
-/// Execute a compiled jq filter on JSON input (string).
-#[allow(dead_code)]
-fn execute_filter(filter: &Filter, input: &str, raw_output: bool) -> Result<String, String> {
-    // Parse input JSON
-    let json: serde_json::Value = serde_json::from_str(input)
-        .map_err(|e| format!("jq: invalid JSON input: {}", e))?;
-
-    execute_filter_json(filter, json, raw_output)
-}
-
 /// Execute a compiled jq filter on pre-parsed JSON.
 fn execute_filter_json(filter: &Filter, json: serde_json::Value, raw_output: bool) -> Result<String, String> {
     // Convert serde_json::Value to jaq_json::Val
@@ -330,8 +320,8 @@ impl Tool for JqNative {
 
 /// Validate a jq filter expression without executing it.
 /// Returns Ok(()) if valid, Err(message) if invalid.
-#[allow(dead_code)] // Used by tests, will be used by parser for early validation
-pub fn validate_filter(filter: &str) -> Result<(), String> {
+#[cfg(test)]
+fn validate_filter(filter: &str) -> Result<(), String> {
     compile_filter(filter)?;
     Ok(())
 }

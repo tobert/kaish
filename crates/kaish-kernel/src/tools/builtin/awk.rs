@@ -342,18 +342,15 @@ enum Token {
     Eof,
 }
 
-struct AwkLexer<'a> {
-    #[allow(dead_code)]
-    input: &'a str,
+struct AwkLexer {
     chars: Vec<char>,
     pos: usize,
     in_regex_context: bool,
 }
 
-impl<'a> AwkLexer<'a> {
-    fn new(input: &'a str) -> Self {
+impl AwkLexer {
+    fn new(input: &str) -> Self {
         Self {
-            input,
             chars: input.chars().collect(),
             pos: 0,
             in_regex_context: true, // Start of program can have regex

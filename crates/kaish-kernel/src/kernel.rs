@@ -113,14 +113,6 @@ pub struct KernelConfig {
     /// errors early. Set to true to skip validation for performance or to
     /// allow dynamic/external commands.
     pub skip_validation: bool,
-
-    // Deprecated fields — kept for backwards compatibility
-    #[doc(hidden)]
-    #[deprecated(since = "0.2.0", note = "use vfs_mode instead")]
-    pub mount_local: bool,
-    #[doc(hidden)]
-    #[deprecated(since = "0.2.0", note = "use vfs_mode instead")]
-    pub local_root: Option<PathBuf>,
 }
 
 /// Get the default sandbox root ($HOME).
@@ -130,7 +122,6 @@ fn default_sandbox_root() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/"))
 }
 
-#[allow(deprecated)]
 impl Default for KernelConfig {
     fn default() -> Self {
         let home = default_sandbox_root();
@@ -139,14 +130,10 @@ impl Default for KernelConfig {
             vfs_mode: VfsMountMode::Sandboxed { root: None },
             cwd: home,
             skip_validation: false,
-            // Deprecated compat
-            mount_local: true,
-            local_root: None,
         }
     }
 }
 
-#[allow(deprecated)]
 impl KernelConfig {
     /// Create a transient kernel config (sandboxed, for temporary use).
     pub fn transient() -> Self {
@@ -156,8 +143,6 @@ impl KernelConfig {
             vfs_mode: VfsMountMode::Sandboxed { root: None },
             cwd: home,
             skip_validation: false,
-            mount_local: true,
-            local_root: None,
         }
     }
 
@@ -169,8 +154,6 @@ impl KernelConfig {
             vfs_mode: VfsMountMode::Sandboxed { root: None },
             cwd: home,
             skip_validation: false,
-            mount_local: true,
-            local_root: None,
         }
     }
 
@@ -185,8 +168,6 @@ impl KernelConfig {
             vfs_mode: VfsMountMode::Passthrough,
             cwd,
             skip_validation: false,
-            mount_local: false, // Not used in passthrough
-            local_root: None,
         }
     }
 
@@ -201,8 +182,6 @@ impl KernelConfig {
             vfs_mode: VfsMountMode::Sandboxed { root: None },
             cwd: home,
             skip_validation: false,
-            mount_local: true,
-            local_root: None,
         }
     }
 
@@ -215,8 +194,6 @@ impl KernelConfig {
             vfs_mode: VfsMountMode::Sandboxed { root: Some(root.clone()) },
             cwd: root,
             skip_validation: false,
-            mount_local: true,
-            local_root: None,
         }
     }
 
@@ -229,8 +206,6 @@ impl KernelConfig {
             vfs_mode: VfsMountMode::NoLocal,
             cwd: PathBuf::from("/"),
             skip_validation: false,
-            mount_local: false,
-            local_root: None,
         }
     }
 
@@ -280,7 +255,6 @@ pub struct Kernel {
 
 impl Kernel {
     /// Create a new kernel with the given configuration.
-    #[allow(deprecated)]
     pub fn new(config: KernelConfig) -> Result<Self> {
         let mut vfs = Self::setup_vfs(&config);
         let jobs = Arc::new(JobManager::new());
@@ -321,7 +295,6 @@ impl Kernel {
     }
 
     /// Set up VFS based on mount mode.
-    #[allow(deprecated)]
     fn setup_vfs(config: &KernelConfig) -> VfsRouter {
         let mut vfs = VfsRouter::new();
 
@@ -362,18 +335,6 @@ impl Kernel {
                 vfs.mount("/v", MemoryFs::new());
                 vfs.mount("/scratch", MemoryFs::new());
             }
-        }
-
-        // Legacy support: if mount_local is true but vfs_mode is NoLocal,
-        // the deprecated fields take precedence for backwards compatibility.
-        // This handles old code that only sets mount_local/local_root.
-        if matches!(config.vfs_mode, VfsMountMode::NoLocal) && config.mount_local {
-            let root = config.local_root.clone().unwrap_or_else(|| {
-                std::env::var("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| PathBuf::from("/"))
-            });
-            vfs.mount("/mnt/local", LocalFs::new(root));
         }
 
         vfs

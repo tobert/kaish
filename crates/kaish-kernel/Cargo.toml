@@ -6,10 +6,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-kaish-glob = { path = "../kaish-glob" }
-kaish-schema = { path = "../kaish-schema" }
+kaish-glob = { path = "../kaish-glob", version = "0.1.0" }
+kaish-schema = { path = "../kaish-schema", version = "0.1.0" }
 
 # Async runtime
 tokio = { workspace = true }
@@ -48,14 +50,14 @@ tiktoken-rs = { workspace = true }
 # XDG paths
 directories = { workspace = true }
 
-# Process information (Linux)
-procfs = { workspace = true }
-
 # RPC server (L10: Kernel)
 capnp = { workspace = true }
 capnp-rpc = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+procfs = { workspace = true }
 
 [build-dependencies]
 chrono = { workspace = true }
