@@ -8,8 +8,8 @@ use std::sync::Arc;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    Annotated, CallToolResult, Content, Implementation, ListResourcesResult, PaginatedRequestParam,
-    ProtocolVersion, RawResource, ReadResourceRequestParam, ReadResourceResult, ResourceContents,
+    Annotated, CallToolResult, Content, Implementation, ListResourcesResult, PaginatedRequestParams,
+    ProtocolVersion, RawResource, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
     ServerCapabilities, ServerInfo,
 };
 use rmcp::schemars::{self, JsonSchema};
@@ -189,7 +189,7 @@ impl rmcp::ServerHandler for KaishServerHandler {
 
     async fn list_resources(
         &self,
-        _request: Option<PaginatedRequestParam>,
+        _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         // List root VFS resources
@@ -225,7 +225,7 @@ impl rmcp::ServerHandler for KaishServerHandler {
 
     async fn read_resource(
         &self,
-        request: ReadResourceRequestParam,
+        request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         let uri = request.uri.as_str();

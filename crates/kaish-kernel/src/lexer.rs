@@ -483,7 +483,7 @@ pub enum Token {
     // ═══════════════════════════════════════════════════════════════════
 
     /// Comment: `# ...` to end of line
-    #[regex(r"#[^\n\r]*")]
+    #[regex(r"#[^\n\r]*", allow_greedy = true)]
     Comment,
 
     /// Newline (significant in kaish - ends statements)

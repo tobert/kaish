@@ -18,6 +18,7 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -126,9 +127,10 @@ impl BlobStreamImpl {
     }
 }
 
+#[allow(refining_impl_trait)]
 impl blob_stream::Server for BlobStreamImpl {
     fn read(
-        &mut self,
+        self: Rc<Self>,
         params: blob_stream::ReadParams,
         mut results: blob_stream::ReadResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -155,7 +157,7 @@ impl blob_stream::Server for BlobStreamImpl {
     }
 
     fn size(
-        &mut self,
+        self: Rc<Self>,
         _params: blob_stream::SizeParams,
         mut results: blob_stream::SizeResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -166,7 +168,7 @@ impl blob_stream::Server for BlobStreamImpl {
     }
 
     fn cancel(
-        &mut self,
+        self: Rc<Self>,
         _params: blob_stream::CancelParams,
         _results: blob_stream::CancelResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -194,9 +196,10 @@ impl BlobSinkImpl {
     }
 }
 
+#[allow(refining_impl_trait)]
 impl blob_sink::Server for BlobSinkImpl {
     fn write(
-        &mut self,
+        self: Rc<Self>,
         params: blob_sink::WriteParams,
         _results: blob_sink::WriteResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -223,7 +226,7 @@ impl blob_sink::Server for BlobSinkImpl {
     }
 
     fn finish(
-        &mut self,
+        self: Rc<Self>,
         _params: blob_sink::FinishParams,
         mut results: blob_sink::FinishResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -272,7 +275,7 @@ impl blob_sink::Server for BlobSinkImpl {
     }
 
     fn abort(
-        &mut self,
+        self: Rc<Self>,
         _params: blob_sink::AbortParams,
         _results: blob_sink::AbortResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -311,10 +314,11 @@ impl KernelImpl {
     }
 }
 
+#[allow(refining_impl_trait)]
 impl kernel::Server for KernelImpl {
     /// Execute kaish code and return the result.
     fn execute(
-        &mut self,
+        self: Rc<Self>,
         params: kernel::ExecuteParams,
         mut results: kernel::ExecuteResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -360,7 +364,7 @@ impl kernel::Server for KernelImpl {
 
     /// Get a variable value.
     fn get_var(
-        &mut self,
+        self: Rc<Self>,
         params: kernel::GetVarParams,
         mut results: kernel::GetVarResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -388,7 +392,7 @@ impl kernel::Server for KernelImpl {
 
     /// Set a variable value.
     fn set_var(
-        &mut self,
+        self: Rc<Self>,
         params: kernel::SetVarParams,
         _results: kernel::SetVarResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -424,7 +428,7 @@ impl kernel::Server for KernelImpl {
 
     /// List all variables.
     fn list_vars(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::ListVarsParams,
         mut results: kernel::ListVarsResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -446,7 +450,7 @@ impl kernel::Server for KernelImpl {
 
     /// List available tools.
     fn list_tools(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::ListToolsParams,
         mut results: kernel::ListToolsResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -465,7 +469,7 @@ impl kernel::Server for KernelImpl {
 
     /// Ping the kernel (health check).
     fn ping(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::PingParams,
         mut results: kernel::PingResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -479,7 +483,7 @@ impl kernel::Server for KernelImpl {
     /// is handled by the calling frontend (REPL, MCP server) after receiving the
     /// successful response.
     fn shutdown(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::ShutdownParams,
         _results: kernel::ShutdownResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -489,7 +493,7 @@ impl kernel::Server for KernelImpl {
 
     /// Reset kernel state.
     fn reset(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::ResetParams,
         _results: kernel::ResetResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -507,7 +511,7 @@ impl kernel::Server for KernelImpl {
 
     /// Get the current working directory.
     fn get_cwd(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::GetCwdParams,
         mut results: kernel::GetCwdResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -522,7 +526,7 @@ impl kernel::Server for KernelImpl {
 
     /// Set the current working directory.
     fn set_cwd(
-        &mut self,
+        self: Rc<Self>,
         params: kernel::SetCwdParams,
         mut results: kernel::SetCwdResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -552,7 +556,7 @@ impl kernel::Server for KernelImpl {
 
     /// Get the last execution result ($?).
     fn get_last_result(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::GetLastResultParams,
         mut results: kernel::GetLastResultResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -585,7 +589,7 @@ impl kernel::Server for KernelImpl {
     // --- Placeholder implementations for remaining methods ---
 
     fn execute_streaming(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::ExecuteStreamingParams,
         _results: kernel::ExecuteStreamingResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -595,7 +599,7 @@ impl kernel::Server for KernelImpl {
     }
 
     fn call_tool(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::CallToolParams,
         _results: kernel::CallToolResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -605,7 +609,7 @@ impl kernel::Server for KernelImpl {
     }
 
     fn mount(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::MountParams,
         _results: kernel::MountResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -615,7 +619,7 @@ impl kernel::Server for KernelImpl {
     }
 
     fn unmount(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::UnmountParams,
         _results: kernel::UnmountResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -625,7 +629,7 @@ impl kernel::Server for KernelImpl {
     }
 
     fn list_mounts(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::ListMountsParams,
         _results: kernel::ListMountsResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -635,7 +639,7 @@ impl kernel::Server for KernelImpl {
     }
 
     fn register_mcp(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::RegisterMcpParams,
         _results: kernel::RegisterMcpResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -645,7 +649,7 @@ impl kernel::Server for KernelImpl {
     }
 
     fn unregister_mcp(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::UnregisterMcpParams,
         _results: kernel::UnregisterMcpResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -655,7 +659,7 @@ impl kernel::Server for KernelImpl {
     }
 
     fn list_mcp_servers(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::ListMcpServersParams,
         _results: kernel::ListMcpServersResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -665,7 +669,7 @@ impl kernel::Server for KernelImpl {
     }
 
     fn snapshot(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::SnapshotParams,
         _results: kernel::SnapshotResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -675,7 +679,7 @@ impl kernel::Server for KernelImpl {
     }
 
     fn restore(
-        &mut self,
+        self: Rc<Self>,
         _params: kernel::RestoreParams,
         _results: kernel::RestoreResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -685,7 +689,7 @@ impl kernel::Server for KernelImpl {
     }
 
     fn read_blob(
-        &mut self,
+        self: Rc<Self>,
         params: kernel::ReadBlobParams,
         mut results: kernel::ReadBlobResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -720,7 +724,7 @@ impl kernel::Server for KernelImpl {
     }
 
     fn write_blob(
-        &mut self,
+        self: Rc<Self>,
         params: kernel::WriteBlobParams,
         mut results: kernel::WriteBlobResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
@@ -760,7 +764,7 @@ impl kernel::Server for KernelImpl {
     }
 
     fn delete_blob(
-        &mut self,
+        self: Rc<Self>,
         params: kernel::DeleteBlobParams,
         mut results: kernel::DeleteBlobResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {

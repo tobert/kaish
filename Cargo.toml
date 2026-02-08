@@ -37,19 +37,19 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Cap'n Proto (L0)
-capnp = "0.21"
-capnpc = "0.21"
-capnp-rpc = "0.21"
+capnp = "0.25"
+capnpc = "0.25"
+capnp-rpc = "0.25"
 futures = "0.3"
 tokio-util = { version = "0.7", features = ["compat"] }
 
 # Lexer/Parser (L1-L2)
-logos = "0.15"
+logos = "0.16"
 chumsky = "1.0.0-alpha.8"
-ariadne = "0.5"
+ariadne = "0.6"
 
 # REPL (L4)
-rustyline = "15"
+rustyline = "17"
 
 # Pattern matching (grep)
 regex = "1"
@@ -58,7 +58,7 @@ regex = "1"
 similar = "2"
 
 # Git operations
-git2 = "0.19"
+git2 = "0.20"
 
 # Date/time (date)
 chrono = "0.4"
@@ -69,21 +69,21 @@ jaq-std = "2.1"
 jaq-json = "1.1"
 
 # MCP client (L8)
-rmcp = { version = "0.13", default-features = true, features = ["client", "transport-child-process"] }
+rmcp = { version = "0.14", default-features = true, features = ["client", "transport-child-process"] }
 
 # XDG paths
 directories = "5"
 
 # Process information (Linux)
-procfs = "0.17"
+procfs = "0.18"
 
 # Token counting (BPE tokenization)
 tiktoken-rs = "0.9"
 
 # Testing
 proptest = "1"
-rstest = "0.23"
-insta = "1.42"
+rstest = "0.26"
+insta = "1.46"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

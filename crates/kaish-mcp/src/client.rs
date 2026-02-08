@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use rmcp::model::{CallToolRequestParam, CallToolResult, Tool as McpTool};
+use rmcp::model::{CallToolRequestParams, CallToolResult, Tool as McpTool};
 use rmcp::service::{RoleClient, RunningService, ServiceExt};
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use rmcp::ClientHandler;
@@ -166,10 +166,11 @@ impl McpClient {
             .clone();
 
         let result = service
-            .call_tool(CallToolRequestParam {
+            .call_tool(CallToolRequestParams {
                 name: name.to_string().into(),
                 arguments,
                 task: None,
+                meta: None,
             })
             .await
             .map_err(|e| anyhow::anyhow!("Failed to call tool: {}", e))?;
