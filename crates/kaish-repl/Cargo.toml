@@ -15,8 +15,8 @@ name = "kaish"
 path = "src/main.rs"
 
 [dependencies]
-kaish-kernel = { path = "../kaish-kernel", version = "0.1.5" }
-kaish-client = { path = "../kaish-client", version = "0.1.5" }
+kaish-kernel = { path = "../kaish-kernel", version = "0.1.6" }
+kaish-client = { path = "../kaish-client", version = "0.1.6" }
 
 # Line editing
 rustyline = { workspace = true }
