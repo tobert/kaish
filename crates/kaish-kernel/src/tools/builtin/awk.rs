@@ -2561,6 +2561,66 @@ mod tests {
         assert_eq!(result, "hello,world\n");
     }
 
+    // === Real-World Pattern Tests ===
+    // Based on actual `cargo test` output processing pipelines.
+
+    #[test]
+    fn test_eval_accumulate_single_field() {
+        // Pattern: cargo test | grep "^test result:" | awk '{sum += $4} END {print "passed:", sum}'
+        let prog = parse_program(r#"{sum += $4} END {print "passed:", sum}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let input = "\
+test result: ok. 100 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 50 passed; 1 failed; 2 ignored; 0 measured; 0 filtered out
+test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
+        let result = rt.execute(&prog, input).unwrap();
+        assert_eq!(result, "passed: 779\n");
+    }
+
+    #[test]
+    fn test_eval_accumulate_multiple_fields() {
+        // Pattern: cargo test | grep "^test result:" | awk '{p+=$4; i+=$8} END {print "passed:", p, "ignored:", i, "total:", p+i}'
+        let prog = parse_program(
+            r#"{p += $4; i += $8} END {print "passed:", p, "ignored:", i, "total:", p+i}"#,
+        )
+        .unwrap();
+        let mut rt = AwkRuntime::new();
+        let input = "\
+test result: ok. 100 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out
+test result: ok. 50 passed; 1 failed; 2 ignored; 0 measured; 0 filtered out
+test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
+        let result = rt.execute(&prog, input).unwrap();
+        assert_eq!(result, "passed: 779 ignored: 5 total: 784\n");
+    }
+
+    #[test]
+    fn test_eval_high_field_index() {
+        // Accessing $10+ works correctly
+        let prog = parse_program("{print $10}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "a b c d e f g h i j k l").unwrap();
+        assert_eq!(result, "j\n");
+    }
+
+    #[test]
+    fn test_eval_semicolon_separated_stmts() {
+        // Multiple statements in one rule separated by ;
+        let prog = parse_program("{a = $1; b = $2; print b, a}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "hello world").unwrap();
+        assert_eq!(result, "world hello\n");
+    }
+
+    #[test]
+    fn test_eval_end_arithmetic_expression() {
+        // Arithmetic in END print arguments
+        let prog =
+            parse_program(r#"{a += $1; b += $2} END {print "sum:", a+b, "diff:", a-b}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "10 3\n20 7").unwrap();
+        assert_eq!(result, "sum: 40 diff: 20\n");
+    }
+
     // === Integration Tests ===
 
     #[tokio::test]
