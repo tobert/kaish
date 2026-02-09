@@ -1,8 +1,8 @@
 # kaish (会sh)
 
-**A predictable shell for AI agents** — Bourne-like syntax without the gotchas.
-
-The 会 (kai) means "gathering" in Japanese — a shell that gathers tools together.
+A predictable shell for AI agents. A distilled Bourne-like shell with builtin
+core utiltities. Kaish is embeddable, has stronger validation ahead of execution,
+and can embed MCPs as commands.
 
 ## Install
 
@@ -10,7 +10,7 @@ The 会 (kai) means "gathering" in Japanese — a shell that gathers tools toget
 cargo install kaish
 ```
 
-This is preferred for now while kaish is still experimental. Containers and binaries
+This is preferred for now whil kaish is still experimental. Containers and binaries
 are in future plans when things stabilize a bit more and I have time (or PRs!).
 
 ## Why kaish?
@@ -26,7 +26,7 @@ commonly-used parts of sh while eliminating entire classes of bugs at the langua
 - **Strict booleans** — `TRUE` and `yes` are errors, not truthy
 - **Pre-validation** — catch errors before execution, not at runtime
 
-Skills transfer from bash. Footguns don't.
+Skills transfer from bash. Footguns (hopefully) don't.
 
 ## Quick Tour
 
@@ -141,7 +141,9 @@ kaish>
 
 ### kaish-mcp
 
-MCP server exposing kaish as tools for AI agents.
+MCP server exposing kaish as tools for AI agents. Builtins produce structured
+data internally — humans see clean readable text. The --json flag is still available
+as a rendering option but your agent will see json either way.
 
 #### Installation
 
@@ -170,11 +172,27 @@ NOT supported: process substitution <(), backticks, eval, aliases.
 Paths: /mnt/local = $HOME, /scratch/ = ephemeral memory.
 ```
 
+Output is clean text by default — simple commands return plain text, structured
+builtins (`ls`, `mounts`, `vars`) return readable tab-separated values. Use
+`--json` on any command for structured JSON output when needed.
+
 **`help`** — Discover syntax, builtins, VFS, and capabilities.
 
 ```
 Topics: overview, syntax, builtins, vfs, scatter, limits
 Tool help: help grep, help jq, help git
+```
+
+#### MCP Client Mode
+
+kaish can also consume external MCP tools, appearing as namespaced commands:
+
+```bash
+# External MCP tools look like CLI commands
+exa:web_search --query "rust parser combinators"
+
+# Pipe MCP results through kaish builtins
+github:list_issues --repo="foo/bar" | jq '.[] | .title'
 ```
 
 #### Why an MCP shell?
@@ -197,17 +215,11 @@ seq 1 10 | scatter as=N limit=4 | echo "processing $N" | gather
 
 The kernel runs builtins in-process (no fork/exec), making it fast and predictable.
 
-#### MCP Client Mode
+## Why 会sh (kaish)?
 
-kaish can also consume external MCP tools, appearing as namespaced commands:
-
-```bash
-# External MCP tools look like CLI commands
-exa:web_search --query "rust parser combinators"
-
-# Pipe MCP results through kaish builtins
-github:list_issues --repo="foo/bar" | jq '.[] | .title'
-```
+会sh was originally prototyped as part of 会術 Kaijutsu and was separate enough
+it made sense to split it out. Amy was also a fan of ksh and pdksh back in the 00s
+so k-ai-sh seems fun.
 
 ---
 
@@ -223,7 +235,7 @@ cargo build --release
 
 Agent-generated PRs are welcome! 🤖 This project is built with AI agents and we
 love seeing what other agents come up with. That said, please have your agent (or
-another model) review the PR before submitting — a quick sanity check goes a long
+another model) review the PR before submitting — a few tokens on review goes a long
 way. Same goes for issues: agent-filed is fine, just make sure it makes sense.
 
 If you're working with AI coding agents, you might also be interested in:

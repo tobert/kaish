@@ -818,3 +818,46 @@ async fn test_compound_short_circuit_or() {
     let result = kernel.execute(r#"[[ -d /tmp || $(cat /nonexistent_file) == "x" ]] && echo "yes" || echo "no""#).await.unwrap();
     assert_eq!(result.out.trim(), "yes", "OR should short-circuit: {}", result.out);
 }
+
+// ============================================================================
+// Bug: Short flags with values (-n 5) don't consume the next positional
+//
+// `head -n 5` and `tail -n 5` should work like `head --lines=5`.
+// Currently, build_tool_args treats short flags as always boolean,
+// never looking up the schema to check if the flag takes a value.
+// ============================================================================
+
+#[tokio::test]
+async fn test_short_flag_with_value_head() {
+    let kernel = Kernel::transient().unwrap();
+    // Write a test file
+    kernel.execute(r#"printf "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n" > /tmp/lines.txt"#).await.unwrap();
+
+    // head -n 3 should return first 3 lines
+    let result = kernel.execute("head -n 3 /tmp/lines.txt").await.unwrap();
+    assert!(result.ok(), "head -n 3 should succeed: err={}", result.err);
+    let lines: Vec<&str> = result.out.trim().lines().collect();
+    assert_eq!(lines, vec!["1", "2", "3"], "head -n 3 should return first 3 lines, got: {:?}", lines);
+}
+
+#[tokio::test]
+async fn test_short_flag_with_value_tail() {
+    let kernel = Kernel::transient().unwrap();
+    kernel.execute(r#"printf "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n" > /tmp/lines.txt"#).await.unwrap();
+
+    // tail -n 3 should return last 3 lines
+    let result = kernel.execute("tail -n 3 /tmp/lines.txt").await.unwrap();
+    assert!(result.ok(), "tail -n 3 should succeed: err={}", result.err);
+    let lines: Vec<&str> = result.out.trim().lines().collect();
+    assert_eq!(lines, vec!["8", "9", "10"], "tail -n 3 should return last 3 lines, got: {:?}", lines);
+}
+
+#[tokio::test]
+async fn test_short_flag_with_value_in_pipeline() {
+    let kernel = Kernel::transient().unwrap();
+    // Piped input: echo | head -n 3
+    let result = kernel.execute(r#"printf "a\nb\nc\nd\ne\n" | head -n 3"#).await.unwrap();
+    assert!(result.ok(), "pipeline head -n 3 should succeed: err={}", result.err);
+    let lines: Vec<&str> = result.out.trim().lines().collect();
+    assert_eq!(lines, vec!["a", "b", "c"], "head -n 3 in pipeline should return first 3 lines, got: {:?}", lines);
+}
