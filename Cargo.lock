@@ -843,7 +843,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-client"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -872,7 +872,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-kernel"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "ariadne",
@@ -907,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-mcp"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-repl"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "directories",
