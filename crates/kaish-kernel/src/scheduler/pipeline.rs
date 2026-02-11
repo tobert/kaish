@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use crate::arithmetic;
 use crate::ast::{Arg, Command, Expr, Redirect, RedirectKind, Value};
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
-use crate::interpreter::{apply_output_format, ExecResult};
-use crate::tools::{extract_output_format, ExecContext, ToolArgs, ToolRegistry, ToolSchema};
+use crate::interpreter::ExecResult;
+use crate::tools::{ExecContext, ToolArgs, ToolRegistry, ToolSchema};
 use tokio::io::AsyncWriteExt;
 
 use super::scatter::{
@@ -156,7 +156,24 @@ impl PipelineRunner {
 
         // Check for scatter/gather pipeline
         if let Some((scatter_idx, gather_idx)) = find_scatter_gather(commands) {
-            return self.run_scatter_gather(commands, scatter_idx, gather_idx, ctx).await;
+            return self.run_scatter_gather(commands, scatter_idx, gather_idx, ctx, dispatcher).await;
+        }
+
+        self.run_sequential(commands, ctx, dispatcher).await
+    }
+
+    /// Execute commands sequentially without scatter/gather detection.
+    ///
+    /// Used by `ScatterGatherRunner` for pre_scatter, post_gather, and parallel
+    /// workers. Breaks the async recursion chain (`run` → scatter → `run`).
+    pub async fn run_sequential(
+        &self,
+        commands: &[Command],
+        ctx: &mut ExecContext,
+        dispatcher: &dyn CommandDispatcher,
+    ) -> ExecResult {
+        if commands.is_empty() {
+            return ExecResult::success("");
         }
 
         if commands.len() == 1 {
@@ -175,6 +192,7 @@ impl PipelineRunner {
         scatter_idx: usize,
         gather_idx: usize,
         ctx: &mut ExecContext,
+        _dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
         // Split pipeline into parts
         let pre_scatter = &commands[..scatter_idx];
@@ -190,8 +208,13 @@ impl PipelineRunner {
         let scatter_opts = parse_scatter_options(&build_tool_args(&scatter_cmd.args, ctx, scatter_schema.as_ref()));
         let gather_opts = parse_gather_options(&build_tool_args(&gather_cmd.args, ctx, gather_schema.as_ref()));
 
-        // Run with ScatterGatherRunner
-        let runner = ScatterGatherRunner::new(self.tools.clone());
+        // Create a BackendDispatcher for scatter workers.
+        // Parallel workers MUST use a stateless dispatcher to avoid data races
+        // on shared scope. BackendDispatcher is stateless (routes through backend.call_tool).
+        let scatter_dispatcher: Arc<dyn CommandDispatcher> =
+            Arc::new(crate::dispatch::BackendDispatcher::new(self.tools.clone()));
+
+        let runner = ScatterGatherRunner::new(self.tools.clone(), scatter_dispatcher);
         runner
             .run(
                 pre_scatter,
@@ -263,6 +286,7 @@ impl PipelineRunner {
 
             // Set pipeline position for stdio inheritance decisions
             ctx.pipeline_position = match i {
+                0 if last_idx == 0 => PipelinePosition::Only,
                 0 => PipelinePosition::First,
                 n if n == last_idx => PipelinePosition::Last,
                 _ => PipelinePosition::Middle,
@@ -603,102 +627,6 @@ fn find_scatter_gather(commands: &[Command]) -> Option<(usize, usize)> {
     } else {
         None
     }
-}
-
-/// Run a pipeline sequentially without scatter/gather detection.
-///
-/// This is used internally by ScatterGatherRunner to avoid recursion.
-/// The `tools` parameter is used for schema lookup to enable schema-aware argument parsing.
-pub async fn run_sequential_pipeline(
-    tools: &Arc<ToolRegistry>,
-    commands: &[Command],
-    ctx: &mut ExecContext,
-) -> ExecResult {
-    if commands.is_empty() {
-        return ExecResult::success("");
-    }
-
-    let mut current_stdin: Option<String> = ctx.take_stdin();
-    let mut current_data: Option<Value> = ctx.take_stdin_data();
-    let mut last_result = ExecResult::success("");
-
-    for (i, cmd) in commands.iter().enumerate() {
-        // Handle built-in true/false
-        match cmd.name.as_str() {
-            "true" => {
-                last_result = ExecResult::success("");
-                if i < commands.len() - 1 {
-                    current_stdin = Some(last_result.out.clone());
-                    current_data = last_result.data.clone();
-                }
-                continue;
-            }
-            "false" => {
-                return ExecResult::failure(1, "");
-            }
-            _ => {}
-        }
-
-        // Build tool args with schema-aware parsing
-        let schema = tools.get(&cmd.name).map(|t| t.schema());
-        let mut tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
-        let output_format = extract_output_format(&mut tool_args, schema.as_ref());
-
-        // Set up stdin from redirects (< file, <<heredoc)
-        setup_stdin_redirects(cmd, ctx);
-
-        // Set stdin from previous command's stdout (overrides redirect stdin)
-        // Also pass structured data if available from previous command
-        if let Some(input) = current_stdin.take() {
-            ctx.set_stdin_with_data(input, current_data.take());
-        }
-
-        // Execute via backend (clone Arc to avoid borrow conflict)
-        let backend = ctx.backend.clone();
-        last_result = match backend.call_tool(&cmd.name, tool_args, ctx).await {
-            Ok(tool_result) => {
-                let mut exec = ExecResult::from_output(
-                    tool_result.code as i64, tool_result.stdout, tool_result.stderr,
-                );
-                exec.output = tool_result.output;
-                exec
-            }
-            Err(e) => ExecResult::failure(127, e.to_string()),
-        };
-
-        // Apply output format transform
-        last_result = match output_format {
-            Some(format) => apply_output_format(last_result, format),
-            None => last_result,
-        };
-
-        // Apply post-execution redirects
-        last_result = apply_redirects(last_result, &cmd.redirects, ctx).await;
-
-        // If command failed, stop the pipeline
-        if !last_result.ok() {
-            return last_result;
-        }
-
-        // Pass stdout and structured data to next command's stdin (unless last command)
-        if i < commands.len() - 1 {
-            current_stdin = Some(last_result.out.clone());
-            current_data = last_result.data.clone();
-        }
-    }
-
-    last_result
-}
-
-/// Run a pipeline sequentially with owned data (for spawned tasks).
-///
-/// This is used by scatter workers to run commands in parallel.
-pub async fn run_sequential_pipeline_owned(
-    tools: Arc<ToolRegistry>,
-    commands: Vec<Command>,
-    ctx: &mut ExecContext,
-) -> ExecResult {
-    run_sequential_pipeline(&tools, &commands, ctx).await
 }
 
 #[cfg(test)]

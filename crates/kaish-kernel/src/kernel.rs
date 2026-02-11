@@ -1399,9 +1399,30 @@ impl Kernel {
                 }
             }
             Expr::CommandSubst(pipeline) => {
-                // Execute the pipeline and return structured data if available
+                // Snapshot scope+cwd before running — only output escapes,
+                // not side effects like `cd` or variable assignments.
+                let saved_scope = { self.scope.read().await.clone() };
+                let saved_cwd = {
+                    let ec = self.exec_ctx.read().await;
+                    (ec.cwd.clone(), ec.prev_cwd.clone())
+                };
+
                 let result = self.execute_pipeline(pipeline).await?;
                 self.update_last_result(&result).await;
+
+                // Restore scope (preserving last_result) and cwd
+                {
+                    let mut scope = self.scope.write().await;
+                    let last_result = scope.last_result().clone();
+                    *scope = saved_scope;
+                    scope.set_last_result(last_result);
+                }
+                {
+                    let mut ec = self.exec_ctx.write().await;
+                    ec.cwd = saved_cwd.0;
+                    ec.prev_cwd = saved_cwd.1;
+                }
+
                 // Prefer structured data (enables `for i in $(cmd)` iteration)
                 if let Some(data) = &result.data {
                     Ok(data.clone())
@@ -1544,8 +1565,29 @@ impl Kernel {
                 }
             }
             StringPart::CommandSubst(pipeline) => {
-                // Execute the pipeline and capture its output
+                // Snapshot scope+cwd — command substitution in strings must
+                // not leak side effects (e.g., `"dir: $(cd /; pwd)"` must not change cwd).
+                let saved_scope = { self.scope.read().await.clone() };
+                let saved_cwd = {
+                    let ec = self.exec_ctx.read().await;
+                    (ec.cwd.clone(), ec.prev_cwd.clone())
+                };
+
                 let result = self.execute_pipeline(pipeline).await?;
+
+                // Restore scope (preserving last_result) and cwd
+                {
+                    let mut scope = self.scope.write().await;
+                    let last_result = scope.last_result().clone();
+                    *scope = saved_scope;
+                    scope.set_last_result(last_result);
+                }
+                {
+                    let mut ec = self.exec_ctx.write().await;
+                    ec.cwd = saved_cwd.0;
+                    ec.prev_cwd = saved_cwd.1;
+                }
+
                 Ok(result.out.trim_end_matches('\n').to_string())
             }
             StringPart::LastExitCode => {

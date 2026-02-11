@@ -6,6 +6,7 @@
 //! - Path resolution for nested access (`${VAR.field[0]}`)
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::ast::{Value, VarPath, VarSegment};
 
@@ -15,10 +16,17 @@ use super::result::ExecResult;
 ///
 /// Variables are looked up from innermost to outermost frame.
 /// The `?` variable always refers to the last command result.
+///
+/// The `frames` field is wrapped in `Arc` for copy-on-write (COW) semantics.
+/// Cloning a Scope is O(1) — just bumps the Arc refcount. Mutations use
+/// `Arc::make_mut` to clone the inner data only when shared. This matters
+/// because `execute_pipeline` snapshots the scope into ExecContext (clone)
+/// and syncs it back (clone) on every command.
 #[derive(Debug, Clone)]
 pub struct Scope {
     /// Stack of variable frames. Last element is the innermost scope.
-    frames: Vec<HashMap<String, Value>>,
+    /// Wrapped in Arc for copy-on-write: clone is O(1), mutation clones on demand.
+    frames: Arc<Vec<HashMap<String, Value>>>,
     /// Variables marked for export to child processes.
     exported: HashSet<String>,
     /// The result of the last command execution.
@@ -37,7 +45,7 @@ impl Scope {
     /// Create a new scope with one empty frame.
     pub fn new() -> Self {
         Self {
-            frames: vec![HashMap::new()],
+            frames: Arc::new(vec![HashMap::new()]),
             exported: HashSet::new(),
             last_result: ExecResult::default(),
             script_name: String::new(),
@@ -54,7 +62,7 @@ impl Scope {
 
     /// Push a new scope frame (for entering a loop, tool call, etc.)
     pub fn push_frame(&mut self) {
-        self.frames.push(HashMap::new());
+        Arc::make_mut(&mut self.frames).push(HashMap::new());
     }
 
     /// Pop the innermost scope frame.
@@ -62,7 +70,7 @@ impl Scope {
     /// Panics if attempting to pop the last frame.
     pub fn pop_frame(&mut self) {
         if self.frames.len() > 1 {
-            self.frames.pop();
+            Arc::make_mut(&mut self.frames).pop();
         } else {
             panic!("cannot pop the root scope frame");
         }
@@ -72,7 +80,7 @@ impl Scope {
     ///
     /// Use this for `local` variable declarations.
     pub fn set(&mut self, name: impl Into<String>, value: Value) {
-        if let Some(frame) = self.frames.last_mut() {
+        if let Some(frame) = Arc::make_mut(&mut self.frames).last_mut() {
             frame.insert(name.into(), value);
         }
     }
@@ -86,7 +94,8 @@ impl Scope {
         let name = name.into();
 
         // Search from innermost to outermost to find existing variable
-        for frame in self.frames.iter_mut().rev() {
+        let frames = Arc::make_mut(&mut self.frames);
+        for frame in frames.iter_mut().rev() {
             if let std::collections::hash_map::Entry::Occupied(mut e) = frame.entry(name.clone()) {
                 e.insert(value);
                 return;
@@ -94,7 +103,7 @@ impl Scope {
         }
 
         // Variable doesn't exist - create in root frame (index 0)
-        if let Some(frame) = self.frames.first_mut() {
+        if let Some(frame) = frames.first_mut() {
             frame.insert(name, value);
         }
     }
@@ -113,7 +122,7 @@ impl Scope {
     ///
     /// Returns the removed value if found, None otherwise.
     pub fn remove(&mut self, name: &str) -> Option<Value> {
-        for frame in self.frames.iter_mut().rev() {
+        for frame in Arc::make_mut(&mut self.frames).iter_mut().rev() {
             if let Some(value) = frame.remove(name) {
                 return Some(value);
             }
@@ -296,7 +305,7 @@ impl Scope {
     pub fn all(&self) -> Vec<(String, Value)> {
         let mut result = std::collections::HashMap::new();
         // Iterate outer to inner so inner frames override
-        for frame in &self.frames {
+        for frame in self.frames.iter() {
             for (name, value) in frame {
                 result.insert(name.clone(), value.clone());
             }

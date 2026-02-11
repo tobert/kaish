@@ -17,10 +17,11 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use crate::ast::{Command, Value};
+use crate::dispatch::CommandDispatcher;
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ToolRegistry};
 
-use super::pipeline::{run_sequential_pipeline, run_sequential_pipeline_owned};
+use super::pipeline::PipelineRunner;
 
 /// Options for scatter operation.
 #[derive(Debug, Clone)]
@@ -71,14 +72,22 @@ pub struct ScatterResult {
 }
 
 /// Runs scatter/gather pipelines.
+///
+/// The dispatcher is used for pre_scatter, post_gather, and parallel worker
+/// command execution. This enables scatter blocks to run user tools, scripts,
+/// and external commands — not just builtins.
 pub struct ScatterGatherRunner {
     tools: Arc<ToolRegistry>,
+    dispatcher: Arc<dyn CommandDispatcher>,
 }
 
 impl ScatterGatherRunner {
-    /// Create a new scatter/gather runner.
-    pub fn new(tools: Arc<ToolRegistry>) -> Self {
-        Self { tools }
+    /// Create a new scatter/gather runner with the given dispatcher.
+    ///
+    /// The dispatcher handles the full command resolution chain for all
+    /// pipeline stages (pre_scatter, parallel workers, post_gather).
+    pub fn new(tools: Arc<ToolRegistry>, dispatcher: Arc<dyn CommandDispatcher>) -> Self {
+        Self { tools, dispatcher }
     }
 
     /// Execute a scatter/gather pipeline.
@@ -98,12 +107,15 @@ impl ScatterGatherRunner {
         post_gather: &[Command],
         ctx: &mut ExecContext,
     ) -> ExecResult {
-        // Run pre-scatter commands to get input
+        let runner = PipelineRunner::new(self.tools.clone());
+
+        // Run pre-scatter commands to get input.
+        // Uses run_sequential to avoid async recursion (scatter → run → scatter).
         let input = if pre_scatter.is_empty() {
             // Use existing stdin
             ctx.take_stdin().unwrap_or_default()
         } else {
-            let result = run_sequential_pipeline(&self.tools, pre_scatter, ctx).await;
+            let result = runner.run_sequential(pre_scatter, ctx, &*self.dispatcher).await;
             if !result.ok() {
                 return result;
             }
@@ -129,11 +141,22 @@ impl ScatterGatherRunner {
             ExecResult::success(gathered)
         } else {
             ctx.set_stdin(gathered);
-            run_sequential_pipeline(&self.tools, post_gather, ctx).await
+            runner.run_sequential(post_gather, ctx, &*self.dispatcher).await
         }
     }
 
     /// Run the parallel stage for all items.
+    ///
+    /// # Safety constraint
+    ///
+    /// Parallel workers share the dispatcher via `Arc`. The dispatcher MUST be
+    /// stateless (like `BackendDispatcher`) when used from parallel workers.
+    /// Using a stateful dispatcher (like `Kernel`, which writes to `self.scope`)
+    /// would cause data races — parallel workers would stomp each other's scope.
+    ///
+    /// The `Kernel` dispatcher is safe for pre_scatter and post_gather (sequential),
+    /// but scatter workers must use `BackendDispatcher` until per-worker kernel
+    /// instances are implemented.
     async fn run_parallel(
         &self,
         items: &[String],
@@ -143,6 +166,7 @@ impl ScatterGatherRunner {
     ) -> Vec<ScatterResult> {
         let semaphore = Arc::new(Semaphore::new(opts.limit));
         let tools = self.tools.clone();
+        let dispatcher = self.dispatcher.clone();
         let var_name = opts.var_name.clone();
 
         // Spawn parallel tasks
@@ -151,6 +175,7 @@ impl ScatterGatherRunner {
         for item in items.iter().cloned() {
             let permit = semaphore.clone().acquire_owned().await;
             let tools = tools.clone();
+            let dispatcher = dispatcher.clone();
             let commands = commands.to_vec();
             let var_name = var_name.clone();
             let base_scope = base_ctx.scope.clone();
@@ -167,8 +192,10 @@ impl ScatterGatherRunner {
                 let mut ctx = ExecContext::with_backend_and_scope(backend, scope);
                 ctx.set_cwd(cwd);
 
-                // Run the commands using sequential runner (no nested scatter/gather)
-                let result = run_sequential_pipeline_owned(tools, commands, &mut ctx).await;
+                // Run through PipelineRunner + dispatcher (full resolution chain).
+                // Uses run_sequential to avoid async recursion and infinite future size.
+                let runner = PipelineRunner::new(tools);
+                let result = runner.run_sequential(&commands, &mut ctx, &*dispatcher).await;
 
                 ScatterResult { item, result }
             });

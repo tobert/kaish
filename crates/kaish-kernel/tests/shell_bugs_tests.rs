@@ -861,3 +861,112 @@ async fn test_short_flag_with_value_in_pipeline() {
     let lines: Vec<&str> = result.out.trim().lines().collect();
     assert_eq!(lines, vec!["a", "b", "c"], "head -n 3 in pipeline should return first 3 lines, got: {:?}", lines);
 }
+
+// ============================================================================
+// Bug 14: Command substitution leaks scope and cwd
+//
+// Side effects inside $() (cd, variable assignments) must not leak to the parent.
+// Only the captured stdout escapes. Uses functions to test multi-statement
+// logic since kaish only supports pipelines inside $().
+// ============================================================================
+
+#[tokio::test]
+async fn test_cmd_subst_cwd_isolation() {
+    let kernel = Kernel::transient().unwrap();
+    // Define a function that changes cwd and prints it.
+    // The captured output should be "/" but pwd after should be the original cwd.
+    let result = kernel
+        .execute(
+            r#"
+go_root() { cd /; pwd; }
+X=$(go_root)
+pwd
+"#,
+        )
+        .await
+        .unwrap();
+    assert!(result.ok(), "Should succeed: err={}", result.err);
+    // pwd should NOT be "/", it should be the original working dir
+    let pwd_output = result.out.trim();
+    assert_ne!(
+        pwd_output, "/",
+        "CWD should not leak from command substitution, got: {}",
+        pwd_output
+    );
+}
+
+#[tokio::test]
+async fn test_cmd_subst_variable_isolation() {
+    let kernel = Kernel::transient().unwrap();
+    // Variable set inside $() via a function should not leak to parent
+    let result = kernel
+        .execute(
+            r#"
+X=outer
+set_inner() { X=inner; echo $X; }
+Y=$(set_inner)
+echo $X
+"#,
+        )
+        .await
+        .unwrap();
+    assert!(result.ok(), "Should succeed: err={}", result.err);
+    assert_eq!(
+        result.out.trim(),
+        "outer",
+        "Variable should not leak from command substitution: {}",
+        result.out
+    );
+}
+
+#[tokio::test]
+async fn test_cmd_subst_in_string_cwd_isolation() {
+    let kernel = Kernel::transient().unwrap();
+    // Command substitution in string interpolation should also be isolated
+    let result = kernel
+        .execute(
+            r#"
+go_root() { cd /; pwd; }
+echo "dir: $(go_root)"
+pwd
+"#,
+        )
+        .await
+        .unwrap();
+    assert!(result.ok(), "Should succeed: err={}", result.err);
+    let lines: Vec<&str> = result.out.trim().lines().collect();
+    assert!(lines.len() >= 2, "Expected at least 2 lines: {:?}", lines);
+    assert!(
+        lines[0].contains("dir: /"),
+        "Captured output should contain '/': {}",
+        lines[0]
+    );
+    // The second line (pwd) should NOT be "/"
+    assert_ne!(
+        lines[1], "/",
+        "CWD should not leak from string command substitution: {}",
+        lines[1]
+    );
+}
+
+#[tokio::test]
+async fn test_cmd_subst_captures_output_correctly() {
+    let kernel = Kernel::transient().unwrap();
+    // Ensure the captured value is still correct despite isolation
+    let result = kernel
+        .execute(
+            r#"
+go_root() { cd /; pwd; }
+X=$(go_root)
+echo "captured: $X"
+"#,
+        )
+        .await
+        .unwrap();
+    assert!(result.ok(), "Should succeed: err={}", result.err);
+    assert!(
+        result.out.contains("captured: /"),
+        "Should capture '/' from subshell: {}",
+        result.out
+    );
+}
