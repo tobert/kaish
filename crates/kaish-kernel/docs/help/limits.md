@@ -12,9 +12,10 @@ These bash features are omitted by design:
 | Shell glob expansion `*.txt` | Tools handle their own patterns |
 | Process substitution `<(cmd)` | Use temp files |
 | Backticks `` `cmd` `` | Use `$(cmd)` |
-| Single bracket tests `[ ]` | Supported, but prefer `[[ ]]` |
 | Aliases, `eval` | Explicit is better |
 | Implicit word splitting | Use `split` explicitly |
+
+**Note:** `[ ]` (single brackets) is supported as a builtin but `[[ ]]` is preferred.
 
 ## Preprocessing
 

@@ -130,7 +130,7 @@ mkdir /tmp/work && cd /tmp/work && echo "ready"
 [[ ! -f a || -d b && -e c ]]    # parsed as: (! -f a) || ((-d b) && (-e c))
 ```
 
-Note: `[ ]` (single brackets) is not supported — use `[[ ]]` for all tests.
+Note: `[ ]` (single brackets) is supported as a builtin but `[[ ]]` is preferred for all tests.
 
 ## Control Flow
 
@@ -145,7 +145,7 @@ else
 fi
 
 # For loop
-for ITEM in "one two three"; do
+for ITEM in one two three; do
     echo $ITEM
 done
 
@@ -454,7 +454,7 @@ These bash features are omitted because they're confusing, error-prone, or ambig
 | Shell glob expansion `*.txt` | Tools handle their own patterns | SC2035 |
 | Process substitution `<(cmd)` | Use temp files | — |
 | Backtick substitution `` `cmd` `` | Use `$(cmd)` | SC2006 |
-| Single bracket tests `[ ]` | Use `[[ ]]` | SC2039 |
+| Single bracket tests `[ ]` | Supported; prefer `[[ ]]` | SC2039 |
 | Aliases, `eval` | Explicit is better | SC2091 |
 
 ## ShellCheck Alignment
