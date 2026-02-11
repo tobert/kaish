@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::ast::Value;
 use crate::backend::{KernelBackend, LocalBackend};
+use crate::dispatch::PipelinePosition;
 use crate::interpreter::Scope;
 use crate::scheduler::JobManager;
 use crate::tools::ToolRegistry;
@@ -59,6 +60,8 @@ pub struct ExecContext {
     pub tools: Option<Arc<ToolRegistry>>,
     /// Job manager for background jobs (optional).
     pub job_manager: Option<Arc<JobManager>>,
+    /// Position of this command within a pipeline (for stdio decisions).
+    pub pipeline_position: PipelinePosition,
 }
 
 impl ExecContext {
@@ -77,6 +80,7 @@ impl ExecContext {
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
+            pipeline_position: PipelinePosition::Only,
         }
     }
 
@@ -95,6 +99,7 @@ impl ExecContext {
             tool_schemas: Vec::new(),
             tools: Some(tools),
             job_manager: None,
+            pipeline_position: PipelinePosition::Only,
         }
     }
 
@@ -110,6 +115,7 @@ impl ExecContext {
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
+            pipeline_position: PipelinePosition::Only,
         }
     }
 
@@ -125,6 +131,7 @@ impl ExecContext {
             tool_schemas: Vec::new(),
             tools: Some(tools),
             job_manager: None,
+            pipeline_position: PipelinePosition::Only,
         }
     }
 
@@ -143,6 +150,7 @@ impl ExecContext {
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
+            pipeline_position: PipelinePosition::Only,
         }
     }
 
@@ -158,6 +166,7 @@ impl ExecContext {
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
+            pipeline_position: PipelinePosition::Only,
         }
     }
 

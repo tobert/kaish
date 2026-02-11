@@ -15,6 +15,7 @@ pub mod arithmetic;
 pub mod ast;
 pub mod backend;
 pub(crate) mod backend_walker_fs;
+pub mod dispatch;
 pub mod help;
 pub mod interpreter;
 pub mod kernel;
@@ -48,6 +49,7 @@ pub use backend::{
     BackendError, BackendResult, EntryInfo, KernelBackend, LocalBackend, PatchOp, ReadRange,
     ToolInfo, ToolResult, VirtualOverlayBackend, WriteMode,
 };
+pub use dispatch::{BackendDispatcher, CommandDispatcher, PipelinePosition};
 pub use kernel::{Kernel, KernelConfig, VfsMountMode};
 pub use rpc::KernelRpcServer;
 
