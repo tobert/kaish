@@ -59,19 +59,13 @@ pub use rpc::KernelRpcServer;
 
 // Backend with /v/* support for embedders
 //
-// Use `VirtualOverlayBackend` to wrap your custom backend and get automatic
-// support for `/v/*` paths (job observability, blob storage, etc.):
+// Use `Kernel::with_backend()` to provide a custom backend with automatic
+// `/v/*` path support (job observability, blob storage):
 //
 // ```ignore
-// let my_backend = Arc::new(MyBackend::new());
-// let overlay = VirtualOverlayBackend::new(my_backend, vfs);
-// let kernel = Kernel::with_backend(Arc::new(overlay), config)?;
-// ```
-//
-// Or use the convenience constructor:
-//
-// ```ignore
-// let kernel = Kernel::with_backend_and_virtual_paths(my_backend, config)?;
+// let kernel = Kernel::with_backend(my_backend, config, |vfs| {
+//     vfs.mount_arc("/v/docs", docs_fs);
+// })?;
 // ```
 
 // Git types (for embedders that want direct GitVfs access)

@@ -98,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
     let backend = Arc::new(KaijutsuBackend::new());
     let config = KernelConfig::default();
 
-    let kernel = Kernel::with_backend(backend, config)?;
+    let kernel = Kernel::with_backend(backend, config, |_| {})?;
 
     // Git operations now work on worktrees!
     kernel.execute("cd /mnt/repos/kaish && git status").await?;

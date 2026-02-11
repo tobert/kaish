@@ -285,34 +285,8 @@ impl Kernel {
 
         let vfs = Arc::new(vfs);
 
-        // Set up tools
-        let mut tools = ToolRegistry::new();
-        register_builtins(&mut tools);
-        let tools = Arc::new(tools);
-
-        // Pipeline runner
-        let runner = PipelineRunner::new(tools.clone());
-
-        let scope = Scope::new();
-        let cwd = config.cwd;
-
-        // Create execution context with VFS and tools for backend dispatch
-        let mut exec_ctx = ExecContext::with_vfs_and_tools(vfs.clone(), tools.clone());
-        exec_ctx.set_cwd(cwd);
-        exec_ctx.set_job_manager(jobs.clone());
-        exec_ctx.set_tool_schemas(tools.schemas());
-
-        Ok(Self {
-            name: config.name,
-            scope: RwLock::new(scope),
-            tools,
-            user_tools: RwLock::new(HashMap::new()),
-            vfs,
-            jobs,
-            runner,
-            exec_ctx: RwLock::new(exec_ctx),
-            skip_validation: config.skip_validation,
-            interactive: config.interactive,
+        Self::assemble(config, vfs, jobs, |vfs_ref, tools| {
+            ExecContext::with_vfs_and_tools(vfs_ref.clone(), tools.clone())
         })
     }
 
@@ -364,126 +338,96 @@ impl Kernel {
         Self::new(KernelConfig::transient())
     }
 
-    /// Create a kernel with a custom backend.
+    /// Create a kernel with a custom backend and `/v/*` virtual path support.
     ///
-    /// This constructor allows embedding kaish in other systems that provide
+    /// This is the constructor for embedding kaish in other systems that provide
     /// their own storage backend (e.g., CRDT-backed storage in kaijutsu).
-    /// The provided backend will be used for all file operations in builtins.
     ///
-    /// Note: A VfsRouter is still created internally for compatibility with
-    /// the `vfs()` method, but it won't be used for execution context operations.
-    pub fn with_backend(backend: Arc<dyn KernelBackend>, config: KernelConfig) -> Result<Self> {
-        // Create VFS for compatibility (but exec_ctx will use the provided backend)
-        let mut vfs = Self::setup_vfs(&config);
-        let jobs = Arc::new(JobManager::new());
-
-        // Mount JobFs for job observability at /v/jobs
-        vfs.mount("/v/jobs", JobFs::new(jobs.clone()));
-
-        let vfs = Arc::new(vfs);
-
-        // Set up tools
-        let mut tools = ToolRegistry::new();
-        register_builtins(&mut tools);
-        let tools = Arc::new(tools);
-
-        // Pipeline runner
-        let runner = PipelineRunner::new(tools.clone());
-
-        let scope = Scope::new();
-        let cwd = config.cwd;
-
-        // Create execution context with custom backend
-        let mut exec_ctx = ExecContext::with_backend(backend);
-        exec_ctx.set_cwd(cwd);
-        exec_ctx.set_job_manager(jobs.clone());
-        exec_ctx.set_tool_schemas(tools.schemas());
-        exec_ctx.set_tools(tools.clone());
-
-        Ok(Self {
-            name: config.name,
-            scope: RwLock::new(scope),
-            tools,
-            user_tools: RwLock::new(HashMap::new()),
-            vfs,
-            jobs,
-            runner,
-            exec_ctx: RwLock::new(exec_ctx),
-            skip_validation: config.skip_validation,
-            interactive: config.interactive,
-        })
-    }
-
-    /// Create a kernel with a custom backend and automatic `/v/*` path support.
-    ///
-    /// This is the recommended constructor for embedders who want their custom backend
-    /// to also support kaish's virtual filesystems (like `/v/jobs` for job observability).
-    ///
-    /// Paths are routed as follows:
-    /// - `/v/*` → Internal VFS (JobFs at `/v/jobs`, MemoryFs at `/v/blobs`, etc.)
+    /// A `VirtualOverlayBackend` routes paths automatically:
+    /// - `/v/*` → Internal VFS (JobFs at `/v/jobs`, MemoryFs at `/v/blobs`)
     /// - Everything else → Your custom backend
+    ///
+    /// The optional `configure_vfs` closure lets you add additional virtual mounts
+    /// (e.g., `/v/docs` for CRDT blocks) after the built-in mounts are set up.
+    ///
+    /// **Note:** The config's `vfs_mode` is ignored — all non-`/v/*` path routing
+    /// is handled by your custom backend. The config is only used for `name`, `cwd`,
+    /// `skip_validation`, and `interactive`.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// let my_backend: Arc<dyn KernelBackend> = Arc::new(MyBackend::new());
-    /// let kernel = Kernel::with_backend_and_virtual_paths(my_backend, config)?;
+    /// // Simple: default /v/* mounts only
+    /// let kernel = Kernel::with_backend(backend, config, |_| {})?;
     ///
-    /// // Now agents can use /v/jobs to monitor background commands
-    /// kernel.execute("cargo build &").await?;
-    /// kernel.execute("cat /v/jobs/1/stdout").await?;
+    /// // With custom mounts
+    /// let kernel = Kernel::with_backend(backend, config, |vfs| {
+    ///     vfs.mount_arc("/v/docs", docs_fs);
+    ///     vfs.mount_arc("/v/g", git_fs);
+    /// })?;
     /// ```
-    pub fn with_backend_and_virtual_paths(
+    pub fn with_backend(
         backend: Arc<dyn KernelBackend>,
         config: KernelConfig,
+        configure_vfs: impl FnOnce(&mut VfsRouter),
     ) -> Result<Self> {
         use crate::backend::VirtualOverlayBackend;
 
-        // Create VFS with virtual filesystems
         let mut vfs = VfsRouter::new();
         let jobs = Arc::new(JobManager::new());
 
-        // Mount JobFs for job observability
         vfs.mount("/v/jobs", JobFs::new(jobs.clone()));
-        // Mount MemoryFs for blob storage
         vfs.mount("/v/blobs", MemoryFs::new());
-        // Mount MemoryFs for ephemeral data
-        vfs.mount("/v/scratch", MemoryFs::new());
+
+        // Let caller add custom mounts (e.g., /v/docs, /v/g)
+        configure_vfs(&mut vfs);
 
         let vfs = Arc::new(vfs);
 
-        // Wrap the backend with virtual overlay
-        let overlay: Arc<dyn KernelBackend> = Arc::new(VirtualOverlayBackend::new(backend, vfs.clone()));
+        let overlay: Arc<dyn KernelBackend> =
+            Arc::new(VirtualOverlayBackend::new(backend, vfs.clone()));
 
-        // Set up tools
+        Self::assemble(config, vfs, jobs, |_: &Arc<VfsRouter>, _: &Arc<ToolRegistry>| {
+            ExecContext::with_backend(overlay)
+        })
+    }
+
+    /// Shared assembly: wires up tools, runner, scope, and ExecContext.
+    ///
+    /// The `make_ctx` closure receives the VFS and tools so backends that need
+    /// them (like `LocalBackend::with_tools`) can capture them. Custom backends
+    /// that already have their own storage can ignore these parameters.
+    fn assemble(
+        config: KernelConfig,
+        vfs: Arc<VfsRouter>,
+        jobs: Arc<JobManager>,
+        make_ctx: impl FnOnce(&Arc<VfsRouter>, &Arc<ToolRegistry>) -> ExecContext,
+    ) -> Result<Self> {
+        let KernelConfig { name, cwd, skip_validation, interactive, .. } = config;
+
         let mut tools = ToolRegistry::new();
         register_builtins(&mut tools);
         let tools = Arc::new(tools);
 
-        // Pipeline runner
         let runner = PipelineRunner::new(tools.clone());
 
-        let scope = Scope::new();
-        let cwd = config.cwd;
-
-        // Create execution context with the overlay backend
-        let mut exec_ctx = ExecContext::with_backend(overlay);
+        let mut exec_ctx = make_ctx(&vfs, &tools);
         exec_ctx.set_cwd(cwd);
         exec_ctx.set_job_manager(jobs.clone());
         exec_ctx.set_tool_schemas(tools.schemas());
         exec_ctx.set_tools(tools.clone());
 
         Ok(Self {
-            name: config.name,
-            scope: RwLock::new(scope),
+            name,
+            scope: RwLock::new(Scope::new()),
             tools,
             user_tools: RwLock::new(HashMap::new()),
             vfs,
             jobs,
             runner,
             exec_ctx: RwLock::new(exec_ctx),
-            skip_validation: config.skip_validation,
-            interactive: config.interactive,
+            skip_validation,
+            interactive,
         })
     }
 

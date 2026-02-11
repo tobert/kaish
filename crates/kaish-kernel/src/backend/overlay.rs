@@ -5,22 +5,12 @@
 //!
 //! # Usage
 //!
+//! Prefer using `Kernel::with_backend()` which handles overlay setup automatically:
+//!
 //! ```ignore
-//! use kaish_kernel::{VirtualOverlayBackend, KernelBackend, VfsRouter, JobFs};
-//!
-//! // Your custom backend for /docs, /g, etc.
-//! let my_backend: Arc<dyn KernelBackend> = Arc::new(MyBackend::new());
-//!
-//! // Internal VFS with JobFs mounted
-//! let mut vfs = VfsRouter::new();
-//! vfs.mount("/v/jobs", JobFs::new(job_manager.clone()));
-//! vfs.mount("/v/blobs", MemoryFs::new());
-//!
-//! // Wrap your backend with virtual overlay
-//! let backend = VirtualOverlayBackend::new(my_backend, Arc::new(vfs));
-//!
-//! // Now /v/* routes to VFS, everything else to your backend
-//! let kernel = Kernel::with_backend(Arc::new(backend), config)?;
+//! let kernel = Kernel::with_backend(my_backend, config, |vfs| {
+//!     vfs.mount_arc("/v/docs", docs_fs);
+//! })?;
 //! ```
 //!
 //! # Path Routing
