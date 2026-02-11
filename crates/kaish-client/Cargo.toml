@@ -13,8 +13,8 @@ categories.workspace = true
 readme = "../../README.md"
 
 [dependencies]
-kaish-kernel = { path = "../kaish-kernel", version = "0.1.6" }
-kaish-schema = { path = "../kaish-schema", version = "0.1.6" }
+kaish-kernel = { path = "../kaish-kernel", version = "0.1.7" }
+kaish-schema = { path = "../kaish-schema", version = "0.1.7" }
 
 # Async runtime
 tokio = { workspace = true }
