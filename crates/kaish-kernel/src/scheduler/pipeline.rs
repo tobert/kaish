@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use crate::arithmetic;
 use crate::ast::{Arg, Command, Expr, Redirect, RedirectKind, Value};
+use crate::dispatch::{CommandDispatcher, PipelinePosition};
 use crate::interpreter::{apply_output_format, ExecResult};
 use crate::tools::{extract_output_format, ExecContext, ToolArgs, ToolRegistry, ToolSchema};
 use tokio::io::AsyncWriteExt;
@@ -139,10 +140,15 @@ impl PipelineRunner {
     /// Each command's stdout becomes the next command's stdin.
     /// If the pipeline contains scatter/gather, delegates to ScatterGatherRunner.
     /// Returns the result of the last command in the pipeline.
+    ///
+    /// The `dispatcher` handles the full command resolution chain (user tools,
+    /// builtins, scripts, external commands, backend tools). The runner handles
+    /// I/O routing: stdin redirects, piping between commands, and output redirects.
     pub async fn run(
         &self,
         commands: &[Command],
         ctx: &mut ExecContext,
+        dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
         if commands.is_empty() {
             return ExecResult::success("");
@@ -155,11 +161,11 @@ impl PipelineRunner {
 
         if commands.len() == 1 {
             // Single command, no piping needed
-            return self.run_single(&commands[0], ctx, None).await;
+            return self.run_single(&commands[0], ctx, None, dispatcher).await;
         }
 
         // Multi-command pipeline
-        self.run_pipeline(commands, ctx).await
+        self.run_pipeline(commands, ctx, dispatcher).await
     }
 
     /// Run a scatter/gather pipeline.
@@ -199,24 +205,16 @@ impl PipelineRunner {
     }
 
     /// Run a single command with optional stdin.
+    ///
+    /// The dispatcher handles arg parsing, schema lookup, output format, and execution.
+    /// The runner handles stdin setup (redirects + pipeline) and output redirects.
     async fn run_single(
         &self,
         cmd: &Command,
         ctx: &mut ExecContext,
         stdin: Option<String>,
+        dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
-        // Handle built-in true/false
-        match cmd.name.as_str() {
-            "true" => return ExecResult::success(""),
-            "false" => return ExecResult::failure(1, ""),
-            _ => {}
-        }
-
-        // Build tool args with schema-aware parsing
-        let schema = self.tools.get(&cmd.name).map(|t| t.schema());
-        let mut tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
-        let output_format = extract_output_format(&mut tool_args, schema.as_ref());
-
         // Set up stdin from redirects (< file, <<heredoc)
         setup_stdin_redirects(cmd, ctx);
 
@@ -225,23 +223,13 @@ impl PipelineRunner {
             ctx.set_stdin(input);
         }
 
-        // Execute via backend (clone Arc to avoid borrow conflict)
-        let backend = ctx.backend.clone();
-        let result = match backend.call_tool(&cmd.name, tool_args, ctx).await {
-            Ok(tool_result) => {
-                let mut exec = ExecResult::from_output(
-                    tool_result.code as i64, tool_result.stdout, tool_result.stderr,
-                );
-                exec.output = tool_result.output;
-                exec
-            }
-            Err(e) => ExecResult::failure(127, e.to_string()),
-        };
+        // Set pipeline position for stdio inheritance decisions
+        ctx.pipeline_position = PipelinePosition::Only;
 
-        // Apply output format transform
-        let result = match output_format {
-            Some(format) => apply_output_format(result, format),
-            None => result,
+        // Execute via dispatcher (full resolution chain)
+        let result = match dispatcher.dispatch(cmd, ctx).await {
+            Ok(result) => result,
+            Err(e) => ExecResult::failure(1, e.to_string()),
         };
 
         // Apply post-execution redirects
@@ -249,24 +237,21 @@ impl PipelineRunner {
     }
 
     /// Run a multi-command pipeline.
+    ///
+    /// Each command's stdout becomes the next command's stdin.
+    /// The dispatcher handles execution; the runner handles I/O routing.
     async fn run_pipeline(
         &self,
         commands: &[Command],
         ctx: &mut ExecContext,
+        dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
-        // We'll run commands sequentially for simplicity, passing stdout as stdin
-        // A more sophisticated implementation would use tokio::spawn for true parallelism
-
         let mut current_stdin: Option<String> = None;
         let mut current_data: Option<Value> = None;
         let mut last_result = ExecResult::success("");
+        let last_idx = commands.len() - 1;
 
         for (i, cmd) in commands.iter().enumerate() {
-            // Build tool args with schema-aware parsing
-            let schema = self.tools.get(&cmd.name).map(|t| t.schema());
-            let mut tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
-            let output_format = extract_output_format(&mut tool_args, schema.as_ref());
-
             // Set up stdin from redirects (< file, <<heredoc)
             setup_stdin_redirects(cmd, ctx);
 
@@ -276,23 +261,17 @@ impl PipelineRunner {
                 ctx.set_stdin_with_data(input, current_data.take());
             }
 
-            // Execute via backend (clone Arc to avoid borrow conflict)
-            let backend = ctx.backend.clone();
-            last_result = match backend.call_tool(&cmd.name, tool_args, ctx).await {
-                Ok(tool_result) => {
-                    let mut exec = ExecResult::from_output(
-                        tool_result.code as i64, tool_result.stdout, tool_result.stderr,
-                    );
-                    exec.output = tool_result.output;
-                    exec
-                }
-                Err(e) => ExecResult::failure(127, e.to_string()),
+            // Set pipeline position for stdio inheritance decisions
+            ctx.pipeline_position = match i {
+                0 => PipelinePosition::First,
+                n if n == last_idx => PipelinePosition::Last,
+                _ => PipelinePosition::Middle,
             };
 
-            // Apply output format transform
-            last_result = match output_format {
-                Some(format) => apply_output_format(last_result, format),
-                None => last_result,
+            // Execute via dispatcher (full resolution chain)
+            last_result = match dispatcher.dispatch(cmd, ctx).await {
+                Ok(result) => result,
+                Err(e) => ExecResult::failure(1, e.to_string()),
             };
 
             // Apply post-execution redirects
@@ -304,7 +283,7 @@ impl PipelineRunner {
             }
 
             // Pass stdout and structured data to next command's stdin (unless last command)
-            if i < commands.len() - 1 {
+            if i < last_idx {
                 current_stdin = Some(last_result.out.clone());
                 current_data = last_result.data.clone();
             }
@@ -317,16 +296,24 @@ impl PipelineRunner {
 /// Extract parameter types from a tool schema.
 ///
 /// Returns a map from param name → param type (e.g., "verbose" → "bool", "output" → "string").
-fn schema_param_types(schema: &ToolSchema) -> HashMap<&str, &str> {
-    schema
-        .params
-        .iter()
-        .map(|p| (p.name.as_str(), p.param_type.as_str()))
-        .collect()
+/// Build a map from flag name → (canonical param name, param type).
+///
+/// Includes both primary names and aliases (with dashes stripped).
+/// For short flags like `-n` aliased to `lines`, maps `"n"` → `("lines", "int")`.
+pub fn schema_param_lookup(schema: &ToolSchema) -> HashMap<String, (&str, &str)> {
+    let mut map = HashMap::new();
+    for p in &schema.params {
+        map.insert(p.name.clone(), (p.name.as_str(), p.param_type.as_str()));
+        for alias in &p.aliases {
+            let stripped = alias.trim_start_matches('-');
+            map.insert(stripped.to_string(), (p.name.as_str(), p.param_type.as_str()));
+        }
+    }
+    map
 }
 
 /// Check if a type is considered boolean.
-fn is_bool_type(param_type: &str) -> bool {
+pub fn is_bool_type(param_type: &str) -> bool {
     matches!(param_type.to_lowercase().as_str(), "bool" | "boolean")
 }
 
@@ -339,7 +326,7 @@ fn is_bool_type(param_type: &str) -> bool {
 /// This enables natural shell syntax like `mcp_tool --query "test" --limit 10`.
 pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSchema>) -> ToolArgs {
     let mut tool_args = ToolArgs::new();
-    let param_types = schema.map(schema_param_types).unwrap_or_default();
+    let param_lookup = schema.map(schema_param_lookup).unwrap_or_default();
 
     // Track which positional indices have been consumed as flag values
     let mut consumed_positionals: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -377,10 +364,38 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
             }
             Arg::ShortFlag(name) => {
                 if past_double_dash {
-                    // After --, treat as positional (though parser wouldn't emit this)
                     tool_args.positional.push(Value::String(format!("-{name}")));
+                } else if name.len() == 1 {
+                    // Single-char short flag: look up schema to check if it takes a value.
+                    // e.g., `-n 5` where `-n` is an alias for `lines` (type: int)
+                    let flag_name = name.as_str();
+                    let lookup = param_lookup.get(flag_name);
+                    let is_bool = lookup
+                        .map(|(_, typ)| is_bool_type(typ))
+                        .unwrap_or(true);
+
+                    if is_bool {
+                        tool_args.flags.insert(flag_name.to_string());
+                    } else {
+                        // Non-bool: consume next positional as value, insert under canonical name
+                        let canonical = lookup.map(|(name, _)| *name).unwrap_or(flag_name);
+                        let next_positional = positional_indices
+                            .iter()
+                            .find(|(idx, _)| *idx > i && !consumed_positionals.contains(idx));
+
+                        if let Some((pos_idx, expr)) = next_positional {
+                            if let Some(value) = eval_simple_expr(expr, ctx) {
+                                tool_args.named.insert(canonical.to_string(), value);
+                                consumed_positionals.insert(*pos_idx);
+                            } else {
+                                tool_args.flags.insert(flag_name.to_string());
+                            }
+                        } else {
+                            tool_args.flags.insert(flag_name.to_string());
+                        }
+                    }
                 } else {
-                    // Expand combined flags like -la
+                    // Multi-char combined flags like -la: always boolean
                     for c in name.chars() {
                         tool_args.flags.insert(c.to_string());
                     }
@@ -388,36 +403,31 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
             }
             Arg::LongFlag(name) => {
                 if past_double_dash {
-                    // After --, treat as positional (though parser wouldn't emit this)
                     tool_args.positional.push(Value::String(format!("--{name}")));
                 } else {
-                    // Look up type in schema
-                    let is_bool = param_types
-                        .get(name.as_str())
-                        .map(|t| is_bool_type(t))
-                        .unwrap_or(true); // Unknown params default to bool (backward compat)
+                    // Look up type in schema (checks name and aliases)
+                    let lookup = param_lookup.get(name.as_str());
+                    let is_bool = lookup
+                        .map(|(_, typ)| is_bool_type(typ))
+                        .unwrap_or(true); // Unknown params default to bool
 
                     if is_bool {
-                        // Boolean flag - just add to flags set
                         tool_args.flags.insert(name.clone());
                     } else {
-                        // Non-bool flag - try to consume next positional as value
-                        // Look for the next positional arg after this flag
+                        // Non-bool: consume next positional as value, insert under canonical name
+                        let canonical = lookup.map(|(name, _)| *name).unwrap_or(name.as_str());
                         let next_positional = positional_indices
                             .iter()
                             .find(|(idx, _)| *idx > i && !consumed_positionals.contains(idx));
 
                         if let Some((pos_idx, expr)) = next_positional {
                             if let Some(value) = eval_simple_expr(expr, ctx) {
-                                tool_args.named.insert(name.clone(), value);
+                                tool_args.named.insert(canonical.to_string(), value);
                                 consumed_positionals.insert(*pos_idx);
                             } else {
-                                // Expression didn't evaluate - treat as bool flag
                                 tool_args.flags.insert(name.clone());
                             }
                         } else {
-                            // No positional available - treat as bool flag
-                            // (Could be an error, but we're lenient for compatibility)
                             tool_args.flags.insert(name.clone());
                         }
                     }
@@ -694,15 +704,17 @@ pub async fn run_sequential_pipeline_owned(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatch::BackendDispatcher;
     use crate::tools::register_builtins;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::path::Path;
 
-    async fn make_runner_and_ctx() -> (PipelineRunner, ExecContext) {
+    async fn make_runner_and_ctx() -> (PipelineRunner, ExecContext, BackendDispatcher) {
         let mut tools = ToolRegistry::new();
         register_builtins(&mut tools);
         let tools = Arc::new(tools);
         let runner = PipelineRunner::new(tools.clone());
+        let dispatcher = BackendDispatcher::new(tools.clone());
 
         let mut vfs = VfsRouter::new();
         let mem = MemoryFs::new();
@@ -710,7 +722,7 @@ mod tests {
         vfs.mount("/", mem);
         let ctx = ExecContext::with_vfs_and_tools(Arc::new(vfs), tools);
 
-        (runner, ctx)
+        (runner, ctx, dispatcher)
     }
 
     fn make_cmd(name: &str, args: Vec<&str>) -> Command {
@@ -723,17 +735,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_command() {
-        let (runner, mut ctx) = make_runner_and_ctx().await;
+        let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
         let cmd = make_cmd("echo", vec!["hello"]);
 
-        let result = runner.run(&[cmd], &mut ctx).await;
+        let result = runner.run(&[cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok());
         assert_eq!(result.out.trim(), "hello");
     }
 
     #[tokio::test]
     async fn test_pipeline_echo_grep() {
-        let (runner, mut ctx) = make_runner_and_ctx().await;
+        let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
         // echo "hello\nworld" | grep pattern="world"
         let echo_cmd = Command {
@@ -747,14 +759,14 @@ mod tests {
             redirects: vec![],
         };
 
-        let result = runner.run(&[echo_cmd, grep_cmd], &mut ctx).await;
+        let result = runner.run(&[echo_cmd, grep_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok());
         assert_eq!(result.out.trim(), "world");
     }
 
     #[tokio::test]
     async fn test_pipeline_cat_grep() {
-        let (runner, mut ctx) = make_runner_and_ctx().await;
+        let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
         // cat /test.txt | grep pattern="hello"
         let cat_cmd = make_cmd("cat", vec!["/test.txt"]);
@@ -764,17 +776,17 @@ mod tests {
             redirects: vec![],
         };
 
-        let result = runner.run(&[cat_cmd, grep_cmd], &mut ctx).await;
+        let result = runner.run(&[cat_cmd, grep_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok());
         assert!(result.out.contains("hello"));
     }
 
     #[tokio::test]
     async fn test_command_not_found() {
-        let (runner, mut ctx) = make_runner_and_ctx().await;
+        let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
         let cmd = make_cmd("nonexistent", vec![]);
 
-        let result = runner.run(&[cmd], &mut ctx).await;
+        let result = runner.run(&[cmd], &mut ctx, &dispatcher).await;
         assert!(!result.ok());
         assert_eq!(result.code, 127);
         assert!(result.err.contains("not found"));
@@ -782,7 +794,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipeline_stops_on_failure() {
-        let (runner, mut ctx) = make_runner_and_ctx().await;
+        let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
         // cat /nonexistent | grep "hello"
         let cat_cmd = make_cmd("cat", vec!["/nonexistent"]);
@@ -792,14 +804,14 @@ mod tests {
             redirects: vec![],
         };
 
-        let result = runner.run(&[cat_cmd, grep_cmd], &mut ctx).await;
+        let result = runner.run(&[cat_cmd, grep_cmd], &mut ctx, &dispatcher).await;
         assert!(!result.ok());
     }
 
     #[tokio::test]
     async fn test_empty_pipeline() {
-        let (runner, mut ctx) = make_runner_and_ctx().await;
-        let result = runner.run(&[], &mut ctx).await;
+        let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
+        let result = runner.run(&[], &mut ctx, &dispatcher).await;
         assert!(result.ok());
     }
 
@@ -849,7 +861,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_scatter_gather_simple() {
-        let (runner, mut ctx) = make_runner_and_ctx().await;
+        let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
         // echo "a\nb\nc" | scatter | echo ${ITEM} | gather
         let echo_cmd = Command {
@@ -865,7 +877,7 @@ mod tests {
         };
         let gather_cmd = make_cmd("gather", vec![]);
 
-        let result = runner.run(&[echo_cmd, scatter_cmd, process_cmd, gather_cmd], &mut ctx).await;
+        let result = runner.run(&[echo_cmd, scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok());
         // Each echo should output the item
         assert!(result.out.contains("a"));
@@ -875,7 +887,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_scatter_gather_empty_input() {
-        let (runner, mut ctx) = make_runner_and_ctx().await;
+        let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
         // echo "" | scatter | echo ${ITEM} | gather
         let echo_cmd = Command {
@@ -891,14 +903,14 @@ mod tests {
         };
         let gather_cmd = make_cmd("gather", vec![]);
 
-        let result = runner.run(&[echo_cmd, scatter_cmd, process_cmd, gather_cmd], &mut ctx).await;
+        let result = runner.run(&[echo_cmd, scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok());
         assert!(result.out.trim().is_empty());
     }
 
     #[tokio::test]
     async fn test_scatter_gather_with_stdin() {
-        let (runner, mut ctx) = make_runner_and_ctx().await;
+        let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
         // Set stdin directly and use scatter | echo | gather
         ctx.set_stdin("x\ny\nz".to_string());
@@ -911,7 +923,7 @@ mod tests {
         };
         let gather_cmd = make_cmd("gather", vec![]);
 
-        let result = runner.run(&[scatter_cmd, process_cmd, gather_cmd], &mut ctx).await;
+        let result = runner.run(&[scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok());
         assert!(result.out.contains("x"));
         assert!(result.out.contains("y"));
@@ -920,7 +932,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_scatter_gather_json_input() {
-        let (runner, mut ctx) = make_runner_and_ctx().await;
+        let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
         // JSON array input
         ctx.set_stdin(r#"["one", "two", "three"]"#.to_string());
@@ -933,7 +945,7 @@ mod tests {
         };
         let gather_cmd = make_cmd("gather", vec![]);
 
-        let result = runner.run(&[scatter_cmd, process_cmd, gather_cmd], &mut ctx).await;
+        let result = runner.run(&[scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok());
         assert!(result.out.contains("one"));
         assert!(result.out.contains("two"));
@@ -942,7 +954,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_scatter_gather_with_post_gather() {
-        let (runner, mut ctx) = make_runner_and_ctx().await;
+        let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
         // echo "a\nb" | scatter | echo ${ITEM} | gather | grep "a"
         let echo_cmd = Command {
@@ -963,7 +975,7 @@ mod tests {
             redirects: vec![],
         };
 
-        let result = runner.run(&[echo_cmd, scatter_cmd, process_cmd, gather_cmd, grep_cmd], &mut ctx).await;
+        let result = runner.run(&[echo_cmd, scatter_cmd, process_cmd, gather_cmd, grep_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok());
         assert!(result.out.contains("a"));
         assert!(!result.out.contains("b"));
@@ -971,7 +983,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_scatter_custom_var_name() {
-        let (runner, mut ctx) = make_runner_and_ctx().await;
+        let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
         ctx.set_stdin("test1\ntest2".to_string());
 
@@ -991,7 +1003,7 @@ mod tests {
         };
         let gather_cmd = make_cmd("gather", vec![]);
 
-        let result = runner.run(&[scatter_cmd, process_cmd, gather_cmd], &mut ctx).await;
+        let result = runner.run(&[scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok());
         assert!(result.out.contains("test1"));
         assert!(result.out.contains("test2"));
@@ -1011,13 +1023,14 @@ mod tests {
         // Create context with mock backend
         let mut ctx = crate::tools::ExecContext::with_backend(backend);
 
-        // Create a dummy tool registry (not used since backend intercepts)
+        // BackendDispatcher routes through backend.call_tool()
         let tools = std::sync::Arc::new(ToolRegistry::new());
-        let runner = PipelineRunner::new(tools);
+        let runner = PipelineRunner::new(tools.clone());
+        let dispatcher = BackendDispatcher::new(tools);
 
         // Single command should route through backend
         let cmd = make_cmd("test-tool", vec!["arg1"]);
-        let result = runner.run(&[cmd], &mut ctx).await;
+        let result = runner.run(&[cmd], &mut ctx, &dispatcher).await;
 
         assert!(result.ok(), "Mock backend should return success");
         assert_eq!(call_count.load(Ordering::SeqCst), 1, "call_tool should be invoked once");
@@ -1034,14 +1047,15 @@ mod tests {
         let mut ctx = crate::tools::ExecContext::with_backend(backend);
 
         let tools = std::sync::Arc::new(ToolRegistry::new());
-        let runner = PipelineRunner::new(tools);
+        let runner = PipelineRunner::new(tools.clone());
+        let dispatcher = BackendDispatcher::new(tools);
 
         // Pipeline with 3 commands
         let cmd1 = make_cmd("tool1", vec![]);
         let cmd2 = make_cmd("tool2", vec![]);
         let cmd3 = make_cmd("tool3", vec![]);
 
-        let result = runner.run(&[cmd1, cmd2, cmd3], &mut ctx).await;
+        let result = runner.run(&[cmd1, cmd2, cmd3], &mut ctx, &dispatcher).await;
 
         assert!(result.ok());
         assert_eq!(call_count.load(Ordering::SeqCst), 3, "call_tool should be invoked for each command");
@@ -1286,6 +1300,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_short_flag_with_alias_consumes_value() {
+        // `-n 5` where `-n` is aliased to `lines` (type: int)
+        // Should produce named: {"lines": 5}, not flags: {"n"} + positional: [5]
+        let schema = ToolSchema::new("head", "Output first part of files")
+            .param(ParamSchema::optional("lines", "int", Value::Int(10), "Number of lines")
+                .with_aliases(["-n"]));
+        let args = vec![
+            Arg::ShortFlag("n".to_string()),
+            Arg::Positional(Expr::Literal(Value::Int(5))),
+            Arg::Positional(Expr::Literal(Value::String("/tmp/file.txt".to_string()))),
+        ];
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        assert!(tool_args.flags.is_empty(), "no boolean flags: {:?}", tool_args.flags);
+        assert_eq!(tool_args.named.get("lines"), Some(&Value::Int(5)), "should resolve alias to canonical name");
+        assert_eq!(tool_args.positional, vec![Value::String("/tmp/file.txt".to_string())]);
+    }
+
     // === Redirect Execution Tests ===
 
     #[tokio::test]
@@ -1345,7 +1380,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_redirect_with_command_execution() {
-        let (runner, mut ctx) = make_runner_and_ctx().await;
+        let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
         // echo "hello" with 2>&1 redirect
         let cmd = Command {
@@ -1357,7 +1392,7 @@ mod tests {
             }],
         };
 
-        let result = runner.run(&[cmd], &mut ctx).await;
+        let result = runner.run(&[cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok());
         // echo produces no stderr, so this just validates the redirect doesn't break anything
         assert!(result.out.contains("hello"));
@@ -1365,7 +1400,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_stderr_in_pipeline() {
-        let (runner, mut ctx) = make_runner_and_ctx().await;
+        let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
         // echo "output" 2>&1 | grep "output"
         // The 2>&1 should be applied to echo's result, then piped to grep
@@ -1383,7 +1418,7 @@ mod tests {
             redirects: vec![],
         };
 
-        let result = runner.run(&[echo_cmd, grep_cmd], &mut ctx).await;
+        let result = runner.run(&[echo_cmd, grep_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok(), "result failed: code={}, err={}", result.code, result.err);
         assert!(result.out.contains("output"));
     }

@@ -29,12 +29,15 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 
-use crate::ast::{Arg, Expr, Stmt, StringPart, ToolDef, Value, BinaryOp};
+use async_trait::async_trait;
+
+use crate::ast::{Arg, Command, Expr, Stmt, StringPart, ToolDef, Value, BinaryOp};
 use crate::backend::{BackendError, KernelBackend};
 use kaish_glob::glob_match;
+use crate::dispatch::{CommandDispatcher, PipelinePosition};
 use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value, value_to_string, ControlFlow, ExecResult, Scope};
 use crate::parser::parse;
-use crate::scheduler::{drain_to_stream, BoundedStream, JobManager, PipelineRunner, DEFAULT_STREAM_MAX_SIZE};
+use crate::scheduler::{drain_to_stream, is_bool_type, schema_param_lookup, BoundedStream, JobManager, PipelineRunner, DEFAULT_STREAM_MAX_SIZE};
 use crate::tools::{extract_output_format, register_builtins, resolve_in_path, ExecContext, ToolArgs, ToolRegistry};
 use crate::validator::{Severity, Validator};
 use crate::vfs::{JobFs, LocalFs, MemoryFs, VfsRouter};
@@ -590,7 +593,7 @@ impl Kernel {
     fn execute_stmt_flow<'a>(
         &'a self,
         stmt: &'a Stmt,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ControlFlow>> + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ControlFlow>> + Send + 'a>> {
         Box::pin(async move {
         match stmt {
             Stmt::Assignment(assign) => {
@@ -611,7 +614,13 @@ impl Kernel {
                 Ok(ControlFlow::ok(ExecResult::success("")))
             }
             Stmt::Command(cmd) => {
-                let result = self.execute_command(&cmd.name, &cmd.args).await?;
+                // Route single commands through execute_pipeline for a unified path.
+                // This ensures all commands go through the dispatcher chain.
+                let pipeline = crate::ast::Pipeline {
+                    commands: vec![cmd.clone()],
+                    background: false,
+                };
+                let result = self.execute_pipeline(&pipeline).await?;
                 self.update_last_result(&result).await;
 
                 // Check for error exit mode (set -e)
@@ -932,22 +941,38 @@ impl Kernel {
             return self.execute_background(pipeline).await;
         }
 
-        // For single command without redirects, execute directly for efficiency
-        if pipeline.commands.len() == 1 && pipeline.commands[0].redirects.is_empty() {
-            let cmd = &pipeline.commands[0];
-            return self.execute_command(&cmd.name, &cmd.args).await;
-        }
-
-        // Pipeline with redirects or multiple commands uses the runner
-        let mut ctx = self.exec_ctx.write().await;
-        {
+        // All commands go through the runner with the Kernel as dispatcher.
+        // This is the single execution path — no fast path for single commands.
+        //
+        // IMPORTANT: We snapshot exec_ctx into a local context and release the
+        // lock before running. This prevents deadlocks when dispatch_command
+        // is called from within the pipeline and recursively triggers another
+        // pipeline (e.g., via user-defined tools).
+        let mut ctx = {
+            let ec = self.exec_ctx.read().await;
             let scope = self.scope.read().await;
-            ctx.scope = scope.clone();
-        }
+            ExecContext {
+                backend: ec.backend.clone(),
+                scope: scope.clone(),
+                cwd: ec.cwd.clone(),
+                prev_cwd: ec.prev_cwd.clone(),
+                stdin: None,
+                stdin_data: None,
+                tool_schemas: ec.tool_schemas.clone(),
+                tools: ec.tools.clone(),
+                job_manager: ec.job_manager.clone(),
+                pipeline_position: PipelinePosition::Only,
+            }
+        }; // locks released
 
-        let result = self.runner.run(&pipeline.commands, &mut ctx).await;
+        let result = self.runner.run(&pipeline.commands, &mut ctx, self).await;
 
         // Sync changes back from context
+        {
+            let mut ec = self.exec_ctx.write().await;
+            ec.cwd = ctx.cwd.clone();
+            ec.prev_cwd = ctx.prev_cwd.clone();
+        }
         {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
@@ -1009,11 +1034,15 @@ impl Kernel {
             let mut bg_ctx = ExecContext::with_backend(backend);
             bg_ctx.scope = scope;
             bg_ctx.cwd = cwd;
-            bg_ctx.set_tools(tools);
+            bg_ctx.set_tools(tools.clone());
             bg_ctx.set_tool_schemas(tool_schemas);
 
+            // Use BackendDispatcher for background jobs (builtins only).
+            // Full Kernel dispatch requires Arc<Kernel> — planned for a future phase.
+            let dispatcher = crate::dispatch::BackendDispatcher::new(tools);
+
             // Execute the pipeline
-            let result = runner.run(&commands, &mut bg_ctx).await;
+            let result = runner.run(&commands, &mut bg_ctx, &dispatcher).await;
 
             // Write output to streams
             if !result.out.is_empty() {
@@ -1127,7 +1156,7 @@ impl Kernel {
                 }
 
                 // Try backend-registered tools (embedder engines, MCP tools, etc.)
-                let tool_args = self.build_args_async(args).await?;
+                let tool_args = self.build_args_async(args, None).await?;
                 let mut ctx = self.exec_ctx.write().await;
                 {
                     let scope = self.scope.read().await;
@@ -1156,9 +1185,10 @@ impl Kernel {
             }
         };
 
-        // Build arguments (async to support command substitution)
-        let mut tool_args = self.build_args_async(args).await?;
-        let output_format = extract_output_format(&mut tool_args, Some(&tool.schema()));
+        // Build arguments (async to support command substitution, schema-aware for flag values)
+        let schema = tool.schema();
+        let mut tool_args = self.build_args_async(args, Some(&schema)).await?;
+        let output_format = extract_output_format(&mut tool_args, Some(&schema));
 
         // Execute
         let mut ctx = self.exec_ctx.write().await;
@@ -1186,36 +1216,100 @@ impl Kernel {
     /// Build tool arguments from AST args.
     ///
     /// Uses async evaluation to support command substitution in arguments.
-    async fn build_args_async(&self, args: &[Arg]) -> Result<ToolArgs> {
+    async fn build_args_async(&self, args: &[Arg], schema: Option<&crate::tools::ToolSchema>) -> Result<ToolArgs> {
         let mut tool_args = ToolArgs::new();
+        let param_lookup = schema.map(schema_param_lookup).unwrap_or_default();
 
-        for arg in args {
-            match arg {
+        // Track which positional indices have been consumed as flag values
+        let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut past_double_dash = false;
+
+        // Find positional arg indices for flag value consumption
+        let positional_indices: Vec<usize> = args.iter().enumerate()
+            .filter_map(|(i, a)| matches!(a, Arg::Positional(_)).then_some(i))
+            .collect();
+
+        let mut i = 0;
+        while i < args.len() {
+            match &args[i] {
+                Arg::DoubleDash => {
+                    past_double_dash = true;
+                }
                 Arg::Positional(expr) => {
-                    let value = self.eval_expr_async(expr).await?;
-                    // Apply tilde expansion to string values
-                    let value = apply_tilde_expansion(value);
-                    tool_args.positional.push(value);
+                    if !consumed.contains(&i) {
+                        let value = self.eval_expr_async(expr).await?;
+                        let value = apply_tilde_expansion(value);
+                        tool_args.positional.push(value);
+                    }
                 }
                 Arg::Named { key, value } => {
                     let val = self.eval_expr_async(value).await?;
-                    // Apply tilde expansion to string values
                     let val = apply_tilde_expansion(val);
                     tool_args.named.insert(key.clone(), val);
                 }
                 Arg::ShortFlag(name) => {
-                    for c in name.chars() {
-                        tool_args.flags.insert(c.to_string());
+                    if past_double_dash {
+                        tool_args.positional.push(Value::String(format!("-{name}")));
+                    } else if name.len() == 1 {
+                        let flag_name = name.as_str();
+                        let lookup = param_lookup.get(flag_name);
+                        let is_bool = lookup.map(|(_, typ)| is_bool_type(typ)).unwrap_or(true);
+
+                        if is_bool {
+                            tool_args.flags.insert(flag_name.to_string());
+                        } else {
+                            // Non-bool: consume next positional as value
+                            let canonical = lookup.map(|(name, _)| *name).unwrap_or(flag_name);
+                            let next_pos = positional_indices.iter()
+                                .find(|idx| **idx > i && !consumed.contains(idx));
+
+                            if let Some(&pos_idx) = next_pos {
+                                if let Arg::Positional(expr) = &args[pos_idx] {
+                                    let value = self.eval_expr_async(expr).await?;
+                                    let value = apply_tilde_expansion(value);
+                                    tool_args.named.insert(canonical.to_string(), value);
+                                    consumed.insert(pos_idx);
+                                }
+                            } else {
+                                tool_args.flags.insert(flag_name.to_string());
+                            }
+                        }
+                    } else {
+                        // Multi-char combined flags like -la: always boolean
+                        for c in name.chars() {
+                            tool_args.flags.insert(c.to_string());
+                        }
                     }
                 }
                 Arg::LongFlag(name) => {
-                    tool_args.flags.insert(name.clone());
-                }
-                Arg::DoubleDash => {
-                    // Marker for end of flags - no action needed here,
-                    // subsequent flags were converted to positional during parsing
+                    if past_double_dash {
+                        tool_args.positional.push(Value::String(format!("--{name}")));
+                    } else {
+                        let lookup = param_lookup.get(name.as_str());
+                        let is_bool = lookup.map(|(_, typ)| is_bool_type(typ)).unwrap_or(true);
+
+                        if is_bool {
+                            tool_args.flags.insert(name.clone());
+                        } else {
+                            let canonical = lookup.map(|(name, _)| *name).unwrap_or(name.as_str());
+                            let next_pos = positional_indices.iter()
+                                .find(|idx| **idx > i && !consumed.contains(idx));
+
+                            if let Some(&pos_idx) = next_pos {
+                                if let Arg::Positional(expr) = &args[pos_idx] {
+                                    let value = self.eval_expr_async(expr).await?;
+                                    let value = apply_tilde_expansion(value);
+                                    tool_args.named.insert(canonical.to_string(), value);
+                                    consumed.insert(pos_idx);
+                                }
+                            } else {
+                                tool_args.flags.insert(name.clone());
+                            }
+                        }
+                    }
                 }
             }
+            i += 1;
         }
 
         Ok(tool_args)
@@ -1265,7 +1359,7 @@ impl Kernel {
     ///
     /// This is used for contexts where expressions may contain `$(...)` command
     /// substitution. Unlike the sync `eval_expr`, this can execute pipelines.
-    fn eval_expr_async<'a>(&'a self, expr: &'a Expr) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + 'a>> {
+    fn eval_expr_async<'a>(&'a self, expr: &'a Expr) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
         Box::pin(async move {
         match expr {
             Expr::Literal(value) => Ok(value.clone()),
@@ -1383,7 +1477,7 @@ impl Kernel {
     }
 
     /// Async helper to evaluate multiple StringParts into a single string.
-    fn eval_string_parts_async<'a>(&'a self, parts: &'a [StringPart]) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + 'a>> {
+    fn eval_string_parts_async<'a>(&'a self, parts: &'a [StringPart]) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(async move {
             let mut result = String::new();
             for part in parts {
@@ -1394,7 +1488,7 @@ impl Kernel {
     }
 
     /// Async helper to evaluate a StringPart.
-    fn eval_string_part_async<'a>(&'a self, part: &'a StringPart) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + 'a>> {
+    fn eval_string_part_async<'a>(&'a self, part: &'a StringPart) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(async move {
             match part {
                 StringPart::Literal(s) => Ok(s.clone()),
@@ -1479,7 +1573,7 @@ impl Kernel {
     /// scopes (or create in root if new).
     async fn execute_user_tool(&self, def: ToolDef, args: &[Arg]) -> Result<ExecResult> {
         // 1. Build function args from AST args (async to support command substitution)
-        let tool_args = self.build_args_async(args).await?;
+        let tool_args = self.build_args_async(args, None).await?;
 
         // 2. Push a new scope frame for local variables
         {
@@ -1578,7 +1672,7 @@ impl Kernel {
     /// allowing the sourced script to set variables and modify shell state.
     async fn execute_source(&self, args: &[Arg]) -> Result<ExecResult> {
         // Get the file path from the first positional argument
-        let tool_args = self.build_args_async(args).await?;
+        let tool_args = self.build_args_async(args, None).await?;
         let path = match tool_args.positional.first() {
             Some(Value::String(s)) => s.clone(),
             Some(v) => value_to_string(v),
@@ -1737,7 +1831,7 @@ impl Kernel {
             };
 
             // Build tool_args from args (async for command substitution support)
-            let tool_args = self.build_args_async(args).await?;
+            let tool_args = self.build_args_async(args, None).await?;
 
             // Create isolated scope (like user tools)
             let mut isolated_scope = Scope::new();
@@ -2093,6 +2187,59 @@ impl Kernel {
         // Wait for all background jobs
         self.jobs.wait_all().await;
         Ok(())
+    }
+
+    /// Dispatch a single command using the full resolution chain.
+    ///
+    /// This is the core of `CommandDispatcher` — it syncs state between the
+    /// passed-in `ExecContext` and kernel-internal state (scope, exec_ctx),
+    /// then delegates to `execute_command` for the actual dispatch.
+    ///
+    /// State flow:
+    /// 1. ctx → self: sync scope, cwd, stdin so internal methods see current state
+    /// 2. execute_command: full dispatch chain (user tools, builtins, scripts, external, backend)
+    /// 3. self → ctx: sync scope, cwd changes back so the pipeline runner sees them
+    async fn dispatch_command(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult> {
+        // 1. Sync ctx → self internals
+        {
+            let mut scope = self.scope.write().await;
+            *scope = ctx.scope.clone();
+        }
+        {
+            let mut ec = self.exec_ctx.write().await;
+            ec.cwd = ctx.cwd.clone();
+            ec.prev_cwd = ctx.prev_cwd.clone();
+            ec.stdin = ctx.stdin.take();
+            ec.stdin_data = ctx.stdin_data.take();
+        }
+
+        // 2. Execute via the full dispatch chain
+        let result = self.execute_command(&cmd.name, &cmd.args).await?;
+
+        // 3. Sync self → ctx
+        {
+            let scope = self.scope.read().await;
+            ctx.scope = scope.clone();
+        }
+        {
+            let ec = self.exec_ctx.read().await;
+            ctx.cwd = ec.cwd.clone();
+            ctx.prev_cwd = ec.prev_cwd.clone();
+        }
+
+        Ok(result)
+    }
+}
+
+#[async_trait]
+impl CommandDispatcher for Kernel {
+    /// Dispatch a command through the Kernel's full resolution chain.
+    ///
+    /// This is the single path for all command execution when called from
+    /// the pipeline runner. It provides the full dispatch chain:
+    /// user tools → builtins → .kai scripts → external commands → backend tools.
+    async fn dispatch(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult> {
+        self.dispatch_command(cmd, ctx).await
     }
 }
 
