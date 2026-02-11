@@ -132,8 +132,9 @@ Kernel (核)
 ```
 crates/
 ├── kaish-schema/    # Cap'n Proto codegen from schema/kaish.capnp
+├── kaish-glob/      # Glob matching and async file walking with gitignore support
 ├── kaish-kernel/    # Core: lexer, parser, interpreter, tools, VFS, validator
-├── kaish-mcp/       # MCP client integration (consuming external MCP tools)
+├── kaish-mcp/       # MCP server + client (expose kaish tools, consume external MCP tools)
 ├── kaish-client/    # Client implementations (embedded, IPC)
 └── kaish-repl/      # Interactive REPL with rustyline
 ```

@@ -1,7 +1,7 @@
 # kaish (会sh)
 
 A predictable shell for AI agents. A distilled Bourne-like shell with builtin
-core utiltities. Kaish is embeddable, has stronger validation ahead of execution,
+core utilities. Kaish is embeddable, has stronger validation ahead of execution,
 and can embed MCPs as commands.
 
 ## Install
@@ -10,7 +10,7 @@ and can embed MCPs as commands.
 cargo install kaish
 ```
 
-This is preferred for now whil kaish is still experimental. Containers and binaries
+This is preferred for now while kaish is still experimental. Containers and binaries
 are in future plans when things stabilize a bit more and I have time (or PRs!).
 
 ## Why kaish?
@@ -69,7 +69,7 @@ seq 1 10 | scatter as=N limit=4 | echo "processing $N" | gather
 
 | Feature | Description |
 |---------|-------------|
-| **Bourne-compatible** | Variables, pipes, control flow, functions — familiar syntax |
+| **Familiar syntax** | Variables, pipes, control flow, functions — Bourne-inspired, modern semantics |
 | **Builtins** | grep, jq, git, find, sed, awk, diff, patch, and more — all in-process |
 | **Structured data** | Commands return typed arrays — `for i in $(seq 1 5)` iterates 5 values, not word-split text |
 | **Strict validation** | Errors caught before execution with clear messages |
