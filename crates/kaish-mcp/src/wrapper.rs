@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use opentelemetry::trace::TraceContextExt;
 use rmcp::model::{RawContent, ResourceContents, Tool as McpTool};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use kaish_kernel::ast::Value;
 use kaish_kernel::interpreter::ExecResult;
@@ -147,6 +149,7 @@ impl Tool for McpToolWrapper {
         schema
     }
 
+    #[tracing::instrument(level = "info", skip(args, _ctx), fields(mcp_server = %self.client.name(), tool = %self.mcp_tool.name))]
     async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
         // Get parameter names for positional arg mapping
         let param_names = self.param_names();
@@ -154,8 +157,29 @@ impl Tool for McpToolWrapper {
         // Convert kaish args to JSON arguments
         let arguments = args_to_json(&args, &param_names);
 
+        // Build trace context meta for outbound propagation
+        let cx = tracing::Span::current().context();
+        let span_ref = cx.span();
+        let sc = span_ref.span_context();
+        let meta = if sc.is_valid() {
+            let mut m = serde_json::Map::new();
+            m.insert(
+                "traceparent".into(),
+                format!(
+                    "00-{}-{}-{:02x}",
+                    sc.trace_id(),
+                    sc.span_id(),
+                    sc.trace_flags().to_u8()
+                )
+                .into(),
+            );
+            Some(m)
+        } else {
+            None
+        };
+
         // Call the MCP tool
-        match self.client.call_tool(&self.mcp_tool.name, arguments).await {
+        match self.client.call_tool(&self.mcp_tool.name, arguments, meta).await {
             Ok(result) => {
                 // Extract text content from the result
                 let mut output = String::new();

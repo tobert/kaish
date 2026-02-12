@@ -66,7 +66,7 @@ async fn execute_script_with_opts(
         args.insert("timeout_ms".into(), json!(timeout_ms));
     }
 
-    let result = client.call_tool("execute", Some(args)).await?;
+    let result = client.call_tool("execute", Some(args), None).await?;
 
     // structured_content is only present on error/stderr.
     // For clean success, reconstruct from content text blocks.

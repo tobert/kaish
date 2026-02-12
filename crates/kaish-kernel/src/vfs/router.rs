@@ -168,16 +168,19 @@ impl VfsRouter {
 
 #[async_trait]
 impl Filesystem for VfsRouter {
+    #[tracing::instrument(level = "trace", skip(self), fields(path = %path.display()))]
     async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         let (fs, relative) = self.find_mount(path)?;
         fs.read(&relative).await
     }
 
+    #[tracing::instrument(level = "trace", skip(self, data), fields(path = %path.display(), size = data.len()))]
     async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
         let (fs, relative) = self.find_mount(path)?;
         fs.write(&relative, data).await
     }
 
+    #[tracing::instrument(level = "trace", skip(self), fields(path = %path.display()))]
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
         // Special case: listing root might need to show mount points
         let path_str = path.to_string_lossy();
@@ -189,6 +192,7 @@ impl Filesystem for VfsRouter {
         fs.list(&relative).await
     }
 
+    #[tracing::instrument(level = "trace", skip(self), fields(path = %path.display()))]
     async fn stat(&self, path: &Path) -> io::Result<Metadata> {
         // Special case: root always exists
         let path_str = path.to_string_lossy();

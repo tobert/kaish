@@ -451,6 +451,7 @@ impl Kernel {
     ///
     /// External commands in interactive mode already stream to the terminal
     /// via `Stdio::inherit()`, so the callback mainly handles builtins.
+    #[tracing::instrument(level = "info", skip(self, on_output), fields(input_len = input.len()))]
     pub async fn execute_streaming(
         &self,
         input: &str,
@@ -532,6 +533,8 @@ impl Kernel {
         &'a self,
         stmt: &'a Stmt,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ControlFlow>> + Send + 'a>> {
+        use tracing::Instrument;
+        let span = tracing::debug_span!("execute_stmt_flow", stmt_type = %stmt.kind_name());
         Box::pin(async move {
         match stmt {
             Stmt::Assignment(assign) => {
@@ -865,10 +868,11 @@ impl Kernel {
             }
             Stmt::Empty => Ok(ControlFlow::ok(ExecResult::success(""))),
         }
-        })
+        }.instrument(span))
     }
 
     /// Execute a pipeline.
+    #[tracing::instrument(level = "debug", skip(self, pipeline), fields(background = pipeline.background, command_count = pipeline.commands.len()))]
     async fn execute_pipeline(&self, pipeline: &crate::ast::Pipeline) -> Result<ExecResult> {
         if pipeline.commands.is_empty() {
             return Ok(ExecResult::success(""));
@@ -926,6 +930,7 @@ impl Kernel {
     /// `/v/jobs/{id}/stdout`, `/v/jobs/{id}/stderr`, and `/v/jobs/{id}/status`.
     ///
     /// Returns immediately with a job ID like "[1]".
+    #[tracing::instrument(level = "debug", skip(self, pipeline), fields(command_count = pipeline.commands.len()))]
     async fn execute_background(&self, pipeline: &crate::ast::Pipeline) -> Result<ExecResult> {
         use tokio::sync::oneshot;
 
@@ -1061,6 +1066,7 @@ impl Kernel {
     }
 
     /// Execute a single command.
+    #[tracing::instrument(level = "info", skip(self, args), fields(command = %name), err)]
     async fn execute_command(&self, name: &str, args: &[Arg]) -> Result<ExecResult> {
         // Special built-ins
         match name {
@@ -1907,6 +1913,7 @@ impl Kernel {
     /// - `Ok(Some(result))` if command was found and executed
     /// - `Ok(None)` if command was not found in PATH
     /// - `Err` on execution errors
+    #[tracing::instrument(level = "debug", skip(self, args), fields(command = %name))]
     async fn try_execute_external(&self, name: &str, args: &[Arg]) -> Result<Option<ExecResult>> {
         // Skip if name contains path separator (absolute/relative paths handled differently)
         if name.contains('/') {
@@ -1927,6 +1934,8 @@ impl Kernel {
             Some(path) => path,
             None => return Ok(None), // Not found - let caller handle error
         };
+
+        tracing::debug!(executable = %executable, "resolved external command");
 
         // Get current working directory and verify it's on real filesystem
         let real_cwd = {

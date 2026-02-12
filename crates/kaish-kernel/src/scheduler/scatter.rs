@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;
+use tracing::Instrument;
 
 use crate::ast::{Command, Value};
 use crate::dispatch::CommandDispatcher;
@@ -98,6 +99,7 @@ impl ScatterGatherRunner {
     /// - post_gather: commands after gather
     ///
     /// Returns the final result after all stages complete.
+    #[tracing::instrument(level = "info", skip(self, pre_scatter, scatter_opts, parallel, gather_opts, post_gather, ctx), fields(item_count = tracing::field::Empty, parallelism = scatter_opts.limit))]
     pub async fn run(
         &self,
         pre_scatter: &[Command],
@@ -128,6 +130,8 @@ impl ScatterGatherRunner {
             return ExecResult::success("");
         }
 
+        tracing::Span::current().record("item_count", items.len());
+
         // Run parallel stage
         let results = self
             .run_parallel(&items, &scatter_opts, parallel, ctx)
@@ -157,6 +161,7 @@ impl ScatterGatherRunner {
     /// The `Kernel` dispatcher is safe for pre_scatter and post_gather (sequential),
     /// but scatter workers must use `BackendDispatcher` until per-worker kernel
     /// instances are implemented.
+    #[tracing::instrument(level = "debug", skip(self, items, opts, commands, base_ctx), fields(worker_count = items.len()))]
     async fn run_parallel(
         &self,
         items: &[String],
@@ -182,6 +187,12 @@ impl ScatterGatherRunner {
             let backend = base_ctx.backend.clone();
             let cwd = base_ctx.cwd.clone();
 
+            let item_label = if item.len() > 64 {
+                format!("{}...", &item[..64])
+            } else {
+                item.clone()
+            };
+            let worker_span = tracing::debug_span!("scatter_worker", item = %item_label);
             let handle = tokio::spawn(async move {
                 let _permit = permit; // Hold permit until done
 
@@ -198,7 +209,7 @@ impl ScatterGatherRunner {
                 let result = runner.run_sequential(&commands, &mut ctx, &*dispatcher).await;
 
                 ScatterResult { item, result }
-            });
+            }.instrument(worker_span));
 
             handles.push(handle);
         }

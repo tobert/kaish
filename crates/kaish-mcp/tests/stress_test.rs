@@ -34,7 +34,7 @@ async fn create_client() -> Result<Arc<McpClient>> {
 async fn execute(client: &McpClient, script: &str) -> Result<ExecuteResult> {
     let mut args = serde_json::Map::new();
     args.insert("script".into(), json!(script));
-    let result = client.call_tool("execute", Some(args)).await?;
+    let result = client.call_tool("execute", Some(args), None).await?;
 
     // structured_content is only present on error/stderr.
     // For clean success, reconstruct from content text blocks.
@@ -335,7 +335,7 @@ async fn test_rapid_concurrent_50() {
             tokio::spawn(async move {
                 let mut args = serde_json::Map::new();
                 args.insert("script".into(), json!(format!("echo {}", i)));
-                (i, client.call_tool("execute", Some(args)).await)
+                (i, client.call_tool("execute", Some(args), None).await)
             })
         })
         .collect();

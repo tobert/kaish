@@ -146,10 +146,15 @@ pub async fn execute(
     // is simpler and works around kaish_kernel returning !Send futures.
     let (tx, rx) = tokio::sync::oneshot::channel();
 
+    // Capture current span so kernel spans are children of the handler span
+    let parent_span = tracing::Span::current();
+
     std::thread::Builder::new()
         .name("kaish-execute".to_string())
         .stack_size(16 * 1024 * 1024) // 16MB stack
         .spawn(move || {
+            let _guard = parent_span.entered();
+
             // Create a new single-threaded runtime for this execution
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()

@@ -150,10 +150,14 @@ impl McpClient {
     ///
     /// Tool calls can run concurrently - we clone the Arc and release
     /// the lock before awaiting the call.
+    ///
+    /// The optional `meta` parameter allows passing metadata (e.g., trace context)
+    /// alongside the tool call per the MCP specification.
     pub async fn call_tool(
         &self,
         name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
+        meta: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<CallToolResult> {
         // Get Arc clone of the service, releasing the lock immediately.
         // This allows concurrent tool calls instead of serializing them.
@@ -170,7 +174,7 @@ impl McpClient {
                 name: name.to_string().into(),
                 arguments,
                 task: None,
-                meta: None,
+                meta: meta.map(rmcp::model::Meta),
             })
             .await
             .map_err(|e| anyhow::anyhow!("Failed to call tool: {}", e))?;

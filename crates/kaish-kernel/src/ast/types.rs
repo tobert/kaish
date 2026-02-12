@@ -45,6 +45,30 @@ pub enum Stmt {
     Empty,
 }
 
+impl Stmt {
+    /// Human-readable variant name for tracing spans.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Stmt::Assignment(_) => "assignment",
+            Stmt::Command(_) => "command",
+            Stmt::Pipeline(_) => "pipeline",
+            Stmt::If(_) => "if",
+            Stmt::For(_) => "for",
+            Stmt::While(_) => "while",
+            Stmt::Case(_) => "case",
+            Stmt::Break(_) => "break",
+            Stmt::Continue(_) => "continue",
+            Stmt::Return(_) => "return",
+            Stmt::Exit(_) => "exit",
+            Stmt::ToolDef(_) => "tooldef",
+            Stmt::Test(_) => "test",
+            Stmt::AndChain { .. } => "and_chain",
+            Stmt::OrChain { .. } => "or_chain",
+            Stmt::Empty => "empty",
+        }
+    }
+}
+
 /// Variable assignment: `NAME=value` (bash-style) or `local NAME = value` (scoped)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
