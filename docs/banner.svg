@@ -132,8 +132,8 @@
     <text x="478" y="88"  fill="#5C6370">#!/usr/bin/env kaish</text>
     <text x="478" y="116"><tspan fill="#E5C07B">GREETING</tspan><tspan fill="#AEB2C0">=</tspan><tspan fill="#98C379">"Hello from"</tspan></text>
     <text x="478" y="152" fill="#5C6370"># greet in parallel with scatter/gather</text>
-    <text x="478" y="178"><tspan fill="#61AFEF">printf</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#98C379">"%s\n"</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#98C379">"Kai"</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#98C379">"Amy"</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#98C379">"Claude"</tspan><tspan fill="#AEB2C0"> \</tspan></text>
-    <text x="502" y="204"><tspan fill="#AEB2C0">| </tspan><tspan fill="#C678DD">scatter</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#E06C75">as</tspan><tspan fill="#AEB2C0">=</tspan><tspan fill="#E5C07B">NAME</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#E06C75">limit</tspan><tspan fill="#AEB2C0">=</tspan><tspan fill="#D19A66">3</tspan><tspan fill="#AEB2C0"> \</tspan></text>
+    <text x="478" y="178"><tspan fill="#61AFEF">split</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#98C379">"Kai,Amy,Claude"</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#98C379">","</tspan><tspan fill="#AEB2C0"> \</tspan></text>
+    <text x="502" y="204"><tspan fill="#AEB2C0">| </tspan><tspan fill="#C678DD">scatter</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#E06C75">as</tspan><tspan fill="#AEB2C0">=</tspan><tspan fill="#E5C07B">NAME</tspan><tspan fill="#AEB2C0"> \</tspan></text>
     <text x="502" y="230"><tspan fill="#AEB2C0">| </tspan><tspan fill="#61AFEF">echo</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#98C379">"$GREETING $NAME!"</tspan><tspan fill="#AEB2C0"> \</tspan></text>
     <text x="502" y="256"><tspan fill="#AEB2C0">| </tspan><tspan fill="#C678DD">gather</tspan></text>
     <text x="478" y="296" fill="#5C6370"># → Hello from Kai!</text>
