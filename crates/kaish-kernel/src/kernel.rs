@@ -511,8 +511,8 @@ impl Kernel {
                     result.output = last_output;
                 }
                 ControlFlow::Exit { code } => {
-                    let exit_result = ExecResult::success(code.to_string());
-                    return Ok(exit_result);
+                    result.code = code;
+                    return Ok(result);
                 }
                 ControlFlow::Return { value } => {
                     on_output(&value);
@@ -598,14 +598,15 @@ impl Kernel {
                     if_stmt.else_branch.as_deref().unwrap_or(&[])
                 };
 
-                let mut flow = ControlFlow::ok(ExecResult::success(""));
+                let mut result = ExecResult::success("");
                 for stmt in branch {
-                    flow = self.execute_stmt_flow(stmt).await?;
-                    if !flow.is_normal() {
-                        return Ok(flow);
+                    let flow = self.execute_stmt_flow(stmt).await?;
+                    match flow {
+                        ControlFlow::Normal(r) => accumulate_result(&mut result, &r),
+                        _ => return Ok(flow),
                     }
                 }
-                Ok(flow)
+                Ok(ControlFlow::ok(result))
             }
             Stmt::For(for_loop) => {
                 // Evaluate all items and collect values for iteration
@@ -757,14 +758,15 @@ impl Kernel {
 
                     if matched {
                         // Execute the branch body
-                        let mut result = ControlFlow::ok(ExecResult::success(""));
+                        let mut result = ExecResult::success("");
                         for stmt in &branch.body {
-                            result = self.execute_stmt_flow(stmt).await?;
-                            if !result.is_normal() {
-                                return Ok(result);
+                            let flow = self.execute_stmt_flow(stmt).await?;
+                            match flow {
+                                ControlFlow::Normal(r) => accumulate_result(&mut result, &r),
+                                _ => return Ok(flow),
                             }
                         }
-                        return Ok(result);
+                        return Ok(ControlFlow::ok(result));
                     }
                 }
 
@@ -1679,7 +1681,13 @@ impl Kernel {
             return Err(e);
         }
         if let Some(code) = exit_code {
-            return Ok(ExecResult::failure(code, "exit"));
+            return Ok(ExecResult {
+                code,
+                out: accumulated_out,
+                err: accumulated_err,
+                data: last_data,
+                output: None,
+            });
         }
 
         Ok(ExecResult {
@@ -1773,8 +1781,9 @@ impl Kernel {
                             return Ok(value);
                         }
                         ControlFlow::Exit { code } => {
-                            // Exit from sourced script propagates
-                            return Ok(ExecResult::failure(code, "exit"));
+                            // Exit from sourced script — preserve accumulated output
+                            result.code = code;
+                            return Ok(result);
                         }
                     }
                 }
@@ -1919,7 +1928,8 @@ impl Kernel {
                 return Err(e.context(format!("script: {}", script_path.display())));
             }
             if let Some(code) = exit_code {
-                return Ok(Some(ExecResult::failure(code, "exit")));
+                result.code = code;
+                return Ok(Some(result));
             }
 
             return Ok(Some(result));
@@ -2874,8 +2884,8 @@ mod tests {
             .await
             .expect("exit failed");
 
-        // The exit code should be in the output
-        assert_eq!(result.out, "42");
+        assert_eq!(result.code, 42);
+        assert!(result.out.is_empty(), "exit should not produce stdout");
     }
 
     #[tokio::test]
@@ -3059,8 +3069,14 @@ mod tests {
             .ok();
 
         let count = kernel.get_var("COUNT").await;
-        assert_eq!(count, Some(Value::String("3".into())),
-            "without set -e, loop should complete all iterations");
+        // Arithmetic produces Int values; accept either Int or String representation
+        let count_val = match &count {
+            Some(Value::Int(n)) => *n,
+            Some(Value::String(s)) => s.parse().unwrap_or(-1),
+            _ => -1,
+        };
+        assert_eq!(count_val, 3,
+            "without set -e, loop should complete all iterations (got {:?})", count);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

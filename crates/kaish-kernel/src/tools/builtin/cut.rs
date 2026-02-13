@@ -29,19 +29,19 @@ impl Tool for Cut {
                 "string",
                 Value::String("\t".into()),
                 "Field delimiter (-d)",
-            ))
+            ).with_aliases(["-d"]))
             .param(ParamSchema::optional(
                 "fields",
                 "string",
                 Value::Null,
                 "Select fields by number, e.g. '1,3' or '1-3' (-f)",
-            ))
+            ).with_aliases(["-f"]))
             .param(ParamSchema::optional(
                 "characters",
                 "string",
                 Value::Null,
                 "Select characters by position (-c)",
-            ))
+            ).with_aliases(["-c"]))
             .example("Extract first field (CSV)", "cut -d ',' -f 1 data.csv")
             .example("Extract fields 1 and 3", "cut -d ':' -f 1,3 /etc/passwd")
             .example("Extract characters 1-10", "cut -c 1-10 file.txt")

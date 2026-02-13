@@ -1159,9 +1159,11 @@ where
         Token::ShortFlag(s) if s == "n" => StringTestOp::IsNonEmpty,
     };
 
-    // Comparison operators: ==, !=, =~, !~, >, <, >=, <=, -gt, -lt, -ge, -le, -eq, -ne
+    // Comparison operators: =, ==, !=, =~, !~, >, <, >=, <=, -gt, -lt, -ge, -le, -eq, -ne
+    // Note: = and == are equivalent inside [[ ]] (matching bash behavior)
     let cmp_op = choice((
         just(Token::EqEq).to(TestCmpOp::Eq),
+        just(Token::Eq).to(TestCmpOp::Eq),
         just(Token::NotEq).to(TestCmpOp::NotEq),
         just(Token::Match).to(TestCmpOp::Match),
         just(Token::NotMatch).to(TestCmpOp::NotMatch),
@@ -3030,6 +3032,20 @@ cmd < "input.txt"
     fn parse_test_expr_comparison() {
         let result = parse(r#"[[ $X == "value" ]]"#);
         assert!(result.is_ok(), "failed to parse comparison test: {:?}", result);
+    }
+
+    #[test]
+    fn parse_test_expr_single_eq() {
+        // = and == are equivalent inside [[ ]] (matching bash behavior)
+        let result = parse(r#"[[ $X = "value" ]]"#);
+        assert!(result.is_ok(), "failed to parse single-= comparison: {:?}", result);
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Stmt::Test(TestExpr::Comparison { op, .. }) => {
+                assert_eq!(op, &TestCmpOp::Eq);
+            }
+            other => panic!("expected Test(Comparison), got {:?}", other),
+        }
     }
 
     #[test]
