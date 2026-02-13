@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="1200" height="400">
+  <defs>
+    <linearGradient id="shellGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F2996E"/>
+      <stop offset="100%" stop-color="#C25A32"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <!-- scanline effect for code area -->
+    <pattern id="scanlines" width="4" height="4" patternUnits="userSpaceOnUse">
+      <rect width="4" height="2" fill="#0D0D1A" opacity="0.15"/>
+    </pattern>
+  </defs>
+
+  <!-- background -->
+  <rect width="1200" height="400" rx="16" fill="#1A1A2E"/>
+
+  <!-- subtle grid dots in code area -->
+  <g fill="#252545" opacity="0.4">
+    <circle cx="480" cy="40" r="1"/>  <circle cx="520" cy="40" r="1"/>
+    <circle cx="560" cy="40" r="1"/>  <circle cx="600" cy="40" r="1"/>
+    <circle cx="640" cy="40" r="1"/>  <circle cx="680" cy="40" r="1"/>
+    <circle cx="720" cy="40" r="1"/>  <circle cx="760" cy="40" r="1"/>
+    <circle cx="800" cy="40" r="1"/>  <circle cx="840" cy="40" r="1"/>
+    <circle cx="880" cy="40" r="1"/>  <circle cx="920" cy="40" r="1"/>
+    <circle cx="960" cy="40" r="1"/>  <circle cx="1000" cy="40" r="1"/>
+    <circle cx="1040" cy="40" r="1"/> <circle cx="1080" cy="40" r="1"/>
+    <circle cx="1120" cy="40" r="1"/> <circle cx="1160" cy="40" r="1"/>
+  </g>
+
+  <!-- ═══════════ LEFT SIDE: Kai the crab ═══════════ -->
+  <g transform="translate(170, 195) scale(0.72)">
+    <!-- large 会 kanji as the shell -->
+    <text x="0" y="-65" text-anchor="middle" dominant-baseline="central"
+          font-family="Noto Sans JP, sans-serif" font-size="200" font-weight="900"
+          fill="url(#shellGrad)" opacity="0.9">会</text>
+
+    <!-- circuit traces on kanji -->
+    <g fill="none" stroke="#66D9EF" stroke-width="2" opacity="0.6" filter="url(#glow)">
+      <path d="M-76,-155 L0,-155 L0,-130"/>
+      <path d="M0,-155 L76,-155"/>
+      <path d="M-96,-105 L-56,-105 L-56,-80 L0,-80"/>
+      <path d="M0,-80 L56,-80 L56,-105 L96,-105"/>
+      <path d="M-76,-35 L-41,-35 L-41,-15"/>
+      <path d="M41,-15 L41,-35 L76,-35"/>
+    </g>
+    <g fill="#66D9EF" filter="url(#glow)">
+      <circle cx="-76" cy="-155" r="3.5"/>
+      <circle cx="76" cy="-155" r="3.5"/>
+      <circle cx="-96" cy="-105" r="3.5"/>
+      <circle cx="96" cy="-105" r="3.5"/>
+      <circle cx="-76" cy="-35" r="3.5"/>
+      <circle cx="76" cy="-35" r="3.5"/>
+    </g>
+
+    <!-- body -->
+    <ellipse cx="0" cy="55" rx="80" ry="30" fill="#F09060" opacity="0.9"/>
+
+    <!-- claws -->
+    <g fill="#E07850" stroke="#C25A32" stroke-width="2">
+      <!-- left claw -->
+      <path d="M-80,45 Q-131,10 -156,25 Q-171,35 -166,50 Q-158,70 -136,63 Q-108,55 -80,63 Z"/>
+      <path d="M-156,25 Q-168,10 -178,15" fill="none" stroke="#C25A32" stroke-width="3" stroke-linecap="round"/>
+      <path d="M-156,25 Q-164,7 -174,5" fill="none" stroke="#C25A32" stroke-width="3" stroke-linecap="round"/>
+      <!-- right claw (reaching toward code!) -->
+      <path d="M80,45 Q140,5 170,15 Q188,22 184,42 Q178,62 155,56 Q125,48 80,63 Z"/>
+      <path d="M170,15 Q185,-2 196,2" fill="none" stroke="#C25A32" stroke-width="3" stroke-linecap="round"/>
+      <path d="M170,15 Q180,-5 190,-8" fill="none" stroke="#C25A32" stroke-width="3" stroke-linecap="round"/>
+    </g>
+
+    <!-- eyes — pupils shifted RIGHT, looking at the code -->
+    <!-- left eye stalk -->
+    <path d="M-36,35 Q-46,5 -58,-7" fill="none" stroke="#F09060" stroke-width="8" stroke-linecap="round"/>
+    <circle cx="-58" cy="-12" r="15" fill="#FFFFFF" stroke="#C25A32" stroke-width="2"/>
+    <circle cx="-52" cy="-13" r="8" fill="#2D1B14"/>
+    <circle cx="-49" cy="-16" r="3" fill="#FFFFFF"/>
+
+    <!-- right eye stalk -->
+    <path d="M36,35 Q46,5 58,-7" fill="none" stroke="#F09060" stroke-width="8" stroke-linecap="round"/>
+    <circle cx="58" cy="-12" r="15" fill="#FFFFFF" stroke="#C25A32" stroke-width="2"/>
+    <circle cx="64" cy="-13" r="8" fill="#2D1B14"/>
+    <circle cx="67" cy="-16" r="3" fill="#FFFFFF"/>
+
+    <!-- legs -->
+    <g fill="none" stroke="#E07850" stroke-width="5" stroke-linecap="round">
+      <path d="M-61,67 Q-88,95 -108,103"/>
+      <path d="M-66,75 Q-91,110 -116,125"/>
+      <path d="M61,67 Q88,95 108,103"/>
+      <path d="M66,75 Q91,110 116,125"/>
+    </g>
+
+    <!-- smile -->
+    <path d="M-16,65 Q0,77 16,65" fill="none" stroke="#C25A32" stroke-width="2.5" stroke-linecap="round"/>
+  </g>
+
+  <!-- ═══════════ DIVIDER: circuit trace connecting crab to code ═══════════ -->
+  <g fill="none" stroke="#66D9EF" stroke-width="1.5" opacity="0.4" filter="url(#glow)">
+    <path d="M330,200 L380,200 L400,180 L430,180"/>
+    <path d="M330,210 L370,210 L390,230 L430,230"/>
+    <path d="M380,200 L380,160 L420,160"/>
+    <path d="M370,210 L370,250 L420,250"/>
+  </g>
+  <g fill="#66D9EF" opacity="0.4" filter="url(#glow)">
+    <circle cx="330" cy="200" r="2.5"/>
+    <circle cx="330" cy="210" r="2.5"/>
+    <circle cx="420" cy="160" r="2"/>
+    <circle cx="430" cy="180" r="2"/>
+    <circle cx="430" cy="230" r="2"/>
+    <circle cx="420" cy="250" r="2"/>
+  </g>
+
+  <!-- ═══════════ RIGHT SIDE: kaish code ═══════════ -->
+  <!-- terminal frame -->
+  <rect x="450" y="32" width="720" height="336" rx="10" fill="#0D0D1A"
+        stroke="#2A2A4A" stroke-width="1.5"/>
+  <!-- title bar -->
+  <rect x="450" y="32" width="720" height="28" rx="10" fill="#1E1E38"/>
+  <rect x="450" y="50" width="720" height="10" fill="#1E1E38"/>
+  <!-- traffic lights -->
+  <circle cx="470" cy="46" r="5" fill="#FF5F57" opacity="0.8"/>
+  <circle cx="486" cy="46" r="5" fill="#FFBD2E" opacity="0.8"/>
+  <circle cx="502" cy="46" r="5" fill="#28CA41" opacity="0.8"/>
+  <!-- title -->
+  <text x="810" y="50" text-anchor="middle" font-family="monospace" font-size="11"
+        fill="#555570">kaish — the gathering shell</text>
+
+  <!-- code content — xml:space="preserve" keeps monospace spacing correct -->
+  <g font-family="monospace" font-size="14" xml:space="preserve">
+    <text x="478" y="88"  fill="#5C6370">#!/usr/bin/env kaish</text>
+    <text x="478" y="114"><tspan fill="#A6E22E">greet</tspan><tspan fill="#AEB2C0">() {</tspan></text>
+    <text x="502" y="136"><tspan fill="#C678DD">local</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#E06C75">NAME</tspan><tspan fill="#AEB2C0">=</tspan><tspan fill="#98C379">"${1:-world}"</tspan></text>
+    <text x="502" y="158"><tspan fill="#61AFEF">echo</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#98C379">"Hello, $NAME!"</tspan></text>
+    <text x="478" y="180" fill="#AEB2C0">}</text>
+    <text x="478" y="210" fill="#5C6370"># parallel greetings</text>
+    <text x="478" y="232"><tspan fill="#E5C07B">NAMES</tspan><tspan fill="#AEB2C0">=(</tspan><tspan fill="#98C379">"Kai" "Amy" "Claude"</tspan><tspan fill="#AEB2C0">)</tspan></text>
+    <text x="478" y="258"><tspan fill="#C678DD">for</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#E06C75">name</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#C678DD">in</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#AEB2C0">"${NAMES[@]}";</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#C678DD">do</tspan></text>
+    <text x="502" y="280"><tspan fill="#61AFEF">greet</tspan><tspan fill="#AEB2C0"> </tspan><tspan fill="#98C379">"$name"</tspan></text>
+    <text x="478" y="302" fill="#C678DD">done</text>
+    <text x="478" y="332" fill="#5C6370"># → Hello, Kai!  Hello, Amy!  Hello, Claude!</text>
+  </g>
+
+  <!-- ═══════════ TITLE overlaid bottom-left ═══════════ -->
+  <text x="170" y="370" text-anchor="middle" font-family="monospace" font-size="22"
+        fill="#66D9EF" filter="url(#glow)" letter-spacing="3">kaish</text>
+  <text x="170" y="390" text-anchor="middle" font-family="Noto Sans JP, sans-serif"
+        font-size="12" fill="#3A7A8A" letter-spacing="1">会sh — the gathering shell</text>
+</svg>

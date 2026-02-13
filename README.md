@@ -1,7 +1,7 @@
 # kaish (会sh)
 
 <p align="center">
-  <img src="docs/mascot.svg" alt="Kai — the kaish mascot" width="256">
+  <img src="docs/banner.svg" alt="Kai the hermit crab — kaish mascot — looking at kaish code" width="720">
 </p>
 
 A predictable shell for AI agents. A distilled Bourne-like shell with builtin
