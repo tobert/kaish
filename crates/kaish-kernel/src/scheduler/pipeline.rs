@@ -467,6 +467,53 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
         i += 1;
     }
 
+    // Map remaining positionals to unfilled non-bool schema params (in order).
+    // This enables `drift_push "abc" "hello"` → named["target_ctx"] = "abc", named["content"] = "hello"
+    // Positionals that appeared after `--` are never mapped (they're raw data).
+    // Only for MCP/external tools (map_positionals=true). Builtins handle their own positionals.
+    if let Some(schema) = schema.filter(|s| s.map_positionals) {
+        // Count how many positionals were added before `--`
+        let pre_dash_count = if past_double_dash {
+            // Find where the double-dash was in the original args to count pre-dash positionals
+            let dash_pos = args.iter().position(|a| matches!(a, Arg::DoubleDash)).unwrap_or(args.len());
+            // Count unconsumed positionals before the double-dash
+            positional_indices.iter()
+                .filter(|(idx, _)| *idx < dash_pos && !consumed_positionals.contains(idx))
+                .count()
+        } else {
+            tool_args.positional.len()
+        };
+
+        let mut remaining = Vec::new();
+        let mut positional_iter = tool_args.positional.drain(..).enumerate();
+
+        for param in &schema.params {
+            if tool_args.named.contains_key(&param.name) || tool_args.flags.contains(&param.name) {
+                continue; // Already filled by a flag or named arg
+            }
+            if is_bool_type(&param.param_type) {
+                continue; // Bool params should only be set by flags
+            }
+            // Take from pre-dash positionals only
+            loop {
+                match positional_iter.next() {
+                    Some((idx, val)) if idx < pre_dash_count => {
+                        tool_args.named.insert(param.name.clone(), val);
+                        break;
+                    }
+                    Some((_, val)) => {
+                        remaining.push(val); // Post-dash or past limit, keep as positional
+                    }
+                    None => break,
+                }
+            }
+        }
+
+        // Any leftover positionals stay positional (e.g. `cat file1 file2`)
+        remaining.extend(positional_iter.map(|(_, v)| v));
+        tool_args.positional = remaining;
+    }
+
     tool_args
 }
 
@@ -1026,6 +1073,7 @@ mod tests {
             .param(ParamSchema::optional("limit", "int", Value::Int(10), "Max results"))
             .param(ParamSchema::optional("verbose", "bool", Value::Bool(false), "Verbose output"))
             .param(ParamSchema::optional("output", "string", Value::String("stdout".into()), "Output destination"))
+            .with_positional_mapping()
     }
 
     fn make_minimal_ctx() -> ExecContext {
@@ -1074,7 +1122,7 @@ mod tests {
     #[test]
     fn test_schema_aware_mixed() {
         // mcp_tool file.txt --output out.txt --verbose
-        // Should produce: positional: ["file.txt"], named: {"output": "out.txt"}, flags: {"verbose"}
+        // file.txt maps to "query" (first unfilled non-bool schema param)
         let args = vec![
             Arg::Positional(Expr::Literal(Value::String("file.txt".to_string()))),
             Arg::LongFlag("output".to_string()),
@@ -1086,7 +1134,11 @@ mod tests {
 
         let tool_args = build_tool_args(&args, &ctx, Some(&schema));
 
-        assert_eq!(tool_args.positional, vec![Value::String("file.txt".to_string())]);
+        assert!(tool_args.positional.is_empty(), "file.txt consumed as query param");
+        assert_eq!(
+            tool_args.named.get("query"),
+            Some(&Value::String("file.txt".to_string()))
+        );
         assert_eq!(
             tool_args.named.get("output"),
             Some(&Value::String("out.txt".to_string()))
@@ -1175,7 +1227,7 @@ mod tests {
 
     #[test]
     fn test_unknown_flag_in_schema() {
-        // --unknown-flag value should treat --unknown-flag as bool (not in schema)
+        // --unknown-flag value: --unknown is bool (not in schema), "value" maps to query
         let args = vec![
             Arg::LongFlag("unknown".to_string()),
             Arg::Positional(Expr::Literal(Value::String("value".to_string()))),
@@ -1185,11 +1237,11 @@ mod tests {
 
         let tool_args = build_tool_args(&args, &ctx, Some(&schema));
 
-        // Unknown flag defaults to bool behavior
         assert!(tool_args.flags.contains("unknown"));
+        assert!(tool_args.positional.is_empty(), "value consumed as query param");
         assert_eq!(
-            tool_args.positional,
-            vec![Value::String("value".to_string())]
+            tool_args.named.get("query"),
+            Some(&Value::String("value".to_string()))
         );
     }
 
@@ -1217,7 +1269,7 @@ mod tests {
 
     #[test]
     fn test_short_flags_unchanged() {
-        // Short flags -la should expand regardless of schema
+        // Short flags -la should expand regardless of schema; file.txt maps to query
         let args = vec![
             Arg::ShortFlag("la".to_string()),
             Arg::Positional(Expr::Literal(Value::String("file.txt".to_string()))),
@@ -1229,15 +1281,17 @@ mod tests {
 
         assert!(tool_args.flags.contains("l"));
         assert!(tool_args.flags.contains("a"));
+        assert!(tool_args.positional.is_empty(), "file.txt consumed as query param");
         assert_eq!(
-            tool_args.positional,
-            vec![Value::String("file.txt".to_string())]
+            tool_args.named.get("query"),
+            Some(&Value::String("file.txt".to_string()))
         );
     }
 
     #[test]
     fn test_flag_at_end_no_value() {
         // --output at end with no value available - treat as flag (lenient)
+        // file.txt maps to query (first unfilled non-bool param)
         let args = vec![
             Arg::Positional(Expr::Literal(Value::String("file.txt".to_string()))),
             Arg::LongFlag("output".to_string()),
@@ -1249,10 +1303,238 @@ mod tests {
 
         // output expects a value but none available after it, so it becomes a flag
         assert!(tool_args.flags.contains("output"));
+        assert!(tool_args.positional.is_empty(), "file.txt consumed as query param");
+        assert_eq!(
+            tool_args.named.get("query"),
+            Some(&Value::String("file.txt".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_positional_skips_bool_params() {
+        // Schema: [query: string, verbose: bool, output: string]
+        // Args: "val1" "val2"
+        // Expected: query="val1", verbose unset, output="val2"
+        let schema = ToolSchema::new("test", "")
+            .param(ParamSchema::required("query", "string", ""))
+            .param(ParamSchema::optional(
+                "verbose",
+                "bool",
+                Value::Bool(false),
+                "",
+            ))
+            .param(ParamSchema::optional(
+                "output",
+                "string",
+                Value::Null,
+                "",
+            ))
+            .with_positional_mapping();
+        let args = vec![
+            Arg::Positional(Expr::Literal(Value::String("val1".to_string()))),
+            Arg::Positional(Expr::Literal(Value::String("val2".to_string()))),
+        ];
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        assert_eq!(
+            tool_args.named.get("query"),
+            Some(&Value::String("val1".to_string()))
+        );
+        assert_eq!(
+            tool_args.named.get("output"),
+            Some(&Value::String("val2".to_string()))
+        );
+        assert!(!tool_args.flags.contains("verbose"));
+        assert!(tool_args.positional.is_empty());
+    }
+
+    #[test]
+    fn test_positionals_fill_available_slots() {
+        // Schema has query (string), limit (int), verbose (bool), output (string).
+        // Three positionals fill the 3 non-bool slots.
+        let args = vec![
+            Arg::Positional(Expr::Literal(Value::String("val1".to_string()))),
+            Arg::Positional(Expr::Literal(Value::String("val2".to_string()))),
+            Arg::Positional(Expr::Literal(Value::String("val3".to_string()))),
+        ];
+        let schema = make_test_schema(); // query, limit(int), verbose(bool), output
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        // val1 → query, val2 → limit (int param but receives string — tool decides),
+        // val3 → output
+        assert_eq!(
+            tool_args.named.get("query"),
+            Some(&Value::String("val1".to_string()))
+        );
+        assert_eq!(
+            tool_args.named.get("limit"),
+            Some(&Value::String("val2".to_string()))
+        );
+        assert_eq!(
+            tool_args.named.get("output"),
+            Some(&Value::String("val3".to_string()))
+        );
+        assert!(tool_args.positional.is_empty());
+    }
+
+    #[test]
+    fn test_truly_excess_positionals() {
+        // More positionals than non-bool schema params — leftovers stay positional
+        let schema = ToolSchema::new("test", "")
+            .param(ParamSchema::required("name", "string", ""))
+            .with_positional_mapping();
+        let args = vec![
+            Arg::Positional(Expr::Literal(Value::String("first".to_string()))),
+            Arg::Positional(Expr::Literal(Value::String("second".to_string()))),
+            Arg::Positional(Expr::Literal(Value::String("third".to_string()))),
+        ];
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        assert_eq!(
+            tool_args.named.get("name"),
+            Some(&Value::String("first".to_string()))
+        );
         assert_eq!(
             tool_args.positional,
-            vec![Value::String("file.txt".to_string())]
+            vec![
+                Value::String("second".to_string()),
+                Value::String("third".to_string()),
+            ]
         );
+    }
+
+    #[test]
+    fn test_double_dash_positional_not_mapped() {
+        // `tool val1 -- val2` — val1 maps to query, val2 stays positional (post-dash)
+        let args = vec![
+            Arg::Positional(Expr::Literal(Value::String("val1".to_string()))),
+            Arg::DoubleDash,
+            Arg::Positional(Expr::Literal(Value::String("val2".to_string()))),
+        ];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        assert_eq!(
+            tool_args.named.get("query"),
+            Some(&Value::String("val1".to_string()))
+        );
+        // val2 is after --, should NOT be mapped even though schema has unfilled params
+        assert_eq!(
+            tool_args.positional,
+            vec![Value::String("val2".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_all_params_filled_by_flags() {
+        // All schema params satisfied by explicit flags — no positional mapping needed
+        let args = vec![
+            Arg::LongFlag("query".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("search".to_string()))),
+            Arg::LongFlag("output".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("out.txt".to_string()))),
+            Arg::LongFlag("verbose".to_string()),
+        ];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        assert_eq!(
+            tool_args.named.get("query"),
+            Some(&Value::String("search".to_string()))
+        );
+        assert_eq!(
+            tool_args.named.get("output"),
+            Some(&Value::String("out.txt".to_string()))
+        );
+        assert!(tool_args.flags.contains("verbose"));
+        assert!(tool_args.positional.is_empty());
+    }
+
+    #[test]
+    fn test_mixed_flags_and_positional_fill() {
+        // --output foo val1 — output is explicit, val1 maps to query
+        let args = vec![
+            Arg::LongFlag("output".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("foo".to_string()))),
+            Arg::Positional(Expr::Literal(Value::String("val1".to_string()))),
+        ];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        assert_eq!(
+            tool_args.named.get("output"),
+            Some(&Value::String("foo".to_string()))
+        );
+        assert_eq!(
+            tool_args.named.get("query"),
+            Some(&Value::String("val1".to_string()))
+        );
+        assert!(tool_args.positional.is_empty());
+    }
+
+    #[test]
+    fn test_alias_flag_prevents_mapping_overwrite() {
+        // -q "search" "out.txt" — -q is alias for query, so out.txt should map to output
+        let schema = ToolSchema::new("test", "")
+            .param(ParamSchema::required("query", "string", "").with_aliases(["-q"]))
+            .param(ParamSchema::required("output", "string", ""))
+            .with_positional_mapping();
+        let args = vec![
+            Arg::ShortFlag("q".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("search".to_string()))),
+            Arg::Positional(Expr::Literal(Value::String("out.txt".to_string()))),
+        ];
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        assert_eq!(
+            tool_args.named.get("query"),
+            Some(&Value::String("search".to_string()))
+        );
+        assert_eq!(
+            tool_args.named.get("output"),
+            Some(&Value::String("out.txt".to_string()))
+        );
+        assert!(tool_args.positional.is_empty());
+    }
+
+    #[test]
+    fn test_builtin_schema_no_positional_mapping() {
+        // Builtins have map_positionals=false — positionals stay positional
+        let schema = ToolSchema::new("echo", "")
+            .param(ParamSchema::optional("args", "any", Value::Null, ""))
+            .param(ParamSchema::optional("no_newline", "bool", Value::Bool(false), ""));
+        // Note: no .with_positional_mapping() — this is a builtin
+        let args = vec![
+            Arg::Positional(Expr::Literal(Value::String("hello".to_string()))),
+            Arg::Positional(Expr::Literal(Value::String("world".to_string()))),
+        ];
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        // Positionals should NOT be consumed as named params
+        assert_eq!(
+            tool_args.positional,
+            vec![
+                Value::String("hello".to_string()),
+                Value::String("world".to_string()),
+            ]
+        );
+        assert!(tool_args.named.get("args").is_none());
     }
 
     #[test]

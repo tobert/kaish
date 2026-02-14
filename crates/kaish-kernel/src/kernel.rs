@@ -1121,7 +1121,16 @@ impl Kernel {
                 }
 
                 // Try backend-registered tools (embedder engines, MCP tools, etc.)
-                let tool_args = self.build_args_async(args, None).await?;
+                // Look up tool schema for positional→named mapping.
+                // Clone backend and drop read lock before awaiting (may involve network I/O).
+                // Backend tools expect named JSON params, so enable positional mapping.
+                let backend = self.exec_ctx.read().await.backend.clone();
+                let tool_schema = backend.get_tool(name).await.ok().flatten().map(|t| {
+                    let mut s = t.schema;
+                    s.map_positionals = true;
+                    s
+                });
+                let tool_args = self.build_args_async(args, tool_schema.as_ref()).await?;
                 let mut ctx = self.exec_ctx.write().await;
                 {
                     let scope = self.scope.read().await;
@@ -1275,6 +1284,48 @@ impl Kernel {
                 }
             }
             i += 1;
+        }
+
+        // Map remaining positionals to unfilled non-bool schema params (in order).
+        // This enables `drift_push "abc" "hello"` → named["target_ctx"] = "abc", named["content"] = "hello"
+        // Positionals that appeared after `--` are never mapped (they're raw data).
+        // Only for MCP/external tools (map_positionals=true). Builtins handle their own positionals.
+        if let Some(schema) = schema.filter(|s| s.map_positionals) {
+            let pre_dash_count = if past_double_dash {
+                let dash_pos = args.iter().position(|a| matches!(a, Arg::DoubleDash)).unwrap_or(args.len());
+                positional_indices.iter()
+                    .filter(|idx| **idx < dash_pos && !consumed.contains(idx))
+                    .count()
+            } else {
+                tool_args.positional.len()
+            };
+
+            let mut remaining = Vec::new();
+            let mut positional_iter = tool_args.positional.drain(..).enumerate();
+
+            for param in &schema.params {
+                if tool_args.named.contains_key(&param.name) || tool_args.flags.contains(&param.name) {
+                    continue;
+                }
+                if is_bool_type(&param.param_type) {
+                    continue;
+                }
+                loop {
+                    match positional_iter.next() {
+                        Some((idx, val)) if idx < pre_dash_count => {
+                            tool_args.named.insert(param.name.clone(), val);
+                            break;
+                        }
+                        Some((_, val)) => {
+                            remaining.push(val);
+                        }
+                        None => break,
+                    }
+                }
+            }
+
+            remaining.extend(positional_iter.map(|(_, v)| v));
+            tool_args.positional = remaining;
         }
 
         Ok(tool_args)

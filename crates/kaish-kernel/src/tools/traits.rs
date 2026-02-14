@@ -98,6 +98,10 @@ pub struct ToolSchema {
     pub params: Vec<ParamSchema>,
     /// Usage examples.
     pub examples: Vec<Example>,
+    /// Map remaining positional args to named params by schema order.
+    /// Only for MCP/external tools that expect named JSON params.
+    /// Builtins handle their own positionals and should leave this false.
+    pub map_positionals: bool,
 }
 
 impl ToolSchema {
@@ -108,7 +112,14 @@ impl ToolSchema {
             description: description.into(),
             params: Vec::new(),
             examples: Vec::new(),
+            map_positionals: false,
         }
+    }
+
+    /// Enable positional→named parameter mapping for MCP/external tools.
+    pub fn with_positional_mapping(mut self) -> Self {
+        self.map_positionals = true;
+        self
     }
 
     /// Add a parameter to the schema.
