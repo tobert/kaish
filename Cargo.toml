@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Amy Tobey <tobert@gmail.com>"]
@@ -76,7 +76,7 @@ jaq-std = "2.1"
 jaq-json = "1.1"
 
 # MCP client (L8)
-rmcp = { version = "0.14", default-features = true, features = ["client", "transport-child-process"] }
+rmcp = { version = "0.15", default-features = true, features = ["client", "transport-child-process"] }
 
 # XDG paths
 directories = "5"
