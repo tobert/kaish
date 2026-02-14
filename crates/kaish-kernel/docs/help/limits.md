@@ -82,6 +82,9 @@ cargo build  # Error: cannot run external from virtual directory
 | `[ -f file ]` | Supported via builtin; prefer `[[ ]]` |
 | `*.txt` expands at shell | Passed literally to tools |
 | Regex in `=~` is unquoted | Quotes allowed: `=~ "\.rs$"` |
+| `printf "a"; printf "b"` → `ab` | → `a\nb` (line-separated) |
+
+**Output model:** Bash concatenates raw byte streams — `printf "a"; printf "b"` produces `ab`. kaish separates statement outputs by newlines, so the same produces `a\nb`. This is intentional: line-oriented output is more predictable for agents parsing results. Each statement's output is one or more complete lines.
 
 ## Workarounds
 

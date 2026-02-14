@@ -96,6 +96,8 @@ cmd1 || cmd2                    # run cmd2 only if cmd1 fails
 mkdir /tmp/work && cd /tmp/work && echo "ready"
 ```
 
+> **Output model:** Unlike bash, which concatenates raw byte streams (`printf "a"; printf "b"` → `ab`), kaish separates statement outputs by newlines (`a\nb`). Each statement produces one or more complete lines. This is intentional — line-oriented output is more predictable for agents parsing results.
+
 ## Test Expressions
 
 ```bash
