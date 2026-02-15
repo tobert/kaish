@@ -440,6 +440,9 @@ impl Kernel {
     ///
     /// Returns the result of the last statement executed.
     pub async fn execute(&self, input: &str) -> Result<ExecResult> {
+        // Alias expansion: replace the first word if it matches an alias
+        let expanded = self.expand_alias(input).await;
+        let input = expanded.as_deref().unwrap_or(input);
         self.execute_streaming(input, &mut |_| {}).await
     }
 
@@ -925,6 +928,7 @@ impl Kernel {
                 tools: ec.tools.clone(),
                 job_manager: ec.job_manager.clone(),
                 pipeline_position: PipelinePosition::Only,
+                aliases: ec.aliases.clone(),
             }
         }; // locks released
 
@@ -935,6 +939,7 @@ impl Kernel {
             let mut ec = self.exec_ctx.write().await;
             ec.cwd = ctx.cwd.clone();
             ec.prev_cwd = ctx.prev_cwd.clone();
+            ec.aliases = ctx.aliases.clone();
         }
         {
             let mut scope = self.scope.write().await;
@@ -2239,7 +2244,34 @@ impl Kernel {
         scope.last_result().clone()
     }
 
+    // --- Aliases ---
+
+    /// Expand aliases in the input string (first word only, non-recursive).
+    ///
+    /// Returns `Some(expanded)` if the first word matched an alias, `None` otherwise.
+    async fn expand_alias(&self, input: &str) -> Option<String> {
+        let trimmed = input.trim_start();
+        if trimmed.is_empty() {
+            return None;
+        }
+        // Extract the first word
+        let first_word_end = trimmed.find(|c: char| c.is_whitespace()).unwrap_or(trimmed.len());
+        let first_word = &trimmed[..first_word_end];
+        let rest = &trimmed[first_word_end..];
+
+        let ctx = self.exec_ctx.read().await;
+        let alias_value = ctx.aliases.get(first_word)?.clone();
+        drop(ctx);
+
+        Some(format!("{}{}", alias_value, rest))
+    }
+
     // --- Tools ---
+
+    /// Check if a user-defined function exists.
+    pub async fn has_function(&self, name: &str) -> bool {
+        self.user_tools.read().await.contains_key(name)
+    }
 
     /// Get available tool schemas.
     pub fn tool_schemas(&self) -> Vec<crate::tools::ToolSchema> {
@@ -2307,6 +2339,7 @@ impl Kernel {
             ec.prev_cwd = ctx.prev_cwd.clone();
             ec.stdin = ctx.stdin.take();
             ec.stdin_data = ctx.stdin_data.take();
+            ec.aliases = ctx.aliases.clone();
         }
 
         // 2. Execute via the full dispatch chain

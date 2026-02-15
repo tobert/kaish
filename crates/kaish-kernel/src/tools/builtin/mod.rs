@@ -2,6 +2,7 @@
 //!
 //! These tools are always available and provide core functionality.
 
+mod alias;
 mod assert;
 mod awk;
 mod basename;
@@ -74,6 +75,8 @@ use super::ToolRegistry;
 
 /// Register all built-in tools with the registry.
 pub fn register_builtins(registry: &mut ToolRegistry) {
+    registry.register(alias::Alias);
+    registry.register(alias::Unalias);
     registry.register(assert::Assert);
     registry.register(awk::Awk);
     registry.register(basename::Basename);

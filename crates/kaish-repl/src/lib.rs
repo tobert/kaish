@@ -633,23 +633,26 @@ fn format_result(result: &ExecResult) -> String {
         return formatted;
     }
 
-    // No structured output - use classic status format
-    let status = if result.ok() { "✓" } else { "✗" };
-    let mut output = format!("{} code={}", status, result.code);
-
-    if !result.out.is_empty() {
-        if result.out.contains('\n') {
-            output.push_str(&format!("\n{}", result.out));
-        } else {
-            output.push_str(&format!(" out={}", result.out));
+    // No structured output — just pass through the raw text.
+    // Success: show output directly (no status prefix).
+    // Failure: show stderr or exit code so the user notices.
+    if result.ok() {
+        result.out.clone()
+    } else {
+        let mut output = String::new();
+        if !result.out.is_empty() {
+            output.push_str(&result.out);
+            if !output.ends_with('\n') {
+                output.push('\n');
+            }
         }
+        if !result.err.is_empty() {
+            output.push_str(&format!("✗ {}", result.err));
+        } else {
+            output.push_str(&format!("✗ [exit {}]", result.code));
+        }
+        output
     }
-
-    if !result.err.is_empty() {
-        output.push_str(&format!(" err=\"{}\"", result.err));
-    }
-
-    output
 }
 
 // ── Help text ───────────────────────────────────────────────────────
@@ -739,6 +742,50 @@ fn load_history(rl: &mut Editor<KaishHelper, DefaultHistory>) -> Option<PathBuf>
     history_path
 }
 
+// ── RC file and prompt ──────────────────────────────────────────────
+
+/// Load the RC file for interactive sessions.
+///
+/// Search order: `$KAISH_INIT` → `~/.config/kaish/init.kai` → `~/.kaishrc`
+fn load_rc_file(repl: &Repl) {
+    let candidates: Vec<PathBuf> = if let Ok(path) = std::env::var("KAISH_INIT") {
+        vec![PathBuf::from(path)]
+    } else {
+        vec![
+            kaish_kernel::paths::config_dir().join("init.kai"),
+            directories::BaseDirs::new()
+                .map(|b| b.home_dir().join(".kaishrc"))
+                .unwrap_or_else(|| PathBuf::from("/.kaishrc")),
+        ]
+    };
+
+    for path in &candidates {
+        if path.is_file() {
+            let cmd = format!(r#"source "{}""#, path.display());
+            if let Err(e) = repl.runtime.block_on(repl.kernel.execute(&cmd)) {
+                eprintln!("kaish: warning: error sourcing {}: {}", path.display(), e);
+            }
+            return;
+        }
+    }
+}
+
+/// Resolve the prompt string: call `kaish_prompt()` if defined, else default.
+fn resolve_prompt(repl: &Repl) -> String {
+    let has_fn = repl.runtime.block_on(repl.kernel.has_function("kaish_prompt"));
+    if has_fn {
+        if let Ok(result) = repl.runtime.block_on(repl.kernel.execute("kaish_prompt")) {
+            if result.ok() {
+                let text = result.out.trim_end().to_string();
+                if !text.is_empty() {
+                    return text;
+                }
+            }
+        }
+    }
+    "会sh> ".to_string()
+}
+
 // ── Entry points ────────────────────────────────────────────────────
 
 /// Run the REPL.
@@ -747,6 +794,9 @@ pub fn run() -> Result<()> {
     println!("Type /help for commands, /quit to exit.");
 
     let mut repl = Repl::new()?;
+
+    // Source RC file (interactive only)
+    load_rc_file(&repl);
 
     // Build the helper with a kernel reference and runtime handle
     let helper = KaishHelper::new(repl.kernel.clone(), repl.runtime.handle().clone());
@@ -760,7 +810,9 @@ pub fn run() -> Result<()> {
     println!();
 
     loop {
-        let prompt = "会sh> ";
+        // Dynamic prompt: call kaish_prompt() if defined, else default
+        let prompt_string = resolve_prompt(&repl);
+        let prompt: &str = &prompt_string;
 
         match rl.readline(prompt) {
             Ok(line) => {
@@ -769,7 +821,13 @@ pub fn run() -> Result<()> {
                 }
 
                 match repl.process_line(&line) {
-                    ProcessResult::Output(output) => println!("{}", output),
+                    ProcessResult::Output(output) => {
+                        if output.ends_with('\n') {
+                            print!("{}", output);
+                        } else {
+                            println!("{}", output);
+                        }
+                    }
                     ProcessResult::Empty => {}
                     ProcessResult::Exit => {
                         save_history(&mut rl, &history_path);
@@ -853,7 +911,12 @@ pub fn run_with_client(
 
                 match result {
                     Ok(exec_result) => {
-                        println!("{}", format_result(&exec_result));
+                        let output = format_result(&exec_result);
+                        if output.ends_with('\n') {
+                            print!("{}", output);
+                        } else {
+                            println!("{}", output);
+                        }
                     }
                     Err(e) => {
                         eprintln!("Error: {}", e);

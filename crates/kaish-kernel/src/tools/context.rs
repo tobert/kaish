@@ -1,5 +1,6 @@
 //! Execution context for tools.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -62,6 +63,8 @@ pub struct ExecContext {
     pub job_manager: Option<Arc<JobManager>>,
     /// Position of this command within a pipeline (for stdio decisions).
     pub pipeline_position: PipelinePosition,
+    /// Command aliases (name → expansion string).
+    pub aliases: HashMap<String, String>,
 }
 
 impl ExecContext {
@@ -81,6 +84,7 @@ impl ExecContext {
             tools: None,
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
+            aliases: HashMap::new(),
         }
     }
 
@@ -100,6 +104,7 @@ impl ExecContext {
             tools: Some(tools),
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
+            aliases: HashMap::new(),
         }
     }
 
@@ -116,6 +121,7 @@ impl ExecContext {
             tools: None,
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
+            aliases: HashMap::new(),
         }
     }
 
@@ -132,6 +138,7 @@ impl ExecContext {
             tools: Some(tools),
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
+            aliases: HashMap::new(),
         }
     }
 
@@ -151,6 +158,7 @@ impl ExecContext {
             tools: None,
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
+            aliases: HashMap::new(),
         }
     }
 
@@ -167,6 +175,7 @@ impl ExecContext {
             tools: None,
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
+            aliases: HashMap::new(),
         }
     }
 
