@@ -1239,6 +1239,21 @@ impl Kernel {
         let mut tool_args = self.build_args_async(args, Some(&schema)).await?;
         let output_format = extract_output_format(&mut tool_args, Some(&schema));
 
+        // --help / -h: show help unless the tool's schema claims that flag
+        let schema_claims = |flag: &str| -> bool {
+            let bare = flag.trim_start_matches('-');
+            schema.params.iter().any(|p| p.matches_flag(flag) || p.matches_flag(bare))
+        };
+        let wants_help =
+            (tool_args.flags.contains("help") && !schema_claims("help"))
+            || (tool_args.flags.contains("h") && !schema_claims("-h"));
+        if wants_help {
+            let help_topic = crate::help::HelpTopic::Tool(name.to_string());
+            let ctx = self.exec_ctx.read().await;
+            let content = crate::help::get_help(&help_topic, &ctx.tool_schemas);
+            return Ok(ExecResult::with_output(crate::interpreter::OutputData::text(content)));
+        }
+
         // Execute
         let mut ctx = self.exec_ctx.write().await;
         {

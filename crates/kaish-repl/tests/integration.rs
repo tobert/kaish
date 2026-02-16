@@ -1253,3 +1253,33 @@ fn quit_still_works() {
     let result = repl.process_line("quit");
     assert!(matches!(result, ProcessResult::Exit));
 }
+
+#[test]
+fn builtin_help_flag() {
+    // --help shows help for any builtin
+    let outputs = run_script("ls --help");
+    let joined = outputs.join("\n");
+    assert!(joined.contains("ls"), "Should mention ls: {}", joined);
+    assert!(joined.contains("directory") || joined.contains("Directory"),
+        "Should describe ls: {}", joined);
+}
+
+#[test]
+fn builtin_h_flag_shows_help_when_unclaimed() {
+    // echo doesn't claim -h, so it should show help
+    let outputs = run_script("echo -h");
+    let joined = outputs.join("\n");
+    assert!(joined.contains("echo"), "Should mention echo: {}", joined);
+    assert!(joined.contains("Print") || joined.contains("print"),
+        "Should describe echo: {}", joined);
+}
+
+#[test]
+fn builtin_h_flag_does_not_show_help_when_claimed() {
+    // ls claims -h for human-readable sizes, so -h should NOT show help
+    let outputs = run_script("ls -h /tmp");
+    let joined = outputs.join("\n");
+    // Should not show help text — should show directory listing or empty
+    assert!(!joined.contains("List directory contents"),
+        "ls -h should not show help: {}", joined);
+}
