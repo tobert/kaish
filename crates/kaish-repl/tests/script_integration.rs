@@ -2,7 +2,6 @@ use std::path::Path;
 use std::process::Command;
 
 #[test]
-#[ignore] // test_cli.kai: command substitution with external commands doesn't capture output
 fn integration_scripts() {
     let kaish = env!("CARGO_BIN_EXE_kaish");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");

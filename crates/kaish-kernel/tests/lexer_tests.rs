@@ -538,3 +538,19 @@ fn lexer_special_variables(#[case] input: &str, #[case] expected: &[&str]) {
 fn lexer_special_variables_in_context(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
+
+/// Arithmetic inside command substitutions must not be preprocessed by the outer lexer.
+/// The inner command sub is re-lexed when evaluated, so $((expr)) inside $(...) is
+/// handled by the inner lexer, not the outer preprocessing pass.
+#[rstest]
+#[case::arith_inside_cmd_sub_single_quoted(
+    "$(kaish -c 'echo $((2 + 2))')",
+    &["CMDSUBST", "IDENT(kaish)", "SHORTFLAG(c)", "SINGLESTRING(echo $((2 + 2)))", "RPAREN"]
+)]
+#[case::arith_outside_cmd_sub(
+    "X=$((1 + 2)); $(echo hello)",
+    &["IDENT(X)", "EQ", "ARITH(1 + 2)", "SEMI", "CMDSUBST", "IDENT(echo)", "IDENT(hello)", "RPAREN"]
+)]
+fn lexer_arithmetic_in_command_substitution(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}

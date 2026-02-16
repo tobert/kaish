@@ -5,8 +5,11 @@
 use std::process::Command;
 
 fn main() {
-    println!("cargo::rerun-if-changed=../../.git/HEAD");
-    println!("cargo::rerun-if-changed=../../.git/refs/heads/");
+    // Only watch .git if it exists (absent in tarball/crate builds)
+    if std::path::Path::new("../../.git").exists() {
+        println!("cargo::rerun-if-changed=../../.git/HEAD");
+        println!("cargo::rerun-if-changed=../../.git/refs/heads/");
+    }
 
     let git_hash = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])

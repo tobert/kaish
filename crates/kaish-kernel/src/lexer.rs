@@ -963,6 +963,50 @@ fn preprocess_arithmetic(source: &str) -> Result<ArithmeticPreprocessResult, Lex
     while i < chars_vec.len() {
         let ch = chars_vec[i];
 
+        // Skip single-quoted strings — no expansion inside
+        if ch == '\'' {
+            result.push(ch);
+            i += 1;
+            source_pos += 1;
+            while i < chars_vec.len() && chars_vec[i] != '\'' {
+                result.push(chars_vec[i]);
+                source_pos += chars_vec[i].len_utf8();
+                i += 1;
+            }
+            if i < chars_vec.len() {
+                result.push(chars_vec[i]); // closing quote
+                source_pos += 1;
+                i += 1;
+            }
+            continue;
+        }
+
+        // Skip $(...) command substitutions — inner arithmetic belongs to the subcommand
+        if ch == '$' && i + 1 < chars_vec.len() && chars_vec[i + 1] == '('
+            && !(i + 2 < chars_vec.len() && chars_vec[i + 2] == '(')
+        {
+            // Copy $( and track paren depth to find the matching )
+            result.push('$');
+            result.push('(');
+            i += 2;
+            source_pos += 2;
+            let mut depth: usize = 1;
+            while i < chars_vec.len() && depth > 0 {
+                let c = chars_vec[i];
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                if depth > 0 || c == ')' {
+                    result.push(c);
+                    source_pos += c.len_utf8();
+                    i += 1;
+                }
+            }
+            continue;
+        }
+
         // Look for $(( (potential arithmetic)
         if ch == '$' && i + 2 < chars_vec.len() && chars_vec[i + 1] == '(' && chars_vec[i + 2] == '(' {
             let arith_start_pos = result.len();
