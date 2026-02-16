@@ -47,7 +47,10 @@ fn run() -> Result<ExitCode> {
         }
 
         Some("--version" | "-V") => {
-            println!("kaish {}", env!("CARGO_PKG_VERSION"));
+            println!("kaish {} ({} {})",
+                     env!("CARGO_PKG_VERSION"),
+                     env!("KAISH_GIT_HASH"),
+                     env!("KAISH_BUILD_DATE"));
             Ok(ExitCode::SUCCESS)
         }
 

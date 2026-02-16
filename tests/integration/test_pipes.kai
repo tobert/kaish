@@ -1,0 +1,16 @@
+#!/usr/bin/env kaish
+source lib.kai
+
+# Simple pipe
+RESULT=$(echo hello | cat)
+check "$RESULT" "hello" "simple pipe echo to cat"
+
+# Command substitution
+RESULT=$(echo "$(echo nested)")
+check "$RESULT" "nested" "nested command substitution"
+
+# Multiple pipes
+RESULT=$(echo "hello world" | cat | cat)
+check "$RESULT" "hello world" "triple pipe"
+
+summary

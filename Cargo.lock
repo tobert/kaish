@@ -1126,6 +1126,7 @@ name = "kaish-repl"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "directories",
  "kaish-client",
  "kaish-kernel",

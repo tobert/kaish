@@ -1,0 +1,16 @@
+#!/usr/bin/env kaish
+source lib.kai
+
+# External command exit code 0
+true
+check_ok "$?" "true returns 0"
+
+# External command exit code 1
+false
+check "$?" "1" "false returns 1"
+
+# External command output capture
+RESULT=$(echo test_value)
+check "$RESULT" "test_value" "capture external output"
+
+summary

@@ -43,5 +43,8 @@ terminal_size = "0.4"
 [dev-dependencies]
 serde_json = { workspace = true }
 
+[build-dependencies]
+chrono = { workspace = true }
+
 [lints]
 workspace = true

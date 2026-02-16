@@ -1,0 +1,42 @@
+# lib.kai — TAP-like test helpers for kaish integration tests
+# Source this from test_*.kai scripts.
+
+_PASS=0
+_FAIL=0
+_TOTAL=0
+
+# check <actual> <expected> <description>
+check() {
+    _TOTAL=$((_TOTAL + 1))
+    if [[ "$1" == "$2" ]]; then
+        _PASS=$((_PASS + 1))
+        echo "ok $_TOTAL - $3"
+    else
+        _FAIL=$((_FAIL + 1))
+        echo "not ok $_TOTAL - $3"
+        echo "#   expected: $2"
+        echo "#   got:      $1"
+    fi
+}
+
+# check_ok <exit_code> <description> — assert exit code 0
+check_ok() {
+    _TOTAL=$((_TOTAL + 1))
+    if [[ "$1" == "0" ]]; then
+        _PASS=$((_PASS + 1))
+        echo "ok $_TOTAL - $2"
+    else
+        _FAIL=$((_FAIL + 1))
+        echo "not ok $_TOTAL - $2 (exit $1)"
+    fi
+}
+
+summary() {
+    echo "1..$_TOTAL"
+    if [[ $_FAIL -gt 0 ]]; then
+        echo "# FAIL: $_FAIL of $_TOTAL tests failed"
+        exit 1
+    else
+        echo "# ok: all $_TOTAL tests passed"
+    fi
+}

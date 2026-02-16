@@ -1,0 +1,34 @@
+#!/usr/bin/env kaish
+source lib.kai
+
+# Simple assignment and expansion
+FOO=bar
+check "$FOO" "bar" "simple assignment"
+
+# Braced expansion
+check "${FOO}" "bar" "braced expansion"
+
+# Default value — unset
+check "${UNSET_VAR:-default}" "default" "default value for unset var"
+
+# Default value — set
+SET_VAR=actual
+check "${SET_VAR:-default}" "actual" "default value not used when set"
+
+# Arithmetic
+X=$((2 + 3))
+check "$X" "5" "arithmetic addition"
+
+Y=$((X * 4))
+check "$Y" "20" "arithmetic multiplication"
+
+# String length
+STR="hello"
+check "${#STR}" "5" "string length"
+
+# Nested assignment
+A=1
+B=$A
+check "$B" "1" "variable referencing variable"
+
+summary

@@ -1,0 +1,45 @@
+#!/usr/bin/env kaish
+source lib.kai
+
+# if/else true branch
+if [[ 1 -eq 1 ]]; then
+    RESULT="true"
+else
+    RESULT="false"
+fi
+check "$RESULT" "true" "if true branch"
+
+# if/else false branch
+if [[ 1 -eq 2 ]]; then
+    RESULT="true"
+else
+    RESULT="false"
+fi
+check "$RESULT" "false" "if false branch"
+
+# for loop
+SUM=0
+for i in 1 2 3; do
+    SUM=$((SUM + i))
+done
+check "$SUM" "6" "for loop sum"
+
+# while loop
+COUNT=0
+while [[ $COUNT -lt 3 ]]; do
+    COUNT=$((COUNT + 1))
+done
+check "$COUNT" "3" "while loop"
+
+# elif
+VAL=2
+if [[ $VAL -eq 1 ]]; then
+    RESULT="one"
+elif [[ $VAL -eq 2 ]]; then
+    RESULT="two"
+else
+    RESULT="other"
+fi
+check "$RESULT" "two" "elif branch"
+
+summary

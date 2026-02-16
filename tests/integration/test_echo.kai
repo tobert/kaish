@@ -1,0 +1,28 @@
+#!/usr/bin/env kaish
+source lib.kai
+
+# Basic echo
+RESULT=$(echo hello)
+check "$RESULT" "hello" "echo hello"
+
+# Echo with multiple args
+RESULT=$(echo hello world)
+check "$RESULT" "hello world" "echo multiple args"
+
+# Echo empty string
+RESULT=$(echo "")
+check "$RESULT" "" "echo empty string"
+
+# Echo with quoted spaces
+RESULT=$(echo "hello   world")
+check "$RESULT" "hello   world" "echo preserves spaces in quotes"
+
+# Printf basic
+RESULT=$(printf "%s" "hello")
+check "$RESULT" "hello" "printf %s"
+
+# Printf with newline
+RESULT=$(printf "%s\n" "line")
+check "$RESULT" "line" "printf %s newline"
+
+summary

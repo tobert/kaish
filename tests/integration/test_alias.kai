@@ -1,0 +1,19 @@
+#!/usr/bin/env kaish
+source lib.kai
+
+# Define and use alias
+alias xyzgreet='echo hello'
+RESULT=$(xyzgreet)
+check "$RESULT" "hello" "alias basic expansion"
+
+# Alias with args
+alias xyzsay='echo'
+RESULT=$(xyzsay world)
+check "$RESULT" "world" "alias passes args"
+
+# Unalias
+unalias xyzgreet
+xyzgreet 2>/dev/null
+check "$?" "127" "unalias removes alias"
+
+summary

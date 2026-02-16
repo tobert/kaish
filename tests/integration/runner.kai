@@ -1,0 +1,24 @@
+#!/usr/bin/env kaish
+# Find and run all test_*.kai files in the current directory.
+# Run from the tests/integration/ directory.
+
+TOTAL_PASS=0
+TOTAL_FAIL=0
+
+for test_file in $(glob "test_*.kai"); do
+    NAME=$(basename "$test_file")
+    echo "--- $NAME ---"
+    kaish "$test_file"
+    if [[ $? -eq 0 ]]; then
+        TOTAL_PASS=$((TOTAL_PASS + 1))
+    else
+        TOTAL_FAIL=$((TOTAL_FAIL + 1))
+    fi
+done
+
+echo ""
+echo "=== Results: $((TOTAL_PASS + TOTAL_FAIL)) files, $TOTAL_PASS passed, $TOTAL_FAIL failed ==="
+
+if [[ $TOTAL_FAIL -gt 0 ]]; then
+    exit 1
+fi

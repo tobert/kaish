@@ -1,0 +1,20 @@
+#!/usr/bin/env kaish
+source lib.kai
+
+# -c mode: basic execution
+RESULT=$(kaish -c 'echo hello')
+check "$RESULT" "hello" "kaish -c echo"
+
+# -c mode: exit code 0
+kaish -c 'exit 0'
+check_ok "$?" "kaish -c exit 0"
+
+# -c mode: exit code propagation
+kaish -c 'exit 42'
+check "$?" "42" "kaish -c exit 42 propagates code"
+
+# -c mode: variable expansion
+RESULT=$(kaish -c 'echo $((2 + 2))')
+check "$RESULT" "4" "kaish -c arithmetic"
+
+summary
