@@ -246,7 +246,7 @@ fn run_repl_connected(socket_path: &str) -> Result<ExitCode> {
 
     println!("会sh — kaish v{} (connected to {})",
              env!("CARGO_PKG_VERSION"), socket_path);
-    println!("Type /help for commands, /quit to exit.\n");
+    println!("Type help for commands, exit to quit.\n");
 
     let rt = tokio::runtime::Runtime::new()?;
     let local = LocalSet::new();

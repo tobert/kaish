@@ -2,7 +2,6 @@
 //!
 //! This REPL provides an interactive interface to the kaish kernel.
 //! It handles:
-//! - Meta-commands: `/help`, `/quit`, `/ast`, `/scope`, `/cwd`, `/jobs`, `/tools`
 //! - Multi-line input via keyword/quote balancing (if/for/while → fi/done)
 //! - Tab completion for commands, variables, and paths
 //! - Command execution via the Kernel
@@ -507,47 +506,6 @@ fn format_result(result: &ExecResult) -> String {
     }
 }
 
-// ── Help text ───────────────────────────────────────────────────────
-
-const HELP_TEXT: &str = r#"会sh — kaish REPL
-
-Session:
-  exit, quit          Exit the REPL
-  kaish-clear         Clear session state (variables, cwd)
-  kaish-ast [-on|-off] 'expr'  Toggle or one-shot AST display
-  kaish-status        Show kernel session info
-  kaish-version       Print kaish version
-  help [tool]         Show tool help
-
-Built-in Tools:
-  echo [args...]    Print arguments
-  cat <path> [-n]   Read file contents (-n for line numbers)
-  ls [path] [-la]   List directory (-a hidden, -l long)
-  cd [path | -]     Change directory (- for previous)
-  pwd               Print working directory
-  vars              Show all variables
-  tools             List available tools
-  jobs              List background jobs
-  wait [job_id]     Wait for background jobs
-
-External Commands:
-  Commands not found as builtins are searched in PATH
-  and executed as external processes (cargo, git, etc.)
-  Absolute paths work directly: /usr/bin/ps, /bin/echo
-
-Language:
-  X=value           Assign a variable
-  ${VAR}            Variable reference
-  ${?.ok}           Last result access
-  a | b | c         Pipeline (connects stdout → stdin)
-  cmd &             Run in background
-  if cond; then ... fi
-  for X in arr; do ... done
-
-Tab Completion:
-  <Tab>             Complete commands, variables ($), or paths
-"#;
-
 // ── History ─────────────────────────────────────────────────────────
 
 /// Save REPL history to disk.
@@ -718,7 +676,7 @@ pub fn run_with_client(
     }
 
     println!("会sh — kaish v{} (connected)", env!("CARGO_PKG_VERSION"));
-    println!("Type /help for commands, /quit to exit.");
+    println!("Type help for commands, exit to quit.");
     println!();
 
     loop {
@@ -730,13 +688,8 @@ pub fn run_with_client(
 
                 let trimmed = line.trim();
 
-                // Handle meta-commands locally
                 match trimmed {
-                    "/quit" | "/q" | "/exit" | "quit" | "exit" => break,
-                    "/help" | "/?" | "help" => {
-                        println!("{}", HELP_TEXT);
-                        continue;
-                    }
+                    "quit" | "exit" => break,
                     "" => continue,
                     _ => {}
                 }
