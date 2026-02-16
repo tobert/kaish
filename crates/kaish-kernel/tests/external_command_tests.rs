@@ -212,6 +212,76 @@ async fn external_command_inherits_env() {
 }
 
 // ============================================================================
+// Interactive Stdin Inheritance Tests
+// ============================================================================
+
+/// Helper to create a kernel with interactive mode enabled.
+fn interactive_kernel() -> Kernel {
+    Kernel::new(KernelConfig::repl().with_interactive(true)).expect("Failed to create kernel")
+}
+
+// TODO: Interactive stdin inheritance tests are disabled pending a design review
+// of how interactive mode interacts with pipelines. The current `inherit_output`
+// logic in kernel.rs:2167 (`self.interactive && stdin_data.is_none()`) doesn't
+// account for pipeline position — the first external command in a pipeline gets
+// stdout inherited to terminal instead of captured for the pipe. We need to:
+// 1. Read `man bash` to understand how bash handles interactive stdio in pipelines
+// 2. Fix inherit_output to check pipeline position
+// 3. Then write proper tests for the stdin inheritance behavior
+//
+// See also: kernel.rs:2156-2176 (stdin/stdout inheritance logic)
+
+#[tokio::test]
+#[ignore = "blocked on interactive stdio pipeline design review"]
+async fn non_interactive_stdin_is_dev_null() {
+    let kernel = repl_kernel();
+    // Use /bin/readlink to bypass the builtin — we need an external process
+    // to introspect its own fd/0, since the builtin reads kaish's fd/0.
+    let result = kernel
+        .execute("/bin/readlink /proc/self/fd/0")
+        .await
+        .unwrap();
+    assert!(result.ok(), "readlink should succeed: {:?}", result);
+    assert_eq!(
+        result.out.trim(),
+        "/dev/null",
+        "Non-interactive external command stdin should be /dev/null: {}",
+        result.out
+    );
+}
+
+#[tokio::test]
+#[ignore = "blocked on interactive stdio pipeline design review"]
+async fn interactive_stdin_is_not_dev_null() {
+    let kernel = interactive_kernel();
+    let result = kernel
+        .execute("/bin/readlink /proc/self/fd/0")
+        .await
+        .unwrap();
+    assert!(result.ok(), "readlink should succeed: {:?}", result);
+    assert_ne!(
+        result.out.trim(),
+        "/dev/null",
+        "Interactive external command stdin should NOT be /dev/null: {}",
+        result.out
+    );
+}
+
+#[tokio::test]
+#[ignore = "blocked on interactive stdio pipeline design review"]
+async fn interactive_piped_stdin_still_works() {
+    let kernel = interactive_kernel();
+    let result = kernel.execute("echo hello | /bin/cat").await.unwrap();
+    assert!(result.ok(), "pipe should succeed: {:?}", result);
+    assert_eq!(
+        result.out.trim(),
+        "hello",
+        "Piped stdin should pass data in interactive mode: {}",
+        result.out
+    );
+}
+
+// ============================================================================
 // Minus Alone (stdin indicator) Tests
 // ============================================================================
 
