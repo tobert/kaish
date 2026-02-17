@@ -1,166 +1,58 @@
 # kaish Virtual Filesystem (VFS)
 
-The VFS provides unified resource access across different backends.
+## Modes
 
-## Mount Modes
+| Mode | Access | Context |
+|------|--------|---------|
+| **Passthrough** | Full filesystem | REPL (human) |
+| **Sandboxed** | `$HOME` + `/tmp` only | MCP (agent) |
+| **NoLocal** | Memory only | Tests |
 
-kaish supports different VFS configurations depending on the use case:
+In sandboxed mode, paths look native but access outside `$HOME` fails (except `/tmp`).
 
-### Passthrough Mode (REPL)
-
-For human-operated REPL sessions, native paths work directly:
-
-```
-/                native filesystem root
-/v/              memory storage for blobs
-```
-
-Example:
-```bash
-ls /home/atobey/src/kaish     # works directly
-cat /etc/passwd                # works
-pwd                            # shows actual cwd
-```
-
-### Sandboxed Mode (MCP)
-
-For agent/MCP use, paths look native but access is restricted to `$HOME`:
+## Mount Points
 
 ```
-/                memory root (catches paths outside sandbox)
-/home/user/      user's home directory (sandboxed)
-/tmp/            real /tmp (for interop with other processes)
-/v/              memory storage for blobs
+/home/user/    real filesystem (sandboxed to $HOME in MCP mode)
+/tmp/          real /tmp (always accessible, tmpfs on Linux)
+/v/blobs/      memory storage for blobs
+/v/bin/        read-only listing of builtins (can invoke: /v/bin/echo hello)
+/v/jobs/{id}/  live background job state (see below)
+/git/          read-only git metadata for cwd
 ```
 
-Example:
-```bash
-ls /home/atobey/src/kaish     # works (within $HOME)
-cat /etc/passwd                # fails (outside sandbox)
-pwd                            # /home/atobey
+## /v/jobs — Job Observability
+
+Each background job gets a directory:
+
 ```
-
-The sandbox can be restricted further (e.g., to `~/src`) via configuration.
-
-## Path Conventions
-
-- Absolute paths start with `/`
-- Paths are Unix-style (forward slashes)
-- In passthrough mode, all paths work
-- In sandboxed mode, only paths under the sandbox root work
-
-## /tmp — Temporary Storage
-
-Maps to the real `/tmp` directory. On Linux, `/tmp` is typically tmpfs (in-memory),
-so it's both fast and ephemeral. In sandboxed mode, this is the only path outside
-`$HOME` with real filesystem access. Files written here are visible to external
-commands.
+/v/jobs/{id}/stdout    live output (ring buffer, 10MB max)
+/v/jobs/{id}/stderr    live error stream
+/v/jobs/{id}/status    "running" | "done:0" | "failed:N"
+/v/jobs/{id}/command   original command string
+```
 
 ```bash
-write /tmp/temp.json '{"key": "value"}'
-jq '.key' /tmp/temp.json
-```
-
-## /v — Virtual Namespace
-
-Memory storage for blobs, builtins, and other synthetic resources.
-
-```bash
-# Blobs are stored at /v/blobs/{id}
-ls /v/blobs/
-```
-
-### /v/bin — Builtin Commands
-
-Read-only listing of all registered builtin commands. Commands can be invoked
-via their `/v/bin/` path:
-
-```bash
-ls /v/bin                  # list all builtins
-/v/bin/echo hello          # run echo builtin explicitly
-```
-
-### /v/jobs — Job Observability
-
-Live access to background job state. Each job gets a directory:
-
-```
-/v/jobs/
-└── {job_id}/
-    ├── stdout   ← live output stream (ring buffer, 10MB max)
-    ├── stderr   ← live error stream
-    ├── status   ← "running" | "done:0" | "failed:N"
-    └── command  ← the original command string
-```
-
-Example:
-```bash
-# Start background job
 cargo build &
-# [1] Running cargo build  /v/jobs/1/
-
-# Check progress
-cat /v/jobs/1/status    # running
-cat /v/jobs/1/stdout    # build output so far
-
-# After completion
-cat /v/jobs/1/status    # done:0
-
-# Cleanup completed jobs
-jobs --cleanup
+cat /v/jobs/1/status       # running
+cat /v/jobs/1/stdout       # build output so far
+jobs --cleanup             # remove completed jobs
 ```
-
-Output streams use bounded ring buffers (10MB default). If a job produces more output, the oldest data is evicted — the pipe never blocks and memory stays bounded.
 
 ## /git — Repository Introspection
 
-Read-only access to git metadata for the current working directory.
-
 ```bash
-cat /git/status                # git status output
-cat /git/log                   # recent commits
-cat /git/diff                  # current diff
-cat /git/blame/path/to/file.rs # blame for specific file
+cat /git/status            # git status
+cat /git/log               # recent commits
+cat /git/diff              # current diff
+cat /git/blame/path/to/f   # blame for specific file
 ```
 
-## Example Session (MCP/Sandboxed)
+## /tmp — Interop
+
+`/tmp` is the only path outside `$HOME` accessible in sandboxed mode. Use it for data exchange with external commands.
 
 ```bash
-# Start in $HOME by default
-pwd                            # /home/atobey
-
-# Work with local files using native paths
-cd /home/atobey/src/kaish
-ls src/
-cat src/main.rs | head -20
-
-# Use /tmp for intermediate data
-ls src/*.rs | write /tmp/rust_files.txt
-
-# Check git status
-cat /git/status
-
-# This fails - outside sandbox
-cat /etc/passwd                # error: not found
+write /tmp/data.json '{"key": "value"}'
+jq '.key' /tmp/data.json
 ```
-
-## Example Session (REPL/Passthrough)
-
-```bash
-# Native paths work directly
-pwd                            # /home/atobey/src/kaish
-ls src/
-cat /etc/passwd                # full filesystem access
-```
-
-## Security Implications
-
-| Mode | Access | Use Case |
-|------|--------|----------|
-| Passthrough | Full filesystem | Human-operated REPL |
-| Sandboxed | `$HOME` only (or subset) | Agents, MCP servers |
-| NoLocal | Memory only | Tests, isolation |
-
-**Passthrough mode** gives full filesystem access — appropriate for human users who trust their own commands.
-
-**Sandboxed mode** restricts access to the user's home directory (or a configured subset). Paths look native but `/etc/passwd` is not accessible.

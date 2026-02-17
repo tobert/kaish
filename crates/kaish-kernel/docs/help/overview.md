@@ -1,11 +1,7 @@
 # kaish (会sh)
 
-Predictable shell for MCP tool orchestration.
-
-- **Bourne-like syntax** — familiar, but no implicit word splitting, glob expansion, or backticks
-- **Strict validation** — catches errors before execution, not at runtime
-- **Clear errors** — fails fast with useful messages, never guesses
-- **Builtin-first** — builtins run in-process; external commands available via PATH fallback
+Strict Bourne-like shell. No implicit word splitting, no glob expansion, no backticks.
+Validates before execution. Builtins run in-process; external commands via PATH fallback.
 
 ## Topics
 
@@ -18,64 +14,38 @@ help limits     Known limitations
 help <tool>     Detailed tool help (e.g., help grep)
 ```
 
+## Output Formats
+
+Builtins return structured data. Use `--json` for machine-readable output:
+
+```bash
+ls --json                # JSON array of file nodes
+vars --json              # JSON array of {NAME, VALUE} objects
+ps --json                # JSON array of process info
+```
+
 ## Quick Examples
 
 ```bash
-# External commands work transparently
-cargo build --release
-git status
-date +%Y-%m-%d
+# Pipes and structured iteration
+glob "*.json" | scatter as=F limit=4 | jq ".name" $F | gather
 
-# Pipes and filters
-ls -l | grep "\.rs$" | head lines=5
-
-# Iteration with glob
-for f in $(glob "*.json"); do
-    jq ".name" "$f"
-done
-
-# Variables and expansion
+# Variables and conditionals
 NAME="world"
-echo "Hello, ${NAME}!"
-echo "Length: ${#NAME}"
-
-# Conditionals
-if [[ -f config.json ]]; then
-    jq ".settings" config.json
-fi
+if [[ -n $NAME ]]; then echo "Hello, ${NAME}!"; fi
 
 # Background jobs with live observability
-cargo build &             # [1] Running cargo build  /v/jobs/1/
-cat /v/jobs/1/stdout      # check progress
-cat /v/jobs/1/status      # running | done:0 | failed:N
-jobs --cleanup            # remove completed jobs
+cargo build &
+cat /v/jobs/1/status     # running | done:0 | failed:N
 
-# Parallel processing
-seq 1 10 | scatter as=N limit=4 | echo "processing $N" | gather
-
-# Explicit subprocess control (env, cwd, timeout)
-spawn --cwd /tmp --timeout 5000 -- make -j4
+# MCP tool integration
+exa:web_search query="rust async" | jq ".title"
 ```
 
 ## Key Differences from Bash
 
-- **No implicit word splitting** — use `split` explicitly
-- **No shell glob expansion** — tools handle their own patterns
-- **No backticks** — use `$(cmd)` always
-- **No `[ ]`** — use `[[ ]]` for all tests
-- **ERE regex everywhere** — no BRE quirks
-
-## MCP Tool Integration
-
-External MCP servers register tools as commands:
-
-```bash
-exa:web_search query="rust async"
-github:create_issue --repo tobert/kaish --title "Bug"
-```
-
-## See Also
-
-- LANGUAGE.md — Full language reference
-- `help builtins` — List all builtins
-- `help <tool>` — Detailed help for any tool
+- No implicit word splitting — use `split` explicitly
+- No shell glob expansion — use `glob` builtin or tool-native patterns
+- No backticks — use `$(cmd)` always
+- ERE regex everywhere — no BRE quirks
+- `true`/`false` are commands, not strings — `"true"` is an error in boolean context
