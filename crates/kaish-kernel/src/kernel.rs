@@ -558,7 +558,7 @@ impl Kernel {
             // otherwise be lost (only the last stage's result is returned).
             let drained_stderr = {
                 let mut receiver = self.stderr_receiver.lock().await;
-                receiver.drain()
+                receiver.drain_lossy()
             };
 
             match flow {
@@ -2140,16 +2140,38 @@ impl Kernel {
     /// - `Err` on execution errors
     #[tracing::instrument(level = "debug", skip(self, args), fields(command = %name))]
     async fn try_execute_external(&self, name: &str, args: &[Arg]) -> Result<Option<ExecResult>> {
+        // Get real working directory for relative path resolution and child cwd
+        let real_cwd = {
+            let ctx = self.exec_ctx.read().await;
+            match ctx.backend.resolve_real_path(&ctx.cwd) {
+                Some(p) => p,
+                None => {
+                    return Ok(Some(ExecResult::failure(
+                        1,
+                        format!(
+                            "{}: cannot run external command from virtual directory '{}'",
+                            name,
+                            ctx.cwd.display()
+                        ),
+                    )));
+                }
+            }
+        };
+
         let executable = if name.contains('/') {
-            // Absolute or relative path — use directly
-            let path = std::path::Path::new(name);
-            if !path.exists() {
+            // Resolve relative paths (./script, ../bin/tool) against the shell's cwd
+            let resolved = if std::path::Path::new(name).is_absolute() {
+                std::path::PathBuf::from(name)
+            } else {
+                real_cwd.join(name)
+            };
+            if !resolved.exists() {
                 return Ok(Some(ExecResult::failure(
                     127,
                     format!("{}: No such file or directory", name),
                 )));
             }
-            if !path.is_file() {
+            if !resolved.is_file() {
                 return Ok(Some(ExecResult::failure(
                     126,
                     format!("{}: Is a directory", name),
@@ -2158,7 +2180,7 @@ impl Kernel {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let mode = std::fs::metadata(name)
+                let mode = std::fs::metadata(&resolved)
                     .map(|m| m.permissions().mode())
                     .unwrap_or(0);
                 if mode & 0o111 == 0 {
@@ -2168,7 +2190,7 @@ impl Kernel {
                     )));
                 }
             }
-            name.to_string()
+            resolved.to_string_lossy().into_owned()
         } else {
             // Get PATH from scope or environment
             let path_var = {
@@ -2187,24 +2209,6 @@ impl Kernel {
         };
 
         tracing::debug!(executable = %executable, "resolved external command");
-
-        // Get current working directory and verify it's on real filesystem
-        let real_cwd = {
-            let ctx = self.exec_ctx.read().await;
-            match ctx.backend.resolve_real_path(&ctx.cwd) {
-                Some(p) => p,
-                None => {
-                    return Ok(Some(ExecResult::failure(
-                        1,
-                        format!(
-                            "{}: cannot run external command from virtual directory '{}'",
-                            name,
-                            ctx.cwd.display()
-                        ),
-                    )));
-                }
-            }
-        };
 
         // Build flat argv (preserves flag format)
         let argv = self.build_args_flat(args).await?;

@@ -381,7 +381,7 @@ impl PipelineRunner {
                 // stderr goes through the pipe as expected.
                 if !result.err.is_empty() {
                     if let Some(ref stderr) = stage_ctx.stderr {
-                        stderr.write(&result.err);
+                        stderr.write_str(&result.err);
                         result.err.clear();
                     }
                 }

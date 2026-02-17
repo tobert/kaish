@@ -96,10 +96,20 @@ impl BackendDispatcher {
         args: &[Arg],
         ctx: &mut ExecContext,
     ) -> Option<ExecResult> {
+        // Get real working directory (needed for relative path resolution and child cwd)
+        let real_cwd = ctx.backend.resolve_real_path(&ctx.cwd)
+            .unwrap_or_else(|| std::path::PathBuf::from("/"));
+
         // Resolve command: absolute/relative path or PATH lookup
         let executable = if name.contains('/') {
-            if std::path::Path::new(name).exists() {
-                name.to_string()
+            // Resolve relative paths (./script, ../bin/tool) against the shell's cwd
+            let resolved = if std::path::Path::new(name).is_absolute() {
+                std::path::PathBuf::from(name)
+            } else {
+                real_cwd.join(name)
+            };
+            if resolved.exists() {
+                resolved.to_string_lossy().into_owned()
             } else {
                 return Some(ExecResult::failure(127, format!("{}: No such file or directory", name)));
             }
@@ -109,10 +119,6 @@ impl BackendDispatcher {
                 .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
             resolve_in_path(name, &path_var)?
         };
-
-        // Get real working directory
-        let real_cwd = ctx.backend.resolve_real_path(&ctx.cwd)
-            .unwrap_or_else(|| std::path::PathBuf::from("/"));
 
         // Build flat argv from args
         let argv: Vec<String> = args.iter().filter_map(|arg| {
@@ -213,9 +219,8 @@ impl BackendDispatcher {
                         Ok(0) => break,
                         Ok(n) => {
                             if let Some(ref stream) = stderr_stream_handle {
-                                // Stream in real-time — no buffering or cap needed
-                                let text = String::from_utf8_lossy(&chunk[..n]);
-                                stream.write(&text);
+                                // Stream raw bytes — no decode here, lossy decode at drain site
+                                stream.write(&chunk[..n]);
                             } else {
                                 buf.extend_from_slice(&chunk[..n]);
                             }
