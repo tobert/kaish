@@ -430,7 +430,13 @@ impl Kernel {
 
         Ok(Self {
             name,
-            scope: RwLock::new(Scope::new()),
+            scope: RwLock::new({
+                let mut scope = Scope::new();
+                if let Ok(home) = std::env::var("HOME") {
+                    scope.set("HOME", Value::String(home));
+                }
+                scope
+            }),
             tools,
             user_tools: RwLock::new(HashMap::new()),
             vfs,

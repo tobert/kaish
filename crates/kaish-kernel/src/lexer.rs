@@ -318,8 +318,23 @@ pub enum Token {
     #[token(",")]
     Comma,
 
+    #[token("..")]
+    DotDot,
+
     #[token(".")]
     Dot,
+
+    /// Tilde path: `~/foo`, `~user/bar` - value includes the full string
+    #[regex(r"~[a-zA-Z0-9_./+-]+", lex_tilde_path, priority = 3)]
+    TildePath(String),
+
+    /// Bare tilde: `~` alone (expands to $HOME)
+    #[token("~")]
+    Tilde,
+
+    /// Relative path starting with `../`: `../foo/bar`
+    #[regex(r"\.\./[a-zA-Z0-9_./-]+", lex_relative_path, priority = 3)]
+    RelativePath(String),
 
     #[token("{")]
     LBrace,
@@ -632,7 +647,11 @@ impl Token {
             Token::Comment => TokenCategory::Comment,
 
             // Paths
-            Token::Path(_) => TokenCategory::Path,
+            Token::Path(_)
+            | Token::TildePath(_)
+            | Token::RelativePath(_)
+            | Token::Tilde
+            | Token::DotDot => TokenCategory::Path,
 
             // Commands/identifiers (and bare words)
             Token::Ident(_)
@@ -767,6 +786,16 @@ fn lex_path(lex: &mut logos::Lexer<Token>) -> String {
     lex.slice().to_string()
 }
 
+/// Lex a tilde path: `~/foo` → `~/foo`
+fn lex_tilde_path(lex: &mut logos::Lexer<Token>) -> String {
+    lex.slice().to_string()
+}
+
+/// Lex a relative path: `../foo` → `../foo`
+fn lex_relative_path(lex: &mut logos::Lexer<Token>) -> String {
+    lex.slice().to_string()
+}
+
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -820,6 +849,10 @@ impl fmt::Display for Token {
             Token::Colon => write!(f, ":"),
             Token::Comma => write!(f, ","),
             Token::Dot => write!(f, "."),
+            Token::DotDot => write!(f, ".."),
+            Token::Tilde => write!(f, "~"),
+            Token::TildePath(s) => write!(f, "{}", s),
+            Token::RelativePath(s) => write!(f, "{}", s),
             Token::LBrace => write!(f, "{{"),
             Token::RBrace => write!(f, "}}"),
             Token::LBracket => write!(f, "["),

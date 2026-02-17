@@ -681,3 +681,32 @@ fn parser_case_with_varref_pattern() {
 fn parser_pipe_with_args() {
     parse_and_snapshot("pipe_with_args", r#"ls path="/src" | grep pattern="\.rs$" | wc"#);
 }
+
+// =============================================================================
+// Navigation: cd .., cd ~, cd ~/foo, cd ../bar
+// =============================================================================
+
+#[test]
+fn parser_cd_dotdot() {
+    parse_and_snapshot("cd_dotdot", "cd ..");
+}
+
+#[test]
+fn parser_cd_tilde() {
+    parse_and_snapshot("cd_tilde", "cd ~");
+}
+
+#[test]
+fn parser_cd_tilde_path() {
+    parse_and_snapshot("cd_tilde_path", "cd ~/foo");
+}
+
+#[test]
+fn parser_cd_relative_path() {
+    parse_and_snapshot("cd_relative_path", "cd ../bar");
+}
+
+#[test]
+fn parser_bare_dotdot() {
+    parse_and_snapshot("bare_dotdot", "echo ..");
+}

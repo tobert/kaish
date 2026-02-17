@@ -21,7 +21,7 @@ impl Tool for Cd {
             .param(ParamSchema::optional(
                 "path",
                 "string",
-                Value::String("/".into()),
+                Value::String("~".into()),
                 "Directory to change to (use - for previous directory)",
             ))
     }
@@ -29,7 +29,7 @@ impl Tool for Cd {
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         let path_arg = args
             .get_string("path", 0)
-            .unwrap_or_else(|| "/".to_string());
+            .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".to_string()));
 
         // Handle `cd -` for previous directory
         let resolved: PathBuf = if path_arg == "-" {

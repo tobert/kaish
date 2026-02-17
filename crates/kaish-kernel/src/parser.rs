@@ -832,6 +832,10 @@ where
         select! { Token::Star => "*".to_string() },
         select! { Token::Question => "?".to_string() },
         select! { Token::Dot => ".".to_string() },
+        select! { Token::DotDot => "..".to_string() },
+        select! { Token::Tilde => "~".to_string() },
+        select! { Token::TildePath(s) => s },
+        select! { Token::RelativePath(s) => s },
         select! { Token::Path(p) => p },
         select! { Token::VarRef(v) => v },
         select! { Token::SimpleVarRef(v) => format!("${}", v) },
@@ -1379,6 +1383,13 @@ where
             // Absolute paths become string literals
             path_parser().map(|s| Expr::Literal(Value::String(s))),
             // Bare words starting with + or - (date +%s, cat -)
+            // Shell navigation tokens
+            select! {
+                Token::DotDot => Expr::Literal(Value::String("..".into())),
+                Token::Tilde => Expr::Literal(Value::String("~".into())),
+                Token::TildePath(s) => Expr::Literal(Value::String(s)),
+                Token::RelativePath(s) => Expr::Literal(Value::String(s)),
+            },
             plus_minus_bare,
             // Keywords can be used as barewords in argument position
             keyword_as_bareword,

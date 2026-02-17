@@ -71,6 +71,10 @@ fn format_token(token: &Token) -> String {
         Token::Colon => "COLON".to_string(),
         Token::Comma => "COMMA".to_string(),
         Token::Dot => "DOT".to_string(),
+        Token::DotDot => "DOTDOT".to_string(),
+        Token::Tilde => "TILDE".to_string(),
+        Token::TildePath(s) => format!("TILDEPATH({})", s),
+        Token::RelativePath(s) => format!("RELPATH({})", s),
 
         // Brackets
         Token::LBrace => "LBRACE".to_string(),
@@ -567,5 +571,24 @@ fn lexer_special_variables_in_context(#[case] input: &str, #[case] expected: &[&
     &["CMDSUBST", "IDENT(echo)", "STRING(foo ) bar)", "RPAREN"]
 )]
 fn lexer_arithmetic_in_command_substitution(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+// =============================================================================
+// Navigation tokens: .., ~, ~/path, ../path
+// =============================================================================
+
+#[rstest]
+#[case::dotdot("..", &["DOTDOT"])]
+#[case::tilde("~", &["TILDE"])]
+#[case::tilde_path("~/foo", &["TILDEPATH(~/foo)"])]
+#[case::tilde_path_nested("~/src/kaish", &["TILDEPATH(~/src/kaish)"])]
+#[case::relative_path("../foo", &["RELPATH(../foo)"])]
+#[case::relative_path_nested("../foo/bar", &["RELPATH(../foo/bar)"])]
+#[case::cd_dotdot("cd ..", &["IDENT(cd)", "DOTDOT"])]
+#[case::cd_tilde("cd ~", &["IDENT(cd)", "TILDE"])]
+#[case::cd_tilde_path("cd ~/foo", &["IDENT(cd)", "TILDEPATH(~/foo)"])]
+#[case::cd_relative("cd ../bar", &["IDENT(cd)", "RELPATH(../bar)"])]
+fn lexer_navigation_tokens(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
