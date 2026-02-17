@@ -50,10 +50,12 @@ mod job;
 mod pipe_stream;
 mod pipeline;
 mod scatter;
+mod stderr_stream;
 mod stream;
 
 pub use job::{Job, JobId, JobInfo, JobManager, JobStatus};
 pub use pipe_stream::{pipe_stream, pipe_stream_default, PipeReader, PipeWriter, PIPE_BUFFER_SIZE};
+pub use stderr_stream::{stderr_stream, StderrReceiver, StderrStream};
 pub use stream::{drain_to_stream, BoundedStream, StreamStats, DEFAULT_STREAM_MAX_SIZE};
 pub use pipeline::{build_tool_args, is_bool_type, schema_param_lookup, PipelineRunner};
 pub use scatter::{

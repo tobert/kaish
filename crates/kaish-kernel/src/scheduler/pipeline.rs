@@ -374,6 +374,18 @@ impl PipelineRunner {
                 // Apply post-execution redirects
                 result = apply_redirects(result, &cmd.redirects, &stage_ctx).await;
 
+                // Flush buffered stderr to the kernel's stderr stream.
+                // This delivers error output from intermediate pipeline stages
+                // in real-time (via the kernel drain) instead of silently discarding it.
+                // Redirects like 2>&1 have already cleared result.err, so merged
+                // stderr goes through the pipe as expected.
+                if !result.err.is_empty() {
+                    if let Some(ref stderr) = stage_ctx.stderr {
+                        stderr.write(&result.err);
+                        result.err.clear();
+                    }
+                }
+
                 // Write output to pipe for next stage (if not last)
                 if let Some(mut pipe_out) = stage_ctx.pipe_stdout.take() {
                     if !result.out.is_empty() {

@@ -164,8 +164,8 @@ impl BackendDispatcher {
         };
 
         // Stream stdin: copy pipe_stdin → child stdin in chunks (bounded memory)
-        if let Some(mut pipe_in) = ctx.pipe_stdin.take() {
-            if let Some(mut child_stdin) = child.stdin.take() {
+        let stdin_task: Option<tokio::task::JoinHandle<()>> = if let Some(mut pipe_in) = ctx.pipe_stdin.take() {
+            child.stdin.take().map(|mut child_stdin| {
                 tokio::spawn(async move {
                     let mut buf = [0u8; 8192];
                     loop {
@@ -180,15 +180,18 @@ impl BackendDispatcher {
                         }
                     }
                     // Drop child_stdin signals EOF to child
-                });
-            }
+                })
+            })
         } else if let Some(data) = ctx.stdin.take() {
             // Buffered string stdin
             if let Some(mut child_stdin) = child.stdin.take() {
                 let _ = child_stdin.write_all(data.as_bytes()).await;
                 // Drop child_stdin signals EOF
             }
-        }
+            None
+        } else {
+            None
+        };
 
         // Stream stdout: copy child stdout → pipe_stdout in chunks (bounded memory)
         if let Some(mut pipe_out) = ctx.pipe_stdout.take() {
@@ -199,10 +202,33 @@ impl BackendDispatcher {
             let Some(mut child_stderr_reader) = child.stderr.take() else {
                 return Some(ExecResult::failure(1, "internal: stderr not available"));
             };
+            // Stream stderr to the kernel's stderr stream (if available) for
+            // real-time delivery. Otherwise buffer with a cap.
+            let stderr_stream_handle = ctx.stderr.clone();
             let stderr_task = tokio::spawn(async move {
                 let mut buf = Vec::new();
-                let _ = child_stderr_reader.read_to_end(&mut buf).await;
-                String::from_utf8_lossy(&buf).into_owned()
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match child_stderr_reader.read(&mut chunk).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if let Some(ref stream) = stderr_stream_handle {
+                                // Stream in real-time — no buffering or cap needed
+                                let text = String::from_utf8_lossy(&chunk[..n]);
+                                stream.write(&text);
+                            } else {
+                                buf.extend_from_slice(&chunk[..n]);
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if stderr_stream_handle.is_some() {
+                    // Already streamed — return empty
+                    String::new()
+                } else {
+                    String::from_utf8_lossy(&buf).into_owned()
+                }
             });
 
             // Copy child stdout → pipe_stdout in chunks
@@ -221,13 +247,15 @@ impl BackendDispatcher {
             let _ = pipe_out.shutdown().await;
             drop(pipe_out);
             let status = child.wait().await;
+            // Abort stdin copier if child exited (it may be blocked on pipe_in.read)
+            if let Some(task) = stdin_task { task.abort(); }
             let stderr = stderr_task.await.unwrap_or_default();
             let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
             // Output was streamed to pipe, so result.out is empty
             Some(ExecResult::from_output(code, String::new(), stderr))
         } else {
             // No pipe_stdout — buffer output as before (last stage or non-pipeline)
-            match child.wait_with_output().await {
+            let result = match child.wait_with_output().await {
                 Ok(output) => {
                     let code = output.status.code().unwrap_or(1) as i64;
                     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -235,7 +263,9 @@ impl BackendDispatcher {
                     Some(ExecResult::from_output(code, stdout, stderr))
                 }
                 Err(e) => Some(ExecResult::failure(1, format!("{}: {}", name, e))),
-            }
+            };
+            if let Some(task) = stdin_task { task.abort(); }
+            result
         }
     }
 }

@@ -37,7 +37,7 @@ use kaish_glob::glob_match;
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
 use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value, value_to_string, ControlFlow, ExecResult, Scope};
 use crate::parser::parse;
-use crate::scheduler::{drain_to_stream, is_bool_type, schema_param_lookup, BoundedStream, JobManager, PipelineRunner, DEFAULT_STREAM_MAX_SIZE};
+use crate::scheduler::{drain_to_stream, is_bool_type, schema_param_lookup, stderr_stream, BoundedStream, JobManager, PipelineRunner, StderrReceiver, DEFAULT_STREAM_MAX_SIZE};
 use crate::tools::{extract_output_format, register_builtins, resolve_in_path, ExecContext, ToolArgs, ToolRegistry};
 use crate::validator::{Severity, Validator};
 use crate::vfs::{BuiltinFs, JobFs, LocalFs, MemoryFs, VfsRouter};
@@ -272,6 +272,11 @@ pub struct Kernel {
     skip_validation: bool,
     /// When true, standalone external commands inherit stdio for real-time output.
     interactive: bool,
+    /// Receiver for the kernel stderr stream.
+    ///
+    /// Pipeline stages write to the corresponding `StderrStream` (set on ExecContext).
+    /// The kernel drains this after each statement in `execute_streaming`.
+    stderr_receiver: tokio::sync::Mutex<StderrReceiver>,
     /// Terminal state for job control (interactive mode only, Unix only).
     #[cfg(unix)]
     terminal_state: Option<Arc<crate::terminal::TerminalState>>,
@@ -414,11 +419,14 @@ impl Kernel {
 
         let runner = PipelineRunner::new(tools.clone());
 
+        let (stderr_writer, stderr_receiver) = stderr_stream();
+
         let mut exec_ctx = make_ctx(&vfs, &tools);
         exec_ctx.set_cwd(cwd);
         exec_ctx.set_job_manager(jobs.clone());
         exec_ctx.set_tool_schemas(tools.schemas());
         exec_ctx.set_tools(tools.clone());
+        exec_ctx.stderr = Some(stderr_writer);
 
         Ok(Self {
             name,
@@ -431,6 +439,7 @@ impl Kernel {
             exec_ctx: RwLock::new(exec_ctx),
             skip_validation,
             interactive,
+            stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
             #[cfg(unix)]
             terminal_state: None,
         })
@@ -537,8 +546,25 @@ impl Kernel {
                 continue;
             }
             let flow = self.execute_stmt_flow(&stmt).await?;
+
+            // Drain any stderr written by pipeline stages during this statement.
+            // This captures stderr from intermediate pipeline stages that would
+            // otherwise be lost (only the last stage's result is returned).
+            let drained_stderr = {
+                let mut receiver = self.stderr_receiver.lock().await;
+                receiver.drain()
+            };
+
             match flow {
-                ControlFlow::Normal(r) => {
+                ControlFlow::Normal(mut r) => {
+                    if !drained_stderr.is_empty() {
+                        if !r.err.is_empty() && !r.err.ends_with('\n') {
+                            r.err.push('\n');
+                        }
+                        // Prepend pipeline stderr before the last stage's stderr
+                        let combined = format!("{}{}", drained_stderr, r.err);
+                        r.err = combined;
+                    }
                     on_output(&r);
                     // Carry the last statement's structured output for MCP TOON encoding.
                     // Must be done here (not in accumulate_result) because accumulate_result
@@ -548,14 +574,23 @@ impl Kernel {
                     result.output = last_output;
                 }
                 ControlFlow::Exit { code } => {
+                    if !drained_stderr.is_empty() {
+                        result.err.push_str(&drained_stderr);
+                    }
                     result.code = code;
                     return Ok(result);
                 }
-                ControlFlow::Return { value } => {
+                ControlFlow::Return { mut value } => {
+                    if !drained_stderr.is_empty() {
+                        value.err = format!("{}{}", drained_stderr, value.err);
+                    }
                     on_output(&value);
                     result = value;
                 }
-                ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
+                ControlFlow::Break { result: mut r, .. } | ControlFlow::Continue { result: mut r, .. } => {
+                    if !drained_stderr.is_empty() {
+                        r.err = format!("{}{}", drained_stderr, r.err);
+                    }
                     on_output(&r);
                     result = r;
                 }
@@ -960,6 +995,7 @@ impl Kernel {
                 stdin_data: None,
                 pipe_stdin: None,
                 pipe_stdout: None,
+                stderr: ec.stderr.clone(),
                 tool_schemas: ec.tool_schemas.clone(),
                 tools: ec.tools.clone(),
                 job_manager: ec.job_manager.clone(),

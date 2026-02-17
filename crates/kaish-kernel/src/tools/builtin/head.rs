@@ -54,13 +54,16 @@ impl Tool for Head {
 
         // Streaming path: read from pipe_stdin line by line, stop after N lines
         // This enables early termination — `seq 1 1000000 | head -5` stops after 5 lines
-        if args.get_string("path", 0).is_none() && ctx.pipe_stdin.is_some() {
+        if args.get_string("path", 0).is_none() && let Some(pipe_in) = ctx.pipe_stdin.take() {
             let bytes = args.get("bytes", usize::MAX).and_then(|v| match v {
                 Value::Int(i) => Some(*i as usize),
                 Value::String(s) => s.parse().ok(),
                 _ => None,
             });
-            if bytes.is_none() {
+            if bytes.is_some() {
+                // Put pipe back — bytes mode doesn't use streaming
+                ctx.pipe_stdin = Some(pipe_in);
+            } else {
                 let lines = args
                     .get("lines", usize::MAX)
                     .and_then(|v| match v {
@@ -82,7 +85,7 @@ impl Tool for Head {
                     lines
                 };
 
-                return self.stream_head_lines(ctx, lines).await;
+                return self.stream_head_lines(ctx, pipe_in, lines).await;
             }
         }
 
@@ -170,10 +173,8 @@ impl Tool for Head {
 impl Head {
     /// Stream head: read lines from pipe_stdin, write to pipe_stdout or buffer,
     /// stop after `max_lines`. Drops pipe_stdin early to signal upstream to stop.
-    async fn stream_head_lines(&self, ctx: &mut ExecContext, max_lines: usize) -> ExecResult {
+    async fn stream_head_lines(&self, ctx: &mut ExecContext, pipe_in: crate::scheduler::PipeReader, max_lines: usize) -> ExecResult {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-        let pipe_in = ctx.pipe_stdin.take().unwrap();
         let mut reader = BufReader::new(pipe_in);
         let mut pipe_out = ctx.pipe_stdout.take();
         let mut buffered = String::new();

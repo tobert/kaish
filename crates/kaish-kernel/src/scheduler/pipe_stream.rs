@@ -11,34 +11,44 @@
 //!                  ├── drop writer → EOF (reader returns 0)
 //!                  └── drop reader → broken pipe (writer returns error)
 //! ```
+//!
+//! Implementation uses `std::sync::Mutex` (not tokio) since critical sections
+//! are just VecDeque operations (microseconds). Closed flags are `AtomicBool`
+//! so Drop is always synchronous — no `tokio::spawn` in destructors.
+//! Wakers are stored under the lock to prevent lost wakeups.
 
 use std::collections::VecDeque;
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::{Mutex, Notify};
 
 /// Default pipe buffer capacity (matches Linux kernel pipe default).
 pub const PIPE_BUFFER_SIZE: usize = 64 * 1024;
 
-/// Shared state between PipeWriter and PipeReader.
-struct PipeInner {
+/// Shared mutable state protected by std::sync::Mutex.
+///
+/// Lock is held only for VecDeque operations and waker registration —
+/// always non-blocking and fast.
+struct PipeBuffer {
     buffer: VecDeque<u8>,
     capacity: usize,
-    /// Writer has been dropped (EOF).
-    writer_closed: bool,
-    /// Reader has been dropped (broken pipe).
-    reader_closed: bool,
+    /// Waker for the reader task (set when reader finds empty buffer).
+    reader_waker: Option<Waker>,
+    /// Waker for the writer task (set when writer finds full buffer).
+    writer_waker: Option<Waker>,
 }
 
-/// Shared handle wrapping the inner state with async synchronization.
+/// Shared state between PipeWriter and PipeReader.
 struct PipeShared {
-    inner: Mutex<PipeInner>,
-    /// Notified when data is available to read or space is available to write.
-    notify: Notify,
+    buf: Mutex<PipeBuffer>,
+    /// Writer has been dropped (EOF). Atomic so Drop is lock-free.
+    writer_closed: AtomicBool,
+    /// Reader has been dropped (broken pipe). Atomic so Drop is lock-free.
+    reader_closed: AtomicBool,
 }
 
 /// Writing end of a pipe stream.
@@ -58,13 +68,14 @@ pub struct PipeReader {
 /// Dropping the writer signals EOF; dropping the reader signals broken pipe.
 pub fn pipe_stream(capacity: usize) -> (PipeWriter, PipeReader) {
     let shared = Arc::new(PipeShared {
-        inner: Mutex::new(PipeInner {
+        buf: Mutex::new(PipeBuffer {
             buffer: VecDeque::with_capacity(capacity.min(8192)),
             capacity,
-            writer_closed: false,
-            reader_closed: false,
+            reader_waker: None,
+            writer_waker: None,
         }),
-        notify: Notify::new(),
+        writer_closed: AtomicBool::new(false),
+        reader_closed: AtomicBool::new(false),
     });
 
     (
@@ -83,37 +94,20 @@ impl PipeWriter {
     ///
     /// Returns the number of bytes written, or an error if the reader has been dropped.
     pub async fn write_bytes(&self, data: &[u8]) -> io::Result<usize> {
+        use std::future::poll_fn;
+
         if data.is_empty() {
             return Ok(0);
         }
 
-        loop {
-            {
-                let mut inner = self.shared.inner.lock().await;
-
-                if inner.reader_closed {
-                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe reader closed"));
-                }
-
-                let available = inner.capacity.saturating_sub(inner.buffer.len());
-                if available > 0 {
-                    let to_write = data.len().min(available);
-                    inner.buffer.extend(&data[..to_write]);
-                    // Notify reader that data is available
-                    self.shared.notify.notify_waiters();
-                    return Ok(to_write);
-                }
-            }
-
-            // Buffer is full — wait for reader to consume
-            self.shared.notify.notified().await;
-        }
+        poll_fn(|cx| Pin::new(&mut &*self).poll_write_impl(cx, data)).await
     }
 }
 
-impl AsyncWrite for PipeWriter {
-    fn poll_write(
-        self: Pin<&mut Self>,
+impl PipeWriter {
+    /// Shared poll implementation used by both AsyncWrite and write_bytes.
+    fn poll_write_impl(
+        &self,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
@@ -121,19 +115,17 @@ impl AsyncWrite for PipeWriter {
             return Poll::Ready(Ok(0));
         }
 
-        let shared = self.shared.clone();
+        if self.shared.reader_closed.load(Ordering::Acquire) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "pipe reader closed",
+            )));
+        }
 
-        // Try to acquire lock and write
-        let mut inner = match shared.inner.try_lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                // Lock contended — register waker and return pending
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
-        };
+        let mut inner = self.shared.buf.lock().unwrap_or_else(|e| e.into_inner());
 
-        if inner.reader_closed {
+        // Re-check reader_closed under lock (writer may have raced with reader drop)
+        if self.shared.reader_closed.load(Ordering::Acquire) {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "pipe reader closed",
@@ -144,15 +136,26 @@ impl AsyncWrite for PipeWriter {
         if available > 0 {
             let to_write = buf.len().min(available);
             inner.buffer.extend(&buf[..to_write]);
-            shared.notify.notify_waiters();
+            // Wake reader if it was waiting for data
+            if let Some(waker) = inner.reader_waker.take() {
+                waker.wake();
+            }
             Poll::Ready(Ok(to_write))
         } else {
-            // Buffer full — register waker via notify
-            drop(inner);
-            // We need to re-poll when space becomes available
-            cx.waker().wake_by_ref();
+            // Buffer full — register waker so reader can wake us
+            inner.writer_waker = Some(cx.waker().clone());
             Poll::Pending
         }
+    }
+}
+
+impl AsyncWrite for PipeWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.poll_write_impl(cx, buf)
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -160,37 +163,26 @@ impl AsyncWrite for PipeWriter {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // Signal EOF by marking writer as closed
-        let shared = self.shared.clone();
-        match shared.inner.try_lock() {
-            Ok(mut inner) => {
-                inner.writer_closed = true;
-                shared.notify.notify_waiters();
-                Poll::Ready(Ok(()))
-            }
-            Err(_) => {
-                _cx.waker().wake_by_ref();
-                Poll::Pending
-            }
+        self.shared.writer_closed.store(true, Ordering::Release);
+        let mut inner = self.shared.buf.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(waker) = inner.reader_waker.take() {
+            waker.wake();
         }
+        Poll::Ready(Ok(()))
     }
 }
 
 impl Drop for PipeWriter {
     fn drop(&mut self) {
-        // Signal EOF to the reader
-        if let Ok(mut inner) = self.shared.inner.try_lock() {
-            inner.writer_closed = true;
-            self.shared.notify.notify_waiters();
-        } else {
-            // Can't acquire lock in drop — spawn a task to signal
-            let shared = self.shared.clone();
-            tokio::spawn(async move {
-                let mut inner = shared.inner.lock().await;
-                inner.writer_closed = true;
-                shared.notify.notify_waiters();
-            });
+        self.shared.writer_closed.store(true, Ordering::Release);
+        // Wake reader so it sees EOF. Lock is std::sync::Mutex — always available
+        // synchronously (no tokio::spawn needed).
+        if let Ok(mut inner) = self.shared.buf.lock() {
+            if let Some(waker) = inner.reader_waker.take() {
+                waker.wake();
+            }
         }
+        // If lock is poisoned, reader will see writer_closed on next poll.
     }
 }
 
@@ -200,18 +192,9 @@ impl AsyncRead for PipeReader {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let shared = self.shared.clone();
-
-        let mut inner = match shared.inner.try_lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
-        };
+        let mut inner = self.shared.buf.lock().unwrap_or_else(|e| e.into_inner());
 
         if !inner.buffer.is_empty() {
-            // Read available data
             let to_read = buf.remaining().min(inner.buffer.len());
             let (front, back) = inner.buffer.as_slices();
 
@@ -224,16 +207,17 @@ impl AsyncRead for PipeReader {
             }
 
             inner.buffer.drain(..to_read);
-            // Notify writer that space is available
-            shared.notify.notify_waiters();
+            // Wake writer if it was waiting for space
+            if let Some(waker) = inner.writer_waker.take() {
+                waker.wake();
+            }
             Poll::Ready(Ok(()))
-        } else if inner.writer_closed {
-            // EOF
+        } else if self.shared.writer_closed.load(Ordering::Acquire) {
+            // EOF — writer is gone and buffer is drained
             Poll::Ready(Ok(()))
         } else {
-            // No data available, writer still open — wait
-            drop(inner);
-            cx.waker().wake_by_ref();
+            // No data, writer still alive — register waker and wait
+            inner.reader_waker = Some(cx.waker().clone());
             Poll::Pending
         }
     }
@@ -241,16 +225,11 @@ impl AsyncRead for PipeReader {
 
 impl Drop for PipeReader {
     fn drop(&mut self) {
-        if let Ok(mut inner) = self.shared.inner.try_lock() {
-            inner.reader_closed = true;
-            self.shared.notify.notify_waiters();
-        } else {
-            let shared = self.shared.clone();
-            tokio::spawn(async move {
-                let mut inner = shared.inner.lock().await;
-                inner.reader_closed = true;
-                shared.notify.notify_waiters();
-            });
+        self.shared.reader_closed.store(true, Ordering::Release);
+        if let Ok(mut inner) = self.shared.buf.lock() {
+            if let Some(waker) = inner.writer_waker.take() {
+                waker.wake();
+            }
         }
     }
 }
@@ -395,5 +374,124 @@ mod tests {
 
         write_task.await.unwrap();
         assert_eq!(output, expected);
+    }
+
+    /// Stress test: many concurrent writers/readers shouldn't hang or lose data.
+    /// This would hang with the lost-wakeup bug (writer misses notify after
+    /// releasing the lock but before calling notified().await).
+    #[tokio::test]
+    async fn test_no_lost_wakeups_under_contention() {
+        // Small buffer + many iterations maximizes lock contention
+        let (writer, mut reader) = pipe_stream(16);
+
+        let write_task = tokio::spawn(async move {
+            for i in 0u32..1000 {
+                let bytes = i.to_le_bytes();
+                let mut pos = 0;
+                while pos < bytes.len() {
+                    let n = writer.write_bytes(&bytes[pos..]).await.unwrap();
+                    pos += n;
+                }
+            }
+            // Writer dropped → EOF
+        });
+
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output).await.unwrap();
+        write_task.await.unwrap();
+
+        // Should have received exactly 1000 * 4 bytes
+        assert_eq!(output.len(), 4000);
+    }
+
+    /// Stress test with timeout: detects hangs from lost wakeups or deadlocks.
+    #[tokio::test]
+    async fn test_concurrent_stress_no_hang() {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (writer, mut reader) = pipe_stream(64);
+
+            let write_task = tokio::spawn(async move {
+                let chunk = vec![0xABu8; 37]; // odd size to stress partial writes
+                for _ in 0..5000 {
+                    let mut pos = 0;
+                    while pos < chunk.len() {
+                        match writer.write_bytes(&chunk[pos..]).await {
+                            Ok(n) => pos += n,
+                            Err(_) => return, // broken pipe
+                        }
+                    }
+                }
+            });
+
+            let mut total = 0usize;
+            let mut buf = [0u8; 128];
+            loop {
+                match reader.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => total += n,
+                    Err(_) => break,
+                }
+            }
+
+            write_task.await.unwrap();
+            assert_eq!(total, 37 * 5000);
+        }).await;
+
+        assert!(result.is_ok(), "pipe stress test timed out — likely deadlock");
+    }
+
+    /// Drop writer while reader is actively reading — must not panic or hang.
+    #[tokio::test]
+    async fn test_writer_drop_during_active_read() {
+        let (writer, mut reader) = pipe_stream(1024);
+
+        // Spawn reader that's actively waiting for data
+        let read_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            reader.read_to_end(&mut buf).await.unwrap();
+            buf
+        });
+
+        // Small delay then drop writer without writing
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        drop(writer);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            read_task,
+        ).await;
+        assert!(result.is_ok(), "reader hung after writer dropped");
+        assert!(result.unwrap().unwrap().is_empty());
+    }
+
+    /// Drop reader while writer is blocked on full buffer — must not hang.
+    #[tokio::test]
+    async fn test_reader_drop_while_writer_blocked() {
+        let (writer, reader) = pipe_stream(8);
+
+        let write_task = tokio::spawn(async move {
+            let data = vec![0u8; 1024]; // much larger than buffer
+            let mut pos = 0;
+            while pos < data.len() {
+                match writer.write_bytes(&data[pos..]).await {
+                    Ok(n) => pos += n,
+                    Err(e) => {
+                        assert_eq!(e.kind(), io::ErrorKind::BrokenPipe);
+                        return;
+                    }
+                }
+            }
+            panic!("writer should have gotten broken pipe");
+        });
+
+        // Let writer fill the buffer and block, then drop reader
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        drop(reader);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            write_task,
+        ).await;
+        assert!(result.is_ok(), "writer hung after reader dropped");
     }
 }

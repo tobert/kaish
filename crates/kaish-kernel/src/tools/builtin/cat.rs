@@ -34,23 +34,25 @@ impl Tool for Cat {
         if args.positional.is_empty() {
             // Streaming path: pipe_stdin → pipe_stdout without buffering
             if !number_lines && ctx.pipe_stdin.is_some() && ctx.pipe_stdout.is_some() {
-                let mut pipe_in = ctx.pipe_stdin.take().unwrap();
-                let mut pipe_out = ctx.pipe_stdout.take().unwrap();
-                use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                let mut buf = [0u8; 8192];
-                loop {
-                    match pipe_in.read(&mut buf).await {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if pipe_out.write_all(&buf[..n]).await.is_err() {
-                                break; // broken pipe
+                if let (Some(mut pipe_in), Some(mut pipe_out)) =
+                    (ctx.pipe_stdin.take(), ctx.pipe_stdout.take())
+                {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        match pipe_in.read(&mut buf).await {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                if pipe_out.write_all(&buf[..n]).await.is_err() {
+                                    break; // broken pipe
+                                }
                             }
+                            Err(_) => break,
                         }
-                        Err(_) => break,
                     }
+                    let _ = pipe_out.shutdown().await;
+                    return ExecResult::success("");
                 }
-                let _ = pipe_out.shutdown().await;
-                return ExecResult::success("");
             }
 
             // Buffered path: read all stdin

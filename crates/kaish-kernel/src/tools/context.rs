@@ -8,7 +8,7 @@ use crate::ast::Value;
 use crate::backend::{KernelBackend, LocalBackend};
 use crate::dispatch::PipelinePosition;
 use crate::interpreter::Scope;
-use crate::scheduler::{JobManager, PipeReader, PipeWriter};
+use crate::scheduler::{JobManager, PipeReader, PipeWriter, StderrStream};
 use crate::tools::ToolRegistry;
 use crate::vfs::VfsRouter;
 
@@ -65,6 +65,12 @@ pub struct ExecContext {
     pub tools: Option<Arc<ToolRegistry>>,
     /// Job manager for background jobs (optional).
     pub job_manager: Option<Arc<JobManager>>,
+    /// Kernel stderr stream for real-time error output from pipeline stages.
+    ///
+    /// When set, pipeline stages write stderr here instead of buffering in
+    /// `ExecResult.err`. This allows stderr from all stages to stream to
+    /// the terminal (or other sink) concurrently, matching bash behavior.
+    pub stderr: Option<StderrStream>,
     /// Position of this command within a pipeline (for stdio decisions).
     pub pipeline_position: PipelinePosition,
     /// Whether we're running in interactive (REPL) mode.
@@ -91,6 +97,7 @@ impl ExecContext {
             stdin_data: None,
             pipe_stdin: None,
             pipe_stdout: None,
+            stderr: None,
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
@@ -116,6 +123,7 @@ impl ExecContext {
             stdin_data: None,
             pipe_stdin: None,
             pipe_stdout: None,
+            stderr: None,
             tool_schemas: Vec::new(),
             tools: Some(tools),
             job_manager: None,
@@ -138,6 +146,7 @@ impl ExecContext {
             stdin_data: None,
             pipe_stdin: None,
             pipe_stdout: None,
+            stderr: None,
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
@@ -160,6 +169,7 @@ impl ExecContext {
             stdin_data: None,
             pipe_stdin: None,
             pipe_stdout: None,
+            stderr: None,
             tool_schemas: Vec::new(),
             tools: Some(tools),
             job_manager: None,
@@ -185,6 +195,7 @@ impl ExecContext {
             stdin_data: None,
             pipe_stdin: None,
             pipe_stdout: None,
+            stderr: None,
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
@@ -207,6 +218,7 @@ impl ExecContext {
             stdin_data: None,
             pipe_stdin: None,
             pipe_stdout: None,
+            stderr: None,
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
@@ -311,6 +323,7 @@ impl ExecContext {
             stdin_data: None,
             pipe_stdin: None,
             pipe_stdout: None,
+            stderr: self.stderr.clone(),
             tool_schemas: self.tool_schemas.clone(),
             tools: self.tools.clone(),
             job_manager: self.job_manager.clone(),

@@ -263,13 +263,17 @@ impl Tool for Grep {
 
         // Streaming path: pipe_stdin → pipe_stdout, process line by line
         // Only for simple stdin grep (no context, no count, no quiet, no files-only, no only-matching)
-        if args.get_string("path", 1).is_none()
-            && ctx.pipe_stdin.is_some()
-            && ctx.pipe_stdout.is_some()
+        let can_stream = args.get_string("path", 1).is_none()
             && !count_only && !quiet && !files_only && !only_matching
             && before_context.is_none() && after_context.is_none()
-        {
-            return self.stream_grep(ctx, &regex, invert, line_number).await;
+            && ctx.pipe_stdin.is_some() && ctx.pipe_stdout.is_some();
+        if can_stream {
+            // Both checked with is_some() above — take() cannot return None.
+            if let (Some(pipe_stdin), Some(pipe_stdout)) =
+                (ctx.pipe_stdin.take(), ctx.pipe_stdout.take())
+            {
+                return self.stream_grep(ctx, pipe_stdin, pipe_stdout, &regex, invert, line_number).await;
+            }
         }
 
         // Single file or stdin search
@@ -337,16 +341,16 @@ impl Grep {
     /// Stream grep: read lines from pipe_stdin, write matching lines to pipe_stdout.
     async fn stream_grep(
         &self,
-        ctx: &mut ExecContext,
+        _ctx: &mut ExecContext,
+        pipe_in: crate::scheduler::PipeReader,
+        mut pipe_out: crate::scheduler::PipeWriter,
         regex: &regex::Regex,
         invert: bool,
         show_line_numbers: bool,
     ) -> ExecResult {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-        let pipe_in = ctx.pipe_stdin.take().unwrap();
         let mut reader = BufReader::new(pipe_in);
-        let mut pipe_out = ctx.pipe_stdout.take().unwrap();
         let mut match_count = 0usize;
         let mut line_num = 0usize;
 
