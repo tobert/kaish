@@ -27,9 +27,17 @@ impl Tool for Cd {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        let path_arg = args
-            .get_string("path", 0)
-            .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".to_string()));
+        let path_arg = args.get_string("path", 0).unwrap_or_else(|| {
+            // Check shell scope first, then process env, then fall back to /
+            ctx.scope
+                .get("HOME")
+                .and_then(|v| match v {
+                    Value::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .or_else(|| std::env::var("HOME").ok())
+                .unwrap_or_else(|| "/".to_string())
+        });
 
         // Handle `cd -` for previous directory
         let resolved: PathBuf = if path_arg == "-" {
@@ -177,5 +185,21 @@ mod tests {
         let result = Cd.execute(args, &mut ctx).await;
         assert!(!result.ok());
         assert!(result.err.contains("OLDPWD not set"));
+    }
+
+    #[tokio::test]
+    async fn test_bare_cd_uses_scope_home() {
+        let mut ctx = make_ctx().await;
+        // Create /home dir in the VFS
+        ctx.backend.mkdir(Path::new("/home")).await.unwrap();
+
+        // Set HOME in scope to /home
+        ctx.scope.set("HOME", Value::String("/home".into()));
+
+        // Bare cd (no args) should go to scope HOME
+        let args = ToolArgs::new();
+        let result = Cd.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(ctx.cwd, PathBuf::from("/home"));
     }
 }
