@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
+use crate::glob::contains_glob;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
 
@@ -70,17 +71,39 @@ impl Tool for Cat {
             }
             return ExecResult::failure(1, "cat: missing path argument");
         }
-        let mut all_content = String::new();
-        let mut line_num = 1;
-
-        for (i, arg) in args.positional.iter().enumerate() {
-            let path = match arg {
+        // Collect paths, expanding any glob patterns
+        let mut paths: Vec<String> = Vec::new();
+        for arg in &args.positional {
+            let s = match arg {
                 Value::String(s) => s.clone(),
                 Value::Int(n) => n.to_string(),
                 _ => continue,
             };
+            if contains_glob(&s) {
+                match ctx.expand_glob(&s).await {
+                    Ok(expanded) => {
+                        let root = ctx.resolve_path(".");
+                        for p in expanded {
+                            let rel = p.strip_prefix(&root).unwrap_or(&p);
+                            paths.push(rel.to_string_lossy().to_string());
+                        }
+                    }
+                    Err(e) => return ExecResult::failure(1, format!("cat: {}", e)),
+                }
+            } else {
+                paths.push(s);
+            }
+        }
 
-            let resolved = ctx.resolve_path(&path);
+        if paths.is_empty() {
+            return ExecResult::failure(1, "cat: missing path argument");
+        }
+
+        let mut all_content = String::new();
+        let mut line_num = 1;
+
+        for (i, path) in paths.iter().enumerate() {
+            let resolved = ctx.resolve_path(path);
 
             match ctx.backend.read(Path::new(&resolved), None).await {
                 Ok(data) => match String::from_utf8(data) {
@@ -246,5 +269,29 @@ mod tests {
         assert!(result.ok());
         // lines.txt has 3 lines, so test.txt should start at line 4
         assert!(result.out.contains("4\thello world"));
+    }
+
+    #[tokio::test]
+    async fn test_cat_glob() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("*.txt".into()));
+
+        let result = Cat.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Should include content from test.txt, lines.txt, other.txt
+        assert!(result.out.contains("hello world"));
+        assert!(result.out.contains("other content"));
+    }
+
+    #[tokio::test]
+    async fn test_cat_glob_no_matches() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("*.nonexistent".into()));
+
+        let result = Cat.execute(args, &mut ctx).await;
+        // No matches → missing path
+        assert!(!result.ok());
     }
 }

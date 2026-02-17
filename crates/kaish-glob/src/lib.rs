@@ -17,7 +17,7 @@ mod ignore;
 mod walker;
 
 pub use filter::{FilterResult, IncludeExclude};
-pub use glob::{expand_braces, glob_match};
+pub use glob::{contains_glob, expand_braces, glob_match};
 pub use glob_path::{GlobPath, PathSegment, PatternError};
 pub use ignore::IgnoreFilter;
 pub use walker::{EntryTypes, ErrorCallback, FileWalker, WalkOptions};

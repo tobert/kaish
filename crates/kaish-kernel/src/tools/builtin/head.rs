@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
+use crate::glob::contains_glob;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
@@ -52,9 +53,35 @@ impl Tool for Head {
             }
         }
 
+        // Collect all file paths, expanding globs
+        let mut paths: Vec<String> = Vec::new();
+        for arg in &args.positional {
+            if let Value::String(s) = arg {
+                if contains_glob(s) {
+                    match ctx.expand_glob(s).await {
+                        Ok(expanded) => {
+                            let root = ctx.resolve_path(".");
+                            for p in expanded {
+                                let rel = p.strip_prefix(&root).unwrap_or(&p);
+                                paths.push(rel.to_string_lossy().to_string());
+                            }
+                        }
+                        Err(e) => return ExecResult::failure(1, format!("head: {}", e)),
+                    }
+                } else {
+                    paths.push(s.clone());
+                }
+            }
+        }
+
+        // Multiple files: show each with header
+        if paths.len() > 1 {
+            return self.head_files(ctx, &args, &paths).await;
+        }
+
         // Streaming path: read from pipe_stdin line by line, stop after N lines
         // This enables early termination — `seq 1 1000000 | head -5` stops after 5 lines
-        if args.get_string("path", 0).is_none() && let Some(pipe_in) = ctx.pipe_stdin.take() {
+        if paths.is_empty() && let Some(pipe_in) = ctx.pipe_stdin.take() {
             let bytes = args.get("bytes", usize::MAX).and_then(|v| match v {
                 Value::Int(i) => Some(*i as usize),
                 Value::String(s) => s.parse().ok(),
@@ -89,10 +116,10 @@ impl Tool for Head {
             }
         }
 
-        // Get input: from file or stdin
-        let input = match args.get_string("path", 0) {
+        // Get input: from single file or stdin
+        let input = match paths.first() {
             Some(path) => {
-                let resolved = ctx.resolve_path(&path);
+                let resolved = ctx.resolve_path(path);
                 match ctx.backend.read(Path::new(&resolved), None).await {
                     Ok(data) => match String::from_utf8(data) {
                         Ok(s) => s,
@@ -171,6 +198,61 @@ impl Tool for Head {
 }
 
 impl Head {
+    /// Head for multiple files: show each with `==> filename <==` header.
+    async fn head_files(&self, ctx: &mut ExecContext, args: &ToolArgs, paths: &[String]) -> ExecResult {
+        let lines = Self::parse_line_count(args);
+        let mut output = String::new();
+        let multi = paths.len() > 1;
+
+        for (i, path) in paths.iter().enumerate() {
+            let resolved = ctx.resolve_path(path);
+
+            match ctx.backend.read(std::path::Path::new(&resolved), None).await {
+                Ok(data) => match String::from_utf8(data) {
+                    Ok(content) => {
+                        if multi {
+                            if i > 0 { output.push('\n'); }
+                            output.push_str(&format!("==> {} <==\n", path));
+                        }
+                        let head: Vec<&str> = content.lines().take(lines).collect();
+                        output.push_str(&head.join("\n"));
+                        output.push('\n');
+                    }
+                    Err(_) => return ExecResult::failure(1, format!("head: {}: invalid UTF-8", path)),
+                },
+                Err(e) => return ExecResult::failure(1, format!("head: {}: {}", path, e)),
+            }
+        }
+
+        let mut result = ExecResult::with_output(OutputData::text(output.trim_end().to_string()));
+        result.out = output.trim_end().to_string();
+        result
+    }
+
+    /// Parse line count from args (shared by execute and head_glob).
+    fn parse_line_count(args: &ToolArgs) -> usize {
+        let lines = args
+            .get("lines", usize::MAX)
+            .and_then(|v| match v {
+                Value::Int(i) => Some(*i as usize),
+                Value::String(s) => s.parse().ok(),
+                _ => None,
+            })
+            .unwrap_or(10);
+
+        if args.has_flag("n") {
+            args.get("n", usize::MAX)
+                .and_then(|v| match v {
+                    Value::Int(i) => Some(*i as usize),
+                    Value::String(s) => s.parse().ok(),
+                    _ => None,
+                })
+                .unwrap_or(lines)
+        } else {
+            lines
+        }
+    }
+
     /// Stream head: read lines from pipe_stdin, write to pipe_stdout or buffer,
     /// stop after `max_lines`. Drops pipe_stdin early to signal upstream to stop.
     async fn stream_head_lines(&self, ctx: &mut ExecContext, pipe_in: crate::scheduler::PipeReader, max_lines: usize) -> ExecResult {
@@ -444,19 +526,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_head_single_file_only() {
-        // 80/20 design: only first positional argument is used.
-        // Extra file arguments are silently ignored.
+    async fn test_head_glob() {
         let mut ctx = make_ctx().await;
         let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/lines.txt".into()));
-        args.positional.push(Value::String("/short.txt".into())); // ignored
+        args.positional.push(Value::String("*.txt".into()));
+        args.named.insert("lines".to_string(), Value::Int(2));
 
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
-        // Should only read from first file (lines.txt has "line 1", "line 2", etc.)
-        let lines: Vec<&str> = result.out.lines().collect();
-        assert_eq!(lines.len(), 10);
-        assert_eq!(lines[0], "line 1");
+        // Multiple files: should have headers
+        assert!(result.out.contains("==>"));
+        // Should contain first 2 lines from lines.txt
+        assert!(result.out.contains("line 1"));
+        assert!(result.out.contains("line 2"));
+        // Should contain first 2 lines from short.txt
+        assert!(result.out.contains("one"));
+        assert!(result.out.contains("two"));
+    }
+
+    #[tokio::test]
+    async fn test_head_multiple_files() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/lines.txt".into()));
+        args.positional.push(Value::String("/short.txt".into()));
+        args.named.insert("lines".to_string(), Value::Int(2));
+
+        let result = Head.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Should show both files with headers
+        assert!(result.out.contains("==> /lines.txt <=="));
+        assert!(result.out.contains("==> /short.txt <=="));
+        assert!(result.out.contains("line 1"));
+        assert!(result.out.contains("one"));
     }
 }

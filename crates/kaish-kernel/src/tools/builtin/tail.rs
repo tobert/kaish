@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
+use crate::glob::contains_glob;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
@@ -52,10 +53,36 @@ impl Tool for Tail {
             }
         }
 
-        // Get input: from file or stdin
-        let input = match args.get_string("path", 0) {
+        // Collect all file paths, expanding globs
+        let mut paths: Vec<String> = Vec::new();
+        for arg in &args.positional {
+            if let Value::String(s) = arg {
+                if contains_glob(s) {
+                    match ctx.expand_glob(s).await {
+                        Ok(expanded) => {
+                            let root = ctx.resolve_path(".");
+                            for p in expanded {
+                                let rel = p.strip_prefix(&root).unwrap_or(&p);
+                                paths.push(rel.to_string_lossy().to_string());
+                            }
+                        }
+                        Err(e) => return ExecResult::failure(1, format!("tail: {}", e)),
+                    }
+                } else {
+                    paths.push(s.clone());
+                }
+            }
+        }
+
+        // Multiple files: show each with header
+        if paths.len() > 1 {
+            return self.tail_files(ctx, &args, &paths).await;
+        }
+
+        // Get input: from single file or stdin
+        let input = match paths.first() {
             Some(path) => {
-                let resolved = ctx.resolve_path(&path);
+                let resolved = ctx.resolve_path(path);
                 match ctx.backend.read(Path::new(&resolved), None).await {
                     Ok(data) => match String::from_utf8(data) {
                         Ok(s) => s,
@@ -124,6 +151,49 @@ impl Tool for Tail {
             result.out = format!("{}\n", output_lines.join("\n"));
             result
         }
+    }
+}
+
+impl Tail {
+    /// Tail for multiple files: show each with `==> filename <==` header.
+    async fn tail_files(&self, ctx: &mut ExecContext, args: &ToolArgs, paths: &[String]) -> ExecResult {
+        let lines = args
+            .get("lines", usize::MAX)
+            .and_then(|v| match v {
+                Value::Int(i) => Some(*i as usize),
+                Value::String(s) => s.parse().ok(),
+                _ => None,
+            })
+            .unwrap_or(10);
+
+        let mut output = String::new();
+        let multi = paths.len() > 1;
+
+        for (i, path) in paths.iter().enumerate() {
+            let resolved = ctx.resolve_path(path);
+
+            match ctx.backend.read(std::path::Path::new(&resolved), None).await {
+                Ok(data) => match String::from_utf8(data) {
+                    Ok(content) => {
+                        if multi {
+                            if i > 0 { output.push('\n'); }
+                            output.push_str(&format!("==> {} <==\n", path));
+                        }
+                        let all_lines: Vec<&str> = content.lines().collect();
+                        let skip = all_lines.len().saturating_sub(lines);
+                        let tail: Vec<&str> = all_lines.into_iter().skip(skip).collect();
+                        output.push_str(&tail.join("\n"));
+                        output.push('\n');
+                    }
+                    Err(_) => return ExecResult::failure(1, format!("tail: {}: invalid UTF-8", path)),
+                },
+                Err(e) => return ExecResult::failure(1, format!("tail: {}: {}", path, e)),
+            }
+        }
+
+        let mut result = ExecResult::with_output(OutputData::text(output.trim_end().to_string()));
+        result.out = output.trim_end().to_string();
+        result
     }
 }
 
@@ -362,19 +432,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tail_single_file_only() {
-        // 80/20 design: only first positional argument is used.
-        // Extra file arguments are silently ignored.
+    async fn test_tail_glob() {
         let mut ctx = make_ctx().await;
         let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/lines.txt".into()));
-        args.positional.push(Value::String("/short.txt".into())); // ignored
+        args.positional.push(Value::String("*.txt".into()));
+        args.named.insert("lines".to_string(), Value::Int(2));
 
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
-        // Should only read from first file (lines.txt ends with "line 12")
-        let lines: Vec<&str> = result.out.lines().collect();
-        assert_eq!(lines.len(), 10);
-        assert_eq!(lines[9], "line 12");
+        // Multiple files: should have headers
+        assert!(result.out.contains("==>"));
+        // Should contain last 2 lines from lines.txt
+        assert!(result.out.contains("line 11"));
+        assert!(result.out.contains("line 12"));
+        // Should contain last 2 lines from short.txt
+        assert!(result.out.contains("two"));
+        assert!(result.out.contains("three"));
+    }
+
+    #[tokio::test]
+    async fn test_tail_multiple_files() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/lines.txt".into()));
+        args.positional.push(Value::String("/short.txt".into()));
+        args.named.insert("lines".to_string(), Value::Int(2));
+
+        let result = Tail.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Should show both files with headers
+        assert!(result.out.contains("==> /lines.txt <=="));
+        assert!(result.out.contains("==> /short.txt <=="));
+        assert!(result.out.contains("line 12"));
+        assert!(result.out.contains("three"));
     }
 }

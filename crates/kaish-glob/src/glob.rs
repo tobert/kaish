@@ -28,6 +28,21 @@ const MAX_MATCH_CALLS: usize = 100_000;
 /// assert!(glob_match("*.{rs,go}", "main.rs"));
 /// assert!(!glob_match("*.txt", "main.rs"));
 /// ```
+/// Check if a string contains glob metacharacters (`*`, `?`, `[`).
+///
+/// Useful for builtins that want to detect when a path argument is a glob
+/// pattern and switch to pattern-matching mode.
+///
+/// ```
+/// use kaish_glob::contains_glob;
+/// assert!(contains_glob("*.rs"));
+/// assert!(contains_glob("src/[ab]*.txt"));
+/// assert!(!contains_glob("src/main.rs"));
+/// ```
+pub fn contains_glob(s: &str) -> bool {
+    s.contains('*') || s.contains('?') || s.contains('[')
+}
+
 pub fn glob_match(pattern: &str, input: &str) -> bool {
     use std::cell::Cell;
 

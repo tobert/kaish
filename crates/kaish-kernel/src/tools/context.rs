@@ -335,6 +335,35 @@ impl ExecContext {
             terminal_state: self.terminal_state.clone(),
         }
     }
+
+    /// Expand a glob pattern to matching file paths.
+    ///
+    /// Returns the matched paths (absolute). Used by builtins that accept glob
+    /// patterns in their path arguments (ls, cat, head, tail, wc, etc.).
+    pub async fn expand_glob(&self, pattern: &str) -> Result<Vec<PathBuf>, String> {
+        use crate::backend_walker_fs::BackendWalkerFs;
+        use crate::walker::{EntryTypes, FileWalker, GlobPath, WalkOptions};
+
+        let glob = GlobPath::new(pattern).map_err(|e| format!("invalid pattern: {}", e))?;
+
+        let root = if glob.is_anchored() {
+            self.resolve_path("/")
+        } else {
+            self.resolve_path(".")
+        };
+
+        let options = WalkOptions {
+            entry_types: EntryTypes::all(),
+            ..WalkOptions::default()
+        };
+
+        let fs = BackendWalkerFs(self.backend.as_ref());
+        let walker = FileWalker::new(&fs, &root)
+            .with_pattern(glob)
+            .with_options(options);
+
+        walker.collect().await.map_err(|e| e.to_string())
+    }
 }
 
 /// Normalize a path by resolving `.` and `..` components lexically (no filesystem access).

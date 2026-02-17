@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
+use crate::glob::contains_glob;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
@@ -60,15 +61,26 @@ impl Tool for Wc {
         let bytes_only = args.has_flag("bytes") || args.has_flag("c");
         let show_all = !lines_only && !words_only && !chars_only && !bytes_only;
 
-        // Collect all file paths from positional arguments
-        let paths: Vec<String> = args
-            .positional
-            .iter()
-            .filter_map(|v| match v {
-                Value::String(s) => Some(s.clone()),
-                _ => None,
-            })
-            .collect();
+        // Collect all file paths from positional arguments, expanding globs
+        let mut paths: Vec<String> = Vec::new();
+        for v in &args.positional {
+            if let Value::String(s) = v {
+                if contains_glob(s) {
+                    match ctx.expand_glob(s).await {
+                        Ok(expanded) => {
+                            let root = ctx.resolve_path(".");
+                            for p in expanded {
+                                let rel = p.strip_prefix(&root).unwrap_or(&p);
+                                paths.push(rel.to_string_lossy().to_string());
+                            }
+                        }
+                        Err(e) => return ExecResult::failure(1, format!("wc: {}", e)),
+                    }
+                } else {
+                    paths.push(s.clone());
+                }
+            }
+        }
 
         // Build headers based on flags
         let headers = build_headers(lines_only, words_only, chars_only, bytes_only, show_all);
@@ -426,5 +438,18 @@ mod tests {
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.out.contains("10001")); // 10000 + newline
+    }
+
+    #[tokio::test]
+    async fn test_wc_glob() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("*.txt".into()));
+        args.flags.insert("l".to_string());
+
+        let result = Wc.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Should show counts for multiple files and a total
+        assert!(result.out.contains("total"));
     }
 }

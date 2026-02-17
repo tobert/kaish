@@ -35,7 +35,7 @@ pub use kaish_glob as glob_crate;
 
 /// Glob pattern matching (re-exported from kaish-glob).
 pub mod glob {
-    pub use kaish_glob::glob::{expand_braces, glob_match};
+    pub use kaish_glob::glob::{contains_glob, expand_braces, glob_match};
 }
 
 /// Recursive file walking infrastructure (re-exported from kaish-glob).

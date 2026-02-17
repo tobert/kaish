@@ -6,10 +6,10 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::backend::EntryInfo;
-use crate::backend_walker_fs::BackendWalkerFs;
+use crate::glob::contains_glob;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
-use crate::walker::{EntryTypes, FileWalker, GlobPath, IgnoreFilter, WalkOptions};
+use crate::walker::IgnoreFilter;
 
 /// Ls tool: list directory contents.
 pub struct Ls;
@@ -104,7 +104,7 @@ impl Tool for Ls {
         };
 
         // If path contains glob characters, expand the pattern and list matches
-        if path_contains_glob(&path) {
+        if contains_glob(&path) {
             return self
                 .list_glob(ctx, &path, long_format, human_readable, show_all, &sort_opts)
                 .await;
@@ -197,35 +197,15 @@ impl Ls {
         pattern: &str,
         long_format: bool,
         human_readable: bool,
-        show_all: bool,
+        _show_all: bool,
         sort_opts: &SortOptions,
     ) -> ExecResult {
-        let glob = match GlobPath::new(pattern) {
-            Ok(g) => g,
-            Err(e) => return ExecResult::failure(1, format!("ls: invalid pattern: {}", e)),
-        };
-
-        let root = if glob.is_anchored() {
-            ctx.resolve_path("/")
-        } else {
-            ctx.resolve_path(".")
-        };
-
-        let options = WalkOptions {
-            entry_types: EntryTypes::all(),
-            include_hidden: show_all,
-            ..WalkOptions::default()
-        };
-
-        let fs = BackendWalkerFs(ctx.backend.as_ref());
-        let walker = FileWalker::new(&fs, &root)
-            .with_pattern(glob)
-            .with_options(options);
-
-        let paths = match walker.collect().await {
+        let paths = match ctx.expand_glob(pattern).await {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(1, format!("ls: {}", e)),
         };
+
+        let root = ctx.resolve_path(".");
 
         if paths.is_empty() {
             return ExecResult::with_output(OutputData::new());
@@ -484,11 +464,6 @@ impl Ls {
         result.out = text_output.trim_end().to_string();
         result
     }
-}
-
-/// Check if a path string contains glob metacharacters.
-fn path_contains_glob(path: &str) -> bool {
-    path.contains('*') || path.contains('?') || path.contains('[')
 }
 
 /// Filter hidden files and sort entries.
