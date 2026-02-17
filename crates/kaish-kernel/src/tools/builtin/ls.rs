@@ -6,9 +6,10 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::backend::EntryInfo;
+use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
-use crate::walker::IgnoreFilter;
+use crate::walker::{EntryTypes, FileWalker, GlobPath, IgnoreFilter, WalkOptions};
 
 /// Ls tool: list directory contents.
 pub struct Ls;
@@ -102,6 +103,13 @@ impl Tool for Ls {
             reverse,
         };
 
+        // If path contains glob characters, expand the pattern and list matches
+        if path_contains_glob(&path) {
+            return self
+                .list_glob(ctx, &path, long_format, human_readable, show_all, &sort_opts)
+                .await;
+        }
+
         // Check if path is a file (not a directory)
         // Real ls behavior: `ls file.txt` just outputs the filename
         if let Ok(info) = ctx.backend.stat(Path::new(&resolved)).await
@@ -176,6 +184,123 @@ impl Ls {
             )
         } else {
             OutputData::nodes(vec![node])
+        };
+
+        ExecResult::with_output(output)
+    }
+
+    /// List files matching a glob pattern.
+    #[allow(clippy::too_many_arguments)]
+    async fn list_glob(
+        &self,
+        ctx: &mut ExecContext,
+        pattern: &str,
+        long_format: bool,
+        human_readable: bool,
+        show_all: bool,
+        sort_opts: &SortOptions,
+    ) -> ExecResult {
+        let glob = match GlobPath::new(pattern) {
+            Ok(g) => g,
+            Err(e) => return ExecResult::failure(1, format!("ls: invalid pattern: {}", e)),
+        };
+
+        let root = if glob.is_anchored() {
+            ctx.resolve_path("/")
+        } else {
+            ctx.resolve_path(".")
+        };
+
+        let options = WalkOptions {
+            entry_types: EntryTypes::all(),
+            include_hidden: show_all,
+            ..WalkOptions::default()
+        };
+
+        let fs = BackendWalkerFs(ctx.backend.as_ref());
+        let walker = FileWalker::new(&fs, &root)
+            .with_pattern(glob)
+            .with_options(options);
+
+        let paths = match walker.collect().await {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(1, format!("ls: {}", e)),
+        };
+
+        if paths.is_empty() {
+            return ExecResult::with_output(OutputData::new());
+        }
+
+        // Stat each match and build EntryInfo list for sorting/formatting
+        let mut entries: Vec<(String, EntryInfo)> = Vec::new();
+        for p in &paths {
+            let rel = p.strip_prefix(&root).unwrap_or(p);
+            let name = rel.to_string_lossy().to_string();
+            match ctx.backend.stat(p).await {
+                Ok(info) => entries.push((name, info)),
+                Err(_) => {
+                    // File disappeared between walk and stat; skip it
+                }
+            }
+        }
+
+        // Sort using the same logic as regular ls
+        let mut infos: Vec<EntryInfo> = entries
+            .into_iter()
+            .map(|(name, mut info)| {
+                info.name = name;
+                info
+            })
+            .collect();
+
+        infos.sort_by(|a, b| {
+            let cmp = if sort_opts.by_time {
+                compare_by_time(a, b)
+            } else if sort_opts.by_size {
+                compare_by_size(a, b)
+            } else {
+                a.name.cmp(&b.name)
+            };
+            if sort_opts.reverse {
+                cmp.reverse()
+            } else {
+                cmp
+            }
+        });
+
+        let nodes: Vec<OutputNode> = infos
+            .iter()
+            .map(|e| {
+                let entry_type = entry_info_to_type(e);
+                if long_format {
+                    let type_char = if e.is_symlink {
+                        "l"
+                    } else if e.is_dir {
+                        "d"
+                    } else {
+                        "-"
+                    };
+                    let size_str = if human_readable {
+                        format_human_size(e.size)
+                    } else {
+                        format!("{:>8}", e.size)
+                    };
+                    OutputNode::new(&e.name)
+                        .with_cells(vec![type_char.to_string(), size_str])
+                        .with_entry_type(entry_type)
+                } else {
+                    OutputNode::new(&e.name).with_entry_type(entry_type)
+                }
+            })
+            .collect();
+
+        let output = if long_format {
+            OutputData::table(
+                vec!["Name".to_string(), "Type".to_string(), "Size".to_string()],
+                nodes,
+            )
+        } else {
+            OutputData::nodes(nodes)
         };
 
         ExecResult::with_output(output)
@@ -359,6 +484,11 @@ impl Ls {
         result.out = text_output.trim_end().to_string();
         result
     }
+}
+
+/// Check if a path string contains glob metacharacters.
+fn path_contains_glob(path: &str) -> bool {
+    path.contains('*') || path.contains('?') || path.contains('[')
 }
 
 /// Filter hidden files and sort entries.
@@ -736,5 +866,56 @@ mod tests {
         assert!(result.ok());
         // Symlinks should appear with @ suffix
         assert!(result.out.contains("link.txt@"));
+    }
+
+    #[tokio::test]
+    async fn test_ls_glob_txt() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("*.txt".into()));
+
+        let result = Ls.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains("file1.txt"));
+        assert!(result.out.contains("file2.txt"));
+        assert!(!result.out.contains("subdir"));
+    }
+
+    #[tokio::test]
+    async fn test_ls_glob_scoped_subdir() {
+        let mut ctx = make_ctx_with_subdirs().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("src/*.rs".into()));
+
+        let result = Ls.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains("main.rs"));
+        assert!(!result.out.contains("README.md"));
+    }
+
+    #[tokio::test]
+    async fn test_ls_glob_long_format() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("*.txt".into()));
+        args.named.insert("long".to_string(), Value::Bool(true));
+
+        let result = Ls.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains("file1.txt"));
+        assert!(result.output.is_some());
+        let output = result.output.unwrap();
+        assert!(output.headers.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_ls_glob_no_matches() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("*.nonexistent".into()));
+
+        let result = Ls.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.is_empty());
     }
 }

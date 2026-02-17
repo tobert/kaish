@@ -530,7 +530,7 @@ fn command_expects_pattern_or_text(cmd: &str) -> bool {
     matches!(
         cmd,
         // Pattern-based commands
-        "grep" | "egrep" | "fgrep" | "sed" | "awk" | "find" | "glob" | "regex"
+        "grep" | "egrep" | "fgrep" | "sed" | "awk" | "find" | "glob" | "regex" | "ls"
         // Text output commands - anything is valid text
         | "echo" | "printf"
         // JSON/text processing
@@ -811,7 +811,6 @@ mod tests {
 
     #[test]
     fn command_expects_pattern_or_text_returns_false() {
-        assert!(!command_expects_pattern_or_text("ls"));
         assert!(!command_expects_pattern_or_text("cat"));
         assert!(!command_expects_pattern_or_text("rm"));
         assert!(!command_expects_pattern_or_text("cp"));
@@ -833,7 +832,7 @@ mod tests {
         };
 
         let issues = validator.validate(&program);
-        assert!(issues.iter().any(|i| i.code == IssueCode::ShellGlobPattern));
+        assert!(!issues.iter().any(|i| i.code == IssueCode::ShellGlobPattern));
     }
 
     #[test]
