@@ -69,7 +69,7 @@ impl Tool for Tail {
                     Err(e) => return ExecResult::failure(1, format!("tail: {}: {}", path, e)),
                 }
             }
-            None => ctx.take_stdin().unwrap_or_default(),
+            None => ctx.read_stdin_to_string().await.unwrap_or_default(),
         };
 
         // Check for byte mode (-c)

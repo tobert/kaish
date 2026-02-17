@@ -152,7 +152,7 @@ impl Tool for Spawn {
         }
 
         // Handle stdin
-        let stdin_data = ctx.take_stdin();
+        let stdin_data = ctx.read_stdin_to_string().await;
         cmd.stdin(if stdin_data.is_some() {
             std::process::Stdio::piped()
         } else {

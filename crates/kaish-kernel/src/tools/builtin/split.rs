@@ -83,7 +83,7 @@ impl Tool for Split {
         // When stdin is available AND there's no explicit string= named arg,
         // read input from stdin and shift positionals so pos[0] = delimiter.
         let has_named_string = args.named.contains_key("string");
-        let stdin = ctx.take_stdin();
+        let stdin = ctx.read_stdin_to_string().await;
         let (input, delim_idx) = if let Some(s) = stdin.filter(|s| !s.is_empty() && !has_named_string) {
             // Stdin mode: input from pipe, positional[0] is the delimiter
             (s.trim_end_matches('\n').to_string(), 0usize)

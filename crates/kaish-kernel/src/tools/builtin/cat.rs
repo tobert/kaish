@@ -32,7 +32,29 @@ impl Tool for Cat {
 
         // If no files specified, read from stdin (like POSIX cat)
         if args.positional.is_empty() {
-            if let Some(stdin) = ctx.take_stdin() {
+            // Streaming path: pipe_stdin → pipe_stdout without buffering
+            if !number_lines && ctx.pipe_stdin.is_some() && ctx.pipe_stdout.is_some() {
+                let mut pipe_in = ctx.pipe_stdin.take().unwrap();
+                let mut pipe_out = ctx.pipe_stdout.take().unwrap();
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 8192];
+                loop {
+                    match pipe_in.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if pipe_out.write_all(&buf[..n]).await.is_err() {
+                                break; // broken pipe
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let _ = pipe_out.shutdown().await;
+                return ExecResult::success("");
+            }
+
+            // Buffered path: read all stdin
+            if let Some(stdin) = ctx.read_stdin_to_string().await {
                 if number_lines {
                     let numbered = stdin
                         .lines()

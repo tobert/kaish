@@ -39,7 +39,7 @@ impl Tool for Tee {
         };
 
         let append = args.has_flag("append") || args.has_flag("a");
-        let input = ctx.take_stdin().unwrap_or_default();
+        let input = ctx.read_stdin_to_string().await.unwrap_or_default();
 
         let resolved = ctx.resolve_path(&path_str);
         // Note: kaish VFS doesn't support append mode directly

@@ -52,7 +52,7 @@ impl Tool for Tr {
         let delete = args.has_flag("delete") || args.has_flag("d");
         let squeeze = args.has_flag("squeeze") || args.has_flag("s");
 
-        let input = ctx.take_stdin().unwrap_or_default();
+        let input = ctx.read_stdin_to_string().await.unwrap_or_default();
 
         // Expand character classes and ranges
         let chars1 = expand_char_set(&set1);

@@ -8,7 +8,7 @@ use crate::ast::Value;
 use crate::backend::{KernelBackend, LocalBackend};
 use crate::dispatch::PipelinePosition;
 use crate::interpreter::Scope;
-use crate::scheduler::JobManager;
+use crate::scheduler::{JobManager, PipeReader, PipeWriter};
 use crate::tools::ToolRegistry;
 use crate::vfs::VfsRouter;
 
@@ -55,6 +55,10 @@ pub struct ExecContext {
     /// Structured data from pipeline (pre-parsed JSON from previous command).
     /// Tools can check this before parsing stdin to avoid redundant JSON parsing.
     pub stdin_data: Option<Value>,
+    /// Streaming pipe input (set when this command is in a concurrent pipeline).
+    pub pipe_stdin: Option<PipeReader>,
+    /// Streaming pipe output (set when this command is in a concurrent pipeline).
+    pub pipe_stdout: Option<PipeWriter>,
     /// Tool schemas for help command.
     pub tool_schemas: Vec<ToolSchema>,
     /// Tool registry reference (for tools that need to inspect available tools).
@@ -63,6 +67,8 @@ pub struct ExecContext {
     pub job_manager: Option<Arc<JobManager>>,
     /// Position of this command within a pipeline (for stdio decisions).
     pub pipeline_position: PipelinePosition,
+    /// Whether we're running in interactive (REPL) mode.
+    pub interactive: bool,
     /// Command aliases (name → expansion string).
     pub aliases: HashMap<String, String>,
     /// Terminal state for job control (interactive mode, Unix only).
@@ -83,10 +89,13 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             stdin_data: None,
+            pipe_stdin: None,
+            pipe_stdout: None,
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
+            interactive: false,
             aliases: HashMap::new(),
             #[cfg(unix)]
             terminal_state: None,
@@ -105,10 +114,13 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             stdin_data: None,
+            pipe_stdin: None,
+            pipe_stdout: None,
             tool_schemas: Vec::new(),
             tools: Some(tools),
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
+            interactive: false,
             aliases: HashMap::new(),
             #[cfg(unix)]
             terminal_state: None,
@@ -124,10 +136,13 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             stdin_data: None,
+            pipe_stdin: None,
+            pipe_stdout: None,
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
+            interactive: false,
             aliases: HashMap::new(),
             #[cfg(unix)]
             terminal_state: None,
@@ -143,10 +158,13 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             stdin_data: None,
+            pipe_stdin: None,
+            pipe_stdout: None,
             tool_schemas: Vec::new(),
             tools: Some(tools),
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
+            interactive: false,
             aliases: HashMap::new(),
             #[cfg(unix)]
             terminal_state: None,
@@ -165,10 +183,13 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             stdin_data: None,
+            pipe_stdin: None,
+            pipe_stdout: None,
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
+            interactive: false,
             aliases: HashMap::new(),
             #[cfg(unix)]
             terminal_state: None,
@@ -184,10 +205,13 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             stdin_data: None,
+            pipe_stdin: None,
+            pipe_stdout: None,
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
+            interactive: false,
             aliases: HashMap::new(),
             #[cfg(unix)]
             terminal_state: None,
@@ -256,5 +280,45 @@ impl ExecContext {
     /// Get the previous working directory (for `cd -`).
     pub fn get_prev_cwd(&self) -> Option<&PathBuf> {
         self.prev_cwd.as_ref()
+    }
+
+    /// Read all stdin (pipe or buffered string) into a String.
+    ///
+    /// Prefers pipe_stdin if set (streaming pipeline), otherwise falls back
+    /// to the buffered stdin string. Consumes the source.
+    pub async fn read_stdin_to_string(&mut self) -> Option<String> {
+        if let Some(mut reader) = self.pipe_stdin.take() {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            reader.read_to_end(&mut buf).await.ok()?;
+            Some(String::from_utf8_lossy(&buf).into_owned())
+        } else {
+            self.stdin.take()
+        }
+    }
+
+    /// Create a child context for a pipeline stage.
+    ///
+    /// Shares backend, tools, job_manager, aliases, cwd, and scope
+    /// but has independent stdin/stdout pipes.
+    pub fn child_for_pipeline(&self) -> Self {
+        Self {
+            backend: self.backend.clone(),
+            scope: self.scope.clone(),
+            cwd: self.cwd.clone(),
+            prev_cwd: self.prev_cwd.clone(),
+            stdin: None,
+            stdin_data: None,
+            pipe_stdin: None,
+            pipe_stdout: None,
+            tool_schemas: self.tool_schemas.clone(),
+            tools: self.tools.clone(),
+            job_manager: self.job_manager.clone(),
+            pipeline_position: PipelinePosition::Only,
+            interactive: self.interactive,
+            aliases: self.aliases.clone(),
+            #[cfg(unix)]
+            terminal_state: self.terminal_state.clone(),
+        }
     }
 }

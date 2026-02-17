@@ -75,7 +75,7 @@ impl Tool for Wc {
 
         // If no files, read from stdin
         if paths.is_empty() {
-            let input = ctx.take_stdin().unwrap_or_default();
+            let input = ctx.read_stdin_to_string().await.unwrap_or_default();
             let (lc, wc, cc, bc) = count_content(&input);
             let cells = build_cells(lc, wc, cc, bc, lines_only, words_only, chars_only, bytes_only, show_all);
             let node = OutputNode::new("").with_cells(cells);

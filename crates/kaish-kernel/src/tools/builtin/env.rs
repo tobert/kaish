@@ -237,7 +237,7 @@ async fn execute_with_env(
     }
 
     // Handle stdin
-    if let Some(stdin_data) = ctx.take_stdin() {
+    if let Some(stdin_data) = ctx.read_stdin_to_string().await {
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());

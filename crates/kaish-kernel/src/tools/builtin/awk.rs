@@ -89,7 +89,7 @@ impl Tool for Awk {
                     Err(e) => return ExecResult::failure(1, format!("awk: {}: {}", path, e)),
                 }
             }
-            None => ctx.take_stdin().unwrap_or_default(),
+            None => ctx.read_stdin_to_string().await.unwrap_or_default(),
         };
 
         // Build runtime with initial variables

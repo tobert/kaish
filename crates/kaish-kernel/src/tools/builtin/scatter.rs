@@ -52,7 +52,7 @@ impl Tool for Scatter {
 
         // Get structured data and text from stdin
         let data = ctx.take_stdin_data();
-        let text = ctx.take_stdin().unwrap_or_default();
+        let text = ctx.read_stdin_to_string().await.unwrap_or_default();
 
         let items = match extract_items(data.as_ref(), &text) {
             Ok(items) => items,

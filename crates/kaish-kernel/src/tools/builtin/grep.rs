@@ -261,6 +261,17 @@ impl Tool for Grep {
                 .await;
         }
 
+        // Streaming path: pipe_stdin → pipe_stdout, process line by line
+        // Only for simple stdin grep (no context, no count, no quiet, no files-only, no only-matching)
+        if args.get_string("path", 1).is_none()
+            && ctx.pipe_stdin.is_some()
+            && ctx.pipe_stdout.is_some()
+            && !count_only && !quiet && !files_only && !only_matching
+            && before_context.is_none() && after_context.is_none()
+        {
+            return self.stream_grep(ctx, &regex, invert, line_number).await;
+        }
+
         // Single file or stdin search
         let (input, filename) = match args.get_string("path", 1) {
             Some(path) => {
@@ -275,7 +286,7 @@ impl Tool for Grep {
                     Err(e) => return ExecResult::failure(1, format!("grep: {}: {}", path, e)),
                 }
             }
-            None => (ctx.take_stdin().unwrap_or_default(), None),
+            None => (ctx.read_stdin_to_string().await.unwrap_or_default(), None),
         };
 
         let (text_output, nodes, match_count) = grep_lines_structured(&input, &regex, &grep_opts, filename.as_deref());
@@ -323,6 +334,60 @@ impl Tool for Grep {
 }
 
 impl Grep {
+    /// Stream grep: read lines from pipe_stdin, write matching lines to pipe_stdout.
+    async fn stream_grep(
+        &self,
+        ctx: &mut ExecContext,
+        regex: &regex::Regex,
+        invert: bool,
+        show_line_numbers: bool,
+    ) -> ExecResult {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let pipe_in = ctx.pipe_stdin.take().unwrap();
+        let mut reader = BufReader::new(pipe_in);
+        let mut pipe_out = ctx.pipe_stdout.take().unwrap();
+        let mut match_count = 0usize;
+        let mut line_num = 0usize;
+
+        let mut line_buf = String::new();
+        loop {
+            line_buf.clear();
+            match reader.read_line(&mut line_buf).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    line_num += 1;
+                    let matches = regex.is_match(line_buf.trim_end_matches('\n'));
+                    let should_output = if invert { !matches } else { matches };
+                    if should_output {
+                        match_count += 1;
+                        let output = if show_line_numbers {
+                            format!("{}:{}", line_num, line_buf)
+                        } else {
+                            line_buf.clone()
+                        };
+                        if pipe_out.write_all(output.as_bytes()).await.is_err() {
+                            break;
+                        }
+                        if !output.ends_with('\n') && pipe_out.write_all(b"\n").await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        drop(reader);
+        let _ = pipe_out.shutdown().await;
+
+        if match_count > 0 {
+            ExecResult::success("")
+        } else {
+            ExecResult::from_output(1, String::new(), String::new())
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn grep_multiple_files(
         &self,

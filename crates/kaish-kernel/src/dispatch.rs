@@ -26,11 +26,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::ast::{Command, Value};
+use crate::ast::{Arg, Command, Expr, Value};
 use crate::backend::BackendError;
 use crate::interpreter::{apply_output_format, ExecResult};
 use crate::scheduler::build_tool_args;
-use crate::tools::{extract_output_format, ExecContext, ToolRegistry};
+use crate::tools::{extract_output_format, resolve_in_path, ExecContext, ToolRegistry};
 
 /// Position of a command within a pipeline.
 ///
@@ -84,6 +84,160 @@ impl BackendDispatcher {
     pub fn new(tools: Arc<ToolRegistry>) -> Self {
         Self { tools }
     }
+
+    /// Try to execute an external command (PATH lookup + process spawn).
+    ///
+    /// Used as fallback when no builtin/backend tool matches. Returns None if
+    /// the command is not found in PATH. Always captures stdout/stderr (never
+    /// inherits terminal — pipeline stages don't need interactive I/O).
+    async fn try_external(
+        &self,
+        name: &str,
+        args: &[Arg],
+        ctx: &mut ExecContext,
+    ) -> Option<ExecResult> {
+        // Resolve command: absolute/relative path or PATH lookup
+        let executable = if name.contains('/') {
+            if std::path::Path::new(name).exists() {
+                name.to_string()
+            } else {
+                return Some(ExecResult::failure(127, format!("{}: No such file or directory", name)));
+            }
+        } else {
+            let path_var = ctx.scope.get("PATH")
+                .map(crate::interpreter::value_to_string)
+                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
+            resolve_in_path(name, &path_var)?
+        };
+
+        // Get real working directory
+        let real_cwd = ctx.backend.resolve_real_path(&ctx.cwd)
+            .unwrap_or_else(|| std::path::PathBuf::from("/"));
+
+        // Build flat argv from args
+        let argv: Vec<String> = args.iter().filter_map(|arg| {
+            match arg {
+                Arg::Positional(expr) => match expr {
+                    Expr::Literal(Value::String(s)) => Some(s.clone()),
+                    Expr::Literal(Value::Int(i)) => Some(i.to_string()),
+                    Expr::Literal(Value::Float(f)) => Some(f.to_string()),
+                    Expr::VarRef(path) => ctx.scope.resolve_path(path).map(|v| crate::interpreter::value_to_string(&v)),
+                    _ => None,
+                },
+                Arg::ShortFlag(f) => Some(format!("-{f}")),
+                Arg::LongFlag(f) => Some(format!("--{f}")),
+                Arg::Named { key, value } => match value {
+                    Expr::Literal(Value::String(s)) => Some(format!("{key}={s}")),
+                    _ => Some(format!("{key}=")),
+                },
+                Arg::DoubleDash => Some("--".to_string()),
+            }
+        }).collect();
+
+        // Check for streaming pipes
+        let has_pipe_stdin = ctx.pipe_stdin.is_some();
+        // pipe_stdout checked later when deciding buffered vs streaming output
+        let has_buffered_stdin = ctx.stdin.is_some();
+
+        // Spawn process
+        use tokio::process::Command;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut cmd = Command::new(&executable);
+        cmd.args(&argv);
+        cmd.current_dir(&real_cwd);
+
+        // Stdin: pipe_stdin or buffered string or inherit (interactive) or null
+        cmd.stdin(if has_pipe_stdin || has_buffered_stdin {
+            std::process::Stdio::piped()
+        } else if ctx.interactive && matches!(ctx.pipeline_position, PipelinePosition::First | PipelinePosition::Only) {
+            std::process::Stdio::inherit()
+        } else {
+            std::process::Stdio::null()
+        });
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => return Some(ExecResult::failure(127, format!("{}: {}", name, e))),
+        };
+
+        // Stream stdin: copy pipe_stdin → child stdin in chunks (bounded memory)
+        if let Some(mut pipe_in) = ctx.pipe_stdin.take() {
+            if let Some(mut child_stdin) = child.stdin.take() {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        match pipe_in.read(&mut buf).await {
+                            Ok(0) => break, // EOF
+                            Ok(n) => {
+                                if child_stdin.write_all(&buf[..n]).await.is_err() {
+                                    break; // child closed stdin
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    // Drop child_stdin signals EOF to child
+                });
+            }
+        } else if let Some(data) = ctx.stdin.take() {
+            // Buffered string stdin
+            if let Some(mut child_stdin) = child.stdin.take() {
+                let _ = child_stdin.write_all(data.as_bytes()).await;
+                // Drop child_stdin signals EOF
+            }
+        }
+
+        // Stream stdout: copy child stdout → pipe_stdout in chunks (bounded memory)
+        if let Some(mut pipe_out) = ctx.pipe_stdout.take() {
+            // Safety: stdout/stderr were set to piped() above, so take() always returns Some
+            let Some(mut child_stdout) = child.stdout.take() else {
+                return Some(ExecResult::failure(1, "internal: stdout not available"));
+            };
+            let Some(mut child_stderr_reader) = child.stderr.take() else {
+                return Some(ExecResult::failure(1, "internal: stderr not available"));
+            };
+            let stderr_task = tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let _ = child_stderr_reader.read_to_end(&mut buf).await;
+                String::from_utf8_lossy(&buf).into_owned()
+            });
+
+            // Copy child stdout → pipe_stdout in chunks
+            let mut buf = [0u8; 8192];
+            loop {
+                match child_stdout.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if pipe_out.write_all(&buf[..n]).await.is_err() {
+                            break; // next stage dropped its reader (broken pipe)
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = pipe_out.shutdown().await;
+            drop(pipe_out);
+            let status = child.wait().await;
+            let stderr = stderr_task.await.unwrap_or_default();
+            let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
+            // Output was streamed to pipe, so result.out is empty
+            Some(ExecResult::from_output(code, String::new(), stderr))
+        } else {
+            // No pipe_stdout — buffer output as before (last stage or non-pipeline)
+            match child.wait_with_output().await {
+                Ok(output) => {
+                    let code = output.status.code().unwrap_or(1) as i64;
+                    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                    Some(ExecResult::from_output(code, stdout, stderr))
+                }
+                Err(e) => Some(ExecResult::failure(1, format!("{}: {}", name, e))),
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -118,7 +272,11 @@ impl CommandDispatcher for BackendDispatcher {
                 exec
             }
             Err(BackendError::ToolNotFound(_)) => {
-                ExecResult::failure(127, format!("command not found: {}", cmd.name))
+                // Fall back to external command execution
+                match self.try_external(&cmd.name, &cmd.args, ctx).await {
+                    Some(result) => result,
+                    None => ExecResult::failure(127, format!("command not found: {}", cmd.name)),
+                }
             }
             Err(e) => ExecResult::failure(127, e.to_string()),
         };

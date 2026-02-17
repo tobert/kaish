@@ -53,7 +53,7 @@ impl Tool for Gather {
         let opts = parse_gather_options(&args);
 
         // Get input (in standalone mode, just pass through)
-        let input = ctx.take_stdin().unwrap_or_default();
+        let input = ctx.read_stdin_to_string().await.unwrap_or_default();
 
         if input.is_empty() {
             return ExecResult::with_output(OutputData::text(""));

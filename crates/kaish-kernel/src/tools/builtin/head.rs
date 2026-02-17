@@ -52,6 +52,40 @@ impl Tool for Head {
             }
         }
 
+        // Streaming path: read from pipe_stdin line by line, stop after N lines
+        // This enables early termination — `seq 1 1000000 | head -5` stops after 5 lines
+        if args.get_string("path", 0).is_none() && ctx.pipe_stdin.is_some() {
+            let bytes = args.get("bytes", usize::MAX).and_then(|v| match v {
+                Value::Int(i) => Some(*i as usize),
+                Value::String(s) => s.parse().ok(),
+                _ => None,
+            });
+            if bytes.is_none() {
+                let lines = args
+                    .get("lines", usize::MAX)
+                    .and_then(|v| match v {
+                        Value::Int(i) => Some(*i as usize),
+                        Value::String(s) => s.parse().ok(),
+                        _ => None,
+                    })
+                    .unwrap_or(10);
+
+                let lines = if args.has_flag("n") {
+                    args.get("n", usize::MAX)
+                        .and_then(|v| match v {
+                            Value::Int(i) => Some(*i as usize),
+                            Value::String(s) => s.parse().ok(),
+                            _ => None,
+                        })
+                        .unwrap_or(lines)
+                } else {
+                    lines
+                };
+
+                return self.stream_head_lines(ctx, lines).await;
+            }
+        }
+
         // Get input: from file or stdin
         let input = match args.get_string("path", 0) {
             Some(path) => {
@@ -69,7 +103,7 @@ impl Tool for Head {
                     Err(e) => return ExecResult::failure(1, format!("head: {}: {}", path, e)),
                 }
             }
-            None => ctx.take_stdin().unwrap_or_default(),
+            None => ctx.read_stdin_to_string().await.unwrap_or_default(),
         };
 
         // Check for byte mode (-c)
@@ -127,6 +161,65 @@ impl Tool for Head {
             );
             let mut result = ExecResult::with_output(output_data);
             // Override canonical output with traditional format
+            result.out = format!("{}\n", output_lines.join("\n"));
+            result
+        }
+    }
+}
+
+impl Head {
+    /// Stream head: read lines from pipe_stdin, write to pipe_stdout or buffer,
+    /// stop after `max_lines`. Drops pipe_stdin early to signal upstream to stop.
+    async fn stream_head_lines(&self, ctx: &mut ExecContext, max_lines: usize) -> ExecResult {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let pipe_in = ctx.pipe_stdin.take().unwrap();
+        let mut reader = BufReader::new(pipe_in);
+        let mut pipe_out = ctx.pipe_stdout.take();
+        let mut buffered = String::new();
+        let mut line_count = 0;
+
+        let mut line_buf = String::new();
+        while line_count < max_lines {
+            line_buf.clear();
+            match reader.read_line(&mut line_buf).await {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    line_count += 1;
+                    if let Some(ref mut out) = pipe_out {
+                        if out.write_all(line_buf.as_bytes()).await.is_err() {
+                            break; // broken pipe
+                        }
+                    } else {
+                        buffered.push_str(&line_buf);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        // Drop reader (and pipe_stdin inside it) — signals broken pipe to upstream
+        drop(reader);
+
+        if let Some(mut out) = pipe_out {
+            let _ = out.shutdown().await;
+            ExecResult::success("")
+        } else {
+            // Remove trailing newline for consistency with buffered path
+            if buffered.ends_with('\n') {
+                buffered.pop();
+            }
+            let output_lines: Vec<&str> = buffered.lines().collect();
+            let nodes: Vec<OutputNode> = output_lines
+                .iter()
+                .enumerate()
+                .map(|(i, line)| OutputNode::new(*line).with_cells(vec![(i + 1).to_string()]))
+                .collect();
+            let output_data = OutputData::table(
+                vec!["Line".to_string(), "Num".to_string()],
+                nodes,
+            );
+            let mut result = ExecResult::with_output(output_data);
             result.out = format!("{}\n", output_lines.join("\n"));
             result
         }

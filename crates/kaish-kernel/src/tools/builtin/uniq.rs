@@ -68,7 +68,7 @@ impl Tool for Uniq {
                     Err(e) => return ExecResult::failure(1, format!("uniq: {}: {}", path, e)),
                 }
             }
-            None => ctx.take_stdin().unwrap_or_default(),
+            None => ctx.read_stdin_to_string().await.unwrap_or_default(),
         };
 
         let show_count = args.has_flag("count") || args.has_flag("c");

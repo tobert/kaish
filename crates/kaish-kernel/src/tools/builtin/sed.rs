@@ -92,7 +92,7 @@ impl Tool for Sed {
                     Err(e) => return ExecResult::failure(1, format!("sed: {}: {}", path, e)),
                 }
             }
-            None => ctx.take_stdin().unwrap_or_default(),
+            None => ctx.read_stdin_to_string().await.unwrap_or_default(),
         };
 
         // Execute

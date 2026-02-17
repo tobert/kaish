@@ -61,7 +61,7 @@ impl Tool for Tokens {
         // Get text from positional arg or stdin
         let text = match args.get_string("text", 0) {
             Some(t) => t,
-            None => match ctx.take_stdin() {
+            None => match ctx.read_stdin_to_string().await {
                 Some(s) => s,
                 None => return ExecResult::failure(1, "tokens: no input provided"),
             },

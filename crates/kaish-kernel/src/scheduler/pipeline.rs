@@ -16,6 +16,7 @@ use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ToolArgs, ToolRegistry, ToolSchema};
 use tokio::io::AsyncWriteExt;
 
+use super::pipe_stream::pipe_stream_default;
 use super::scatter::{
     parse_gather_options, parse_scatter_options, ScatterGatherRunner,
 };
@@ -269,53 +270,154 @@ impl PipelineRunner {
         apply_redirects(result, &cmd.redirects, ctx).await
     }
 
-    /// Run a multi-command pipeline.
+    /// Run a multi-command pipeline concurrently.
     ///
-    /// Each command's stdout becomes the next command's stdin.
-    /// The dispatcher handles execution; the runner handles I/O routing.
-    #[tracing::instrument(level = "debug", skip(self, commands, ctx, dispatcher), fields(stage_count = commands.len()))]
+    /// Each stage runs in its own tokio task, connected by bounded pipe streams
+    /// (64KB ring buffers with backpressure). This provides:
+    /// - Bounded memory usage (no buffering entire outputs)
+    /// - Backpressure (fast producers wait for slow consumers)
+    /// - Early termination (e.g., `seq 1 1000000 | head -n 5`)
+    ///
+    /// Structured data (`stdin_data`) is passed via oneshot channels alongside pipes.
+    #[tracing::instrument(level = "debug", skip(self, commands, ctx, _dispatcher), fields(stage_count = commands.len()))]
     async fn run_pipeline(
         &self,
         commands: &[Command],
         ctx: &mut ExecContext,
-        dispatcher: &dyn CommandDispatcher,
+        _dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
-        let mut current_stdin: Option<String> = None;
-        let mut current_data: Option<Value> = None;
-        let mut last_result = ExecResult::success("");
-        let last_idx = commands.len() - 1;
+        let stage_count = commands.len();
+        let last_idx = stage_count - 1;
+
+        // Create N-1 pipe pairs connecting adjacent stages
+        let mut pipe_writers: Vec<Option<super::pipe_stream::PipeWriter>> = Vec::new();
+        let mut pipe_readers: Vec<Option<super::pipe_stream::PipeReader>> = Vec::new();
+
+        for _ in 0..last_idx {
+            let (writer, reader) = pipe_stream_default();
+            pipe_writers.push(Some(writer));
+            pipe_readers.push(Some(reader));
+        }
+
+        // Create N-1 oneshot channels for structured data sideband
+        let mut data_senders: Vec<Option<tokio::sync::oneshot::Sender<Option<Value>>>> = Vec::new();
+        let mut data_receivers: Vec<Option<tokio::sync::oneshot::Receiver<Option<Value>>>> = Vec::new();
+
+        for _ in 0..last_idx {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            data_senders.push(Some(tx));
+            data_receivers.push(Some(rx));
+        }
+
+        // Concurrent pipeline stages use BackendDispatcher (builtins + backend tools).
+        // The original dispatcher (which may be the full Kernel dispatcher) can't be
+        // shared across tokio::spawn boundaries since it's not 'static.
+        // This is the same limitation scatter workers have.
+        let stage_dispatcher: Arc<dyn CommandDispatcher> =
+            Arc::new(crate::dispatch::BackendDispatcher::new(self.tools.clone()));
+
+        let mut handles: Vec<tokio::task::JoinHandle<(ExecResult, ExecContext)>> = Vec::with_capacity(stage_count);
 
         for (i, cmd) in commands.iter().enumerate() {
-            // Set up stdin from redirects (< file, <<heredoc)
-            setup_stdin_redirects(cmd, ctx);
+            let mut stage_ctx = ctx.child_for_pipeline();
+            let cmd = cmd.clone();
 
-            // Set stdin from previous command's stdout (overrides redirect stdin)
-            // Also pass structured data if available from previous command
-            if let Some(input) = current_stdin.take() {
-                ctx.set_stdin_with_data(input, current_data.take());
+            // Set up stdin from redirects on the child context
+            setup_stdin_redirects(&cmd, &mut stage_ctx);
+
+            // Wire pipe_stdin: stage 0 gets parent stdin (if no redirect), others get pipe reader
+            if i == 0 {
+                // First stage inherits the parent's stdin, but only if redirects didn't
+                // already set stdin (e.g., heredoc). Don't overwrite redirect-provided stdin.
+                if stage_ctx.stdin.is_none() {
+                    stage_ctx.stdin = ctx.stdin.take();
+                }
+                if stage_ctx.stdin_data.is_none() {
+                    stage_ctx.stdin_data = ctx.stdin_data.take();
+                }
+            } else {
+                // Intermediate/last stages read from pipe
+                stage_ctx.pipe_stdin = pipe_readers[i - 1].take();
+                // Structured data received via oneshot (resolved at start of execution)
             }
 
-            // Set pipeline position for stdio inheritance decisions
-            ctx.pipeline_position = match i {
-                0 if last_idx == 0 => PipelinePosition::Only,
+            // Wire pipe_stdout: last stage writes to ExecResult, others write to pipe
+            if i < last_idx {
+                stage_ctx.pipe_stdout = pipe_writers[i].take();
+            }
+
+            // Set pipeline position
+            stage_ctx.pipeline_position = match i {
                 0 => PipelinePosition::First,
                 n if n == last_idx => PipelinePosition::Last,
                 _ => PipelinePosition::Middle,
             };
 
-            // Execute via dispatcher (full resolution chain)
-            last_result = match dispatcher.dispatch(cmd, ctx).await {
-                Ok(result) => result,
-                Err(e) => ExecResult::failure(1, e.to_string()),
-            };
+            let data_sender = if i < last_idx { data_senders[i].take() } else { None };
+            let data_receiver = if i > 0 { data_receivers[i - 1].take() } else { None };
+            let task_dispatcher = stage_dispatcher.clone();
 
-            // Apply post-execution redirects
-            last_result = apply_redirects(last_result, &cmd.redirects, ctx).await;
+            let handle: tokio::task::JoinHandle<(ExecResult, ExecContext)> = tokio::spawn(async move {
+                // Receive structured data from previous stage via oneshot
+                if let Some(rx) = data_receiver {
+                    if let Ok(data) = rx.await {
+                        stage_ctx.stdin_data = data;
+                    }
+                }
 
-            // Pass stdout and structured data to next command's stdin (unless last command)
-            if i < last_idx {
-                current_stdin = Some(last_result.out.clone());
-                current_data = last_result.data.clone();
+                // Execute the command
+                let mut result = match task_dispatcher.dispatch(&cmd, &mut stage_ctx).await {
+                    Ok(result) => result,
+                    Err(e) => ExecResult::failure(1, e.to_string()),
+                };
+
+                // Apply post-execution redirects
+                result = apply_redirects(result, &cmd.redirects, &stage_ctx).await;
+
+                // Write output to pipe for next stage (if not last)
+                if let Some(mut pipe_out) = stage_ctx.pipe_stdout.take() {
+                    if !result.out.is_empty() {
+                        // Write result to pipe; ignore broken pipe (reader dropped early)
+                        let _ = pipe_out.write_all(result.out.as_bytes()).await;
+                        let _ = pipe_out.shutdown().await;
+                    }
+                    // Drop pipe_out signals EOF to next stage's reader
+                }
+
+                // Send structured data to next stage via oneshot
+                if let Some(tx) = data_sender {
+                    // Ignore error — receiver may have been dropped (early termination)
+                    let _ = tx.send(result.data.clone());
+                }
+
+                (result, stage_ctx)
+            });
+
+            handles.push(handle);
+        }
+
+        // Await all stages and return last stage's result.
+        // Sync the last stage's scope back to the parent context so that
+        // variable assignments in the last pipeline stage are visible
+        // (e.g., `echo "Alice" | read NAME`).
+        let mut last_result = ExecResult::success("");
+        for (i, handle) in handles.into_iter().enumerate() {
+            match handle.await {
+                Ok((result, stage_ctx)) => {
+                    if i == last_idx {
+                        last_result = result;
+                        // Sync last stage's scope and cwd changes back
+                        ctx.scope = stage_ctx.scope;
+                        ctx.cwd = stage_ctx.cwd;
+                        ctx.prev_cwd = stage_ctx.prev_cwd;
+                        ctx.aliases = stage_ctx.aliases;
+                    }
+                }
+                Err(e) => {
+                    if i == last_idx {
+                        last_result = ExecResult::failure(1, format!("pipeline stage panicked: {}", e));
+                    }
+                }
             }
         }
 

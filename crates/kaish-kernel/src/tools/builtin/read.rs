@@ -72,7 +72,7 @@ impl Tool for Read {
         let prompt_output = prompt.as_deref().unwrap_or("");
 
         // Get input from stdin
-        let input = match ctx.take_stdin() {
+        let input = match ctx.read_stdin_to_string().await {
             Some(s) => s,
             None => {
                 // No stdin provided - return failure (no data to read)

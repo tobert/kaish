@@ -958,10 +958,13 @@ impl Kernel {
                 prev_cwd: ec.prev_cwd.clone(),
                 stdin: None,
                 stdin_data: None,
+                pipe_stdin: None,
+                pipe_stdout: None,
                 tool_schemas: ec.tool_schemas.clone(),
                 tools: ec.tools.clone(),
                 job_manager: ec.job_manager.clone(),
                 pipeline_position: PipelinePosition::Only,
+                interactive: self.interactive,
                 aliases: ec.aliases.clone(),
                 #[cfg(unix)]
                 terminal_state: ec.terminal_state.clone(),

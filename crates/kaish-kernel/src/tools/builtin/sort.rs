@@ -80,7 +80,7 @@ impl Tool for Sort {
                     Err(e) => return ExecResult::failure(1, format!("sort: {}: {}", path, e)),
                 }
             }
-            None => ctx.take_stdin().unwrap_or_default(),
+            None => ctx.read_stdin_to_string().await.unwrap_or_default(),
         };
 
         let numeric = args.has_flag("numeric") || args.has_flag("n");

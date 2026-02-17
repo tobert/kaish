@@ -288,7 +288,7 @@ impl Tool for JqNative {
             } else if let Some(data) = ctx.take_stdin_data() {
                 // Fast path: use pre-parsed structured data from pipeline
                 ast_value_to_json(&data)
-            } else if let Some(text) = ctx.take_stdin() {
+            } else if let Some(text) = ctx.read_stdin_to_string().await {
                 // Fallback: parse stdin text as JSON
                 match serde_json::from_str(&text) {
                     Ok(json) => json,
@@ -300,7 +300,7 @@ impl Tool for JqNative {
         } else if let Some(data) = ctx.take_stdin_data() {
             // Fast path: use pre-parsed structured data from pipeline
             ast_value_to_json(&data)
-        } else if let Some(text) = ctx.take_stdin() {
+        } else if let Some(text) = ctx.read_stdin_to_string().await {
             // Fallback: parse stdin text as JSON
             match serde_json::from_str(&text) {
                 Ok(json) => json,
