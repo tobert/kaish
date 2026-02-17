@@ -38,6 +38,7 @@ These bash features are omitted by design:
 
 ## Execution
 
+- **Pipeline stages run concurrently** — Each stage in `a | b | c` runs in its own task with an isolated scope (like bash subshells). Variable assignments in one stage are not visible to other stages. The last stage's scope is synced back to the parent.
 - **Scatter results in completion order** — 散 returns results as jobs complete, not in input order.
 - **No command substitution in redirect targets** — `cmd > $(...)` not supported. Evaluate the path first.
 
@@ -48,7 +49,7 @@ External commands (via PATH fallback) have constraints:
 | Limitation | Reason | Workaround |
 |------------|--------|------------|
 | No PTY/TTY | Commands run with piped I/O | Use builtins or non-interactive modes |
-| Output captured | Not streamed, may be truncated | Large output: redirect to file |
+| Output buffered (non-pipeline) | Standalone commands capture all output before returning | Large output: redirect to file or use in a pipeline |
 | Virtual cwd fails | `/v/` isn't real filesystem | `cd` to real directory first |
 
 ```bash
