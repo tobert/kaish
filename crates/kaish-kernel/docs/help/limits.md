@@ -27,6 +27,7 @@
 ## Execution
 
 - **Pipeline stages run concurrently** with isolated scopes (like bash subshells). Variable assignments in one stage aren't visible in others. Last stage syncs back to parent.
+- **User functions and .kai scripts cannot run inside pipeline stages or scatter workers.** Only builtins and external commands work in these contexts.
 - **Scatter results in completion order**, not input order.
 - **No command substitution in redirect targets** — `cmd > $(...)` not supported. Evaluate path first.
 - **Preprocessor is context-unaware** — `$(( ))` and heredoc markers replaced before parsing.
@@ -35,9 +36,10 @@
 
 | Constraint | Workaround |
 |-----------|------------|
-| No PTY/TTY | Use builtins or non-interactive modes |
+| No PTY assumed | TTY works if present, but kaish doesn't allocate one |
 | Output buffered (non-pipeline) | Redirect to file or use in pipeline |
 | Virtual cwd fails | `cd` to real directory before running |
+| Bypass VFS sandbox | External binaries access the real filesystem |
 
 ## Bash vs kaish
 
