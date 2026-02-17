@@ -836,6 +836,7 @@ where
         select! { Token::Tilde => "~".to_string() },
         select! { Token::TildePath(s) => s },
         select! { Token::RelativePath(s) => s },
+        select! { Token::DotSlashPath(s) => s },
         select! { Token::Path(p) => p },
         select! { Token::VarRef(v) => v },
         select! { Token::SimpleVarRef(v) => format!("${}", v) },
@@ -943,10 +944,11 @@ fn command_parser<'tokens, I>(
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    // Command name can be an identifier, path, 'true', 'false', or '.' (source alias)
+    // Command name can be an identifier, path, 'true', 'false', '.' (source alias), or ./path
     let command_name = choice((
         ident_parser(),
         path_parser(),
+        select! { Token::DotSlashPath(s) => s },
         just(Token::True).to("true".to_string()),
         just(Token::False).to("false".to_string()),
         just(Token::Dot).to(".".to_string()),
@@ -1389,6 +1391,7 @@ where
                 Token::Tilde => Expr::Literal(Value::String("~".into())),
                 Token::TildePath(s) => Expr::Literal(Value::String(s)),
                 Token::RelativePath(s) => Expr::Literal(Value::String(s)),
+                Token::DotSlashPath(s) => Expr::Literal(Value::String(s)),
             },
             plus_minus_bare,
             // Keywords can be used as barewords in argument position

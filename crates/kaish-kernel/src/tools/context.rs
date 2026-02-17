@@ -1,7 +1,7 @@
 //! Execution context for tools.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 use std::sync::Arc;
 
 use crate::ast::Value;
@@ -272,13 +272,14 @@ impl ExecContext {
         self.stdin_data.take()
     }
 
-    /// Resolve a path relative to cwd.
+    /// Resolve a path relative to cwd, normalizing `.` and `..` components.
     pub fn resolve_path(&self, path: &str) -> PathBuf {
-        if path.starts_with('/') {
+        let raw = if path.starts_with('/') {
             PathBuf::from(path)
         } else {
             self.cwd.join(path)
-        }
+        };
+        normalize_path(&raw)
     }
 
     /// Change the current working directory.
@@ -333,5 +334,29 @@ impl ExecContext {
             #[cfg(unix)]
             terminal_state: self.terminal_state.clone(),
         }
+    }
+}
+
+/// Normalize a path by resolving `.` and `..` components lexically (no filesystem access).
+fn normalize_path(path: &std::path::Path) -> PathBuf {
+    let mut parts: Vec<Component> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {} // skip `.`
+            Component::ParentDir => {
+                // Pop the last normal component, but don't pop past root
+                if let Some(Component::Normal(_)) = parts.last() {
+                    parts.pop();
+                } else {
+                    parts.push(component);
+                }
+            }
+            _ => parts.push(component),
+        }
+    }
+    if parts.is_empty() {
+        PathBuf::from("/")
+    } else {
+        parts.iter().collect()
     }
 }

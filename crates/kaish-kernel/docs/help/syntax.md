@@ -30,6 +30,19 @@ $#                    # argument count
 $?                    # last exit code (0-255)
 ```
 
+## Paths
+
+```bash
+/usr/bin/foo          # absolute path
+../parent/file        # relative path with ..
+./script.sh           # dot-slash (explicit relative)
+~/src/project         # tilde expands to $HOME
+~                     # bare tilde = $HOME
+..                    # parent directory
+cd                    # bare cd goes to $HOME
+cd -                  # previous directory
+```
+
 ## Quoting
 
 ```bash

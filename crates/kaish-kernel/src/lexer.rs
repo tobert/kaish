@@ -336,6 +336,10 @@ pub enum Token {
     #[regex(r"\.\./[a-zA-Z0-9_./-]+", lex_relative_path, priority = 3)]
     RelativePath(String),
 
+    /// Dot-slash path: `./foo`, `./script.sh`
+    #[regex(r"\./[a-zA-Z0-9_./-]+", lex_dot_slash_path, priority = 3)]
+    DotSlashPath(String),
+
     #[token("{")]
     LBrace,
 
@@ -651,7 +655,8 @@ impl Token {
             | Token::TildePath(_)
             | Token::RelativePath(_)
             | Token::Tilde
-            | Token::DotDot => TokenCategory::Path,
+            | Token::DotDot
+            | Token::DotSlashPath(_) => TokenCategory::Path,
 
             // Commands/identifiers (and bare words)
             Token::Ident(_)
@@ -796,6 +801,11 @@ fn lex_relative_path(lex: &mut logos::Lexer<Token>) -> String {
     lex.slice().to_string()
 }
 
+/// Lex a dot-slash path: `./foo` → `./foo`
+fn lex_dot_slash_path(lex: &mut logos::Lexer<Token>) -> String {
+    lex.slice().to_string()
+}
+
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -853,6 +863,7 @@ impl fmt::Display for Token {
             Token::Tilde => write!(f, "~"),
             Token::TildePath(s) => write!(f, "{}", s),
             Token::RelativePath(s) => write!(f, "{}", s),
+            Token::DotSlashPath(s) => write!(f, "{}", s),
             Token::LBrace => write!(f, "{{"),
             Token::RBrace => write!(f, "}}"),
             Token::LBracket => write!(f, "["),

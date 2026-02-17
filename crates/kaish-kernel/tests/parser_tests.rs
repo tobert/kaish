@@ -710,3 +710,13 @@ fn parser_cd_relative_path() {
 fn parser_bare_dotdot() {
     parse_and_snapshot("bare_dotdot", "echo ..");
 }
+
+#[test]
+fn parser_cd_dot_slash() {
+    parse_and_snapshot("cd_dot_slash", "cd ./crates");
+}
+
+#[test]
+fn parser_dot_slash_exec() {
+    parse_and_snapshot("dot_slash_exec", "./script.sh");
+}

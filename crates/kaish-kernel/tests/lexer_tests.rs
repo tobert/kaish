@@ -75,6 +75,7 @@ fn format_token(token: &Token) -> String {
         Token::Tilde => "TILDE".to_string(),
         Token::TildePath(s) => format!("TILDEPATH({})", s),
         Token::RelativePath(s) => format!("RELPATH({})", s),
+        Token::DotSlashPath(s) => format!("DOTSLASH({})", s),
 
         // Brackets
         Token::LBrace => "LBRACE".to_string(),
@@ -589,6 +590,9 @@ fn lexer_arithmetic_in_command_substitution(#[case] input: &str, #[case] expecte
 #[case::cd_tilde("cd ~", &["IDENT(cd)", "TILDE"])]
 #[case::cd_tilde_path("cd ~/foo", &["IDENT(cd)", "TILDEPATH(~/foo)"])]
 #[case::cd_relative("cd ../bar", &["IDENT(cd)", "RELPATH(../bar)"])]
+#[case::dot_slash("./foo", &["DOTSLASH(./foo)"])]
+#[case::dot_slash_nested("./src/main.rs", &["DOTSLASH(./src/main.rs)"])]
+#[case::cd_dot_slash("cd ./crates", &["IDENT(cd)", "DOTSLASH(./crates)"])]
 fn lexer_navigation_tokens(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
