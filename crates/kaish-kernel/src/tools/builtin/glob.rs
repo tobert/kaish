@@ -161,7 +161,7 @@ impl Tool for Glob {
         let options = WalkOptions {
             max_depth,
             entry_types,
-            respect_gitignore: !no_ignore,
+            respect_gitignore: if no_ignore { false } else { ctx.ignore_config.auto_gitignore() },
             include_hidden,
             filter,
             ..WalkOptions::default()
@@ -169,9 +169,16 @@ impl Tool for Glob {
 
         // Create walker
         let fs = BackendWalkerFs(ctx.backend.as_ref());
-        let walker = FileWalker::new(&fs, &root)
+        let mut walker = FileWalker::new(&fs, &root)
             .with_pattern(glob)
             .with_options(options);
+
+        // Inject ignore filter from config (unless --no-ignore)
+        if !no_ignore {
+            if let Some(ignore_filter) = ctx.build_ignore_filter(&root).await {
+                walker = walker.with_ignore(ignore_filter);
+            }
+        }
 
         // Collect results
         let paths = match walker.collect().await {
@@ -356,5 +363,77 @@ mod tests {
         let result = Glob.execute(args, &mut ctx).await;
         assert!(!result.ok());
         assert!(result.err.contains("missing pattern"));
+    }
+
+    async fn make_ctx_with_artifacts() -> ExecContext {
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+
+        mem.mkdir(Path::new("src")).await.unwrap();
+        mem.mkdir(Path::new("target")).await.unwrap();
+        mem.mkdir(Path::new("target/debug")).await.unwrap();
+        mem.mkdir(Path::new("node_modules")).await.unwrap();
+        mem.mkdir(Path::new("node_modules/foo")).await.unwrap();
+
+        mem.write(Path::new("src/main.rs"), b"fn main() {}")
+            .await
+            .unwrap();
+        mem.write(Path::new("target/debug/app.rs"), b"compiled")
+            .await
+            .unwrap();
+        mem.write(Path::new("node_modules/foo/index.js"), b"module")
+            .await
+            .unwrap();
+
+        vfs.mount("/", mem);
+        ExecContext::new(Arc::new(vfs))
+    }
+
+    #[tokio::test]
+    async fn test_glob_none_config_no_filtering() {
+        // IgnoreConfig::none() — glob should return everything
+        let mut ctx = make_ctx_with_artifacts().await;
+        // Default is IgnoreConfig::none()
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("**/*.rs".into()));
+
+        let result = Glob.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains("main.rs"));
+        // With none config, target/ files should be included
+        assert!(result.out.contains("app.rs"), "none config should include target/debug/app.rs");
+    }
+
+    #[tokio::test]
+    async fn test_glob_mcp_config_filters_defaults() {
+        // IgnoreConfig::mcp() — glob should skip target/ and node_modules/
+        let mut ctx = make_ctx_with_artifacts().await;
+        ctx.ignore_config = crate::ignore_config::IgnoreConfig::mcp();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("**/*.rs".into()));
+
+        let result = Glob.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains("main.rs"));
+        // MCP config has defaults on — target/ should be filtered
+        assert!(!result.out.contains("app.rs"), "mcp config should filter target/debug/app.rs");
+    }
+
+    #[tokio::test]
+    async fn test_glob_no_ignore_overrides_config() {
+        // --no-ignore should bypass config filtering
+        let mut ctx = make_ctx_with_artifacts().await;
+        ctx.ignore_config = crate::ignore_config::IgnoreConfig::mcp();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("**/*.rs".into()));
+        args.flags.insert("no_ignore".to_string());
+
+        let result = Glob.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains("main.rs"));
+        // --no-ignore overrides: target/ files should be visible
+        assert!(result.out.contains("app.rs"), "--no-ignore should bypass config");
     }
 }

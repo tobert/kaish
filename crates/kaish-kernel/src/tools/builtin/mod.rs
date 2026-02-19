@@ -29,6 +29,7 @@ mod gather;
 mod git;
 mod grep;
 mod head;
+mod ignore;
 mod help;
 mod hostname;
 mod introspect;
@@ -108,6 +109,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(grep::Grep);
     registry.register(head::Head);
     registry.register(help::Help);
+    registry.register(ignore::KaishIgnore);
     registry.register(hostname::Hostname);
     registry.register(introspect::Mounts);
     registry.register(introspect::Tools);

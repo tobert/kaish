@@ -236,20 +236,25 @@ impl Tool for Grep {
             let options = WalkOptions {
                 max_depth: None,
                 entry_types: crate::walker::EntryTypes::files_only(),
-                respect_gitignore: true,
+                respect_gitignore: ctx.ignore_config.auto_gitignore(),
                 include_hidden: false,
                 filter,
                 ..WalkOptions::default()
             };
 
             let fs = BackendWalkerFs(ctx.backend.as_ref());
-            let walker = if let Some(g) = glob {
+            let mut walker = if let Some(g) = glob {
                 FileWalker::new(&fs, &root)
                     .with_pattern(g)
                     .with_options(options)
             } else {
                 FileWalker::new(&fs, &root).with_options(options)
             };
+
+            // Inject ignore filter from config
+            if let Some(ignore_filter) = ctx.build_ignore_filter(&root).await {
+                walker = walker.with_ignore(ignore_filter);
+            }
 
             let files = match walker.collect().await {
                 Ok(f) => f,

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::ast::Value;
 use crate::backend::{KernelBackend, LocalBackend};
 use crate::dispatch::PipelinePosition;
+use crate::ignore_config::IgnoreConfig;
 use crate::interpreter::Scope;
 use crate::scheduler::{JobManager, PipeReader, PipeWriter, StderrStream};
 use crate::tools::ToolRegistry;
@@ -77,6 +78,8 @@ pub struct ExecContext {
     pub interactive: bool,
     /// Command aliases (name → expansion string).
     pub aliases: HashMap<String, String>,
+    /// Ignore file configuration for file-walking tools.
+    pub ignore_config: IgnoreConfig,
     /// Terminal state for job control (interactive mode, Unix only).
     #[cfg(unix)]
     pub terminal_state: Option<std::sync::Arc<crate::terminal::TerminalState>>,
@@ -104,6 +107,7 @@ impl ExecContext {
             pipeline_position: PipelinePosition::Only,
             interactive: false,
             aliases: HashMap::new(),
+            ignore_config: IgnoreConfig::none(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -130,6 +134,7 @@ impl ExecContext {
             pipeline_position: PipelinePosition::Only,
             interactive: false,
             aliases: HashMap::new(),
+            ignore_config: IgnoreConfig::none(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -153,6 +158,7 @@ impl ExecContext {
             pipeline_position: PipelinePosition::Only,
             interactive: false,
             aliases: HashMap::new(),
+            ignore_config: IgnoreConfig::none(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -176,6 +182,7 @@ impl ExecContext {
             pipeline_position: PipelinePosition::Only,
             interactive: false,
             aliases: HashMap::new(),
+            ignore_config: IgnoreConfig::none(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -202,6 +209,7 @@ impl ExecContext {
             pipeline_position: PipelinePosition::Only,
             interactive: false,
             aliases: HashMap::new(),
+            ignore_config: IgnoreConfig::none(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -225,6 +233,7 @@ impl ExecContext {
             pipeline_position: PipelinePosition::Only,
             interactive: false,
             aliases: HashMap::new(),
+            ignore_config: IgnoreConfig::none(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -331,9 +340,19 @@ impl ExecContext {
             pipeline_position: PipelinePosition::Only,
             interactive: self.interactive,
             aliases: self.aliases.clone(),
+            ignore_config: self.ignore_config.clone(),
             #[cfg(unix)]
             terminal_state: self.terminal_state.clone(),
         }
+    }
+
+    /// Build an `IgnoreFilter` from the current ignore configuration.
+    ///
+    /// Returns `None` if no filtering is configured.
+    pub async fn build_ignore_filter(&self, root: &std::path::Path) -> Option<crate::walker::IgnoreFilter> {
+        use crate::backend_walker_fs::BackendWalkerFs;
+        let fs = BackendWalkerFs(self.backend.as_ref());
+        self.ignore_config.build_filter(root, &fs).await
     }
 
     /// Expand a glob pattern to matching file paths.
@@ -354,13 +373,21 @@ impl ExecContext {
 
         let options = WalkOptions {
             entry_types: EntryTypes::all(),
+            respect_gitignore: self.ignore_config.auto_gitignore(),
             ..WalkOptions::default()
         };
 
         let fs = BackendWalkerFs(self.backend.as_ref());
-        let walker = FileWalker::new(&fs, &root)
+        let mut walker = FileWalker::new(&fs, &root)
             .with_pattern(glob)
             .with_options(options);
+
+        // Note: if ignore_files contains ".gitignore" AND auto_gitignore is true,
+        // the root .gitignore is loaded twice (once here, once by the walker).
+        // This is harmless — merge is additive and rules are idempotent.
+        if let Some(filter) = self.ignore_config.build_filter(&root, &fs).await {
+            walker = walker.with_ignore(filter);
+        }
 
         walker.collect().await.map_err(|e| e.to_string())
     }

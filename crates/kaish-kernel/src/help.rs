@@ -226,7 +226,7 @@ mod tests {
         // Verify the markdown files are embedded
         assert!(OVERVIEW.contains("kaish"));
         assert!(SYNTAX.contains("Variables"));
-        assert!(VFS.contains("Mount Modes"));
+        assert!(VFS.contains("Mount Points"));
         assert!(SCATTER.contains("scatter"));
         assert!(LIMITS.contains("Limitations"));
     }

@@ -9,7 +9,6 @@ use crate::backend::EntryInfo;
 use crate::glob::contains_glob;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
-use crate::walker::IgnoreFilter;
 
 /// Ls tool: list directory contents.
 pub struct Ls;
@@ -378,7 +377,7 @@ impl Ls {
             ".".to_string(),
         )];
 
-        let ignore_filter = IgnoreFilter::with_defaults();
+        let ignore_filter = ctx.build_ignore_filter(root).await;
 
         while let Some((dir_path, display_path)) = dirs_to_visit.pop() {
             // List this directory
@@ -397,13 +396,15 @@ impl Ls {
             let mut filtered = filter_and_sort(entries, show_all, sort_opts);
 
             // Filter out ignored directories
-            filtered.retain(|e| {
-                if e.is_dir && !show_all {
-                    !ignore_filter.is_name_ignored(&e.name, true)
-                } else {
-                    true
-                }
-            });
+            if let Some(ref filter) = ignore_filter {
+                filtered.retain(|e| {
+                    if e.is_dir && !show_all {
+                        !filter.is_name_ignored(&e.name, true)
+                    } else {
+                        true
+                    }
+                });
+            }
 
             // Collect subdirs for recursion (before formatting)
             let subdirs: Vec<_> = filtered

@@ -119,6 +119,9 @@ pub struct KernelConfig {
     /// Set by script runner and REPL for human-visible output.
     /// Not set by MCP server (output must be captured for structured responses).
     pub interactive: bool,
+
+    /// Ignore file configuration for file-walking tools.
+    pub ignore_config: crate::ignore_config::IgnoreConfig,
 }
 
 /// Get the default sandbox root ($HOME).
@@ -137,6 +140,7 @@ impl Default for KernelConfig {
             cwd: home,
             skip_validation: false,
             interactive: false,
+            ignore_config: crate::ignore_config::IgnoreConfig::none(),
         }
     }
 }
@@ -151,6 +155,7 @@ impl KernelConfig {
             cwd: home,
             skip_validation: false,
             interactive: false,
+            ignore_config: crate::ignore_config::IgnoreConfig::none(),
         }
     }
 
@@ -163,6 +168,7 @@ impl KernelConfig {
             cwd: home,
             skip_validation: false,
             interactive: false,
+            ignore_config: crate::ignore_config::IgnoreConfig::none(),
         }
     }
 
@@ -178,6 +184,7 @@ impl KernelConfig {
             cwd,
             skip_validation: false,
             interactive: false,
+            ignore_config: crate::ignore_config::IgnoreConfig::none(),
         }
     }
 
@@ -193,6 +200,7 @@ impl KernelConfig {
             cwd: home,
             skip_validation: false,
             interactive: false,
+            ignore_config: crate::ignore_config::IgnoreConfig::mcp(),
         }
     }
 
@@ -206,6 +214,7 @@ impl KernelConfig {
             cwd: root,
             skip_validation: false,
             interactive: false,
+            ignore_config: crate::ignore_config::IgnoreConfig::mcp(),
         }
     }
 
@@ -219,6 +228,7 @@ impl KernelConfig {
             cwd: PathBuf::from("/"),
             skip_validation: false,
             interactive: false,
+            ignore_config: crate::ignore_config::IgnoreConfig::none(),
         }
     }
 
@@ -243,6 +253,12 @@ impl KernelConfig {
     /// Enable interactive mode (external commands inherit stdio).
     pub fn with_interactive(mut self, interactive: bool) -> Self {
         self.interactive = interactive;
+        self
+    }
+
+    /// Set the ignore file configuration.
+    pub fn with_ignore_config(mut self, config: crate::ignore_config::IgnoreConfig) -> Self {
+        self.ignore_config = config;
         self
     }
 }
@@ -406,7 +422,7 @@ impl Kernel {
         jobs: Arc<JobManager>,
         make_ctx: impl FnOnce(&Arc<VfsRouter>, &Arc<ToolRegistry>) -> ExecContext,
     ) -> Result<Self> {
-        let KernelConfig { name, cwd, skip_validation, interactive, .. } = config;
+        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, .. } = config;
 
         let mut tools = ToolRegistry::new();
         register_builtins(&mut tools);
@@ -427,6 +443,7 @@ impl Kernel {
         exec_ctx.set_tool_schemas(tools.schemas());
         exec_ctx.set_tools(tools.clone());
         exec_ctx.stderr = Some(stderr_writer);
+        exec_ctx.ignore_config = ignore_config;
 
         Ok(Self {
             name,
@@ -1008,6 +1025,7 @@ impl Kernel {
                 pipeline_position: PipelinePosition::Only,
                 interactive: self.interactive,
                 aliases: ec.aliases.clone(),
+                ignore_config: ec.ignore_config.clone(),
                 #[cfg(unix)]
                 terminal_state: ec.terminal_state.clone(),
             }
@@ -1021,6 +1039,7 @@ impl Kernel {
             ec.cwd = ctx.cwd.clone();
             ec.prev_cwd = ctx.prev_cwd.clone();
             ec.aliases = ctx.aliases.clone();
+            ec.ignore_config = ctx.ignore_config.clone();
         }
         {
             let mut scope = self.scope.write().await;
@@ -2556,6 +2575,7 @@ impl Kernel {
             ec.stdin = ctx.stdin.take();
             ec.stdin_data = ctx.stdin_data.take();
             ec.aliases = ctx.aliases.clone();
+            ec.ignore_config = ctx.ignore_config.clone();
             ec.pipeline_position = ctx.pipeline_position;
         }
 
@@ -2572,6 +2592,7 @@ impl Kernel {
             ctx.cwd = ec.cwd.clone();
             ctx.prev_cwd = ec.prev_cwd.clone();
             ctx.aliases = ec.aliases.clone();
+            ctx.ignore_config = ec.ignore_config.clone();
         }
 
         Ok(result)

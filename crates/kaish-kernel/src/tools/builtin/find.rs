@@ -17,6 +17,7 @@ use std::time::SystemTime;
 
 use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
+use crate::ignore_config::IgnoreScope;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 use crate::walker::{EntryTypes, FileWalker, GlobPath, WalkOptions};
@@ -116,12 +117,16 @@ impl Tool for Find {
             .get_string("size", usize::MAX)
             .and_then(|s| parse_size_filter(&s));
 
+        // find only respects ignore config in Enforced scope
+        let respect_ignore = matches!(ctx.ignore_config.scope(), IgnoreScope::Enforced)
+            && ctx.ignore_config.is_active();
+
         // Build walker options
         let options = WalkOptions {
             max_depth,
             entry_types,
             include_hidden: true, // find includes hidden by default
-            respect_gitignore: false, // find doesn't respect gitignore
+            respect_gitignore: if respect_ignore { ctx.ignore_config.auto_gitignore() } else { false },
             ..WalkOptions::default()
         };
 
@@ -129,6 +134,13 @@ impl Tool for Find {
         let fs = BackendWalkerFs(ctx.backend.as_ref());
         let mut walker = FileWalker::new(&fs, &resolved_path)
             .with_options(options);
+
+        // Inject ignore filter in Enforced scope
+        if respect_ignore {
+            if let Some(ignore_filter) = ctx.build_ignore_filter(&resolved_path).await {
+                walker = walker.with_ignore(ignore_filter);
+            }
+        }
 
         // Add glob pattern if specified
         if let Some(ref pattern) = name_pattern {
@@ -396,6 +408,87 @@ mod tests {
         // find includes hidden files by default
         assert!(result.out.contains(".hidden"));
         assert!(result.out.contains("secret.txt"));
+    }
+
+    /// Create a ctx with build artifact dirs to test ignore filtering.
+    async fn make_ctx_with_artifacts() -> ExecContext {
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+
+        mem.mkdir(Path::new("src")).await.unwrap();
+        mem.mkdir(Path::new("target")).await.unwrap();
+        mem.mkdir(Path::new("target/debug")).await.unwrap();
+        mem.mkdir(Path::new("node_modules")).await.unwrap();
+        mem.mkdir(Path::new("node_modules/foo")).await.unwrap();
+
+        mem.write(Path::new("src/main.rs"), b"fn main() {}")
+            .await
+            .unwrap();
+        mem.write(Path::new("target/debug/binary"), b"\x7fELF")
+            .await
+            .unwrap();
+        mem.write(Path::new("node_modules/foo/index.js"), b"module.exports = {}")
+            .await
+            .unwrap();
+        mem.write(Path::new("README.md"), b"# Test").await.unwrap();
+
+        vfs.mount("/", mem);
+        ExecContext::new(Arc::new(vfs))
+    }
+
+    #[tokio::test]
+    async fn test_find_advisory_ignores_nothing() {
+        // Advisory scope (default): find shows everything, even with config
+        let mut ctx = make_ctx_with_artifacts().await;
+        ctx.ignore_config = crate::ignore_config::IgnoreConfig::none();
+        ctx.ignore_config.set_defaults(true); // defaults on, but scope is Advisory
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/".into()));
+
+        let result = Find.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Advisory scope: find does NOT filter, even with defaults on
+        assert!(result.out.contains("target"), "Advisory find should show target/");
+        assert!(result.out.contains("node_modules"), "Advisory find should show node_modules/");
+        assert!(result.out.contains("main.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_find_enforced_filters_defaults() {
+        // Enforced scope (MCP default): find skips default-ignored dirs
+        let mut ctx = make_ctx_with_artifacts().await;
+        ctx.ignore_config = crate::ignore_config::IgnoreConfig::mcp();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/".into()));
+
+        let result = Find.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Enforced scope with defaults: target/ and node_modules/ are filtered
+        assert!(!result.out.contains("target"), "Enforced find should skip target/");
+        assert!(!result.out.contains("node_modules"), "Enforced find should skip node_modules/");
+        // Source files still visible
+        assert!(result.out.contains("main.rs"));
+        assert!(result.out.contains("README.md"));
+    }
+
+    #[tokio::test]
+    async fn test_find_enforced_but_inactive() {
+        // Enforced scope but no config active: find shows everything
+        let mut ctx = make_ctx_with_artifacts().await;
+        let mut config = crate::ignore_config::IgnoreConfig::none();
+        config.set_scope(crate::ignore_config::IgnoreScope::Enforced);
+        // scope is Enforced but is_active() is false (no defaults, no files)
+        ctx.ignore_config = config;
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/".into()));
+
+        let result = Find.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains("target"), "Enforced but inactive should show target/");
+        assert!(result.out.contains("node_modules"));
     }
 
     #[test]

@@ -17,6 +17,7 @@ pub mod backend;
 pub(crate) mod backend_walker_fs;
 pub mod dispatch;
 pub mod help;
+pub mod ignore_config;
 pub mod interpreter;
 pub mod kernel;
 pub mod lexer;
@@ -52,6 +53,7 @@ pub use backend::{
     ToolInfo, ToolResult, VirtualOverlayBackend, WriteMode,
 };
 pub use dispatch::{BackendDispatcher, CommandDispatcher, PipelinePosition};
+pub use ignore_config::{IgnoreConfig, IgnoreScope};
 pub use kernel::{Kernel, KernelConfig, VfsMountMode};
 pub use rpc::KernelRpcServer;
 

@@ -7,7 +7,6 @@ use std::path::Path;
 use crate::ast::Value;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
-use crate::walker::IgnoreFilter;
 
 /// Tree tool: display directory structure.
 pub struct Tree;
@@ -195,11 +194,11 @@ impl Tool for Tree {
         // Build tree by walking directory
         let mut tree = TreeNode::default();
 
-        // Set up ignore filter
+        // Set up ignore filter from config (unless --no-ignore)
         let ignore_filter = if no_ignore {
             None
         } else {
-            Some(IgnoreFilter::with_defaults())
+            ctx.build_ignore_filter(&ctx.resolve_path(&resolved)).await
         };
 
         // Walk directory using stack-based iteration
