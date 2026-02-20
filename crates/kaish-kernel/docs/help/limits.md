@@ -23,6 +23,7 @@
 | `git` | Operates on real filesystem, not VFS |
 | `head`/`tail -c` | Counts UTF-8 characters, not bytes |
 | `**` globs | Slow on deep trees; use specific prefixes |
+| `kaish-ignore` | Runtime changes don't persist across sessions; use `~/.kaishrc` |
 
 ## Execution
 

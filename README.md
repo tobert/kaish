@@ -110,7 +110,7 @@ everywhere, a `jq` that always uses the same filter syntax, an `awk` that never 
 | **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, printf, ps, seq, set, sleep, spawn, test/\[\[, tokens, uname, unalias, unset, validate, vars, wait, which |
 | **Parallel** | scatter, gather |
 | **Meta** | assert, false, mounts, tools, true |
-| **kaish-*** | kaish-ast, kaish-clear, kaish-status, kaish-version |
+| **kaish-*** | kaish-ast, kaish-clear, kaish-ignore, kaish-status, kaish-version |
 
 ---
 

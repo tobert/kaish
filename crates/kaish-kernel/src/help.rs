@@ -18,6 +18,8 @@ pub enum HelpTopic {
     Vfs,
     /// Scatter/gather parallel processing.
     Scatter,
+    /// Ignore file configuration.
+    Ignore,
     /// Known limitations.
     Limits,
     /// Help for a specific tool.
@@ -36,6 +38,7 @@ impl HelpTopic {
             "builtins" | "tools" | "commands" => Self::Builtins,
             "vfs" | "filesystem" | "fs" | "paths" => Self::Vfs,
             "scatter" | "gather" | "parallel" | "散" | "集" => Self::Scatter,
+            "ignore" | "gitignore" | "kaish-ignore" => Self::Ignore,
             "limits" | "limitations" | "missing" => Self::Limits,
             other => Self::Tool(other.to_string()),
         }
@@ -49,6 +52,7 @@ impl HelpTopic {
             Self::Builtins => "List of available builtins",
             Self::Vfs => "Virtual filesystem mounts and paths",
             Self::Scatter => "Parallel processing (散/集)",
+            Self::Ignore => "Ignore file configuration",
             Self::Limits => "Known limitations",
             Self::Tool(_) => "Help for a specific tool",
         }
@@ -61,6 +65,7 @@ const OVERVIEW: &str = include_str!("../docs/help/overview.md");
 const SYNTAX: &str = include_str!("../docs/help/syntax.md");
 const VFS: &str = include_str!("../docs/help/vfs.md");
 const SCATTER: &str = include_str!("../docs/help/scatter.md");
+const IGNORE: &str = include_str!("../docs/help/ignore.md");
 const LIMITS: &str = include_str!("../docs/help/limits.md");
 
 /// Get help content for a topic.
@@ -75,6 +80,7 @@ pub fn get_help(topic: &HelpTopic, tool_schemas: &[ToolSchema]) -> String {
         HelpTopic::Builtins => format_tool_list(tool_schemas),
         HelpTopic::Vfs => VFS.to_string(),
         HelpTopic::Scatter => SCATTER.to_string(),
+        HelpTopic::Ignore => IGNORE.to_string(),
         HelpTopic::Limits => LIMITS.to_string(),
         HelpTopic::Tool(name) => format_tool_help(name, tool_schemas),
     }
@@ -196,6 +202,7 @@ pub fn list_topics() -> Vec<(&'static str, &'static str)> {
         ("builtins", "List of available builtins"),
         ("vfs", "Virtual filesystem mounts and paths"),
         ("scatter", "Parallel processing (散/集)"),
+        ("ignore", "Ignore file configuration"),
         ("limits", "Known limitations"),
     ]
 }
@@ -228,6 +235,7 @@ mod tests {
         assert!(SYNTAX.contains("Variables"));
         assert!(VFS.contains("Mount Points"));
         assert!(SCATTER.contains("scatter"));
+        assert!(IGNORE.contains("kaish-ignore"));
         assert!(LIMITS.contains("Limitations"));
     }
 
