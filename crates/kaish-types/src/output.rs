@@ -45,7 +45,7 @@ pub enum EntryType {
 /// - Some(""): this IS a text node whose content is empty (e.g. `echo ""`)
 ///
 /// The `is_text_only()` method depends on this distinction.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct OutputNode {
@@ -139,7 +139,7 @@ impl OutputNode {
 /// | Flat nodes, `name` only | Multi-column, colored | One per line |
 /// | Flat nodes with `cells` | Aligned table | TSV or names only |
 /// | Nested `children` | Box-drawing tree | Brace notation |
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct OutputData {
