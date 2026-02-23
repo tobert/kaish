@@ -107,10 +107,10 @@ everywhere, a `jq` that always uses the same filter syntax, an `awk` that never 
 | **Files** | basename, cat, cd, cp, dirname, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, read, readlink, realpath, rm, stat, tee, touch, tree, write |
 | **JSON** | jq |
 | **Git** | git (init, clone, status, add, commit, log, diff, branch, checkout, worktree) |
-| **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, printf, ps, seq, set, sleep, spawn, test/\[\[, tokens, uname, unalias, unset, validate, vars, wait, which |
+| **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, printf, ps, seq, set, sleep, spawn, test/\[\[, tokens, uname, unalias, unset, wait, which |
 | **Parallel** | scatter, gather |
-| **Meta** | assert, false, mounts, tools, true |
-| **kaish-*** | kaish-ast, kaish-clear, kaish-ignore, kaish-status, kaish-version |
+| **Meta** | assert, false, true |
+| **kaish-*** | kaish-ast, kaish-clear, kaish-ignore, kaish-mounts, kaish-status, kaish-tools, kaish-validate, kaish-vars, kaish-version |
 
 ---
 
@@ -204,7 +204,7 @@ Paths: Native paths work within $HOME (e.g., /home/user/src/project). /tmp for t
 ```
 
 Output is clean text by default — simple commands return plain text, structured
-builtins (`ls`, `mounts`, `vars`) return readable tab-separated values. Use
+builtins (`ls`, `kaish-mounts`, `kaish-vars`) return readable tab-separated values. Use
 `--json` on any command for structured JSON output when needed.
 
 **`help`** — Discover syntax, builtins, VFS, and capabilities.

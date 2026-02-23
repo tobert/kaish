@@ -1805,7 +1805,7 @@ mod tests {
     fn keyword_prefix_identifiers() {
         // Identifiers that start with keywords but aren't keywords
         assert_eq!(lex("setup"), vec![Token::Ident("setup".to_string())]);
-        assert_eq!(lex("tools"), vec![Token::Ident("tools".to_string())]);
+        assert_eq!(lex("kaish-tools"), vec![Token::Ident("kaish-tools".to_string())]);
         assert_eq!(lex("iffy"), vec![Token::Ident("iffy".to_string())]);
         assert_eq!(lex("forked"), vec![Token::Ident("forked".to_string())]);
         assert_eq!(lex("done-with-it"), vec![Token::Ident("done-with-it".to_string())]);

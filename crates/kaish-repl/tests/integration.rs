@@ -587,7 +587,7 @@ fn introspect_vars_shows_set_variables() {
     let outputs = run_script(r#"
         X=42
         NAME="Alice"
-        vars
+        kaish-vars
     "#);
     let joined = outputs.join("\n");
     // Table format: NAME\tVALUE\tTYPE (canonical TSV from OutputData)
@@ -600,7 +600,7 @@ fn introspect_vars_shows_set_variables() {
 fn introspect_vars_json_format() {
     let outputs = run_script(r#"
         COUNT=100
-        vars --json
+        kaish-vars --json
     "#);
     let joined = outputs.join("\n");
     // Global --json produces table-keyed JSON: [{"NAME": ..., "VALUE": ..., "TYPE": ...}]
@@ -612,19 +612,19 @@ fn introspect_vars_json_format() {
 #[test]
 fn introspect_tools_lists_builtins() {
     let outputs = run_script(r#"
-        tools
+        kaish-tools
     "#);
     let joined = outputs.join("\n");
-    assert!(joined.contains("echo"), "tools should list echo. Output was: {}", joined);
-    assert!(joined.contains("ls"), "tools should list ls. Output was: {}", joined);
-    assert!(joined.contains("cat"), "tools should list cat. Output was: {}", joined);
-    assert!(joined.contains("vars"), "tools should list vars. Output was: {}", joined);
+    assert!(joined.contains("echo"), "kaish-tools should list echo. Output was: {}", joined);
+    assert!(joined.contains("ls"), "kaish-tools should list ls. Output was: {}", joined);
+    assert!(joined.contains("cat"), "kaish-tools should list cat. Output was: {}", joined);
+    assert!(joined.contains("kaish-vars"), "kaish-tools should list kaish-vars. Output was: {}", joined);
 }
 
 #[test]
 fn introspect_tools_json_format() {
     let outputs = run_script(r#"
-        tools --json
+        kaish-tools --json
     "#);
     let joined = outputs.join("\n");
     // Global --json produces table-keyed JSON: [{"NAME": ..., "DESCRIPTION": ..., "PARAMS": ...}]
@@ -637,16 +637,16 @@ fn introspect_tools_json_format() {
 #[test]
 fn introspect_tools_detail() {
     let outputs = run_script(r#"
-        tools echo
+        kaish-tools echo
     "#);
     let joined = outputs.join("\n");
-    assert!(joined.contains("echo"), "tools echo should show echo info. Output was: {}", joined);
+    assert!(joined.contains("echo"), "kaish-tools echo should show echo info. Output was: {}", joined);
 }
 
 #[test]
 fn introspect_mounts_shows_vfs() {
     let outputs = run_script(r#"
-        mounts
+        kaish-mounts
     "#);
     let joined = outputs.join("\n");
     // Should show at least the root mount
@@ -658,7 +658,7 @@ fn introspect_mounts_shows_vfs() {
 #[test]
 fn introspect_mounts_json_format() {
     let outputs = run_script(r#"
-        mounts --json
+        kaish-mounts --json
     "#);
     let joined = outputs.join("\n");
     // Global --json produces table-keyed JSON: [{"PATH": ..., "MODE": ...}]

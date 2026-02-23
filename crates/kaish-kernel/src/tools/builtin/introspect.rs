@@ -8,7 +8,7 @@ use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 // ============================================================================
-// tools — List available tools
+// kaish-tools — List available tools
 // ============================================================================
 
 /// Tools builtin: lists all available tools and their schemas.
@@ -17,11 +17,11 @@ pub struct Tools;
 #[async_trait]
 impl Tool for Tools {
     fn name(&self) -> &str {
-        "tools"
+        "kaish-tools"
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("tools", "List available tools and their schemas")
+        ToolSchema::new("kaish-tools", "List available tools and their schemas")
             .param(ParamSchema::optional(
                 "name",
                 "string",
@@ -84,7 +84,7 @@ fn format_tool_detail(schemas: &[ToolSchema], name: &str) -> ExecResult {
 }
 
 // ============================================================================
-// mounts — List VFS mount points
+// kaish-mounts — List VFS mount points
 // ============================================================================
 
 /// Mounts builtin: lists all VFS mount points.
@@ -93,11 +93,11 @@ pub struct Mounts;
 #[async_trait]
 impl Tool for Mounts {
     fn name(&self) -> &str {
-        "mounts"
+        "kaish-mounts"
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("mounts", "List VFS mount points")
+        ToolSchema::new("kaish-mounts", "List VFS mount points")
     }
 
     async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

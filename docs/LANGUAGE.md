@@ -494,7 +494,7 @@ Features that ShellCheck warns about (word splitting, glob expansion, backticks)
 | **Arithmetic** | `$(( ))` | `$((expr))` with comparisons | Integer arithmetic + `>`, `<`, `==` returning 1/0 |
 | **Scatter/gather** | None | `散/集` | Built-in parallelism *(experimental)* |
 | **VFS** | None | `/tmp/`, `/v/`, `/git/` | Unified resource access |
-| **Pre-validation** | None | `validate` builtin | Catch errors before execution |
+| **Pre-validation** | None | `kaish-validate` builtin | Catch errors before execution |
 | **Strict validation** | Guesses | Rejects `TRUE`, `yes`, `123abc` | Agent-friendly, fail-fast |
 
 ## Known Limitations

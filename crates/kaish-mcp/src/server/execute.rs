@@ -353,7 +353,7 @@ mod tests {
     async fn test_execute_structured_as_canonical_text() {
         // Structured builtins return readable canonical text by default
         let params = ExecuteParams {
-            script: "mounts".to_string(),
+            script: "kaish-mounts".to_string(),
             cwd: None,
             env: None,
             timeout_ms: None,

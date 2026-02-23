@@ -1,10 +1,10 @@
-//! validate — Validate kaish scripts without executing.
+//! kaish-validate — Validate kaish scripts without executing.
 //!
 //! # Examples
 //!
 //! ```kaish
-//! validate script.kai           # Validate a script file
-//! validate -e 'echo $UNDEFINED'  # Validate inline code
+//! kaish-validate script.kai           # Validate a script file
+//! kaish-validate -e 'echo $UNDEFINED'  # Validate inline code
 //! ```
 
 use async_trait::async_trait;
@@ -23,11 +23,11 @@ pub struct Validate;
 #[async_trait]
 impl Tool for Validate {
     fn name(&self) -> &str {
-        "validate"
+        "kaish-validate"
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("validate", "Validate kaish scripts without executing")
+        ToolSchema::new("kaish-validate", "Validate kaish scripts without executing")
             .param(ParamSchema::optional(
                 "path",
                 "string",
@@ -52,16 +52,16 @@ impl Tool for Validate {
                 Value::Bool(true),
                 "Show warnings in addition to errors",
             ).with_aliases(["-w"]))
-            .example("Validate a script file", "validate script.kai")
-            .example("Validate inline code", "validate -e 'grep \"[\" file.txt'")
-            .example("Check exit code only", "validate -q script.kai && echo 'valid'")
+            .example("Validate a script file", "kaish-validate script.kai")
+            .example("Validate inline code", "kaish-validate -e 'grep \"[\" file.txt'")
+            .example("Check exit code only", "kaish-validate -q script.kai && echo 'valid'")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         // Get registry from context
         let registry = match &ctx.tools {
             Some(r) => r.clone(),
-            None => return ExecResult::failure(1, "validate: tool registry not available"),
+            None => return ExecResult::failure(1, "kaish-validate: tool registry not available"),
         };
 
         let quiet = args.has_flag("quiet") || args.has_flag("q");
@@ -75,14 +75,14 @@ impl Tool for Validate {
             match ctx.backend.read(Path::new(&resolved), None).await {
                 Ok(data) => match String::from_utf8(data) {
                     Ok(content) => (content, path),
-                    Err(_) => return ExecResult::failure(1, format!("validate: {}: invalid UTF-8", path)),
+                    Err(_) => return ExecResult::failure(1, format!("kaish-validate: {}: invalid UTF-8", path)),
                 },
-                Err(e) => return ExecResult::failure(1, format!("validate: {}: {}", path, e)),
+                Err(e) => return ExecResult::failure(1, format!("kaish-validate: {}: {}", path, e)),
             }
         } else if let Some(stdin) = &ctx.stdin {
             (stdin.clone(), "<stdin>".to_string())
         } else {
-            return ExecResult::failure(1, "validate: no input provided (use path or -e)");
+            return ExecResult::failure(1, "kaish-validate: no input provided (use path or -e)");
         };
 
         // Parse the script

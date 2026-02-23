@@ -164,7 +164,7 @@ fn format_tool_list(schemas: &[ToolSchema]) -> String {
             "jq" => json_tools.push(entry),
             "scatter" | "gather" => parallel_tools.push(entry),
             "exec" | "spawn" | "jobs" | "wait" | "ps" | "git" | "bg" | "fg" | "kill" => process_tools.push(entry),
-            "help" | "validate" | "vars" | "mounts" | "tools" | "tokens"
+            "help" | "kaish-validate" | "kaish-vars" | "kaish-mounts" | "kaish-tools" | "tokens"
             | "kaish-ast" | "kaish-clear" | "kaish-status" | "kaish-version" => {
                 introspection_tools.push(entry)
             }

@@ -1,4 +1,4 @@
-//! vars — List all variables in scope.
+//! kaish-vars — List all variables in scope.
 
 use async_trait::async_trait;
 
@@ -12,11 +12,11 @@ pub struct Vars;
 #[async_trait]
 impl Tool for Vars {
     fn name(&self) -> &str {
-        "vars"
+        "kaish-vars"
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("vars", "List all variables in the current scope")
+        ToolSchema::new("kaish-vars", "List all variables in the current scope")
     }
 
     async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

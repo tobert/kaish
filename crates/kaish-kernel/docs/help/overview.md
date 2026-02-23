@@ -21,7 +21,7 @@ Builtins return structured data. Use `--json` for machine-readable output:
 
 ```bash
 ls --json                # JSON array of file nodes
-vars --json              # JSON array of {NAME, VALUE} objects
+kaish-vars --json        # JSON array of {NAME, VALUE} objects
 ps --json                # JSON array of process info
 ```
 

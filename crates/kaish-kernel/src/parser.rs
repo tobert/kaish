@@ -2473,11 +2473,11 @@ mod tests {
     #[test]
     fn parse_cmd_subst_in_condition() {
         // Shell-compatible: conditions are commands, not command substitutions
-        let result = parse("if validate; then echo; fi").unwrap();
+        let result = parse("if kaish-validate; then echo; fi").unwrap();
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
                 Expr::Command(cmd) => {
-                    assert_eq!(cmd.name, "validate");
+                    assert_eq!(cmd.name, "kaish-validate");
                 }
                 other => panic!("expected command, got {:?}", other),
             },
@@ -2658,7 +2658,7 @@ echo "Items: ${ITEMS}"
     #[test]
     fn script_level2_branching() {
         let script = r#"
-RESULT=$(validate "input.json")
+RESULT=$(kaish-validate "input.json")
 
 if [[ ${RESULT.ok} == true ]]; then
     echo "Validation passed"
@@ -2807,7 +2807,7 @@ long-running-task &
     #[test]
     fn script_level4_complex_nesting() {
         let script = r#"
-RESULT=$(cat "config.json" | jq query=".servers" | validate schema="server-schema.json")
+RESULT=$(cat "config.json" | jq query=".servers" | kaish-validate schema="server-schema.json")
 
 if ping host=${HOST} && [[ ${RESULT} == true ]]; then
     for SERVER in "prod-1 prod-2"; do
