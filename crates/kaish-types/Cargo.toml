@@ -1,0 +1,25 @@
+[package]
+name = "kaish-types"
+description = "Pure data types for kaish — structured output, values, tool schemas"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+schemars = { version = "1", optional = true }
+
+[features]
+schema = ["dep:schemars"]
+
+[lints]
+workspace = true

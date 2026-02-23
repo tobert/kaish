@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/kaish-glob",
     "crates/kaish-schema",
+    "crates/kaish-types",
     "crates/kaish-kernel",
     "crates/kaish-mcp",
     "crates/kaish-client",

@@ -10,33 +10,41 @@ use crate::backend::KernelBackend;
 use crate::vfs::DirEntry;
 use kaish_glob::{WalkerDirEntry, WalkerError, WalkerFs};
 
-/// Wraps a `&dyn KernelBackend` to implement `WalkerFs`.
-pub struct BackendWalkerFs<'a>(pub &'a dyn KernelBackend);
+/// Newtype wrapper to impl the external `WalkerDirEntry` trait for `DirEntry`
+/// (orphan rule: both types are now in external crates).
+pub struct BackendDirEntry(pub DirEntry);
 
-impl WalkerDirEntry for DirEntry {
+impl WalkerDirEntry for BackendDirEntry {
     fn name(&self) -> &str {
-        &self.name
+        &self.0.name
     }
 
     fn is_dir(&self) -> bool {
-        self.is_dir()
+        self.0.is_dir()
     }
 
     fn is_file(&self) -> bool {
-        self.is_file()
+        self.0.is_file()
     }
 
     fn is_symlink(&self) -> bool {
-        self.is_symlink()
+        self.0.is_symlink()
     }
 }
 
+/// Wraps a `&dyn KernelBackend` to implement `WalkerFs`.
+pub struct BackendWalkerFs<'a>(pub &'a dyn KernelBackend);
+
 #[async_trait]
 impl WalkerFs for BackendWalkerFs<'_> {
-    type DirEntry = DirEntry;
+    type DirEntry = BackendDirEntry;
 
-    async fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, WalkerError> {
-        self.0.list(path).await.map_err(|e| WalkerError::Io(e.to_string()))
+    async fn list_dir(&self, path: &Path) -> Result<Vec<BackendDirEntry>, WalkerError> {
+        self.0
+            .list(path)
+            .await
+            .map(|entries| entries.into_iter().map(BackendDirEntry).collect())
+            .map_err(|e| WalkerError::Io(e.to_string()))
     }
 
     async fn read_file(&self, path: &Path) -> Result<Vec<u8>, WalkerError> {
