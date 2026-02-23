@@ -22,7 +22,7 @@
 //! - **Frontends**: Handle all rendering (REPL, MCP, kaijutsu)
 
 use crate::ast::Value;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 // ============================================================
 // Structured Output (Tree-of-Tables Model)
@@ -32,7 +32,7 @@ use serde::Serialize;
 ///
 /// This unified enum is used by both the new OutputNode system
 /// and the legacy DisplayHint::Table for backward compatibility.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EntryType {
     /// Generic text content.
@@ -50,8 +50,14 @@ pub enum EntryType {
 
 /// A node in the output tree.
 ///
-/// Nodes can carry text, tabular cells, and nested children.
-/// This is the building block for all structured output.
+/// All fields are always serialized (no skip_serializing_if) for predictable shape
+/// across JSON, postcard, and bincode formats.
+///
+/// `text` is Option<String> because None and Some("") are semantically distinct:
+/// - None: this is a named entry (file listing, table row), not a text node
+/// - Some(""): this IS a text node whose content is empty (e.g. `echo ""`)
+///
+/// The `is_text_only()` method depends on this distinction.
 ///
 /// # Examples
 ///
@@ -83,7 +89,8 @@ pub enum EntryType {
 ///     .with_entry_type(EntryType::Directory)
 ///     .with_children(vec![child]);
 /// ```
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OutputNode {
     /// Primary identifier (filename, key, label).
     pub name: String,
@@ -163,6 +170,10 @@ impl OutputNode {
 /// This is the top-level structure for command output.
 /// It contains optional column headers and a list of root nodes.
 ///
+/// `headers` is Option<Vec<String>> because None means "not tabular" while
+/// Some(vec![]) means "tabular with no column headers." The rendering dispatch
+/// in to_json() and the REPL formatter branch on this distinction.
+///
 /// # Rendering Rules
 ///
 /// | Structure | Interactive | Piped/Model |
@@ -171,7 +182,8 @@ impl OutputNode {
 /// | Flat nodes, `name` only | Multi-column, colored | One per line |
 /// | Flat nodes with `cells` | Aligned table | TSV or names only |
 /// | Nested `children` | Box-drawing tree | Brace notation |
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OutputData {
     /// Column headers (optional, for table output).
     pub headers: Option<Vec<String>>,

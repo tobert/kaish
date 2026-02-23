@@ -219,14 +219,10 @@ impl KaishServerHandler {
             content.push(Content::text(format!("[stderr] {}", result.stderr)));
         }
 
-        // Only include structured metadata when there's something beyond stdout
-        // (errors, stderr, non-zero exit). Clean success → just the text.
-        let structured_content = if !result.ok || !result.stderr.is_empty() {
+        let structured_content = {
             let structured = serde_json::to_value(&result)
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
             Some(structured)
-        } else {
-            None
         };
 
         Ok(CallToolResult {
@@ -727,11 +723,15 @@ mod tests {
             panic!("Expected text content");
         }
 
-        // Clean success → no structured_content (just text content blocks)
-        assert!(
-            result.structured_content.is_none(),
-            "success should not have structured_content"
-        );
+        // structured_content always present — carries OutputData for rendering
+        let structured = result
+            .structured_content
+            .as_ref()
+            .expect("should have structured_content");
+        assert_eq!(structured["ok"], true);
+        assert_eq!(structured["code"], 0);
+        // echo produces OutputData with a text node
+        assert!(structured["output"].is_object(), "should have output field");
 
         // is_error should be false for success
         assert_eq!(result.is_error, Some(false));

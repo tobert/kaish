@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use kaish_kernel::interpreter::OutputData;
 use kaish_kernel::{Kernel, KernelConfig};
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +33,13 @@ pub struct ExecuteParams {
 }
 
 /// Result from script execution.
+///
+/// `output` and `data` are complementary, not duplicative:
+/// - `output`: structured output model for rendering. Present for builtins, None for
+///   external commands and `--json` results (cleared by the sentinel pattern in
+///   `apply_output_format`).
+/// - `data`: auto-parsed JSON from stdout. Present when stdout is valid JSON.
+/// - When `--json` is used, `output` is None and the JSON is in `stdout`/`data`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecuteResult {
     /// Exit code (0 = success).
@@ -49,6 +57,12 @@ pub struct ExecuteResult {
 
     /// Whether the command succeeded (code == 0).
     pub ok: bool,
+
+    /// Structured output for rendering. Present for builtins, None for
+    /// external commands and --json results. Carried as the typed kernel struct;
+    /// serialization happens at the MCP wire boundary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<OutputData>,
 }
 
 impl ExecuteResult {
@@ -61,6 +75,7 @@ impl ExecuteResult {
             stderr: String::new(),
             data,
             ok: true,
+            output: None,
         }
     }
 
@@ -72,6 +87,7 @@ impl ExecuteResult {
             stderr,
             data: None,
             ok: false,
+            output: None,
         }
     }
 
@@ -108,6 +124,7 @@ impl ExecuteResult {
             stderr: result.err.clone(),
             data,
             ok: result.ok(),
+            output: result.output.clone(),
         }
     }
 }

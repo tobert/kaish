@@ -16,6 +16,8 @@ struct ExecuteResult {
     #[serde(default)]
     data: Option<serde_json::Value>,
     ok: bool,
+    #[serde(default)]
+    output: Option<serde_json::Value>,
 }
 
 async fn cleanup(client: &McpClient) {
@@ -41,32 +43,9 @@ async fn execute(client: &McpClient, script: &str) -> Result<ExecuteResult> {
     args.insert("script".into(), json!(script));
     let result = client.call_tool("execute", Some(args), None).await?;
 
-    // structured_content is only present on error/stderr.
-    // For clean success, reconstruct from content text blocks.
-    if let Ok(typed) = result.clone().into_typed::<ExecuteResult>() {
-        return Ok(typed);
-    }
-
-    let is_error = result.is_error.unwrap_or(false);
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    for block in &result.content {
-        if let Some(text) = block.raw.as_text() {
-            if text.text.starts_with("[stderr] ") {
-                stderr.push_str(text.text.trim_start_matches("[stderr] "));
-            } else {
-                stdout.push_str(&text.text);
-            }
-        }
-    }
-
-    Ok(ExecuteResult {
-        code: if is_error { 1 } else { 0 },
-        stdout,
-        stderr,
-        data: None,
-        ok: !is_error,
-    })
+    // structured_content is always present — deserialize directly.
+    result.into_typed::<ExecuteResult>()
+        .context("Failed to deserialize ExecuteResult from structured_content")
 }
 
 // =============================================================================
