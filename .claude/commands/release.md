@@ -78,14 +78,13 @@ Cargo.toml → version = "$ARGUMENTS"
 ### Standalone crate versions (not using workspace version)
 ```
 crates/kaish-glob/Cargo.toml   → version = "$ARGUMENTS"
-crates/kaish-schema/Cargo.toml → version = "$ARGUMENTS"
 ```
 
 ### Inter-crate dependency versions
 These use `path + version` for both local dev and crates.io publishing:
 ```
-crates/kaish-kernel/Cargo.toml → kaish-glob version, kaish-schema version
-crates/kaish-client/Cargo.toml → kaish-kernel version, kaish-schema version
+crates/kaish-kernel/Cargo.toml → kaish-glob version, kaish-types version
+crates/kaish-client/Cargo.toml → kaish-kernel version
 crates/kaish-mcp/Cargo.toml    → kaish-kernel version
 crates/kaish-repl/Cargo.toml   → kaish-kernel version, kaish-client version
 ```
@@ -112,7 +111,7 @@ its dependents can be published. Wait 15 seconds between publishes.
 ```
 cargo publish -p kaish-glob
 # wait 15s
-cargo publish -p kaish-schema
+cargo publish -p kaish-types
 # wait 15s
 cargo publish -p kaish-kernel
 # wait 15s
@@ -137,7 +136,7 @@ and retry once.
 
 ## Known Issues
 
-- `kaish-glob` and `kaish-schema` use standalone `version = "X.Y.Z"` instead
-  of `version.workspace = true`. Both must be bumped manually.
+- `kaish-glob` uses standalone `version = "X.Y.Z"` instead
+  of `version.workspace = true` and must be bumped manually.
 - All inter-crate deps pin exact versions. These must match what's being published.
 - crates.io has a propagation delay — the 15s waits handle this.

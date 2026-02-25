@@ -62,6 +62,8 @@ impl Tool for Diff {
                 Value::Int(3),
                 "Lines of context (default: 3)",
             ).with_aliases(["-C"]))
+            .example("Compare two files", "diff file1.txt file2.txt")
+            .example("Quiet mode", "diff -q old.txt new.txt")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

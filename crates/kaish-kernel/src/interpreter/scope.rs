@@ -37,6 +37,9 @@ pub struct Scope {
     positional: Vec<String>,
     /// Error exit mode (set -e): exit on any command failure.
     error_exit: bool,
+    /// Counter for temporarily suppressing errexit (e.g. inside && / || left side).
+    /// When > 0, error_exit_enabled() returns false even if error_exit is true.
+    errexit_suppressed: usize,
     /// AST display mode (kaish-ast -on/-off): show AST instead of executing.
     show_ast: bool,
     /// Current process ID ($$), captured at scope creation.
@@ -53,6 +56,7 @@ impl Scope {
             script_name: String::new(),
             positional: Vec::new(),
             error_exit: false,
+            errexit_suppressed: 0,
             show_ast: false,
             pid: std::process::id(),
         }
@@ -183,14 +187,27 @@ impl Scope {
         self.positional.len()
     }
 
-    /// Check if error-exit mode is enabled (set -e).
+    /// Check if error-exit mode is active (set -e and not suppressed).
+    ///
+    /// Returns false when inside the left side of `&&` or `||` chains,
+    /// matching bash behavior where those operators handle failure themselves.
     pub fn error_exit_enabled(&self) -> bool {
-        self.error_exit
+        self.error_exit && self.errexit_suppressed == 0
     }
 
     /// Set error-exit mode (set -e / set +e).
     pub fn set_error_exit(&mut self, enabled: bool) {
         self.error_exit = enabled;
+    }
+
+    /// Suppress errexit temporarily (for `&&`/`||` left side).
+    pub fn suppress_errexit(&mut self) {
+        self.errexit_suppressed += 1;
+    }
+
+    /// Unsuppress errexit (after `&&`/`||` left side completes).
+    pub fn unsuppress_errexit(&mut self) {
+        self.errexit_suppressed = self.errexit_suppressed.saturating_sub(1);
     }
 
     /// Check if AST display mode is enabled (kaish-ast -on).

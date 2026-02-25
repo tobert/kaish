@@ -43,6 +43,8 @@ impl Tool for Read {
                 Value::Null,
                 "Variable names to store input (space-separated if multiple)",
             ))
+            .example("Read into variable", "read NAME")
+            .example("Read with prompt", "read -p 'Enter value: ' VAR")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

@@ -413,6 +413,7 @@ impl PipelineRunner {
         // variable assignments in the last pipeline stage are visible
         // (e.g., `echo "Alice" | read NAME`).
         let mut last_result = ExecResult::success("");
+        let mut panics: Vec<String> = Vec::new();
         for (i, handle) in handles.into_iter().enumerate() {
             match handle.await {
                 Ok((result, stage_ctx)) => {
@@ -426,11 +427,16 @@ impl PipelineRunner {
                     }
                 }
                 Err(e) => {
-                    if i == last_idx {
-                        last_result = ExecResult::failure(1, format!("pipeline stage panicked: {}", e));
-                    }
+                    panics.push(format!("stage {}: {}", i, e));
                 }
             }
+        }
+
+        if !panics.is_empty() {
+            last_result = ExecResult::failure(
+                1,
+                format!("pipeline stage(s) panicked: {}", panics.join("; ")),
+            );
         }
 
         last_result

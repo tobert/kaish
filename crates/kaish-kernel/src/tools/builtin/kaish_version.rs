@@ -16,6 +16,7 @@ impl Tool for KaishVersion {
 
     fn schema(&self) -> ToolSchema {
         ToolSchema::new("kaish-version", "Print kaish version")
+            .example("Show version", "kaish-version")
     }
 
     async fn execute(&self, _args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {

@@ -17,6 +17,7 @@ impl Tool for Vars {
 
     fn schema(&self) -> ToolSchema {
         ToolSchema::new("kaish-vars", "List all variables in the current scope")
+            .example("List all variables", "kaish-vars")
     }
 
     async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

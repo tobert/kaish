@@ -22,6 +22,8 @@ impl Tool for Unset {
                 "array",
                 "Variable names to unset",
             ))
+            .example("Remove a variable", "unset MY_VAR")
+            .example("Remove multiple", "unset A B C")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

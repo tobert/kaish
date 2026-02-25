@@ -37,6 +37,8 @@ impl Tool for Which {
                 Value::Bool(false),
                 "Print all matches, not just the first (-a)",
             ))
+            .example("Find a command", "which cargo")
+            .example("Show all matches", "which -a python")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

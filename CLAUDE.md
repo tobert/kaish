@@ -42,29 +42,6 @@ cargo tarpaulin --out Html --output-dir coverage/  # Coverage
 cargo +nightly fuzz run parser -- -max_len=4096    # Fuzz (nightly)
 ```
 
-### Cap'n Proto Schema
-
-The kaish-schema crate vendors pre-generated Rust code from `schema/kaish.capnp`.
-Users don't need the `capnp` CLI tool — `cargo install kaish` just works.
-
-After editing `schema/kaish.capnp`, regenerate the vendored code:
-
-```bash
-cargo build -p kaish-schema --features codegen
-cp target/debug/build/kaish-schema-*/out/kaish_capnp.rs \
-   crates/kaish-schema/src/kaish_capnp.rs
-```
-
-This requires the `capnp` CLI tool:
-- Arch: `pacman -S capnproto`
-- Debian/Ubuntu: `apt install capnproto`
-- macOS: `brew install capnp`
-
-If Cap'n Proto schema changes don't trigger rebuilds:
-```bash
-cargo clean -p kaish-schema && cargo build -p kaish-schema
-```
-
 ## Development Guidelines
 
 ### Error Handling
@@ -114,8 +91,7 @@ The 核 (kaku/kernel) is the unit of execution. Multiple frontends connect to th
 ```
 Frontends (REPL, Script Runner, Embedded)
     ↓ KernelClient trait
-        ├── EmbeddedClient (direct in-process)
-        └── IpcClient (Unix socket + Cap'n Proto RPC)
+        └── EmbeddedClient (direct in-process)
     ↓
 Kernel (核)
     ├── Lexer (logos)
@@ -132,11 +108,10 @@ Kernel (核)
 ```
 crates/
 ├── kaish-types/     # Pure-data leaf crate: OutputData, ExecResult, Value, DirEntry, etc.
-├── kaish-schema/    # Cap'n Proto codegen from schema/kaish.capnp
 ├── kaish-glob/      # Glob matching and async file walking with gitignore support
 ├── kaish-kernel/    # Core: lexer, parser, interpreter, tools, VFS, validator
 ├── kaish-mcp/       # MCP server + client (expose kaish tools, consume external MCP tools)
-├── kaish-client/    # Client implementations (embedded, IPC)
+├── kaish-client/    # Client implementations (embedded)
 └── kaish-repl/      # Interactive REPL with rustyline
 ```
 
@@ -220,6 +195,3 @@ for LLM agents using kaish.
 The builtin list in `help builtins` is generated dynamically from tool schemas, but
 `syntax.md` and `limits.md` need manual updates.
 
-## Schema Files
-
-- `schema/kaish.capnp` — Cap'n Proto schema (kernel protocol, types)

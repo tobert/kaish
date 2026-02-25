@@ -27,6 +27,9 @@ impl Tool for Alias {
                 Value::Null,
                 "Alias definitions (name=value) or names to display",
             ))
+            .example("List all aliases", "alias")
+            .example("Define an alias", "alias ll='ls -la'")
+            .example("Show one alias", "alias ll")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -98,6 +101,7 @@ impl Tool for Unalias {
     fn schema(&self) -> ToolSchema {
         ToolSchema::new("unalias", "Remove command aliases")
             .param(ParamSchema::required("names", "array", "Alias names to remove"))
+            .example("Remove an alias", "unalias ll")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

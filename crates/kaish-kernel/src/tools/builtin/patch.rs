@@ -53,6 +53,9 @@ impl Tool for Patch {
                 Value::Bool(false),
                 "Show what would change without applying",
             ))
+            .example("Apply a patch", "patch < changes.patch")
+            .example("Dry run", "patch --dry-run < changes.patch")
+            .example("Strip path prefix", "patch -p1 < changes.patch")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

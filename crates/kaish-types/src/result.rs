@@ -13,7 +13,7 @@ use crate::value::Value;
 /// - `err` — error message if failed
 /// - `out` — raw stdout as string
 /// - `data` — parsed JSON from stdout (if valid JSON)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecResult {
     /// Exit code. 0 means success.
     pub code: i64,

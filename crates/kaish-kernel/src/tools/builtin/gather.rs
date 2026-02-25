@@ -46,6 +46,8 @@ impl Tool for Gather {
                 Value::String("lines".to_string()),
                 "Output format: 'lines' or 'json'",
             ))
+            .example("Collect scatter results", "seq 1 10 | scatter | echo ${ITEM} | gather")
+            .example("Collect first 5 results", "gather first=5")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

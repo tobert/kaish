@@ -54,6 +54,13 @@ pub struct OutputNode {
     /// Rendering hint (colors, icons).
     pub entry_type: EntryType,
     /// Text content (for echo, cat, exec).
+    ///
+    /// Three-state semantics:
+    /// - `None` — named entry (file listing, table row), not text
+    /// - `Some("")` — text node with empty content (e.g., `echo ""`)
+    /// - `Some("x")` — text node with content
+    ///
+    /// `is_text_only()` returns true iff text is Some AND name/cells/children are empty.
     pub text: Option<String>,
     /// Additional columns (for ls -l, ps, env).
     pub cells: Vec<String>,

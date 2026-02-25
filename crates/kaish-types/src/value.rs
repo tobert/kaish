@@ -1,5 +1,7 @@
 //! Value types for kaish's AST and runtime.
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
 /// A literal value.
 ///
 /// Supports primitives (null, bool, int, float, string), structured JSON data
@@ -18,11 +20,26 @@ pub enum Value {
     Blob(BlobRef),
 }
 
+impl Serialize for Value {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Delegate to value_to_json for consistent JSON representation.
+        // Float NaN → null, BlobRef → {_type: "blob", ...}, Json → inline.
+        crate::result::value_to_json(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Value {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let json = serde_json::Value::deserialize(deserializer)?;
+        Ok(crate::result::json_to_value(json))
+    }
+}
+
 /// Reference to binary data stored in `/v/blobs/{id}`.
 ///
 /// Binary data flows through the blob storage system rather than being
 /// encoded as base64 in text fields.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BlobRef {
     /// Unique identifier, also the path suffix: `/v/blobs/{id}`
     pub id: String,

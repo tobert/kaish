@@ -18,6 +18,8 @@ impl Tool for Realpath {
     fn schema(&self) -> ToolSchema {
         ToolSchema::new("realpath", "Print the resolved absolute pathname")
             .param(ParamSchema::required("path", "string", "Path to resolve"))
+            .example("Resolve a path", "realpath ../lib")
+            .example("Normalize path", "realpath /usr/bin/../lib")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

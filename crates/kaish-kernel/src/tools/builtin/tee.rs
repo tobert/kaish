@@ -30,6 +30,8 @@ impl Tool for Tee {
                 Value::Bool(false),
                 "Append to file instead of overwriting (-a)",
             ))
+            .example("Save and display", "echo hello | tee output.txt")
+            .example("Append to log", "echo entry | tee -a log.txt")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

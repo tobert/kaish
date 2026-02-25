@@ -309,6 +309,12 @@ pub struct Kernel {
     /// Pipeline stages write to the corresponding `StderrStream` (set on ExecContext).
     /// The kernel drains this after each statement in `execute_streaming`.
     stderr_receiver: tokio::sync::Mutex<StderrReceiver>,
+    /// Cancellation token for interrupting execution (Ctrl-C).
+    ///
+    /// Protected by `std::sync::Mutex` (not tokio) because the SIGINT handler
+    /// needs sync access. Each `execute()` call gets a fresh child token;
+    /// `cancel()` cancels the current token and replaces it.
+    cancel_token: std::sync::Mutex<tokio_util::sync::CancellationToken>,
     /// Terminal state for job control (interactive mode only, Unix only).
     #[cfg(unix)]
     terminal_state: Option<Arc<crate::terminal::TerminalState>>,
@@ -487,6 +493,7 @@ impl Kernel {
             skip_validation,
             interactive,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
+            cancel_token: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             #[cfg(unix)]
             terminal_state: None,
         })
@@ -518,6 +525,34 @@ impl Kernel {
                 tracing::warn!("failed to initialize terminal job control: {}", e);
             }
         }
+    }
+
+    /// Cancel the current execution.
+    ///
+    /// This cancels the current cancellation token, causing any execution
+    /// loop to exit at the next checkpoint with exit code 130 (SIGINT).
+    /// A fresh token is installed for the next `execute()` call.
+    pub fn cancel(&self) {
+        #[allow(clippy::expect_used)]
+        let token = self.cancel_token.lock().expect("cancel_token poisoned");
+        token.cancel();
+    }
+
+    /// Check if the current execution has been cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        #[allow(clippy::expect_used)]
+        let token = self.cancel_token.lock().expect("cancel_token poisoned");
+        token.is_cancelled()
+    }
+
+    /// Reset the cancellation token (called at the start of each execute).
+    fn reset_cancel(&self) -> tokio_util::sync::CancellationToken {
+        #[allow(clippy::expect_used)]
+        let mut token = self.cancel_token.lock().expect("cancel_token poisoned");
+        if token.is_cancelled() {
+            *token = tokio_util::sync::CancellationToken::new();
+        }
+        token.clone()
     }
 
     /// Execute kaish source code.
@@ -588,10 +623,20 @@ impl Kernel {
 
         let mut result = ExecResult::success("");
 
+        // Reset cancellation token for this execution.
+        let cancel = self.reset_cancel();
+
         for stmt in program.statements {
             if matches!(stmt, Stmt::Empty) {
                 continue;
             }
+
+            // Cancellation checkpoint
+            if cancel.is_cancelled() {
+                result.code = 130;
+                return Ok(result);
+            }
+
             let flow = self.execute_stmt_flow(&stmt).await?;
 
             // Drain any stderr written by pipeline stages during this statement.
@@ -721,8 +766,14 @@ impl Kernel {
                 for stmt in branch {
                     let flow = self.execute_stmt_flow(stmt).await?;
                     match flow {
-                        ControlFlow::Normal(r) => accumulate_result(&mut result, &r),
-                        _ => return Ok(flow),
+                        ControlFlow::Normal(r) => {
+                            accumulate_result(&mut result, &r);
+                            self.drain_stderr_into(&mut result).await;
+                        }
+                        other => {
+                            self.drain_stderr_into(&mut result).await;
+                            return Ok(other);
+                        }
                     }
                 }
                 Ok(ControlFlow::ok(result))
@@ -758,12 +809,20 @@ impl Kernel {
                 }
 
                 'outer: for item in items {
+                    // Cancellation checkpoint per iteration
+                    if self.is_cancelled() {
+                        let mut scope = self.scope.write().await;
+                        scope.pop_frame();
+                        result.code = 130;
+                        return Ok(ControlFlow::ok(result));
+                    }
                     {
                         let mut scope = self.scope.write().await;
                         scope.set(&for_loop.variable, item);
                     }
                     for stmt in &for_loop.body {
                         let mut flow = self.execute_stmt_flow(stmt).await?;
+                        self.drain_stderr_into(&mut result).await;
                         match &mut flow {
                             ControlFlow::Normal(r) => {
                                 accumulate_result(&mut result, r);
@@ -779,20 +838,16 @@ impl Kernel {
                             }
                             ControlFlow::Break { .. } => {
                                 if flow.decrement_level() {
-                                    // Break handled at this level
                                     break 'outer;
                                 }
-                                // Propagate to outer loop
                                 let mut scope = self.scope.write().await;
                                 scope.pop_frame();
                                 return Ok(flow);
                             }
                             ControlFlow::Continue { .. } => {
                                 if flow.decrement_level() {
-                                    // Continue handled at this level
                                     continue 'outer;
                                 }
-                                // Propagate to outer loop
                                 let mut scope = self.scope.write().await;
                                 scope.pop_frame();
                                 return Ok(flow);
@@ -817,6 +872,12 @@ impl Kernel {
 
                 'outer: loop {
                     // Evaluate condition - use async to support command substitution
+                    // Cancellation checkpoint per iteration
+                    if self.is_cancelled() {
+                        result.code = 130;
+                        return Ok(ControlFlow::ok(result));
+                    }
+
                     let cond_value = self.eval_expr_async(&while_loop.condition).await?;
 
                     if !is_truthy(&cond_value) {
@@ -826,6 +887,7 @@ impl Kernel {
                     // Execute body
                     for stmt in &while_loop.body {
                         let mut flow = self.execute_stmt_flow(stmt).await?;
+                        self.drain_stderr_into(&mut result).await;
                         match &mut flow {
                             ControlFlow::Normal(r) => {
                                 accumulate_result(&mut result, r);
@@ -838,18 +900,14 @@ impl Kernel {
                             }
                             ControlFlow::Break { .. } => {
                                 if flow.decrement_level() {
-                                    // Break handled at this level
                                     break 'outer;
                                 }
-                                // Propagate to outer loop
                                 return Ok(flow);
                             }
                             ControlFlow::Continue { .. } => {
                                 if flow.decrement_level() {
-                                    // Continue handled at this level
                                     continue 'outer;
                                 }
-                                // Propagate to outer loop
                                 return Ok(flow);
                             }
                             ControlFlow::Return { .. } | ControlFlow::Exit { .. } => {
@@ -881,8 +939,14 @@ impl Kernel {
                         for stmt in &branch.body {
                             let flow = self.execute_stmt_flow(stmt).await?;
                             match flow {
-                                ControlFlow::Normal(r) => accumulate_result(&mut result, &r),
-                                _ => return Ok(flow),
+                                ControlFlow::Normal(r) => {
+                                    accumulate_result(&mut result, &r);
+                                    self.drain_stderr_into(&mut result).await;
+                                }
+                                other => {
+                                    self.drain_stderr_into(&mut result).await;
+                                    return Ok(other);
+                                }
                             }
                         }
                         return Ok(ControlFlow::ok(result));
@@ -942,46 +1006,66 @@ impl Kernel {
             }
             Stmt::AndChain { left, right } => {
                 // cmd1 && cmd2 - run cmd2 only if cmd1 succeeds (exit code 0)
+                // Suppress errexit for the left side — && handles failure itself.
+                {
+                    let mut scope = self.scope.write().await;
+                    scope.suppress_errexit();
+                }
                 let left_flow = self.execute_stmt_flow(left).await?;
+                {
+                    let mut scope = self.scope.write().await;
+                    scope.unsuppress_errexit();
+                }
                 match left_flow {
-                    ControlFlow::Normal(left_result) => {
+                    ControlFlow::Normal(mut left_result) => {
+                        self.drain_stderr_into(&mut left_result).await;
                         self.update_last_result(&left_result).await;
                         if left_result.ok() {
                             let right_flow = self.execute_stmt_flow(right).await?;
                             match right_flow {
-                                ControlFlow::Normal(right_result) => {
+                                ControlFlow::Normal(mut right_result) => {
+                                    self.drain_stderr_into(&mut right_result).await;
                                     self.update_last_result(&right_result).await;
-                                    // Combine left and right output
                                     let mut combined = left_result;
                                     accumulate_result(&mut combined, &right_result);
                                     Ok(ControlFlow::ok(combined))
                                 }
-                                other => Ok(other), // Propagate non-normal flow
+                                other => Ok(other),
                             }
                         } else {
                             Ok(ControlFlow::ok(left_result))
                         }
                     }
-                    _ => Ok(left_flow), // Propagate non-normal flow
+                    _ => Ok(left_flow),
                 }
             }
             Stmt::OrChain { left, right } => {
                 // cmd1 || cmd2 - run cmd2 only if cmd1 fails (non-zero exit code)
+                // Suppress errexit for the left side — || handles failure itself.
+                {
+                    let mut scope = self.scope.write().await;
+                    scope.suppress_errexit();
+                }
                 let left_flow = self.execute_stmt_flow(left).await?;
+                {
+                    let mut scope = self.scope.write().await;
+                    scope.unsuppress_errexit();
+                }
                 match left_flow {
-                    ControlFlow::Normal(left_result) => {
+                    ControlFlow::Normal(mut left_result) => {
+                        self.drain_stderr_into(&mut left_result).await;
                         self.update_last_result(&left_result).await;
                         if !left_result.ok() {
                             let right_flow = self.execute_stmt_flow(right).await?;
                             match right_flow {
-                                ControlFlow::Normal(right_result) => {
+                                ControlFlow::Normal(mut right_result) => {
+                                    self.drain_stderr_into(&mut right_result).await;
                                     self.update_last_result(&right_result).await;
-                                    // Combine left and right output
                                     let mut combined = left_result;
                                     accumulate_result(&mut combined, &right_result);
                                     Ok(ControlFlow::ok(combined))
                                 }
-                                other => Ok(other), // Propagate non-normal flow
+                                other => Ok(other),
                             }
                         } else {
                             Ok(ControlFlow::ok(left_result))
@@ -1828,6 +1912,24 @@ impl Kernel {
         scope.set_last_result(result.clone());
     }
 
+    /// Drain accumulated pipeline stderr into a result.
+    ///
+    /// Called after each sub-statement inside control structures (`if`, `for`,
+    /// `while`, `case`, `&&`, `||`) so that stderr appears incrementally rather
+    /// than batching until the entire structure finishes.
+    async fn drain_stderr_into(&self, result: &mut ExecResult) {
+        let drained = {
+            let mut receiver = self.stderr_receiver.lock().await;
+            receiver.drain_lossy()
+        };
+        if !drained.is_empty() {
+            if !result.err.is_empty() && !result.err.ends_with('\n') {
+                result.err.push('\n');
+            }
+            result.err.push_str(&drained);
+        }
+    }
+
     /// Execute a user-defined function with local variable scoping.
     ///
     /// Functions push a new scope frame for local variables. Variables declared
@@ -1872,6 +1974,15 @@ impl Kernel {
         for stmt in &def.body {
             match self.execute_stmt_flow(stmt).await {
                 Ok(flow) => {
+                    // Drain pipeline stderr after each sub-statement.
+                    let drained = {
+                        let mut receiver = self.stderr_receiver.lock().await;
+                        receiver.drain_lossy()
+                    };
+                    if !drained.is_empty() {
+                        accumulated_err.push_str(&drained);
+                    }
+
                     match flow {
                         ControlFlow::Normal(r) => {
                             accumulated_out.push_str(&r.out);
@@ -2000,24 +2111,22 @@ impl Kernel {
 
             match self.execute_stmt_flow(&stmt).await {
                 Ok(flow) => {
+                    self.drain_stderr_into(&mut result).await;
                     match flow {
                         ControlFlow::Normal(r) => {
                             result = r.clone();
                             self.update_last_result(&r).await;
                         }
                         ControlFlow::Break { .. } | ControlFlow::Continue { .. } => {
-                            // break/continue in sourced file - unusual but propagate
                             return Err(anyhow::anyhow!(
                                 "source: {}: unexpected break/continue outside loop",
                                 path
                             ));
                         }
                         ControlFlow::Return { value } => {
-                            // Return from sourced script ends the source
                             return Ok(value);
                         }
                         ControlFlow::Exit { code } => {
-                            // Exit from sourced script — preserve accumulated output
                             result.code = code;
                             return Ok(result);
                         }
@@ -3592,6 +3701,84 @@ AFTER="yes"'"#)
 
         // Note: This test depends on whether error exit is checked within source
         // Currently our implementation checks per-statement in the main kernel
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // set -e with && / || chains
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_set_e_and_chain_left_fails() {
+        // set -e; false && echo hi; REACHED=1 → REACHED should be set
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        kernel.execute("set -e").await.expect("set -e failed");
+
+        kernel
+            .execute("false && echo hi; REACHED=1")
+            .await
+            .expect("execution failed");
+
+        let reached = kernel.get_var("REACHED").await;
+        assert_eq!(
+            reached,
+            Some(Value::Int(1)),
+            "set -e should not trigger on left side of &&"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_e_and_chain_right_fails() {
+        // set -e; true && false; REACHED=1 → REACHED should NOT be set
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        kernel.execute("set -e").await.expect("set -e failed");
+
+        kernel
+            .execute("true && false; REACHED=1")
+            .await
+            .expect("execution failed");
+
+        let reached = kernel.get_var("REACHED").await;
+        assert!(
+            reached.is_none(),
+            "set -e should trigger when right side of && fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_e_or_chain_recovers() {
+        // set -e; false || echo recovered; REACHED=1 → REACHED should be set
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        kernel.execute("set -e").await.expect("set -e failed");
+
+        kernel
+            .execute("false || echo recovered; REACHED=1")
+            .await
+            .expect("execution failed");
+
+        let reached = kernel.get_var("REACHED").await;
+        assert_eq!(
+            reached,
+            Some(Value::Int(1)),
+            "set -e should not trigger when || recovers the failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_e_or_chain_both_fail() {
+        // set -e; false || false; REACHED=1 → REACHED should NOT be set
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        kernel.execute("set -e").await.expect("set -e failed");
+
+        kernel
+            .execute("false || false; REACHED=1")
+            .await
+            .expect("execution failed");
+
+        let reached = kernel.get_var("REACHED").await;
+        assert!(
+            reached.is_none(),
+            "set -e should trigger when || chain ultimately fails"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

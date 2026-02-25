@@ -40,6 +40,8 @@ impl Tool for Tr {
                 Value::Bool(false),
                 "Squeeze repeated characters (-s)",
             ))
+            .example("Lowercase to uppercase", "echo hello | tr a-z A-Z")
+            .example("Delete characters", "echo 'a1b2c3' | tr -d 0-9")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

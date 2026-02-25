@@ -69,6 +69,9 @@ impl Tool for Find {
                 Value::Null,
                 "Size filter: +N larger than N bytes, -N smaller than N bytes",
             ))
+            .example("Find all files", "find .")
+            .example("Find by name pattern", "find src -name '*.rs'")
+            .example("Find directories only", "find . -type d")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

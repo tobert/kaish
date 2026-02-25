@@ -21,6 +21,8 @@ impl Tool for Write {
         ToolSchema::new("write", "Write content to a file")
             .param(ParamSchema::required("path", "string", "File path to write"))
             .param(ParamSchema::required("content", "string", "Content to write"))
+            .example("Write to a file", "write output.txt \"hello world\"")
+            .example("Pipe into write", "echo content | write file.txt")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

@@ -16,6 +16,7 @@ impl Tool for KaishClear {
 
     fn schema(&self) -> ToolSchema {
         ToolSchema::new("kaish-clear", "Clear session state (variables, cwd)")
+            .example("Reset session", "kaish-clear")
     }
 
     async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

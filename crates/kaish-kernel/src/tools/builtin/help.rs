@@ -27,6 +27,9 @@ impl Tool for Help {
             Value::Null,
             "Topic or tool name: overview, syntax, builtins, vfs, scatter, limits, or a tool name",
         ))
+        .example("Show overview", "help")
+        .example("Syntax reference", "help syntax")
+        .example("Help for a tool", "help cat")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

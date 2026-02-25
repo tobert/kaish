@@ -24,7 +24,6 @@ pub mod kernel;
 pub mod lexer;
 pub mod parser;
 pub mod paths;
-pub mod rpc;
 pub mod scheduler;
 pub mod tools;
 pub mod validator;
@@ -57,7 +56,6 @@ pub use dispatch::{BackendDispatcher, CommandDispatcher, PipelinePosition};
 pub use ignore_config::{IgnoreConfig, IgnoreScope};
 pub use kernel::{Kernel, KernelConfig, VfsMountMode};
 pub use output_limit::OutputLimitConfig;
-pub use rpc::KernelRpcServer;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Embedding Conveniences

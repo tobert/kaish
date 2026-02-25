@@ -23,6 +23,8 @@ impl Tool for Jobs {
                 Value::Bool(false),
                 "Remove completed jobs from tracking (--cleanup)",
             ))
+            .example("List background jobs", "jobs")
+            .example("Clean up completed jobs", "jobs --cleanup")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

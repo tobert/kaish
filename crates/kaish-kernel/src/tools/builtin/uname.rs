@@ -143,6 +143,9 @@ impl Tool for Uname {
                 Value::Bool(false),
                 "Report host OS identity instead of kaish",
             ))
+            .example("System name", "uname")
+            .example("All info", "uname -a")
+            .example("Host OS identity", "uname --host")
     }
 
     async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {

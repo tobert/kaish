@@ -23,6 +23,8 @@ impl Tool for Sleep {
                 "number",
                 "Number of seconds to sleep (supports decimals)",
             ))
+            .example("Sleep for 1 second", "sleep 1")
+            .example("Sleep for half a second", "sleep 0.5")
     }
 
     async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {

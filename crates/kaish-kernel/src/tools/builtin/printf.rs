@@ -70,6 +70,8 @@ impl Tool for Printf {
                 Value::Null,
                 "Arguments for format string",
             ))
+            .example("Formatted output", "printf \"%s is %d\\n\" name 42")
+            .example("Zero-padded number", "printf \"%08d\" 42")
     }
 
     async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {

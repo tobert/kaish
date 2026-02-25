@@ -24,6 +24,7 @@ impl Tool for Hostname {
 
     fn schema(&self) -> ToolSchema {
         ToolSchema::new("hostname", "Print the system hostname")
+            .example("Print hostname", "hostname")
     }
 
     async fn execute(&self, _args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {

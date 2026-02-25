@@ -19,6 +19,8 @@ impl Tool for Touch {
     fn schema(&self) -> ToolSchema {
         ToolSchema::new("touch", "Change file timestamps or create empty files")
             .param(ParamSchema::required("path", "string", "File to touch"))
+            .example("Create empty file", "touch newfile.txt")
+            .example("Update timestamp", "touch existing.txt")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

@@ -69,6 +69,8 @@ impl Tool for Spawn {
                 Value::Bool(false),
                 "Start with empty environment",
             ))
+            .example("Run a command", "spawn command=\"cargo\" argv=[\"build\"]")
+            .example("With timeout", "spawn command=\"sleep\" argv=[\"10\"] timeout=1000")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

@@ -3,12 +3,12 @@
 # Publish kaish crates to crates.io in dependency order.
 #
 # Leaf crates first (no internal deps), then up the tree:
-#   kaish-glob, kaish-schema  (no internal deps)
-#   kaish-kernel              (depends on glob, schema)
-#   kaish-client              (depends on kernel, schema)
-#   kaish-mcp, kaish-repl     (depends on kernel, client)
+#   kaish-glob, kaish-types      (no internal deps)
+#   kaish-kernel                  (depends on glob, types)
+#   kaish-client                  (depends on kernel)
+#   kaish-mcp, kaish-repl         (depends on kernel, client)
 
-for crate in kaish-glob kaish-schema kaish-kernel kaish-client kaish-mcp kaish-repl; do
+for crate in kaish-glob kaish-types kaish-kernel kaish-client kaish-mcp kaish-repl; do
     echo "📦 Publishing $crate..."
     cargo publish -p "$crate"
     echo "✅ $crate published"

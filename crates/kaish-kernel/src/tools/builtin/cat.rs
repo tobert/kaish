@@ -26,6 +26,9 @@ impl Tool for Cat {
                 Value::Bool(false),
                 "Number output lines (-n)",
             ).with_aliases(["-n"]))
+            .example("Read a file", "cat README.md")
+            .example("Show line numbers", "cat -n src/main.rs")
+            .example("Concatenate files", "cat header.txt body.txt")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

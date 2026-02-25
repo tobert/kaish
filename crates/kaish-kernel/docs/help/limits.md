@@ -13,6 +13,14 @@
 
 `[ ]` is supported as a builtin but `[[ ]]` is preferred.
 
+## Lexer/Parser Limitations
+
+| Limitation | Details | Workaround |
+|-----------|---------|------------|
+| `case` with path-like patterns | Glob patterns like `/tmp/[a-z]*` are lexed as a single Path token | Use quoted strings: `"/tmp/"*` |
+| `[[ ]]` parsed as two brackets | Two separate `[` tokens, not a compound keyword | Works for tests; kaish will never have `[]` array syntax |
+| Keywords as bare arguments | `echo done` may fail because `done` is a keyword token | Quote: `echo "done"` |
+
 ## Builtin Constraints
 
 | Builtin | Limitation |
@@ -29,7 +37,7 @@
 ## Execution
 
 - **Pipeline stages run concurrently** with isolated scopes (like bash subshells). Variable assignments in one stage aren't visible in others. Last stage syncs back to parent.
-- **User functions and .kai scripts cannot run inside pipeline stages or scatter workers.** Only builtins and external commands work in these contexts.
+- **User functions and .kai scripts cannot run inside pipeline stages, scatter workers, or background jobs (`&`).** Only builtins and external commands work in these contexts. Future: per-worker kernel instances.
 - **Scatter results in completion order**, not input order.
 - **No command substitution in redirect targets** — `cmd > $(...)` not supported. Evaluate path first.
 - **Preprocessor is context-unaware** — `$(( ))` and heredoc markers replaced before parsing.

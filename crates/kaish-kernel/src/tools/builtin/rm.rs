@@ -32,6 +32,8 @@ impl Tool for Rm {
                 Value::Bool(false),
                 "Ignore nonexistent files, never prompt (-f)",
             ).with_aliases(["-f"]))
+            .example("Remove a file", "rm temp.txt")
+            .example("Remove directory recursively", "rm -rf build/")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

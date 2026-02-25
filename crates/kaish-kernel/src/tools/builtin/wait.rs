@@ -24,6 +24,8 @@ impl Tool for Wait {
                 Value::Null,
                 "Specific job ID to wait for (waits for all if not specified)",
             ))
+            .example("Wait for all jobs", "wait")
+            .example("Wait for specific job", "wait 1")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

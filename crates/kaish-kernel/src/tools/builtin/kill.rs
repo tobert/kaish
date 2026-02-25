@@ -29,6 +29,8 @@ impl Tool for Kill {
                 "string",
                 "Process ID or %N for job reference",
             ))
+            .example("Terminate a job", "kill %1")
+            .example("Kill a process by PID", "kill --signal KILL 1234")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

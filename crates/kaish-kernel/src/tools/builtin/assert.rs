@@ -28,6 +28,8 @@ impl Tool for Assert {
                 Value::String("assertion failed".into()),
                 "Error message if assertion fails",
             ))
+            .example("Assert a value is truthy", "assert $RESULT")
+            .example("Assert with custom message", "assert $OK \"deploy failed\"")
     }
 
     async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {

@@ -16,6 +16,7 @@ impl Tool for Pwd {
 
     fn schema(&self) -> ToolSchema {
         ToolSchema::new("pwd", "Print current working directory")
+            .example("Show current directory", "pwd")
     }
 
     async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

@@ -48,6 +48,9 @@ impl Tool for Test {
                 Value::Null,
                 "Conditional expression to evaluate",
             ))
+            .example("File exists", "test -e file.txt")
+            .example("String equality", "test \"$VAR\" = \"expected\"")
+            .example("Numeric comparison", "test 5 -gt 3")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -69,6 +72,8 @@ impl Tool for Bracket {
                 Value::Null,
                 "Conditional expression to evaluate (must end with ])",
             ))
+            .example("Check file type", "[ -f file.txt ]")
+            .example("String test", "[ -n \"$VAR\" ]")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

@@ -39,6 +39,8 @@ impl Tool for Cp {
                 Value::Bool(false),
                 "Preserve file attributes (-p)",
             ).with_aliases(["-p"]))
+            .example("Copy a file", "cp src.txt dest.txt")
+            .example("Copy directory recursively", "cp -r src/ backup/")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

@@ -16,6 +16,7 @@ impl Tool for KaishStatus {
 
     fn schema(&self) -> ToolSchema {
         ToolSchema::new("kaish-status", "Show kernel session status")
+            .example("Check session status", "kaish-status")
     }
 
     async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

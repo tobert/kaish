@@ -28,6 +28,8 @@ impl Tool for Tools {
                 crate::ast::Value::Null,
                 "Show detailed schema for a specific tool",
             ))
+            .example("List all tools", "kaish-tools")
+            .example("Show tool detail", "kaish-tools cat")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -98,6 +100,7 @@ impl Tool for Mounts {
 
     fn schema(&self) -> ToolSchema {
         ToolSchema::new("kaish-mounts", "List VFS mount points")
+            .example("Show mount points", "kaish-mounts")
     }
 
     async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

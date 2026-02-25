@@ -18,6 +18,8 @@ impl Tool for Dirname {
     fn schema(&self) -> ToolSchema {
         ToolSchema::new("dirname", "Strip last component from filename")
             .param(ParamSchema::required("path", "string", "Path to process"))
+            .example("Get directory part", "dirname /usr/bin/sort")
+            .example("Relative path", "dirname path/to/file.txt")
     }
 
     async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {

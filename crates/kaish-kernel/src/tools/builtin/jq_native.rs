@@ -249,6 +249,9 @@ impl Tool for JqNative {
                 Value::String("".into()),
                 "Read from VFS file instead of stdin",
             ))
+            .example("Extract a field", "cat data.json | jq '.name'")
+            .example("Raw string output", "cat data.json | jq -r '.version'")
+            .example("Filter an array", "cat items.json | jq '.[] | select(.active)'")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

@@ -54,6 +54,9 @@ impl Tool for Git {
                 Value::Null,
                 "Number of entries to show (-n)",
             ).with_aliases(["-n"]))
+            .example("Show status", "git status")
+            .example("Stage and commit", "git add file.rs; git commit -m 'fix bug'")
+            .example("Recent log", "git log -n 5 --oneline")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

@@ -22,6 +22,7 @@ impl Tool for True {
 
     fn schema(&self) -> ToolSchema {
         ToolSchema::new("true", "Exit with success (code 0)")
+            .example("Always succeeds", "true")
     }
 
     async fn execute(&self, _args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
@@ -40,6 +41,7 @@ impl Tool for False {
 
     fn schema(&self) -> ToolSchema {
         ToolSchema::new("false", "Exit with failure (code 1)")
+            .example("Always fails", "false")
     }
 
     async fn execute(&self, _args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {

@@ -38,6 +38,8 @@ impl Tool for Exec {
                 "string",
                 "Command to exec into (name or path)",
             ))
+            .example("Replace shell with bash", "exec bash")
+            .example("Replace shell with a command", "exec cargo build --release")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

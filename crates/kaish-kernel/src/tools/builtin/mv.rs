@@ -27,6 +27,8 @@ impl Tool for Mv {
                 Value::Bool(false),
                 "Do not overwrite existing files (-n)",
             ))
+            .example("Rename a file", "mv old.txt new.txt")
+            .example("Move into directory", "mv file.txt /archive/")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

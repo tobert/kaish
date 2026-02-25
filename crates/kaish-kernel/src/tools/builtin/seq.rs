@@ -47,6 +47,9 @@ impl Tool for Seq {
                 Value::Bool(false),
                 "Equalize width by padding with zeros (-w)",
             ).with_aliases(["-w"]))
+            .example("Count to 5", "seq 5")
+            .example("Range with step", "seq 1 2 10")
+            .example("Zero-padded", "seq -w 1 100")
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {

@@ -20,10 +20,6 @@ pub enum ClientError {
     #[error("execution error: {0}")]
     Execution(String),
 
-    /// Cap'n Proto RPC error.
-    #[error("rpc error: {0}")]
-    Rpc(#[from] capnp::Error),
-
     /// I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -31,10 +27,6 @@ pub enum ClientError {
     /// UTF-8 decoding error.
     #[error("utf8 error: {0}")]
     Utf8(#[from] std::str::Utf8Error),
-
-    /// Cap'n Proto schema error.
-    #[error("schema error: {0}")]
-    Schema(#[from] capnp::NotInSchema),
 
     /// The kernel is not connected.
     #[error("not connected")]
@@ -47,8 +39,8 @@ pub enum ClientError {
 
 /// Common interface for interacting with a kaish kernel.
 ///
-/// Both `EmbeddedClient` and `IpcClient` implement this trait,
-/// allowing code to work with either client type.
+/// Both `EmbeddedClient` and custom client implementations can implement this trait,
+/// allowing code to work with any client type.
 #[async_trait(?Send)]
 pub trait KernelClient {
     /// Execute kaish source code.

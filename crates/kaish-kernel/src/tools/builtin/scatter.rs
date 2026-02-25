@@ -44,6 +44,8 @@ impl Tool for Scatter {
                 Value::Int(8),
                 "Maximum parallelism (concurrent workers)",
             ))
+            .example("Parallel processing", "seq 1 10 | scatter | echo ${ITEM} | gather")
+            .example("Custom variable name", "split \"a,b,c\" \",\" | scatter as=X | echo ${X} | gather")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

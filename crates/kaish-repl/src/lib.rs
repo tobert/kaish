@@ -449,8 +449,23 @@ impl Repl {
             return ProcessResult::Exit;
         }
 
-        // Execute via kernel (absolute paths, builtins, externals all go through here)
-        let result = self.runtime.block_on(self.kernel.execute(trimmed));
+        // Execute via kernel with SIGINT handling.
+        // A per-execute signal listener catches Ctrl-C during execution,
+        // cancels the kernel, and returns exit code 130.
+        let kernel = self.kernel.clone();
+        let input = trimmed.to_string();
+        let result = self.runtime.block_on(async {
+            let mut sigint = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::interrupt(),
+            )?;
+            tokio::select! {
+                result = kernel.execute(&input) => result,
+                _ = sigint.recv() => {
+                    kernel.cancel();
+                    Ok(ExecResult::failure(130, ""))
+                }
+            }
+        });
 
         match result {
             Ok(exec_result) => ProcessResult::Output(format_result(&exec_result)),
@@ -647,131 +662,6 @@ pub fn run() -> Result<()> {
 
     Ok(())
 }
-
-/// Run a REPL connected to a remote kernel via IpcClient.
-///
-/// This REPL forwards commands to the remote kernel and displays results.
-/// The `LocalSet` is required because IpcClient uses spawn_local internally.
-pub fn run_with_client(
-    client: kaish_client::IpcClient,
-    rt: &Runtime,
-    local: &tokio::task::LocalSet,
-) -> Result<()> {
-    use kaish_client::KernelClient;
-
-    // Connected mode uses a simple helper with path completion only
-    let simple_helper = SimpleHelper {
-        path_completer: FilenameCompleter::new(),
-    };
-
-    let mut rl: Editor<SimpleHelper, DefaultHistory> =
-        Editor::new().context("Failed to create editor")?;
-    rl.set_helper(Some(simple_helper));
-
-    let history_path = directories::BaseDirs::new()
-        .map(|b| b.data_dir().join("kaish").join("history.txt"));
-    if let Some(ref path) = history_path {
-        // Ignore load errors on connected mode
-        let _ = rl.load_history(path);
-    }
-
-    println!("会sh — kaish v{} (connected)", env!("CARGO_PKG_VERSION"));
-    println!("Type help for commands, exit to quit.");
-    println!();
-
-    loop {
-        let prompt = "会sh> ";
-
-        match rl.readline(prompt) {
-            Ok(line) => {
-                let _ = rl.add_history_entry(line.as_str());
-
-                let trimmed = line.trim();
-
-                match trimmed {
-                    "quit" | "exit" => break,
-                    "" => continue,
-                    _ => {}
-                }
-
-                // Send to remote kernel
-                let result = local.block_on(rt, async { client.execute(trimmed).await });
-
-                match result {
-                    Ok(exec_result) => {
-                        let output = format_result(&exec_result);
-                        if output.ends_with('\n') {
-                            print!("{}", output);
-                        } else {
-                            println!("{}", output);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error: {}", e);
-                    }
-                }
-            }
-            Err(ReadlineError::Interrupted) => {
-                println!("^C");
-                continue;
-            }
-            Err(ReadlineError::Eof) => {
-                println!("^D");
-                break;
-            }
-            Err(err) => {
-                eprintln!("Error: {}", err);
-                break;
-            }
-        }
-    }
-
-    // Save history
-    if let Some(ref path) = history_path {
-        if let Some(parent) = path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent) {
-                tracing::warn!("Failed to create history directory: {}", e);
-            }
-        if let Err(e) = rl.save_history(path) {
-            tracing::warn!("Failed to save history: {}", e);
-        }
-    }
-
-    Ok(())
-}
-
-// ── SimpleHelper (for connected mode) ───────────────────────────────
-
-/// Minimal helper for connected REPL — path completion only.
-struct SimpleHelper {
-    path_completer: FilenameCompleter,
-}
-
-impl Completer for SimpleHelper {
-    type Candidate = Pair;
-
-    fn complete(
-        &self,
-        line: &str,
-        pos: usize,
-        ctx: &rustyline::Context<'_>,
-    ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        self.path_completer.complete(line, pos, ctx)
-    }
-}
-
-impl Highlighter for SimpleHelper {}
-impl Validator for SimpleHelper {}
-
-impl Hinter for SimpleHelper {
-    type Hint = NoHint;
-
-    fn hint(&self, _line: &str, _pos: usize, _ctx: &rustyline::Context<'_>) -> Option<NoHint> {
-        None
-    }
-}
-
-impl Helper for SimpleHelper {}
 
 // ── Tests ───────────────────────────────────────────────────────────
 

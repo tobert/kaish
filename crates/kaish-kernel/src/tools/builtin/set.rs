@@ -28,6 +28,8 @@ impl Tool for Set {
                 Value::Null,
                 "Shell options (-e, +e, etc.)",
             ))
+            .example("Exit on error", "set -e")
+            .example("Disable exit on error", "set +e")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

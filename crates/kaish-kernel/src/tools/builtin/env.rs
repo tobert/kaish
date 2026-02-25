@@ -55,6 +55,8 @@ impl Tool for Env {
             Value::Null,
             "Unset variable from environment (-u VAR)",
         ))
+        .example("Print environment", "env")
+        .example("Run with modified env", "env MY_VAR=hello command")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

@@ -18,6 +18,8 @@ impl Tool for Mkdir {
     fn schema(&self) -> ToolSchema {
         ToolSchema::new("mkdir", "Create directories")
             .param(ParamSchema::required("path", "string", "Directory path to create"))
+            .example("Create a directory", "mkdir output")
+            .example("Create nested directories", "mkdir -p src/utils/helpers")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

@@ -43,6 +43,9 @@ impl Tool for Export {
                 Value::Bool(false),
                 "Print all exported variables (-p)",
             ))
+            .example("Set and export", "export MY_VAR=value")
+            .example("Export existing variable", "export PATH")
+            .example("List exports", "export -p")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

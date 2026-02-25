@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use crate::value::Value;
 
 /// Schema for a tool parameter.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ParamSchema {
     /// Parameter name.
     pub name: String,
@@ -64,7 +64,7 @@ impl ParamSchema {
 }
 
 /// An example showing how to use a tool.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Example {
     /// Short description of what the example demonstrates.
     pub description: String,
@@ -83,7 +83,7 @@ impl Example {
 }
 
 /// Schema describing a tool's interface.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolSchema {
     /// Tool name.
     pub name: String,
@@ -131,7 +131,7 @@ impl ToolSchema {
 }
 
 /// Parsed arguments ready for tool execution.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ToolArgs {
     /// Positional arguments in order.
     pub positional: Vec<Value>,

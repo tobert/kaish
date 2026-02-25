@@ -25,6 +25,8 @@ impl Tool for Basename {
                 Value::Null,
                 "Suffix to remove from the filename",
             ))
+            .example("Extract filename", "basename /usr/bin/sort")
+            .example("Remove extension", "basename /path/to/file.txt .txt")
     }
 
     async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {

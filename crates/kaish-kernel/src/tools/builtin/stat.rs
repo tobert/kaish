@@ -25,6 +25,8 @@ impl Tool for Stat {
                 Value::Null,
                 "Output format (--format). Supports: %n (name), %s (size), %F (type)",
             ))
+            .example("Show file info", "stat README.md")
+            .example("Just the size", "stat --format '%s' file.txt")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

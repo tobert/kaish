@@ -24,6 +24,9 @@ impl Tool for Cd {
                 Value::String("~".into()),
                 "Directory to change to (use - for previous directory)",
             ))
+            .example("Go home", "cd")
+            .example("Change directory", "cd /tmp")
+            .example("Previous directory", "cd -")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

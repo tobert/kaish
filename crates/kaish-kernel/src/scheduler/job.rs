@@ -341,6 +341,9 @@ impl JobManager {
     }
 
     /// Spawn a new background job from a future.
+    ///
+    /// The job is inserted into the map synchronously before returning,
+    /// guaranteeing it's immediately queryable via `exists()` or `get()`.
     pub fn spawn<F>(&self, command: String, future: F) -> JobId
     where
         F: std::future::Future<Output = ExecResult> + Send + 'static,
@@ -349,15 +352,22 @@ impl JobManager {
         let handle = tokio::spawn(future);
         let job = Job::new(id, command, handle);
 
-        // Try synchronous insert first (succeeds if lock is uncontended)
-        let jobs = self.jobs.clone();
-        if let Ok(mut guard) = jobs.try_lock() {
-            guard.insert(id, job);
-        } else {
-            tokio::spawn(async move {
-                let mut jobs = jobs.lock().await;
-                jobs.insert(id, job);
-            });
+        // Spin on try_lock to guarantee the job is in the map on return.
+        // The lock is tokio::sync::Mutex which is only held briefly during
+        // HashMap operations, so contention resolves quickly.
+        let mut job_opt = Some(job);
+        loop {
+            match self.jobs.try_lock() {
+                Ok(mut guard) => {
+                    if let Some(j) = job_opt.take() {
+                        guard.insert(id, j);
+                    }
+                    break;
+                }
+                Err(_) => {
+                    std::hint::spin_loop();
+                }
+            }
         }
 
         id

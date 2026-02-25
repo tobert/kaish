@@ -42,6 +42,9 @@ impl Tool for Date {
                 Value::Bool(false),
                 "Output Unix timestamp (seconds since epoch)",
             ))
+            .example("Current date and time", "date")
+            .example("ISO 8601 format", "date --iso")
+            .example("Unix timestamp", "date --unix")
     }
 
     async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {

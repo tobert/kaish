@@ -24,6 +24,8 @@ impl Tool for Fg {
                 Value::Null,
                 "Job ID to resume (defaults to most recently stopped job)",
             ))
+            .example("Resume last stopped job", "fg")
+            .example("Resume specific job", "fg 2")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

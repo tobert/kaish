@@ -48,6 +48,8 @@ impl Tool for Uniq {
                 Value::Bool(false),
                 "Ignore case when comparing (-i)",
             ))
+            .example("Remove adjacent duplicates", "sort data.txt | uniq")
+            .example("Count occurrences", "sort data.txt | uniq -c")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

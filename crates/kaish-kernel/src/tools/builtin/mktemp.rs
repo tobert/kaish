@@ -57,6 +57,9 @@ impl Tool for Mktemp {
                 Value::Null,
                 "Template (positional form)",
             ))
+            .example("Create temp file", "mktemp")
+            .example("Create temp directory", "mktemp -d")
+            .example("Custom template", "mktemp -t myapp.XXXXXX")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

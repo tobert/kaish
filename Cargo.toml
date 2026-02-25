@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/kaish-glob",
-    "crates/kaish-schema",
     "crates/kaish-types",
     "crates/kaish-kernel",
     "crates/kaish-mcp",
@@ -44,13 +43,6 @@ opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "trace"] }
 tracing-opentelemetry = "0.32"
 
-# Cap'n Proto (L0)
-capnp = "0.25"
-capnpc = "0.25"
-capnp-rpc = "0.25"
-futures = "0.3"
-tokio-util = { version = "0.7", features = ["compat"] }
-
 # Lexer/Parser (L1-L2)
 logos = "0.16"
 chumsky = "1.0.0-alpha.8"
@@ -78,6 +70,9 @@ jaq-json = "1.1"
 
 # MCP client (L8)
 rmcp = { version = "0.16", default-features = true, features = ["client", "transport-child-process"] }
+
+# Async utilities
+tokio-util = { version = "0.7", features = ["compat"] }
 
 # XDG paths
 directories = "5"

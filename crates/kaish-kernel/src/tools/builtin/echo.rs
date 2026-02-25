@@ -29,6 +29,8 @@ impl Tool for Echo {
                 Value::Bool(false),
                 "Do not output trailing newline (-n)",
             ))
+            .example("Print a message", "echo hello world")
+            .example("No trailing newline", "echo -n \"prompt: \"")
     }
 
     async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
