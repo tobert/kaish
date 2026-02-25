@@ -21,16 +21,10 @@ impl Tool for KaishStatus {
 
     async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         let var_count = ctx.scope.all_names().len();
-        let job_count = ctx
-            .job_manager
-            .as_ref()
-            .map(|jm| {
-                // Use tokio to block on the async list
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(jm.list()).len()
-                })
-            })
-            .unwrap_or(0);
+        let job_count = match ctx.job_manager.as_ref() {
+            Some(jm) => jm.list().await.len(),
+            None => 0,
+        };
 
         let headers = vec![
             "KEY".to_string(),

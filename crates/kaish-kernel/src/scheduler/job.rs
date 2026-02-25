@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::future::Future;
 use std::sync::Arc;
 
 use tokio::sync::{oneshot, Mutex};
@@ -304,16 +305,18 @@ impl Job {
         if let Some(handle) = self.handle.as_mut()
             && handle.is_finished() {
                 // Take the handle and wait for it (should be instant)
-                let Some(handle) = self.handle.take() else {
+                let Some(mut handle) = self.handle.take() else {
                     return false;
                 };
-                // We can't await here, so we use now_or_never
-                // Note: this is synchronous since is_finished() was true
-                let result = match tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(handle)
-                }) {
-                    Ok(r) => r,
-                    Err(e) => ExecResult::failure(1, format!("job panicked: {}", e)),
+                // Poll directly with a noop waker — safe because is_finished() was true
+                let waker = std::task::Waker::noop();
+                let mut cx = std::task::Context::from_waker(waker);
+                let result = match std::pin::Pin::new(&mut handle).poll(&mut cx) {
+                    std::task::Poll::Ready(Ok(r)) => r,
+                    std::task::Poll::Ready(Err(e)) => {
+                        ExecResult::failure(1, format!("job panicked: {}", e))
+                    }
+                    std::task::Poll::Pending => return false, // shouldn't happen
                 };
                 self.result = Some(result);
                 return true;
