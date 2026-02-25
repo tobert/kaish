@@ -3782,6 +3782,91 @@ AFTER="yes"'"#)
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Cancellation Tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Helper: schedule a cancel after a delay from a background thread.
+    /// Uses std::thread because cancel() is sync and Kernel is not Send.
+    fn schedule_cancel(kernel: &Arc<Kernel>, delay: std::time::Duration) {
+        let k = Arc::clone(kernel);
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            k.cancel();
+        });
+    }
+
+    #[tokio::test]
+    async fn test_cancel_interrupts_for_loop() {
+        let kernel = Arc::new(Kernel::transient().expect("failed to create kernel"));
+
+        // Schedule cancel after a short delay from a background OS thread
+        schedule_cancel(&kernel, std::time::Duration::from_millis(10));
+
+        let result = kernel
+            .execute("for i in $(seq 1 100000); do X=$i; done")
+            .await
+            .expect("execute failed");
+
+        assert_eq!(result.code, 130, "cancelled execution should exit with code 130");
+
+        // The loop variable should be set to something < 100000
+        let x = kernel.get_var("X").await;
+        if let Some(Value::Int(n)) = x {
+            assert!(n < 100000, "loop should have been interrupted before finishing, got X={n}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancel_interrupts_while_loop() {
+        let kernel = Arc::new(Kernel::transient().expect("failed to create kernel"));
+        kernel.execute("COUNT=0").await.expect("init failed");
+
+        schedule_cancel(&kernel, std::time::Duration::from_millis(10));
+
+        let result = kernel
+            .execute("while true; do COUNT=$((COUNT + 1)); done")
+            .await
+            .expect("execute failed");
+
+        assert_eq!(result.code, 130);
+
+        let count = kernel.get_var("COUNT").await;
+        if let Some(Value::Int(n)) = count {
+            assert!(n > 0, "loop should have run at least once");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reset_after_cancel() {
+        // After cancellation, the next execute() should work normally
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        kernel.cancel(); // cancel with nothing running
+
+        let result = kernel.execute("echo hello").await.expect("execute failed");
+        assert!(result.ok(), "execute after cancel should succeed");
+        assert_eq!(result.out.trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_cancel_interrupts_statement_sequence() {
+        let kernel = Arc::new(Kernel::transient().expect("failed to create kernel"));
+
+        // Schedule cancel after the first statement runs but before sleep finishes
+        schedule_cancel(&kernel, std::time::Duration::from_millis(50));
+
+        let result = kernel
+            .execute("STEP=1; sleep 5; STEP=2; sleep 5; STEP=3")
+            .await
+            .expect("execute failed");
+
+        assert_eq!(result.code, 130);
+
+        // STEP should be 1 (set before sleep), not 2 or 3
+        let step = kernel.get_var("STEP").await;
+        assert_eq!(step, Some(Value::Int(1)), "cancel should stop before STEP=2");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Case Statement Tests
     // ═══════════════════════════════════════════════════════════════════════════
 
