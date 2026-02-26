@@ -43,6 +43,11 @@ impl Tool for Exec {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        if !ctx.allow_external_commands {
+            return ExecResult::failure(1,
+                "exec: external commands are disabled (allow_external_commands=false)");
+        }
+
         // First positional is the command, rest are argv
         let command_name = match args.get_string("command", 0) {
             Some(cmd) => cmd,

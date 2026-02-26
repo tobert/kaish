@@ -66,6 +66,9 @@ pub enum VfsMountMode {
     /// so `/home/user/src/project` just works. But paths outside the sandbox
     /// root are not accessible.
     ///
+    /// **Note:** This only restricts VFS (builtin) operations. External commands
+    /// bypass the sandbox entirely — see [`KernelConfig::allow_external_commands`].
+    ///
     /// Mounts:
     /// - `/` → MemoryFs (catches paths outside sandbox)
     /// - `{root}` → LocalFs(root)  (e.g., `/home/user` → LocalFs)
@@ -125,6 +128,17 @@ pub struct KernelConfig {
 
     /// Output size limit configuration for agent safety.
     pub output_limit: crate::output_limit::OutputLimitConfig,
+
+    /// Whether external command execution (PATH lookup, `exec`, `spawn`) is allowed.
+    ///
+    /// When `true` (default), commands not found as builtins are resolved via PATH
+    /// and executed as child processes. When `false`, only kaish builtins and
+    /// backend-registered tools (MCP) are available.
+    ///
+    /// **Security:** External commands bypass the VFS sandbox entirely — they see
+    /// the real filesystem, network, and environment. Set to `false` when running
+    /// untrusted input.
+    pub allow_external_commands: bool,
 }
 
 /// Get the default sandbox root ($HOME).
@@ -145,6 +159,7 @@ impl Default for KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
+            allow_external_commands: true,
         }
     }
 }
@@ -161,6 +176,7 @@ impl KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
+            allow_external_commands: true,
         }
     }
 
@@ -175,6 +191,7 @@ impl KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
+            allow_external_commands: true,
         }
     }
 
@@ -192,13 +209,16 @@ impl KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
+            allow_external_commands: true,
         }
     }
 
     /// Create an MCP server config with sandboxed filesystem access.
     ///
     /// Local filesystem is accessible at its real path (e.g., `/home/user`),
-    /// but sandboxed to `$HOME`. Paths outside the sandbox are not accessible.
+    /// but sandboxed to `$HOME`. Paths outside the sandbox are not accessible
+    /// through builtins. External commands still access the real filesystem —
+    /// use `.with_allow_external_commands(false)` to block them.
     pub fn mcp() -> Self {
         let home = default_sandbox_root();
         Self {
@@ -209,6 +229,7 @@ impl KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::mcp(),
             output_limit: crate::output_limit::OutputLimitConfig::mcp(),
+            allow_external_commands: true,
         }
     }
 
@@ -224,11 +245,13 @@ impl KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::mcp(),
             output_limit: crate::output_limit::OutputLimitConfig::mcp(),
+            allow_external_commands: true,
         }
     }
 
     /// Create a config with no local filesystem (memory only).
     ///
+    /// Complete isolation: no local filesystem and external commands are disabled.
     /// Useful for tests or pure sandboxed execution.
     pub fn isolated() -> Self {
         Self {
@@ -239,6 +262,7 @@ impl KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
+            allow_external_commands: false,
         }
     }
 
@@ -277,6 +301,16 @@ impl KernelConfig {
         self.output_limit = config;
         self
     }
+
+    /// Set whether external command execution is allowed.
+    ///
+    /// When `false`, commands not found as builtins produce "command not found"
+    /// instead of searching PATH. The `exec` and `spawn` builtins also return
+    /// errors. Use this to prevent VFS sandbox bypass via external binaries.
+    pub fn with_allow_external_commands(mut self, allow: bool) -> Self {
+        self.allow_external_commands = allow;
+        self
+    }
 }
 
 /// The Kernel (核) — executes kaish code.
@@ -304,6 +338,8 @@ pub struct Kernel {
     skip_validation: bool,
     /// When true, standalone external commands inherit stdio for real-time output.
     interactive: bool,
+    /// Whether external command execution is allowed.
+    allow_external_commands: bool,
     /// Receiver for the kernel stderr stream.
     ///
     /// Pipeline stages write to the corresponding `StderrStream` (set on ExecContext).
@@ -451,7 +487,7 @@ impl Kernel {
         jobs: Arc<JobManager>,
         make_ctx: impl FnOnce(&Arc<VfsRouter>, &Arc<ToolRegistry>) -> ExecContext,
     ) -> Result<Self> {
-        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, output_limit, .. } = config;
+        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, output_limit, allow_external_commands, .. } = config;
 
         let mut tools = ToolRegistry::new();
         register_builtins(&mut tools);
@@ -474,6 +510,7 @@ impl Kernel {
         exec_ctx.stderr = Some(stderr_writer);
         exec_ctx.ignore_config = ignore_config;
         exec_ctx.output_limit = output_limit;
+        exec_ctx.allow_external_commands = allow_external_commands;
 
         Ok(Self {
             name,
@@ -492,6 +529,7 @@ impl Kernel {
             exec_ctx: RwLock::new(exec_ctx),
             skip_validation,
             interactive,
+            allow_external_commands,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
             cancel_token: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             #[cfg(unix)]
@@ -1135,6 +1173,7 @@ impl Kernel {
                 aliases: ec.aliases.clone(),
                 ignore_config: ec.ignore_config.clone(),
                 output_limit: ec.output_limit.clone(),
+                allow_external_commands: self.allow_external_commands,
                 #[cfg(unix)]
                 terminal_state: ec.terminal_state.clone(),
             }
@@ -1210,6 +1249,7 @@ impl Kernel {
         };
         let tools = self.tools.clone();
         let tool_schemas = self.tools.schemas();
+        let allow_ext = self.allow_external_commands;
 
         // Spawn the background task
         tokio::spawn(async move {
@@ -1220,6 +1260,7 @@ impl Kernel {
             bg_ctx.cwd = cwd;
             bg_ctx.set_tools(tools.clone());
             bg_ctx.set_tool_schemas(tool_schemas);
+            bg_ctx.allow_external_commands = allow_ext;
 
             // Use BackendDispatcher for background jobs (builtins only).
             // Full Kernel dispatch requires Arc<Kernel> — planned for a future phase.
@@ -2299,6 +2340,10 @@ impl Kernel {
     /// - `Err` on execution errors
     #[tracing::instrument(level = "debug", skip(self, args), fields(command = %name))]
     async fn try_execute_external(&self, name: &str, args: &[Arg]) -> Result<Option<ExecResult>> {
+        if !self.allow_external_commands {
+            return Ok(None);
+        }
+
         // Get real working directory for relative path resolution and child cwd.
         // If the CWD is virtual (no real filesystem path), skip external command
         // execution entirely — return None so the dispatch can fall through to

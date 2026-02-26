@@ -59,6 +59,14 @@ jq '.key' /tmp/data.json
 
 ## Sandbox Limitations
 
-**External binaries bypass the VFS sandbox.** Sandboxed mode restricts kaish builtins to `$HOME` + `/tmp`, but external commands (anything resolved via PATH) access the real filesystem directly. Only `NoLocal` mode effectively blocks external commands by removing the real working directory.
+**External binaries bypass the VFS sandbox.** Sandboxed mode restricts kaish builtins to `$HOME` + `/tmp`, but external commands (anything resolved via PATH), `exec`, and `spawn` access the real filesystem directly.
 
-If you need full isolation, prefer builtins over external commands — kaish's in-process builtins (grep, sed, jq, etc.) respect VFS boundaries.
+To block external command execution, set `allow_external_commands=false` in `KernelConfig`:
+
+```rust
+KernelConfig::mcp().with_allow_external_commands(false)
+```
+
+When disabled, PATH lookups return "command not found" and the `exec`/`spawn` builtins return errors. `KernelConfig::isolated()` sets this to `false` by default.
+
+Prefer builtins over external commands — kaish's in-process builtins (grep, sed, jq, etc.) respect VFS boundaries.

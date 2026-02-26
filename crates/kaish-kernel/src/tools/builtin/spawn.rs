@@ -74,6 +74,11 @@ impl Tool for Spawn {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        if !ctx.allow_external_commands {
+            return ExecResult::failure(1,
+                "spawn: external commands are disabled (allow_external_commands=false)");
+        }
+
         // Get command (required)
         let command_name = match args.get_string("command", 0) {
             Some(cmd) => cmd,

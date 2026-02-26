@@ -73,7 +73,6 @@ pub trait CommandDispatcher: Send + Sync {
 /// Limitations compared to the Kernel dispatcher:
 /// - No user-defined tools
 /// - No .kai script resolution
-/// - No external command execution
 /// - No async argument evaluation (command substitution in args won't work)
 pub struct BackendDispatcher {
     tools: Arc<ToolRegistry>,
@@ -96,9 +95,16 @@ impl BackendDispatcher {
         args: &[Arg],
         ctx: &mut ExecContext,
     ) -> Option<ExecResult> {
-        // Get real working directory (needed for relative path resolution and child cwd)
-        let real_cwd = ctx.backend.resolve_real_path(&ctx.cwd)
-            .unwrap_or_else(|| std::path::PathBuf::from("/"));
+        if !ctx.allow_external_commands {
+            return None;
+        }
+
+        // Get real working directory (needed for relative path resolution and child cwd).
+        // If the CWD is virtual (no real path), skip external execution entirely.
+        let real_cwd = match ctx.backend.resolve_real_path(&ctx.cwd) {
+            Some(p) => p,
+            None => return None,
+        };
 
         // Resolve command: absolute/relative path or PATH lookup
         let executable = if name.contains('/') {

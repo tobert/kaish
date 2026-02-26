@@ -83,6 +83,11 @@ pub struct ExecContext {
     pub ignore_config: IgnoreConfig,
     /// Output size limit configuration for agent safety.
     pub output_limit: OutputLimitConfig,
+    /// Whether external command execution is allowed.
+    ///
+    /// When `false`, external commands (PATH lookup, `exec`, `spawn`) are blocked.
+    /// Only kaish builtins and backend-registered tools (MCP) are available.
+    pub allow_external_commands: bool,
     /// Terminal state for job control (interactive mode, Unix only).
     #[cfg(unix)]
     pub terminal_state: Option<std::sync::Arc<crate::terminal::TerminalState>>,
@@ -112,6 +117,7 @@ impl ExecContext {
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
+            allow_external_commands: true,
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -140,6 +146,7 @@ impl ExecContext {
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
+            allow_external_commands: true,
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -165,6 +172,7 @@ impl ExecContext {
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
+            allow_external_commands: true,
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -190,6 +198,7 @@ impl ExecContext {
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
+            allow_external_commands: true,
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -218,6 +227,7 @@ impl ExecContext {
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
+            allow_external_commands: true,
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -243,6 +253,7 @@ impl ExecContext {
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
+            allow_external_commands: true,
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -351,6 +362,7 @@ impl ExecContext {
             aliases: self.aliases.clone(),
             ignore_config: self.ignore_config.clone(),
             output_limit: self.output_limit.clone(),
+            allow_external_commands: self.allow_external_commands,
             #[cfg(unix)]
             terminal_state: self.terminal_state.clone(),
         }
