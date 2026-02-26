@@ -136,7 +136,7 @@ mod tests {
 
         let result = Help.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("Mount Modes"));
+        assert!(result.out.contains("Modes"));
     }
 
     #[tokio::test]

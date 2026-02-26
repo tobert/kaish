@@ -56,3 +56,9 @@ cat /git/blame/path/to/f   # blame for specific file
 write /tmp/data.json '{"key": "value"}'
 jq '.key' /tmp/data.json
 ```
+
+## Sandbox Limitations
+
+**External binaries bypass the VFS sandbox.** Sandboxed mode restricts kaish builtins to `$HOME` + `/tmp`, but external commands (anything resolved via PATH) access the real filesystem directly. Only `NoLocal` mode effectively blocks external commands by removing the real working directory.
+
+If you need full isolation, prefer builtins over external commands — kaish's in-process builtins (grep, sed, jq, etc.) respect VFS boundaries.
