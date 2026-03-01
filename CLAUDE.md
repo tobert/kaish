@@ -132,6 +132,7 @@ crates/
 - `if/elif/else/fi`, `for/do/done`, `while/do/done` — control flow
 - `break`, `continue`, `return`, `exit` — control statements
 - `set -e` — exit on error mode
+- `set -o latch` / `set -o trash` — confirmation latch, trash-on-delete
 - `source file` or `. file` — script sourcing
 - `alias name='cmd'` / `unalias name` — command aliases
 - `-x`, `--flag` — flag arguments

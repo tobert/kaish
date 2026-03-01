@@ -110,7 +110,7 @@ everywhere, a `jq` that always uses the same filter syntax, an `awk` that never 
 | **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, printf, ps, seq, set, sleep, spawn, test/\[\[, tokens, uname, unalias, unset, wait, which |
 | **Parallel** | scatter, gather |
 | **Meta** | assert, false, true |
-| **kaish-*** | kaish-ast, kaish-clear, kaish-ignore, kaish-mounts, kaish-output-limit, kaish-status, kaish-tools, kaish-validate, kaish-vars, kaish-version |
+| **kaish-*** | kaish-ast, kaish-clear, kaish-ignore, kaish-mounts, kaish-output-limit, kaish-status, kaish-tools, kaish-trash, kaish-validate, kaish-vars, kaish-version |
 
 ---
 
@@ -137,6 +137,16 @@ kaish_prompt() {
 
 The `kaish_prompt` function is called before each input line. If not defined,
 the default `会sh> ` prompt is used.
+
+### Environment Variables
+
+| Variable | Effect |
+|----------|--------|
+| `KAISH_INIT` | Path to init script (overrides default locations) |
+| `KAISH_LATCH=1` | Enable confirmation latch — `rm` requires nonce confirmation |
+| `KAISH_TRASH=1` | Enable trash-on-delete — `rm` moves small files to Trash |
+
+Latch and trash can also be toggled at runtime with `set -o latch` / `set -o trash`.
 
 ---
 

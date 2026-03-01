@@ -1,4 +1,4 @@
-//! set — Set shell options (like set -e).
+//! set — Set shell options (like set -e, set -o latch).
 
 use async_trait::async_trait;
 
@@ -8,8 +8,10 @@ use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Set tool: configure shell options.
 ///
-/// Currently supports:
+/// Supports:
 /// - `-e` / `+e`: Enable/disable error-exit mode (exit on command failure)
+/// - `-o latch` / `+o latch`: Enable/disable confirmation latch for dangerous ops
+/// - `-o trash` / `+o trash`: Enable/disable trash-on-delete for rm
 ///
 /// Unrecognized options are silently ignored for bash compatibility.
 pub struct Set;
@@ -26,10 +28,12 @@ impl Tool for Set {
                 "options",
                 "string",
                 Value::Null,
-                "Shell options (-e, +e, etc.)",
+                "Shell options (-e, +e, -o latch, -o trash, etc.)",
             ))
             .example("Exit on error", "set -e")
             .example("Disable exit on error", "set +e")
+            .example("Enable confirmation latch", "set -o latch")
+            .example("Enable trash-on-delete", "set -o trash")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -39,32 +43,81 @@ impl Tool for Set {
             if ctx.scope.error_exit_enabled() {
                 output.push_str("set -e\n");
             }
+            if ctx.scope.latch_enabled() {
+                output.push_str("set -o latch\n");
+            }
+            if ctx.scope.trash_enabled() {
+                output.push_str("set -o trash\n");
+            }
             return ExecResult::with_output(OutputData::text(output.trim_end()));
         }
 
-        // Process options from both flags and positional args
-        // From parser: ShortFlag("e") -> args.flags contains "e"
-        // From parser: PlusFlag("e") -> args.positional contains String("+e")
-        // From direct call: args.positional might contain String("-e") or String("+e")
+        // Process flags (from parser: ShortFlag("e") -> args.flags contains "e")
         for flag in &args.flags {
-            if flag.as_str() == "e" {
-                ctx.scope.set_error_exit(true);
+            match flag.as_str() {
+                "e" => ctx.scope.set_error_exit(true),
+                "o" => {} // handled below with positional args
+                _ => {}   // silently ignore for bash compatibility
             }
-            // Silently ignore unrecognized flags for bash compatibility
         }
 
-        for arg in &args.positional {
-            let opt = match arg {
-                Value::String(s) => s.as_str(),
-                _ => continue,
-            };
+        // Process positional args.
+        // From parser: PlusFlag("e") -> String("+e"), String("-o") followed by String("latch"), etc.
+        let positionals: Vec<&str> = args
+            .positional
+            .iter()
+            .filter_map(|v| match v {
+                Value::String(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
 
+        let mut i = 0;
+        while i < positionals.len() {
+            let opt = positionals[i];
             match opt {
                 "-e" => ctx.scope.set_error_exit(true),
                 "+e" => ctx.scope.set_error_exit(false),
-                // Silently ignore unrecognized options for bash compatibility:
-                // -u, -o, -x, -v, pipefail, etc.
-                _ => {}
+                "-o" => {
+                    // Consume next positional as option name
+                    if let Some(&name) = positionals.get(i + 1) {
+                        match name {
+                            "latch" => ctx.scope.set_latch_enabled(true),
+                            "trash" => ctx.scope.set_trash_enabled(true),
+                            _ => {} // silently ignore (pipefail, etc.)
+                        }
+                        i += 1; // skip the option name
+                    }
+                }
+                "+o" => {
+                    if let Some(&name) = positionals.get(i + 1) {
+                        match name {
+                            "latch" => ctx.scope.set_latch_enabled(false),
+                            "trash" => ctx.scope.set_trash_enabled(false),
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                }
+                _ => {} // silently ignore
+            }
+            i += 1;
+        }
+
+        // Handle case where parser split `-o` into flags and the option name
+        // ended up as a bare positional (flags=["o"], positional=["latch"]).
+        // Only fire if no "-o" or "+o" appeared in positionals (which would have
+        // already consumed the option name above).
+        if args.flags.contains("o")
+            && !positionals.iter().any(|p| *p == "-o" || *p == "+o")
+        {
+            // The first positional that matches a known option name gets enabled
+            for &name in &positionals {
+                match name {
+                    "latch" => { ctx.scope.set_latch_enabled(true); break; }
+                    "trash" => { ctx.scope.set_trash_enabled(true); break; }
+                    _ => {}
+                }
             }
         }
 
@@ -150,5 +203,86 @@ mod tests {
         let result = Set.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(ctx.scope.error_exit_enabled());
+    }
+
+    #[tokio::test]
+    async fn test_set_o_latch_enables() {
+        let mut ctx = make_ctx();
+        assert!(!ctx.scope.latch_enabled());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("-o".into()));
+        args.positional.push(Value::String("latch".into()));
+
+        let result = Set.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(ctx.scope.latch_enabled());
+    }
+
+    #[tokio::test]
+    async fn test_set_plus_o_latch_disables() {
+        let mut ctx = make_ctx();
+        ctx.scope.set_latch_enabled(true);
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("+o".into()));
+        args.positional.push(Value::String("latch".into()));
+
+        let result = Set.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(!ctx.scope.latch_enabled());
+    }
+
+    #[tokio::test]
+    async fn test_set_o_trash_enables() {
+        let mut ctx = make_ctx();
+        assert!(!ctx.scope.trash_enabled());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("-o".into()));
+        args.positional.push(Value::String("trash".into()));
+
+        let result = Set.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(ctx.scope.trash_enabled());
+    }
+
+    #[tokio::test]
+    async fn test_set_plus_o_trash_disables() {
+        let mut ctx = make_ctx();
+        ctx.scope.set_trash_enabled(true);
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("+o".into()));
+        args.positional.push(Value::String("trash".into()));
+
+        let result = Set.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(!ctx.scope.trash_enabled());
+    }
+
+    #[tokio::test]
+    async fn test_set_no_args_shows_all_options() {
+        let mut ctx = make_ctx();
+        ctx.scope.set_latch_enabled(true);
+        ctx.scope.set_trash_enabled(true);
+
+        let args = ToolArgs::new();
+        let result = Set.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains("set -o latch"));
+        assert!(result.out.contains("set -o trash"));
+    }
+
+    #[tokio::test]
+    async fn test_set_o_unknown_ignored() {
+        let mut ctx = make_ctx();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("-o".into()));
+        args.positional.push(Value::String("pipefail".into()));
+
+        let result = Set.execute(args, &mut ctx).await;
+        assert!(result.ok());
     }
 }

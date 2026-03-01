@@ -42,6 +42,13 @@ pub struct Scope {
     errexit_suppressed: usize,
     /// AST display mode (kaish-ast -on/-off): show AST instead of executing.
     show_ast: bool,
+    /// Latch mode (set -o latch): gate dangerous operations behind nonce confirmation.
+    latch_enabled: bool,
+    /// Trash mode (set -o trash): move deleted files to freedesktop.org Trash.
+    trash_enabled: bool,
+    /// Maximum file size (bytes) for trash. Files larger than this bypass trash.
+    /// Default: 10 MB.
+    trash_max_size: u64,
     /// Current process ID ($$), captured at scope creation.
     pid: u32,
 }
@@ -58,6 +65,9 @@ impl Scope {
             error_exit: false,
             errexit_suppressed: 0,
             show_ast: false,
+            latch_enabled: false,
+            trash_enabled: false,
+            trash_max_size: 10 * 1024 * 1024, // 10 MB
             pid: std::process::id(),
         }
     }
@@ -218,6 +228,36 @@ impl Scope {
     /// Set AST display mode (kaish-ast -on / kaish-ast -off).
     pub fn set_show_ast(&mut self, enabled: bool) {
         self.show_ast = enabled;
+    }
+
+    /// Check if latch mode is enabled (set -o latch).
+    pub fn latch_enabled(&self) -> bool {
+        self.latch_enabled
+    }
+
+    /// Set latch mode (set -o latch / set +o latch).
+    pub fn set_latch_enabled(&mut self, enabled: bool) {
+        self.latch_enabled = enabled;
+    }
+
+    /// Check if trash mode is enabled (set -o trash).
+    pub fn trash_enabled(&self) -> bool {
+        self.trash_enabled
+    }
+
+    /// Set trash mode (set -o trash / set +o trash).
+    pub fn set_trash_enabled(&mut self, enabled: bool) {
+        self.trash_enabled = enabled;
+    }
+
+    /// Get the maximum file size for trash (bytes).
+    pub fn trash_max_size(&self) -> u64 {
+        self.trash_max_size
+    }
+
+    /// Set the maximum file size for trash (bytes).
+    pub fn set_trash_max_size(&mut self, size: u64) {
+        self.trash_max_size = size;
     }
 
     /// Mark a variable as exported (visible to child processes).

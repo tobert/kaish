@@ -121,6 +121,18 @@ function greet { echo "Hello, $1!"; }
 greet "Amy"
 ```
 
+## Shell Options
+
+```bash
+set -e                    # exit on first error
+set -o latch              # require nonce confirmation for rm (exit code 2)
+set -o trash              # move rm'd files to Trash (small files only)
+set +o latch              # disable latch
+set +o trash              # disable trash
+```
+
+Env vars: `KAISH_LATCH=1`, `KAISH_TRASH=1` enable at startup.
+
 ## Error Handling
 
 ```bash

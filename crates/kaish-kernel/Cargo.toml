@@ -47,6 +47,9 @@ chrono = { workspace = true }
 similar = { workspace = true }
 git2 = { workspace = true }
 
+# Trash (freedesktop.org)
+trash = { workspace = true }
+
 # jq (native implementation via jaq v2)
 jaq-core = { workspace = true }
 jaq-std = { workspace = true }

@@ -139,6 +139,19 @@ pub struct KernelConfig {
     /// the real filesystem, network, and environment. Set to `false` when running
     /// untrusted input.
     pub allow_external_commands: bool,
+
+    /// Enable confirmation latch for dangerous operations (set -o latch).
+    ///
+    /// When enabled, destructive operations like `rm` require nonce confirmation.
+    /// Can also be enabled at runtime with `set -o latch` or via `KAISH_LATCH=1`.
+    pub latch_enabled: bool,
+
+    /// Enable trash-on-delete for rm (set -o trash).
+    ///
+    /// When enabled, small files are moved to freedesktop.org Trash instead of
+    /// being permanently deleted. Can also be enabled at runtime with `set -o trash`
+    /// or via `KAISH_TRASH=1`.
+    pub trash_enabled: bool,
 }
 
 /// Get the default sandbox root ($HOME).
@@ -160,6 +173,8 @@ impl Default for KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: true,
+            latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
+            trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
         }
     }
 }
@@ -177,6 +192,8 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: true,
+            latch_enabled: false,
+            trash_enabled: false,
         }
     }
 
@@ -192,6 +209,8 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: true,
+            latch_enabled: false,
+            trash_enabled: false,
         }
     }
 
@@ -210,6 +229,8 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: true,
+            latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
+            trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
         }
     }
 
@@ -230,6 +251,8 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::mcp(),
             output_limit: crate::output_limit::OutputLimitConfig::mcp(),
             allow_external_commands: true,
+            latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
+            trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
         }
     }
 
@@ -246,6 +269,8 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::mcp(),
             output_limit: crate::output_limit::OutputLimitConfig::mcp(),
             allow_external_commands: true,
+            latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
+            trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
         }
     }
 
@@ -263,6 +288,8 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: false,
+            latch_enabled: false,
+            trash_enabled: false,
         }
     }
 
@@ -309,6 +336,18 @@ impl KernelConfig {
     /// errors. Use this to prevent VFS sandbox bypass via external binaries.
     pub fn with_allow_external_commands(mut self, allow: bool) -> Self {
         self.allow_external_commands = allow;
+        self
+    }
+
+    /// Enable or disable confirmation latch at startup.
+    pub fn with_latch(mut self, enabled: bool) -> Self {
+        self.latch_enabled = enabled;
+        self
+    }
+
+    /// Enable or disable trash-on-delete at startup.
+    pub fn with_trash(mut self, enabled: bool) -> Self {
+        self.trash_enabled = enabled;
         self
     }
 }
@@ -487,7 +526,7 @@ impl Kernel {
         jobs: Arc<JobManager>,
         make_ctx: impl FnOnce(&Arc<VfsRouter>, &Arc<ToolRegistry>) -> ExecContext,
     ) -> Result<Self> {
-        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, output_limit, allow_external_commands, .. } = config;
+        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, output_limit, allow_external_commands, latch_enabled, trash_enabled, .. } = config;
 
         let mut tools = ToolRegistry::new();
         register_builtins(&mut tools);
@@ -519,6 +558,8 @@ impl Kernel {
                 if let Ok(home) = std::env::var("HOME") {
                     scope.set("HOME", Value::String(home));
                 }
+                scope.set_latch_enabled(latch_enabled);
+                scope.set_trash_enabled(trash_enabled);
                 scope
             }),
             tools,
@@ -1174,6 +1215,7 @@ impl Kernel {
                 ignore_config: ec.ignore_config.clone(),
                 output_limit: ec.output_limit.clone(),
                 allow_external_commands: self.allow_external_commands,
+                nonce_store: ec.nonce_store.clone(),
                 #[cfg(unix)]
                 terminal_state: ec.terminal_state.clone(),
             }

@@ -77,6 +77,9 @@ tokio-util = { version = "0.7", features = ["compat"] }
 # XDG paths
 directories = "5"
 
+# Trash (freedesktop.org)
+trash = "5"
+
 # Process information (Linux)
 procfs = "0.18"
 

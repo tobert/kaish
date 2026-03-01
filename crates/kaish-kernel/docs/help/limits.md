@@ -26,7 +26,7 @@
 | Builtin | Limitation |
 |---------|------------|
 | `alias` | First word only; not in pipelines or compound commands |
-| `set` | Only `-e` (exit on error) |
+| `set` | `-e`, `-o latch`, `-o trash` (no `-u`, `-x`, `pipefail`) |
 | `ps` | Linux-only (reads `/proc`) |
 | `git` | Operates on real filesystem, not VFS |
 | `head`/`tail -c` | Counts UTF-8 characters, not bytes |

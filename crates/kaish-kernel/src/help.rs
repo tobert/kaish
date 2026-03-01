@@ -165,8 +165,8 @@ fn format_tool_list(schemas: &[ToolSchema]) -> String {
             "scatter" | "gather" => parallel_tools.push(entry),
             "exec" | "spawn" | "jobs" | "wait" | "ps" | "git" | "bg" | "fg" | "kill" => process_tools.push(entry),
             "help" | "kaish-validate" | "kaish-vars" | "kaish-mounts" | "kaish-tools" | "tokens"
-            | "kaish-ast" | "kaish-clear" | "kaish-status" | "kaish-version" | "kaish-ignore"
-            | "kaish-output-limit" => {
+            | "kaish-ast" | "kaish-clear" | "kaish-status" | "kaish-trash" | "kaish-version"
+            | "kaish-ignore" | "kaish-output-limit" => {
                 introspection_tools.push(entry)
             }
             _ => other_tools.push(entry),

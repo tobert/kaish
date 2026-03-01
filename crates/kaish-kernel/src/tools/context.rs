@@ -9,6 +9,7 @@ use crate::backend::{KernelBackend, LocalBackend};
 use crate::dispatch::PipelinePosition;
 use crate::ignore_config::IgnoreConfig;
 use crate::interpreter::Scope;
+use crate::nonce::NonceStore;
 use crate::output_limit::OutputLimitConfig;
 use crate::scheduler::{JobManager, PipeReader, PipeWriter, StderrStream};
 use crate::tools::ToolRegistry;
@@ -88,6 +89,11 @@ pub struct ExecContext {
     /// When `false`, external commands (PATH lookup, `exec`, `spawn`) are blocked.
     /// Only kaish builtins and backend-registered tools (MCP) are available.
     pub allow_external_commands: bool,
+    /// Confirmation nonce store for latch-gated operations.
+    ///
+    /// Arc-shared across pipeline stages so nonces issued in one stage
+    /// can be validated in another.
+    pub nonce_store: NonceStore,
     /// Terminal state for job control (interactive mode, Unix only).
     #[cfg(unix)]
     pub terminal_state: Option<std::sync::Arc<crate::terminal::TerminalState>>,
@@ -118,6 +124,7 @@ impl ExecContext {
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
+            nonce_store: NonceStore::new(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -147,6 +154,7 @@ impl ExecContext {
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
+            nonce_store: NonceStore::new(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -173,6 +181,7 @@ impl ExecContext {
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
+            nonce_store: NonceStore::new(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -199,6 +208,7 @@ impl ExecContext {
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
+            nonce_store: NonceStore::new(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -228,6 +238,7 @@ impl ExecContext {
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
+            nonce_store: NonceStore::new(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -254,6 +265,7 @@ impl ExecContext {
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
+            nonce_store: NonceStore::new(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -363,6 +375,7 @@ impl ExecContext {
             ignore_config: self.ignore_config.clone(),
             output_limit: self.output_limit.clone(),
             allow_external_commands: self.allow_external_commands,
+            nonce_store: self.nonce_store.clone(),
             #[cfg(unix)]
             terminal_state: self.terminal_state.clone(),
         }

@@ -286,6 +286,31 @@ echo $((A * B + 1))             # 31
 echo $((A > B))                 # 1
 ```
 
+## Shell Options
+
+```bash
+set -e                          # exit on first error
+set -o latch                    # require nonce confirmation for destructive rm
+set -o trash                    # move rm'd files to freedesktop.org Trash
+set +o latch                    # disable latch
+set +o trash                    # disable trash
+```
+
+Options compose orthogonally: with both enabled, small files go to Trash
+(no confirmation needed), large files require nonce confirmation.
+
+Environment variables `KAISH_LATCH=1` and `KAISH_TRASH=1` enable at kernel startup.
+
+When latch is enabled, `rm` returns **exit code 2** with a nonce:
+```bash
+$ rm important.dat
+rm: important.dat: confirmation required (latch enabled)
+To confirm, run: rm --confirm=a3f7b2c1 important.dat
+Nonce expires in 60 seconds.
+```
+
+The `kaish-trash` builtin manages trashed files: `list`, `restore`, `empty`, `config`.
+
 ## Error Handling
 
 ```bash
@@ -511,7 +536,7 @@ These are documented limitations of the current implementation:
 
 ### Builtins
 
-- **`set` only supports `-e`** — Unlike bash, only `set -e` (exit on error) is implemented. Other set options are not supported.
+- **`set` supports `-e`, `-o latch`, `-o trash`** — Unlike bash, only these options are implemented. `-u`, `-x`, `pipefail` and other bash set options are silently ignored for compatibility.
 - **`ps` is Linux-only** — The process listing builtin reads from `/proc` and only works on Linux systems.
 - **`git` requires real filesystem** — The git builtin operates on the actual filesystem, not the VFS. It won't work with memory-backed or remote VFS mounts.
 - **`head`/`tail -c` counts UTF-8 characters** — Unlike POSIX which specifies bytes, `-c` in kaish counts Unicode characters. This is intentional for safer text handling.
