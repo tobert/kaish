@@ -27,6 +27,8 @@
 |---------|------------|
 | `alias` | First word only; not in pipelines or compound commands |
 | `set` | `-e`, `-o latch`, `-o trash` (no `-u`, `-x`, `pipefail`) |
+| `rm` (trash) | Trash failure = error, no fallthrough to permanent delete. Dirs always trash (stat size unreliable). |
+| `rm` (latch) | Nonces scoped to (command, paths). Subset confirmation only. 60s TTL. |
 | `ps` | Linux-only (reads `/proc`) |
 | `git` | Operates on real filesystem, not VFS |
 | `head`/`tail -c` | Counts UTF-8 characters, not bytes |

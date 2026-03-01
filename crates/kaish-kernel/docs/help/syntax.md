@@ -126,12 +126,19 @@ greet "Amy"
 ```bash
 set -e                    # exit on first error
 set -o latch              # require nonce confirmation for rm (exit code 2)
-set -o trash              # move rm'd files to Trash (small files only)
+set -o trash              # move rm'd files to Trash
 set +o latch              # disable latch
 set +o trash              # disable trash
 ```
 
 Env vars: `KAISH_LATCH=1`, `KAISH_TRASH=1` enable at startup.
+
+**Latch:** Nonces scoped to (command, paths). A nonce for `rm A` rejects `rm B`.
+Confirmed paths must be subset of authorized paths. Exit code 2 = needs confirmation.
+
+**Trash:** Files <= 10MB and directories always trash. `/tmp`, `/v/*` excluded.
+If trash fails, rm errors (no silent fallthrough to permanent delete).
+Configure threshold: `kaish-trash config max-size <bytes>`.
 
 ## Error Handling
 

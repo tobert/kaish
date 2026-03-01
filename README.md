@@ -144,9 +144,17 @@ the default `会sh> ` prompt is used.
 |----------|--------|
 | `KAISH_INIT` | Path to init script (overrides default locations) |
 | `KAISH_LATCH=1` | Enable confirmation latch — `rm` requires nonce confirmation |
-| `KAISH_TRASH=1` | Enable trash-on-delete — `rm` moves small files to Trash |
+| `KAISH_TRASH=1` | Enable trash-on-delete — `rm` moves files to freedesktop.org Trash |
 
 Latch and trash can also be toggled at runtime with `set -o latch` / `set -o trash`.
+
+**Latch details:** Nonces are scoped to command + path — a nonce issued for `rm fileA`
+cannot confirm `rm fileB`. Confirmed paths must be a subset of authorized paths.
+
+**Trash details:** Files under 10MB and all directories go to trash (configurable via
+`kaish-trash config max-size`). Excluded paths (`/tmp`, `/v/*`) bypass trash. If
+`trash::delete` fails, `rm` returns an error — it never silently falls through to
+permanent delete.
 
 ---
 
