@@ -32,6 +32,7 @@ fn decide_rm_action(
     real_path: Option<&Path>,
     file_size: Option<u64>,
     trash_max_size: u64,
+    is_dir: bool,
 ) -> RmAction {
     if trash_enabled {
         if let Some(rp) = real_path {
@@ -41,6 +42,11 @@ fn decide_rm_action(
                 || path_str.starts_with("/v/");
 
             if !excluded {
+                // Directories always go to trash — stat size is unreliable
+                // and trash::delete handles them atomically.
+                if is_dir {
+                    return RmAction::Trash(rp.to_path_buf());
+                }
                 let size = file_size.unwrap_or(0);
                 if size <= trash_max_size {
                     return RmAction::Trash(rp.to_path_buf());
@@ -124,39 +130,41 @@ impl Tool for Rm {
         let real_path = ctx.backend.resolve_real_path(Path::new(&resolved));
         let file_size = stat.as_ref().map(|s| s.size);
 
+        let is_dir = stat.as_ref().is_some_and(|s| s.is_dir());
         let action = decide_rm_action(
             trash_enabled,
             latch_enabled,
             real_path.as_deref(),
             file_size,
             trash_max_size,
+            is_dir,
         );
 
         match action {
             RmAction::Trash(real) => {
-                // Attempt to trash the file
                 let real_display = real.display().to_string();
                 let trash_result = tokio::task::spawn_blocking(move || trash::delete(real)).await;
                 match trash_result {
-                    Ok(Ok(())) => return ExecResult::with_output(OutputData::text("")),
+                    Ok(Ok(())) => ExecResult::with_output(OutputData::text("")),
                     Ok(Err(e)) => {
-                        tracing::warn!("trash::delete failed for {}: {}, falling back to permanent delete", real_display, e);
+                        ExecResult::failure(1, format!(
+                            "rm: {}: trash failed: {} (use `set +o trash` to delete permanently)",
+                            real_display, e
+                        ))
                     }
                     Err(e) => {
-                        tracing::warn!("trash::delete task failed for {}: {}, falling back to permanent delete", real_display, e);
+                        ExecResult::failure(1, format!(
+                            "rm: {}: trash task failed: {} (use `set +o trash` to delete permanently)",
+                            real_display, e
+                        ))
                     }
-                }
-                // Fall through to normal delete
-                match remove_path(&*ctx.backend, Path::new(&resolved), recursive, force).await {
-                    Ok(()) => ExecResult::with_output(OutputData::text("")),
-                    Err(e) => ExecResult::failure(1, format!("rm: {}: {}", path, e)),
                 }
             }
             RmAction::Latch => {
                 // Check if a valid confirmation nonce was provided
                 if let Some(nonce) = &confirm {
-                    match ctx.nonce_store.validate(nonce) {
-                        Ok(_desc) => {
+                    match ctx.nonce_store.validate(nonce, "rm", &[&path]) {
+                        Ok(()) => {
                             // Nonce valid — proceed with delete
                             match remove_path(&*ctx.backend, Path::new(&resolved), recursive, force).await {
                                 Ok(()) => ExecResult::with_output(OutputData::text("")),
@@ -167,11 +175,11 @@ impl Tool for Rm {
                     }
                 } else {
                     // Issue a nonce and return exit code 2
-                    let nonce = ctx.nonce_store.issue(format!("rm {}", path));
+                    let nonce = ctx.nonce_store.issue("rm", &[&path]);
                     let ttl = ctx.nonce_store.ttl().as_secs();
                     let msg = format!(
-                        "rm: {}: confirmation required (latch enabled)\nTo confirm, run: rm --confirm={} {}\nNonce expires in {} seconds.",
-                        path, nonce, path, ttl
+                        "rm: {}: confirmation required (latch enabled)\nAuthorized: {}\nTo confirm, run: rm --confirm={} {}\nNonce expires in {} seconds.",
+                        path, path, nonce, path, ttl
                     );
                     ExecResult::failure(2, msg)
                 }
@@ -400,8 +408,9 @@ mod tests {
 
         let result = Rm.execute(args, &mut ctx).await;
         assert_eq!(result.code, 2);
-        // Error message should contain a hex nonce pattern
+        // Error message should contain a hex nonce pattern and authorized paths
         assert!(result.err.contains("confirmation required"));
+        assert!(result.err.contains("Authorized: /file.txt"));
         assert!(result.err.contains("--confirm="));
         assert!(result.err.contains("60 seconds"));
         // File should still exist
@@ -414,7 +423,7 @@ mod tests {
         ctx.scope.set_latch_enabled(true);
 
         // Issue a nonce manually
-        let nonce = ctx.nonce_store.issue("rm /file.txt");
+        let nonce = ctx.nonce_store.issue("rm", &["/file.txt"]);
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("/file.txt".into()));
@@ -473,7 +482,7 @@ mod tests {
         let mut ctx = make_ctx().await;
         ctx.scope.set_latch_enabled(true);
 
-        let nonce = ctx.nonce_store.issue("rm /file.txt");
+        let nonce = ctx.nonce_store.issue("rm", &["/file.txt"]);
 
         // First confirm: deletes the file
         let mut args = ToolArgs::new();
@@ -523,20 +532,20 @@ mod tests {
 
     #[test]
     fn test_decide_rm_action_no_flags() {
-        let action = decide_rm_action(false, false, None, Some(100), 10_000_000);
+        let action = decide_rm_action(false, false, None, Some(100), 10_000_000, false);
         assert_eq!(action, RmAction::Delete);
     }
 
     #[test]
     fn test_decide_rm_action_latch_only() {
-        let action = decide_rm_action(false, true, None, Some(100), 10_000_000);
+        let action = decide_rm_action(false, true, None, Some(100), 10_000_000, false);
         assert_eq!(action, RmAction::Latch);
     }
 
     #[test]
     fn test_decide_rm_action_trash_small_file() {
         let real = PathBuf::from("/home/user/file.txt");
-        let action = decide_rm_action(true, false, Some(&real), Some(100), 10_000_000);
+        let action = decide_rm_action(true, false, Some(&real), Some(100), 10_000_000, false);
         assert_eq!(action, RmAction::Trash(real));
     }
 
@@ -544,42 +553,68 @@ mod tests {
     fn test_decide_rm_action_trash_small_with_latch() {
         // Small file → trash catches it, latch irrelevant
         let real = PathBuf::from("/home/user/file.txt");
-        let action = decide_rm_action(true, true, Some(&real), Some(100), 10_000_000);
+        let action = decide_rm_action(true, true, Some(&real), Some(100), 10_000_000, false);
         assert_eq!(action, RmAction::Trash(real));
     }
 
     #[test]
     fn test_decide_rm_action_trash_large_no_latch() {
         let real = PathBuf::from("/home/user/bigfile.bin");
-        let action = decide_rm_action(true, false, Some(&real), Some(100_000_000), 10_000_000);
+        let action = decide_rm_action(true, false, Some(&real), Some(100_000_000), 10_000_000, false);
         assert_eq!(action, RmAction::Delete);
     }
 
     #[test]
     fn test_decide_rm_action_trash_large_with_latch() {
         let real = PathBuf::from("/home/user/bigfile.bin");
-        let action = decide_rm_action(true, true, Some(&real), Some(100_000_000), 10_000_000);
+        let action = decide_rm_action(true, true, Some(&real), Some(100_000_000), 10_000_000, false);
         assert_eq!(action, RmAction::Latch);
     }
 
     #[test]
     fn test_decide_rm_action_trash_virtual_path() {
         // Virtual path (resolve_real_path returns None) → normal delete
-        let action = decide_rm_action(true, false, None, Some(100), 10_000_000);
+        let action = decide_rm_action(true, false, None, Some(100), 10_000_000, false);
         assert_eq!(action, RmAction::Delete);
     }
 
     #[test]
     fn test_decide_rm_action_trash_excluded_tmp() {
         let real = PathBuf::from("/tmp/scratch");
-        let action = decide_rm_action(true, false, Some(&real), Some(100), 10_000_000);
+        let action = decide_rm_action(true, false, Some(&real), Some(100), 10_000_000, false);
         assert_eq!(action, RmAction::Delete);
     }
 
     #[test]
     fn test_decide_rm_action_trash_excluded_v() {
         let real = PathBuf::from("/v/jobs/something");
-        let action = decide_rm_action(true, false, Some(&real), Some(100), 10_000_000);
+        let action = decide_rm_action(true, false, Some(&real), Some(100), 10_000_000, false);
+        assert_eq!(action, RmAction::Delete);
+    }
+
+    // ── Directory-specific tests ──
+
+    #[test]
+    fn test_decide_rm_action_dir_always_trashes() {
+        let real = PathBuf::from("/home/user/mydir");
+        // Directory with size=0 (stat behavior) — should trash regardless of threshold
+        let action = decide_rm_action(true, false, Some(&real), Some(0), 10_000_000, true);
+        assert_eq!(action, RmAction::Trash(real));
+    }
+
+    #[test]
+    fn test_decide_rm_action_dir_trashes_with_latch() {
+        let real = PathBuf::from("/home/user/mydir");
+        // Directory always trashes when trash enabled — latch irrelevant
+        let action = decide_rm_action(true, true, Some(&real), Some(0), 10_000_000, true);
+        assert_eq!(action, RmAction::Trash(real));
+    }
+
+    #[test]
+    fn test_decide_rm_action_dir_excluded_tmp() {
+        let real = PathBuf::from("/tmp/mydir");
+        // Excluded path — directory still gets excluded
+        let action = decide_rm_action(true, false, Some(&real), Some(0), 10_000_000, true);
         assert_eq!(action, RmAction::Delete);
     }
 
@@ -607,25 +642,31 @@ mod tests {
         let large = 100_000_000u64;
         let max = 10_000_000u64;
 
-        // (trash, latch, size) → expected outcome
+        // (trash, latch, size, is_dir) → expected outcome
         let cases = vec![
-            (false, false, small, Outcome::Deleted),
-            (false, true,  small, Outcome::Latched),
-            (true,  false, small, Outcome::Trashed),
-            (true,  true,  small, Outcome::Trashed),   // trash catches small, latch irrelevant
-            (false, false, large, Outcome::Deleted),
-            (false, true,  large, Outcome::Latched),
-            (true,  false, large, Outcome::Deleted),    // too big for trash, no latch → delete
-            (true,  true,  large, Outcome::Latched),    // too big for trash + latch → gate
+            (false, false, small, false, Outcome::Deleted),
+            (false, true,  small, false, Outcome::Latched),
+            (true,  false, small, false, Outcome::Trashed),
+            (true,  true,  small, false, Outcome::Trashed),   // trash catches small, latch irrelevant
+            (false, false, large, false, Outcome::Deleted),
+            (false, true,  large, false, Outcome::Latched),
+            (true,  false, large, false, Outcome::Deleted),    // too big for trash, no latch → delete
+            (true,  true,  large, false, Outcome::Latched),    // too big for trash + latch → gate
+            // Directories always trash (size irrelevant)
+            (true,  false, 0,     true,  Outcome::Trashed),
+            (true,  true,  0,     true,  Outcome::Trashed),
+            // Dir without trash enabled → normal flow
+            (false, false, 0,     true,  Outcome::Deleted),
+            (false, true,  0,     true,  Outcome::Latched),
         ];
 
-        for (trash, latch, size, expected) in cases {
-            let action = decide_rm_action(trash, latch, Some(&real), Some(size), max);
+        for (trash, latch, size, is_dir, expected) in cases {
+            let action = decide_rm_action(trash, latch, Some(&real), Some(size), max, is_dir);
             let outcome = matrix_action_to_outcome(&action);
             assert_eq!(
                 outcome, expected,
-                "trash={}, latch={}, size={}: expected {:?}, got {:?}",
-                trash, latch, size, expected, outcome
+                "trash={}, latch={}, size={}, is_dir={}: expected {:?}, got {:?}",
+                trash, latch, size, is_dir, expected, outcome
             );
         }
     }

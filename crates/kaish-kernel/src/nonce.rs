@@ -3,11 +3,24 @@
 //! Used by the latch system (`set -o latch`) to gate destructive commands
 //! behind a nonce-based confirmation flow. Nonces are time-limited and
 //! reusable within their TTL for idempotent retries.
+//!
+//! Nonces are path-scoped: a nonce issued for `rm fileA` cannot confirm
+//! `rm fileB`. Validation checks both the command and that confirmed paths
+//! are a subset of the authorized paths.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::hash::{BuildHasher, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
+
+/// What a nonce authorizes: a command and a set of paths.
+#[derive(Debug, Clone)]
+pub struct NonceScope {
+    /// Command name (e.g. "rm", "kaish-trash empty").
+    pub command: String,
+    /// Authorized paths. Empty means no path constraint (command-only ops).
+    pub paths: BTreeSet<String>,
+}
 
 /// A store for confirmation nonces with TTL-based expiration.
 ///
@@ -22,8 +35,8 @@ pub struct NonceStore {
 }
 
 struct NonceStoreInner {
-    /// Map from nonce string to (created_at, description).
-    nonces: HashMap<String, (Instant, String)>,
+    /// Map from nonce string to (created_at, scope).
+    nonces: HashMap<String, (Instant, NonceScope)>,
 }
 
 impl NonceStore {
@@ -42,13 +55,18 @@ impl NonceStore {
         }
     }
 
-    /// Issue a new nonce for the given description.
+    /// Issue a new nonce for the given command and paths.
     ///
     /// Returns an 8-character hex string. Opportunistically GCs expired nonces.
-    pub fn issue(&self, description: impl Into<String>) -> String {
+    pub fn issue(&self, command: &str, paths: &[&str]) -> String {
         let nonce = generate_nonce();
         let now = Instant::now();
         let ttl = self.ttl;
+
+        let scope = NonceScope {
+            command: command.to_string(),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+        };
 
         #[allow(clippy::expect_used)]
         let mut inner = self.inner.lock().expect("nonce store poisoned");
@@ -56,14 +74,17 @@ impl NonceStore {
         // Opportunistic GC: remove expired nonces
         inner.nonces.retain(|_, (created, _)| now.duration_since(*created) < ttl);
 
-        inner.nonces.insert(nonce.clone(), (now, description.into()));
+        inner.nonces.insert(nonce.clone(), (now, scope));
         nonce
     }
 
-    /// Validate a nonce, returning the description if valid.
+    /// Validate a nonce against a command and paths.
+    ///
+    /// Checks that the nonce exists, hasn't expired, the command matches,
+    /// and the confirmed paths are a subset of the authorized paths.
     ///
     /// Does NOT consume the nonce — it stays valid until TTL expires.
-    pub fn validate(&self, nonce: &str) -> Result<String, String> {
+    pub fn validate(&self, nonce: &str, command: &str, paths: &[&str]) -> Result<(), String> {
         let now = Instant::now();
         let ttl = self.ttl;
 
@@ -71,12 +92,34 @@ impl NonceStore {
         let inner = self.inner.lock().expect("nonce store poisoned");
 
         match inner.nonces.get(nonce) {
-            Some((created, description)) => {
-                if now.duration_since(*created) < ttl {
-                    Ok(description.clone())
-                } else {
-                    Err("nonce expired".to_string())
+            Some((created, scope)) => {
+                if now.duration_since(*created) >= ttl {
+                    return Err("nonce expired".to_string());
                 }
+
+                if scope.command != command {
+                    return Err(format!(
+                        "nonce scope mismatch: issued for command '{}', got '{}'",
+                        scope.command, command
+                    ));
+                }
+
+                let confirmed: BTreeSet<String> = paths.iter().map(|p| p.to_string()).collect();
+
+                if scope.paths.is_empty() && confirmed.is_empty() {
+                    return Ok(());
+                }
+
+                if !confirmed.is_subset(&scope.paths) {
+                    let unauthorized: Vec<_> = confirmed.difference(&scope.paths).collect();
+                    return Err(format!(
+                        "nonce scope mismatch: authorized {:?}, got unauthorized {:?}",
+                        scope.paths.iter().collect::<Vec<_>>(),
+                        unauthorized
+                    ));
+                }
+
+                Ok(())
             }
             None => Err("invalid nonce".to_string()),
         }
@@ -121,49 +164,48 @@ mod tests {
     #[test]
     fn issue_and_validate() {
         let store = NonceStore::new();
-        let nonce = store.issue("delete /tmp/important");
+        let nonce = store.issue("rm", &["/tmp/important"]);
         assert_eq!(nonce.len(), 8);
         assert!(nonce.chars().all(|c| c.is_ascii_hexdigit()));
 
-        let result = store.validate(&nonce);
-        assert_eq!(result, Ok("delete /tmp/important".to_string()));
+        let result = store.validate(&nonce, "rm", &["/tmp/important"]);
+        assert!(result.is_ok());
     }
 
     #[test]
     fn idempotent_reuse() {
         let store = NonceStore::new();
-        let nonce = store.issue("rm bigdir/");
+        let nonce = store.issue("rm", &["bigdir/"]);
 
-        let first = store.validate(&nonce);
-        let second = store.validate(&nonce);
+        let first = store.validate(&nonce, "rm", &["bigdir/"]);
+        let second = store.validate(&nonce, "rm", &["bigdir/"]);
         assert!(first.is_ok());
         assert!(second.is_ok());
-        assert_eq!(first, second);
     }
 
     #[test]
     fn expired_nonce_fails() {
         let store = NonceStore::with_ttl(Duration::from_millis(0));
-        let nonce = store.issue("ephemeral");
+        let nonce = store.issue("rm", &["ephemeral"]);
 
         // With 0ms TTL, nonce is immediately expired
         std::thread::sleep(Duration::from_millis(1));
-        let result = store.validate(&nonce);
+        let result = store.validate(&nonce, "rm", &["ephemeral"]);
         assert_eq!(result, Err("nonce expired".to_string()));
     }
 
     #[test]
     fn invalid_nonce_fails() {
         let store = NonceStore::new();
-        let result = store.validate("bogus123");
+        let result = store.validate("bogus123", "rm", &["anything"]);
         assert_eq!(result, Err("invalid nonce".to_string()));
     }
 
     #[test]
     fn nonces_are_unique() {
         let store = NonceStore::new();
-        let a = store.issue("first");
-        let b = store.issue("second");
+        let a = store.issue("rm", &["first"]);
+        let b = store.issue("rm", &["second"]);
         assert_ne!(a, b);
     }
 
@@ -171,24 +213,86 @@ mod tests {
     fn clone_shares_state() {
         let store = NonceStore::new();
         let cloned = store.clone();
-        let nonce = store.issue("shared");
+        let nonce = store.issue("rm", &["/shared"]);
 
-        let result = cloned.validate(&nonce);
+        let result = cloned.validate(&nonce, "rm", &["/shared"]);
         assert!(result.is_ok());
     }
 
     #[test]
     fn gc_cleans_expired() {
         let store = NonceStore::with_ttl(Duration::from_millis(10));
-        let old_nonce = store.issue("old");
+        let old_nonce = store.issue("rm", &["old"]);
 
         std::thread::sleep(Duration::from_millis(20));
 
         // This issue() triggers GC
-        let _new = store.issue("new");
+        let _new = store.issue("rm", &["new"]);
 
         // Old nonce should be gone (GC'd)
-        let result = store.validate(&old_nonce);
+        let result = store.validate(&old_nonce, "rm", &["old"]);
+        assert!(result.is_err());
+    }
+
+    // ── Path-scoping tests ──
+
+    #[test]
+    fn path_mismatch_rejected() {
+        let store = NonceStore::new();
+        let nonce = store.issue("rm", &["fileA.txt"]);
+
+        let result = store.validate(&nonce, "rm", &["fileB.txt"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("nonce scope mismatch"));
+    }
+
+    #[test]
+    fn subset_accepted() {
+        let store = NonceStore::new();
+        let nonce = store.issue("rm", &["a.txt", "b.txt", "c.txt"]);
+
+        // Subset of authorized paths — should succeed
+        let result = store.validate(&nonce, "rm", &["a.txt", "b.txt"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn superset_rejected() {
+        let store = NonceStore::new();
+        let nonce = store.issue("rm", &["a.txt", "b.txt"]);
+
+        // Superset — c.txt not authorized
+        let result = store.validate(&nonce, "rm", &["a.txt", "b.txt", "c.txt"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unauthorized"));
+    }
+
+    #[test]
+    fn command_mismatch_rejected() {
+        let store = NonceStore::new();
+        let nonce = store.issue("rm", &["file.txt"]);
+
+        let result = store.validate(&nonce, "kaish-trash empty", &[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("command"));
+    }
+
+    #[test]
+    fn empty_paths_command_only() {
+        let store = NonceStore::new();
+        let nonce = store.issue("kaish-trash empty", &[]);
+
+        let result = store.validate(&nonce, "kaish-trash empty", &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn empty_paths_rejects_nonempty() {
+        let store = NonceStore::new();
+        let nonce = store.issue("kaish-trash empty", &[]);
+
+        // Nonce was issued with no paths — can't use it to authorize a path
+        let result = store.validate(&nonce, "kaish-trash empty", &["sneaky.txt"]);
         assert!(result.is_err());
     }
 }

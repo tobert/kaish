@@ -155,8 +155,8 @@ async fn cmd_empty(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
 
     // Empty always requires nonce confirmation (inherently destructive)
     if let Some(nonce) = &confirm {
-        match ctx.nonce_store.validate(nonce) {
-            Ok(_desc) => {
+        match ctx.nonce_store.validate(nonce, "kaish-trash empty", &[]) {
+            Ok(()) => {
                 // Check if trash is actually empty first
                 let items = match tokio::task::spawn_blocking(trash::os_limited::list).await {
                     Ok(Ok(items)) => items,
@@ -178,7 +178,7 @@ async fn cmd_empty(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         }
     } else {
         // Issue a nonce
-        let nonce = ctx.nonce_store.issue("kaish-trash empty");
+        let nonce = ctx.nonce_store.issue("kaish-trash empty", &[]);
         let ttl = ctx.nonce_store.ttl().as_secs();
         ExecResult::failure(2, format!(
             "kaish-trash empty: confirmation required (emptying trash is destructive)\nTo confirm, run: kaish-trash empty --confirm={}\nNonce expires in {} seconds.",
@@ -313,7 +313,7 @@ mod tests {
     async fn test_empty_with_valid_nonce_on_empty_trash() {
         let mut ctx = make_ctx();
 
-        let nonce = ctx.nonce_store.issue("kaish-trash empty");
+        let nonce = ctx.nonce_store.issue("kaish-trash empty", &[]);
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("empty".into()));
