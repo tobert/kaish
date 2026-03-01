@@ -11,6 +11,19 @@ use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 /// KaishTrash tool: manage the system trash.
 pub struct KaishTrash;
 
+/// Run a blocking trash operation, flattening the JoinError/trash::Error into a single Result.
+async fn trash_op<F, T>(op: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, trash::Error> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(op).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 #[async_trait]
 impl Tool for KaishTrash {
     fn name(&self) -> &str {
@@ -63,9 +76,8 @@ impl Tool for KaishTrash {
 async fn cmd_list(args: &ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
     let filter = args.get_string("arg", 1);
 
-    let items = match tokio::task::spawn_blocking(trash::os_limited::list).await {
-        Ok(Ok(items)) => items,
-        Ok(Err(e)) => return ExecResult::failure(1, format!("kaish-trash list: {}", e)),
+    let items = match trash_op(trash::os_limited::list).await {
+        Ok(items) => items,
         Err(e) => return ExecResult::failure(1, format!("kaish-trash list: {}", e)),
     };
 
@@ -106,9 +118,8 @@ async fn cmd_restore(args: &ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
         None => return ExecResult::failure(1, "kaish-trash restore: specify a path/name to restore"),
     };
 
-    let items = match tokio::task::spawn_blocking(trash::os_limited::list).await {
-        Ok(Ok(items)) => items,
-        Ok(Err(e)) => return ExecResult::failure(1, format!("kaish-trash restore: {}", e)),
+    let items = match trash_op(trash::os_limited::list).await {
+        Ok(items) => items,
         Err(e) => return ExecResult::failure(1, format!("kaish-trash restore: {}", e)),
     };
 
@@ -140,9 +151,8 @@ async fn cmd_restore(args: &ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
         ));
     }
 
-    match tokio::task::spawn_blocking(move || trash::os_limited::restore_all(matches)).await {
-        Ok(Ok(())) => ExecResult::with_output(OutputData::text(format!("restored: {}", name))),
-        Ok(Err(e)) => ExecResult::failure(1, format!("kaish-trash restore: {}", e)),
+    match trash_op(move || trash::os_limited::restore_all(matches)).await {
+        Ok(()) => ExecResult::with_output(OutputData::text(format!("restored: {}", name))),
         Err(e) => ExecResult::failure(1, format!("kaish-trash restore: {}", e)),
     }
 }
@@ -158,9 +168,8 @@ async fn cmd_empty(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         match ctx.nonce_store.validate(nonce, "kaish-trash empty", &[]) {
             Ok(()) => {
                 // Check if trash is actually empty first
-                let items = match tokio::task::spawn_blocking(trash::os_limited::list).await {
-                    Ok(Ok(items)) => items,
-                    Ok(Err(e)) => return ExecResult::failure(1, format!("kaish-trash empty: {}", e)),
+                let items = match trash_op(trash::os_limited::list).await {
+                    Ok(items) => items,
                     Err(e) => return ExecResult::failure(1, format!("kaish-trash empty: {}", e)),
                 };
 
@@ -168,9 +177,8 @@ async fn cmd_empty(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
                     return ExecResult::with_output(OutputData::text("trash is already empty"));
                 }
 
-                match tokio::task::spawn_blocking(move || trash::os_limited::purge_all(items)).await {
-                    Ok(Ok(())) => ExecResult::with_output(OutputData::text("trash emptied")),
-                    Ok(Err(e)) => ExecResult::failure(1, format!("kaish-trash empty: {}", e)),
+                match trash_op(move || trash::os_limited::purge_all(items)).await {
+                    Ok(()) => ExecResult::with_output(OutputData::text("trash emptied")),
                     Err(e) => ExecResult::failure(1, format!("kaish-trash empty: {}", e)),
                 }
             }

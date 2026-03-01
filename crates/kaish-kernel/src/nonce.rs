@@ -17,9 +17,21 @@ use std::time::{Duration, Instant, SystemTime};
 #[derive(Debug, Clone)]
 pub struct NonceScope {
     /// Command name (e.g. "rm", "kaish-trash empty").
-    pub command: String,
+    command: String,
     /// Authorized paths. Empty means no path constraint (command-only ops).
-    pub paths: BTreeSet<String>,
+    paths: BTreeSet<String>,
+}
+
+impl NonceScope {
+    /// The command this nonce authorizes (e.g. "rm").
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+
+    /// The paths this nonce authorizes. Empty means command-only (no path constraint).
+    pub fn paths(&self) -> &BTreeSet<String> {
+        &self.paths
+    }
 }
 
 /// A store for confirmation nonces with TTL-based expiration.
@@ -52,6 +64,29 @@ impl NonceStore {
                 nonces: HashMap::new(),
             })),
             ttl,
+        }
+    }
+
+    /// Look up a nonce's scope without validating against a command/path.
+    ///
+    /// Returns the scope if the nonce exists and hasn't expired, or an error.
+    /// Useful for embedders building custom confirmation UIs.
+    pub fn lookup(&self, nonce: &str) -> Result<NonceScope, String> {
+        let now = Instant::now();
+        let ttl = self.ttl;
+
+        #[allow(clippy::expect_used)]
+        let inner = self.inner.lock().expect("nonce store poisoned");
+
+        match inner.nonces.get(nonce) {
+            Some((created, scope)) => {
+                if now.duration_since(*created) >= ttl {
+                    Err("nonce expired".to_string())
+                } else {
+                    Ok(scope.clone())
+                }
+            }
+            None => Err("invalid nonce".to_string()),
         }
     }
 
@@ -104,14 +139,14 @@ impl NonceStore {
                     ));
                 }
 
-                let confirmed: BTreeSet<String> = paths.iter().map(|p| p.to_string()).collect();
+                // Every confirmed path must be in the authorized set.
+                // Linear scan avoids BTreeSet allocation — slices are typically 0-1 elements.
+                let unauthorized: Vec<_> = paths
+                    .iter()
+                    .filter(|p| !scope.paths.contains(**p))
+                    .collect();
 
-                if scope.paths.is_empty() && confirmed.is_empty() {
-                    return Ok(());
-                }
-
-                if !confirmed.is_subset(&scope.paths) {
-                    let unauthorized: Vec<_> = confirmed.difference(&scope.paths).collect();
+                if !unauthorized.is_empty() {
                     return Err(format!(
                         "nonce scope mismatch: authorized {:?}, got unauthorized {:?}",
                         scope.paths.iter().collect::<Vec<_>>(),
