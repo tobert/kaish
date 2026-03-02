@@ -32,6 +32,7 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 
 use kaish_kernel::help::{get_help, HelpTopic};
+use kaish_kernel::nonce::NonceStore;
 use kaish_kernel::tools::ToolSchema;
 use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
 
@@ -59,6 +60,8 @@ pub struct KaishServerHandler {
     log_level: Arc<RwLock<Option<LoggingLevel>>>,
     /// Cached tool schemas (static — avoids creating a kernel per prompt_builtins call).
     tool_schemas: Vec<ToolSchema>,
+    /// Shared nonce store so confirmation latch nonces survive across execute() calls.
+    nonce_store: NonceStore,
 }
 
 /// Map LoggingLevel to a numeric severity for comparison.
@@ -123,6 +126,7 @@ impl KaishServerHandler {
             peer,
             log_level: Arc::new(RwLock::new(None)),
             tool_schemas,
+            nonce_store: NonceStore::new(),
         })
     }
 
@@ -203,7 +207,7 @@ impl KaishServerHandler {
     ///
     /// Each call runs in a fresh, isolated environment. Supports restricted/modified
     /// Bourne syntax plus kaish extensions (scatter/gather, typed params, MCP tool calls).
-    #[tool(description = "Execute kaish shell scripts. Fresh isolated environment per call.\n\nSupports: pipes, redirects, here-docs, if/for/while, functions, builtins (grep, jq, git, find, sed, awk, cat, ls, etc.), ${VAR:-default}, $((arithmetic)), scatter/gather parallelism.\n\nNOT supported: process substitution <(), backticks, eval, implicit word splitting.\n\nPaths: Native paths work within $HOME (e.g., /home/user/src/project). /scratch/ = ephemeral memory. Use 'help' tool for details.")]
+    #[tool(description = "Execute kaish shell scripts. Each call runs in a fresh kernel (variables, functions, and cwd reset). Confirmation nonces (set -o latch) persist across calls within the MCP session.\n\nSupports: pipes, redirects, here-docs, if/for/while, functions, builtins (grep, jq, git, find, sed, awk, cat, ls, etc.), ${VAR:-default}, $((arithmetic)), scatter/gather parallelism.\n\nNOT supported: process substitution <(), backticks, eval, implicit word splitting.\n\nPaths: Native paths work within $HOME (e.g., /home/user/src/project). /v/ = ephemeral memory. Use 'help' tool for details.")]
     async fn execute(&self, input: Parameters<ExecuteInput>) -> Result<CallToolResult, McpError> {
         tracing::info!(
             script_len = input.0.script.len(),
@@ -219,7 +223,12 @@ impl KaishServerHandler {
         };
 
         let result =
-            execute::execute(params, &self.config.mcp_servers, self.config.default_timeout_ms)
+            execute::execute(
+                params,
+                &self.config.mcp_servers,
+                self.config.default_timeout_ms,
+                Some(self.nonce_store.clone()),
+            )
                 .await
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 

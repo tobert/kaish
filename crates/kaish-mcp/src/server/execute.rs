@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use kaish_kernel::interpreter::{value_to_json, OutputData};
+use kaish_kernel::nonce::NonceStore;
 use kaish_kernel::{Kernel, KernelConfig};
 use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
@@ -117,6 +118,7 @@ pub async fn execute(
     params: ExecuteParams,
     external_servers: &[ExternalServerConfig],
     default_timeout_ms: u64,
+    nonce_store: Option<NonceStore>,
 ) -> Result<ExecuteResult> {
     let timeout_ms = params.timeout_ms.unwrap_or(default_timeout_ms);
 
@@ -167,11 +169,14 @@ pub async fn execute(
 
                 // Create a fresh kernel in sandboxed MCP mode
                 // Default cwd is $HOME (from KernelConfig::mcp())
-                let config = if let Some(cwd) = params.cwd {
+                let mut config = if let Some(cwd) = params.cwd {
                     KernelConfig::mcp().with_cwd(PathBuf::from(cwd))
                 } else {
                     KernelConfig::mcp()
                 };
+                if let Some(store) = nonce_store {
+                    config = config.with_nonce_store(store);
+                }
 
                 let kernel = Kernel::new(config).context("Failed to create kernel")?;
 
@@ -222,7 +227,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000).await.expect("execute failed");
+        let result = execute(params, &[], 30_000, None).await.expect("execute failed");
         assert!(result.ok);
         assert_eq!(result.code, 0);
         // Simple text passes through unchanged (no TOON encoding)
@@ -241,7 +246,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000).await.expect("execute failed");
+        let result = execute(params, &[], 30_000, None).await.expect("execute failed");
         assert!(result.ok);
         // Simple text passes through unchanged (no TOON encoding)
         assert_eq!(result.stdout.trim(), "hello world");
@@ -256,7 +261,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000).await.expect("execute failed");
+        let result = execute(params, &[], 30_000, None).await.expect("execute failed");
         assert!(!result.ok);
         assert_eq!(result.code, 127);
     }
@@ -270,7 +275,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000).await.expect("execute failed");
+        let result = execute(params, &[], 30_000, None).await.expect("execute failed");
         assert!(result.ok);
         assert!(result.data.is_some());
 
@@ -293,7 +298,7 @@ mod tests {
             timeout_ms: Some(10), // Very short timeout
         };
 
-        let result = execute(params, &[], 30_000).await.expect("execute failed");
+        let result = execute(params, &[], 30_000, None).await.expect("execute failed");
         assert!(!result.ok);
         assert_eq!(result.code, 124);
         assert!(result.stderr.contains("timed out"));
@@ -342,7 +347,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000).await.expect("execute failed");
+        let result = execute(params, &[], 30_000, None).await.expect("execute failed");
         assert!(result.ok);
         // Should be valid JSON, not TOON-wrapped JSON
         let parsed: serde_json::Value = serde_json::from_str(&result.stdout).expect("valid JSON");
@@ -359,7 +364,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000).await.expect("execute failed");
+        let result = execute(params, &[], 30_000, None).await.expect("execute failed");
         assert!(result.ok);
         // Canonical text: tab-separated values, one per line
         assert!(result.stdout.contains("/"), "should contain mount paths");
@@ -376,7 +381,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000).await.expect("execute failed");
+        let result = execute(params, &[], 30_000, None).await.expect("execute failed");
         assert!(result.ok);
         // Plain text, not TOON-quoted
         assert_eq!(result.stdout.trim(), "hello world");

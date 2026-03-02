@@ -140,6 +140,12 @@ Confirmed paths must be subset of authorized paths. Exit code 2 = needs confirma
 If trash fails, rm errors (no silent fallthrough to permanent delete).
 Configure threshold: `kaish-trash config max-size <bytes>`.
 
+**Nonce persistence:** The kernel creates a fresh nonce store by default.
+The MCP server shares one store across all `execute()` calls in a session,
+so a nonce from call 1 can confirm in call 2. The REPL keeps one kernel
+alive — nonces persist naturally. Embedders control this via
+`KernelConfig::with_nonce_store()`.
+
 ## Error Handling
 
 ```bash

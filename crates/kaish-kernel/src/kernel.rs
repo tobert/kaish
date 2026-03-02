@@ -152,6 +152,13 @@ pub struct KernelConfig {
     /// being permanently deleted. Can also be enabled at runtime with `set -o trash`
     /// or via `KAISH_TRASH=1`.
     pub trash_enabled: bool,
+
+    /// Shared nonce store for cross-request confirmation latch.
+    ///
+    /// When `Some`, the kernel uses this store instead of creating a fresh one.
+    /// This allows nonces issued in one MCP `execute()` call to be validated
+    /// in a subsequent call. When `None` (default), a fresh store is created.
+    pub nonce_store: Option<crate::nonce::NonceStore>,
 }
 
 /// Get the default sandbox root ($HOME).
@@ -175,6 +182,7 @@ impl Default for KernelConfig {
             allow_external_commands: true,
             latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
+            nonce_store: None,
         }
     }
 }
@@ -194,6 +202,7 @@ impl KernelConfig {
             allow_external_commands: true,
             latch_enabled: false,
             trash_enabled: false,
+            nonce_store: None,
         }
     }
 
@@ -211,6 +220,7 @@ impl KernelConfig {
             allow_external_commands: true,
             latch_enabled: false,
             trash_enabled: false,
+            nonce_store: None,
         }
     }
 
@@ -231,6 +241,7 @@ impl KernelConfig {
             allow_external_commands: true,
             latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
+            nonce_store: None,
         }
     }
 
@@ -253,6 +264,7 @@ impl KernelConfig {
             allow_external_commands: true,
             latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
+            nonce_store: None,
         }
     }
 
@@ -271,6 +283,7 @@ impl KernelConfig {
             allow_external_commands: true,
             latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
+            nonce_store: None,
         }
     }
 
@@ -290,6 +303,7 @@ impl KernelConfig {
             allow_external_commands: false,
             latch_enabled: false,
             trash_enabled: false,
+            nonce_store: None,
         }
     }
 
@@ -348,6 +362,15 @@ impl KernelConfig {
     /// Enable or disable trash-on-delete at startup.
     pub fn with_trash(mut self, enabled: bool) -> Self {
         self.trash_enabled = enabled;
+        self
+    }
+
+    /// Use a shared nonce store for cross-request confirmation latch.
+    ///
+    /// Pass a `NonceStore` that outlives individual kernel instances so nonces
+    /// issued in one MCP `execute()` call can be validated in subsequent calls.
+    pub fn with_nonce_store(mut self, store: crate::nonce::NonceStore) -> Self {
+        self.nonce_store = Some(store);
         self
     }
 }
@@ -526,7 +549,7 @@ impl Kernel {
         jobs: Arc<JobManager>,
         make_ctx: impl FnOnce(&Arc<VfsRouter>, &Arc<ToolRegistry>) -> ExecContext,
     ) -> Result<Self> {
-        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, output_limit, allow_external_commands, latch_enabled, trash_enabled, .. } = config;
+        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, output_limit, allow_external_commands, latch_enabled, trash_enabled, nonce_store, .. } = config;
 
         let mut tools = ToolRegistry::new();
         register_builtins(&mut tools);
@@ -550,6 +573,9 @@ impl Kernel {
         exec_ctx.ignore_config = ignore_config;
         exec_ctx.output_limit = output_limit;
         exec_ctx.allow_external_commands = allow_external_commands;
+        if let Some(store) = nonce_store {
+            exec_ctx.nonce_store = store;
+        }
 
         Ok(Self {
             name,

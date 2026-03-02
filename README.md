@@ -150,6 +150,9 @@ Latch and trash can also be toggled at runtime with `set -o latch` / `set -o tra
 
 **Latch details:** Nonces are scoped to command + path — a nonce issued for `rm fileA`
 cannot confirm `rm fileB`. Confirmed paths must be a subset of authorized paths.
+Nonces persist within a session — in the REPL across commands, in MCP across
+`execute()` calls. Each new connection starts a fresh nonce store.
+Embedders control this via `KernelConfig::with_nonce_store()`.
 
 **Trash details:** Files under 10MB and all directories go to trash (configurable via
 `kaish-trash config max-size`). Excluded paths (`/tmp`, `/v/*`) bypass trash. If
@@ -210,7 +213,9 @@ Add to your MCP client configuration:
 
 #### Tools
 
-**`execute`** — Run kaish scripts in a fresh, isolated environment.
+**`execute`** — Run kaish scripts. Each call gets a fresh kernel (variables and
+functions reset), but confirmation nonces (`set -o latch`) persist across calls
+within the MCP session.
 
 ```
 Supports: pipes, redirects, here-docs, if/for/while, functions, builtins,

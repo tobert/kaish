@@ -311,6 +311,18 @@ Nonce expires in 60 seconds.
 
 The `kaish-trash` builtin manages trashed files: `list`, `restore`, `empty`, `config`.
 
+Nonces are scoped to (command, paths) — a nonce for `rm fileA` cannot confirm
+`rm fileB`. They expire after 60 seconds and are not consumed on use (idempotent
+retries work).
+
+**Nonce store lifecycle:** The kernel creates a fresh `NonceStore` by default.
+Frontends control persistence:
+- **REPL** — one kernel per session; nonces persist across commands naturally.
+- **MCP server** — shares a `NonceStore` across `execute()` calls within a
+  connection, so a nonce issued in one call can be confirmed in the next.
+- **Embedders** — pass a shared store via `KernelConfig::with_nonce_store()`
+  to get cross-call persistence, or accept the default (fresh per kernel).
+
 ## Error Handling
 
 ```bash

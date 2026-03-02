@@ -40,12 +40,13 @@ impl NonceScope {
 /// They remain valid until their TTL expires — not consumed on validation —
 /// making operations idempotent: a retried `rm --confirm=abc123 bigdir/`
 /// works if the nonce hasn't expired.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NonceStore {
     inner: Arc<Mutex<NonceStoreInner>>,
     ttl: Duration,
 }
 
+#[derive(Debug)]
 struct NonceStoreInner {
     /// Map from nonce string to (created_at, scope).
     nonces: HashMap<String, (Instant, NonceScope)>,
