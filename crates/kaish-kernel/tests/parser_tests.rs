@@ -720,3 +720,22 @@ fn parser_cd_dot_slash() {
 fn parser_dot_slash_exec() {
     parse_and_snapshot("dot_slash_exec", "./script.sh");
 }
+
+// =============================================================================
+// COLON IN UNQUOTED WORDS
+// =============================================================================
+
+#[test]
+fn parser_colon_double() {
+    parse_and_snapshot("colon_double", "echo foo::bar");
+}
+
+#[test]
+fn parser_colon_port() {
+    parse_and_snapshot("colon_port", "echo host:8080");
+}
+
+#[test]
+fn parser_colon_in_cargo_test() {
+    parse_and_snapshot("colon_cargo_test", "cargo test -- ls::tests");
+}

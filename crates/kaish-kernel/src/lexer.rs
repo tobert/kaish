@@ -1411,6 +1411,95 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String, bool)>) {
     (result, heredocs)
 }
 
+/// Extract the text contribution of a token for colon-adjacent merging.
+///
+/// Returns `Some(text)` for token types that can participate in word-like
+/// merging, `None` for everything else.
+fn mergeable_text(token: &Token) -> Option<String> {
+    match token {
+        Token::Ident(s) => Some(s.clone()),
+        Token::Colon => Some(":".to_string()),
+        Token::Int(n) => Some(n.to_string()),
+        Token::Path(p) => Some(p.clone()),
+        Token::Float(f) => Some(f.to_string()),
+        _ => None,
+    }
+}
+
+/// Merge span-adjacent token runs containing `Token::Colon` into single `Ident` tokens.
+///
+/// In bash, `:` is a regular character in unquoted words. kaish tokenizes it
+/// separately, which breaks Rust paths (`foo::bar`), URLs (`host:8080`), etc.
+///
+/// This pass fuses span-adjacent mergeable tokens (Ident, Colon, Int, Path, Float)
+/// into a single `Ident` when the run contains at least one `Colon`. Runs without
+/// colons or standalone tokens pass through unchanged.
+fn merge_colon_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
+    if tokens.is_empty() {
+        return tokens;
+    }
+
+    let mut result = Vec::with_capacity(tokens.len());
+    let mut run: Vec<&Spanned<Token>> = Vec::new();
+
+    for token in &tokens {
+        if run.is_empty() {
+            if mergeable_text(&token.token).is_some() {
+                run.push(token);
+            } else {
+                result.push(token.clone());
+            }
+            continue;
+        }
+
+        // Check span adjacency: previous run's last token ends where this one starts
+        // Safety: run is non-empty (checked above)
+        let Some(last) = run.last() else { unreachable!() };
+        let adjacent = last.span.end == token.span.start;
+
+        if adjacent && mergeable_text(&token.token).is_some() {
+            run.push(token);
+        } else {
+            flush_colon_run(&mut run, &mut result);
+            if mergeable_text(&token.token).is_some() {
+                run.push(token);
+            } else {
+                result.push(token.clone());
+            }
+        }
+    }
+
+    flush_colon_run(&mut run, &mut result);
+
+    result
+}
+
+/// Flush a run of mergeable tokens: merge if it contains a colon, otherwise emit individually.
+fn flush_colon_run(run: &mut Vec<&Spanned<Token>>, result: &mut Vec<Spanned<Token>>) {
+    if run.is_empty() {
+        return;
+    }
+
+    let has_colon = run.iter().any(|t| matches!(t.token, Token::Colon));
+
+    if run.len() >= 2 && has_colon {
+        let text: String = run
+            .iter()
+            .filter_map(|t| mergeable_text(&t.token))
+            .collect();
+        // Safety: run.len() >= 2 so first/last exist
+        let start = run.first().map(|t| t.span.start).unwrap_or(0);
+        let end = run.last().map(|t| t.span.end).unwrap_or(0);
+        result.push(Spanned::new(Token::Ident(text), start..end));
+    } else {
+        for t in run.iter() {
+            result.push((*t).clone());
+        }
+    }
+
+    run.clear();
+}
+
 /// Tokenize source code into a vector of spanned tokens.
 ///
 /// Skips whitespace and comments (unless you need them for formatting).
@@ -1419,6 +1508,7 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String, bool)>) {
 /// Handles:
 /// - Arithmetic: `$((expr))` becomes `Arithmetic("expr")`
 /// - Here-docs: `<<EOF\nhello\nEOF` becomes `HereDocStart` + `HereDoc("hello")`
+/// - Colon merge: span-adjacent `foo::bar` becomes `Ident("foo::bar")`
 pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerError>>> {
     // Preprocess arithmetic first (before heredocs because heredoc content might contain $((
     let arith_result = preprocess_arithmetic(source)
@@ -1507,7 +1597,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerEr
         i += 1;
     }
 
-    Ok(final_tokens)
+    Ok(merge_colon_adjacent(final_tokens))
 }
 
 /// Tokenize source code, preserving comments.
@@ -2804,5 +2894,73 @@ mod tests {
         assert!(heredoc.is_some(), "should have a heredoc token");
         let data = heredoc.unwrap();
         assert!(!data.literal, "unquoted delimiter should have literal=false");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Colon merge tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn colon_double_in_word() {
+        assert_eq!(lex("foo::bar"), vec![Token::Ident("foo::bar".into())]);
+    }
+
+    #[test]
+    fn colon_single_in_word() {
+        assert_eq!(lex("a:b:c"), vec![Token::Ident("a:b:c".into())]);
+    }
+
+    #[test]
+    fn colon_with_port() {
+        assert_eq!(lex("host:8080"), vec![Token::Ident("host:8080".into())]);
+    }
+
+    #[test]
+    fn colon_standalone() {
+        assert_eq!(lex(":"), vec![Token::Colon]);
+    }
+
+    #[test]
+    fn colon_spaced_no_merge() {
+        assert_eq!(
+            lex("foo : bar"),
+            vec![
+                Token::Ident("foo".into()),
+                Token::Colon,
+                Token::Ident("bar".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn colon_in_command_arg() {
+        assert_eq!(
+            lex("echo foo::bar"),
+            vec![
+                Token::Ident("echo".into()),
+                Token::Ident("foo::bar".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn colon_trailing() {
+        // Trailing colon merges with preceding ident
+        assert_eq!(lex("foo:"), vec![Token::Ident("foo:".into())]);
+    }
+
+    #[test]
+    fn colon_leading() {
+        // Leading colon merges with following ident
+        assert_eq!(lex(":foo"), vec![Token::Ident(":foo".into())]);
+    }
+
+    #[test]
+    fn colon_with_path() {
+        // Path token + colon + int
+        assert_eq!(
+            lex("/usr/bin:8080"),
+            vec![Token::Ident("/usr/bin:8080".into())]
+        );
     }
 }

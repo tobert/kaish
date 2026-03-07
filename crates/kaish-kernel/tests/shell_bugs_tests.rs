@@ -973,3 +973,30 @@ echo "captured: $X"
         result.out
     );
 }
+
+#[tokio::test]
+async fn test_colon_in_unquoted_arg() {
+    let kernel = Kernel::transient().expect("kernel");
+    let result = kernel.execute("echo foo::bar").await.expect("execute");
+    assert!(result.ok(), "Should succeed: err={}", result.err);
+    assert_eq!(result.out.trim(), "foo::bar");
+}
+
+#[tokio::test]
+async fn test_colon_port_in_arg() {
+    let kernel = Kernel::transient().expect("kernel");
+    let result = kernel.execute("echo host:8080").await.expect("execute");
+    assert!(result.ok(), "Should succeed: err={}", result.err);
+    assert_eq!(result.out.trim(), "host:8080");
+}
+
+#[tokio::test]
+async fn test_colon_in_variable_assignment() {
+    let kernel = Kernel::transient().expect("kernel");
+    let result = kernel
+        .execute("PATH=/usr/bin:/usr/local/bin\necho $PATH")
+        .await
+        .expect("execute");
+    assert!(result.ok(), "Should succeed: err={}", result.err);
+    assert_eq!(result.out.trim(), "/usr/bin:/usr/local/bin");
+}
