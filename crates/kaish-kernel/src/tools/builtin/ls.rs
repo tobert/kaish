@@ -167,7 +167,7 @@ impl Ls {
             let size_str = if human_readable {
                 format_human_size(info.size)
             } else {
-                format!("{:>8}", info.size)
+                info.size.to_string()
             };
             OutputNode::new(path)
                 .with_cells(vec![type_char.to_string(), size_str])
@@ -262,7 +262,7 @@ impl Ls {
                     let size_str = if human_readable {
                         format_human_size(e.size)
                     } else {
-                        format!("{:>8}", e.size)
+                        e.size.to_string()
                     };
                     OutputNode::new(&e.name)
                         .with_cells(vec![type_char.to_string(), size_str])
@@ -334,7 +334,7 @@ impl Ls {
                             let size_str = if human_readable {
                                 format_human_size(e.size)
                             } else {
-                                format!("{:>8}", e.size)
+                                e.size.to_string()
                             };
                             OutputNode::new(name_display)
                                 .with_cells(vec![type_char.to_string(), size_str])
@@ -430,7 +430,7 @@ impl Ls {
                     let size_str = if human_readable {
                         format_human_size(e.size)
                     } else {
-                        format!("{:>8}", e.size)
+                        e.size.to_string()
                     };
                     OutputNode::new(name)
                         .with_cells(vec![type_char.to_string(), size_str])
@@ -525,7 +525,7 @@ fn format_entries(entries: &[DirEntry], long_format: bool, human_readable: bool)
                 let size_str = if human_readable {
                     format_human_size(e.size)
                 } else {
-                    format!("{:>8}", e.size)
+                    e.size.to_string()
                 };
                 // For symlinks, show the target
                 let name_display = if e.is_symlink() {
@@ -579,11 +579,11 @@ fn format_human_size(bytes: u64) -> String {
     }
 
     if unit_idx == 0 {
-        format!("{:>4}", bytes)
+        bytes.to_string()
     } else if size >= 10.0 {
-        format!("{:>3.0}{}", size, UNITS[unit_idx])
+        format!("{:.0}{}", size, UNITS[unit_idx])
     } else {
-        format!("{:>3.1}{}", size, UNITS[unit_idx])
+        format!("{:.1}{}", size, UNITS[unit_idx])
     }
 }
 
