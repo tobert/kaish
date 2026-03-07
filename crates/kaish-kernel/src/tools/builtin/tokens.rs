@@ -132,6 +132,7 @@ impl Tool for Tokens {
             data: None,
             output: Some(table),
             did_spill: false,
+            original_code: None,
         }
     }
 }

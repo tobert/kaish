@@ -647,6 +647,7 @@ mod tests {
         let big = "x".repeat(200);
         let result = kernel.execute(&format!("echo '{}'", big)).await.expect("execute");
         assert_eq!(result.code, 3, "spill without latch should exit 3");
+        assert_eq!(result.original_code, Some(0), "original command exit code preserved");
         assert!(result.out.contains("[output truncated:"));
     }
 
@@ -669,6 +670,7 @@ mod tests {
         let big = "x".repeat(200);
         let result = kernel.execute(&format!("echo '{}'", big)).await.expect("execute");
         assert_eq!(result.code, 2, "spill with latch should exit 2");
+        assert_eq!(result.original_code, Some(0), "original command exit code preserved");
         assert!(result.out.contains("[output truncated:"));
         assert!(result.err.contains("--confirm="), "latch should include confirm hint");
     }

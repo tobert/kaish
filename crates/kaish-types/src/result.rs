@@ -28,9 +28,11 @@ pub struct ExecResult {
     /// Structured output data for rendering.
     pub output: Option<OutputData>,
     /// True if output was truncated and written to a spill file.
-    /// Invisible in serialized output — internal signal for the kernel.
-    #[serde(skip)]
     pub did_spill: bool,
+    /// The command's original exit code before spill logic overwrote it with 2 or 3.
+    /// Present only when `did_spill` is true and `code` was changed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_code: Option<i64>,
 }
 
 impl ExecResult {
@@ -45,6 +47,7 @@ impl ExecResult {
             data,
             output: None,
             did_spill: false,
+            original_code: None,
         }
     }
 
@@ -68,6 +71,7 @@ impl ExecResult {
             data,
             output: Some(output),
             did_spill: false,
+            original_code: None,
         }
     }
 
@@ -81,6 +85,7 @@ impl ExecResult {
             data: Some(data),
             output: None,
             did_spill: false,
+            original_code: None,
         }
     }
 
@@ -100,6 +105,7 @@ impl ExecResult {
             data: Some(data),
             output: None,
             did_spill: false,
+            original_code: None,
         }
     }
 
@@ -112,6 +118,7 @@ impl ExecResult {
             data: None,
             output: None,
             did_spill: false,
+            original_code: None,
         }
     }
 
@@ -137,6 +144,7 @@ impl ExecResult {
             data,
             output: None,
             did_spill: false,
+            original_code: None,
         }
     }
 
@@ -154,6 +162,7 @@ impl ExecResult {
             data,
             output: Some(output),
             did_spill: false,
+            original_code: None,
         }
     }
 
@@ -347,10 +356,25 @@ mod tests {
     }
 
     #[test]
-    fn did_spill_not_serialized() {
+    fn did_spill_is_serialized() {
         let mut result = ExecResult::success("hi");
         result.did_spill = true;
         let json = serde_json::to_string(&result).unwrap();
-        assert!(!json.contains("did_spill"));
+        assert!(json.contains("\"did_spill\":true"));
+    }
+
+    #[test]
+    fn original_code_omitted_when_none() {
+        let result = ExecResult::success("hi");
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("original_code"));
+    }
+
+    #[test]
+    fn original_code_present_when_set() {
+        let mut result = ExecResult::success("hi");
+        result.original_code = Some(0);
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"original_code\":0"));
     }
 }

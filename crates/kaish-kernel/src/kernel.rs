@@ -1100,6 +1100,7 @@ impl Kernel {
                         data: None,
                         output: None,
                         did_spill: false,
+                        original_code: None,
                     }
                 } else {
                     ExecResult::success("")
@@ -1271,6 +1272,7 @@ impl Kernel {
 
         // Apply spill exit code and optionally issue latch nonce for recovery
         if result.did_spill {
+            let original = result.code;
             let latch = ctx.scope.latch_enabled();
             if latch {
                 let nonce = ctx.nonce_store.issue_with_result(result.clone());
@@ -1279,8 +1281,10 @@ impl Kernel {
                     "\n[output truncated — to retrieve, run: --confirm={}]\n[Nonce expires in {} seconds.]",
                     nonce, ttl
                 ));
+                result.original_code = Some(original);
                 result.code = 2;
             } else {
+                result.original_code = Some(original);
                 result.code = 3;
             }
         }
@@ -2176,6 +2180,7 @@ impl Kernel {
                 data: last_data,
                 output: None,
                 did_spill: false,
+                original_code: None,
             });
         }
 
@@ -2186,6 +2191,7 @@ impl Kernel {
             data: last_data,
             output: None,
             did_spill: false,
+            original_code: None,
         })
     }
 
