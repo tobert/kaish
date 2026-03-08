@@ -4,10 +4,12 @@ Controls maximum command output size. When exceeded, full output is written to a
 
 ## Modes
 
-| Mode | Enabled | Limit | Head | Tail |
+| Mode | Enabled by default | Limit | Head | Tail |
 |------|---------|-------|------|------|
 | REPL | off | unlimited | 1K | 512 |
 | MCP | on | 64K | 1K | 512 |
+
+The REPL starts with no limit but `set -o output-limit` works at any time. To make it persistent, add it to `~/.kaishrc`.
 
 ## How It Works
 
