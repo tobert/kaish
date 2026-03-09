@@ -402,6 +402,11 @@ impl ExecContext {
     /// `reason` explains why confirmation is needed (e.g., `"latch enabled"`,
     /// `"emptying trash is destructive"`). The `confirm_hint` closure receives
     /// the nonce string so each tool can format its own re-run command.
+    ///
+    /// The result includes structured data in `.data` for programmatic access:
+    /// ```json
+    /// {"nonce": "a3f7b2c1", "command": "rm", "paths": [...], "hint": "rm --confirm=a3f7b2c1 file", "ttl": 60}
+    /// ```
     pub fn latch_result(
         &self,
         command: &str,
@@ -417,9 +422,18 @@ impl ExecContext {
             format!("\nAuthorized: {}", paths.join(", "))
         };
         let hint = confirm_hint(&nonce);
-        ExecResult::failure(2, format!(
+
+        let mut result = ExecResult::failure(2, format!(
             "{command}: confirmation required ({reason}){authorized}\nTo confirm, run: {hint}\nNonce expires in {ttl} seconds."
-        ))
+        ));
+        result.data = Some(Value::Json(serde_json::json!({
+            "nonce": nonce,
+            "command": command,
+            "paths": paths,
+            "hint": hint,
+            "ttl": ttl,
+        })));
+        result
     }
 
     /// Expand a glob pattern to matching file paths.

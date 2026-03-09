@@ -409,6 +409,17 @@ mod tests {
         assert!(result.err.contains("Authorized: /file.txt"));
         assert!(result.err.contains("--confirm="));
         assert!(result.err.contains("60 seconds"));
+        // Structured latch data should be present
+        let data = result.data.as_ref().expect("latch result should have data");
+        if let Value::Json(json) = data {
+            assert!(json["nonce"].is_string());
+            assert_eq!(json["command"], "rm");
+            assert_eq!(json["paths"], serde_json::json!(["/file.txt"]));
+            assert_eq!(json["ttl"], 60);
+            assert!(json["hint"].as_str().unwrap().contains("--confirm="));
+        } else {
+            panic!("expected Value::Json, got {:?}", data);
+        }
         // File should still exist
         assert!(ctx.backend.exists(Path::new("/file.txt")).await);
     }
