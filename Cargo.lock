@@ -1193,6 +1193,7 @@ dependencies = [
  "owo-colors",
  "rustyline",
  "serde_json",
+ "tempfile",
  "terminal_size",
  "tokio",
  "tracing",

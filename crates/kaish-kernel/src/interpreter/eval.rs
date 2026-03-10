@@ -11,6 +11,7 @@ use std::fmt;
 
 use crate::arithmetic;
 use crate::ast::{BinaryOp, Expr, FileTestOp, Pipeline, StringPart, StringTestOp, TestCmpOp, TestExpr, Value, VarPath};
+use crate::vfs::DirEntry;
 use std::path::Path;
 
 use super::result::ExecResult;
@@ -69,6 +70,31 @@ pub trait Executor {
     /// 2. Capture stdout/stderr
     /// 3. Return an ExecResult with code, output, and parsed data
     fn execute(&mut self, pipeline: &Pipeline, scope: &mut Scope) -> EvalResult<ExecResult>;
+
+    /// Stat a file path through the VFS.
+    ///
+    /// Returns `Some(entry)` if the path exists, `None` otherwise.
+    /// Used by `[[ -d path ]]`, `[[ -f path ]]`, etc.
+    ///
+    /// Default: falls back to `std::fs::metadata` (bypasses VFS).
+    fn file_stat(&self, path: &Path) -> Option<DirEntry> {
+        std::fs::metadata(path).ok().map(|meta| {
+            if meta.is_dir() {
+                DirEntry::directory(path.file_name().unwrap_or_default().to_string_lossy())
+            } else {
+                let mut entry = DirEntry::file(
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    meta.len(),
+                );
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    entry.permissions = Some(meta.permissions().mode());
+                }
+                entry
+            }
+        })
+    }
 }
 
 /// A stub executor that always returns an error.
@@ -162,32 +188,18 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                 let path_value = self.eval(path)?;
                 let path_str = value_to_string(&path_value);
                 let path = Path::new(&path_str);
+                let entry = self.executor.file_stat(path);
                 match op {
-                    FileTestOp::Exists => path.exists(),
-                    FileTestOp::IsFile => path.is_file(),
-                    FileTestOp::IsDir => path.is_dir(),
-                    FileTestOp::Readable => path.exists() && std::fs::metadata(path).is_ok(),
-                    FileTestOp::Writable => {
-                        // Check if we can write to the file
-                        if path.exists() {
-                            std::fs::OpenOptions::new().write(true).open(path).is_ok()
-                        } else {
-                            false
-                        }
-                    }
-                    FileTestOp::Executable => {
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            path.metadata()
-                                .map(|m| m.permissions().mode() & 0o111 != 0)
-                                .unwrap_or(false)
-                        }
-                        #[cfg(not(unix))]
-                        {
-                            path.exists()
-                        }
-                    }
+                    FileTestOp::Exists => entry.is_some(),
+                    FileTestOp::IsFile => entry.as_ref().is_some_and(|e| e.is_file()),
+                    FileTestOp::IsDir => entry.as_ref().is_some_and(|e| e.is_dir()),
+                    FileTestOp::Readable => entry.is_some(),
+                    FileTestOp::Writable => entry.as_ref().is_some_and(|e| {
+                        e.permissions.is_none_or(|p| p & 0o222 != 0)
+                    }),
+                    FileTestOp::Executable => entry.as_ref().is_some_and(|e| {
+                        e.permissions.is_some_and(|p| p & 0o111 != 0)
+                    }),
                 }
             }
             TestExpr::StringTest { op, value } => {

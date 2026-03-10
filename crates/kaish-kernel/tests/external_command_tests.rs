@@ -85,12 +85,15 @@ async fn external_command_date_complex_format() {
 #[tokio::test]
 async fn external_command_short_flags() {
     let kernel = repl_kernel();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().display();
     // ls -la should work (testing short flag preservation)
-    let result = kernel.execute("ls -la /tmp").await.unwrap();
+    let result = kernel.execute(&format!("ls -la {path}")).await.unwrap();
     // We have builtin ls, but this tests that flags are handled
     assert!(result.ok(), "ls -la should succeed: {:?}", result);
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn external_command_long_flags() {
     let kernel = repl_kernel();
@@ -153,13 +156,16 @@ async fn external_command_stdin_piping() {
 #[tokio::test]
 async fn external_command_respects_cwd() {
     let kernel = repl_kernel();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().to_string_lossy().to_string();
     // cd to a known directory, then run pwd
-    kernel.execute("cd /tmp").await.unwrap();
+    kernel.execute(&format!("cd {path}")).await.unwrap();
     let result = kernel.execute("pwd").await.unwrap();
     assert!(result.ok(), "pwd should succeed: {:?}", result);
     assert!(
-        result.out.contains("/tmp"),
-        "Should be in /tmp: {}",
+        result.out.contains(&path),
+        "Should be in {}: {}",
+        path,
         result.out
     );
 }
@@ -201,12 +207,12 @@ async fn pipeline_builtin_to_builtin() {
 async fn external_command_inherits_env() {
     let kernel = repl_kernel();
     // Test that external commands can see process environment
-    // We use printenv which is typically external
-    let result = kernel.execute("printenv HOME").await.unwrap();
+    // PATH is always set on any Unix system
+    let result = kernel.execute("printenv PATH").await.unwrap();
     assert!(result.ok(), "printenv should succeed: {:?}", result);
     assert!(
         !result.out.trim().is_empty(),
-        "Should see HOME: {}",
+        "Should see PATH: {}",
         result.out
     );
 }
@@ -220,13 +226,15 @@ fn interactive_kernel() -> Kernel {
     Kernel::new(KernelConfig::repl().with_interactive(true)).expect("Failed to create kernel")
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn non_interactive_stdin_is_dev_null() {
     let kernel = repl_kernel();
     // Use /bin/readlink to bypass the builtin — we need an external process
     // to introspect its own fd/0, since the builtin reads kaish's fd/0.
+    // Linux-specific: requires /proc/self/fd/0.
     let result = kernel
-        .execute("/bin/readlink /proc/self/fd/0")
+        .execute("readlink /proc/self/fd/0")
         .await
         .unwrap();
     assert!(result.ok(), "readlink should succeed: {:?}", result);
@@ -238,16 +246,18 @@ async fn non_interactive_stdin_is_dev_null() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 #[ignore = "requires TTY stdin — fails when cargo test runs with stdin=/dev/null"]
 async fn interactive_stdin_is_not_dev_null() {
     let kernel = interactive_kernel();
     // Standalone interactive commands inherit stdout (real-time streaming),
-    // so we pipe through /bin/cat to capture output. Readlink is First in
+    // so we pipe through cat to capture output. Readlink is First in
     // the pipeline: stdout is captured for the pipe, but stdin still inherits
     // from the terminal (no piped input for the first command).
+    // Linux-specific: requires /proc/self/fd/0.
     let result = kernel
-        .execute("/bin/readlink /proc/self/fd/0 | /bin/cat")
+        .execute("readlink /proc/self/fd/0 | cat")
         .await
         .unwrap();
     assert!(result.ok(), "readlink should succeed: {:?}", result);
@@ -266,7 +276,7 @@ async fn interactive_piped_stdin_still_works() {
     // through the pipe. In interactive mode the last command (grep) inherits
     // stdout to the terminal, so we assert on exit code rather than output.
     let result = kernel
-        .execute("echo hello | /bin/grep hello")
+        .execute("echo hello | grep hello")
         .await
         .unwrap();
     assert_eq!(

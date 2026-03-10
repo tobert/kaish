@@ -1188,10 +1188,12 @@ fn glob_brace_expansion() {
 // kaish-* Builtins and Absolute Paths
 // ============================================================================
 
+#[cfg(target_os = "linux")]
 #[test]
 fn absolute_path_bin_echo() {
     // /bin/echo runs as an external command — it streams output to terminal
     // (Stdio::inherit), so ExecResult.out is empty. We verify it succeeds (no error).
+    // Linux-specific: assumes /bin/echo exists.
     let outputs = run_script("/bin/echo hello");
     let joined = outputs.join("\n");
     assert!(!joined.contains("Error"), "Should not error: {}", joined);
@@ -1276,8 +1278,10 @@ fn builtin_h_flag_shows_help_when_unclaimed() {
 
 #[test]
 fn builtin_h_flag_does_not_show_help_when_claimed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().display().to_string();
     // ls claims -h for human-readable sizes, so -h should NOT show help
-    let outputs = run_script("ls -h /tmp");
+    let outputs = run_script(&format!("ls -h {path}"));
     let joined = outputs.join("\n");
     // Should not show help text — should show directory listing or empty
     assert!(!joined.contains("List directory contents"),
@@ -1296,22 +1300,23 @@ fn run_one(cmd: &str) -> ProcessResult {
 
 #[test]
 fn silent_cd() {
-    assert!(matches!(run_one("cd /tmp"), ProcessResult::Empty), "cd should produce no output");
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().display().to_string();
+    assert!(matches!(run_one(&format!("cd {path}")), ProcessResult::Empty), "cd should produce no output");
 }
 
 #[test]
 fn silent_mkdir_and_rmdir() {
-    let dir = format!("/tmp/kaish-test-{}", std::process::id());
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = format!("{}/kaish-test-sub", tmp.path().display());
     assert!(matches!(run_one(&format!("mkdir {}", dir)), ProcessResult::Empty), "mkdir should produce no output");
-    // cleanup
-    let _ = std::fs::remove_dir(&dir);
 }
 
 #[test]
 fn silent_touch() {
-    let path = format!("/tmp/kaish-touch-{}", std::process::id());
+    let tmp = tempfile::tempdir().unwrap();
+    let path = format!("{}/kaish-touch-file", tmp.path().display());
     assert!(matches!(run_one(&format!("touch {}", path)), ProcessResult::Empty), "touch should produce no output");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1331,12 +1336,12 @@ fn silent_export() {
 
 #[test]
 fn silent_mv_cp() {
-    let src = format!("/tmp/kaish-mv-src-{}", std::process::id());
-    let dst = format!("/tmp/kaish-mv-dst-{}", std::process::id());
+    let tmp = tempfile::tempdir().unwrap();
+    let src = format!("{}/mv-src", tmp.path().display());
+    let dst = format!("{}/mv-dst", tmp.path().display());
     std::fs::write(&src, "x").unwrap();
     assert!(matches!(run_one(&format!("cp {} {}", src, dst)), ProcessResult::Empty), "cp should produce no output");
     assert!(matches!(run_one(&format!("mv {} {}", dst, src)), ProcessResult::Empty), "mv should produce no output");
-    let _ = std::fs::remove_file(&src);
 }
 
 #[test]
@@ -1347,12 +1352,14 @@ fn echo_still_produces_output() {
 
 #[test]
 fn cd_dash_produces_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().display().to_string();
     // cd - prints the new directory, like bash
     let mut repl = Repl::new().expect("Failed to create REPL");
-    repl.process_line("cd /tmp");
+    repl.process_line(&format!("cd {path}"));
     let result = repl.process_line("cd -");
     match result {
-        ProcessResult::Output(s) => assert!(s.contains("tmp") || !s.is_empty(), "cd - should print new dir: {:?}", s),
+        ProcessResult::Output(s) => assert!(!s.is_empty(), "cd - should print new dir: {:?}", s),
         ProcessResult::Empty => panic!("cd - should print the new directory"),
         ProcessResult::Exit => panic!("unexpected exit"),
     }

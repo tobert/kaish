@@ -701,67 +701,110 @@ async fn test_var_in_default_with_cmd_subst() {
 // COMPOUND TEST EXPRESSIONS: [[ A && B ]], [[ A || B ]], [[ ! A ]]
 // ============================================================================
 
+// Bug 15: [[ -d ]] / [[ -f ]] used std::path directly, bypassing VFS.
+// Fixed: eval_test now routes through Executor::file_stat → backend.stat().
+
+#[tokio::test]
+async fn test_file_test_sees_vfs_dirs() {
+    let kernel = Kernel::transient().unwrap();
+    kernel.execute("mkdir -p /v/testdir").await.unwrap();
+    let result = kernel.execute(r#"[[ -d /v/testdir ]] && echo "found" || echo "missing""#).await.unwrap();
+    assert_eq!(result.out.trim(), "found", "[[ -d ]] should see VFS dirs: {}", result.out);
+}
+
+#[tokio::test]
+async fn test_file_test_sees_vfs_files() {
+    let kernel = Kernel::transient().unwrap();
+    kernel.execute("write /v/testfile 'hello'").await.unwrap();
+    let result = kernel.execute(r#"[[ -f /v/testfile ]] && echo "found" || echo "missing""#).await.unwrap();
+    assert_eq!(result.out.trim(), "found", "[[ -f ]] should see VFS files: {}", result.out);
+}
+
+#[tokio::test]
+async fn test_file_test_exists_vfs() {
+    let kernel = Kernel::transient().unwrap();
+    kernel.execute("write /v/somefile 'data'").await.unwrap();
+    let result = kernel.execute(r#"[[ -e /v/somefile ]] && echo "found" || echo "missing""#).await.unwrap();
+    assert_eq!(result.out.trim(), "found", "[[ -e ]] should see VFS entries: {}", result.out);
+}
+
 #[tokio::test]
 async fn test_compound_and_both_true() {
     let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"[[ -d /tmp && -d /home ]] && echo "both""#).await.unwrap();
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let a = dir_a.path().display();
+    let b = dir_b.path().display();
+    let result = kernel.execute(&format!(r#"[[ -d {a} && -d {b} ]] && echo "both""#)).await.unwrap();
     assert_eq!(result.out.trim(), "both", "AND with both true should pass: {}", result.out);
 }
 
 #[tokio::test]
 async fn test_compound_and_one_false() {
     let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"[[ -d /tmp && -f /nonexistent ]] && echo "both" || echo "failed""#).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().display();
+    let result = kernel.execute(&format!(r#"[[ -d {d} && -f /nonexistent_kaish_test ]] && echo "both" || echo "failed""#)).await.unwrap();
     assert_eq!(result.out.trim(), "failed", "AND with one false should fail: {}", result.out);
 }
 
 #[tokio::test]
 async fn test_compound_or_first_true() {
     let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"[[ -d /tmp || -f /nonexistent ]] && echo "one""#).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().display();
+    let result = kernel.execute(&format!(r#"[[ -d {d} || -f /nonexistent_kaish_test ]] && echo "one""#)).await.unwrap();
     assert_eq!(result.out.trim(), "one", "OR with first true should pass: {}", result.out);
 }
 
 #[tokio::test]
 async fn test_compound_or_second_true() {
     let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"[[ -f /nonexistent || -d /tmp ]] && echo "one""#).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().display();
+    let result = kernel.execute(&format!(r#"[[ -f /nonexistent_kaish_test || -d {d} ]] && echo "one""#)).await.unwrap();
     assert_eq!(result.out.trim(), "one", "OR with second true should pass: {}", result.out);
 }
 
 #[tokio::test]
 async fn test_compound_or_both_false() {
     let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"[[ -f /nonexistent || -f /also_nonexistent ]] && echo "yes" || echo "no""#).await.unwrap();
+    let result = kernel.execute(r#"[[ -f /nonexistent_kaish_test || -f /also_nonexistent_kaish ]] && echo "yes" || echo "no""#).await.unwrap();
     assert_eq!(result.out.trim(), "no", "OR with both false should fail: {}", result.out);
 }
 
 #[tokio::test]
 async fn test_compound_not_true() {
     let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"[[ ! -f /nonexistent ]] && echo "correct""#).await.unwrap();
+    let result = kernel.execute(r#"[[ ! -f /nonexistent_kaish_test ]] && echo "correct""#).await.unwrap();
     assert_eq!(result.out.trim(), "correct", "NOT on false should be true: {}", result.out);
 }
 
 #[tokio::test]
 async fn test_compound_not_false() {
     let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"[[ ! -d /tmp ]] && echo "yes" || echo "no""#).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().display();
+    let result = kernel.execute(&format!(r#"[[ ! -d {d} ]] && echo "yes" || echo "no""#)).await.unwrap();
     assert_eq!(result.out.trim(), "no", "NOT on true should be false: {}", result.out);
 }
 
 #[tokio::test]
 async fn test_compound_double_not() {
     let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"[[ ! ! -d /tmp ]] && echo "yes" || echo "no""#).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().display();
+    let result = kernel.execute(&format!(r#"[[ ! ! -d {d} ]] && echo "yes" || echo "no""#)).await.unwrap();
     assert_eq!(result.out.trim(), "yes", "Double NOT should cancel out: {}", result.out);
 }
 
 #[tokio::test]
 async fn test_compound_not_with_and() {
     let kernel = Kernel::transient().unwrap();
-    // ! binds tighter than &&, so this is: (! -f /nonexistent) && (-d /tmp)
-    let result = kernel.execute(r#"[[ ! -f /nonexistent && -d /tmp ]] && echo "both""#).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().display();
+    // ! binds tighter than &&, so this is: (! -f /nonexistent) && (-d dir)
+    let result = kernel.execute(&format!(r#"[[ ! -f /nonexistent_kaish_test && -d {d} ]] && echo "both""#)).await.unwrap();
     assert_eq!(result.out.trim(), "both", "NOT with AND should work: {}", result.out);
 }
 
@@ -796,10 +839,14 @@ async fn test_compound_in_if() {
 #[tokio::test]
 async fn test_compound_precedence() {
     let kernel = Kernel::transient().unwrap();
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let a = dir_a.path().display();
+    let b = dir_b.path().display();
     // Precedence: || has lower precedence than &&
-    // [[ -f /x || -d /tmp && -d /home ]] = [[ -f /x || (-d /tmp && -d /home) ]]
+    // [[ -f /x || -d a && -d b ]] = [[ -f /x || (-d a && -d b) ]]
     // false || (true && true) = true
-    let result = kernel.execute(r#"[[ -f /nonexistent || -d /tmp && -d /home ]] && echo "yes" || echo "no""#).await.unwrap();
+    let result = kernel.execute(&format!(r#"[[ -f /nonexistent_kaish_test || -d {a} && -d {b} ]] && echo "yes" || echo "no""#)).await.unwrap();
     assert_eq!(result.out.trim(), "yes", "Precedence: && binds tighter than ||: {}", result.out);
 }
 
@@ -807,15 +854,17 @@ async fn test_compound_precedence() {
 async fn test_compound_short_circuit_and() {
     let kernel = Kernel::transient().unwrap();
     // If first fails, second shouldn't be evaluated (would error on /x)
-    let result = kernel.execute(r#"[[ -f /nonexistent && $(cat /nonexistent_file) == "x" ]] && echo "yes" || echo "no""#).await.unwrap();
+    let result = kernel.execute(r#"[[ -f /nonexistent_kaish_test && $(cat /nonexistent_file) == "x" ]] && echo "yes" || echo "no""#).await.unwrap();
     assert_eq!(result.out.trim(), "no", "AND should short-circuit: {}", result.out);
 }
 
 #[tokio::test]
 async fn test_compound_short_circuit_or() {
     let kernel = Kernel::transient().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().display();
     // If first succeeds, second shouldn't be evaluated
-    let result = kernel.execute(r#"[[ -d /tmp || $(cat /nonexistent_file) == "x" ]] && echo "yes" || echo "no""#).await.unwrap();
+    let result = kernel.execute(&format!(r#"[[ -d {d} || $(cat /nonexistent_file) == "x" ]] && echo "yes" || echo "no""#)).await.unwrap();
     assert_eq!(result.out.trim(), "yes", "OR should short-circuit: {}", result.out);
 }
 

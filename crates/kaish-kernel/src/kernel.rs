@@ -31,11 +31,11 @@ use tokio::sync::RwLock;
 
 use async_trait::async_trait;
 
-use crate::ast::{Arg, Command, Expr, Stmt, StringPart, ToolDef, Value, BinaryOp};
+use crate::ast::{Arg, Command, Expr, FileTestOp, Stmt, StringPart, TestExpr, ToolDef, Value, BinaryOp};
 use crate::backend::{BackendError, KernelBackend};
 use kaish_glob::glob_match;
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
-use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value, value_to_string, ControlFlow, ExecResult, Scope};
+use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value, value_to_bool, value_to_string, ControlFlow, ExecResult, Scope};
 use crate::parser::parse;
 use crate::scheduler::{drain_to_stream, is_bool_type, schema_param_lookup, stderr_stream, BoundedStream, JobManager, PipelineRunner, StderrReceiver, DEFAULT_STREAM_MAX_SIZE};
 use crate::tools::{extract_output_format, register_builtins, resolve_in_path, ExecContext, ToolArgs, ToolRegistry};
@@ -1190,15 +1190,7 @@ impl Kernel {
                 }
             }
             Stmt::Test(test_expr) => {
-                // Evaluate the test expression by wrapping in Expr::Test
-                let expr = crate::ast::Expr::Test(Box::new(test_expr.clone()));
-                let mut scope = self.scope.write().await;
-                let value = eval_expr(&expr, &mut scope)?;
-                drop(scope);
-                let is_true = match value {
-                    crate::ast::Value::Bool(b) => b,
-                    _ => false,
-                };
+                let is_true = self.eval_test_async(test_expr).await?;
                 if is_true {
                     Ok(ControlFlow::ok(ExecResult::success("")))
                 } else {
@@ -1876,10 +1868,7 @@ impl Kernel {
                 }
             }
             Expr::Test(test_expr) => {
-                // For test expressions, use the sync evaluator
-                let expr = Expr::Test(test_expr.clone());
-                let mut scope = self.scope.write().await;
-                eval_expr(&expr, &mut scope).map_err(|e| anyhow::anyhow!("{}", e))
+                Ok(Value::Bool(self.eval_test_async(test_expr).await?))
             }
             Expr::Positional(n) => {
                 let scope = self.scope.read().await;
@@ -1953,6 +1942,66 @@ impl Kernel {
     }
 
     /// Async helper to evaluate a StringPart.
+    /// Evaluate a `[[ ]]` test expression asynchronously, routing file tests
+    /// through the VFS backend instead of using raw `std::path`.
+    fn eval_test_async<'a>(&'a self, test_expr: &'a TestExpr) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + 'a>> {
+        Box::pin(async move {
+            match test_expr {
+                TestExpr::FileTest { op, path } => {
+                    let path_value = self.eval_expr_async(path).await?;
+                    let path_str = value_to_string(&path_value);
+                    let backend = self.exec_ctx.read().await.backend.clone();
+                    let entry = backend.stat(std::path::Path::new(&path_str)).await.ok();
+                    Ok(match op {
+                        FileTestOp::Exists => entry.is_some(),
+                        FileTestOp::IsFile => entry.as_ref().is_some_and(|e| e.is_file()),
+                        FileTestOp::IsDir => entry.as_ref().is_some_and(|e| e.is_dir()),
+                        FileTestOp::Readable => entry.is_some(),
+                        FileTestOp::Writable => entry.as_ref().is_some_and(|e| {
+                            e.permissions.is_none_or(|p| p & 0o222 != 0)
+                        }),
+                        FileTestOp::Executable => entry.as_ref().is_some_and(|e| {
+                            e.permissions.is_some_and(|p| p & 0o111 != 0)
+                        }),
+                    })
+                }
+                TestExpr::StringTest { op, value } => {
+                    let val = self.eval_expr_async(value).await?;
+                    let s = value_to_string(&val);
+                    Ok(match op {
+                        crate::ast::StringTestOp::IsEmpty => s.is_empty(),
+                        crate::ast::StringTestOp::IsNonEmpty => !s.is_empty(),
+                    })
+                }
+                TestExpr::Comparison { .. } => {
+                    // Delegate to sync evaluator for comparisons (no async needed)
+                    let expr = Expr::Test(Box::new(test_expr.clone()));
+                    let mut scope = self.scope.write().await;
+                    let value = eval_expr(&expr, &mut scope)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    Ok(value_to_bool(&value))
+                }
+                TestExpr::And { left, right } => {
+                    if !self.eval_test_async(left).await? {
+                        Ok(false)
+                    } else {
+                        self.eval_test_async(right).await
+                    }
+                }
+                TestExpr::Or { left, right } => {
+                    if self.eval_test_async(left).await? {
+                        Ok(true)
+                    } else {
+                        self.eval_test_async(right).await
+                    }
+                }
+                TestExpr::Not { expr } => {
+                    Ok(!self.eval_test_async(expr).await?)
+                }
+            }
+        })
+    }
+
     fn eval_string_part_async<'a>(&'a self, part: &'a StringPart) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(async move {
             match part {
