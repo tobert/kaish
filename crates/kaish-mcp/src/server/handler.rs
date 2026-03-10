@@ -415,7 +415,8 @@ impl rmcp::ServerHandler for KaishServerHandler {
                  • Destructive operations can require confirmation nonces (set -o latch)\n\
                  • External commands work via PATH (cargo build, git status, etc.)\n\n\
                  Tools:\n\
-                 • execute — Run commands. First time? Run `help builtins` to see what's available.\n\
+                 • execute — Run commands. First time? Run `help builtins` to see what's available.\n\n\
+                 Configuration:\n\
                  • --init <path> — load a .kai script before each command (set defaults, aliases, etc.). Repeatable.\n\n\
                  Resources available via `kaish://vfs/{path}` URIs."
                     .to_string(),
