@@ -205,11 +205,17 @@ Add to your MCP client configuration:
 {
   "mcpServers": {
     "kaish": {
-      "command": "kaish-mcp"
+      "command": "kaish-mcp",
+      "args": ["--init", "/home/you/.config/kaish/agent.kai"]
     }
   }
 }
 ```
+
+The `--init <path>` flag loads a `.kai` script before every `execute` call —
+aliases, safety options, environment setup. Repeatable (multiple `--init` flags
+load in order). Hot-reloaded: edit the file, next call picks up changes without
+restarting. Omit `args` entirely if no init scripts are needed.
 
 #### Tools
 

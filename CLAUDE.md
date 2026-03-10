@@ -115,7 +115,7 @@ crates/
 └── kaish-repl/      # Interactive REPL with rustyline
 ```
 
-**Note:** The `kaish-mcp` crate provides both MCP server (exposing kaish's execute tool) and MCP client (consuming external MCP tools) functionality.
+**Note:** The `kaish-mcp` crate provides both MCP server (exposing kaish's execute tool) and MCP client (consuming external MCP tools) functionality. The server binary accepts `--init <path>` (repeatable) to load `.kai` scripts before each `execute()` call — the MCP equivalent of `~/.bashrc`.
 
 
 ## Language Key Points
