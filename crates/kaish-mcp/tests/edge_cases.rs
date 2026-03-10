@@ -13,6 +13,7 @@ use kaish_mcp::{McpClient, McpConfig, McpTransport};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ExecuteResult {
     code: i64,
+    #[serde(default)]
     stdout: String,
     stderr: String,
     #[serde(default)]
@@ -20,6 +21,21 @@ struct ExecuteResult {
     ok: bool,
     #[serde(default)]
     output: Option<serde_json::Value>,
+}
+
+impl ExecuteResult {
+    /// Get the effective text output: stdout if present, otherwise data as string.
+    /// When `data` carries structured JSON, `stdout` is suppressed from MCP responses.
+    fn effective_stdout(&self) -> String {
+        if !self.stdout.is_empty() {
+            return self.stdout.clone();
+        }
+        match &self.data {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(v) => v.to_string(),
+            None => String::new(),
+        }
+    }
 }
 
 async fn cleanup(client: &McpClient) {
@@ -157,7 +173,7 @@ async fn test_negative_numbers() {
     let client = create_client().await.unwrap();
     let result = execute(&client, "echo $((-5 + 3))").await.unwrap();
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "-2");
+    assert_eq!(result.effective_stdout().trim(), "-2");
     cleanup(&client).await;
 }
 
@@ -167,7 +183,7 @@ async fn test_large_numbers() {
     // i64 max is 9223372036854775807
     let result = execute(&client, "echo $((9223372036854775807))").await.unwrap();
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "9223372036854775807");
+    assert_eq!(result.effective_stdout().trim(), "9223372036854775807");
     cleanup(&client).await;
 }
 
@@ -346,7 +362,7 @@ async fn test_dollar_dollar_pid() {
     let result = execute(&client, "echo $$").await.unwrap();
     assert!(result.ok);
     // Should be a number
-    let pid: i64 = result.stdout.trim().parse().expect("$$ should be a number");
+    let pid: i64 = result.effective_stdout().trim().parse().expect("$$ should be a number");
     assert!(pid > 0, "$$ should be positive");
     cleanup(&client).await;
 }
@@ -409,7 +425,7 @@ async fn test_deeply_nested_arithmetic() {
     let result = execute(&client, "echo $((((((1 + 2) * 3) - 4) / 2) + 1))").await.unwrap();
     assert!(result.ok);
     // ((((1+2)*3)-4)/2)+1 = (((3*3)-4)/2)+1 = ((9-4)/2)+1 = (5/2)+1 = 2+1 = 3
-    assert_eq!(result.stdout.trim(), "3");
+    assert_eq!(result.effective_stdout().trim(), "3");
     cleanup(&client).await;
 }
 

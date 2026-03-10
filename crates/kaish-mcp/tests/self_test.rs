@@ -15,6 +15,7 @@ use kaish_mcp::{McpClient, McpConfig, McpTransport};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ExecuteResult {
     code: i64,
+    #[serde(default)]
     stdout: String,
     stderr: String,
     #[serde(default)]
@@ -22,6 +23,21 @@ struct ExecuteResult {
     ok: bool,
     #[serde(default)]
     output: Option<serde_json::Value>,
+}
+
+impl ExecuteResult {
+    /// Get the effective text output: stdout if present, otherwise data as string.
+    /// When `data` carries structured JSON, `stdout` is suppressed from MCP responses.
+    fn effective_stdout(&self) -> String {
+        if !self.stdout.is_empty() {
+            return self.stdout.clone();
+        }
+        match &self.data {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(v) => v.to_string(),
+            None => String::new(),
+        }
+    }
 }
 
 async fn cleanup(client: &McpClient) {
@@ -110,7 +126,7 @@ async fn test_basic_echo() {
 
     assert!(result.ok, "command should succeed");
     assert_eq!(result.code, 0);
-    assert_eq!(result.stdout.trim(), "hello");
+    assert_eq!(result.effective_stdout().trim(), "hello");
     cleanup(&client).await;
 }
 
@@ -132,7 +148,7 @@ async fn test_env_vars() {
     .expect("execute failed");
 
     assert!(result.ok, "command should succeed");
-    assert_eq!(result.stdout.trim(), "hello world");
+    assert_eq!(result.effective_stdout().trim(), "hello world");
     cleanup(&client).await;
 }
 
@@ -161,21 +177,21 @@ async fn test_arithmetic() {
         .await
         .expect("execute failed");
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "3");
+    assert_eq!(result.effective_stdout().trim(), "3");
 
     // More complex expression
     let result = execute_script(&client, "echo $((2 * 3 + 4))")
         .await
         .expect("execute failed");
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "10");
+    assert_eq!(result.effective_stdout().trim(), "10");
 
     // Variable in arithmetic
     let result = execute_script(&client, "X=5; echo $((X * 2))")
         .await
         .expect("execute failed");
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "10");
+    assert_eq!(result.effective_stdout().trim(), "10");
     cleanup(&client).await;
 }
 
@@ -199,7 +215,7 @@ async fn test_control_flow_if() {
     .expect("execute failed");
 
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "big");
+    assert_eq!(result.effective_stdout().trim(), "big");
     cleanup(&client).await;
 }
 
@@ -221,8 +237,8 @@ async fn test_control_flow_for() {
 
     assert!(result.ok);
     // Filter empty lines since loop output may have extra newlines
-    let lines: Vec<_> = result
-        .stdout
+    let out = result.effective_stdout();
+    let lines: Vec<_> = out
         .trim()
         .lines()
         .filter(|l| !l.is_empty())
@@ -251,8 +267,8 @@ async fn test_control_flow_while() {
 
     assert!(result.ok);
     // Filter empty lines since loop output may have extra newlines
-    let lines: Vec<_> = result
-        .stdout
+    let out = result.effective_stdout();
+    let lines: Vec<_> = out
         .trim()
         .lines()
         .filter(|l| !l.is_empty())
@@ -311,7 +327,7 @@ async fn test_multiple_executions() {
             .expect("execute failed");
 
         assert!(result.ok);
-        assert_eq!(result.stdout.trim(), i.to_string());
+        assert_eq!(result.effective_stdout().trim(), i.to_string());
     }
     cleanup(&client).await;
 }
@@ -332,7 +348,7 @@ async fn test_exit_status_variable() {
     .expect("execute failed");
 
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "0");
+    assert_eq!(result.effective_stdout().trim(), "0");
 
     let result = execute_script(
         &client,
@@ -346,7 +362,7 @@ async fn test_exit_status_variable() {
 
     // Note: The final exit status is 0 because echo succeeded
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "1");
+    assert_eq!(result.effective_stdout().trim(), "1");
     cleanup(&client).await;
 }
 
@@ -360,7 +376,7 @@ async fn test_default_value_expansion() {
         .expect("execute failed");
 
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "default");
+    assert_eq!(result.effective_stdout().trim(), "default");
 
     // Variable with default when set
     let result = execute_script(&client, r#"MYVAR=actual; echo "${MYVAR:-default}""#)
@@ -368,7 +384,7 @@ async fn test_default_value_expansion() {
         .expect("execute failed");
 
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "actual");
+    assert_eq!(result.effective_stdout().trim(), "actual");
     cleanup(&client).await;
 }
 
@@ -381,7 +397,7 @@ async fn test_string_length() {
         .expect("execute failed");
 
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "5");
+    assert_eq!(result.effective_stdout().trim(), "5");
     cleanup(&client).await;
 }
 
@@ -394,7 +410,7 @@ async fn test_printf_builtin() {
         .expect("execute failed");
 
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "hello 42");
+    assert_eq!(result.effective_stdout().trim(), "hello 42");
     cleanup(&client).await;
 }
 
@@ -405,12 +421,12 @@ async fn test_true_false_builtins() {
     let result = execute_script(&client, "true; echo $?")
         .await
         .expect("execute failed");
-    assert_eq!(result.stdout.trim(), "0");
+    assert_eq!(result.effective_stdout().trim(), "0");
 
     let result = execute_script(&client, "false; echo $?")
         .await
         .expect("execute failed");
-    assert_eq!(result.stdout.trim(), "1");
+    assert_eq!(result.effective_stdout().trim(), "1");
     cleanup(&client).await;
 }
 
@@ -424,7 +440,7 @@ async fn test_variable_assignment_and_expansion() {
         .expect("execute failed");
 
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "bar");
+    assert_eq!(result.effective_stdout().trim(), "bar");
 
     // Chained assignments
     let result = execute_script(&client, "A=1; B=2; C=$((A + B)); echo ${C}")
@@ -432,7 +448,7 @@ async fn test_variable_assignment_and_expansion() {
         .expect("execute failed");
 
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "3");
+    assert_eq!(result.effective_stdout().trim(), "3");
     cleanup(&client).await;
 }
 
@@ -446,7 +462,7 @@ async fn test_quoted_strings() {
         .expect("execute failed");
 
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "hello ${VAR}");
+    assert_eq!(result.effective_stdout().trim(), "hello ${VAR}");
 
     // Double quotes (interpolated)
     let result = execute_script(&client, r#"VAR=world; echo "hello ${VAR}""#)
@@ -454,7 +470,7 @@ async fn test_quoted_strings() {
         .expect("execute failed");
 
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "hello world");
+    assert_eq!(result.effective_stdout().trim(), "hello world");
     cleanup(&client).await;
 }
 
@@ -477,7 +493,7 @@ async fn test_pipeline() {
         .expect("execute failed");
 
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "hello world");
+    assert_eq!(result.effective_stdout().trim(), "hello world");
     cleanup(&client).await;
 }
 
@@ -490,13 +506,13 @@ async fn test_command_chaining_and() {
         .await
         .expect("execute failed");
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "success");
+    assert_eq!(result.effective_stdout().trim(), "success");
 
     let result = execute_script(&client, "false && echo success")
         .await
         .expect("execute failed");
     assert!(!result.ok);
-    assert!(result.stdout.is_empty() || result.stdout.trim().is_empty());
+    assert!(result.stdout.is_empty() || result.effective_stdout().trim().is_empty());
     cleanup(&client).await;
 }
 
@@ -509,12 +525,12 @@ async fn test_command_chaining_or() {
         .await
         .expect("execute failed");
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "fallback");
+    assert_eq!(result.effective_stdout().trim(), "fallback");
 
     let result = execute_script(&client, "true || echo fallback")
         .await
         .expect("execute failed");
     assert!(result.ok);
-    assert!(result.stdout.is_empty() || result.stdout.trim().is_empty());
+    assert!(result.stdout.is_empty() || result.effective_stdout().trim().is_empty());
     cleanup(&client).await;
 }

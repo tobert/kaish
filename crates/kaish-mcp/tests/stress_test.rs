@@ -11,6 +11,7 @@ use kaish_mcp::{McpClient, McpConfig, McpTransport};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ExecuteResult {
     code: i64,
+    #[serde(default)]
     stdout: String,
     stderr: String,
     #[serde(default)]
@@ -18,6 +19,21 @@ struct ExecuteResult {
     ok: bool,
     #[serde(default)]
     output: Option<serde_json::Value>,
+}
+
+impl ExecuteResult {
+    /// Get the effective text output: stdout if present, otherwise data as string.
+    /// When `data` carries structured JSON, `stdout` is suppressed from MCP responses.
+    fn effective_stdout(&self) -> String {
+        if !self.stdout.is_empty() {
+            return self.stdout.clone();
+        }
+        match &self.data {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(v) => v.to_string(),
+            None => String::new(),
+        }
+    }
 }
 
 async fn cleanup(client: &McpClient) {
@@ -86,7 +102,7 @@ async fn test_many_variables() {
     script.push_str("echo done");
     let result = execute(&client, &script).await.unwrap();
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "done");
+    assert_eq!(result.effective_stdout().trim(), "done");
     cleanup(&client).await;
 }
 
@@ -97,7 +113,7 @@ async fn test_deeply_nested_braces() {
     let script = r#"echo "${A:-${B:-${C:-${D:-${E:-deep}}}}}""#;
     let result = execute(&client, &script).await.unwrap();
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "deep");
+    assert_eq!(result.effective_stdout().trim(), "deep");
     cleanup(&client).await;
 }
 
@@ -111,7 +127,7 @@ async fn test_many_pipes() {
     }
     let result = execute(&client, &script).await.unwrap();
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "hello");
+    assert_eq!(result.effective_stdout().trim(), "hello");
     cleanup(&client).await;
 }
 
@@ -122,7 +138,8 @@ async fn test_many_semicolons_stress() {
     let script = (0..1000).map(|i| format!("echo {}", i)).collect::<Vec<_>>().join("; ");
     let result = execute(&client, &script).await.unwrap();
     assert!(result.ok);
-    let lines: Vec<_> = result.stdout.trim().lines().filter(|l| !l.is_empty()).collect();
+    let out = result.effective_stdout();
+    let lines: Vec<_> = out.trim().lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(lines.len(), 1000);
     cleanup(&client).await;
 }
@@ -137,7 +154,7 @@ async fn test_equals_in_value() {
     // The value itself contains =
     let result = execute(&client, r#"URL="http://example.com?foo=bar"; echo ${URL}"#).await.unwrap();
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "http://example.com?foo=bar");
+    assert_eq!(result.effective_stdout().trim(), "http://example.com?foo=bar");
     cleanup(&client).await;
 }
 
@@ -183,7 +200,7 @@ async fn test_hash_in_string() {
     // # normally starts a comment, but not in quotes
     let result = execute(&client, r#"echo "hashtag #yolo""#).await.unwrap();
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "hashtag #yolo");
+    assert_eq!(result.effective_stdout().trim(), "hashtag #yolo");
     cleanup(&client).await;
 }
 
@@ -192,7 +209,7 @@ async fn test_semicolon_in_string() {
     let client = create_client().await.unwrap();
     let result = execute(&client, r#"echo "a;b;c""#).await.unwrap();
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "a;b;c");
+    assert_eq!(result.effective_stdout().trim(), "a;b;c");
     cleanup(&client).await;
 }
 
@@ -201,7 +218,7 @@ async fn test_pipe_in_string() {
     let client = create_client().await.unwrap();
     let result = execute(&client, r#"echo "a|b|c""#).await.unwrap();
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "a|b|c");
+    assert_eq!(result.effective_stdout().trim(), "a|b|c");
     cleanup(&client).await;
 }
 
@@ -215,7 +232,7 @@ async fn test_complex_arithmetic() {
     let result = execute(&client, "echo $((1+2*3-4/2+5%3))").await.unwrap();
     // 1 + 6 - 2 + 2 = 7
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "7");
+    assert_eq!(result.effective_stdout().trim(), "7");
     cleanup(&client).await;
 }
 
@@ -225,7 +242,7 @@ async fn test_arithmetic_with_parens() {
     let result = execute(&client, "echo $(((1+2)*(3+4)))").await.unwrap();
     // 3 * 7 = 21
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "21");
+    assert_eq!(result.effective_stdout().trim(), "21");
     cleanup(&client).await;
 }
 
@@ -234,7 +251,7 @@ async fn test_negative_result() {
     let client = create_client().await.unwrap();
     let result = execute(&client, "echo $((5 - 10))").await.unwrap();
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "-5");
+    assert_eq!(result.effective_stdout().trim(), "-5");
     cleanup(&client).await;
 }
 
@@ -264,7 +281,7 @@ async fn test_nested_if() {
         fi
     "#).await.unwrap();
     assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "deep");
+    assert_eq!(result.effective_stdout().trim(), "deep");
     cleanup(&client).await;
 }
 
@@ -279,7 +296,8 @@ async fn test_nested_loops() {
         done
     "#).await.unwrap();
     assert!(result.ok);
-    let lines: Vec<_> = result.stdout.trim().lines().filter(|l| !l.is_empty()).collect();
+    let out = result.effective_stdout();
+    let lines: Vec<_> = out.trim().lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(lines, vec!["1a", "1b", "2a", "2b"]);
     cleanup(&client).await;
 }
@@ -296,7 +314,8 @@ async fn test_break_in_loop() {
         done
     "#).await.unwrap();
     assert!(result.ok);
-    let lines: Vec<_> = result.stdout.trim().lines().filter(|l| !l.is_empty()).collect();
+    let out = result.effective_stdout();
+    let lines: Vec<_> = out.trim().lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(lines, vec!["1", "2"]);
     cleanup(&client).await;
 }
@@ -313,7 +332,8 @@ async fn test_continue_in_loop() {
         done
     "#).await.unwrap();
     assert!(result.ok);
-    let lines: Vec<_> = result.stdout.trim().lines().filter(|l| !l.is_empty()).collect();
+    let out = result.effective_stdout();
+    let lines: Vec<_> = out.trim().lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(lines, vec!["1", "2", "4", "5"]);
     cleanup(&client).await;
 }
@@ -329,7 +349,7 @@ async fn test_rapid_fire_100() {
     for i in 0..100 {
         let result = execute(&client, &format!("echo {}", i)).await.unwrap();
         assert!(result.ok, "Failed at iteration {}", i);
-        assert_eq!(result.stdout.trim(), i.to_string());
+        assert_eq!(result.effective_stdout().trim(), i.to_string());
     }
     cleanup(&client).await;
 }

@@ -47,7 +47,8 @@ pub struct ExecuteResult {
     /// Exit code (0 = success).
     pub code: i64,
 
-    /// Standard output.
+    /// Standard output. Omitted from structured_content when `data` carries the same info.
+    #[serde(default)]
     pub stdout: String,
 
     /// Standard error.

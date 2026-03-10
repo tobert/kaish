@@ -263,8 +263,22 @@ impl KaishServerHandler {
         }
 
         let structured_content = {
-            let structured = serde_json::to_value(&result)
+            let mut structured = serde_json::to_value(&result)
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            // When `data` is the structured form of exactly what's in `stdout`,
+            // suppress `stdout` to avoid redundant escaped-string noise.
+            // Compare trimmed stdout against compact JSON of data — they match
+            // for --json results and single-value JSON, but NOT for accumulated
+            // output (e.g., for-loop "1\n2\n3\n" ≠ data "3").
+            if let Some(ref data) = result.data {
+                if let Ok(data_json) = serde_json::to_string(data) {
+                    if result.stdout.trim() == data_json {
+                        if let Some(obj) = structured.as_object_mut() {
+                            obj.remove("stdout");
+                        }
+                    }
+                }
+            }
             Some(structured)
         };
 

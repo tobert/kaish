@@ -482,15 +482,18 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
     }
     match format {
         OutputFormat::Json => {
-            let json_str = if let Some(ref output) = result.output {
-                serde_json::to_string_pretty(&output.to_json())
-                    .unwrap_or_else(|_| "null".to_string())
+            if let Some(ref output) = result.output {
+                let json_value = output.to_json();
+                result.out = serde_json::to_string(&json_value)
+                    .unwrap_or_else(|_| "null".to_string());
+                result.data = Some(crate::result::json_to_value(json_value));
             } else {
-                // Text-only: wrap as JSON string
-                serde_json::to_string(&*result.text_out())
-                    .unwrap_or_else(|_| "null".to_string())
-            };
-            result.out = json_str;
+                // Text-only: wrap as JSON string, try parse for data
+                let text = result.text_out().into_owned();
+                result.out = serde_json::to_string(&text)
+                    .unwrap_or_else(|_| "null".to_string());
+                result.data = ExecResult::try_parse_json(&result.out);
+            }
             // Clear sentinel — format already applied, prevents double-encoding
             result.output = None;
             result
@@ -607,5 +610,39 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(&json_out).expect("valid JSON");
         assert_eq!(parsed, serde_json::json!(["file1", "file2"]));
+    }
+
+    #[test]
+    fn apply_output_format_populates_data() {
+        let output = OutputData::nodes(vec![
+            OutputNode::new("file1"),
+            OutputNode::new("file2"),
+        ]);
+        let result = ExecResult::with_output(output);
+        assert!(result.data.is_none(), "before: no data on non-text output");
+
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        assert!(formatted.data.is_some(), "after Json: data populated");
+
+        // data should match the JSON in out
+        let data = formatted.data.unwrap();
+        assert!(matches!(data, crate::value::Value::Json(_)), "data should be Json variant");
+        if let crate::value::Value::Json(json) = data {
+            assert_eq!(json, serde_json::json!(["file1", "file2"]));
+        }
+    }
+
+    #[test]
+    fn apply_output_format_compact_json() {
+        let output = OutputData::nodes(vec![
+            OutputNode::new("file1"),
+            OutputNode::new("file2"),
+        ]);
+        let result = ExecResult::with_output(output);
+
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        // Compact JSON: no pretty-printing (no newlines within the array)
+        assert!(!formatted.out.contains('\n'), "should be compact JSON, got: {}", formatted.out);
+        assert_eq!(formatted.out, r#"["file1","file2"]"#);
     }
 }

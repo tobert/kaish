@@ -199,7 +199,7 @@ impl ExecResult {
     }
 
     /// Try to parse a string as JSON, returning a Value if successful.
-    fn try_parse_json(s: &str) -> Option<Value> {
+    pub(crate) fn try_parse_json(s: &str) -> Option<Value> {
         let trimmed = s.trim();
         if trimmed.is_empty() {
             return None;
