@@ -16,7 +16,6 @@
 
 | Limitation | Details | Workaround |
 |-----------|---------|------------|
-| `case` with path-like patterns | Glob patterns like `/tmp/[a-z]*` are lexed as a single Path token | Use quoted strings: `"/tmp/"*` |
 | `[[ ]]` parsed as two brackets | Two separate `[` tokens, not a compound keyword | Works for tests; kaish will never have `[]` array syntax |
 | Keywords as bare arguments | `echo done` may fail because `done` is a keyword token | Quote: `echo "done"` |
 

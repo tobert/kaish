@@ -160,7 +160,7 @@ done
 case $VAR in
     hello) echo "matched hello" ;;
     *.rs) echo "Rust file" ;;
-    y|yes) echo "yes" ;;
+    start|run) echo "starting" ;;
     *) echo "default" ;;
 esac
 
@@ -347,7 +347,7 @@ done
 
 Glob expansion is enabled by default (`set -o glob`). Disable it with `set +o glob` to pass patterns literally to tools (the pre-v0.4 behavior).
 
-If a glob matches zero files, the command fails with an error rather than passing the literal pattern through. This prevents silent bugs where a typo in a pattern goes undetected.
+If a glob matches zero files, the command fails with exit code 1 rather than passing the literal pattern through. This prevents silent bugs where a typo in a pattern goes undetected.
 
 The `glob` builtin still works for advanced options like `--exclude` and recursive `**` patterns:
 

@@ -4210,9 +4210,9 @@ AFTER="yes"'"#)
         let result = kernel
             .execute(r#"
                 case "main.rs" in
-                    "*.py") echo "Python" ;;
-                    "*.rs") echo "Rust" ;;
-                    "*") echo "Unknown" ;;
+                    *.py) echo "Python" ;;
+                    *.rs) echo "Rust" ;;
+                    *) echo "Unknown" ;;
                 esac
             "#)
             .await
@@ -4229,9 +4229,9 @@ AFTER="yes"'"#)
         let result = kernel
             .execute(r#"
                 case "unknown.xyz" in
-                    "*.py") echo "Python" ;;
-                    "*.rs") echo "Rust" ;;
-                    "*") echo "Default" ;;
+                    *.py) echo "Python" ;;
+                    *.rs) echo "Rust" ;;
+                    *) echo "Default" ;;
                 esac
             "#)
             .await
@@ -4306,8 +4306,8 @@ AFTER="yes"'"#)
         let result = kernel
             .execute(r#"
                 case "test1" in
-                    "test?") echo "matched test?" ;;
-                    "*") echo "default" ;;
+                    test?) echo "matched test?" ;;
+                    *) echo "default" ;;
                 esac
             "#)
             .await
@@ -4324,8 +4324,8 @@ AFTER="yes"'"#)
         let result = kernel
             .execute(r#"
                 case "Yes" in
-                    "[Yy]*") echo "yes-like" ;;
-                    "[Nn]*") echo "no-like" ;;
+                    [Yy]*) echo "yes-like" ;;
+                    [Nn]*) echo "no-like" ;;
                 esac
             "#)
             .await

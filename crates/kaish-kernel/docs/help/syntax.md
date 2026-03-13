@@ -133,7 +133,7 @@ set +o glob               # disable bare glob expansion
 set -o glob               # re-enable (on by default)
 ```
 
-Zero matches is an error. The `glob` builtin still works for `--exclude` and `**`.
+Zero matches is an error (exit code 1). The `glob` builtin still works for `--exclude` and `**`.
 
 ## Shell Options
 
