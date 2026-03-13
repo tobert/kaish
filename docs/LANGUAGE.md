@@ -193,8 +193,8 @@ for i in $(seq 1 5); do
     echo "Number: $i"
 done
 
-# glob returns a JSON array — iterates over files
-for f in $(glob "*.rs"); do
+# bare glob — expands to matching files
+for f in *.rs; do
     echo "File: $f"
 done
 
@@ -292,8 +292,10 @@ echo $((A > B))                 # 1
 set -e                          # exit on first error
 set -o latch                    # require nonce confirmation for destructive rm
 set -o trash                    # move rm'd files to freedesktop.org Trash
+set -o glob                     # enable bare glob expansion (on by default)
 set +o latch                    # disable latch
 set +o trash                    # disable trash
+set +o glob                     # disable bare glob expansion
 ```
 
 Options compose orthogonally: with both enabled, small files go to Trash
@@ -330,6 +332,28 @@ Frontends control persistence:
   connection, so a nonce issued in one call can be confirmed in the next.
 - **Embedders** — pass a shared store via `KernelConfig::with_nonce_store()`
   to get cross-call persistence, or accept the default (fresh per kernel).
+
+## Glob Expansion
+
+Bare glob patterns in argument positions are expanded to matching files before the command runs:
+
+```bash
+ls *.txt                        # expands to all .txt files in cwd
+cat src/*.rs                    # expands to .rs files in src/
+for f in *.json; do             # iterates over matching files
+    jq ".name" "$f"
+done
+```
+
+Glob expansion is enabled by default (`set -o glob`). Disable it with `set +o glob` to pass patterns literally to tools (the pre-v0.4 behavior).
+
+If a glob matches zero files, the command fails with an error rather than passing the literal pattern through. This prevents silent bugs where a typo in a pattern goes undetected.
+
+The `glob` builtin still works for advanced options like `--exclude` and recursive `**` patterns:
+
+```bash
+glob "**/*.rs" --exclude="*_test.rs"
+```
 
 ## Error Handling
 
@@ -508,7 +532,6 @@ These bash features are omitted because they're confusing, error-prone, or ambig
 | Feature | Reason | ShellCheck |
 |---------|--------|------------|
 | Shell brace expansion `echo {a,b,c}` | Tools support globs with braces internally | SC1083 |
-| Shell glob expansion `*.txt` | Tools handle their own patterns | SC2035 |
 | Process substitution `<(cmd)` | Use temp files | — |
 | Backtick substitution `` `cmd` `` | Use `$(cmd)` | SC2006 |
 | Single bracket tests `[ ]` | Supported; prefer `[[ ]]` | SC2039 |
@@ -518,14 +541,14 @@ These bash features are omitted because they're confusing, error-prone, or ambig
 
 **The Bourne-compatible subset of kaish passes `shellcheck --enable=all`.**
 
-Features that ShellCheck warns about (word splitting, glob expansion, backticks) don't exist in kaish.
+Features that ShellCheck warns about (word splitting, backticks) don't exist in kaish. Glob expansion is supported but controllable via `set +o glob`.
 
 | SC Code | Warning | Kaish Approach |
 |---------|---------|----------------|
 | SC2006 | Use `$()` instead of backticks | Backticks don't exist |
 | SC2086 | Double quote to prevent word splitting | No implicit word splitting — use `split` explicitly |
 | SC2046 | Quote this to prevent word splitting | `$(cmd)` returns structured data or single string |
-| SC2035 | Use `./*` so globs don't expand | No glob expansion |
+| SC2035 | Use `./*` so globs don't expand | Bare globs expand; use `set +o glob` to disable |
 | SC2039 | Use `[[ ]]` in POSIX sh | Only `[[ ]]` exists |
 | SC1083 | Escape literal braces | No shell-level brace expansion |
 

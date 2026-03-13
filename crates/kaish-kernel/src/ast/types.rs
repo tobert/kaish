@@ -249,6 +249,8 @@ pub enum Expr {
     LastExitCode,
     /// Current shell PID: `$$`
     CurrentPid,
+    /// Bare glob pattern: `*.txt`, `src/**/*.rs` — expanded during arg building
+    GlobPattern(String),
 }
 
 /// Test expression for `[[ ... ]]` conditionals.

@@ -49,6 +49,8 @@ pub struct Scope {
     /// Maximum file size (bytes) for trash. Files larger than this bypass trash.
     /// Default: 10 MB.
     trash_max_size: u64,
+    /// Glob expansion mode (set -o glob): expand bare glob patterns in arguments.
+    glob_enabled: bool,
     /// Current process ID ($$), captured at scope creation.
     pid: u32,
 }
@@ -68,6 +70,7 @@ impl Scope {
             latch_enabled: false,
             trash_enabled: false,
             trash_max_size: 10 * 1024 * 1024, // 10 MB
+            glob_enabled: true,
             pid: std::process::id(),
         }
     }
@@ -258,6 +261,16 @@ impl Scope {
     /// Set the maximum file size for trash (bytes).
     pub fn set_trash_max_size(&mut self, size: u64) {
         self.trash_max_size = size;
+    }
+
+    /// Check if glob expansion is enabled (set -o glob, default true).
+    pub fn glob_enabled(&self) -> bool {
+        self.glob_enabled
+    }
+
+    /// Set glob expansion mode (set -o glob / set +o glob).
+    pub fn set_glob_enabled(&mut self, enabled: bool) {
+        self.glob_enabled = enabled;
     }
 
     /// Mark a variable as exported (visible to child processes).

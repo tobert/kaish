@@ -896,6 +896,36 @@ impl Kernel {
                 // Use async evaluator to support command substitution like $(seq 1 5)
                 let mut items: Vec<Value> = Vec::new();
                 for item_expr in &for_loop.items {
+                    // Glob expansion in for-loop items: `for f in *.txt`
+                    if let Expr::GlobPattern(pattern) = item_expr {
+                        let glob_enabled = {
+                            let scope = self.scope.read().await;
+                            scope.glob_enabled()
+                        };
+                        if glob_enabled {
+                            let (paths, cwd) = {
+                                let ctx = self.exec_ctx.read().await;
+                                let paths = ctx.expand_glob(pattern).await
+                                    .map_err(|e| anyhow::anyhow!("glob: {}", e))?;
+                                let cwd = ctx.resolve_path(".");
+                                (paths, cwd)
+                            };
+                            if paths.is_empty() {
+                                return Err(anyhow::anyhow!("no matches: {}", pattern));
+                            }
+                            for path in paths {
+                                let display = if !pattern.starts_with('/') {
+                                    path.strip_prefix(&cwd)
+                                        .unwrap_or(&path)
+                                        .to_string_lossy().into_owned()
+                                } else {
+                                    path.to_string_lossy().into_owned()
+                                };
+                                items.push(Value::String(display));
+                            }
+                            continue;
+                        }
+                    }
                     let item = self.eval_expr_async(item_expr).await?;
                     // NO implicit word splitting - arrays iterate, strings stay whole
                     match &item {
@@ -1596,6 +1626,37 @@ impl Kernel {
                 }
                 Arg::Positional(expr) => {
                     if !consumed.contains(&i) {
+                        // Glob expansion: bare glob patterns expand to matching files
+                        if let Expr::GlobPattern(pattern) = expr {
+                            let glob_enabled = {
+                                let scope = self.scope.read().await;
+                                scope.glob_enabled()
+                            };
+                            if glob_enabled {
+                                let (paths, cwd) = {
+                                    let ctx = self.exec_ctx.read().await;
+                                    let paths = ctx.expand_glob(pattern).await
+                                        .map_err(|e| anyhow::anyhow!("glob: {}", e))?;
+                                    let cwd = ctx.resolve_path(".");
+                                    (paths, cwd)
+                                };
+                                if paths.is_empty() {
+                                    return Err(anyhow::anyhow!("no matches: {}", pattern));
+                                }
+                                for path in paths {
+                                    let display = if !pattern.starts_with('/') {
+                                        path.strip_prefix(&cwd)
+                                            .unwrap_or(&path)
+                                            .to_string_lossy().into_owned()
+                                    } else {
+                                        path.to_string_lossy().into_owned()
+                                    };
+                                    tool_args.positional.push(Value::String(display));
+                                }
+                                i += 1;
+                                continue;
+                            }
+                        }
                         let value = self.eval_expr_async(expr).await?;
                         let value = apply_tilde_expansion(value);
                         tool_args.positional.push(value);
@@ -1748,6 +1809,36 @@ impl Kernel {
         for arg in args {
             match arg {
                 Arg::Positional(expr) => {
+                    // Glob expansion for external commands
+                    if let Expr::GlobPattern(pattern) = expr {
+                        let glob_enabled = {
+                            let scope = self.scope.read().await;
+                            scope.glob_enabled()
+                        };
+                        if glob_enabled {
+                            let (paths, cwd) = {
+                                let ctx = self.exec_ctx.read().await;
+                                let paths = ctx.expand_glob(pattern).await
+                                    .map_err(|e| anyhow::anyhow!("glob: {}", e))?;
+                                let cwd = ctx.resolve_path(".");
+                                (paths, cwd)
+                            };
+                            if paths.is_empty() {
+                                return Err(anyhow::anyhow!("no matches: {}", pattern));
+                            }
+                            for path in paths {
+                                let display = if !pattern.starts_with('/') {
+                                    path.strip_prefix(&cwd)
+                                        .unwrap_or(&path)
+                                        .to_string_lossy().into_owned()
+                                } else {
+                                    path.to_string_lossy().into_owned()
+                                };
+                                argv.push(display);
+                            }
+                            continue;
+                        }
+                    }
                     let value = self.eval_expr_async(expr).await?;
                     let value = apply_tilde_expansion(value);
                     argv.push(value_to_string(&value));
@@ -1930,6 +2021,7 @@ impl Kernel {
                 let scope = self.scope.read().await;
                 Ok(Value::Int(scope.pid() as i64))
             }
+            Expr::GlobPattern(s) => Ok(Value::String(s.clone())),
         }
         })
     }
@@ -4806,6 +4898,124 @@ AFTER="yes"'"#)
         assert_eq!(result.out.trim(), "2", "Should iterate 2 files, got: {}", result.out);
         kernel.execute(&format!("rm {dir}/a.txt")).await.unwrap();
         kernel.execute(&format!("rm {dir}/b.txt")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_bare_glob_expansion_echo() {
+        let kernel = Kernel::transient().expect("kernel");
+        let dir = format!("/tmp/kaish_test_bareglob_{}", std::process::id());
+        kernel.execute(&format!("mkdir -p {dir}")).await.unwrap();
+        kernel.execute(&format!("echo a > {dir}/a.txt")).await.unwrap();
+        kernel.execute(&format!("echo b > {dir}/b.txt")).await.unwrap();
+        kernel.execute(&format!("echo c > {dir}/c.rs")).await.unwrap();
+        kernel.execute(&format!("cd {dir}")).await.unwrap();
+        let result = kernel.execute("echo *.txt").await.unwrap();
+        assert!(result.ok(), "echo *.txt failed: {}", result.err);
+        let out = result.out.trim();
+        // Should contain both .txt files (order may vary)
+        assert!(out.contains("a.txt"), "missing a.txt in: {}", out);
+        assert!(out.contains("b.txt"), "missing b.txt in: {}", out);
+        assert!(!out.contains("c.rs"), "should not contain c.rs in: {}", out);
+        // cleanup
+        kernel.execute(&format!("rm {dir}/a.txt")).await.unwrap();
+        kernel.execute(&format!("rm {dir}/b.txt")).await.unwrap();
+        kernel.execute(&format!("rm {dir}/c.rs")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_bare_glob_no_matches_errors() {
+        let kernel = Kernel::transient().expect("kernel");
+        let dir = format!("/tmp/kaish_test_bareglob_nomatch_{}", std::process::id());
+        kernel.execute(&format!("mkdir -p {dir}")).await.unwrap();
+        kernel.execute(&format!("cd {dir}")).await.unwrap();
+        let result = kernel.execute("echo *.nonexistent").await;
+        match &result {
+            Ok(exec) => {
+                // No-match glob should produce a non-zero exit code
+                assert!(!exec.ok(), "expected failure, got success: out={}, err={}", exec.out, exec.err);
+                assert!(exec.err.contains("no matches"), "error should say no matches: {}", exec.err);
+            }
+            Err(e) => {
+                assert!(e.to_string().contains("no matches"), "error should say no matches: {}", e);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bare_glob_disabled_with_set() {
+        let kernel = Kernel::transient().expect("kernel");
+        let dir = format!("/tmp/kaish_test_bareglob_noglob_{}", std::process::id());
+        kernel.execute(&format!("mkdir -p {dir}")).await.unwrap();
+        kernel.execute(&format!("echo a > {dir}/a.txt")).await.unwrap();
+        kernel.execute(&format!("cd {dir}")).await.unwrap();
+        // Disable glob expansion
+        kernel.execute("set +o glob").await.unwrap();
+        let result = kernel.execute("echo *.txt").await.unwrap();
+        // With glob disabled, *.txt should be passed as literal string
+        assert!(result.ok(), "echo should succeed: {}", result.err);
+        assert_eq!(result.out.trim(), "*.txt", "should be literal: {}", result.out);
+        // cleanup
+        kernel.execute("set -o glob").await.unwrap();
+        kernel.execute(&format!("rm {dir}/a.txt")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_bare_glob_quoted_not_expanded() {
+        let kernel = Kernel::transient().expect("kernel");
+        let dir = format!("/tmp/kaish_test_bareglob_quoted_{}", std::process::id());
+        kernel.execute(&format!("mkdir -p {dir}")).await.unwrap();
+        kernel.execute(&format!("echo a > {dir}/a.txt")).await.unwrap();
+        kernel.execute(&format!("cd {dir}")).await.unwrap();
+        // Quoted globs should NOT expand
+        let result = kernel.execute("echo \"*.txt\"").await.unwrap();
+        assert!(result.ok(), "echo should succeed: {}", result.err);
+        assert_eq!(result.out.trim(), "*.txt", "quoted should be literal: {}", result.out);
+        // cleanup
+        kernel.execute(&format!("rm {dir}/a.txt")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_bare_glob_for_loop() {
+        let kernel = Kernel::transient().expect("kernel");
+        let dir = format!("/tmp/kaish_test_bareglob_forloop_{}", std::process::id());
+        kernel.execute(&format!("mkdir -p {dir}")).await.unwrap();
+        kernel.execute(&format!("echo a > {dir}/a.txt")).await.unwrap();
+        kernel.execute(&format!("echo b > {dir}/b.txt")).await.unwrap();
+        kernel.execute(&format!("cd {dir}")).await.unwrap();
+        let result = kernel.execute(r#"
+            N=0
+            for f in *.txt; do
+                N=$((N + 1))
+            done
+            echo $N
+        "#).await.unwrap();
+        assert!(result.ok(), "for loop failed: {}", result.err);
+        assert_eq!(result.out.trim(), "2", "should iterate 2 files: {}", result.out);
+        // cleanup
+        kernel.execute(&format!("rm {dir}/a.txt")).await.unwrap();
+        kernel.execute(&format!("rm {dir}/b.txt")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_glob_in_assignment_is_literal() {
+        let kernel = Kernel::transient().expect("kernel");
+        let result = kernel.execute("X=*.txt; echo $X").await.unwrap();
+        assert!(result.ok());
+        assert_eq!(result.out.trim(), "*.txt", "glob in assignment should be literal");
+    }
+
+    #[tokio::test]
+    async fn test_glob_in_test_expr_is_literal() {
+        let kernel = Kernel::transient().expect("kernel");
+        let result = kernel.execute(r#"
+            if [[ *.txt == "*.txt" ]]; then
+                echo "match"
+            else
+                echo "no"
+            fi
+        "#).await.unwrap();
+        assert!(result.ok());
+        assert_eq!(result.out.trim(), "match", "glob in test expr should be literal");
     }
 
     #[tokio::test]

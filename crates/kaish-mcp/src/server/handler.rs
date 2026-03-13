@@ -214,7 +214,7 @@ impl KaishServerHandler {
     ///
     /// Each call runs in a fresh, isolated environment. Supports restricted/modified
     /// Bourne syntax plus kaish extensions (scatter/gather, typed params, MCP tool calls).
-    #[tool(description = "Run shell commands with pre-validation — syntax errors are caught before anything executes.\n\nEach call runs in a fresh kernel (variables reset, cwd reset). Confirmation nonces persist across calls.\n\nKey advantages over bash:\n• No word splitting — $VAR with spaces just works, no quoting bugs\n• No implicit glob expansion — *.txt is literal unless you use glob builtin\n• All builtins support --json for structured output (ls --json, ps --json, etc.)\n• Destructive commands (rm) can be gated behind confirmation nonces (set -o latch)\n\nBuiltins: grep, jq, git, find, sed, awk, cat, ls, tree, stat, diff, and 50+ more.\nAlso supports: pipes, redirects, here-docs, if/for/while, functions, ${VAR:-default}, $((arithmetic)).\n\nNot supported: process substitution <(), backticks, eval.\n\nPaths: Native paths work within $HOME. /v/ = ephemeral memory.\n\nFirst time? Run: help builtins")]
+    #[tool(description = "Run shell commands with pre-validation — syntax errors are caught before anything executes.\n\nEach call runs in a fresh kernel (variables reset, cwd reset). Confirmation nonces persist across calls.\n\nKey advantages over bash:\n• No word splitting — $VAR with spaces just works, no quoting bugs\n• Bare glob expansion — *.txt expands to matching files (disable: set +o glob)\n• All builtins support --json for structured output (ls --json, ps --json, etc.)\n• Destructive commands (rm) can be gated behind confirmation nonces (set -o latch)\n\nBuiltins: grep, jq, git, find, sed, awk, cat, ls, tree, stat, diff, and 50+ more.\nAlso supports: pipes, redirects, here-docs, if/for/while, functions, ${VAR:-default}, $((arithmetic)).\n\nNot supported: process substitution <(), backticks, eval.\n\nPaths: Native paths work within $HOME. /v/ = ephemeral memory.\n\nFirst time? Run: help builtins")]
     async fn execute(&self, input: Parameters<ExecuteInput>) -> Result<CallToolResult, McpError> {
         tracing::info!(
             script_len = input.0.script.len(),
@@ -410,7 +410,7 @@ impl rmcp::ServerHandler for KaishServerHandler {
                 "kaish (会sh) — Shell with pre-validation and structured output for MCP tool orchestration.\n\n\
                  Why use kaish instead of a raw shell:\n\
                  • Syntax errors are caught before execution — no half-run commands\n\
-                 • No word splitting, no glob expansion surprises — $VAR with spaces just works\n\
+                 • No word splitting — $VAR with spaces just works\n\
                  • All builtins support --json for structured output (no parsing ls/ps text)\n\
                  • Destructive operations can require confirmation nonces (set -o latch)\n\
                  • External commands work via PATH (cargo build, git status, etc.)\n\n\

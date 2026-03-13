@@ -4,7 +4,6 @@
 
 | Feature | Workaround |
 |---------|------------|
-| Shell glob expansion `*.txt` | `glob "*.txt"` or tool-native patterns |
 | Shell brace expansion `{a,b,c}` | List items explicitly |
 | Process substitution `<(cmd)` | `cmd > /tmp/t.txt; cmd2 /tmp/t.txt` |
 | Backticks `` `cmd` `` | `$(cmd)` |
@@ -58,6 +57,6 @@
 | Bash | kaish |
 |------|-------|
 | `for i in $VAR` splits on IFS | No splitting; iterates once |
-| `*.txt` expands at shell | Passed literally to tools |
+| `*.txt` expands at shell | Bare globs expand (disable with `set +o glob`) |
 | Regex in `=~` is unquoted | Quotes allowed: `=~ "\.rs$"` |
 | `printf "a"; printf "b"` → `ab` | → `a\nb` (line-separated, intentional) |

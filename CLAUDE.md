@@ -149,7 +149,7 @@ crates/
 
 ### What's Intentionally Missing
 
-Process substitution `<(cmd)`, backticks, `eval`, shell-level glob expansion
+Process substitution `<(cmd)`, backticks, `eval`
 
 ## Testing Strategy
 

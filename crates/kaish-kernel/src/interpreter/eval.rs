@@ -141,6 +141,7 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             Expr::Command(cmd) => self.eval_command(cmd),
             Expr::LastExitCode => self.eval_last_exit_code(),
             Expr::CurrentPid => self.eval_current_pid(),
+            Expr::GlobPattern(s) => Ok(Value::String(s.clone())),
         }
     }
 
