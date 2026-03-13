@@ -156,12 +156,12 @@ while CONDITION; do
     ...
 done
 
-# Case statement
+# Case statement (patterns are glob-matched, not expanded)
 case $VAR in
     hello) echo "matched hello" ;;
-    "*.rs") echo "Rust file" ;;
-    "y"|"yes") echo "yes" ;;
-    "*") echo "default" ;;
+    *.rs) echo "Rust file" ;;
+    y|yes) echo "yes" ;;
+    *) echo "default" ;;
 esac
 
 # Control statements
@@ -579,7 +579,7 @@ These are documented limitations of the current implementation:
 
 ### Builtins
 
-- **`set` supports `-e`, `-o latch`, `-o trash`** — Unlike bash, only these options are implemented. `-u`, `-x`, `pipefail` and other bash set options are silently ignored for compatibility.
+- **`set` supports `-e`, `-o latch`, `-o trash`, `-o glob`** — Unlike bash, only these options are implemented. `-u`, `-x`, `pipefail` and other bash set options are silently ignored for compatibility.
 - **`ps` is Linux-only** — The process listing builtin reads from `/proc` and only works on Linux systems.
 - **`git` requires real filesystem** — The git builtin operates on the actual filesystem, not the VFS. It won't work with memory-backed or remote VFS mounts.
 - **`head`/`tail -c` counts UTF-8 characters** — Unlike POSIX which specifies bytes, `-c` in kaish counts Unicode characters. This is intentional for safer text handling.

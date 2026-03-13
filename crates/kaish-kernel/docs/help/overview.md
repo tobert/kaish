@@ -1,7 +1,7 @@
 # kaish (会sh)
 
-Strict Bourne-like shell. No implicit word splitting, no glob expansion, no backticks.
-Validates before execution. Builtins run in-process; external commands via PATH fallback.
+Bourne-like shell for AI agents. Familiar syntax, fewer footguns.
+Validates before execution. Builtins run in-process; external commands via PATH.
 
 ## Topics
 
@@ -29,16 +29,16 @@ ps --json                # JSON array of process info
 ## Quick Examples
 
 ```bash
-# Pipes and structured iteration
-glob "*.json" | scatter as=F limit=4 | jq ".name" $F | gather
+# Familiar syntax — globs, pipes, control flow all work
+ls *.txt | wc -l
+for f in src/*.rs; do grep "TODO" "$f"; done
 
 # Variables and conditionals
 NAME="world"
 if [[ -n $NAME ]]; then echo "Hello, ${NAME}!"; fi
 
-# Background jobs with live observability
-cargo build &
-cat /v/jobs/1/status     # running | done:0 | failed:N
+# Parallel execution with scatter/gather
+seq 1 100 | scatter as=N limit=4 | process $N | gather
 
 # MCP tool integration
 exa:web_search query="rust async" | jq ".title"
@@ -46,8 +46,9 @@ exa:web_search query="rust async" | jq ".title"
 
 ## Key Differences from Bash
 
-- No implicit word splitting — use `split` explicitly
-- No shell glob expansion — use `glob` builtin or tool-native patterns
-- No backticks — use `$(cmd)` always
+- `$VAR` is always one value — no implicit word splitting (use `split` when needed)
+- `*.txt` expands to matching files — zero matches is an error, not a silent pass-through
+- No backticks — `$(cmd)` only
+- `$(cmd)` returns structured data — `for i in $(seq 1 5)` iterates 5 values, not split text
 - ERE regex everywhere — no BRE quirks
-- `true`/`false` are commands, not strings — `"true"` is an error in boolean context
+- `true`/`false` only — `TRUE`, `yes`, `Yes` are errors
