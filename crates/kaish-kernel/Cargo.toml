@@ -14,8 +14,8 @@ readme = "../../README.md"
 exclude = ["tests/snapshots/"]
 
 [dependencies]
-kaish-glob = { path = "../kaish-glob", version = "0.4.0" }
-kaish-types = { path = "../kaish-types", version = "0.4.0", features = [] }
+kaish-glob = { path = "../kaish-glob", version = "0.5.0" }
+kaish-types = { path = "../kaish-types", version = "0.5.0", features = [] }
 
 # Async runtime
 tokio = { workspace = true }
