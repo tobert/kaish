@@ -825,6 +825,7 @@ where
     // Pattern part: individual tokens that make up a glob pattern
     // e.g., "*.rs" is Star + Dot + Ident("rs")
     let pattern_part = choice((
+        select! { Token::GlobWord(s) => s },
         select! { Token::Ident(s) => s },
         select! { Token::String(s) => s },
         select! { Token::SingleString(s) => s },
@@ -1372,6 +1373,13 @@ where
         Token::MinusAlone => Expr::Literal(Value::String("-".to_string())),
     };
 
+    // Glob patterns: merged GlobWord tokens and bare Star/Question
+    let glob_pattern = select! {
+        Token::GlobWord(s) => Expr::GlobPattern(s),
+        Token::Star => Expr::GlobPattern("*".to_string()),
+        Token::Question => Expr::GlobPattern("?".to_string()),
+    };
+
     recursive(|expr| {
         choice((
             positional,
@@ -1380,6 +1388,8 @@ where
             var_expr_parser(),
             interpolated_string_parser(),
             literal_parser().map(Expr::Literal),
+            // Glob patterns before ident (GlobWord is more specific)
+            glob_pattern,
             // Bare identifiers become string literals (shell barewords)
             ident_parser().map(|s| Expr::Literal(Value::String(s))),
             // Absolute paths become string literals

@@ -82,7 +82,7 @@ cmd1 || cmd2              # cmd2 if cmd1 fails
 if [[ -f file ]]; then echo "found"; elif [[ -d dir ]]; then echo "dir"; else echo "none"; fi
 
 for item in "one" "two"; do echo $item; done
-for f in $(glob "*.txt"); do cat "$f"; done
+for f in *.txt; do cat "$f"; done
 
 while [[ $N -gt 0 ]]; do N=$((N - 1)); done
 
@@ -121,14 +121,30 @@ function greet { echo "Hello, $1!"; }
 greet "Amy"
 ```
 
+## Glob Expansion
+
+```bash
+ls *.txt                  # expands to matching .txt files
+cat src/*.rs              # path-prefixed globs work
+for f in *.json; do       # iterates over matches
+    jq ".name" "$f"
+done
+set +o glob               # disable bare glob expansion
+set -o glob               # re-enable (on by default)
+```
+
+Zero matches is an error (exit code 1). The `glob` builtin still works for `--exclude` and `**`.
+
 ## Shell Options
 
 ```bash
 set -e                    # exit on first error
 set -o latch              # require nonce confirmation for rm (exit code 2)
 set -o trash              # move rm'd files to Trash
+set -o glob               # enable bare glob expansion (on by default)
 set +o latch              # disable latch
 set +o trash              # disable trash
+set +o glob               # disable bare glob expansion
 ```
 
 Env vars: `KAISH_LATCH=1`, `KAISH_TRASH=1` enable at startup.

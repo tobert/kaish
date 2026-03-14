@@ -28,12 +28,13 @@ impl Tool for Set {
                 "options",
                 "string",
                 Value::Null,
-                "Shell options (-e, +e, -o latch, -o trash, etc.)",
+                "Shell options (-e, +e, -o latch, -o trash, -o glob, etc.)",
             ))
             .example("Exit on error", "set -e")
             .example("Disable exit on error", "set +e")
             .example("Enable confirmation latch", "set -o latch")
             .example("Enable trash-on-delete", "set -o trash")
+            .example("Disable glob expansion", "set +o glob")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -48,6 +49,9 @@ impl Tool for Set {
             }
             if ctx.scope.trash_enabled() {
                 output.push_str("set -o trash\n");
+            }
+            if !ctx.scope.glob_enabled() {
+                output.push_str("set +o glob\n");
             }
             if let Some(bytes) = ctx.output_limit.max_bytes() {
                 output.push_str(&format!("set -o output-limit={}\n", format_size_for_set(bytes)));
@@ -87,6 +91,7 @@ impl Tool for Set {
                         match name {
                             "latch" => ctx.scope.set_latch_enabled(true),
                             "trash" => ctx.scope.set_trash_enabled(true),
+                            "glob" => ctx.scope.set_glob_enabled(true),
                             _ => {
                                 if name == "output-limit" || name.starts_with("output-limit=") {
                                     if let Some(size_str) = name.strip_prefix("output-limit=") {
@@ -107,6 +112,7 @@ impl Tool for Set {
                         match name {
                             "latch" => ctx.scope.set_latch_enabled(false),
                             "trash" => ctx.scope.set_trash_enabled(false),
+                            "glob" => ctx.scope.set_glob_enabled(false),
                             "output-limit" => ctx.output_limit.set_limit(None),
                             _ => {}
                         }
@@ -130,6 +136,7 @@ impl Tool for Set {
                 match name {
                     "latch" => { ctx.scope.set_latch_enabled(true); break; }
                     "trash" => { ctx.scope.set_trash_enabled(true); break; }
+                    "glob" => { ctx.scope.set_glob_enabled(true); break; }
                     _ => {
                         if name == "output-limit" || name.starts_with("output-limit=") {
                             if let Some(size_str) = name.strip_prefix("output-limit=") {

@@ -87,6 +87,7 @@ fn format_token(token: &Token) -> String {
         Token::Star => "STAR".to_string(),
         Token::Bang => "BANG".to_string(),
         Token::Question => "QUESTION".to_string(),
+        Token::GlobWord(s) => format!("GLOB({})", s),
 
         // Arithmetic and command substitution
         Token::Arithmetic(s) => format!("ARITH({})", s),
@@ -407,8 +408,34 @@ fn lexer_punctuation(#[case] input: &str, #[case] expected: &[&str]) {
 #[case::bang_notmatch_takes_priority("!~", &["NOTMATCH"])]
 #[case::bang_then_eq("! =", &["BANG", "EQ"])]
 #[case::bang_with_command("! true", &["BANG", "BOOL(true)"])]
-#[case::negated_char_class_pattern("[!a-z]", &["LBRACK", "BANG", "IDENT(a-z)", "RBRACK"])]
+#[case::negated_char_class_pattern("[!a-z]", &["GLOB([!a-z])"])]
 fn lexer_bang_operator(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+// =============================================================================
+// Glob word merging
+// =============================================================================
+
+#[rstest]
+#[case::star_dot_txt("*.txt", &["GLOB(*.txt)"])]
+#[case::double_star_slash_rs("**/*.rs", &["GLOB(**/*.rs)"])]
+#[case::path_star_go("src/*.go", &["GLOB(src/*.go)"])]
+#[case::question_mark_glob("file?.log", &["GLOB(file?.log)"])]
+#[case::bracket_class("[a-z].txt", &["GLOB([a-z].txt)"])]
+#[case::star_alone("*", &["STAR"])]
+#[case::question_alone("?", &["QUESTION"])]
+#[case::quoted_not_glob("\"*.txt\"", &["STRING(*.txt)"])]
+#[case::no_glob_chars("foo bar", &["IDENT(foo)", "IDENT(bar)"])]
+#[case::star_dot_tar_gz("*.tar.gz", &["GLOB(*.tar.gz)"])]
+#[case::dot_star(".*", &["GLOB(.*)"])]
+#[case::star_dot_brace_rs_go("*.{rs,go}", &["GLOB(*.{rs,go})"])]
+#[case::glob_colon_merge("foo::bar*.txt", &["GLOB(foo::bar*.txt)"])]
+#[case::glob_tilde_path("~/src/*.rs", &["GLOB(~/src/*.rs)"])]
+#[case::glob_relative_path("../src/*.rs", &["GLOB(../src/*.rs)"])]
+#[case::glob_dot_slash_path("./*.rs", &["GLOB(./*.rs)"])]
+#[case::glob_adjacent_to_semi("*.txt;", &["GLOB(*.txt)", "SEMI"])]
+fn lexer_glob_word(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
 

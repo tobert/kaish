@@ -4,7 +4,6 @@
 
 | Feature | Workaround |
 |---------|------------|
-| Shell glob expansion `*.txt` | `glob "*.txt"` or tool-native patterns |
 | Shell brace expansion `{a,b,c}` | List items explicitly |
 | Process substitution `<(cmd)` | `cmd > /tmp/t.txt; cmd2 /tmp/t.txt` |
 | Backticks `` `cmd` `` | `$(cmd)` |
@@ -17,7 +16,6 @@
 
 | Limitation | Details | Workaround |
 |-----------|---------|------------|
-| `case` with path-like patterns | Glob patterns like `/tmp/[a-z]*` are lexed as a single Path token | Use quoted strings: `"/tmp/"*` |
 | `[[ ]]` parsed as two brackets | Two separate `[` tokens, not a compound keyword | Works for tests; kaish will never have `[]` array syntax |
 | Keywords as bare arguments | `echo done` may fail because `done` is a keyword token | Quote: `echo "done"` |
 
@@ -26,7 +24,7 @@
 | Builtin | Limitation |
 |---------|------------|
 | `alias` | First word only; not in pipelines or compound commands |
-| `set` | `-e`, `-o latch`, `-o trash` (no `-u`, `-x`, `pipefail`) |
+| `set` | `-e`, `-o latch`, `-o trash`, `-o glob` (no `-u`, `-x`, `pipefail`) |
 | `rm` (trash) | Trash failure = error, no fallthrough to permanent delete. Dirs always trash (stat size unreliable). |
 | `rm` (latch) | Nonces scoped to (command, paths). Subset confirmation only. 60s TTL. Persist within MCP session, not across reconnects. |
 | `ps` | Linux-only (reads `/proc`) |
@@ -58,6 +56,6 @@
 | Bash | kaish |
 |------|-------|
 | `for i in $VAR` splits on IFS | No splitting; iterates once |
-| `*.txt` expands at shell | Passed literally to tools |
+| `*.txt` expands at shell | Bare globs expand (disable with `set +o glob`) |
 | Regex in `=~` is unquoted | Quotes allowed: `=~ "\.rs$"` |
 | `printf "a"; printf "b"` → `ab` | → `a\nb` (line-separated, intentional) |

@@ -367,6 +367,10 @@ pub enum Token {
     #[token("?")]
     Question,
 
+    /// Merged glob word: span-adjacent tokens containing `*`, `?`, or `[...]`.
+    /// Synthesized by `merge_glob_adjacent()`, never produced by logos directly.
+    GlobWord(String),
+
     // ═══════════════════════════════════════════════════════════════════
     // Command substitution
     // ═══════════════════════════════════════════════════════════════════
@@ -647,6 +651,9 @@ impl Token {
             | Token::LineContinuation
             | Token::CmdSubstStart => TokenCategory::Punctuation,
 
+            // Glob words (merged tokens containing wildcards)
+            Token::GlobWord(_) => TokenCategory::Path,
+
             // Comments
             Token::Comment => TokenCategory::Comment,
 
@@ -873,6 +880,7 @@ impl fmt::Display for Token {
             Token::Star => write!(f, "*"),
             Token::Bang => write!(f, "!"),
             Token::Question => write!(f, "?"),
+            Token::GlobWord(s) => write!(f, "GLOB({})", s),
             Token::Arithmetic(s) => write!(f, "ARITHMETIC({})", s),
             Token::CmdSubstStart => write!(f, "$("),
             Token::LongFlag(s) => write!(f, "--{}", s),
@@ -967,6 +975,7 @@ impl Token {
                 | Token::SimpleVarRef(_)
                 | Token::CmdSubstStart
                 | Token::Path(_)
+                | Token::GlobWord(_)
                 | Token::LastExitCode
                 | Token::CurrentPid
         )
@@ -1500,6 +1509,107 @@ fn flush_colon_run(run: &mut Vec<&Spanned<Token>>, result: &mut Vec<Spanned<Toke
     run.clear();
 }
 
+/// Extract the text contribution of a token that can participate in a glob word.
+///
+/// Returns `Some(text)` for tokens that can be part of a glob pattern (identifiers,
+/// wildcard chars, brackets, paths, etc.), `None` for structural tokens.
+fn glob_mergeable_text(token: &Token) -> Option<String> {
+    match token {
+        Token::Star => Some("*".to_string()),
+        Token::Question => Some("?".to_string()),
+        Token::Dot => Some(".".to_string()),
+        Token::DotDot => Some("..".to_string()),
+        Token::Ident(s) => Some(s.clone()),
+        Token::Path(s) => Some(s.clone()),
+        Token::Int(n) => Some(n.to_string()),
+        Token::LBracket => Some("[".to_string()),
+        Token::RBracket => Some("]".to_string()),
+        Token::Bang => Some("!".to_string()),
+        Token::DotSlashPath(s) => Some(s.clone()),
+        Token::RelativePath(s) => Some(s.clone()),
+        Token::TildePath(s) => Some(s.clone()),
+        Token::Tilde => Some("~".to_string()),
+        Token::LBrace => Some("{".to_string()),
+        Token::RBrace => Some("}".to_string()),
+        Token::Comma => Some(",".to_string()),
+        _ => None,
+    }
+}
+
+/// Merge span-adjacent token runs containing glob metacharacters into `GlobWord` tokens.
+///
+/// A run is merged into `GlobWord` when it contains at least one `Star`, `Question`,
+/// or a `LBracket`+`RBracket` pair. Runs without glob chars pass through unchanged.
+///
+/// Runs after colon merge: `foo::bar` stays as `Ident("foo::bar")` because colon merge
+/// already fused it before this pass sees it.
+fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
+    if tokens.is_empty() {
+        return tokens;
+    }
+
+    let mut result = Vec::with_capacity(tokens.len());
+    let mut run: Vec<&Spanned<Token>> = Vec::new();
+
+    for token in &tokens {
+        if run.is_empty() {
+            if glob_mergeable_text(&token.token).is_some() {
+                run.push(token);
+            } else {
+                result.push(token.clone());
+            }
+            continue;
+        }
+
+        // Safety: run is non-empty (checked at top of loop)
+        let Some(last) = run.last() else { unreachable!() };
+        let adjacent = last.span.end == token.span.start;
+
+        if adjacent && glob_mergeable_text(&token.token).is_some() {
+            run.push(token);
+        } else {
+            flush_glob_run(&mut run, &mut result);
+            if glob_mergeable_text(&token.token).is_some() {
+                run.push(token);
+            } else {
+                result.push(token.clone());
+            }
+        }
+    }
+
+    flush_glob_run(&mut run, &mut result);
+
+    result
+}
+
+/// Flush a run of glob-mergeable tokens: merge if it contains glob metacharacters.
+fn flush_glob_run(run: &mut Vec<&Spanned<Token>>, result: &mut Vec<Spanned<Token>>) {
+    if run.is_empty() {
+        return;
+    }
+
+    let has_glob = run.iter().any(|t| {
+        matches!(t.token, Token::Star | Token::Question)
+    }) || (run.iter().any(|t| matches!(t.token, Token::LBracket))
+        && run.iter().any(|t| matches!(t.token, Token::RBracket)));
+
+    if run.len() >= 2 && has_glob {
+        let text: String = run
+            .iter()
+            .filter_map(|t| glob_mergeable_text(&t.token))
+            .collect();
+        let start = run.first().map(|t| t.span.start).unwrap_or(0);
+        let end = run.last().map(|t| t.span.end).unwrap_or(0);
+        result.push(Spanned::new(Token::GlobWord(text), start..end));
+    } else {
+        for t in run.iter() {
+            result.push((*t).clone());
+        }
+    }
+
+    run.clear();
+}
+
 /// Tokenize source code into a vector of spanned tokens.
 ///
 /// Skips whitespace and comments (unless you need them for formatting).
@@ -1597,7 +1707,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerEr
         i += 1;
     }
 
-    Ok(merge_colon_adjacent(final_tokens))
+    Ok(merge_glob_adjacent(merge_colon_adjacent(final_tokens)))
 }
 
 /// Tokenize source code, preserving comments.

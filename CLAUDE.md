@@ -131,8 +131,9 @@ crates/
 - `[[ ]]` — test expressions
 - `if/elif/else/fi`, `for/do/done`, `while/do/done` — control flow
 - `break`, `continue`, `return`, `exit` — control statements
+- `*.txt`, `src/**/*.rs` — bare glob expansion (disable: `set +o glob`)
 - `set -e` — exit on error mode
-- `set -o latch` / `set -o trash` — confirmation latch, trash-on-delete
+- `set -o latch` / `set -o trash` / `set -o glob` — confirmation latch, trash-on-delete, glob expansion
 - `source file` or `. file` — script sourcing
 - `alias name='cmd'` / `unalias name` — command aliases
 - `-x`, `--flag` — flag arguments
@@ -149,7 +150,7 @@ crates/
 
 ### What's Intentionally Missing
 
-Process substitution `<(cmd)`, backticks, `eval`, shell-level glob expansion
+Process substitution `<(cmd)`, backticks, `eval`
 
 ## Testing Strategy
 

@@ -23,7 +23,7 @@ Traditional shells have evolved syntax with many sharp edges. kaish implements t
 commonly-used parts of sh while eliminating entire classes of bugs at the language level:
 
 - **No implicit word splitting** — `$VAR` is always one value, never split on spaces
-- **No glob expansion** — tools handle their own patterns, or use `glob` builtin
+- **Bare glob expansion** — `ls *.txt` works; opt out with `set +o glob`
 - **Structured iteration** — `for i in $(seq 1 5)` works via structured data, not word splitting
 - **Explicit splitting** — use `split "$VAR"` when you actually need word splitting
 - **No backticks** — only `$(cmd)` substitution
@@ -55,14 +55,14 @@ for i in $(seq 1 3); do            # structured data iteration
     echo "Count: $i"
 done
 
-for file in $(glob "*.txt"); do    # structured data iteration
+for file in *.txt; do              # bare glob expansion
     echo "Found: $file"
 done
 
 # Pipes and redirects
 cat urls.txt | grep "https" | head -n 10 > filtered.txt
 
-# Expand glob patterns
+# Glob patterns expand inline, or use the glob builtin for options
 glob "**/*.rs" --exclude="*_test.rs"
 
 # Parallel execution with scatter/gather
@@ -185,7 +185,7 @@ Interactive shell with readline support, history, and tab completion.
 
 ```bash
 $ kaish
-kaish> for f in $(glob "*.rs"); do wc -l "$f"; done
+kaish> for f in *.rs; do wc -l "$f"; done
   142 main.rs
    87 lib.rs
 kaish>
@@ -265,7 +265,7 @@ Raw MCP tools are individual operations; kaish lets agents combine them:
 ls src/ | grep "\.rs$" | head -n 5
 
 # Iterate over results
-for f in $(glob "*.json"); do
+for f in *.json; do
     jq ".name" "$f"
 done
 

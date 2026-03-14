@@ -739,3 +739,67 @@ fn parser_colon_port() {
 fn parser_colon_in_cargo_test() {
     parse_and_snapshot("colon_cargo_test", "cargo test -- ls::tests");
 }
+
+// =============================================================================
+// Glob patterns
+// =============================================================================
+
+#[test]
+fn parser_glob_star_txt() {
+    parse_and_snapshot("glob_star_txt", "ls *.txt");
+}
+
+#[test]
+fn parser_glob_cp_mixed() {
+    parse_and_snapshot("glob_cp_mixed", "cp *.rs /tmp");
+}
+
+#[test]
+fn parser_glob_bracket_class() {
+    parse_and_snapshot("glob_bracket_class", "rm [a-z].txt");
+}
+
+#[test]
+fn parser_glob_bare_star() {
+    parse_and_snapshot("glob_bare_star", "echo *");
+}
+
+#[test]
+fn parser_glob_quoted_stays_literal() {
+    parse_and_snapshot("glob_quoted_literal", "ls \"*.txt\"");
+}
+
+#[test]
+fn parser_glob_double_star() {
+    parse_and_snapshot("glob_double_star", "ls **/*.rs");
+}
+
+#[test]
+fn parser_glob_question_mark() {
+    parse_and_snapshot("glob_question_mark", "ls file?.log");
+}
+
+#[test]
+fn parser_glob_for_loop() {
+    parse_and_snapshot("glob_for_loop", "for f in *.txt; do echo $f; done");
+}
+
+#[test]
+fn parser_glob_bare_question() {
+    parse_and_snapshot("glob_bare_question", "echo ?");
+}
+
+#[test]
+fn parser_glob_in_case() {
+    parse_and_snapshot("glob_in_case", "case $x in\n    *.txt) echo text ;;\nesac");
+}
+
+#[test]
+fn parser_glob_in_named_arg() {
+    parse_and_snapshot("glob_in_named_arg", "cmd file=*.txt");
+}
+
+#[test]
+fn parser_glob_in_test() {
+    parse_and_snapshot("glob_in_test", "[[ *.txt == foo ]]");
+}

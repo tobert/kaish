@@ -285,6 +285,7 @@ pub fn format_expr(expr: &Expr) -> String {
         Expr::Command(cmd) => format_command(cmd),
         Expr::LastExitCode => "(last-exit-code)".to_string(),
         Expr::CurrentPid => "(current-pid)".to_string(),
+        Expr::GlobPattern(s) => format!("(glob \"{}\")", s),
     }
 }
 

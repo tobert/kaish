@@ -786,6 +786,7 @@ fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> {
             }
             Some(Value::String(result))
         }
+        Expr::GlobPattern(s) => Some(Value::String(s.clone())),
         _ => None, // Binary ops and command subst need more context
     }
 }
