@@ -134,6 +134,7 @@ impl Tool for Tokens {
             did_spill: false,
             original_code: None,
             content_type: None,
+            baggage: Default::default(),
         }
     }
 }

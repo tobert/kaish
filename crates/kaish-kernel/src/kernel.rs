@@ -1124,6 +1124,7 @@ impl Kernel {
                         did_spill: false,
                         original_code: None,
                         content_type: None,
+                        baggage: Default::default(),
                     }
                 } else {
                     ExecResult::success("")
@@ -2335,6 +2336,7 @@ impl Kernel {
                 did_spill: false,
                 original_code: None,
                 content_type: None,
+                baggage: Default::default(),
             });
         }
 
@@ -2344,6 +2346,7 @@ impl Kernel {
             err: accumulated_err,
             data: last_data,
             output: None,
+            baggage: Default::default(),
             did_spill: false,
             original_code: None,
             content_type: None,

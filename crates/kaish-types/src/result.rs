@@ -3,6 +3,7 @@
 //! After every command in kaish, the special variable `$?` contains an ExecResult.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 use crate::output::OutputData;
 use crate::value::Value;
@@ -37,6 +38,12 @@ pub struct ExecResult {
     /// When set, downstream consumers can use this instead of sniffing content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
+    /// Opaque key-value context propagated from tools through execution.
+    /// Intermediaries (kaish) carry but don't interpret. Consumers read known keys.
+    /// Follows W3C Baggage semantics — useful for OTel trace propagation,
+    /// application-level hints, etc.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub baggage: BTreeMap<String, String>,
 }
 
 impl ExecResult {
@@ -53,6 +60,7 @@ impl ExecResult {
             did_spill: false,
             original_code: None,
             content_type: None,
+            baggage: BTreeMap::new(),
         }
     }
 
@@ -78,6 +86,7 @@ impl ExecResult {
             did_spill: false,
             original_code: None,
             content_type: None,
+            baggage: BTreeMap::new(),
         }
     }
 
@@ -93,6 +102,7 @@ impl ExecResult {
             did_spill: false,
             original_code: None,
             content_type: None,
+            baggage: BTreeMap::new(),
         }
     }
 
@@ -114,6 +124,7 @@ impl ExecResult {
             did_spill: false,
             original_code: None,
             content_type: None,
+            baggage: BTreeMap::new(),
         }
     }
 
@@ -128,6 +139,7 @@ impl ExecResult {
             did_spill: false,
             original_code: None,
             content_type: None,
+            baggage: BTreeMap::new(),
         }
     }
 
@@ -155,6 +167,7 @@ impl ExecResult {
             did_spill: false,
             original_code: None,
             content_type: None,
+            baggage: BTreeMap::new(),
         }
     }
 
@@ -174,6 +187,7 @@ impl ExecResult {
             did_spill: false,
             original_code: None,
             content_type: None,
+            baggage: BTreeMap::new(),
         }
     }
 
