@@ -16,7 +16,7 @@ use crate::value::Value;
 /// - `err` — error message if failed
 /// - `out` — raw stdout as string
 /// - `data` — parsed JSON from stdout (if valid JSON)
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecResult {
     /// Exit code. 0 means success.
     pub code: i64,
@@ -241,12 +241,6 @@ impl ExecResult {
     }
 }
 
-impl Default for ExecResult {
-    fn default() -> Self {
-        Self::success("")
-    }
-}
-
 /// Convert serde_json::Value to our AST Value.
 ///
 /// Primitives are mapped to their corresponding Value variants.
@@ -407,5 +401,15 @@ mod tests {
         result.original_code = Some(0);
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"original_code\":0"));
+    }
+
+    #[test]
+    fn default_is_empty_success() {
+        let result = ExecResult::default();
+        assert!(result.ok());
+        assert!(result.out.is_empty());
+        assert!(result.data.is_none());
+        assert!(result.content_type.is_none());
+        assert!(result.baggage.is_empty());
     }
 }

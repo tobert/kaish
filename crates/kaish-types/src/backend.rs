@@ -3,6 +3,8 @@
 //! These types define the data contract for `KernelBackend` implementations.
 //! The trait itself lives in kaish-kernel (it depends on async_trait and ExecContext).
 
+use std::collections::BTreeMap;
+
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
@@ -181,6 +183,10 @@ pub struct ToolResult {
     pub data: Option<JsonValue>,
     /// Structured output data for rendering (preserved from ExecResult).
     pub output: Option<OutputData>,
+    /// MIME content type hint (propagated from ExecResult).
+    pub content_type: Option<String>,
+    /// Opaque key-value context (propagated from ExecResult).
+    pub baggage: BTreeMap<String, String>,
 }
 
 impl ToolResult {
@@ -192,6 +198,8 @@ impl ToolResult {
             stderr: String::new(),
             data: None,
             output: None,
+            content_type: None,
+            baggage: BTreeMap::new(),
         }
     }
 
@@ -203,6 +211,8 @@ impl ToolResult {
             stderr: stderr.into(),
             data: None,
             output: None,
+            content_type: None,
+            baggage: BTreeMap::new(),
         }
     }
 
@@ -214,6 +224,8 @@ impl ToolResult {
             stderr: String::new(),
             data: Some(data),
             output: None,
+            content_type: None,
+            baggage: BTreeMap::new(),
         }
     }
 
@@ -237,6 +249,8 @@ impl From<ExecResult> for ToolResult {
             stderr: exec.err,
             data,
             output: exec.output,
+            content_type: exec.content_type,
+            baggage: exec.baggage,
         }
     }
 }
@@ -250,4 +264,34 @@ pub struct ToolInfo {
     pub description: String,
     /// Full tool schema.
     pub schema: ToolSchema,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_result_from_exec_result_preserves_content_type_and_baggage() {
+        let mut exec = ExecResult::success("hello");
+        exec.content_type = Some("text/markdown".to_string());
+        exec.baggage.insert("traceparent".to_string(), "00-abc-def-01".to_string());
+
+        let tool_result = ToolResult::from(exec);
+        assert_eq!(tool_result.content_type.as_deref(), Some("text/markdown"));
+        assert_eq!(
+            tool_result.baggage.get("traceparent").map(|s| s.as_str()),
+            Some("00-abc-def-01")
+        );
+    }
+
+    #[test]
+    fn tool_result_constructors_default_to_empty_baggage() {
+        let success = ToolResult::success("ok");
+        assert!(success.baggage.is_empty());
+        assert!(success.content_type.is_none());
+
+        let failure = ToolResult::failure(1, "err");
+        assert!(failure.baggage.is_empty());
+        assert!(failure.content_type.is_none());
+    }
 }

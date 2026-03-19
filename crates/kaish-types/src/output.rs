@@ -122,7 +122,7 @@ impl OutputNode {
     /// Estimate brace-notation byte size without materializing.
     pub fn estimated_byte_size(&self) -> usize {
         if self.children.is_empty() {
-            self.name.len()
+            self.name.len() + self.text.as_ref().map_or(0, |t| t.len())
         } else {
             // "name/{child1,child2,...}"
             let mut size = self.name.len() + 2; // name + "/{" + "}"
@@ -137,7 +137,7 @@ impl OutputNode {
     }
 
     /// Write brace-notation to a writer. Returns bytes written.
-    pub fn write_canonical(&self, w: &mut dyn std::io::Write, _budget: usize) -> std::io::Result<usize> {
+    pub fn write_canonical(&self, w: &mut dyn std::io::Write, budget: usize) -> std::io::Result<usize> {
         if self.children.is_empty() {
             w.write_all(self.name.as_bytes())?;
             return Ok(self.name.len());
@@ -145,14 +145,20 @@ impl OutputNode {
         let mut written = 0;
         w.write_all(self.name.as_bytes())?;
         written += self.name.len();
+        if written >= budget {
+            return Ok(written);
+        }
         w.write_all(b"/{")?;
         written += 2;
         for (i, child) in self.children.iter().enumerate() {
+            if written >= budget {
+                break;
+            }
             if i > 0 {
                 w.write_all(b",")?;
                 written += 1;
             }
-            written += child.write_canonical(w, _budget.saturating_sub(written))?;
+            written += child.write_canonical(w, budget.saturating_sub(written))?;
         }
         w.write_all(b"}")?;
         written += 1;
@@ -644,5 +650,36 @@ mod tests {
         // Compact JSON: no pretty-printing (no newlines within the array)
         assert!(!formatted.out.contains('\n'), "should be compact JSON, got: {}", formatted.out);
         assert_eq!(formatted.out, r#"["file1","file2"]"#);
+    }
+
+    #[test]
+    fn estimated_byte_size_text_only_node() {
+        let node = OutputNode::text("hello world");
+        // Text-only node: name is empty, text is "hello world" (11 bytes)
+        assert_eq!(node.estimated_byte_size(), 11);
+    }
+
+    #[test]
+    fn estimated_byte_size_named_node() {
+        let node = OutputNode::new("file.txt");
+        assert_eq!(node.estimated_byte_size(), 8);
+    }
+
+    #[test]
+    fn write_canonical_respects_budget() {
+        let parent = OutputNode::new("root")
+            .with_children(vec![
+                OutputNode::new("aaaa"),
+                OutputNode::new("bbbb"),
+                OutputNode::new("cccc"),
+            ]);
+        // With a very small budget, should stop writing children early
+        let mut buf = Vec::new();
+        let written = parent.write_canonical(&mut buf, 8).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        // "root" (4) + "/{" (2) = 6, then budget check kicks in after first child
+        assert!(written <= 16, "should respect budget, wrote {} bytes: {}", written, output);
+        // Should at least write the root name
+        assert!(output.starts_with("root"), "should start with root: {}", output);
     }
 }

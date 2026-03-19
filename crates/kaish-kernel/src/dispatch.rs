@@ -319,6 +319,8 @@ impl CommandDispatcher for BackendDispatcher {
                     tool_result.stderr,
                 );
                 exec.output = tool_result.output;
+                exec.content_type = tool_result.content_type;
+                exec.baggage = tool_result.baggage;
                 // Restore structured data from ToolResult (preserved through backend roundtrip)
                 if let Some(json_data) = tool_result.data {
                     exec.data = Some(Value::Json(json_data));

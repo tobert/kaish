@@ -1,6 +1,6 @@
 //! Tool schema and argument types.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use crate::value::Value;
 
@@ -136,7 +136,7 @@ pub struct ToolArgs {
     /// Positional arguments in order.
     pub positional: Vec<Value>,
     /// Named arguments by key.
-    pub named: HashMap<String, Value>,
+    pub named: BTreeMap<String, Value>,
     /// Boolean flags (e.g., -l, --force).
     pub flags: HashSet<String>,
 }
