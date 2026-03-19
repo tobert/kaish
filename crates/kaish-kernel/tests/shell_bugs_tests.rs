@@ -1234,3 +1234,129 @@ async fn test_pipeline_three_stage_large_output_no_deadlock() {
     let exec = result.unwrap().unwrap();
     assert!(exec.ok(), "pipeline should succeed: err={}", exec.err);
 }
+
+// ============================================================================
+// Bug: for-loop frame leak on error — scope frame not popped if body errors
+// ============================================================================
+
+#[tokio::test]
+async fn test_for_loop_cleanup_after_body_failure() {
+    // Verify that after a for-loop body fails, subsequent for-loops still work.
+    // A leaked frame would accumulate scope frames and could eventually panic.
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute(
+            r#"
+for i in 1 2 3; do
+    false
+done
+for j in a b c; do
+    echo $j
+done
+"#,
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.out.contains("a") && result.out.contains("b") && result.out.contains("c"),
+        "Second for-loop should work after first loop's body failures: {}",
+        result.out
+    );
+}
+
+#[tokio::test]
+async fn test_for_loop_variable_scoped_to_loop() {
+    // In kaish, loop variables are scoped to the loop frame (unlike bash)
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute(
+            r#"
+for i in 1 2 3; do
+    true
+done
+echo "after first: [$i]"
+"#,
+        )
+        .await
+        .unwrap();
+    // Loop variable should not be visible after the loop
+    assert!(
+        result.out.contains("after first: []"),
+        "Loop var should not leak outside loop scope: {}",
+        result.out
+    );
+}
+
+// ============================================================================
+// Bug: errexit suppression leak in &&/|| chains
+// ============================================================================
+
+#[tokio::test]
+async fn test_errexit_works_after_and_chain() {
+    // set -e should still work after a && chain
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute(
+            r#"
+set -e
+true && true
+false
+echo "should not reach"
+"#,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !result.out.contains("should not reach"),
+        "set -e should exit after `false` following && chain: {}",
+        result.out
+    );
+}
+
+#[tokio::test]
+async fn test_errexit_works_after_or_chain() {
+    // set -e should still work after a || chain
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute(
+            r#"
+set -e
+false || true
+false
+echo "should not reach"
+"#,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !result.out.contains("should not reach"),
+        "set -e should exit after `false` following || chain: {}",
+        result.out
+    );
+}
+
+#[tokio::test]
+async fn test_errexit_suppressed_inside_and_chain_left() {
+    // The left side of && should NOT trigger errexit (POSIX behavior)
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute(
+            r#"
+set -e
+false && echo "right"
+echo "reached"
+"#,
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.out.contains("reached"),
+        "false && ... should not trigger errexit: {}",
+        result.out
+    );
+    assert!(
+        !result.out.contains("right"),
+        "Right side should not run when left fails: {}",
+        result.out
+    );
+}

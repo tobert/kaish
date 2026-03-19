@@ -964,7 +964,14 @@ impl Kernel {
                         scope.set(&for_loop.variable, item);
                     }
                     for stmt in &for_loop.body {
-                        let mut flow = self.execute_stmt_flow(stmt).await?;
+                        let mut flow = match self.execute_stmt_flow(stmt).await {
+                            Ok(f) => f,
+                            Err(e) => {
+                                let mut scope = self.scope.write().await;
+                                scope.pop_frame();
+                                return Err(e);
+                            }
+                        };
                         self.drain_stderr_into(&mut result).await;
                         match &mut flow {
                             ControlFlow::Normal(r) => {
@@ -1155,7 +1162,14 @@ impl Kernel {
                     let mut scope = self.scope.write().await;
                     scope.suppress_errexit();
                 }
-                let left_flow = self.execute_stmt_flow(left).await?;
+                let left_flow = match self.execute_stmt_flow(left).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let mut scope = self.scope.write().await;
+                        scope.unsuppress_errexit();
+                        return Err(e);
+                    }
+                };
                 {
                     let mut scope = self.scope.write().await;
                     scope.unsuppress_errexit();
@@ -1190,7 +1204,14 @@ impl Kernel {
                     let mut scope = self.scope.write().await;
                     scope.suppress_errexit();
                 }
-                let left_flow = self.execute_stmt_flow(left).await?;
+                let left_flow = match self.execute_stmt_flow(left).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let mut scope = self.scope.write().await;
+                        scope.unsuppress_errexit();
+                        return Err(e);
+                    }
+                };
                 {
                     let mut scope = self.scope.write().await;
                     scope.unsuppress_errexit();
@@ -2733,10 +2754,18 @@ impl Kernel {
                     use nix::libc::{sigaction, SIGTSTP, SIGTTOU, SIGTTIN, SIGINT, SIG_DFL};
                     let mut sa: nix::libc::sigaction = std::mem::zeroed();
                     sa.sa_sigaction = SIG_DFL;
-                    sigaction(SIGTSTP, &sa, std::ptr::null_mut());
-                    sigaction(SIGTTOU, &sa, std::ptr::null_mut());
-                    sigaction(SIGTTIN, &sa, std::ptr::null_mut());
-                    sigaction(SIGINT, &sa, std::ptr::null_mut());
+                    if sigaction(SIGTSTP, &sa, std::ptr::null_mut()) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if sigaction(SIGTTOU, &sa, std::ptr::null_mut()) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if sigaction(SIGTTIN, &sa, std::ptr::null_mut()) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if sigaction(SIGINT, &sa, std::ptr::null_mut()) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
                     Ok(())
                 });
             }
