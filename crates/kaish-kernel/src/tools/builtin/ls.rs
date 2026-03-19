@@ -96,17 +96,20 @@ impl Tool for Ls {
         let reverse = args.has_flag("reverse") || args.has_flag("r");
         let recursive = args.has_flag("recursive") || args.has_flag("R");
 
-        let sort_opts = SortOptions {
-            by_time: sort_time,
-            by_size: sort_size,
-            reverse,
+        let opts = ListOptions {
+            long_format,
+            human_readable,
+            show_all,
+            sort: SortOptions {
+                by_time: sort_time,
+                by_size: sort_size,
+                reverse,
+            },
         };
 
         // If path contains glob characters, expand the pattern and list matches
         if contains_glob(&path) {
-            return self
-                .list_glob(ctx, &path, long_format, human_readable, show_all, &sort_opts)
-                .await;
+            return self.list_glob(ctx, &path, &opts).await;
         }
 
         // Check if path is a file (not a directory)
@@ -114,32 +117,13 @@ impl Tool for Ls {
         if let Ok(info) = ctx.backend.stat(Path::new(&resolved)).await
             && !info.is_dir() {
                 // It's a file - just display it
-                return self.list_file(ctx, &path, &info, long_format, human_readable);
+                return self.list_file(ctx, &path, &info, &opts);
             }
 
         if recursive {
-            // Recursive listing
-            self.list_recursive(
-                ctx,
-                &resolved,
-                show_all,
-                long_format,
-                human_readable,
-                &sort_opts,
-            )
-            .await
+            self.list_recursive(ctx, &resolved, &opts).await
         } else {
-            // Single directory listing
-            self.list_single(
-                ctx,
-                &path,
-                &resolved,
-                show_all,
-                long_format,
-                human_readable,
-                &sort_opts,
-            )
-            .await
+            self.list_single(ctx, &path, &resolved, &opts).await
         }
     }
 }
@@ -150,6 +134,14 @@ struct SortOptions {
     reverse: bool,
 }
 
+/// Formatting options for ls output.
+struct ListOptions {
+    long_format: bool,
+    human_readable: bool,
+    show_all: bool,
+    sort: SortOptions,
+}
+
 impl Ls {
     /// List a single file (not a directory).
     /// Real `ls file.txt` just outputs the filename.
@@ -158,13 +150,12 @@ impl Ls {
         _ctx: &mut ExecContext,
         path: &str,
         info: &DirEntry,
-        long_format: bool,
-        human_readable: bool,
+        opts: &ListOptions,
     ) -> ExecResult {
         let entry_type = dir_entry_to_type(info);
-        let node = if long_format {
+        let node = if opts.long_format {
             let type_char = if info.is_symlink() { "l" } else { "-" };
-            let size_str = if human_readable {
+            let size_str = if opts.human_readable {
                 format_human_size(info.size)
             } else {
                 info.size.to_string()
@@ -176,7 +167,7 @@ impl Ls {
             OutputNode::new(path).with_entry_type(entry_type)
         };
 
-        let output = if long_format {
+        let output = if opts.long_format {
             OutputData::table(
                 vec!["NAME".to_string(), "TYPE".to_string(), "SIZE".to_string()],
                 vec![node],
@@ -189,15 +180,11 @@ impl Ls {
     }
 
     /// List files matching a glob pattern.
-    #[allow(clippy::too_many_arguments)]
     async fn list_glob(
         &self,
         ctx: &mut ExecContext,
         pattern: &str,
-        long_format: bool,
-        human_readable: bool,
-        _show_all: bool,
-        sort_opts: &SortOptions,
+        opts: &ListOptions,
     ) -> ExecResult {
         let paths = match ctx.expand_glob(pattern).await {
             Ok(p) => p,
@@ -233,14 +220,14 @@ impl Ls {
             .collect();
 
         infos.sort_by(|a, b| {
-            let cmp = if sort_opts.by_time {
+            let cmp = if opts.sort.by_time {
                 compare_by_time(a, b)
-            } else if sort_opts.by_size {
+            } else if opts.sort.by_size {
                 compare_by_size(a, b)
             } else {
                 a.name.cmp(&b.name)
             };
-            if sort_opts.reverse {
+            if opts.sort.reverse {
                 cmp.reverse()
             } else {
                 cmp
@@ -251,7 +238,7 @@ impl Ls {
             .iter()
             .map(|e| {
                 let entry_type = dir_entry_to_type(e);
-                if long_format {
+                if opts.long_format {
                     let type_char = if e.is_symlink() {
                         "l"
                     } else if e.is_dir() {
@@ -259,7 +246,7 @@ impl Ls {
                     } else {
                         "-"
                     };
-                    let size_str = if human_readable {
+                    let size_str = if opts.human_readable {
                         format_human_size(e.size)
                     } else {
                         e.size.to_string()
@@ -273,7 +260,7 @@ impl Ls {
             })
             .collect();
 
-        let output = if long_format {
+        let output = if opts.long_format {
             OutputData::table(
                 vec!["NAME".to_string(), "TYPE".to_string(), "SIZE".to_string()],
                 nodes,
@@ -285,20 +272,16 @@ impl Ls {
         ExecResult::with_output(output)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn list_single(
         &self,
         ctx: &mut ExecContext,
         path: &str,
         resolved: &Path,
-        show_all: bool,
-        long_format: bool,
-        human_readable: bool,
-        sort_opts: &SortOptions,
+        opts: &ListOptions,
     ) -> ExecResult {
         match ctx.backend.list(resolved).await {
             Ok(entries) => {
-                let filtered = filter_and_sort(entries, show_all, sort_opts);
+                let filtered = filter_and_sort(entries, opts.show_all, &opts.sort);
 
                 if filtered.is_empty() {
                     return ExecResult::with_output(OutputData::new());
@@ -310,7 +293,7 @@ impl Ls {
                     .map(|e| {
                         let entry_type = dir_entry_to_type(e);
                         let name_display = if e.is_symlink() {
-                            if long_format {
+                            if opts.long_format {
                                 if let Some(target) = &e.symlink_target {
                                     format!("{} -> {}", e.name, target.display())
                                 } else {
@@ -323,7 +306,7 @@ impl Ls {
                             e.name.clone()
                         };
 
-                        if long_format {
+                        if opts.long_format {
                             let type_char = if e.is_symlink() {
                                 "l"
                             } else if e.is_dir() {
@@ -331,7 +314,7 @@ impl Ls {
                             } else {
                                 "-"
                             };
-                            let size_str = if human_readable {
+                            let size_str = if opts.human_readable {
                                 format_human_size(e.size)
                             } else {
                                 e.size.to_string()
@@ -346,7 +329,7 @@ impl Ls {
                     })
                     .collect();
 
-                let output = if long_format {
+                let output = if opts.long_format {
                     OutputData::table(
                         vec!["NAME".to_string(), "TYPE".to_string(), "SIZE".to_string()],
                         nodes,
@@ -365,10 +348,7 @@ impl Ls {
         &self,
         ctx: &mut ExecContext,
         root: &Path,
-        show_all: bool,
-        long_format: bool,
-        human_readable: bool,
-        sort_opts: &SortOptions,
+        opts: &ListOptions,
     ) -> ExecResult {
         let mut text_output = String::new();
         let mut dir_nodes: Vec<OutputNode> = Vec::new();
@@ -393,12 +373,12 @@ impl Ls {
             text_output.push_str(&display_path);
             text_output.push_str(":\n");
 
-            let mut filtered = filter_and_sort(entries, show_all, sort_opts);
+            let mut filtered = filter_and_sort(entries, opts.show_all, &opts.sort);
 
             // Filter out ignored directories
             if let Some(ref filter) = ignore_filter {
                 filtered.retain(|e| {
-                    if e.is_dir() && !show_all {
+                    if e.is_dir() && !opts.show_all {
                         !filter.is_name_ignored(&e.name, true)
                     } else {
                         true
@@ -425,9 +405,9 @@ impl Ls {
             let child_nodes: Vec<OutputNode> = filtered.iter().map(|e| {
                 let entry_type = dir_entry_to_type(e);
                 let name = e.name.clone();
-                if long_format {
+                if opts.long_format {
                     let type_char = if e.is_symlink() { "l" } else if e.is_dir() { "d" } else { "-" };
-                    let size_str = if human_readable {
+                    let size_str = if opts.human_readable {
                         format_human_size(e.size)
                     } else {
                         e.size.to_string()
@@ -447,7 +427,7 @@ impl Ls {
             );
 
             // Format and output entries (text)
-            let lines = format_entries(&filtered, long_format, human_readable);
+            let lines = format_entries(&filtered, opts.long_format, opts.human_readable);
             text_output.push_str(&lines.join("\n"));
             if !lines.is_empty() {
                 text_output.push('\n');
@@ -459,7 +439,7 @@ impl Ls {
             }
         }
 
-        let output = if long_format {
+        let output = if opts.long_format {
             OutputData::table(
                 vec!["NAME".to_string(), "TYPE".to_string(), "SIZE".to_string()],
                 dir_nodes,
