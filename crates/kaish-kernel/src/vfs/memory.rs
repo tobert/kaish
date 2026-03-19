@@ -183,9 +183,21 @@ impl MemoryFs {
         for component in path.parent().into_iter().flat_map(|p| p.components()) {
             if let std::path::Component::Normal(s) = component {
                 current.push(s);
-                entries.entry(current.clone()).or_insert(Entry::Directory {
-                    modified: SystemTime::now(),
-                });
+                match entries.entry(current.clone()) {
+                    std::collections::hash_map::Entry::Occupied(e) => {
+                        if matches!(e.get(), Entry::File { .. }) {
+                            return Err(io::Error::new(
+                                io::ErrorKind::NotADirectory,
+                                format!("not a directory: {}", current.display()),
+                            ));
+                        }
+                    }
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(Entry::Directory {
+                            modified: SystemTime::now(),
+                        });
+                    }
+                }
             }
         }
         Ok(())
@@ -466,6 +478,19 @@ impl Filesystem for MemoryFs {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "cannot rename root directory",
+            ));
+        }
+
+        // Identity rename is a no-op
+        if from_normalized == to_normalized {
+            return Ok(());
+        }
+
+        // Cannot move a directory into itself
+        if to_normalized.starts_with(&from_normalized) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("cannot move '{}' into itself", from.display()),
             ));
         }
 
@@ -992,5 +1017,40 @@ mod tests {
             "expected symlink loop error, got: {}",
             err
         );
+    }
+
+    #[tokio::test]
+    async fn test_rename_into_self_errors() {
+        let fs = MemoryFs::new();
+        fs.mkdir(Path::new("a")).await.unwrap();
+
+        let result = fs.rename(Path::new("a"), Path::new("a/b")).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn test_rename_identity_noop() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("a"), b"data").await.unwrap();
+
+        // Renaming to self should succeed as a no-op
+        fs.rename(Path::new("a"), Path::new("a")).await.unwrap();
+
+        // Data should still be there
+        let data = fs.read(Path::new("a")).await.unwrap();
+        assert_eq!(data, b"data");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_parents_rejects_file_as_dir() {
+        let fs = MemoryFs::new();
+        // Create a file at "a"
+        fs.write(Path::new("a"), b"I am a file").await.unwrap();
+
+        // Now try to write "a/b" — "a" is a file, not a directory
+        let result = fs.write(Path::new("a/b"), b"child").await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotADirectory);
     }
 }
