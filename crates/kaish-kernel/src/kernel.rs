@@ -3119,6 +3119,10 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     accumulated.err.push_str(&new.err);
     accumulated.code = new.code;
     accumulated.data = new.data.clone();
+    accumulated.did_spill = new.did_spill;
+    accumulated.original_code = new.original_code;
+    accumulated.content_type = new.content_type.clone();
+    accumulated.baggage.clone_from(&new.baggage);
 }
 
 /// Check if a value is truthy.
