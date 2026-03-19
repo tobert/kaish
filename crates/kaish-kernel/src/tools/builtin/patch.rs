@@ -161,12 +161,10 @@ struct DiffHunk {
     /// Original file start line (1-indexed)
     old_start: usize,
     /// Original file line count
-    #[allow(dead_code)]
     old_count: usize,
     /// New file start line (1-indexed)
     new_start: usize,
     /// New file line count
-    #[allow(dead_code)]
     new_count: usize,
     /// Lines in this hunk
     lines: Vec<DiffLine>,
@@ -328,7 +326,21 @@ fn hunks_to_patch_ops(
     // Track line offset as we apply operations
     let mut line_offset: isize = 0;
 
-    for hunk in hunks {
+    for (hunk_idx, hunk) in hunks.iter().enumerate() {
+        // Validate hunk line counts match actual content
+        let actual_old = hunk.lines.iter()
+            .filter(|l| matches!(l, DiffLine::Context(_) | DiffLine::Delete(_)))
+            .count();
+        let actual_new = hunk.lines.iter()
+            .filter(|l| matches!(l, DiffLine::Context(_) | DiffLine::Insert(_)))
+            .count();
+        if actual_old != hunk.old_count || actual_new != hunk.new_count {
+            return Err(format!(
+                "hunk {}: line count mismatch (header says -{}/+{}, actual -{}/+{})",
+                hunk_idx + 1, hunk.old_count, hunk.new_count, actual_old, actual_new
+            ));
+        }
+
         let start_line = if reverse {
             hunk.new_start
         } else {
@@ -584,5 +596,26 @@ mod tests {
         let hunk = &files[0].hunks[0];
         assert_eq!(hunk.old_start, 1);
         assert_eq!(hunk.lines.len(), 4); // context + delete + insert + context
+    }
+
+    #[test]
+    fn test_hunk_count_mismatch_detected() {
+        // Header claims 2 old lines but only 1 context + 0 deletes = 1 old line
+        let bad_patch = concat!(
+            "--- a/test.txt\n",
+            "+++ b/test.txt\n",
+            "@@ -1,2 +1,1 @@\n",
+            " line1\n",
+        );
+        let files = parse_unified_diff(bad_patch).unwrap();
+        let content = "line1\nline2\nline3\n";
+        let result = hunks_to_patch_ops(&files[0].hunks, content, false);
+        assert!(result.is_err(), "should reject mismatched hunk counts");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("line count mismatch"),
+            "error should mention mismatch: {}",
+            err
+        );
     }
 }

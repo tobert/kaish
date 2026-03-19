@@ -104,14 +104,6 @@ impl ScopeTracker {
         self.frames.len()
     }
 
-    /// List all bound variables (for debugging).
-    #[allow(dead_code)]
-    pub fn all_bound(&self) -> Vec<&str> {
-        self.frames
-            .iter()
-            .flat_map(|f| f.iter().map(|s| s.as_str()))
-            .collect()
-    }
 }
 
 #[cfg(test)]
