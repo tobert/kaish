@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 
 use crate::interpreter::ExecResult;
+#[cfg(feature = "native")]
 use crate::paths;
 
 /// Default output limit for MCP mode (8KB).
@@ -106,42 +107,73 @@ pub struct SpillResult {
 /// If the filesystem write fails, the result is replaced with an error.
 /// Fail fast: truncating output silently could corrupt structured data
 /// that an agent acts on. An explicit error is safer.
+///
+/// Without the `native` feature, performs in-memory head+tail truncation
+/// (no disk I/O).
 pub async fn spill_if_needed(
     result: &mut ExecResult,
     config: &OutputLimitConfig,
 ) -> Option<SpillResult> {
     let max = config.max_bytes?;
 
-    // If result.out is already populated (external commands), check it directly
-    if !result.text_out().is_empty() && !result.has_output() {
-        let total = result.text_out().len();
-        if total <= max {
-            return None;
-        }
-        return spill_string(result, config, max).await;
-    }
-
-    // If we have structured OutputData, estimate size before materializing
-    if let Some(output) = result.output() {
-        let estimate = output.estimated_byte_size();
-        if estimate <= max {
-            // Small enough — materialize normally
-            result.materialize();
-            // Re-check actual size (estimate is a lower bound)
-            if result.text_out().len() <= max {
+    #[cfg(feature = "native")]
+    {
+        // If result.out is already populated (external commands), check it directly
+        if !result.text_out().is_empty() && !result.has_output() {
+            let total = result.text_out().len();
+            if total <= max {
                 return None;
             }
             return spill_string(result, config, max).await;
         }
 
-        // Large — stream directly to spill file, never holding full String
-        return spill_output_data(result, config, max).await;
+        // If we have structured OutputData, estimate size before materializing
+        if let Some(output) = result.output() {
+            let estimate = output.estimated_byte_size();
+            if estimate <= max {
+                // Small enough — materialize normally
+                result.materialize();
+                // Re-check actual size (estimate is a lower bound)
+                if result.text_out().len() <= max {
+                    return None;
+                }
+                return spill_string(result, config, max).await;
+            }
+
+            // Large — stream directly to spill file, never holding full String
+            return spill_output_data(result, config, max).await;
+        }
+
+        None
     }
 
-    None
+    // Without native: in-memory head+tail truncation (no disk I/O)
+    #[cfg(not(feature = "native"))]
+    {
+        // Materialize structured OutputData if present
+        if result.has_output() {
+            result.materialize();
+        }
+
+        let total = result.text_out().len();
+        if total <= max {
+            return None;
+        }
+
+        let text = result.text_out().into_owned();
+        let head = truncate_to_char_boundary(&text, config.head_bytes);
+        let tail = tail_from_str(&text, config.tail_bytes);
+        let truncated = format!(
+            "{}\n...\n{}\n[output truncated: {} bytes total — spill not available in sandbox mode]",
+            head, tail, total
+        );
+        result.set_out(truncated);
+        None
+    }
 }
 
 /// Spill an already-materialized string in result.out.
+#[cfg(feature = "native")]
 async fn spill_string(
     result: &mut ExecResult,
     config: &OutputLimitConfig,
@@ -170,6 +202,7 @@ async fn spill_string(
 }
 
 /// Stream OutputData directly to a spill file without materializing the full String.
+#[cfg(feature = "native")]
 async fn spill_output_data(
     result: &mut ExecResult,
     config: &OutputLimitConfig,
@@ -236,6 +269,7 @@ async fn spill_output_data(
 /// 2. If still running after 1s and over limit: stream to spill file
 ///
 /// Returns `(stdout_string, stderr_string, did_spill)`.
+#[cfg(feature = "native")]
 pub async fn spill_aware_collect(
     mut stdout: tokio::process::ChildStdout,
     mut stderr_reader: tokio::process::ChildStderr,
@@ -256,6 +290,7 @@ pub async fn spill_aware_collect(
 }
 
 /// Collect stderr (same pattern as existing dispatch code).
+#[cfg(feature = "native")]
 async fn collect_stderr(
     reader: &mut tokio::process::ChildStderr,
     stream: Option<&crate::scheduler::StderrStream>,
@@ -290,6 +325,7 @@ async fn collect_stderr(
 /// and `DuplexStream` in tests.
 ///
 /// Returns `(stdout_string, did_spill)`.
+#[cfg(feature = "native")]
 async fn collect_stdout_with_spill<R: tokio::io::AsyncRead + Unpin>(
     stdout: &mut R,
     max_bytes: usize,
@@ -385,6 +421,7 @@ async fn collect_stdout_with_spill<R: tokio::io::AsyncRead + Unpin>(
 /// Write buffered data + remaining stdout to a spill file, return truncated result.
 ///
 /// Generic over `AsyncRead + Unpin` for testability.
+#[cfg(feature = "native")]
 async fn stream_to_spill<R: tokio::io::AsyncRead + Unpin>(
     buffer: &[u8],
     stdout: &mut R,
@@ -438,6 +475,7 @@ async fn stream_to_spill<R: tokio::io::AsyncRead + Unpin>(
 }
 
 /// Write output bytes to a new spill file. Returns (path, bytes_written).
+#[cfg(feature = "native")]
 async fn write_spill_file(data: &[u8]) -> Result<(PathBuf, usize), std::io::Error> {
     let dir = paths::spill_dir();
     tokio::fs::create_dir_all(&dir).await?;
@@ -449,6 +487,7 @@ async fn write_spill_file(data: &[u8]) -> Result<(PathBuf, usize), std::io::Erro
 }
 
 /// Build the truncated output string with head, tail, and pointer.
+#[cfg(feature = "native")]
 fn build_truncated_output(
     full: &str,
     config: &OutputLimitConfig,
@@ -491,6 +530,7 @@ fn tail_from_str(s: &str, max_bytes: usize) -> &str {
 }
 
 /// Read the first N bytes from a file for head preview.
+#[cfg(feature = "native")]
 async fn read_head_from_file(path: &std::path::Path, max_bytes: usize) -> Result<String, std::io::Error> {
     use tokio::io::AsyncReadExt;
 
@@ -506,6 +546,7 @@ async fn read_head_from_file(path: &std::path::Path, max_bytes: usize) -> Result
 }
 
 /// Read the last N bytes from a file for tail preview.
+#[cfg(feature = "native")]
 async fn read_tail_from_file(path: &std::path::Path, max_bytes: usize) -> Result<String, std::io::Error> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -531,6 +572,7 @@ async fn read_tail_from_file(path: &std::path::Path, max_bytes: usize) -> Result
 }
 
 /// Generate a unique spill filename using timestamp, PID, and monotonic counter.
+#[cfg(feature = "native")]
 fn generate_spill_filename() -> String {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::SystemTime;
@@ -568,7 +610,7 @@ pub fn parse_size(s: &str) -> Result<usize, String> {
     Ok(num * multiplier)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
 

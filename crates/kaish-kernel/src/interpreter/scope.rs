@@ -12,6 +12,14 @@ use crate::ast::{Value, VarPath, VarSegment};
 
 use super::result::ExecResult;
 
+/// Get process ID, returning 0 on platforms where it's unsupported (WASI).
+fn get_pid() -> u32 {
+    #[cfg(target_os = "wasi")]
+    { 0 }
+    #[cfg(not(target_os = "wasi"))]
+    { std::process::id() }
+}
+
 /// Variable scope with nested frames and last-result tracking.
 ///
 /// Variables are looked up from innermost to outermost frame.
@@ -71,7 +79,7 @@ impl Scope {
             trash_enabled: false,
             trash_max_size: 10 * 1024 * 1024, // 10 MB
             glob_enabled: true,
-            pid: std::process::id(),
+            pid: get_pid(),
         }
     }
 

@@ -59,16 +59,15 @@ async fn apply_redirects(
                 if let Some(path) = eval_redirect_target(&redir.target, ctx) {
                     // Stream OutputData directly to file if available
                     if let Some(output) = result.take_output_for_stream() {
-                        match std::fs::File::create(&path) {
-                            Ok(mut file) => {
-                                if let Err(e) = output.write_canonical(&mut file, None) {
-                                    return ExecResult::failure(1, format!("redirect: {e}"));
-                                }
-                            }
-                            Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
+                        let mut buf = Vec::new();
+                        if let Err(e) = output.write_canonical(&mut buf, None) {
+                            return ExecResult::failure(1, format!("redirect: {e}"));
+                        }
+                        if let Err(e) = redirect_write(ctx, &path, &buf).await {
+                            return ExecResult::failure(1, format!("redirect: {e}"));
                         }
                     } else {
-                        if let Err(e) = tokio::fs::write(&path, result.text_out().as_ref()).await {
+                        if let Err(e) = redirect_write(ctx, &path, result.text_out().as_bytes()).await {
                             return ExecResult::failure(1, format!("redirect: {e}"));
                         }
                     }
@@ -80,27 +79,16 @@ async fn apply_redirects(
                 if let Some(path) = eval_redirect_target(&redir.target, ctx) {
                     // Stream OutputData directly if available
                     if let Some(output) = result.take_output_for_stream() {
-                        match std::fs::OpenOptions::new().append(true).create(true).open(&path) {
-                            Ok(mut file) => {
-                                if let Err(e) = output.write_canonical(&mut file, None) {
-                                    return ExecResult::failure(1, format!("redirect: {e}"));
-                                }
-                            }
-                            Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
+                        let mut buf = Vec::new();
+                        if let Err(e) = output.write_canonical(&mut buf, None) {
+                            return ExecResult::failure(1, format!("redirect: {e}"));
+                        }
+                        if let Err(e) = redirect_append(ctx, &path, &buf).await {
+                            return ExecResult::failure(1, format!("redirect: {e}"));
                         }
                     } else {
-                        let file = tokio::fs::OpenOptions::new()
-                            .append(true)
-                            .create(true)
-                            .open(&path)
-                            .await;
-                        match file {
-                            Ok(mut f) => {
-                                if let Err(e) = f.write_all(result.text_out().as_bytes()).await {
-                                    return ExecResult::failure(1, format!("redirect: {e}"));
-                                }
-                            }
-                            Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
+                        if let Err(e) = redirect_append(ctx, &path, result.text_out().as_bytes()).await {
+                            return ExecResult::failure(1, format!("redirect: {e}"));
                         }
                     }
                     result.clear_out();
@@ -109,7 +97,7 @@ async fn apply_redirects(
             }
             RedirectKind::Stderr => {
                 if let Some(path) = eval_redirect_target(&redir.target, ctx) {
-                    if let Err(e) = tokio::fs::write(&path, &result.err).await {
+                    if let Err(e) = redirect_write(ctx, &path, result.err.as_bytes()).await {
                         return ExecResult::failure(1, format!("redirect: {e}"));
                     }
                     result.err.clear();
@@ -118,7 +106,7 @@ async fn apply_redirects(
             RedirectKind::Both => {
                 if let Some(path) = eval_redirect_target(&redir.target, ctx) {
                     let combined = format!("{}{}", result.text_out(), result.err);
-                    if let Err(e) = tokio::fs::write(&path, combined).await {
+                    if let Err(e) = redirect_write(ctx, &path, combined.as_bytes()).await {
                         return ExecResult::failure(1, format!("redirect: {e}"));
                     }
                     result.clear_out();
@@ -141,6 +129,19 @@ async fn apply_redirects(
 /// Evaluate a redirect target expression to get the file path.
 fn eval_redirect_target(expr: &Expr, ctx: &ExecContext) -> Option<String> {
     eval_simple_expr(expr, ctx).map(|v| value_to_string(&v))
+}
+
+/// Write data to a file via the VFS backend.
+async fn redirect_write(ctx: &ExecContext, path: &str, data: &[u8]) -> Result<(), String> {
+    use crate::backend::WriteMode;
+    let p = std::path::Path::new(path);
+    ctx.backend.write(p, data, WriteMode::Overwrite).await.map_err(|e| e.to_string())
+}
+
+/// Append data to a file via the VFS backend.
+async fn redirect_append(ctx: &ExecContext, path: &str, data: &[u8]) -> Result<(), String> {
+    let p = std::path::Path::new(path);
+    ctx.backend.append(p, data).await.map_err(|e| e.to_string())
 }
 
 /// Set up stdin from redirects (< file, <<heredoc).

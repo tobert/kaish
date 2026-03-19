@@ -82,6 +82,7 @@ pub trait Executor {
             if meta.is_dir() {
                 DirEntry::directory(path.file_name().unwrap_or_default().to_string_lossy())
             } else {
+                #[allow(unused_mut)]
                 let mut entry = DirEntry::file(
                     path.file_name().unwrap_or_default().to_string_lossy(),
                     meta.len(),

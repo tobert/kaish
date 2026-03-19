@@ -11,7 +11,6 @@
 //! ```
 
 use async_trait::async_trait;
-use tokio::process::Command;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
@@ -123,15 +122,24 @@ impl Tool for Env {
             .map(value_to_string)
             .collect();
 
-        execute_with_env(
-            ctx,
-            &command,
-            &cmd_args,
-            &env_overrides,
-            &unset_vars,
-            clear_env,
-        )
-        .await
+        #[cfg(feature = "native")]
+        {
+            return execute_with_env(
+                ctx,
+                &command,
+                &cmd_args,
+                &env_overrides,
+                &unset_vars,
+                clear_env,
+            )
+            .await;
+        }
+
+        #[cfg(not(feature = "native"))]
+        {
+            let _ = (ctx, &command, &cmd_args, &env_overrides, &unset_vars, clear_env);
+            return ExecResult::failure(1, "env: external commands not available in sandbox mode");
+        }
     }
 }
 
@@ -206,6 +214,7 @@ fn print_env_with_overrides(
 }
 
 /// Execute a command with modified environment.
+#[cfg(feature = "native")]
 async fn execute_with_env(
     ctx: &mut ExecContext,
     command: &str,
@@ -214,6 +223,7 @@ async fn execute_with_env(
     unset: &[String],
     clear: bool,
 ) -> ExecResult {
+    use tokio::process::Command;
     let mut cmd = Command::new(command);
     cmd.args(args);
 
@@ -331,6 +341,7 @@ mod tests {
         assert!(result.text_out().is_empty());
     }
 
+    #[cfg(feature = "native")]
     #[tokio::test]
     async fn test_env_with_command() {
         let mut ctx = make_ctx();
@@ -348,6 +359,7 @@ mod tests {
         assert_eq!(result.text_out().trim(), "hello");
     }
 
+    #[cfg(feature = "native")]
     #[tokio::test]
     async fn test_env_i_clears_environment() {
         let mut ctx = make_ctx();

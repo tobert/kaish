@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
+#[cfg(all(unix, feature = "native"))]
 use crate::scheduler::JobId;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
@@ -34,13 +35,13 @@ impl Tool for Kill {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        #[cfg(not(unix))]
+        #[cfg(not(all(unix, feature = "native")))]
         {
             let _ = (args, ctx);
             return ExecResult::failure(1, "kill: not supported on this platform");
         }
 
-        #[cfg(unix)]
+        #[cfg(all(unix, feature = "native"))]
         {
             // Get signal from --signal / -s named param, or default to TERM
             let signal_name = args.named.get("signal")
@@ -113,7 +114,7 @@ impl Tool for Kill {
 }
 
 /// Parse a signal name or number to a Signal value.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "native"))]
 fn parse_signal(name: &str) -> Option<nix::sys::signal::Signal> {
     use nix::sys::signal::Signal;
 

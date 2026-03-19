@@ -26,11 +26,15 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::ast::{Arg, Command, Expr, Value};
+use crate::ast::{Arg, Command, Value};
+#[cfg(feature = "native")]
+use crate::ast::Expr;
 use crate::backend::BackendError;
 use crate::interpreter::{apply_output_format, ExecResult};
 use crate::scheduler::build_tool_args;
-use crate::tools::{extract_output_format, resolve_in_path, ExecContext, ToolRegistry};
+use crate::tools::{extract_output_format, ExecContext, ToolRegistry};
+#[cfg(feature = "native")]
+use crate::tools::resolve_in_path;
 
 /// Position of a command within a pipeline.
 ///
@@ -89,6 +93,18 @@ impl BackendDispatcher {
     /// Used as fallback when no builtin/backend tool matches. Returns None if
     /// the command is not found in PATH. Always captures stdout/stderr (never
     /// inherits terminal — pipeline stages don't need interactive I/O).
+    #[cfg(not(feature = "native"))]
+    async fn try_external(
+        &self,
+        _name: &str,
+        _args: &[Arg],
+        _ctx: &mut ExecContext,
+    ) -> Option<ExecResult> {
+        None
+    }
+
+    /// Try to execute an external command (PATH lookup + process spawn).
+    #[cfg(feature = "native")]
     async fn try_external(
         &self,
         name: &str,

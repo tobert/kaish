@@ -28,10 +28,11 @@ pub mod paths;
 pub mod scheduler;
 pub mod tools;
 pub mod trash;
+#[cfg(feature = "native")]
 pub mod trash_system;
 pub mod validator;
 pub mod vfs;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "native"))]
 pub mod terminal;
 
 // Re-export kaish_glob as our glob/walker modules for backwards compatibility
@@ -76,6 +77,7 @@ pub use output_limit::OutputLimitConfig;
 // ```
 
 // Git types (for embedders that want direct GitVfs access)
+#[cfg(feature = "native")]
 pub use vfs::{FileStatus, GitVfs, LogEntry, StatusSummary, WorktreeInfo};
 
 // Job observability (for embedders capturing command output)

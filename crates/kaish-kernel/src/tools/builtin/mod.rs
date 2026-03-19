@@ -7,6 +7,7 @@ mod assert;
 mod awk;
 mod base64_tool;
 mod basename;
+#[cfg(feature = "native")]
 mod bg;
 mod cat;
 mod cd;
@@ -19,15 +20,20 @@ mod dirname;
 mod patch;
 mod echo;
 mod env;
+#[cfg(feature = "native")]
 mod exec;
+#[cfg(feature = "native")]
 mod spawn;
+#[cfg(feature = "native")]
 pub use spawn::resolve_in_path;
 mod export;
+#[cfg(feature = "native")]
 mod fg;
 mod glob;
 mod find;
 pub(crate) mod format_string;
 mod gather;
+#[cfg(feature = "native")]
 mod git;
 mod grep;
 mod head;
@@ -50,7 +56,7 @@ mod mktemp;
 mod mv;
 mod output_limit;
 mod printf;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "native"))]
 mod ps;
 mod pwd;
 mod read;
@@ -70,6 +76,7 @@ mod tail;
 mod tee;
 mod test_builtin;
 mod timeout;
+#[cfg(feature = "native")]
 mod tokens;
 mod touch;
 mod tr;
@@ -82,6 +89,7 @@ mod validate;
 mod vars;
 mod wait;
 mod wc;
+#[cfg(feature = "native")]
 mod which;
 mod write;
 mod xxd;
@@ -96,6 +104,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(awk::Awk);
     registry.register(base64_tool::Base64Tool);
     registry.register(basename::Basename);
+    #[cfg(feature = "native")]
     registry.register(bg::Bg);
     registry.register(cat::Cat);
     registry.register(cd::Cd);
@@ -107,13 +116,17 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(dirname::Dirname);
     registry.register(echo::Echo);
     registry.register(env::Env);
+    #[cfg(feature = "native")]
     registry.register(exec::Exec);
+    #[cfg(feature = "native")]
     registry.register(spawn::Spawn);
     registry.register(export::Export);
+    #[cfg(feature = "native")]
     registry.register(fg::Fg);
     registry.register(glob::Glob);
     registry.register(find::Find);
     registry.register(gather::Gather);
+    #[cfg(feature = "native")]
     registry.register(git::Git);
     registry.register(grep::Grep);
     registry.register(head::Head);
@@ -138,7 +151,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(output_limit::KaishOutputLimit);
     registry.register(patch::Patch);
     registry.register(printf::Printf);
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "native"))]
     registry.register(ps::Ps);
     registry.register(pwd::Pwd);
     registry.register(read::Read);
@@ -159,6 +172,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(test_builtin::Test);
     registry.register(test_builtin::Bracket);
     registry.register(timeout::Timeout);
+    #[cfg(feature = "native")]
     registry.register(tokens::Tokens);
     registry.register(touch::Touch);
     registry.register(tr::Tr);
@@ -172,6 +186,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(vars::Vars);
     registry.register(wait::Wait);
     registry.register(wc::Wc);
+    #[cfg(feature = "native")]
     registry.register(which::Which);
     registry.register(write::Write);
     registry.register(xxd::Xxd);

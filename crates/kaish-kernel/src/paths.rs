@@ -35,6 +35,7 @@
 
 use std::path::PathBuf;
 
+#[cfg(feature = "native")]
 use directories::BaseDirs;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -70,8 +71,15 @@ pub fn home_dir() -> PathBuf {
 /// let myapp_data = xdg_data_home().join("myapp");
 /// ```
 pub fn xdg_data_home() -> PathBuf {
-    BaseDirs::new()
-        .map(|d| d.data_dir().to_path_buf())
+    std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .ok()
+        .or({
+            #[cfg(feature = "native")]
+            { BaseDirs::new().map(|d| d.data_dir().to_path_buf()) }
+            #[cfg(not(feature = "native"))]
+            { None }
+        })
         .unwrap_or_else(|| home_dir().join(".local").join("share"))
 }
 
@@ -86,8 +94,15 @@ pub fn xdg_data_home() -> PathBuf {
 /// let myapp_config = xdg_config_home().join("myapp");
 /// ```
 pub fn xdg_config_home() -> PathBuf {
-    BaseDirs::new()
-        .map(|d| d.config_dir().to_path_buf())
+    std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .ok()
+        .or({
+            #[cfg(feature = "native")]
+            { BaseDirs::new().map(|d| d.config_dir().to_path_buf()) }
+            #[cfg(not(feature = "native"))]
+            { None }
+        })
         .unwrap_or_else(|| home_dir().join(".config"))
 }
 
@@ -102,8 +117,15 @@ pub fn xdg_config_home() -> PathBuf {
 /// let myapp_cache = xdg_cache_home().join("myapp");
 /// ```
 pub fn xdg_cache_home() -> PathBuf {
-    BaseDirs::new()
-        .map(|d| d.cache_dir().to_path_buf())
+    std::env::var("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .ok()
+        .or({
+            #[cfg(feature = "native")]
+            { BaseDirs::new().map(|d| d.cache_dir().to_path_buf()) }
+            #[cfg(not(feature = "native"))]
+            { None }
+        })
         .unwrap_or_else(|| home_dir().join(".cache"))
 }
 

@@ -37,10 +37,16 @@ use kaish_glob::glob_match;
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
 use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value, value_to_bool, value_to_string, ControlFlow, ExecResult, Scope};
 use crate::parser::parse;
-use crate::scheduler::{drain_to_stream, is_bool_type, schema_param_lookup, stderr_stream, BoundedStream, JobManager, PipelineRunner, StderrReceiver, DEFAULT_STREAM_MAX_SIZE};
-use crate::tools::{extract_output_format, register_builtins, resolve_in_path, ExecContext, ToolArgs, ToolRegistry};
+use crate::scheduler::{is_bool_type, schema_param_lookup, stderr_stream, BoundedStream, JobManager, PipelineRunner, StderrReceiver};
+#[cfg(feature = "native")]
+use crate::scheduler::{drain_to_stream, DEFAULT_STREAM_MAX_SIZE};
+use crate::tools::{extract_output_format, register_builtins, ExecContext, ToolArgs, ToolRegistry};
+#[cfg(feature = "native")]
+use crate::tools::resolve_in_path;
 use crate::validator::{Severity, Validator};
-use crate::vfs::{BuiltinFs, JobFs, LocalFs, MemoryFs, VfsRouter};
+#[cfg(feature = "native")]
+use crate::vfs::LocalFs;
+use crate::vfs::{BuiltinFs, JobFs, MemoryFs, VfsRouter};
 
 /// VFS mount mode determines how the local filesystem is exposed.
 ///
@@ -58,6 +64,7 @@ pub enum VfsMountMode {
     /// Mounts:
     /// - `/` → LocalFs("/")
     /// - `/v` → MemoryFs (blob storage)
+    #[cfg(feature = "native")]
     Passthrough,
 
     /// Transparent sandbox — paths look native but access is restricted.
@@ -74,6 +81,7 @@ pub enum VfsMountMode {
     /// - `{root}` → LocalFs(root)  (e.g., `/home/user` → LocalFs)
     /// - `/tmp` → LocalFs("/tmp")
     /// - `/v` → MemoryFs (blob storage)
+    #[cfg(feature = "native")]
     Sandboxed {
         /// Root path for local filesystem. Defaults to `$HOME`.
         /// Can be restricted further, e.g., `~/src`.
@@ -92,9 +100,13 @@ pub enum VfsMountMode {
     NoLocal,
 }
 
+#[allow(clippy::derivable_impls)] // native has multiple variants; not derivable cross-feature
 impl Default for VfsMountMode {
     fn default() -> Self {
-        VfsMountMode::Sandboxed { root: None }
+        #[cfg(feature = "native")]
+        { VfsMountMode::Sandboxed { root: None } }
+        #[cfg(not(feature = "native"))]
+        { VfsMountMode::NoLocal }
     }
 }
 
@@ -162,6 +174,7 @@ pub struct KernelConfig {
 }
 
 /// Get the default sandbox root ($HOME).
+#[cfg(feature = "native")]
 fn default_sandbox_root() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
@@ -170,25 +183,45 @@ fn default_sandbox_root() -> PathBuf {
 
 impl Default for KernelConfig {
     fn default() -> Self {
-        let home = default_sandbox_root();
-        Self {
-            name: "default".to_string(),
-            vfs_mode: VfsMountMode::Sandboxed { root: None },
-            cwd: home,
-            skip_validation: false,
-            interactive: false,
-            ignore_config: crate::ignore_config::IgnoreConfig::none(),
-            output_limit: crate::output_limit::OutputLimitConfig::none(),
-            allow_external_commands: true,
-            latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
-            trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
-            nonce_store: None,
+        #[cfg(feature = "native")]
+        {
+            let home = default_sandbox_root();
+            Self {
+                name: "default".to_string(),
+                vfs_mode: VfsMountMode::Sandboxed { root: None },
+                cwd: home,
+                skip_validation: false,
+                interactive: false,
+                ignore_config: crate::ignore_config::IgnoreConfig::none(),
+                output_limit: crate::output_limit::OutputLimitConfig::none(),
+                allow_external_commands: true,
+                latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
+                trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
+                nonce_store: None,
+            }
+        }
+        #[cfg(not(feature = "native"))]
+        {
+            Self {
+                name: "default".to_string(),
+                vfs_mode: VfsMountMode::NoLocal,
+                cwd: PathBuf::from("/"),
+                skip_validation: false,
+                interactive: false,
+                ignore_config: crate::ignore_config::IgnoreConfig::none(),
+                output_limit: crate::output_limit::OutputLimitConfig::none(),
+                allow_external_commands: false,
+                latch_enabled: false,
+                trash_enabled: false,
+                nonce_store: None,
+            }
         }
     }
 }
 
 impl KernelConfig {
     /// Create a transient kernel config (sandboxed, for temporary use).
+    #[cfg(feature = "native")]
     pub fn transient() -> Self {
         let home = default_sandbox_root();
         Self {
@@ -206,7 +239,14 @@ impl KernelConfig {
         }
     }
 
+    /// Create a transient kernel config (isolated, no-default-features).
+    #[cfg(not(feature = "native"))]
+    pub fn transient() -> Self {
+        Self::isolated()
+    }
+
     /// Create a kernel config with the given name (sandboxed by default).
+    #[cfg(feature = "native")]
     pub fn named(name: &str) -> Self {
         let home = default_sandbox_root();
         Self {
@@ -224,10 +264,20 @@ impl KernelConfig {
         }
     }
 
+    /// Create a kernel config with the given name (isolated, no-default-features).
+    #[cfg(not(feature = "native"))]
+    pub fn named(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            ..Self::isolated()
+        }
+    }
+
     /// Create a REPL config with passthrough filesystem access.
     ///
     /// Native paths like `/home/user/project` work directly.
     /// The cwd is set to the actual current working directory.
+    #[cfg(feature = "native")]
     pub fn repl() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         Self {
@@ -251,6 +301,7 @@ impl KernelConfig {
     /// but sandboxed to `$HOME`. Paths outside the sandbox are not accessible
     /// through builtins. External commands still access the real filesystem —
     /// use `.with_allow_external_commands(false)` to block them.
+    #[cfg(feature = "native")]
     pub fn mcp() -> Self {
         let home = default_sandbox_root();
         Self {
@@ -271,6 +322,7 @@ impl KernelConfig {
     /// Create an MCP server config with a custom sandbox root.
     ///
     /// Use this to restrict access to a subdirectory like `~/src`.
+    #[cfg(feature = "native")]
     pub fn mcp_with_root(root: PathBuf) -> Self {
         Self {
             name: "mcp".to_string(),
@@ -414,7 +466,7 @@ pub struct Kernel {
     /// `cancel()` cancels the current token and replaces it.
     cancel_token: std::sync::Mutex<tokio_util::sync::CancellationToken>,
     /// Terminal state for job control (interactive mode only, Unix only).
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "native"))]
     terminal_state: Option<Arc<crate::terminal::TerminalState>>,
     /// Weak self-reference for handing out `Arc<dyn CommandDispatcher>`.
     ///
@@ -442,12 +494,14 @@ impl Kernel {
         let mut vfs = VfsRouter::new();
 
         match &config.vfs_mode {
+            #[cfg(feature = "native")]
             VfsMountMode::Passthrough => {
                 // LocalFs at "/" — native paths work directly
                 vfs.mount("/", LocalFs::new(PathBuf::from("/")));
                 // Memory for blobs
                 vfs.mount("/v", MemoryFs::new());
             }
+            #[cfg(feature = "native")]
             VfsMountMode::Sandboxed { root } => {
                 // Memory at root for safety (catches paths outside sandbox)
                 vfs.mount("/", MemoryFs::new());
@@ -582,6 +636,7 @@ impl Kernel {
         exec_ctx.set_job_manager(jobs.clone());
         exec_ctx.set_tool_schemas(tools.schemas());
         exec_ctx.set_tools(tools.clone());
+        #[cfg(feature = "native")]
         exec_ctx.set_trash_backend(Arc::new(crate::trash_system::SystemTrash));
         exec_ctx.stderr = Some(stderr_writer);
         exec_ctx.ignore_config = ignore_config;
@@ -613,7 +668,7 @@ impl Kernel {
             allow_external_commands,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
             cancel_token: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
-            #[cfg(unix)]
+            #[cfg(all(unix, feature = "native"))]
             terminal_state: None,
             self_weak: std::sync::OnceLock::new(),
         })
@@ -651,7 +706,7 @@ impl Kernel {
     ///
     /// Call this after kernel creation when running as an interactive REPL
     /// and stdin is a TTY. Sets up process groups and signal handling.
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "native"))]
     pub fn init_terminal(&mut self) {
         if !self.interactive {
             return;
@@ -1315,7 +1370,7 @@ impl Kernel {
                 allow_external_commands: self.allow_external_commands,
                 nonce_store: ec.nonce_store.clone(),
                 trash_backend: ec.trash_backend.clone(),
-                #[cfg(unix)]
+                #[cfg(all(unix, feature = "native"))]
                 terminal_state: ec.terminal_state.clone(),
                 dispatcher: self.dispatcher(),
             }
@@ -1853,6 +1908,7 @@ impl Kernel {
     /// - `key=value` stays as `key=value`
     ///
     /// This is what external commands expect in their argv.
+    #[cfg(feature = "native")]
     async fn build_args_flat(&self, args: &[Arg]) -> Result<Vec<String>> {
         let mut argv = Vec::new();
         for arg in args {
@@ -2631,6 +2687,13 @@ impl Kernel {
     /// - `Ok(Some(result))` if command was found and executed
     /// - `Ok(None)` if command was not found in PATH
     /// - `Err` on execution errors
+    #[cfg(not(feature = "native"))]
+    async fn try_execute_external(&self, _name: &str, _args: &[Arg]) -> Result<Option<ExecResult>> {
+        Ok(None)
+    }
+
+    /// Try to execute an external command from PATH.
+    #[cfg(feature = "native")]
     #[tracing::instrument(level = "debug", skip(self, args), fields(command = %name))]
     async fn try_execute_external(&self, name: &str, args: &[Arg]) -> Result<Option<ExecResult>> {
         if !self.allow_external_commands {
@@ -3156,7 +3219,7 @@ fn apply_tilde_expansion(value: Value) -> Value {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
 

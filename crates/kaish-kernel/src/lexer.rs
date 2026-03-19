@@ -78,6 +78,9 @@ fn unique_marker_id() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let counter = MARKER_COUNTER.fetch_add(1, Ordering::Relaxed);
+    #[cfg(target_os = "wasi")]
+    let pid = 0u32;
+    #[cfg(not(target_os = "wasi"))]
     let pid = std::process::id();
     format!("{:x}_{:x}_{:x}", timestamp, counter, pid)
 }

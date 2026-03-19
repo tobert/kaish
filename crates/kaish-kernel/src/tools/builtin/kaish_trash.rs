@@ -206,7 +206,7 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
     use crate::trash::find_restore_match;
