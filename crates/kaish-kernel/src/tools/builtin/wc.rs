@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::glob::contains_glob;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
@@ -62,25 +61,10 @@ impl Tool for Wc {
         let show_all = !lines_only && !words_only && !chars_only && !bytes_only;
 
         // Collect all file paths from positional arguments, expanding globs
-        let mut paths: Vec<String> = Vec::new();
-        for v in &args.positional {
-            if let Value::String(s) = v {
-                if contains_glob(s) {
-                    match ctx.expand_glob(s).await {
-                        Ok(expanded) => {
-                            let root = ctx.resolve_path(".");
-                            for p in expanded {
-                                let rel = p.strip_prefix(&root).unwrap_or(&p);
-                                paths.push(rel.to_string_lossy().to_string());
-                            }
-                        }
-                        Err(e) => return ExecResult::failure(1, format!("wc: {}", e)),
-                    }
-                } else {
-                    paths.push(s.clone());
-                }
-            }
-        }
+        let paths = match ctx.expand_paths(&args.positional).await {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(1, format!("wc: {}", e)),
+        };
 
         // Build headers based on flags
         let headers = build_headers(lines_only, words_only, chars_only, bytes_only, show_all);

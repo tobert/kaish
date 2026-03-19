@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::glob::contains_glob;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
@@ -54,25 +53,10 @@ impl Tool for Tail {
         }
 
         // Collect all file paths, expanding globs
-        let mut paths: Vec<String> = Vec::new();
-        for arg in &args.positional {
-            if let Value::String(s) = arg {
-                if contains_glob(s) {
-                    match ctx.expand_glob(s).await {
-                        Ok(expanded) => {
-                            let root = ctx.resolve_path(".");
-                            for p in expanded {
-                                let rel = p.strip_prefix(&root).unwrap_or(&p);
-                                paths.push(rel.to_string_lossy().to_string());
-                            }
-                        }
-                        Err(e) => return ExecResult::failure(1, format!("tail: {}", e)),
-                    }
-                } else {
-                    paths.push(s.clone());
-                }
-            }
-        }
+        let paths = match ctx.expand_paths(&args.positional).await {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(1, format!("tail: {}", e)),
+        };
 
         // Multiple files: show each with header
         if paths.len() > 1 {

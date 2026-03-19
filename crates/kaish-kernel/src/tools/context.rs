@@ -472,6 +472,34 @@ impl ExecContext {
 
         walker.collect().await.map_err(|e| e.to_string())
     }
+
+    /// Expand positional arguments, resolving glob patterns to relative paths.
+    ///
+    /// Used by file-processing builtins (cat, head, tail, wc) that accept
+    /// glob patterns in their path arguments. Non-string values are converted
+    /// to strings (matching shell conventions).
+    pub async fn expand_paths(&self, positional: &[Value]) -> Result<Vec<String>, String> {
+        let mut paths = Vec::new();
+        for arg in positional {
+            let s = match arg {
+                Value::String(s) => s.clone(),
+                Value::Int(n) => n.to_string(),
+                Value::Float(f) => f.to_string(),
+                _ => continue,
+            };
+            if crate::glob::contains_glob(&s) {
+                let expanded = self.expand_glob(&s).await?;
+                let root = self.resolve_path(".");
+                for p in expanded {
+                    let rel = p.strip_prefix(&root).unwrap_or(&p);
+                    paths.push(rel.to_string_lossy().to_string());
+                }
+            } else {
+                paths.push(s);
+            }
+        }
+        Ok(paths)
+    }
 }
 
 /// Normalize a path by resolving `.` and `..` components lexically (no filesystem access).

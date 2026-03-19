@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::glob::contains_glob;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
 
@@ -75,28 +74,10 @@ impl Tool for Cat {
             return ExecResult::failure(1, "cat: missing path argument");
         }
         // Collect paths, expanding any glob patterns
-        let mut paths: Vec<String> = Vec::new();
-        for arg in &args.positional {
-            let s = match arg {
-                Value::String(s) => s.clone(),
-                Value::Int(n) => n.to_string(),
-                _ => continue,
-            };
-            if contains_glob(&s) {
-                match ctx.expand_glob(&s).await {
-                    Ok(expanded) => {
-                        let root = ctx.resolve_path(".");
-                        for p in expanded {
-                            let rel = p.strip_prefix(&root).unwrap_or(&p);
-                            paths.push(rel.to_string_lossy().to_string());
-                        }
-                    }
-                    Err(e) => return ExecResult::failure(1, format!("cat: {}", e)),
-                }
-            } else {
-                paths.push(s);
-            }
-        }
+        let paths = match ctx.expand_paths(&args.positional).await {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(1, format!("cat: {}", e)),
+        };
 
         if paths.is_empty() {
             return ExecResult::failure(1, "cat: missing path argument");
