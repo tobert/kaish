@@ -1411,13 +1411,16 @@ impl Kernel {
             bg_ctx.set_tools(tools.clone());
             bg_ctx.set_tool_schemas(tool_schemas);
             bg_ctx.allow_external_commands = allow_ext;
+            // Set dispatcher on ctx so builtins (e.g. timeout) within the
+            // background job can re-dispatch through the full chain.
             bg_ctx.dispatcher = dispatcher_arc;
 
-            // Execute the pipeline — use the Kernel dispatcher from the context.
-            // The Kernel must be created via into_arc() for this to work.
-            let dispatcher = bg_ctx.dispatcher.clone()
-                .expect("background jobs require Kernel::into_arc()");
-            let result = runner.run(&commands, &mut bg_ctx, &*dispatcher).await;
+            // The top-level runner must use BackendDispatcher (stateless).
+            // Using the Kernel dispatcher here would cause data races —
+            // dispatch_command syncs state through RwLocks, and background
+            // jobs run concurrently with the foreground.
+            let dispatcher = crate::dispatch::BackendDispatcher::new(tools);
+            let result = runner.run(&commands, &mut bg_ctx, &dispatcher).await;
 
             // Write output to streams
             let text = result.text_out();

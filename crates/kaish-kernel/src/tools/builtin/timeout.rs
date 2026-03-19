@@ -1,19 +1,15 @@
 //! timeout — Run a command with a time limit.
 //!
-//! Dispatches through the backend for builtins, spawns a child process
-//! for external commands. Returns exit code 124 on timeout (matching
-//! coreutils convention).
+//! Dispatches the inner command through the full resolution chain via
+//! `ctx.dispatcher` (user tools → builtins → .kai scripts → external commands).
+//! Returns exit code 124 on timeout (matching coreutils convention).
 
 use async_trait::async_trait;
 use std::time::Duration;
-use tokio::process::Command;
 
-use crate::ast::Value;
-use crate::backend::BackendError;
+use crate::ast::{Arg, Command, Expr, Value};
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
-
-use super::spawn::resolve_in_path;
 
 /// Timeout tool: run a command with a deadline.
 pub struct Timeout;
@@ -84,169 +80,30 @@ impl Tool for Timeout {
             }
         };
 
-        // Remaining positionals become the inner command's args
-        let inner_args: Vec<Value> = args.positional[2..].to_vec();
+        // Build an AST Command for the inner command so we can dispatch it
+        // through the full resolution chain.
+        let inner_args: Vec<Arg> = args.positional[2..]
+            .iter()
+            .map(|v| Arg::Positional(Expr::Literal(v.clone())))
+            .collect();
 
-        // Try builtin dispatch first via backend
-        let mut tool_args = ToolArgs::new();
-        tool_args.positional = inner_args.clone();
+        let inner_cmd = Command {
+            name: cmd_name,
+            args: inner_args,
+            redirects: vec![],
+        };
 
-        let backend = ctx.backend.clone();
-        let builtin_future = backend.call_tool(&cmd_name, tool_args, ctx);
+        // Dispatch through the full chain via ctx.dispatcher
+        let Some(dispatcher) = ctx.dispatcher.clone() else {
+            return ExecResult::failure(1,
+                "timeout: no dispatcher available (Kernel must be created via into_arc())");
+        };
 
-        match tokio::time::timeout(duration, builtin_future).await {
-            Ok(Ok(tool_result)) => {
-                // Builtin succeeded within time limit
-                let mut result = ExecResult::from_output(
-                    tool_result.code as i64,
-                    tool_result.stdout,
-                    tool_result.stderr,
-                );
-                result.set_output(tool_result.output);
-                result.content_type = tool_result.content_type;
-                result.baggage = tool_result.baggage;
-                if let Some(json_data) = tool_result.data {
-                    result.data = Some(Value::Json(json_data));
-                }
-                result
-            }
-            Ok(Err(BackendError::ToolNotFound(_))) => {
-                // Not a builtin — try external command
-                self.run_external(ctx, &cmd_name, &inner_args, duration).await
-            }
+        match tokio::time::timeout(duration, dispatcher.dispatch(&inner_cmd, ctx)).await {
+            Ok(Ok(result)) => result,
             Ok(Err(e)) => ExecResult::failure(1, format!("timeout: {}", e)),
             Err(_elapsed) => {
-                // Builtin timed out
                 ExecResult::failure(124, format!("timeout: timed out after {}", duration_str))
-            }
-        }
-    }
-}
-
-impl Timeout {
-    /// Run an external command with a timeout.
-    async fn run_external(
-        &self,
-        ctx: &mut ExecContext,
-        cmd_name: &str,
-        inner_args: &[Value],
-        duration: Duration,
-    ) -> ExecResult {
-        if !ctx.allow_external_commands {
-            return ExecResult::failure(
-                1,
-                "timeout: external commands are disabled",
-            );
-        }
-
-        // Resolve command in PATH
-        let command = if cmd_name.starts_with('/') || cmd_name.starts_with("./") {
-            cmd_name.to_string()
-        } else {
-            let path_var = ctx
-                .scope
-                .get("PATH")
-                .map(value_to_string)
-                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
-
-            match resolve_in_path(cmd_name, &path_var) {
-                Some(resolved) => resolved,
-                None => {
-                    return ExecResult::failure(
-                        127,
-                        format!("timeout: {}: command not found", cmd_name),
-                    )
-                }
-            }
-        };
-
-        // Convert args to strings
-        let argv: Vec<String> = inner_args.iter().map(value_to_string).collect();
-
-        // Build command
-        let mut cmd = Command::new(&command);
-        cmd.args(&argv);
-
-        // Resolve cwd for external command
-        let vfs_cwd = ctx.cwd.clone();
-        if let Some(real_cwd) = ctx.backend.resolve_real_path(&vfs_cwd) {
-            cmd.current_dir(&real_cwd);
-        }
-
-        // Handle stdin
-        let stdin_data = ctx.read_stdin_to_string().await;
-        cmd.stdin(if stdin_data.is_some() {
-            std::process::Stdio::piped()
-        } else {
-            std::process::Stdio::null()
-        });
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-
-        // Spawn
-        let mut child = match cmd.spawn() {
-            Ok(child) => child,
-            Err(e) => {
-                return ExecResult::failure(127, format!("timeout: {}: {}", command, e))
-            }
-        };
-
-        // Write stdin if present
-        if let Some(data) = stdin_data {
-            if let Some(mut stdin) = child.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                // Ignore stdin write errors (broken pipe is fine)
-                let _ = stdin.write_all(data.as_bytes()).await;
-            }
-        }
-
-        // Take stdout/stderr handles so we can read them while keeping child alive for kill
-        let stdout_handle = child.stdout.take();
-        let stderr_handle = child.stderr.take();
-
-        // Spawn readers for stdout and stderr
-        let stdout_task = tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = Vec::new();
-            if let Some(mut out) = stdout_handle {
-                let _ = out.read_to_end(&mut buf).await;
-            }
-            buf
-        });
-        let stderr_task = tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = Vec::new();
-            if let Some(mut err) = stderr_handle {
-                let _ = err.read_to_end(&mut buf).await;
-            }
-            buf
-        });
-
-        // Wait with timeout — we keep &mut child so we can kill on timeout
-        match tokio::time::timeout(duration, child.wait()).await {
-            Ok(Ok(status)) => {
-                let code = status.code().unwrap_or(-1) as i64;
-                let stdout_bytes = stdout_task.await.unwrap_or_default();
-                let stderr_bytes = stderr_task.await.unwrap_or_default();
-                let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
-                let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
-                ExecResult::from_output(code, stdout, stderr)
-            }
-            Ok(Err(e)) => ExecResult::failure(1, format!("timeout: {}: {}", command, e)),
-            Err(_elapsed) => {
-                // Kill the child process, then collect any partial output
-                let _ = child.kill().await;
-                let stdout_bytes = stdout_task.await.unwrap_or_default();
-                let stderr_bytes = stderr_task.await.unwrap_or_default();
-                let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
-                let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
-                let mut result = ExecResult::from_output(124, stdout, stderr);
-                // Append timeout message to stderr
-                if !result.err.is_empty() && !result.err.ends_with('\n') {
-                    result.err.push('\n');
-                }
-                result.err.push_str(&format!("timeout: {}: timed out", cmd_name));
-                result
             }
         }
     }
@@ -298,29 +155,16 @@ fn parse_duration(s: &str) -> Option<Duration> {
     None
 }
 
-/// Convert a Value to a string.
-fn value_to_string(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::Bool(b) => b.to_string(),
-        Value::Int(i) => i.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::String(s) => s.clone(),
-        Value::Json(json) => json.to_string(),
-        Value::Blob(blob) => format!("[blob: {} {}]", blob.formatted_size(), blob.content_type),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vfs::{MemoryFs, VfsRouter};
-    use std::sync::Arc;
+    use crate::kernel::{Kernel, KernelConfig};
 
-    fn make_ctx() -> ExecContext {
-        let mut vfs = VfsRouter::new();
-        vfs.mount("/", MemoryFs::new());
-        ExecContext::new(Arc::new(vfs))
+    /// Create a Kernel wrapped in Arc for tests that need full dispatch.
+    async fn make_kernel() -> std::sync::Arc<Kernel> {
+        Kernel::new(KernelConfig::isolated().with_skip_validation(true))
+            .unwrap()
+            .into_arc()
     }
 
     // --- Duration parsing tests ---
@@ -348,79 +192,52 @@ mod tests {
         assert_eq!(parse_duration("5x"), None);
     }
 
-    // --- Tool execution tests ---
+    // --- Integration tests via Kernel::execute ---
 
     #[tokio::test]
     async fn test_timeout_missing_args() {
-        let mut ctx = make_ctx();
-        let args = ToolArgs::new();
-
-        let result = Timeout.execute(args, &mut ctx).await;
+        let kernel = make_kernel().await;
+        let result = kernel.execute("timeout").await.unwrap();
         assert!(!result.ok());
         assert!(result.err.contains("usage"));
     }
 
     #[tokio::test]
     async fn test_timeout_invalid_duration() {
-        let mut ctx = make_ctx();
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("abc".into()));
-        args.positional.push(Value::String("echo".into()));
-
-        let result = Timeout.execute(args, &mut ctx).await;
+        let kernel = make_kernel().await;
+        let result = kernel.execute("timeout abc echo hi").await.unwrap();
         assert!(!result.ok());
         assert!(result.err.contains("invalid duration"));
     }
 
     #[tokio::test]
     async fn test_timeout_builtin_succeeds() {
-        let mut ctx = make_ctx();
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("5s".into()));
-        args.positional.push(Value::String("echo".into()));
-        args.positional.push(Value::String("hello".into()));
-
-        let result = Timeout.execute(args, &mut ctx).await;
+        let kernel = make_kernel().await;
+        let result = kernel.execute("timeout 5s echo hello").await.unwrap();
         assert!(result.ok());
         assert!(result.text_out().contains("hello"));
     }
 
     #[tokio::test]
     async fn test_timeout_builtin_times_out() {
-        let mut ctx = make_ctx();
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("100ms".into()));
-        args.positional.push(Value::String("sleep".into()));
-        args.positional.push(Value::String("10".into()));
-
-        let result = Timeout.execute(args, &mut ctx).await;
+        let kernel = make_kernel().await;
+        let result = kernel.execute("timeout 100ms sleep 10").await.unwrap();
         assert_eq!(result.code, 124);
         assert!(result.err.contains("timed out"));
     }
 
     #[tokio::test]
     async fn test_timeout_command_not_found() {
-        let mut ctx = make_ctx();
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("5s".into()));
-        args.positional
-            .push(Value::String("not_a_command_xyz_123".into()));
-
-        let result = Timeout.execute(args, &mut ctx).await;
+        let kernel = make_kernel().await;
+        let result = kernel.execute("timeout 5s not_a_command_xyz_123").await.unwrap();
         assert!(!result.ok());
         assert_eq!(result.code, 127);
     }
 
     #[tokio::test]
     async fn test_timeout_numeric_duration() {
-        let mut ctx = make_ctx();
-        let mut args = ToolArgs::new();
-        // Numeric literal (lexer produces Int)
-        args.positional.push(Value::Int(5));
-        args.positional.push(Value::String("echo".into()));
-        args.positional.push(Value::String("works".into()));
-
-        let result = Timeout.execute(args, &mut ctx).await;
+        let kernel = make_kernel().await;
+        let result = kernel.execute("timeout 5 echo works").await.unwrap();
         assert!(result.ok());
         assert!(result.text_out().contains("works"));
     }

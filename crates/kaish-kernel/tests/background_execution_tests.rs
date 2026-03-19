@@ -12,11 +12,13 @@
 
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use kaish_kernel::{Kernel, KernelConfig};
 
 /// Create a test kernel with an isolated (no local filesystem) configuration.
-async fn setup() -> Kernel {
-    Kernel::new(KernelConfig::isolated()).expect("failed to create kernel")
+async fn setup() -> Arc<Kernel> {
+    Kernel::new(KernelConfig::isolated()).expect("failed to create kernel").into_arc()
 }
 
 /// Wait for a job to complete by polling status.
@@ -98,7 +100,7 @@ async fn test_background_job_captures_stdout() {
 #[tokio::test]
 async fn test_background_job_status_transitions() {
     let kernel = setup().await;
-    kernel.execute("sleep 0.2 &").await.unwrap();
+    kernel.execute("sleep 1 &").await.unwrap();
 
     // Give job a moment to register
     tokio::time::sleep(Duration::from_millis(10)).await;

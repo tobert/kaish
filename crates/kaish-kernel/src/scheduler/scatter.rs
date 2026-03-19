@@ -74,21 +74,28 @@ pub struct ScatterResult {
 
 /// Runs scatter/gather pipelines.
 ///
-/// The dispatcher is used for pre_scatter, post_gather, and parallel worker
-/// command execution. This enables scatter blocks to run user tools, scripts,
-/// and external commands — not just builtins.
+/// Uses two dispatchers:
+/// - `sequential_dispatcher` for pre_scatter and post_gather (can be the full
+///   Kernel dispatcher — safe because these run sequentially)
+/// - `parallel_dispatcher` for scatter workers (must be stateless — parallel
+///   workers would stomp each other's scope if using the Kernel dispatcher)
 pub struct ScatterGatherRunner {
     tools: Arc<ToolRegistry>,
-    dispatcher: Arc<dyn CommandDispatcher>,
+    /// Full dispatch chain for sequential stages (pre_scatter, post_gather).
+    sequential_dispatcher: Arc<dyn CommandDispatcher>,
+    /// Stateless dispatcher for parallel scatter workers.
+    parallel_dispatcher: Arc<dyn CommandDispatcher>,
 }
 
 impl ScatterGatherRunner {
-    /// Create a new scatter/gather runner with the given dispatcher.
-    ///
-    /// The dispatcher handles the full command resolution chain for all
-    /// pipeline stages (pre_scatter, parallel workers, post_gather).
-    pub fn new(tools: Arc<ToolRegistry>, dispatcher: Arc<dyn CommandDispatcher>) -> Self {
-        Self { tools, dispatcher }
+    /// Create a new scatter/gather runner with separate dispatchers for
+    /// sequential and parallel stages.
+    pub fn new(
+        tools: Arc<ToolRegistry>,
+        sequential_dispatcher: Arc<dyn CommandDispatcher>,
+        parallel_dispatcher: Arc<dyn CommandDispatcher>,
+    ) -> Self {
+        Self { tools, sequential_dispatcher, parallel_dispatcher }
     }
 
     /// Execute a scatter/gather pipeline.
@@ -119,7 +126,7 @@ impl ScatterGatherRunner {
             let text = ctx.take_stdin().unwrap_or_default();
             (text, data)
         } else {
-            let result = runner.run_sequential(pre_scatter, ctx, &*self.dispatcher).await;
+            let result = runner.run_sequential(pre_scatter, ctx, &*self.sequential_dispatcher).await;
             if !result.ok() {
                 return result;
             }
@@ -150,7 +157,7 @@ impl ScatterGatherRunner {
             ExecResult::success(gathered)
         } else {
             ctx.set_stdin(gathered);
-            runner.run_sequential(post_gather, ctx, &*self.dispatcher).await
+            runner.run_sequential(post_gather, ctx, &*self.sequential_dispatcher).await
         }
     }
 
@@ -176,7 +183,7 @@ impl ScatterGatherRunner {
     ) -> Vec<ScatterResult> {
         let semaphore = Arc::new(Semaphore::new(opts.limit));
         let tools = self.tools.clone();
-        let dispatcher = self.dispatcher.clone();
+        let dispatcher = self.parallel_dispatcher.clone();
         let var_name = opts.var_name.clone();
 
         // Spawn parallel tasks

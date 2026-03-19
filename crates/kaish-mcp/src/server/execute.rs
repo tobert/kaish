@@ -203,7 +203,7 @@ pub async fn execute(
                     }
                 }
 
-                let kernel = Kernel::new(config).context("Failed to create kernel")?;
+                let kernel = Kernel::new(config).context("Failed to create kernel")?.into_arc();
 
                 // Set environment variables as shell variables
                 if let Some(env) = params.env {

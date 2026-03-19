@@ -407,7 +407,7 @@ impl Repl {
         }
 
         Ok(Self {
-            kernel: Arc::new(kernel),
+            kernel: kernel.into_arc(),
             runtime,
         })
     }
@@ -424,7 +424,7 @@ impl Repl {
         }
 
         Ok(Self {
-            kernel: Arc::new(kernel),
+            kernel: kernel.into_arc(),
             runtime,
         })
     }
@@ -825,8 +825,8 @@ mod tests {
     /// Create a test helper (kernel is not used for is_incomplete).
     fn make_test_helper() -> KaishHelper {
         let config = KernelConfig::transient();
-        let kernel = Kernel::new(config).expect("test kernel");
+        let kernel = Kernel::new(config).expect("test kernel").into_arc();
         let rt = Runtime::new().expect("test runtime");
-        KaishHelper::new(Arc::new(kernel), rt.handle().clone())
+        KaishHelper::new(kernel, rt.handle().clone())
     }
 }

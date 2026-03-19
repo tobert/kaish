@@ -59,7 +59,7 @@ impl EmbeddedClient {
     /// Create a new embedded client wrapping the given kernel.
     pub fn new(kernel: Kernel) -> Self {
         Self {
-            kernel: Arc::new(kernel),
+            kernel: kernel.into_arc(),
         }
     }
 

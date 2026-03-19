@@ -9,15 +9,15 @@ use std::path::PathBuf;
 use kaish_kernel::{Kernel, KernelConfig};
 
 /// Helper to create a transient kernel for testing.
-async fn make_kernel() -> Kernel {
-    Kernel::transient().expect("should create kernel")
+async fn make_kernel() -> std::sync::Arc<Kernel> {
+    Kernel::transient().expect("should create kernel").into_arc()
 }
 
 /// Helper to create a kernel with CWD in the repo (for tests that run external commands).
-fn make_repo_kernel() -> Kernel {
+fn make_repo_kernel() -> std::sync::Arc<Kernel> {
     let config = KernelConfig::repl()
         .with_cwd(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    Kernel::new(config).expect("should create kernel")
+    Kernel::new(config).expect("should create kernel").into_arc()
 }
 
 // ============================================================================

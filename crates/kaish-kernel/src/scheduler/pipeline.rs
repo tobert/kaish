@@ -258,13 +258,17 @@ impl PipelineRunner {
         let scatter_opts = parse_scatter_options(&build_tool_args(&scatter_cmd.args, ctx, scatter_schema.as_ref()));
         let gather_opts = parse_gather_options(&build_tool_args(&gather_cmd.args, ctx, gather_schema.as_ref()));
 
-        // Create a BackendDispatcher for scatter workers.
-        // Parallel workers MUST use a stateless dispatcher to avoid data races
-        // on shared scope. BackendDispatcher is stateless (routes through backend.call_tool).
-        let scatter_dispatcher: Arc<dyn CommandDispatcher> =
+        // Sequential stages (pre_scatter, post_gather) use the full Kernel
+        // dispatcher from ctx if available. Parallel workers MUST use a stateless
+        // BackendDispatcher to avoid data races on shared Kernel scope.
+        let Some(sequential_dispatcher) = ctx.dispatcher.clone() else {
+            return ExecResult::failure(1,
+                "scatter/gather: no dispatcher available (Kernel must be created via into_arc())");
+        };
+        let parallel_dispatcher: Arc<dyn CommandDispatcher> =
             Arc::new(crate::dispatch::BackendDispatcher::new(self.tools.clone()));
 
-        let runner = ScatterGatherRunner::new(self.tools.clone(), scatter_dispatcher);
+        let runner = ScatterGatherRunner::new(self.tools.clone(), sequential_dispatcher, parallel_dispatcher);
         runner
             .run(
                 pre_scatter,
