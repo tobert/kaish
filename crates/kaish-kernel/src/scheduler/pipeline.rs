@@ -243,7 +243,7 @@ impl PipelineRunner {
         scatter_idx: usize,
         gather_idx: usize,
         ctx: &mut ExecContext,
-        _dispatcher: &dyn CommandDispatcher,
+        dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
         // Split pipeline into parts
         let pre_scatter = &commands[..scatter_idx];
@@ -259,17 +259,18 @@ impl PipelineRunner {
         let scatter_opts = parse_scatter_options(&build_tool_args(&scatter_cmd.args, ctx, scatter_schema.as_ref()));
         let gather_opts = parse_gather_options(&build_tool_args(&gather_cmd.args, ctx, gather_schema.as_ref()));
 
-        // Sequential stages (pre_scatter, post_gather) use the full Kernel
-        // dispatcher from ctx if available. Parallel workers MUST use a stateless
-        // BackendDispatcher to avoid data races on shared Kernel scope.
-        let Some(sequential_dispatcher) = ctx.dispatcher.clone() else {
-            return ExecResult::failure(1,
-                "scatter/gather: no dispatcher available (Kernel must be created via into_arc())");
-        };
-        let parallel_dispatcher: Arc<dyn CommandDispatcher> =
-            Arc::new(crate::dispatch::BackendDispatcher::new(self.tools.clone()));
+        // We need an `Arc<dyn CommandDispatcher>` to hand to `ScatterGatherRunner`
+        // (which holds it for the duration of the scatter pipeline and also
+        // forks it per parallel worker). The runner's `dispatcher` parameter
+        // is borrowed, so we materialize an owned Arc by calling `fork()` —
+        // which for `Kernel` snapshots per-session state into a fresh subkernel.
+        //
+        // Using fork here instead of requiring ctx.dispatcher means scatter
+        // works with any dispatcher passed to `run` — including test-only
+        // stateless dispatchers that never populate ctx.dispatcher.
+        let sequential_dispatcher: Arc<dyn CommandDispatcher> = dispatcher.fork().await;
 
-        let runner = ScatterGatherRunner::new(self.tools.clone(), sequential_dispatcher, parallel_dispatcher);
+        let runner = ScatterGatherRunner::new(self.tools.clone(), sequential_dispatcher);
         runner
             .run(
                 pre_scatter,
@@ -324,12 +325,12 @@ impl PipelineRunner {
     /// - Early termination (e.g., `seq 1 1000000 | head -n 5`)
     ///
     /// Structured data (`stdin_data`) is passed via oneshot channels alongside pipes.
-    #[tracing::instrument(level = "debug", skip(self, commands, ctx, _dispatcher), fields(stage_count = commands.len()))]
+    #[tracing::instrument(level = "debug", skip(self, commands, ctx, dispatcher), fields(stage_count = commands.len()))]
     async fn run_pipeline(
         &self,
         commands: &[Command],
         ctx: &mut ExecContext,
-        _dispatcher: &dyn CommandDispatcher,
+        dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
         let stage_count = commands.len();
         let last_idx = stage_count - 1;
@@ -354,18 +355,17 @@ impl PipelineRunner {
             data_receivers.push(Some(rx));
         }
 
-        // Concurrent pipeline stages use BackendDispatcher (builtins + backend tools).
-        // The original dispatcher (which may be the full Kernel dispatcher) can't be
-        // shared across tokio::spawn boundaries since it's not 'static.
-        // This is the same limitation scatter workers have.
-        let stage_dispatcher: Arc<dyn CommandDispatcher> =
-            Arc::new(crate::dispatch::BackendDispatcher::new(self.tools.clone()));
-
         let mut handles: Vec<tokio::task::JoinHandle<(ExecResult, ExecContext)>> = Vec::with_capacity(stage_count);
 
         for (i, cmd) in commands.iter().enumerate() {
             let mut stage_ctx = ctx.child_for_pipeline();
             let cmd = cmd.clone();
+
+            // Fork a fresh dispatcher for this stage. Each concurrent stage
+            // needs independent mutable state — a single shared fork would
+            // reintroduce the scope/cwd clobber we're avoiding. Forking is
+            // cheap (Scope is COW, plus a few Arc bumps).
+            let task_dispatcher: Arc<dyn CommandDispatcher> = dispatcher.fork().await;
 
             // Set up stdin from redirects on the child context
             setup_stdin_redirects(&cmd, &mut stage_ctx);
@@ -400,7 +400,6 @@ impl PipelineRunner {
 
             let data_sender = if i < last_idx { data_senders[i].take() } else { None };
             let data_receiver = if i > 0 { data_receivers[i - 1].take() } else { None };
-            let task_dispatcher = stage_dispatcher.clone();
 
             let handle: tokio::task::JoinHandle<(ExecResult, ExecContext)> = tokio::spawn(async move {
                 // Receive structured data from previous stage (non-blocking).

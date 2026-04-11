@@ -473,6 +473,12 @@ pub struct Kernel {
     /// Set by `into_arc()`. Allows builtins to re-dispatch inner commands
     /// through the full Kernel resolution chain.
     self_weak: std::sync::OnceLock<std::sync::Weak<Self>>,
+    /// Serializes concurrent `execute()` / `execute_streaming()` callers on
+    /// this Kernel instance. Tokio's Mutex is fair (FIFO) and acts as the
+    /// queue. Background jobs, scatter workers, and concurrent pipeline
+    /// stages do NOT take this lock — they run against a *forked* Kernel
+    /// (see [`Kernel::fork`]) so they never contend with the foreground.
+    execute_lock: tokio::sync::Mutex<()>,
 }
 
 impl Kernel {
@@ -671,6 +677,7 @@ impl Kernel {
             #[cfg(all(unix, feature = "native"))]
             terminal_state: None,
             self_weak: std::sync::OnceLock::new(),
+            execute_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -689,6 +696,75 @@ impl Kernel {
         let arc = Arc::new(self);
         let _ = arc.self_weak.set(Arc::downgrade(&arc));
         arc
+    }
+
+    /// Fork a subsidiary kernel for concurrent execution.
+    ///
+    /// The fork is a fully-functional `Kernel` that:
+    /// - **Snapshots** per-session state from the parent: scope (COW — cheap),
+    ///   user-defined tools, cwd, aliases, ignore config, etc. Mutations on
+    ///   the fork do NOT propagate back to the parent — matching bash
+    ///   subshell / background-job semantics.
+    /// - **Shares** read-mostly resources with the parent via `Arc`: the tool
+    ///   registry, the VFS router, and the job manager. A job registered by
+    ///   the fork is visible to the parent's `jobs` builtin, and the fork
+    ///   sees the same VFS mounts.
+    /// - **Owns** its own `stderr_receiver`, `cancel_token`, and
+    ///   `execute_lock`. It is never the TTY owner, so `interactive` is
+    ///   `false` and `terminal_state` is `None`.
+    ///
+    /// The returned Arc has its `self_weak` populated (via `into_arc`), so
+    /// nested dispatch through `ctx.dispatcher` (e.g. the `timeout` builtin)
+    /// routes through the fork itself, not the parent — which is essential
+    /// for concurrency safety.
+    ///
+    /// Use this to replace the old "background job runs against the parent
+    /// kernel" pattern. Background jobs, scatter parallel workers, and
+    /// concurrent pipeline stages should all fork rather than share.
+    pub async fn fork(&self) -> Arc<Self> {
+        let scope_snapshot = self.scope.read().await.clone();
+        let user_tools_snapshot = self.user_tools.read().await.clone();
+
+        // Snapshot exec_ctx by cloning the cloneable fields, then override
+        // the ones that should not carry over (stderr channel, dispatcher,
+        // interactive flag, terminal state).
+        let mut fork_ctx = {
+            let parent_ctx = self.exec_ctx.read().await;
+            parent_ctx.child_for_pipeline()
+        };
+        let (stderr_writer, stderr_receiver) = stderr_stream();
+        fork_ctx.stderr = Some(stderr_writer);
+        // Clear dispatcher; dispatch_command will repopulate it to point at
+        // the fork on the first dispatch call.
+        fork_ctx.dispatcher = None;
+        fork_ctx.interactive = false;
+        #[cfg(all(unix, feature = "native"))]
+        {
+            fork_ctx.terminal_state = None;
+        }
+
+        let fork = Self {
+            name: format!("{}:fork", self.name),
+            scope: RwLock::new(scope_snapshot),
+            tools: Arc::clone(&self.tools),
+            user_tools: RwLock::new(user_tools_snapshot),
+            vfs: Arc::clone(&self.vfs),
+            jobs: Arc::clone(&self.jobs),
+            runner: self.runner.clone(),
+            exec_ctx: RwLock::new(fork_ctx),
+            skip_validation: self.skip_validation,
+            // Forks are never the TTY owner — they run in the background.
+            interactive: false,
+            allow_external_commands: self.allow_external_commands,
+            stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
+            cancel_token: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
+            #[cfg(all(unix, feature = "native"))]
+            terminal_state: None,
+            self_weak: std::sync::OnceLock::new(),
+            execute_lock: tokio::sync::Mutex::new(()),
+        };
+
+        fork.into_arc()
     }
 
     /// Get an `Arc<dyn CommandDispatcher>` to this Kernel, if wrapped via `into_arc()`.
@@ -753,6 +829,26 @@ impl Kernel {
         token.clone()
     }
 
+    /// Acquire the per-Kernel execute lock, warning on contention.
+    ///
+    /// Tokio's Mutex is fair (FIFO) so callers queue in arrival order. When
+    /// the lock is already held, emit a warning so the silent serialization
+    /// is observable in logs — if you need real parallelism, fork the kernel.
+    async fn acquire_execute_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        match self.execute_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                tracing::warn!(
+                    target: "kaish::kernel::concurrency",
+                    kernel = %self.name,
+                    "execute() contended — serializing concurrent caller; \
+                     use Kernel::fork() for parallelism instead of sharing"
+                );
+                self.execute_lock.lock().await
+            }
+        }
+    }
+
     /// Execute kaish source code.
     ///
     /// Returns the result of the last statement executed.
@@ -768,11 +864,28 @@ impl Kernel {
     ///
     /// External commands in interactive mode already stream to the terminal
     /// via `Stdio::inherit()`, so the callback mainly handles builtins.
+    ///
+    /// Concurrent callers on the same Kernel serialize on [`Self::execute_lock`].
+    /// If you want true parallelism, call [`Kernel::fork`] per task.
     #[tracing::instrument(level = "info", skip(self, on_output), fields(input_len = input.len()))]
     pub async fn execute_streaming(
         &self,
         input: &str,
-        on_output: &mut dyn FnMut(&ExecResult),
+        on_output: &mut (dyn FnMut(&ExecResult) + Send),
+    ) -> Result<ExecResult> {
+        let _guard = self.acquire_execute_lock().await;
+        self.execute_streaming_inner(input, on_output).await
+    }
+
+    /// The actual body of `execute_streaming`, run while holding the execute lock.
+    ///
+    /// Split out so internal kernel paths that are already under the lock can
+    /// call this without deadlocking on re-entry. External callers must go
+    /// through [`Self::execute_streaming`] so they acquire the lock.
+    async fn execute_streaming_inner(
+        &self,
+        input: &str,
+        on_output: &mut (dyn FnMut(&ExecResult) + Send),
     ) -> Result<ExecResult> {
         let program = parse(input).map_err(|errors| {
             let msg = errors
@@ -1436,46 +1549,33 @@ impl Kernel {
             stderr.clone(),
         ).await;
 
-        // Clone state needed for the spawned task
+        // Fork the kernel for this background job. The fork snapshots the
+        // parent's scope/cwd/aliases/user_tools so mutations stay isolated,
+        // while sharing the job manager, VFS, and tool registry. The fork's
+        // full dispatch chain (user tools, .kai scripts, `$(...)` in args)
+        // is available here — something BackendDispatcher couldn't provide.
+        let fork = self.fork().await;
         let runner = self.runner.clone();
         let commands = pipeline.commands.clone();
-        let backend = {
-            let ctx = self.exec_ctx.read().await;
-            ctx.backend.clone()
+
+        // Snapshot the fork's exec_ctx for the spawned task. We have to do
+        // this before tokio::spawn because the fork's exec_ctx is behind a
+        // tokio RwLock and we want the spawned task to own its ctx.
+        let mut bg_ctx = {
+            let ec = fork.exec_ctx.read().await;
+            ec.child_for_pipeline()
         };
-        let scope = {
-            let scope = self.scope.read().await;
-            scope.clone()
-        };
-        let cwd = {
-            let ctx = self.exec_ctx.read().await;
-            ctx.cwd.clone()
-        };
-        let tools = self.tools.clone();
-        let tool_schemas = self.tools.schemas();
-        let allow_ext = self.allow_external_commands;
-        let dispatcher_arc = self.dispatcher();
+        bg_ctx.scope = fork.scope.read().await.clone();
+        // The fork's dispatcher points at the fork itself; set it here so
+        // builtins inside the background task (e.g. timeout) re-dispatch
+        // through the fork, not the parent.
+        bg_ctx.dispatcher = fork.dispatcher();
 
         // Spawn the background task
         tokio::spawn(async move {
-            // Create execution context for the background job
-            // It inherits env vars and cwd from the parent context
-            let mut bg_ctx = ExecContext::with_backend(backend);
-            bg_ctx.scope = scope;
-            bg_ctx.cwd = cwd;
-            bg_ctx.set_tools(tools.clone());
-            bg_ctx.set_tool_schemas(tool_schemas);
-            bg_ctx.allow_external_commands = allow_ext;
-            // Set dispatcher on ctx so builtins (e.g. timeout) within the
-            // background job can re-dispatch through the full chain.
-            bg_ctx.dispatcher = dispatcher_arc;
-
-            // The top-level runner must use BackendDispatcher (stateless).
-            // Using the Kernel dispatcher here would cause data races —
-            // dispatch_command syncs state through RwLocks, and background
-            // jobs run concurrently with the foreground.
-            let dispatcher = crate::dispatch::BackendDispatcher::new(tools);
-            let result = runner.run(&commands, &mut bg_ctx, &dispatcher).await;
+            // runner.run needs a &dyn CommandDispatcher; fork.as_ref()
+            // gives us that (Kernel implements CommandDispatcher).
+            let result = runner.run(&commands, &mut bg_ctx, fork.as_ref()).await;
 
             // Write output to streams
             let text = result.text_out();
@@ -3112,6 +3212,14 @@ impl Kernel {
     /// 2. execute_command: full dispatch chain (user tools, builtins, scripts, external, backend)
     /// 3. self → ctx: sync scope, cwd changes back so the pipeline runner sees them
     async fn dispatch_command(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult> {
+        // Ensure nested dispatch (e.g. the `timeout` builtin re-dispatching
+        // its inner command via ctx.dispatcher) routes through THIS kernel,
+        // not a stale parent. Critical for forks: the fork's builtins must
+        // use the fork's dispatcher, not the parent's.
+        if let Some(d) = self.dispatcher() {
+            ctx.dispatcher = Some(d);
+        }
+
         // 1. Sync ctx → self internals
         {
             let mut scope = self.scope.write().await;
@@ -3123,6 +3231,16 @@ impl Kernel {
             ec.prev_cwd = ctx.prev_cwd.clone();
             ec.stdin = ctx.stdin.take();
             ec.stdin_data = ctx.stdin_data.take();
+            // Streaming pipe endpoints and kernel stderr must flow to the
+            // tool via self.exec_ctx — execute_command reads that, not the
+            // passed-in ctx. Without moving these, concurrent pipeline
+            // stages dispatched via a fork get pipe_stdin = None and
+            // silently read nothing.
+            ec.pipe_stdin = ctx.pipe_stdin.take();
+            ec.pipe_stdout = ctx.pipe_stdout.take();
+            if let Some(stderr) = ctx.stderr.clone() {
+                ec.stderr = Some(stderr);
+            }
             ec.aliases = ctx.aliases.clone();
             ec.ignore_config = ctx.ignore_config.clone();
             ec.output_limit = ctx.output_limit.clone();
@@ -3138,12 +3256,18 @@ impl Kernel {
             ctx.scope = scope.clone();
         }
         {
-            let ec = self.exec_ctx.read().await;
+            let mut ec = self.exec_ctx.write().await;
             ctx.cwd = ec.cwd.clone();
             ctx.prev_cwd = ec.prev_cwd.clone();
             ctx.aliases = ec.aliases.clone();
             ctx.ignore_config = ec.ignore_config.clone();
             ctx.output_limit = ec.output_limit.clone();
+            // Return any pipe endpoints that the tool didn't consume.
+            // `take()` here keeps the fork's exec_ctx in a clean state for
+            // the next dispatch — these are per-command and shouldn't leak
+            // between calls.
+            ctx.pipe_stdin = ec.pipe_stdin.take();
+            ctx.pipe_stdout = ec.pipe_stdout.take();
         }
 
         Ok(result)
@@ -3159,6 +3283,16 @@ impl CommandDispatcher for Kernel {
     /// user tools → builtins → .kai scripts → external commands → backend tools.
     async fn dispatch(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult> {
         self.dispatch_command(cmd, ctx).await
+    }
+
+    /// Produce a forked dispatcher with independent mutable state.
+    ///
+    /// Calls the inherent `Kernel::fork` method (note the UFCS to avoid
+    /// recursing into the trait method we're defining) and coerces the
+    /// returned `Arc<Kernel>` to `Arc<dyn CommandDispatcher>`.
+    async fn fork(&self) -> Arc<dyn CommandDispatcher> {
+        let fork: Arc<Kernel> = Kernel::fork(self).await;
+        fork
     }
 }
 

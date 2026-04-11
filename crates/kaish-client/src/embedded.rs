@@ -90,7 +90,7 @@ impl EmbeddedClient {
     pub async fn execute_streaming(
         &self,
         input: &str,
-        on_output: &mut dyn FnMut(&ExecResult),
+        on_output: &mut (dyn FnMut(&ExecResult) + Send),
     ) -> ClientResult<ExecResult> {
         self.kernel
             .execute_streaming(input, on_output)

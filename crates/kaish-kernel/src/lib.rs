@@ -56,7 +56,7 @@ pub use backend::{
     BackendError, BackendResult, KernelBackend, LocalBackend, PatchOp, ReadRange,
     ToolInfo, ToolResult, VirtualOverlayBackend, WriteMode,
 };
-pub use dispatch::{BackendDispatcher, CommandDispatcher, PipelinePosition};
+pub use dispatch::{CommandDispatcher, PipelinePosition};
 pub use ignore_config::{IgnoreConfig, IgnoreScope};
 pub use kernel::{Kernel, KernelConfig, VfsMountMode};
 pub use output_limit::OutputLimitConfig;

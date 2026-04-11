@@ -26,14 +26,24 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::ast::{Arg, Command, Value};
-#[cfg(feature = "native")]
+use crate::ast::Command;
+use crate::interpreter::ExecResult;
+use crate::tools::ExecContext;
+
+// The following imports are only used by the test-only `BackendDispatcher`.
+#[cfg(test)]
+use crate::ast::{Arg, Value};
+#[cfg(all(test, feature = "native"))]
 use crate::ast::Expr;
+#[cfg(test)]
 use crate::backend::BackendError;
-use crate::interpreter::{apply_output_format, ExecResult};
+#[cfg(test)]
+use crate::interpreter::apply_output_format;
+#[cfg(test)]
 use crate::scheduler::build_tool_args;
-use crate::tools::{extract_output_format, ExecContext, ToolRegistry};
-#[cfg(feature = "native")]
+#[cfg(test)]
+use crate::tools::{extract_output_format, ToolRegistry};
+#[cfg(all(test, feature = "native"))]
 use crate::tools::resolve_in_path;
 
 /// Position of a command within a pipeline.
@@ -66,25 +76,38 @@ pub trait CommandDispatcher: Send + Sync {
     /// Implementations should handle schema-aware argument parsing and
     /// output format extraction internally.
     async fn dispatch(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult>;
+
+    /// Fork the dispatcher for concurrent execution.
+    ///
+    /// Returns a subsidiary dispatcher with independent mutable state, safe
+    /// to run concurrently with the parent and other forks without data
+    /// races on shared scope/cwd/aliases. Used by scatter parallel workers,
+    /// concurrent pipeline stages, and background jobs.
+    ///
+    /// For stateful dispatchers (e.g. Kernel) this snapshots per-session
+    /// state into a fresh instance. Stateless dispatchers may clone.
+    async fn fork(&self) -> Arc<dyn CommandDispatcher>;
 }
 
-/// Fallback dispatcher that routes through `backend.call_tool()`.
+/// Minimal stateless dispatcher used by pipeline/runner unit tests.
 ///
-/// This provides the same behavior as the old `PipelineRunner` — it dispatches
-/// to builtins via the backend's tool registry. Used for background jobs and
-/// scatter/gather workers until full `Arc<Kernel>` dispatch is wired up.
+/// Production code uses `Kernel` (via `Kernel::fork` for concurrent contexts).
+/// This test-only dispatcher routes directly through `backend.call_tool()` so
+/// the pipeline runner can be exercised without spinning up a full Kernel.
 ///
-/// Limitations compared to the Kernel dispatcher:
+/// Limitations (intentional — these are test-only constraints):
 /// - No user-defined tools
 /// - No .kai script resolution
 /// - No async argument evaluation (command substitution in args won't work)
-pub struct BackendDispatcher {
+#[cfg(test)]
+pub(crate) struct BackendDispatcher {
     tools: Arc<ToolRegistry>,
 }
 
+#[cfg(test)]
 impl BackendDispatcher {
     /// Create a new backend dispatcher with the given tool registry.
-    pub fn new(tools: Arc<ToolRegistry>) -> Self {
+    pub(crate) fn new(tools: Arc<ToolRegistry>) -> Self {
         Self { tools }
     }
 
@@ -310,6 +333,7 @@ impl BackendDispatcher {
     }
 }
 
+#[cfg(test)]
 #[async_trait]
 impl CommandDispatcher for BackendDispatcher {
     async fn dispatch(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult> {
@@ -360,5 +384,10 @@ impl CommandDispatcher for BackendDispatcher {
         };
 
         Ok(result)
+    }
+
+    /// BackendDispatcher is stateless, so a fork is just a clone.
+    async fn fork(&self) -> Arc<dyn CommandDispatcher> {
+        Arc::new(Self { tools: Arc::clone(&self.tools) })
     }
 }
