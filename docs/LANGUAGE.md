@@ -378,6 +378,12 @@ wait                            # wait for all
 wait %1 %2                      # wait for specific
 ```
 
+Background jobs run in an **isolated kernel fork** (`Kernel::fork()`).
+The fork snapshots the parent's session state (scope, cwd, aliases, user tools)
+at the moment the job is spawned. This provides two key benefits:
+1. **Full Dispatch:** Background jobs can run user-defined functions, `.kai` scripts, and command substitutions in their arguments — something traditional backgrounding often limits.
+2. **Isolation:** Mutations inside a background job (e.g. `VAR=new; cd /tmp`) stay within the job's fork and do **not** leak back to the parent kernel.
+
 ## Functions
 
 Shell-style functions using positional parameters:
@@ -481,6 +487,12 @@ cat big_list.txt \
     | slow-operation id=$ID \
     | gather progress=true
 ```
+
+Each **scatter worker** runs in its own **parallel kernel fork**. This means
+workers can run the full resolution chain: user-defined functions, `.kai`
+scripts, and command substitutions in their arguments. Each worker gets its
+own snapshotted scope/cwd/aliases, ensuring they don't race against each
+other or the parent.
 
 ## Virtual Filesystem
 

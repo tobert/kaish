@@ -30,4 +30,4 @@ glob "*.json" | scatter as=FILE limit=4 | jq ".name" $FILE | gather
 - Workers share the same VFS
 - Failed workers: error collected, other workers continue
 - `set -e` before scatter stops on first error
-- **Workers can only run builtins and external commands.** User-defined functions (`tool name { ... }`) and `.kai` scripts cannot be dispatched inside scatter workers or background jobs. This is because the worker's `BackendDispatcher` is stateless. Future: per-worker kernel instances for full dispatch.
+- **Workers run in a forked kernel.** Each parallel worker gets its own kernel instance with snapshotted session state (scope, cwd, aliases, user tools). This means workers can run the **full dispatch chain**: user-defined functions (`tool name { ... }`), `.kai` scripts, and command substitution in arguments all work correctly inside scatter workers. Mutations within a worker (e.g. changing a variable) stay within that worker and do not leak back to the parent or other workers.
