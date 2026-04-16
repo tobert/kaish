@@ -73,8 +73,22 @@ fn compile_filter(filter_str: &str) -> Result<Filter, String> {
     Ok(filter)
 }
 
+/// Outcome of running a compiled jq filter: rendered text for pipes/stdout
+/// plus the raw per-output JSON values so callers can populate `.data`.
+///
+/// `text` uses `-r` or pretty JSON per the caller's preference and is the
+/// canonical representation for downstream pipe stages. `values` preserves
+/// the filter's output stream as a list of JSON values regardless of how
+/// they were rendered — this is what enables `for i in $(jq -r '.[]' …)`
+/// to iterate each element instead of binding the whole newline-joined
+/// stdout to a single loop variable.
+struct JqRun {
+    text: String,
+    values: Vec<serde_json::Value>,
+}
+
 /// Execute a compiled jq filter on pre-parsed JSON.
-fn execute_filter_json(filter: &Filter, json: serde_json::Value, raw_output: bool) -> Result<String, String> {
+fn execute_filter_json(filter: &Filter, json: serde_json::Value, raw_output: bool) -> Result<JqRun, String> {
     // Convert serde_json::Value to jaq_json::Val
     let input_val = json_to_val(json);
 
@@ -87,8 +101,9 @@ fn execute_filter_json(filter: &Filter, json: serde_json::Value, raw_output: boo
         .run((ctx, input_val))
         .collect();
 
-    // Format output
-    let mut output = String::new();
+    // Format output and collect raw values in lock-step.
+    let mut text = String::new();
+    let mut values = Vec::with_capacity(results.len());
     for result in results {
         match result {
             Ok(val) => {
@@ -97,10 +112,11 @@ fn execute_filter_json(filter: &Filter, json: serde_json::Value, raw_output: boo
                 } else {
                     format_json(&val)
                 };
-                if !output.is_empty() {
-                    output.push('\n');
+                if !text.is_empty() {
+                    text.push('\n');
                 }
-                output.push_str(&formatted);
+                text.push_str(&formatted);
+                values.push(val_to_json(&val));
             }
             Err(e) => {
                 return Err(format!("jq runtime error: {}", e));
@@ -108,7 +124,7 @@ fn execute_filter_json(filter: &Filter, json: serde_json::Value, raw_output: boo
         }
     }
 
-    Ok(output)
+    Ok(JqRun { text, values })
 }
 
 /// Convert serde_json::Value to jaq_json::Val.
@@ -315,10 +331,35 @@ impl Tool for JqNative {
 
         // Execute filter with the JSON input
         match execute_filter_json(&filter, input_json, raw_output) {
-            Ok(output) => ExecResult::with_output(OutputData::text(output)),
+            Ok(run) => build_exec_result(run),
             Err(e) => ExecResult::failure(1, e),
         }
     }
+}
+
+/// Build an ExecResult from a JqRun, carrying the filter output stream
+/// into `.data` so for-loop command substitution can iterate per-value.
+///
+/// - 0 values → empty text, no `.data`.
+/// - 1 value → render normally; promote the value to `.data` so `${?.data}`
+///   and single-value iteration are consistent across `-r` and JSON modes.
+/// - 2+ values → render normally; set `.data = Json(Array([…]))` so the
+///   CommandSubst arm in the kernel hands a JSON array to the for-loop
+///   regardless of the `-r` / `-c` rendering flags.
+fn build_exec_result(run: JqRun) -> ExecResult {
+    use crate::interpreter::json_to_value;
+    let JqRun { text, mut values } = run;
+    if values.is_empty() {
+        return ExecResult::with_output(OutputData::text(text));
+    }
+    // Single-value output: keep `.data` as the underlying scalar/object so
+    // `jq '.name'` continues to expose a non-array value to ${?.data}.
+    if values.len() == 1 {
+        if let Some(only) = values.pop() {
+            return ExecResult::success_with_data(text, json_to_value(only));
+        }
+    }
+    ExecResult::success_with_data(text, Value::Json(serde_json::Value::Array(values)))
 }
 
 /// Validate a jq filter expression without executing it.

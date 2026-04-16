@@ -207,9 +207,19 @@ done
 for x in $(split "a b c"); do
     echo "Item: $x"  # prints a, b, c separately
 done
+
+# jq, cut, seq, find, glob — all expose their output stream as
+# structured data, so for-loops iterate per element rather than
+# binding the whole stdout as one string.
+for name in $(echo '["alice","bob","carol"]' | jq -r '.[]'); do
+    echo "Hello $name"      # 3 iterations
+done
+for first in $(printf 'a,1\nb,2\n' | cut -d ',' -f 1); do
+    echo "Col1: $first"     # 2 iterations
+done
 ```
 
-**Why?** Implicit word splitting is a major source of shell bugs. By requiring explicit `split`, kaish makes the intent clear and avoids surprises with variables containing spaces.
+**Why?** Implicit word splitting is a major source of shell bugs. By requiring explicit `split`, kaish makes the intent clear and avoids surprises with variables containing spaces. Builtins with unambiguous list structure (`seq`, `find`, `glob`, `jq`, `cut`, …) populate `$?.data` with a JSON array so iteration works without manually piping through `jq -r`; everything else stays as one string — use `split` when you want whitespace- or line-based iteration.
 
 ## String Splitting
 

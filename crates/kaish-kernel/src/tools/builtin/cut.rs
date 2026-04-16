@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::{ExecResult, OutputData};
+use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Cut tool: select portions of each line.
@@ -114,7 +114,14 @@ impl Tool for Cut {
         if output.is_empty() {
             ExecResult::success("")
         } else {
-            ExecResult::with_output(OutputData::text(format!("{}\n", output.join("\n"))))
+            // Populate .data so `for v in $(cut …)` iterates per output line.
+            // cut reads input via `.lines()` so each line is newline-clean —
+            // safe to treat as a true N-item list without word-splitting risk.
+            let text = format!("{}\n", output.join("\n"));
+            let data = Value::Json(serde_json::Value::Array(
+                output.into_iter().map(serde_json::Value::String).collect(),
+            ));
+            ExecResult::success_with_data(text, data)
         }
     }
 }
