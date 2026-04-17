@@ -86,7 +86,21 @@ cat <<EOF
 multi-line
 content here
 EOF
+
+# Here-strings — feed an expanded word (plus trailing newline) to stdin
+jq -r '.name' <<< "$RESULT"     # canonical JSON field extraction
+cat <<< "hello $NAME"           # interpolation works like double quotes
+cat <<< 'raw $VAR'              # single quotes stay literal
 ```
+
+> **One stdin source per command.** `<`, `<<`, and `<<<` all feed stdin —
+> combining two of them on the same command is a parse error (rather than
+> silently taking the last one, as bash does).
+
+> **jq is built-in.** kaish ships a native jq (jaq) in-process — no external
+> binary required. The `$VAR → jq <<<` idiom replaces bash's
+> `echo "$VAR" | jq` without spawning a subprocess. For structured data,
+> jq is the canonical access path.
 
 ## Statement Chaining
 

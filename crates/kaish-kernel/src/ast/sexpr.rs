@@ -103,6 +103,7 @@ fn format_redirect(redir: &Redirect) -> String {
         RedirectKind::StdoutAppend => ">>",
         RedirectKind::Stdin => "<",
         RedirectKind::HereDoc => "<<",
+        RedirectKind::HereString => "<<<",
         RedirectKind::Stderr => "2>",
         RedirectKind::Both => "&>",
         RedirectKind::MergeStderr => "2>&1",

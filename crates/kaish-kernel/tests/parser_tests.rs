@@ -193,9 +193,23 @@ fn parser_pipe_three() {
 #[case::redirect_in_pipeline("a | b > /out")]
 #[case::redirect_merge_stderr("cmd 2>&1")]
 #[case::redirect_merge_pipe("cmd 2>&1 | tee /tmp/log")]
+#[case::redirect_herestring_bare("cat <<< hi")]
+#[case::redirect_herestring_interpolated(r#"cat <<< "$R""#)]
+#[case::redirect_herestring_literal(r#"cat <<< 'raw $VAR'"#)]
+#[case::redirect_herestring_with_stdout(r#"cat <<< hi > /tmp/out"#)]
+#[case::redirect_herestring_in_pipeline(r#"jq '.x' <<< "$J" | wc -l"#)]
 fn parser_redirects(#[case] input: &str) {
     let name = format!("redirect_{}", input.chars().take(20).filter(|c| c.is_alphanumeric()).collect::<String>());
     parse_and_snapshot(&name, input);
+}
+
+#[rstest]
+#[case::herestring_no_operand("cat <<<")]
+#[case::herestring_then_stdin("cat <<< hi < /in")]
+#[case::stdin_then_herestring("cat < /in <<< hi")]
+#[case::two_herestrings("cat <<< a <<< b")]
+fn parser_herestring_errors(#[case] input: &str) {
+    expect_parse_error(input);
 }
 
 // =============================================================================

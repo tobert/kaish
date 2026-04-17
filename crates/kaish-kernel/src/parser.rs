@@ -1330,10 +1330,33 @@ where
     command_name
         .then(args_list_parser())
         .then(redirect_parser().repeated().collect::<Vec<_>>())
-        .map(|((name, args), redirects)| Command {
-            name,
-            args,
-            redirects,
+        .try_map(|((name, args), redirects), span| {
+            // At most one stdin-source redirect per command. Multiple `<<<`,
+            // or mixing `<` with `<<` or `<<<`, would silently depend on
+            // ordering — reject loudly instead.
+            let stdin_sources = redirects
+                .iter()
+                .filter(|r| {
+                    matches!(
+                        r.kind,
+                        RedirectKind::Stdin
+                            | RedirectKind::HereDoc
+                            | RedirectKind::HereString
+                    )
+                })
+                .count();
+            if stdin_sources > 1 {
+                return Err(Rich::custom(
+                    span,
+                    "multiple stdin redirects on one command are ambiguous; \
+                     use exactly one of `<`, `<<`, or `<<<`",
+                ));
+            }
+            Ok(Command {
+                name,
+                args,
+                redirects,
+            })
         })
         .labelled("command")
         .boxed()
@@ -1502,6 +1525,16 @@ where
             }
         });
 
+    // Here-string redirect: <<< word
+    // The target is any single expression; kaish's existing Expr machinery
+    // handles interpolation, single-quoted literals, and command substitution.
+    let herestring_redirect = just(Token::HereString)
+        .ignore_then(primary_expr_parser())
+        .map(|target| Redirect {
+            kind: RedirectKind::HereString,
+            target,
+        });
+
     // Merge stderr to stdout: 2>&1 (no target needed - implicit)
     let merge_stderr_redirect = just(Token::StderrToStdout)
         .map(|_| Redirect {
@@ -1521,9 +1554,15 @@ where
         target: Expr::Literal(Value::Null),
     });
 
-    choice((heredoc_redirect, merge_stderr_redirect, merge_stdout_redirect, regular_redirect))
-        .labelled("redirect")
-        .boxed()
+    choice((
+        heredoc_redirect,
+        herestring_redirect,
+        merge_stderr_redirect,
+        merge_stdout_redirect,
+        regular_redirect,
+    ))
+    .labelled("redirect")
+    .boxed()
 }
 
 /// Test expression parser for `[[ ... ]]` syntax.

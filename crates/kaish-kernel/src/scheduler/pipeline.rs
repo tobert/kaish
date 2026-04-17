@@ -115,7 +115,7 @@ async fn apply_redirects(
                 }
             }
             // Pre-execution redirects - already handled before command execution
-            RedirectKind::Stdin | RedirectKind::HereDoc => {}
+            RedirectKind::Stdin | RedirectKind::HereDoc | RedirectKind::HereString => {}
         }
     }
     // Materialize any remaining OutputData into result.out.
@@ -165,6 +165,15 @@ fn setup_stdin_redirects(cmd: &Command, ctx: &mut ExecContext) {
                             ctx.set_stdin(value_to_string(&value));
                         }
                     }
+                }
+            }
+            RedirectKind::HereString => {
+                // Per bash, here-strings append a trailing newline to the
+                // expanded word so the command receives a terminated line.
+                if let Some(value) = eval_simple_expr(&redir.target, ctx) {
+                    let mut s = value_to_string(&value);
+                    s.push('\n');
+                    ctx.set_stdin(s);
                 }
             }
             _ => {}

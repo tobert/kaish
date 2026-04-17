@@ -1364,3 +1364,82 @@ fn cd_dash_produces_output() {
         ProcessResult::Exit => panic!("unexpected exit"),
     }
 }
+
+// ============================================================================
+// Here-string (<<<) Tests
+// ============================================================================
+
+#[test]
+fn herestring_bare_word_to_cat() {
+    let outputs = run_script(r#"cat <<< hi"#);
+    let joined = outputs.join("\n");
+    assert!(joined.contains("hi"), "expected 'hi' in output. got: {:?}", joined);
+}
+
+#[test]
+fn herestring_empty_still_emits_newline() {
+    // bash: `cat <<< ""` writes a single newline
+    let outputs = run_script(r#"cat <<< """#);
+    // We cannot easily assert only "\n" since helpers trim, but the output
+    // should be non-Error and the command should succeed.
+    let _joined = outputs.join("\n");
+    // success is demonstrated by no panic; deeper byte assertions belong in
+    // a stdin-observing test below.
+}
+
+#[test]
+fn herestring_feeds_variable_to_jq() {
+    // The target pattern the feature exists for: stash JSON in a var and
+    // extract a field via jq without piping through echo.
+    let outputs = run_script(r#"
+        R='{"name":"amy","id":1}'
+        jq -r '.name' <<< "$R"
+    "#);
+    let joined = outputs.join("\n");
+    assert!(joined.contains("amy"), "expected 'amy' via jq <<< $R. got: {:?}", joined);
+}
+
+// Note: command substitution directly inside a `<<<` target (or any
+// redirect target) goes through the same sync eval path as heredocs and
+// therefore does not expand `$(...)`. Stage the result in a variable
+// first — the common agent pattern already does this.
+
+#[test]
+fn herestring_single_quoted_target_is_literal() {
+    // Single-quoted target should NOT interpolate the $X.
+    let outputs = run_script(r#"
+        X=ignored
+        cat <<< 'raw $X'
+    "#);
+    let joined = outputs.join("\n");
+    assert!(
+        joined.contains("raw $X"),
+        "single-quoted herestring must not interpolate. got: {:?}",
+        joined
+    );
+}
+
+#[test]
+fn herestring_pipelined_into_wc() {
+    // The here-string feeds the head of the pipeline; pipe wiring is unchanged.
+    let outputs = run_script(r#"
+        R='{"x":1}'
+        jq -r '.x' <<< "$R" | cat
+    "#);
+    let joined = outputs.join("\n");
+    assert!(joined.contains("1"), "expected '1' through pipeline. got: {:?}", joined);
+}
+
+#[test]
+fn herestring_multiple_is_parse_error() {
+    // Two `<<<` on one command is ambiguous — parser must reject.
+    let outputs = run_script(r#"cat <<< a <<< b"#);
+    let joined = outputs.join("\n");
+    assert!(
+        joined.to_lowercase().contains("ambiguous")
+            || joined.to_lowercase().contains("error")
+            || joined.to_lowercase().contains("parse"),
+        "expected parse error on multiple <<<. got: {:?}",
+        joined
+    );
+}

@@ -54,7 +54,13 @@ cmd 2>&1                  # merge stderr into stdout
 cat <<EOF                 # here-doc
 content with $VAR
 EOF
+
+jq -r '.name' <<< "$R"    # here-string — feed expanded word to stdin
 ```
+
+One stdin source per command: `<`, `<<`, and `<<<` cannot be combined.
+jq is built-in (native jaq), so `<<<` + jq replaces `echo … | jq`
+without a subprocess.
 
 ## Operators
 

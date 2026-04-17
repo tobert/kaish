@@ -241,7 +241,12 @@ impl Tool for JqNative {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("jq", "JSON query processor (native jaq implementation)")
+        ToolSchema::new(
+            "jq",
+            "JSON query processor — built into kaish (native jaq, no external binary). \
+             The canonical way to extract fields from JSON: pipe data in, or use \
+             `jq '.field' <<< \"$VAR\"` to read from a variable.",
+        )
             .param(ParamSchema::required(
                 "filter",
                 "string",
@@ -268,6 +273,7 @@ impl Tool for JqNative {
             .example("Extract a field", "cat data.json | jq '.name'")
             .example("Raw string output", "cat data.json | jq -r '.version'")
             .example("Filter an array", "cat items.json | jq '.[] | select(.active)'")
+            .example("Read JSON from a variable", r#"jq -r '.name' <<< "$RESULT""#)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

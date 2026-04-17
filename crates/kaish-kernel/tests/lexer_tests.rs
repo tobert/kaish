@@ -59,6 +59,7 @@ fn format_token(token: &Token) -> String {
         Token::Stderr => "REDIR_ERR".to_string(),
         Token::Both => "REDIR_BOTH".to_string(),
         Token::HereDocStart => "HEREDOC_START".to_string(),
+        Token::HereString => "HERESTRING".to_string(),
         Token::DoubleSemi => "DOUBLESEMI".to_string(),
 
         // Single-char operators
@@ -361,6 +362,13 @@ fn lexer_operators(#[case] input: &str, #[case] expected: &[&str]) {
 #[case::redir_merge("2>&1", &["REDIR_MERGE"])]
 #[case::redir_merge_in_cmd("cmd 2>&1", &["IDENT(cmd)", "REDIR_MERGE"])]
 #[case::redir_merge_pipe("cmd 2>&1 | cat", &["IDENT(cmd)", "REDIR_MERGE", "PIPE", "IDENT(cat)"])]
+#[case::herestring_alone("<<<", &["HERESTRING"])]
+#[case::herestring_with_word("<<< hi", &["HERESTRING", "IDENT(hi)"])]
+#[case::herestring_with_var("<<< \"$R\"", &["HERESTRING", "STRING($R)"])]
+#[case::herestring_no_space("<<<hi", &["HERESTRING", "IDENT(hi)"])]
+#[case::herestring_in_cmd("cat <<< hi", &["IDENT(cat)", "HERESTRING", "IDENT(hi)"])]
+#[case::heredoc_start_still_preprocesses("<< EOF", &["HEREDOC_START", "HEREDOC(, literal=false)"])]
+#[case::four_lt_greedy_match("<<<<", &["HERESTRING", "LT"])]
 fn lexer_redirects(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }

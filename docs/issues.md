@@ -19,12 +19,18 @@ subprocess capture, arithmetic token leak) **all validate as fixed** on
 
 ## P1 — High-leverage features and diagnostics
 
-### `${VAR.field}` for JSON values stashed in regular variables
-`scope.rs:332-348`. JSON results stashed in regular variables are
-opaque — only `$?` supports nested field access. Directly contradicts
-the structured-data thesis: `RESULT=$(some-tool --json); echo
-"${RESULT.key}"` is the natural agent pattern and it silently returns
-nothing.
+<!-- Resolved: see docs/plan-here-string.md. Decided against extending
+`${VAR.field}` to regular variables (non-bash, shellcheck-incompatible).
+Instead, added here-string `<<<` so the natural agent pattern is
+`jq -r '.key' <<< "$RESULT"`. kaish ships a native in-process jq. -->
+
+### Here-string `<<<` — parse-error message polish
+`parser.rs` command_parser `.try_map(...)` emits
+"multiple stdin redirects on one command are ambiguous" when two of
+`<`, `<<`, `<<<` appear on the same command. Chumsky's alternative
+backtracking surfaces a less specific "expected '=', or '('" at the
+first redirect instead. Behaviour is correct (loud parse error);
+message should be narrowed so the actionable reason is surfaced.
 
 ### `gather` line-format silently drops failures
 `scheduler/scatter.rs:299` — `.filter(|r| r.result.ok())` drops failed
@@ -208,6 +214,17 @@ isn't lost when those files are deleted.
   `#[ignore = "..."]` with the reason. `test_timeout_numeric_duration`
   (distinct failure, P2) and `test_symlink_absolute_target_escape_blocked`
   (security-relevant, P2) were intentionally not silenced.
+- **Here-string `<<<`** — 2026-04-16. New `Token::HereString`,
+  `RedirectKind::HereString`, parser arm in `redirect_parser()`, and
+  stdin wiring in `setup_stdin_redirects` (append `\n`, match bash).
+  Parser rejects any combination of `<`, `<<`, `<<<` on one command
+  rather than "last wins". Snapshot and E2E coverage; see
+  `docs/plan-here-string.md`.
+- **`${VAR.field}` for JSON variables — decided-against 2026-04-16.**
+  Discussion landed on keeping jq as the one field-access path.
+  `jq -r '.key' <<< "$R"` is bash-idiomatic, shellcheck-clean, and
+  kaish's jq is built in (native jaq, no subprocess). Pointer:
+  `docs/plan-here-string.md`.
 - **Heredoc span tracking** — 2026-04-16 (commits `c21e09c`
   source, `2490127` tests). Interpolated heredoc bodies now carry
   per-part byte offsets via `SpannedPart` and a new `Expr::HereDocBody`

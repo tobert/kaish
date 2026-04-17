@@ -61,6 +61,11 @@ done
 # Pipes and redirects
 cat urls.txt | grep "https" | head -n 10 > filtered.txt
 
+# Here-strings: feed a variable straight into stdin — jq is built-in, so
+# this replaces bash's `echo "$R" | jq` without spawning a subprocess
+RESULT='{"name":"amy"}'
+jq -r '.name' <<< "$RESULT"
+
 # Glob patterns expand inline, or use the glob builtin for options
 glob "**/*.rs" --exclude="*_test.rs"
 

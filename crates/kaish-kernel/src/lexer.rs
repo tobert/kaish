@@ -301,6 +301,9 @@ pub enum Token {
     #[token("&>")]
     Both,
 
+    #[token("<<<")]
+    HereString,
+
     #[token("<<")]
     HereDocStart,
 
@@ -623,6 +626,7 @@ impl Token {
             | Token::Stderr
             | Token::Both
             | Token::HereDocStart
+            | Token::HereString
             | Token::StderrToStdout
             | Token::StdoutToStderr
             | Token::StdoutToStderr2 => TokenCategory::Operator,
@@ -873,6 +877,7 @@ impl fmt::Display for Token {
             Token::Stderr => write!(f, "2>"),
             Token::Both => write!(f, "&>"),
             Token::HereDocStart => write!(f, "<<"),
+            Token::HereString => write!(f, "<<<"),
             Token::DoubleSemi => write!(f, ";;"),
             Token::Eq => write!(f, "="),
             Token::Pipe => write!(f, "|"),
@@ -1336,7 +1341,20 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<HeredocReplacement>) {
     while i < chars_vec.len() {
         let ch = chars_vec[i];
 
-        // Look for << (potential here-doc)
+        // Pass <<< through verbatim so the logos tokenizer sees the here-string
+        // operator. If we fell through naively, the next iteration would see
+        // the remaining `<<` and misfire heredoc preprocessing.
+        if ch == '<'
+            && chars_vec.get(i + 1) == Some(&'<')
+            && chars_vec.get(i + 2) == Some(&'<')
+        {
+            result.push_str("<<<");
+            i += 3;
+            pos += 3;
+            continue;
+        }
+
+        // Look for << (potential here-doc).
         if ch == '<' && chars_vec.get(i + 1) == Some(&'<') {
             i += 2; // consume both '<'
             pos += 2;

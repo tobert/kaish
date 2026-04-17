@@ -201,6 +201,8 @@ pub enum RedirectKind {
     Stdin,
     /// `<<EOF ... EOF` stdin from here-doc
     HereDoc,
+    /// `<<< word` stdin from here-string (bash-style)
+    HereString,
     /// `2>` stderr to file
     Stderr,
     /// `&>` both stdout and stderr to file
@@ -451,6 +453,7 @@ impl fmt::Display for RedirectKind {
             RedirectKind::StdoutAppend => write!(f, ">>"),
             RedirectKind::Stdin => write!(f, "<"),
             RedirectKind::HereDoc => write!(f, "<<"),
+            RedirectKind::HereString => write!(f, "<<<"),
             RedirectKind::Stderr => write!(f, "2>"),
             RedirectKind::Both => write!(f, "&>"),
             RedirectKind::MergeStderr => write!(f, "2>&1"),
