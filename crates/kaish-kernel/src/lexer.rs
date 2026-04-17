@@ -1509,9 +1509,6 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<HeredocReplacement>) {
                 }
             }
 
-            // Remove trailing newline from content (we'll add it when needed)
-            let content = content.trim_end_matches('\n').to_string();
-
             // Create a unique marker for this here-doc (collision-resistant)
             let marker = format!("__KAISH_HEREDOC_{}__", unique_marker_id());
             heredocs.push(HeredocReplacement {

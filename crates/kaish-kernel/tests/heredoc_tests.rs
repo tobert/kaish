@@ -29,14 +29,14 @@ async fn literal_body_no_interpolation() {
     let k = setup().await;
     // Single-quoted delimiter → literal body, no expansion
     let r = k.execute("cat <<'EOF'\n$NOT_A_VAR\nEOF").await.expect("ok");
-    assert_eq!(r.text_out(), "$NOT_A_VAR");
+    assert_eq!(r.text_out(), "$NOT_A_VAR\n");
 }
 
 #[tokio::test]
 async fn double_quoted_delimiter_is_literal() {
     let k = setup().await;
     let r = k.execute("cat <<\"EOF\"\n$NOT_A_VAR\nEOF").await.expect("ok");
-    assert_eq!(r.text_out(), "$NOT_A_VAR");
+    assert_eq!(r.text_out(), "$NOT_A_VAR\n");
 }
 
 #[tokio::test]
@@ -46,7 +46,7 @@ async fn interpolated_body_var_substitution() {
         .execute("X=hello\ncat <<EOF\n${X}\nEOF")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "hello");
+    assert_eq!(r.text_out(), "hello\n");
 }
 
 #[tokio::test]
@@ -56,7 +56,7 @@ async fn interpolated_body_simple_var() {
         .execute("X=world\ncat <<EOF\nhello $X\nEOF")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "hello world");
+    assert_eq!(r.text_out(), "hello world\n");
 }
 
 #[tokio::test]
@@ -78,7 +78,7 @@ async fn dash_form_strips_leading_tabs() {
         .execute("cat <<-EOF\n\thello\n\tworld\n\tEOF")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "hello\nworld");
+    assert_eq!(r.text_out(), "hello\nworld\n");
 }
 
 #[tokio::test]
@@ -86,7 +86,7 @@ async fn dash_form_does_not_strip_leading_spaces() {
     // POSIX strips tabs only — spaces remain.
     let k = setup().await;
     let r = k.execute("cat <<-EOF\n   spaced\n\tEOF").await.expect("ok");
-    assert_eq!(r.text_out(), "   spaced");
+    assert_eq!(r.text_out(), "   spaced\n");
 }
 
 #[tokio::test]
@@ -96,14 +96,14 @@ async fn dash_form_with_interpolation_strips_tabs() {
         .execute("X=value\ncat <<-EOF\n\t${X}\n\tEOF")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "value");
+    assert_eq!(r.text_out(), "value\n");
 }
 
 #[tokio::test]
 async fn dash_form_literal_delimiter_strips_tabs() {
     let k = setup().await;
     let r = k.execute("cat <<-'EOF'\n\thi\n\tEOF").await.expect("ok");
-    assert_eq!(r.text_out(), "hi");
+    assert_eq!(r.text_out(), "hi\n");
 }
 
 #[tokio::test]
@@ -113,7 +113,7 @@ async fn dash_form_strips_multiple_leading_tabs() {
         .execute("cat <<-EOF\n\t\t\tdeep\n\tEOF")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "deep");
+    assert_eq!(r.text_out(), "deep\n");
 }
 
 #[tokio::test]
@@ -124,7 +124,7 @@ async fn dash_form_preserves_internal_tabs() {
         .execute("cat <<-EOF\n\thello\tworld\n\tEOF")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "hello\tworld");
+    assert_eq!(r.text_out(), "hello\tworld\n");
 }
 
 // ============================================================================
@@ -141,7 +141,7 @@ async fn trailing_text_after_delimiter_pipes() {
         .execute("cat <<EOF | tr a-z A-Z\nfoo\nEOF")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "FOO");
+    assert_eq!(r.text_out(), "FOO\n");
 }
 
 #[tokio::test]
@@ -153,7 +153,7 @@ async fn heredoc_body_with_arithmetic_expansion() {
         .execute("cat <<EOF\nresult: $((1+2))\nEOF")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "result: 3");
+    assert_eq!(r.text_out(), "result: 3\n");
 }
 
 // ============================================================================
@@ -165,7 +165,7 @@ async fn crlf_body_works() {
     // Windows line endings inside the body should be normalised.
     let k = setup().await;
     let r = k.execute("cat <<EOF\r\nhello\r\nEOF").await.expect("ok");
-    assert_eq!(r.text_out(), "hello");
+    assert_eq!(r.text_out(), "hello\n");
 }
 
 #[tokio::test]
@@ -189,7 +189,7 @@ async fn multi_line_body_preserves_newlines() {
         .execute("cat <<EOF\nline1\nline2\nline3\nEOF")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "line1\nline2\nline3");
+    assert_eq!(r.text_out(), "line1\nline2\nline3\n");
 }
 
 #[tokio::test]
@@ -199,7 +199,17 @@ async fn body_with_blank_line_in_middle() {
         .execute("cat <<EOF\nfirst\n\nthird\nEOF")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "first\n\nthird");
+    assert_eq!(r.text_out(), "first\n\nthird\n");
+}
+
+#[tokio::test]
+async fn preserves_multiple_trailing_newlines() {
+    let k = setup().await;
+    let r = k
+        .execute("cat <<EOF\nhello\n\n\nEOF")
+        .await
+        .expect("ok");
+    assert_eq!(r.text_out(), "hello\n\n\n");
 }
 
 // ============================================================================
@@ -209,11 +219,9 @@ async fn body_with_blank_line_in_middle() {
 // sequences. Other backslashes are retained literally. Quoted heredocs
 // (`<<'EOF'`) do no escape processing.
 //
-// kaish strips the body's trailing newline at preprocessing
-// (lexer.rs `content.trim_end_matches('\n')`); these tests therefore use
-// exact `assert_eq!` WITHOUT a trailing `\n` to keep the focus on the
-// escape-semantics question. Whether the trailing newline should be
-// preserved is a separate POSIX-conformance question (bash preserves it).
+// kaish preserves the body's trailing newline at preprocessing
+// (lexer.rs); these tests therefore use
+// exact `assert_eq!` WITH a trailing `\n` to match standard shell behavior.
 // ============================================================================
 
 #[tokio::test]
@@ -222,7 +230,7 @@ async fn dollar_escape_in_unquoted_heredoc_suppresses_expansion() {
     // expansion. Pre-fix kaish keeps the `\` AND expands `$X` to `\hello`.
     let k = setup().await;
     let r = k.execute("X=hello\ncat <<EOF\n\\$X\nEOF").await.expect("ok");
-    assert_eq!(r.text_out(), "$X");
+    assert_eq!(r.text_out(), "$X\n");
 }
 
 #[tokio::test]
@@ -234,7 +242,7 @@ async fn dollar_escape_in_quoted_heredoc_is_literal_backslash() {
         .execute("X=hello\ncat <<'EOF'\n\\$X\nEOF")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "\\$X");
+    assert_eq!(r.text_out(), "\\$X\n");
 }
 
 #[tokio::test]
@@ -242,7 +250,7 @@ async fn backslash_backslash_escape_collapses_to_one_backslash() {
     // POSIX: `\\` in an unquoted heredoc body becomes a single `\`.
     let k = setup().await;
     let r = k.execute("cat <<EOF\n\\\\\nEOF").await.expect("ok");
-    assert_eq!(r.text_out(), "\\");
+    assert_eq!(r.text_out(), "\\\n");
 }
 
 #[tokio::test]
@@ -252,7 +260,7 @@ async fn backslash_other_char_kept_literally() {
     let r = k.execute("cat <<EOF\nfoo\\nbar\nEOF").await.expect("ok");
     // `\n` between literal letters is NOT an ANSI-C escape — keep `\n`
     // verbatim (two chars: backslash and the letter n).
-    assert_eq!(r.text_out(), "foo\\nbar");
+    assert_eq!(r.text_out(), "foo\\nbar\n");
 }
 
 #[tokio::test]
@@ -262,7 +270,7 @@ async fn backslash_newline_is_line_continuation() {
     // the backslash signalling continuation, output should be "foobar".
     let k = setup().await;
     let r = k.execute("cat <<EOF\nfoo\\\nbar\nEOF").await.expect("ok");
-    assert_eq!(r.text_out(), "foobar");
+    assert_eq!(r.text_out(), "foobar\n");
 }
 
 #[tokio::test]
@@ -274,7 +282,7 @@ async fn backslash_dollar_then_unrelated_var_only_escapes_first() {
         .execute("X=foo\nY=bar\ncat <<EOF\n\\$X $Y\nEOF")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "$X bar");
+    assert_eq!(r.text_out(), "$X bar\n");
 }
 
 // ============================================================================
@@ -289,7 +297,7 @@ async fn heredoc_inside_if_branch() {
         .execute("if true; then\ncat <<EOF\nin-then\nEOF\nfi")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "in-then");
+    assert_eq!(r.text_out(), "in-then\n");
 }
 
 #[tokio::test]
@@ -302,10 +310,8 @@ async fn heredoc_inside_for_loop_body() {
         .execute("for N in $(seq 1 2); do\ncat <<EOF\npass $N\nEOF\ndone")
         .await
         .expect("ok");
-    // Using contains() for both payloads to sidestep kaish's inter-statement
-    // separator rules, which are documented as "\n between statement outputs".
-    assert!(r.text_out().contains("pass 1"), "missing pass 1: {:?}", r.text_out());
-    assert!(r.text_out().contains("pass 2"), "missing pass 2: {:?}", r.text_out());
+    // Output is "pass 1\npass 2\n"
+    assert_eq!(r.text_out(), "pass 1\npass 2\n");
 }
 
 #[tokio::test]
@@ -315,7 +321,7 @@ async fn heredoc_inside_user_function() {
         .execute("greet() {\ncat <<EOF\nhello from $1\nEOF\n}\ngreet Amy")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "hello from Amy");
+    assert_eq!(r.text_out(), "hello from Amy\n");
 }
 
 // ============================================================================
@@ -342,7 +348,7 @@ async fn nested_command_substitution_in_body() {
         .execute("cat <<EOF\nvia $(echo nested)\nEOF")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "via nested");
+    assert_eq!(r.text_out(), "via nested\n");
 }
 
 #[tokio::test]
@@ -353,7 +359,7 @@ async fn nested_pipeline_command_substitution_in_body() {
         .execute("cat <<EOF\n$(echo -n HELLO | tr A-Z a-z) world\nEOF")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "hello world");
+    assert_eq!(r.text_out(), "hello world\n");
 }
 
 // ============================================================================
@@ -369,7 +375,7 @@ async fn body_line_looking_like_delimiter_but_longer_is_not_delimiter() {
         .execute("cat <<EOF\nEOFSUFFIX\ntrue body\nEOF")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "EOFSUFFIX\ntrue body");
+    assert_eq!(r.text_out(), "EOFSUFFIX\ntrue body\n");
 }
 
 #[tokio::test]
@@ -382,5 +388,5 @@ async fn body_containing_leading_whitespace_before_delimiter_in_plain_form() {
         .execute("cat <<EOF\nbody\n  EOF\nEOF")
         .await
         .expect("ok");
-    assert_eq!(r.text_out(), "body\n  EOF");
+    assert_eq!(r.text_out(), "body\n  EOF\n");
 }
