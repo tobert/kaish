@@ -66,6 +66,9 @@ cat urls.txt | grep "https" | head -n 10 > filtered.txt
 RESULT='{"name":"amy"}'
 jq -r '.name' <<< "$RESULT"
 
+# jq also speaks --arg / --argjson / -n (matches real jq's CLI):
+jq -n --argjson r "$RESULT" -r '$r.name'
+
 # Glob patterns expand inline, or use the glob builtin for options
 glob "**/*.rs" --exclude="*_test.rs"
 

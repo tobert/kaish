@@ -4,6 +4,10 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::value::Value;
 
+fn default_consumes() -> usize {
+    1
+}
+
 /// Schema for a tool parameter.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ParamSchema {
@@ -19,6 +23,15 @@ pub struct ParamSchema {
     pub description: String,
     /// Alternative names/flags for this parameter (e.g., "-r", "-R" for "recursive").
     pub aliases: Vec<String>,
+    /// Number of positional tokens this non-bool flag consumes per occurrence.
+    ///
+    /// Default 1 (standard `--flag value`). Set to 2 for `--flag NAME VALUE`
+    /// patterns such as jq's `--arg` / `--argjson`. When `consumes > 1`, the
+    /// kernel collects each occurrence as an inner array and accumulates
+    /// repeated occurrences under the same `named` key — the tool sees a
+    /// `Value::Json(Array(Array(...)))` listing every (N-tuple) occurrence.
+    #[serde(default = "default_consumes")]
+    pub consumes: usize,
 }
 
 impl ParamSchema {
@@ -31,6 +44,7 @@ impl ParamSchema {
             default: None,
             description: description.into(),
             aliases: Vec::new(),
+            consumes: 1,
         }
     }
 
@@ -43,6 +57,7 @@ impl ParamSchema {
             default: Some(default),
             description: description.into(),
             aliases: Vec::new(),
+            consumes: 1,
         }
     }
 
@@ -51,6 +66,15 @@ impl ParamSchema {
     /// Aliases are used for short flags like `-r`, `-R` that map to `recursive`.
     pub fn with_aliases(mut self, aliases: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.aliases = aliases.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Declare how many positional tokens this non-bool flag consumes per
+    /// occurrence (`--flag v1 v2 ...`). Default is 1. Panics on 0 — a flag
+    /// that consumes nothing is a bool flag, not a schema-typed param.
+    pub fn consumes(mut self, n: usize) -> Self {
+        assert!(n >= 1, "ParamSchema::consumes requires n >= 1 (use a bool param for flags that take no value)");
+        self.consumes = n;
         self
     }
 

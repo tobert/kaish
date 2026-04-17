@@ -60,7 +60,9 @@ jq -r '.name' <<< "$R"    # here-string — feed expanded word to stdin
 
 One stdin source per command: `<`, `<<`, and `<<<` cannot be combined.
 jq is built-in (native jaq), so `<<<` + jq replaces `echo … | jq`
-without a subprocess.
+without a subprocess. jq also accepts real jq's `--arg NAME VALUE`,
+`--argjson NAME VALUE`, and `-n` / `--null-input` flags for binding
+kaish variables directly into the filter.
 
 ## Operators
 

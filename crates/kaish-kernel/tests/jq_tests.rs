@@ -172,3 +172,113 @@ async fn data_field_is_array_for_multi_value_output() {
         other => panic!("expected Value::Json(Array), got {:?}", other),
     }
 }
+
+// ============================================================================
+// --arg / --argjson / -n / --null-input (matches real jq's flag names)
+// ============================================================================
+
+#[tokio::test]
+async fn jq_null_input_short() {
+    let k = setup().await;
+    let r = k.execute(r#"jq -n '1 + 2'"#).await.expect("script ran");
+    assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "3");
+}
+
+#[tokio::test]
+async fn jq_null_input_long() {
+    let k = setup().await;
+    let r = k
+        .execute(r#"jq --null-input '1 + 2'"#)
+        .await
+        .expect("script ran");
+    assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "3");
+}
+
+#[tokio::test]
+async fn jq_arg_binds_string() {
+    let k = setup().await;
+    let r = k
+        .execute(r#"jq -n --arg name amy -r '$name'"#)
+        .await
+        .expect("script ran");
+    assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "amy");
+}
+
+#[tokio::test]
+async fn jq_argjson_binds_integer() {
+    let k = setup().await;
+    let r = k
+        .execute(r#"jq -n --argjson x 42 '$x + 1'"#)
+        .await
+        .expect("script ran");
+    assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "43");
+}
+
+#[tokio::test]
+async fn jq_argjson_binds_object() {
+    let k = setup().await;
+    let r = k
+        .execute(r#"jq -n --argjson v '{"x":7}' -r '$v.x'"#)
+        .await
+        .expect("script ran");
+    assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "7");
+}
+
+#[tokio::test]
+async fn jq_multiple_arg_occurrences_accumulate() {
+    let k = setup().await;
+    let r = k
+        .execute(r#"jq -n --arg a one --arg b two -r '$a + "-" + $b'"#)
+        .await
+        .expect("script ran");
+    assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "one-two");
+}
+
+#[tokio::test]
+async fn jq_arg_from_kaish_variable() {
+    // The canonical agent pattern: stash JSON in a var, bind via --argjson.
+    let k = setup().await;
+    let r = k
+        .execute(
+            r#"
+            R='{"name":"amy","id":1}'
+            jq -n --argjson r "$R" -r '$r.name'
+            "#,
+        )
+        .await
+        .expect("script ran");
+    assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "amy");
+}
+
+#[tokio::test]
+async fn jq_arg_missing_second_operand_errors() {
+    // `--arg name` with no VALUE must fail loudly, matching real jq.
+    let k = setup().await;
+    let r = k
+        .execute(r#"jq -n --arg name"#)
+        .await
+        .expect("script ran");
+    assert!(!r.ok(), "expected non-zero exit, got ok. out={:?}", r.text_out());
+}
+
+#[tokio::test]
+async fn jq_argjson_invalid_json_errors() {
+    let k = setup().await;
+    let r = k
+        .execute(r#"jq -n --argjson x 'not-json' '.'"#)
+        .await
+        .expect("script ran");
+    assert!(
+        !r.ok(),
+        "expected non-zero exit for invalid --argjson. out={:?} err={:?}",
+        r.text_out(),
+        r.err
+    );
+}

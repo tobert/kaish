@@ -1807,6 +1807,88 @@ impl Kernel {
         Ok(result)
     }
 
+    /// Pull `consumes` positional args after a non-bool flag and stash them
+    /// on `tool_args.named` under the canonical param name.
+    ///
+    /// - `consumes == 1` keeps the historical contract: a single scalar value.
+    /// - `consumes > 1` accumulates each occurrence as an inner
+    ///   `serde_json::Value::Array` inside `named[canonical] =
+    ///   Value::Json(Array(...))`, preserving invocation order. This is the
+    ///   shape jq's `--arg NAME VAL` / `--argjson NAME VAL` land in.
+    ///
+    /// Errors loudly if the flag is missing required positionals — matches
+    /// kaish's "no silent fallback" posture and mirrors real jq, which
+    /// errors on `--arg NAME` with no value.
+    #[allow(clippy::too_many_arguments)]
+    async fn consume_flag_positionals(
+        &self,
+        args: &[Arg],
+        flag_name: &str,
+        canonical: &str,
+        consumes: usize,
+        positional_indices: &[usize],
+        consumed: &mut std::collections::HashSet<usize>,
+        current_idx: usize,
+        tool_args: &mut ToolArgs,
+    ) -> Result<()> {
+        let mut collected: Vec<Value> = Vec::with_capacity(consumes.max(1));
+        for _ in 0..consumes.max(1) {
+            let next_pos = positional_indices
+                .iter()
+                .find(|idx| **idx > current_idx && !consumed.contains(idx))
+                .copied();
+            match next_pos {
+                Some(pos_idx) => {
+                    if let Arg::Positional(expr) = &args[pos_idx] {
+                        let value = self.eval_expr_async(expr).await?;
+                        let value = apply_tilde_expansion(value);
+                        collected.push(value);
+                        consumed.insert(pos_idx);
+                    }
+                }
+                None => {
+                    if consumes <= 1 && collected.is_empty() {
+                        // Back-compat: a flag with no follow-up positional
+                        // becomes a bare flag. `--path` with nothing after
+                        // lands in `flags`, same as before this refactor.
+                        tool_args.flags.insert(flag_name.to_string());
+                        return Ok(());
+                    }
+                    anyhow::bail!(
+                        "--{flag_name} requires {consumes} argument{}, got {}",
+                        if consumes == 1 { "" } else { "s" },
+                        collected.len()
+                    );
+                }
+            }
+        }
+
+        if consumes <= 1 {
+            if let Some(v) = collected.pop() {
+                tool_args.named.insert(canonical.to_string(), v);
+            }
+            return Ok(());
+        }
+
+        // Multi-consume: accumulate under named[canonical] as array-of-arrays.
+        let occ: Vec<serde_json::Value> = collected
+            .into_iter()
+            .map(|v| crate::interpreter::value_to_json(&v))
+            .collect();
+        let entry = tool_args
+            .named
+            .entry(canonical.to_string())
+            .or_insert_with(|| Value::Json(serde_json::Value::Array(Vec::new())));
+        if let Value::Json(serde_json::Value::Array(outer)) = entry {
+            outer.push(serde_json::Value::Array(occ));
+        } else {
+            anyhow::bail!(
+                "--{flag_name}: named[{canonical}] already holds a non-array value"
+            );
+        }
+        Ok(())
+    }
+
     /// Build tool arguments from AST args.
     ///
     /// Uses async evaluation to support command substitution in arguments.
@@ -1878,44 +1960,42 @@ impl Kernel {
                     } else if name.len() == 1 {
                         let flag_name = name.as_str();
                         let lookup = param_lookup.get(flag_name);
-                        let is_bool = lookup.map(|(_, typ)| is_bool_type(typ)).unwrap_or(true);
+                        let is_bool = lookup.map(|(_, typ, _)| is_bool_type(typ)).unwrap_or(true);
 
                         if is_bool {
                             tool_args.flags.insert(flag_name.to_string());
                         } else {
-                            // Non-bool: consume next positional as value
-                            let canonical = lookup.map(|(name, _)| *name).unwrap_or(flag_name);
-                            let next_pos = positional_indices.iter()
-                                .find(|idx| **idx > i && !consumed.contains(idx));
-
-                            if let Some(&pos_idx) = next_pos {
-                                if let Arg::Positional(expr) = &args[pos_idx] {
-                                    let value = self.eval_expr_async(expr).await?;
-                                    let value = apply_tilde_expansion(value);
-                                    tool_args.named.insert(canonical.to_string(), value);
-                                    consumed.insert(pos_idx);
-                                }
-                            } else {
-                                tool_args.flags.insert(flag_name.to_string());
-                            }
+                            // Non-bool: consume `consumes` positionals as value(s)
+                            let canonical = lookup.map(|(n, _, _)| *n).unwrap_or(flag_name);
+                            let consumes = lookup.map(|(_, _, c)| *c).unwrap_or(1);
+                            self.consume_flag_positionals(
+                                args,
+                                name,
+                                canonical,
+                                consumes,
+                                &positional_indices,
+                                &mut consumed,
+                                i,
+                                &mut tool_args,
+                            )
+                            .await?;
                         }
-                    } else if let Some(&(canonical, typ)) = param_lookup.get(name.as_str()) {
+                    } else if let Some(&(canonical, typ, consumes)) = param_lookup.get(name.as_str()) {
                         // Multi-char short flag matches a schema param (POSIX style: -name value)
                         if is_bool_type(typ) {
                             tool_args.flags.insert(canonical.to_string());
                         } else {
-                            let next_pos = positional_indices.iter()
-                                .find(|idx| **idx > i && !consumed.contains(idx));
-                            if let Some(&pos_idx) = next_pos {
-                                if let Arg::Positional(expr) = &args[pos_idx] {
-                                    let value = self.eval_expr_async(expr).await?;
-                                    let value = apply_tilde_expansion(value);
-                                    tool_args.named.insert(canonical.to_string(), value);
-                                    consumed.insert(pos_idx);
-                                }
-                            } else {
-                                tool_args.flags.insert(name.clone());
-                            }
+                            self.consume_flag_positionals(
+                                args,
+                                name,
+                                canonical,
+                                consumes,
+                                &positional_indices,
+                                &mut consumed,
+                                i,
+                                &mut tool_args,
+                            )
+                            .await?;
                         }
                     } else {
                         // Multi-char combined flags like -la: always boolean
@@ -1929,25 +2009,24 @@ impl Kernel {
                         tool_args.positional.push(Value::String(format!("--{name}")));
                     } else {
                         let lookup = param_lookup.get(name.as_str());
-                        let is_bool = lookup.map(|(_, typ)| is_bool_type(typ)).unwrap_or(true);
+                        let is_bool = lookup.map(|(_, typ, _)| is_bool_type(typ)).unwrap_or(true);
 
                         if is_bool {
                             tool_args.flags.insert(name.clone());
                         } else {
-                            let canonical = lookup.map(|(name, _)| *name).unwrap_or(name.as_str());
-                            let next_pos = positional_indices.iter()
-                                .find(|idx| **idx > i && !consumed.contains(idx));
-
-                            if let Some(&pos_idx) = next_pos {
-                                if let Arg::Positional(expr) = &args[pos_idx] {
-                                    let value = self.eval_expr_async(expr).await?;
-                                    let value = apply_tilde_expansion(value);
-                                    tool_args.named.insert(canonical.to_string(), value);
-                                    consumed.insert(pos_idx);
-                                }
-                            } else {
-                                tool_args.flags.insert(name.clone());
-                            }
+                            let canonical = lookup.map(|(n, _, _)| *n).unwrap_or(name.as_str());
+                            let consumes = lookup.map(|(_, _, c)| *c).unwrap_or(1);
+                            self.consume_flag_positionals(
+                                args,
+                                name,
+                                canonical,
+                                consumes,
+                                &positional_indices,
+                                &mut consumed,
+                                i,
+                                &mut tool_args,
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -5361,4 +5440,105 @@ AFTER="yes"'"#)
         assert_eq!(&*result.text_out(), "n=1\nn=2\nn=3\n");
     }
 
+    // ------------------------------------------------------------------
+    // build_args_async: multi-consume flags (jq --arg NAME VALUE pattern)
+    // ------------------------------------------------------------------
+
+    /// Helper: a throwaway schema with one `--pair` param declared as
+    /// consuming two positionals per occurrence. Modelled after what
+    /// jq_native will declare for `--arg` / `--argjson`.
+    fn multi_consume_schema() -> crate::tools::ToolSchema {
+        use crate::tools::{ParamSchema, ToolSchema};
+        ToolSchema::new("test", "multi-consume smoke")
+            .param(
+                ParamSchema::optional("pair", "array", Value::Null, "name+value pair")
+                    .consumes(2),
+            )
+    }
+
+    fn pos(s: &str) -> Arg {
+        Arg::Positional(Expr::Literal(Value::String(s.to_string())))
+    }
+
+    #[tokio::test]
+    async fn build_args_multi_consume_single_occurrence() {
+        let kernel = Kernel::transient().expect("kernel");
+        let schema = multi_consume_schema();
+        // Simulates:  test --pair NAME VALUE filter
+        let args = vec![
+            Arg::LongFlag("pair".into()),
+            pos("NAME"),
+            pos("VALUE"),
+            pos("filter"),
+        ];
+        let built = kernel
+            .build_args_async(&args, Some(&schema))
+            .await
+            .expect("build_args should succeed");
+
+        // `--pair` + its two positionals are consumed into named["pair"],
+        // which becomes an outer array of one inner 2-element array.
+        let pair = built.named.get("pair").expect("named[pair] missing");
+        match pair {
+            Value::Json(serde_json::Value::Array(occurrences)) => {
+                assert_eq!(occurrences.len(), 1, "expected one occurrence");
+                match &occurrences[0] {
+                    serde_json::Value::Array(values) => {
+                        assert_eq!(values.len(), 2, "pair must have 2 values");
+                        assert_eq!(values[0], serde_json::Value::String("NAME".into()));
+                        assert_eq!(values[1], serde_json::Value::String("VALUE".into()));
+                    }
+                    other => panic!("expected inner array, got {other:?}"),
+                }
+            }
+            other => panic!("expected Json(Array(...)) for named[pair], got {other:?}"),
+        }
+
+        // The un-consumed positional ("filter") remains in `positional`.
+        assert_eq!(built.positional.len(), 1);
+        assert_eq!(built.positional[0], Value::String("filter".into()));
+    }
+
+    #[tokio::test]
+    async fn build_args_multi_consume_two_occurrences_accumulate() {
+        let kernel = Kernel::transient().expect("kernel");
+        let schema = multi_consume_schema();
+        // Simulates:  test --pair A 1 --pair B 2 filter
+        let args = vec![
+            Arg::LongFlag("pair".into()),
+            pos("A"),
+            pos("1"),
+            Arg::LongFlag("pair".into()),
+            pos("B"),
+            pos("2"),
+            pos("filter"),
+        ];
+        let built = kernel
+            .build_args_async(&args, Some(&schema))
+            .await
+            .expect("build_args should succeed");
+
+        let pair = built.named.get("pair").expect("named[pair] missing");
+        match pair {
+            Value::Json(serde_json::Value::Array(occurrences)) => {
+                assert_eq!(occurrences.len(), 2, "expected two occurrences");
+                // Preserved in invocation order.
+                match &occurrences[0] {
+                    serde_json::Value::Array(values) => {
+                        assert_eq!(values[0], serde_json::Value::String("A".into()));
+                        assert_eq!(values[1], serde_json::Value::String("1".into()));
+                    }
+                    other => panic!("expected inner array, got {other:?}"),
+                }
+                match &occurrences[1] {
+                    serde_json::Value::Array(values) => {
+                        assert_eq!(values[0], serde_json::Value::String("B".into()));
+                        assert_eq!(values[1], serde_json::Value::String("2".into()));
+                    }
+                    other => panic!("expected inner array, got {other:?}"),
+                }
+            }
+            other => panic!("expected Json(Array(...)), got {other:?}"),
+        }
+    }
 }

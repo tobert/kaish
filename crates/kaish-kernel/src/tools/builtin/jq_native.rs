@@ -32,7 +32,12 @@ pub struct JqNative;
 type Filter = jaq_core::Filter<jaq_core::Native<Val>>;
 
 /// Parse and compile a jq filter expression.
-fn compile_filter(filter_str: &str) -> Result<Filter, String> {
+///
+/// `global_vars` are the bindings introduced by `--arg` / `--argjson`, in
+/// declaration order. Each name must start with `$` (per `jaq_core`'s
+/// `with_global_vars` contract). Values are supplied at execution time via
+/// `Ctx::new` in the same order.
+fn compile_filter(filter_str: &str, global_vars: &[String]) -> Result<Filter, String> {
     // Create arena for parsing
     let arena = load::Arena::default();
 
@@ -57,9 +62,11 @@ fn compile_filter(filter_str: &str) -> Result<Filter, String> {
             format!("jq parse error: {}", msgs.join(", "))
         })?;
 
-    // Compile with standard library functions
+    // Compile with standard library functions and any `--arg` / `--argjson` bindings.
     let funs = jaq_std::funs().chain(jaq_json::funs());
-    let compiler = compile::Compiler::default().with_funs(funs);
+    let compiler = compile::Compiler::default()
+        .with_funs(funs)
+        .with_global_vars(global_vars.iter().map(String::as_str));
     let filter = compiler.compile(modules).map_err(|errs| {
         let msgs: Vec<String> = errs
             .into_iter()
@@ -88,13 +95,25 @@ struct JqRun {
 }
 
 /// Execute a compiled jq filter on pre-parsed JSON.
-fn execute_filter_json(filter: &Filter, json: serde_json::Value, raw_output: bool) -> Result<JqRun, String> {
+///
+/// `var_values` holds JSON values for any `--arg` / `--argjson` bindings
+/// declared at compile time, in the **same order** as `global_vars` passed
+/// to `compile_filter`. They're converted to `Val` inside this function
+/// because `Val` contains `Rc` pointers and is therefore `!Send` — keeping
+/// the conversion here lets the async caller stay `Send` across `.await`.
+fn execute_filter_json(
+    filter: &Filter,
+    json: serde_json::Value,
+    raw_output: bool,
+    var_values: Vec<serde_json::Value>,
+) -> Result<JqRun, String> {
     // Convert serde_json::Value to jaq_json::Val
     let input_val = json_to_val(json);
+    let vars: Vec<Val> = var_values.into_iter().map(json_to_val).collect();
 
     // Create execution context with empty inputs iterator
     let inputs: RcIter<_> = RcIter::new(Box::new(core::iter::empty()));
-    let ctx = Ctx::new(Vec::new(), &inputs);
+    let ctx = Ctx::new(vars, &inputs);
 
     // Run the filter
     let results: Vec<Result<Val, jaq_core::Error<Val>>> = filter
@@ -244,8 +263,9 @@ impl Tool for JqNative {
         ToolSchema::new(
             "jq",
             "JSON query processor — built into kaish (native jaq, no external binary). \
-             The canonical way to extract fields from JSON: pipe data in, or use \
-             `jq '.field' <<< \"$VAR\"` to read from a variable.",
+             The canonical way to extract fields from JSON: pipe data in, read \
+             from a variable via `jq '.field' <<< \"$VAR\"`, or bind kaish \
+             variables into the filter with `--arg` / `--argjson` plus `-n`.",
         )
             .param(ParamSchema::required(
                 "filter",
@@ -270,10 +290,41 @@ impl Tool for JqNative {
                 Value::String("".into()),
                 "Read from VFS file instead of stdin",
             ))
+            .param(
+                ParamSchema::optional(
+                    "arg",
+                    "array",
+                    Value::Null,
+                    "Bind a kaish variable as a jq string: --arg NAME VALUE → $NAME. Repeatable.",
+                )
+                .consumes(2),
+            )
+            .param(
+                ParamSchema::optional(
+                    "argjson",
+                    "array",
+                    Value::Null,
+                    "Bind a kaish variable as a jq JSON value: --argjson NAME JSON → $NAME. Repeatable.",
+                )
+                .consumes(2),
+            )
+            .param(
+                ParamSchema::optional(
+                    "null-input",
+                    "bool",
+                    Value::Bool(false),
+                    "Use null as input instead of reading stdin (-n / --null-input).",
+                )
+                .with_aliases(["-n"]),
+            )
             .example("Extract a field", "cat data.json | jq '.name'")
             .example("Raw string output", "cat data.json | jq -r '.version'")
             .example("Filter an array", "cat items.json | jq '.[] | select(.active)'")
             .example("Read JSON from a variable", r#"jq -r '.name' <<< "$RESULT""#)
+            .example(
+                "Bind a kaish variable into the filter",
+                r#"R='{"x":42}'; jq -n --argjson r "$R" '$r.x'"#,
+            )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -283,18 +334,30 @@ impl Tool for JqNative {
             None => return ExecResult::failure(1, "jq: filter expression required"),
         };
 
+        // Collect `--arg NAME VALUE` (string) and `--argjson NAME VALUE` (JSON)
+        // bindings in declaration order. jaq needs the names at compile time
+        // and the values at run time — same order on both sides.
+        let (global_var_names, global_var_values) = match collect_bindings(&args) {
+            Ok(pair) => pair,
+            Err(e) => return ExecResult::failure(1, e),
+        };
+
         // Compile filter (validates at execution time)
-        let filter = match compile_filter(&filter_str) {
+        let filter = match compile_filter(&filter_str, &global_var_names) {
             Ok(f) => f,
             Err(e) => return ExecResult::failure(1, e),
         };
 
         let raw_output = args.has_flag("raw") || args.has_flag("r");
         let _compact = args.has_flag("compact") || args.has_flag("c");
+        let null_input = args.has_flag("null-input") || args.has_flag("n");
 
-        // Get input JSON: check for pre-parsed structured data first (fast path),
-        // then fall back to reading from file or parsing stdin text
-        let input_json: serde_json::Value = if let Some(path) = args.get_string("path", 1) {
+        // Get input JSON. `-n` / `--null-input` skips stdin entirely and feeds
+        // `null` to the filter — same as real jq. Otherwise: fast path through
+        // pre-parsed structured data, then file, then stdin text.
+        let input_json: serde_json::Value = if null_input {
+            serde_json::Value::Null
+        } else if let Some(path) = args.get_string("path", 1) {
             if !path.is_empty() {
                 // Read from backend - path takes precedence over stdin
                 let resolved = ctx.resolve_path(&path);
@@ -336,10 +399,76 @@ impl Tool for JqNative {
         };
 
         // Execute filter with the JSON input
-        match execute_filter_json(&filter, input_json, raw_output) {
+        match execute_filter_json(&filter, input_json, raw_output, global_var_values) {
             Ok(run) => build_exec_result(run),
             Err(e) => ExecResult::failure(1, e),
         }
+    }
+}
+
+/// Pull `--arg` / `--argjson` pairs out of `ToolArgs` and turn them into
+/// (jaq var name, jaq value) tuples in declaration order.
+///
+/// Values are returned as `serde_json::Value` (which is `Send`) and
+/// converted to jaq's `Val` inside `execute_filter_json`. Holding the
+/// `Rc`-full `Val` across an `.await` would make the async body `!Send`.
+fn collect_bindings(args: &ToolArgs) -> Result<(Vec<String>, Vec<serde_json::Value>), String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut values: Vec<serde_json::Value> = Vec::new();
+
+    // Walk --arg pairs: Value::Json(Array([Array([NAME, VALUE]), ...]))
+    if let Some(Value::Json(serde_json::Value::Array(occurrences))) = args.named.get("arg") {
+        for occ in occurrences {
+            let (name, raw) = extract_pair(occ, "arg")?;
+            names.push(format!("${name}"));
+            values.push(serde_json::Value::String(raw));
+        }
+    }
+
+    // Walk --argjson pairs: same shape, but the value is parsed as JSON.
+    if let Some(Value::Json(serde_json::Value::Array(occurrences))) = args.named.get("argjson") {
+        for occ in occurrences {
+            let (name, raw) = extract_pair(occ, "argjson")?;
+            let parsed: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| format!("jq: --argjson {name}: invalid JSON: {e}"))?;
+            names.push(format!("${name}"));
+            values.push(parsed);
+        }
+    }
+
+    Ok((names, values))
+}
+
+/// Pull a (name, value) pair out of a serde_json 2-element array stored by
+/// the kernel's `consumes=2` flag-collection path.
+fn extract_pair(occ: &serde_json::Value, flag: &str) -> Result<(String, String), String> {
+    match occ {
+        serde_json::Value::Array(pair) if pair.len() == 2 => {
+            let name = value_as_string(&pair[0])
+                .ok_or_else(|| format!("jq: --{flag} NAME must be a string"))?;
+            let value = value_as_string(&pair[1])
+                .ok_or_else(|| format!("jq: --{flag} VALUE must be a string"))?;
+            Ok((name, value))
+        }
+        other => Err(format!(
+            "jq: internal error: --{flag} expected 2-element pair, got {other}"
+        )),
+    }
+}
+
+/// Coerce a serde_json value into the string form jaq expects. Agents
+/// routinely pass numbers without quoting (`--argjson x 42`) and kaish
+/// evaluates the positional to `Value::Int(42)` → `json::Number`, so we
+/// stringify it here.
+fn value_as_string(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        // Objects / arrays / null aren't sensible for --arg NAMEs and also
+        // aren't usually what you want for raw --argjson values — but if a
+        // shell expands something exotic, round-trip via serialisation.
+        _ => Some(v.to_string()),
     }
 }
 
@@ -372,7 +501,7 @@ fn build_exec_result(run: JqRun) -> ExecResult {
 /// Returns Ok(()) if valid, Err(message) if invalid.
 #[cfg(test)]
 fn validate_filter(filter: &str) -> Result<(), String> {
-    compile_filter(filter)?;
+    compile_filter(filter, &[])?;
     Ok(())
 }
 

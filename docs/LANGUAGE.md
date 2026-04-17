@@ -102,6 +102,24 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > `echo "$VAR" | jq` without spawning a subprocess. For structured data,
 > jq is the canonical access path.
 
+### Binding kaish variables into jq
+
+kaish's jq speaks real jq's CLI: `--arg NAME VALUE` binds a string and
+`--argjson NAME VALUE` binds a JSON value. Use `-n` / `--null-input`
+when you only want the bindings (no stdin).
+
+```bash
+# Stash JSON, pick a field — no subshell, no <<<
+R='{"name":"amy","id":1}'
+jq -n --argjson r "$R" -r '$r.name'
+
+# Multiple bindings, in declaration order
+jq -n --arg a one --arg b two -r '$a + "-" + $b'
+```
+
+Both flags are repeatable. `--argjson` errors loudly on malformed JSON
+(matching real jq).
+
 ## Statement Chaining
 
 ```bash

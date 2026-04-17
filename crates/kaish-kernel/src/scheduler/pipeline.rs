@@ -513,14 +513,16 @@ impl PipelineRunner {
 /// Build a map from flag name → (canonical param name, param type).
 ///
 /// Includes both primary names and aliases (with dashes stripped).
-/// For short flags like `-n` aliased to `lines`, maps `"n"` → `("lines", "int")`.
-pub fn schema_param_lookup(schema: &ToolSchema) -> HashMap<String, (&str, &str)> {
+/// For short flags like `-n` aliased to `lines`, maps `"n"` → `("lines", "int", 1)`.
+/// The third tuple slot is `consumes`: how many positionals the flag pulls
+/// per occurrence (1 for standard `--flag value`, 2 for jq's `--arg NAME VAL`).
+pub fn schema_param_lookup(schema: &ToolSchema) -> HashMap<String, (&str, &str, usize)> {
     let mut map = HashMap::new();
     for p in &schema.params {
-        map.insert(p.name.clone(), (p.name.as_str(), p.param_type.as_str()));
+        map.insert(p.name.clone(), (p.name.as_str(), p.param_type.as_str(), p.consumes));
         for alias in &p.aliases {
             let stripped = alias.trim_start_matches('-');
-            map.insert(stripped.to_string(), (p.name.as_str(), p.param_type.as_str()));
+            map.insert(stripped.to_string(), (p.name.as_str(), p.param_type.as_str(), p.consumes));
         }
     }
     map
@@ -585,14 +587,14 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
                     let flag_name = name.as_str();
                     let lookup = param_lookup.get(flag_name);
                     let is_bool = lookup
-                        .map(|(_, typ)| is_bool_type(typ))
+                        .map(|(_, typ, _)| is_bool_type(typ))
                         .unwrap_or(true);
 
                     if is_bool {
                         tool_args.flags.insert(flag_name.to_string());
                     } else {
                         // Non-bool: consume next positional as value, insert under canonical name
-                        let canonical = lookup.map(|(name, _)| *name).unwrap_or(flag_name);
+                        let canonical = lookup.map(|(n, _, _)| *n).unwrap_or(flag_name);
                         let next_positional = positional_indices
                             .iter()
                             .find(|(idx, _)| *idx > i && !consumed_positionals.contains(idx));
@@ -608,7 +610,7 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
                             tool_args.flags.insert(flag_name.to_string());
                         }
                     }
-                } else if let Some(&(canonical, typ)) = param_lookup.get(name.as_str()) {
+                } else if let Some(&(canonical, typ, _)) = param_lookup.get(name.as_str()) {
                     // Multi-char short flag matches a schema param (POSIX style: -name value)
                     if is_bool_type(typ) {
                         tool_args.flags.insert(canonical.to_string());
@@ -641,14 +643,18 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
                     // Look up type in schema (checks name and aliases)
                     let lookup = param_lookup.get(name.as_str());
                     let is_bool = lookup
-                        .map(|(_, typ)| is_bool_type(typ))
+                        .map(|(_, typ, _)| is_bool_type(typ))
                         .unwrap_or(true); // Unknown params default to bool
 
                     if is_bool {
                         tool_args.flags.insert(name.clone());
                     } else {
                         // Non-bool: consume next positional as value, insert under canonical name
-                        let canonical = lookup.map(|(name, _)| *name).unwrap_or(name.as_str());
+                        // Note: the sync build_tool_args does NOT honor `consumes > 1`. The async
+                        // build_args_async in kernel.rs is the only path that supports multi-consume
+                        // flags. Sync callers (scheduler pipelines for --json-marker plumbing) don't
+                        // yet need that; if they ever do, lift the logic via a shared helper.
+                        let canonical = lookup.map(|(n, _, _)| *n).unwrap_or(name.as_str());
                         let next_positional = positional_indices
                             .iter()
                             .find(|(idx, _)| *idx > i && !consumed_positionals.contains(idx));

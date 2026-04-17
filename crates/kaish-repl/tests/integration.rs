@@ -1430,6 +1430,35 @@ fn herestring_pipelined_into_wc() {
     assert!(joined.contains("1"), "expected '1' through pipeline. got: {:?}", joined);
 }
 
+// ============================================================================
+// jq --arg / --argjson / -n (matches real jq's CLI)
+// ============================================================================
+
+#[test]
+fn jq_null_input_and_arg_binds_string() {
+    let outputs = run_script(r#"jq -n --arg name amy -r '$name'"#);
+    let joined = outputs.join("\n");
+    assert!(joined.contains("amy"), "expected 'amy'. got: {:?}", joined);
+}
+
+#[test]
+fn jq_argjson_binds_kaish_variable() {
+    // The canonical agent pattern: stash JSON, bind via --argjson, no subshell.
+    let outputs = run_script(r#"
+        R='{"name":"amy","id":1}'
+        jq -n --argjson r "$R" -r '$r.name'
+    "#);
+    let joined = outputs.join("\n");
+    assert!(joined.contains("amy"), "expected 'amy'. got: {:?}", joined);
+}
+
+#[test]
+fn jq_multiple_arg_occurrences_preserve_order() {
+    let outputs = run_script(r#"jq -n --arg a one --arg b two -r '$a + "-" + $b'"#);
+    let joined = outputs.join("\n");
+    assert!(joined.contains("one-two"), "expected 'one-two'. got: {:?}", joined);
+}
+
 #[test]
 fn herestring_multiple_is_parse_error() {
     // Two `<<<` on one command is ambiguous — parser must reject.
