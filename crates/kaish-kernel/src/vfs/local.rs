@@ -292,9 +292,21 @@ impl Filesystem for LocalFs {
     async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
         self.check_writable()?;
 
-        // Validate absolute symlink targets stay within sandbox
+        // Validate absolute symlink targets stay within sandbox.
+        // `resolve` would strip the leading slash and treat `/etc/passwd` as
+        // root-relative, so `<root>/etc/passwd` always "contains". For symlink
+        // targets the OS follows the literal absolute path, so compare the
+        // canonical target (or the literal path if it doesn't exist yet) to
+        // the canonical root.
         if target.is_absolute() {
-            self.resolve(target)?;
+            let canonical_root = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
+            let canonical_target = target.canonicalize().unwrap_or_else(|_| target.to_path_buf());
+            if !canonical_target.starts_with(&canonical_root) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("symlink target escapes root: {}", target.display()),
+                ));
+            }
         }
 
         let link_path = self.resolve_no_follow(link)?;

@@ -55,21 +55,32 @@ The six-field `ExecContext` ↔ kernel-state sync appears near every
 call site that fields a fork (`kernel.rs:3224-3271` and duplicates).
 One helper, one truth.
 
-### `vfs::local::test_symlink_absolute_target_escape_blocked` fails
-`crates/kaish-kernel/src/vfs/local.rs:520`. The test symlinks an
-absolute path (`/etc/passwd`) inside the sandbox root and expects
-`PermissionDenied`; it currently gets a different error or success.
-Security-relevant — the sandbox may not be blocking absolute symlink
-targets as the test assumes. Investigate whether the test is wrong or
-the sandbox has a hole.
+### Dispatcher re-entrancy deadlock (P2, real bug surfaced by timeout)
+`timeout 5 echo works` deadlocks in production and the test
+`test_timeout_numeric_duration` is `#[ignore]`'d for the same reason.
+Root topology:
+1. `execute_command` (`kernel.rs:1788`) acquires `self.exec_ctx.write()`
+   and holds it across `tool.execute(...)`.
+2. `timeout` re-dispatches via `ctx.dispatcher`.
+3. The re-dispatch path (`dispatch_command` or `Kernel::fork`) tries to
+   acquire `self.exec_ctx` again — deadlock.
 
-### `test_timeout_numeric_duration` fails
-`crates/kaish-kernel/src/tools/builtin/timeout.rs:237`. Runs
-`timeout 5 echo works` and expects a successful echo; currently asserts
-fail (`result.ok()` is false). Distinct from the three `5s`/`100ms`
-tests (those are lexer-limited and have been `#[ignore]`'d). This one
-uses a plain numeric duration, so the lexer accepts it — something
-else is wrong in the timeout or dispatch path. Investigate.
+Two fixes considered, both rejected for this release:
+- Sync `ctx.dispatcher` into `self.exec_ctx` so the tool sees it (trivial
+  one-liner in `dispatch_command`'s sync block). Makes the dispatcher
+  visible but converts a fast-fail "no dispatcher" error into a silent
+  5-second hang, so worse UX.
+- Have timeout use `dispatcher.fork().await`. `Kernel::fork` itself
+  reads parent `exec_ctx` and deadlocks on the outer write guard.
+
+Real fix: restructure `execute_command` so the `exec_ctx.write()` guard
+drops before `tool.execute`, with a snapshot-and-merge pattern like
+forks already use elsewhere. Tracked with the `Split execute_stmt_flow`
+refactor above since both touch the same lock discipline.
+
+Tool-side blast radius is limited to builtins that re-dispatch —
+currently only `timeout`. External-command path and normal pipelines
+are unaffected (they don't re-enter the dispatcher from inside a tool).
 
 ### `ls <glob>` only lists the first match under kernel pre-expansion
 Surfaced by the 2026-04-16 cleanup's smoke check: `ls crates/*/Cargo.toml`
@@ -214,6 +225,25 @@ isn't lost when those files are deleted.
   `#[ignore = "..."]` with the reason. `test_timeout_numeric_duration`
   (distinct failure, P2) and `test_symlink_absolute_target_escape_blocked`
   (security-relevant, P2) were intentionally not silenced.
+- **`test_symlink_absolute_target_escape_blocked` — fixed 2026-04-18.**
+  `vfs/local.rs::symlink` was calling `self.resolve(target)` to validate
+  absolute targets, but `resolve` strips the leading `/` and joins with
+  root, so `/etc/passwd` always resolved to `<root>/etc/passwd` and the
+  containment check trivially passed. Replaced with a direct
+  canonical-target vs canonical-root comparison; non-existent absolute
+  targets fall back to the literal path (rejected when outside root).
+- **Heredoc unit-test expectations — fixed 2026-04-18.** `098f3fe` fixed
+  the heredoc lexer to preserve the trailing newline and updated the
+  integration tests in `heredoc_tests.rs`, but missed the seven unit
+  tests in `lexer.rs` (`heredoc_simple`, `heredoc_multiline`,
+  `heredoc_with_special_chars`, `heredoc_strip_tabs`, `heredoc_in_command`,
+  `test_heredoc_preserves_leading_empty_lines`,
+  `test_heredoc_quoted_delimiter_sets_literal`). Expected `content` strings
+  now include the trailing `\n`.
+- **`test_timeout_numeric_duration` — root cause identified, fix deferred
+  2026-04-18.** The test is `#[ignore]`'d with a pointer to the P2
+  "Dispatcher re-entrancy deadlock" entry above, which captures the full
+  topology and fix direction.
 - **Here-string `<<<`** — 2026-04-16. New `Token::HereString`,
   `RedirectKind::HereString`, parser arm in `redirect_parser()`, and
   stdin wiring in `setup_stdin_redirects` (append `\n`, match bash).

@@ -2874,7 +2874,7 @@ mod tests {
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
             Token::HereDoc(HereDocData {
-                content: "hello\nworld".to_string(),
+                content: "hello\nworld\n".to_string(),
                 literal: false,
                 strip_tabs: false,
                 body_start_offset: 10,
@@ -2908,7 +2908,7 @@ mod tests {
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
             Token::HereDoc(HereDocData {
-                content: "$VAR and \"quoted\" 'single'".to_string(),
+                content: "$VAR and \"quoted\" 'single'\n".to_string(),
                 literal: false,
                 strip_tabs: false,
                 body_start_offset: 10,
@@ -2925,7 +2925,7 @@ mod tests {
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
             Token::HereDoc(HereDocData {
-                content: "line1\nline2\nline3".to_string(),
+                content: "line1\nline2\nline3\n".to_string(),
                 literal: false,
                 strip_tabs: false,
                 body_start_offset: 10,
@@ -2942,7 +2942,7 @@ mod tests {
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
             Token::HereDoc(HereDocData {
-                content: "hello".to_string(),
+                content: "hello\n".to_string(),
                 literal: false,
                 strip_tabs: false,
                 body_start_offset: 10,
@@ -2964,7 +2964,7 @@ mod tests {
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
             Token::HereDoc(HereDocData {
-                content: "\thello\n\tworld".to_string(),
+                content: "\thello\n\tworld\n".to_string(),
                 literal: false,
                 strip_tabs: true,
                 body_start_offset: 11,
@@ -3156,7 +3156,7 @@ mod tests {
         assert!(heredoc.is_some(), "should have a heredoc token");
         let data = heredoc.unwrap();
         assert!(data.content.starts_with('\n'), "leading empty line must be preserved, got: {:?}", data.content);
-        assert_eq!(data.content, "\nhello");
+        assert_eq!(data.content, "\nhello\n");
     }
 
     #[test]
@@ -3173,7 +3173,7 @@ mod tests {
         assert!(heredoc.is_some(), "should have a heredoc token");
         let data = heredoc.unwrap();
         assert!(data.literal, "quoted delimiter should set literal=true");
-        assert_eq!(data.content, "hello $HOME");
+        assert_eq!(data.content, "hello $HOME\n");
     }
 
     #[test]
