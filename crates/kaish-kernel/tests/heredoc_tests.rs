@@ -28,29 +28,82 @@ async fn setup() -> Arc<Kernel> {
 }
 
 // ============================================================================
-// Line-ending normalization — kaish-specific (bash preserves \r)
+// Line-ending handling — hybrid: CR-tolerant delimiter, verbatim body
 // ============================================================================
+//
+// Diverges slightly from bash. Bash preserves `\r` in the body AND requires a
+// literal `EOF` line for the delimiter — so a CRLF-saved script with `EOF\r`
+// silently swallows the rest of the file. Kaish treats the line ending as
+// purely a line terminator for delimiter matching (so `EOF\r` still matches
+// `EOF`) while preserving the original bytes in body content (so the user's
+// input is honored verbatim).
 
 #[tokio::test]
-async fn crlf_body_works() {
-    // Windows line endings inside the body should be normalised.
+async fn crlf_body_preserves_carriage_returns() {
+    // CRLF inside the body is preserved byte-for-byte.
     let k = setup().await;
     let r = k.execute("cat <<EOF\r\nhello\r\nEOF").await.expect("ok");
+    assert_eq!(r.text_out(), "hello\r\n");
+}
+
+#[tokio::test]
+async fn bare_cr_body_preserves_carriage_returns() {
+    // Bare `\r` line endings (Mac classic) are also preserved verbatim.
+    let k = setup().await;
+    let r = k.execute("cat <<EOF\rhello\rEOF").await.expect("ok");
+    assert_eq!(r.text_out(), "hello\r");
+}
+
+#[tokio::test]
+async fn crlf_terminated_delimiter_still_matches() {
+    // A delimiter line ending with `\r\n` (or bare `\r`) must still match
+    // the bare `EOF` delimiter — otherwise CRLF-saved scripts break.
+    let k = setup().await;
+    let r = k.execute("cat <<EOF\nhello\nEOF\r\n").await.expect("ok");
+    assert_eq!(r.text_out(), "hello\n");
+}
+
+#[tokio::test]
+async fn bare_cr_terminated_delimiter_still_matches() {
+    let k = setup().await;
+    let r = k.execute("cat <<EOF\nhello\nEOF\r").await.expect("ok");
     assert_eq!(r.text_out(), "hello\n");
 }
 
 // ============================================================================
-// Unterminated heredoc contract — kaish-specific
+// Unterminated heredoc — error rather than silent truncation
 // ============================================================================
+//
+// Previously, kaish silently used whatever was collected when EOF arrived
+// before the closing delimiter. That masked the much-more-likely case where
+// the user's input got truncated (paste cut off, missing closing line, etc.)
+// — silent fallback on missing data is exactly the failure mode we want to
+// surface, not paper over.
 
 #[tokio::test]
-async fn unterminated_heredoc_uses_remaining_content() {
-    // No closing EOF — current contract (lexer.rs:1397-1401) is to use
-    // whatever was collected so far. Pin this so the contract doesn't
-    // silently change.
+async fn unterminated_heredoc_errors() {
     let k = setup().await;
-    let r = k.execute("cat <<EOF\nhello").await.expect("ok");
-    assert_eq!(r.text_out(), "hello");
+    let err = k.execute("cat <<EOF\nhello").await.expect_err(
+        "unterminated heredoc must surface as an error, not silent truncation",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unterminated heredoc"),
+        "error should mention unterminated heredoc; got: {msg}",
+    );
+    assert!(
+        msg.contains("EOF"),
+        "error should name the expected delimiter; got: {msg}",
+    );
+}
+
+#[tokio::test]
+async fn unterminated_heredoc_with_dash_form_errors() {
+    let k = setup().await;
+    let err = k.execute("cat <<-DONE\n\thi").await.expect_err("error expected");
+    let msg = err.to_string();
+    assert!(msg.contains("unterminated heredoc"), "got: {msg}");
+    assert!(msg.contains("DONE"), "got: {msg}");
 }
 
 // ============================================================================

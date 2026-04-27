@@ -114,6 +114,10 @@ pub enum LexerError {
     InvalidFloatNoTrailing,
     /// Nesting depth exceeded (too many nested parentheses in arithmetic).
     NestingTooDeep,
+    /// Heredoc body ended without seeing the closing delimiter on its own line.
+    /// The user almost certainly meant to type the delimiter — silently using
+    /// whatever was collected up to EOF would mask missing data.
+    UnterminatedHeredoc { delimiter: String },
 }
 
 impl fmt::Display for LexerError {
@@ -137,6 +141,9 @@ impl fmt::Display for LexerError {
             LexerError::InvalidFloatNoLeading => write!(f, "float must have leading digit"),
             LexerError::InvalidFloatNoTrailing => write!(f, "float must have trailing digit"),
             LexerError::NestingTooDeep => write!(f, "nesting depth exceeded (max {})", MAX_PAREN_DEPTH),
+            LexerError::UnterminatedHeredoc { delimiter } => {
+                write!(f, "unterminated heredoc, expected closing delimiter `{}` on its own line", delimiter)
+            }
         }
     }
 }
@@ -1328,7 +1335,7 @@ struct HeredocReplacement {
 ///   `cat <<__HEREDOC_0__`
 /// With heredocs[0] = HeredocReplacement { marker: "__HEREDOC_0__",
 /// body: "hello\nworld", literal: false, strip_tabs: false }
-fn preprocess_heredocs(source: &str) -> (String, Vec<HeredocReplacement>) {
+fn preprocess_heredocs(source: &str) -> Result<(String, Vec<HeredocReplacement>), Spanned<LexerError>> {
     let mut result = String::with_capacity(source.len());
     let mut heredocs: Vec<HeredocReplacement> = Vec::new();
     let chars_vec: Vec<char> = source.chars().collect();
@@ -1356,6 +1363,9 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<HeredocReplacement>) {
 
         // Look for << (potential here-doc).
         if ch == '<' && chars_vec.get(i + 1) == Some(&'<') {
+            // Remember where the `<<` started so an unterminated-heredoc
+            // error can point back at the introducer rather than at EOF.
+            let introducer_start = pos;
             i += 2; // consume both '<'
             pos += 2;
 
@@ -1467,8 +1477,13 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<HeredocReplacement>) {
                     Some('\r') => {
                         i += 1;
                         pos += 1;
-                        // Handle \r\n
-                        if chars_vec.get(i) == Some(&'\n') {
+                        // Detect CRLF vs bare CR. We strip the line ending
+                        // for delimiter matching (so `EOF\r` still matches
+                        // `EOF`) but preserve the original byte sequence in
+                        // the body content — the user's input is honored
+                        // verbatim.
+                        let crlf = chars_vec.get(i) == Some(&'\n');
+                        if crlf {
                             i += 1;
                             pos += 1;
                         }
@@ -1481,7 +1496,7 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<HeredocReplacement>) {
                             break;
                         }
                         content.push_str(&current_line);
-                        content.push('\n');
+                        content.push_str(if crlf { "\r\n" } else { "\r" });
                         current_line.clear();
                     }
                     Some(c) => {
@@ -1490,21 +1505,30 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<HeredocReplacement>) {
                         pos += c.len_utf8();
                     }
                     None => {
-                        // EOF - check if current line is the delimiter
+                        // EOF — check if current line is the delimiter (matches
+                        // when the source ends without a trailing newline).
                         let trimmed = if strip_tabs {
                             current_line.trim_start_matches('\t')
                         } else {
                             &current_line
                         };
                         if trimmed == delimiter {
-                            // Found delimiter at EOF
                             break;
                         }
-                        // Not a delimiter - include remaining content
-                        if !current_line.is_empty() {
-                            content.push_str(&current_line);
-                        }
-                        break;
+                        // Not a delimiter — the heredoc was never closed.
+                        // Crash rather than silently using whatever we
+                        // collected: missing data is exactly the failure
+                        // mode where silent fallback masks the bug.
+                        let span_end = introducer_start
+                            + 2
+                            + if strip_tabs { 1 } else { 0 }
+                            + delimiter.len();
+                        return Err(Spanned::new(
+                            LexerError::UnterminatedHeredoc {
+                                delimiter: delimiter.clone(),
+                            },
+                            introducer_start..span_end,
+                        ));
                     }
                 }
             }
@@ -1532,7 +1556,7 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<HeredocReplacement>) {
         }
     }
 
-    (result, heredocs)
+    Ok((result, heredocs))
 }
 
 /// Extract the text contribution of a token for colon-adjacent merging.
@@ -1739,11 +1763,15 @@ pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerEr
     let arith_result = preprocess_arithmetic(source)
         .map_err(|e| vec![Spanned::new(e, 0..source.len())])?;
 
-    // Then preprocess here-docs (heredoc span tracking is not implemented for simplicity)
-    let (preprocessed, heredocs) = preprocess_heredocs(&arith_result.text);
-
-    // Combine replacements for span correction (arithmetic only for now)
+    // Then preprocess here-docs. Spans inside the heredoc preprocessor are in
+    // arith-preprocessed coords; correct back to original-source coords before
+    // surfacing the error to keep parser diagnostics aligned with source.
     let span_replacements = arith_result.replacements;
+    let (preprocessed, heredocs) = preprocess_heredocs(&arith_result.text)
+        .map_err(|e| {
+            let span = correct_span(e.span, &span_replacements);
+            vec![Spanned::new(e.token, span)]
+        })?;
 
     let lexer = Token::lexer(&preprocessed);
     let mut tokens = Vec::new();

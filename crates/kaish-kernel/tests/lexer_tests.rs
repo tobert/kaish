@@ -367,7 +367,7 @@ fn lexer_operators(#[case] input: &str, #[case] expected: &[&str]) {
 #[case::herestring_with_var("<<< \"$R\"", &["HERESTRING", "STRING($R)"])]
 #[case::herestring_no_space("<<<hi", &["HERESTRING", "IDENT(hi)"])]
 #[case::herestring_in_cmd("cat <<< hi", &["IDENT(cat)", "HERESTRING", "IDENT(hi)"])]
-#[case::heredoc_start_still_preprocesses("<< EOF", &["HEREDOC_START", "HEREDOC(, literal=false)"])]
+#[case::heredoc_start_still_preprocesses("<< EOF\nEOF", &["HEREDOC_START", "HEREDOC(, literal=false)"])]
 #[case::four_lt_greedy_match("<<<<", &["HERESTRING", "LT"])]
 fn lexer_redirects(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
