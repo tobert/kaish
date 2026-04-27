@@ -11,6 +11,9 @@ use std::process::Command;
 /// What `bash -c` produced when we ran a script under it.
 pub struct BashOutput {
     pub stdout: String,
+    // Each integration test binary is its own crate; some include compat
+    // tests that never use `exit:` and so never read this field.
+    #[allow(dead_code)]
     pub code: i64,
 }
 
@@ -38,8 +41,10 @@ pub fn run_bash_if_enabled(script: &str) -> Option<BashOutput> {
 /// the kaish side. Recognized clauses:
 ///
 /// - `eq: "..."`        — stdout (after `.trim()`) equals the literal
-/// - `kaish_eq: "..."`  — same, kaish-only (paired with `bash_eq:` for known
-///                         divergences)
+/// - `eq_exact: "..."`  — stdout equals the literal *byte-for-byte*, no trim
+///                        (use for heredoc tests where trailing `\n` matters)
+/// - `kaish_eq: "..."`  — trimmed kaish-only (paired with `bash_eq:` for
+///                        known divergences)
 /// - `bash_eq: "..."`   — ignored on the kaish side
 /// - `contains: "..."`  — stdout contains the substring
 /// - `absent: "..."`    — stdout does not contain the substring
@@ -52,6 +57,15 @@ macro_rules! shell_compat_kaish_assert {
             $out.trim(),
             $e,
             "kaish stdout mismatch:\n--- got ---\n{}\n-----------",
+            $out,
+        );
+        $( $crate::shell_compat_kaish_assert!($out, $code, $($r)*); )?
+    };
+    ($out:expr, $code:expr, eq_exact: $e:expr $(, $($r:tt)*)?) => {
+        assert_eq!(
+            $out,
+            $e,
+            "kaish stdout (exact) mismatch:\n--- got ---\n{:?}\n-----------",
             $out,
         );
         $( $crate::shell_compat_kaish_assert!($out, $code, $($r)*); )?
@@ -102,6 +116,15 @@ macro_rules! shell_compat_bash_assert {
             $out.trim(),
             $e,
             "bash stdout mismatch:\n--- got ---\n{}\n-----------",
+            $out,
+        );
+        $( $crate::shell_compat_bash_assert!($out, $code, $($r)*); )?
+    };
+    ($out:expr, $code:expr, eq_exact: $e:expr $(, $($r:tt)*)?) => {
+        assert_eq!(
+            $out,
+            $e,
+            "bash stdout (exact) mismatch:\n--- got ---\n{:?}\n-----------",
             $out,
         );
         $( $crate::shell_compat_bash_assert!($out, $code, $($r)*); )?
@@ -164,12 +187,18 @@ macro_rules! shell_compat {
         $($body:tt)*
     ) => {
         mod $name {
-            use ::kaish_kernel::Kernel;
+            use ::kaish_kernel::{Kernel, KernelConfig};
 
             #[tokio::test]
             #[allow(unused_variables)]
             async fn kaish() {
-                let kernel = Kernel::transient().expect("transient kernel");
+                // Skip validation so scripts that reference unset vars (heredoc
+                // bodies, $NOT_A_VAR, etc.) reach the runtime — the compat
+                // suite compares runtime behavior with bash, not validator
+                // strictness.
+                let kernel = Kernel::new(
+                    KernelConfig::transient().with_skip_validation(true),
+                ).expect("kernel");
                 let result = kernel.execute($script).await.expect("kaish execute");
                 let out: String = result.text_out().into_owned();
                 let code: i64 = result.code;
