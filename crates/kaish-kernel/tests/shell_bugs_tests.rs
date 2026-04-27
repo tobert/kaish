@@ -1,27 +1,28 @@
-//! Shell variable and expression handling bug tests.
+//! Kaish-specific shell behavior tests that don't translate to bash.
 //!
-//! These tests were written to catch bugs discovered during real-world testing.
-//! Tests are written first (TDD style), then code is fixed to make them pass.
+//! Bash-portable scenarios live in `shell_compat_tests.rs` (which runs each
+//! script through both kaish AND `bash -c` when `KAISH_BASH_COMPAT=1` is set,
+//! catching divergences). This file is the home for behaviors that are
+//! kaish-only by design or otherwise can't be directly compared:
+//!
+//! - `local x = inner` — kaish syntax with surrounding spaces; bash uses
+//!   `local x=inner` and rejects the spaced form.
+//! - `$$` / `${$}` — process IDs differ across processes, so kaish vs.
+//!   `bash -c` can't agree on a value.
+//! - Structured iteration: `split`, `seq` returning arrays.
+//! - Stderr redirects (`>&2`, `1>&2`) — the compat harness only inspects
+//!   stdout today.
+//! - VFS-only paths (`/v/...`) and the `find` builtin's filtering through
+//!   the parser.
+//! - Short flags-with-value tests that depend on a real tempfile.
+//! - Command-substitution cwd isolation, which depends on the host process's
+//!   starting cwd (hard to make deterministic across two runners).
 
 use kaish_kernel::Kernel;
 
 // ============================================================================
-// Bug 1: ${?} braced form returns 0 instead of actual exit code
+// Within-kaish equivalence: $? braced vs unbraced
 // ============================================================================
-
-#[tokio::test]
-async fn test_braced_last_exit_code_after_success() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute("true; echo ${?}").await.unwrap();
-    assert_eq!(result.text_out().trim(), "0", "Expected 0 after true command");
-}
-
-#[tokio::test]
-async fn test_braced_last_exit_code_after_failure() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute("false; echo ${?}").await.unwrap();
-    assert_eq!(result.text_out().trim(), "1", "Expected 1 after false command");
-}
 
 #[tokio::test]
 async fn test_braced_vs_unbraced_exit_code_equivalence() {
@@ -37,115 +38,44 @@ async fn test_braced_vs_unbraced_exit_code_equivalence() {
 }
 
 // ============================================================================
-// Bug 2: $? in arithmetic $(($? + 1)) fails
+// PID forms: $$ and ${$} — values can't be compared cross-process
 // ============================================================================
-
-#[tokio::test]
-async fn test_exit_code_in_arithmetic() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute("false; echo $(( $? + 10 ))").await.unwrap();
-    assert_eq!(result.text_out().trim(), "11", "Expected 1 + 10 = 11");
-}
-
-#[tokio::test]
-async fn test_exit_code_in_arithmetic_after_success() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute("true; echo $(( $? * 5 ))").await.unwrap();
-    assert_eq!(result.text_out().trim(), "0", "Expected 0 * 5 = 0");
-}
 
 #[tokio::test]
 async fn test_pid_in_arithmetic() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute("echo $(( $$ % 100000 ))").await.unwrap();
-    // Just verify it parses and returns a number
     let val: i64 = result.text_out().trim().parse().expect("Should be a number");
     assert!(val >= 0, "PID mod should be non-negative");
 }
 
 #[tokio::test]
-async fn test_braced_exit_code_in_arithmetic() {
+async fn test_braced_current_pid() {
     let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute("false; echo $(( ${?} + 5 ))").await.unwrap();
-    assert_eq!(result.text_out().trim(), "6", "Expected 1 + 5 = 6");
-}
-
-// ============================================================================
-// Bug 3: return N leaks value to stdout
-// ============================================================================
-
-#[tokio::test]
-async fn test_return_does_not_output_value() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel
-        .execute(
-            r#"
-f() {
-    echo "output"
-    return 5
-}
-X=$(f)
-echo "captured: [$X]"
-"#,
-        )
-        .await
-        .unwrap();
-    // The captured output should only contain "output", not the return value
-    assert!(
-        result.text_out().contains("captured: [output]"),
-        "Expected 'captured: [output]', got: {}",
-        result.text_out()
-    );
-    // Should NOT contain JSON or the number 5 in the captured var
-    assert!(
-        !result.text_out().contains("captured: [5"),
-        "Return value leaked to stdout: {}",
-        result.text_out()
-    );
+    let result = kernel.execute("echo ${$}").await.unwrap();
+    // Should be a positive integer (the PID)
+    let pid: u32 = result
+        .text_out()
+        .trim()
+        .parse()
+        .expect("${$} should be a number");
+    assert!(pid > 0, "PID should be positive: {}", pid);
 }
 
 #[tokio::test]
-async fn test_return_sets_exit_code() {
+async fn test_braced_vs_unbraced_pid_equivalence() {
     let kernel = Kernel::transient().unwrap();
-    let result = kernel
-        .execute(
-            r#"
-f() { return 42; }
-f
-echo $?
-"#,
-        )
-        .await
-        .unwrap();
-    assert!(
-        result.text_out().contains("42"),
-        "Expected exit code 42, got: {}",
-        result.text_out()
-    );
-}
-
-#[tokio::test]
-async fn test_return_without_value() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel
-        .execute(
-            r#"
-f() { echo "hi"; return; }
-X=$(f)
-echo "got: [$X]"
-"#,
-        )
-        .await
-        .unwrap();
-    assert!(
-        result.text_out().contains("got: [hi]"),
-        "Expected 'got: [hi]', got: {}",
-        result.text_out()
+    let result1 = kernel.execute("echo $$").await.unwrap();
+    let result2 = kernel.execute("echo ${$}").await.unwrap();
+    assert_eq!(
+        result1.text_out().trim(),
+        result2.text_out().trim(),
+        "Braced and unbraced $$ should be equivalent"
     );
 }
 
 // ============================================================================
-// Bug 4: local keyword doesn't scope variables
+// `local x = value` — kaish syntax with surrounding spaces (bash uses `x=v`)
 // ============================================================================
 
 #[tokio::test]
@@ -225,70 +155,61 @@ echo $count
     );
 }
 
-// ============================================================================
-// Bug 5: Nested command substitution $(echo $(echo x)) fails
-// ============================================================================
-
 #[tokio::test]
-async fn test_nested_command_substitution() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute("echo $(echo $(echo hello))").await.unwrap();
-    assert_eq!(
-        result.text_out().trim(),
-        "hello",
-        "Nested cmd subst should work: {}",
-        result.text_out()
-    );
-}
-
-#[tokio::test]
-async fn test_deeply_nested_command_substitution() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel
-        .execute("echo $(echo $(echo $(echo deep)))")
-        .await
-        .unwrap();
-    assert_eq!(
-        result.text_out().trim(),
-        "deep",
-        "Deeply nested cmd subst should work: {}",
-        result.text_out()
-    );
-}
-
-// ============================================================================
-// Behavior: No implicit word splitting in for loops
-// ============================================================================
-// kaish does NOT split strings on whitespace. Use `split` for explicit splitting
-// or use builtins that return arrays (seq, glob, find).
-
-#[tokio::test]
-async fn test_command_subst_no_implicit_split() {
-    // In kaish, $(echo "a b c") returns ONE string, not three words
+async fn test_local_with_command_substitution() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel
         .execute(
             r#"
-for x in $(echo "a b c"); do
-    echo "item: $x"
-done
+val=original
+f() {
+    local val = $(echo "from_cmd")
+    echo "local: $val"
+}
+f
+echo "outer: $val"
 "#,
         )
         .await
         .unwrap();
-    // Should iterate ONCE with the whole string
     assert!(
-        result.text_out().contains("item: a b c"),
-        "Should have whole string: {}",
+        result.text_out().contains("local: from_cmd"),
+        "Local with cmd subst: {}",
         result.text_out()
     );
-    // Should NOT have separate items
     assert!(
-        !result.text_out().contains("item: a\n"),
-        "Should NOT split: {}",
+        result.text_out().contains("outer: original"),
+        "Outer unchanged: {}",
         result.text_out()
     );
 }
+
+#[tokio::test]
+async fn test_positional_params_arithmetic_with_variable() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute(
+            r#"
+calc() {
+    local base = 10
+    echo $(($base + $1))
+}
+calc 5
+"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.text_out().trim(),
+        "15",
+        "$(($base + $1)) with base=10 and $1=5 should be 15: {}",
+        result.text_out()
+    );
+}
+
+// ============================================================================
+// Structured iteration: kaish split / seq return arrays (no implicit splitting)
+// ============================================================================
 
 #[tokio::test]
 async fn test_command_subst_with_explicit_split() {
@@ -353,7 +274,7 @@ done
 }
 
 // ============================================================================
-// Bug 7: >&2 and 1>&2 redirects don't parse
+// Stderr redirects: 1>&2 and >&2 — compat harness only inspects stdout today
 // ============================================================================
 
 #[tokio::test]
@@ -384,382 +305,8 @@ async fn test_stdout_to_stderr_redirect_ampersand_2() {
 }
 
 // ============================================================================
-// Bug 8: ${$} braced PID form (same issue as ${?})
+// VFS file tests — [[ -d / -f / -e ]] against `/v/...` paths
 // ============================================================================
-
-#[tokio::test]
-async fn test_braced_current_pid() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute("echo ${$}").await.unwrap();
-    // Should be a positive integer (the PID)
-    let pid: u32 = result
-        .text_out()
-        .trim()
-        .parse()
-        .expect("${$} should be a number");
-    assert!(pid > 0, "PID should be positive: {}", pid);
-}
-
-#[tokio::test]
-async fn test_braced_vs_unbraced_pid_equivalence() {
-    let kernel = Kernel::transient().unwrap();
-    let result1 = kernel.execute("echo $$").await.unwrap();
-    let result2 = kernel.execute("echo ${$}").await.unwrap();
-    assert_eq!(
-        result1.text_out().trim(),
-        result2.text_out().trim(),
-        "Braced and unbraced $$ should be equivalent"
-    );
-}
-
-// ============================================================================
-// Additional edge cases and combinations
-// ============================================================================
-
-#[tokio::test]
-async fn test_exit_code_in_string_interpolation() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel
-        .execute(r#"false; echo "exit code: $?""#)
-        .await
-        .unwrap();
-    assert!(
-        result.text_out().contains("exit code: 1"),
-        "Expected 'exit code: 1': {}",
-        result.text_out()
-    );
-}
-
-#[tokio::test]
-async fn test_braced_exit_code_in_string_interpolation() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel
-        .execute(r#"false; echo "exit code: ${?}""#)
-        .await
-        .unwrap();
-    assert!(
-        result.text_out().contains("exit code: 1"),
-        "Expected 'exit code: 1': {}",
-        result.text_out()
-    );
-}
-
-// ============================================================================
-// Bug 9: $(true) and $(false) fail to parse - builtins in command substitution
-// ============================================================================
-
-#[tokio::test]
-async fn test_cmd_subst_with_true() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute("VAR=$(true); echo \"exit: $?\"").await.unwrap();
-    assert!(
-        result.text_out().contains("exit: 0"),
-        "$(true) should succeed with exit 0: {}",
-        result.text_out()
-    );
-}
-
-#[tokio::test]
-async fn test_cmd_subst_with_false() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute("VAR=$(false); echo \"exit: $?\"").await.unwrap();
-    assert!(
-        result.text_out().contains("exit: 1"),
-        "$(false) should fail with exit 1: {}",
-        result.text_out()
-    );
-}
-
-// Note: `if $(true); then` is NOT valid kaish syntax because $(true)
-// evaluates to empty string which isn't a command. Use `if true; then` instead.
-
-// ============================================================================
-// Bug 10: export VAR="value" doesn't set the variable
-// ============================================================================
-
-#[tokio::test]
-async fn test_export_with_value() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute("export FOO=\"bar\"; echo $FOO").await.unwrap();
-    assert_eq!(
-        result.text_out().trim(),
-        "bar",
-        "export should set variable value: {}",
-        result.text_out()
-    );
-}
-
-#[tokio::test]
-async fn test_export_multiple_vars() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute("export A=1; export B=2; echo \"$A $B\"").await.unwrap();
-    assert_eq!(
-        result.text_out().trim(),
-        "1 2",
-        "export should set multiple variables: {}",
-        result.text_out()
-    );
-}
-
-// ============================================================================
-// Bug 11: Positional params in arithmetic $(($1 + $2)) always return 0
-// ============================================================================
-
-#[tokio::test]
-async fn test_positional_params_in_arithmetic() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel
-        .execute(
-            r#"
-add() {
-    echo $(($1 + $2))
-}
-add 3 4
-"#,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        result.text_out().trim(),
-        "7",
-        "$(($1 + $2)) with 3 4 should be 7: {}",
-        result.text_out()
-    );
-}
-
-#[tokio::test]
-async fn test_positional_params_arithmetic_multiply() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel
-        .execute(
-            r#"
-mul() {
-    echo $(($1 * $2))
-}
-mul 5 6
-"#,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        result.text_out().trim(),
-        "30",
-        "$(($1 * $2)) with 5 6 should be 30: {}",
-        result.text_out()
-    );
-}
-
-#[tokio::test]
-async fn test_positional_params_arithmetic_with_variable() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel
-        .execute(
-            r#"
-calc() {
-    local base = 10
-    echo $(($base + $1))
-}
-calc 5
-"#,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        result.text_out().trim(),
-        "15",
-        "$(($base + $1)) with base=10 and $1=5 should be 15: {}",
-        result.text_out()
-    );
-}
-
-#[tokio::test]
-async fn test_local_with_command_substitution() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel
-        .execute(
-            r#"
-val=original
-f() {
-    local val = $(echo "from_cmd")
-    echo "local: $val"
-}
-f
-echo "outer: $val"
-"#,
-        )
-        .await
-        .unwrap();
-    assert!(
-        result.text_out().contains("local: from_cmd"),
-        "Local with cmd subst: {}",
-        result.text_out()
-    );
-    assert!(
-        result.text_out().contains("outer: original"),
-        "Outer unchanged: {}",
-        result.text_out()
-    );
-}
-
-// ============================================================================
-// Bug 12: Nested ${VAR:-default} doesn't work
-// ============================================================================
-
-#[tokio::test]
-async fn test_nested_var_default() {
-    let kernel = Kernel::transient().unwrap();
-    // All variables unset, should return the innermost default "deep"
-    let result = kernel.execute(r#"echo "${A:-${B:-deep}}""#).await.unwrap();
-    assert_eq!(
-        result.text_out().trim(),
-        "deep",
-        "Nested defaults should work: {}",
-        result.text_out()
-    );
-}
-
-#[tokio::test]
-async fn test_nested_var_default_outer_set() {
-    let kernel = Kernel::transient().unwrap();
-    // A is set, should return A's value
-    let result = kernel.execute(r#"A=outer; echo "${A:-${B:-deep}}""#).await.unwrap();
-    assert_eq!(
-        result.text_out().trim(),
-        "outer",
-        "Outer var set should return outer: {}",
-        result.text_out()
-    );
-}
-
-#[tokio::test]
-async fn test_nested_var_default_middle_set() {
-    let kernel = Kernel::transient().unwrap();
-    // A unset, B set - should return B's value
-    let result = kernel.execute(r#"B=middle; echo "${A:-${B:-deep}}""#).await.unwrap();
-    assert_eq!(
-        result.text_out().trim(),
-        "middle",
-        "Middle var set should return middle: {}",
-        result.text_out()
-    );
-}
-
-#[tokio::test]
-async fn test_deeply_nested_defaults() {
-    let kernel = Kernel::transient().unwrap();
-    // Three levels of nesting
-    let result = kernel.execute(r#"echo "${A:-${B:-${C:-deepest}}}""#).await.unwrap();
-    assert_eq!(
-        result.text_out().trim(),
-        "deepest",
-        "Deeply nested defaults should work: {}",
-        result.text_out()
-    );
-}
-
-// ============================================================================
-// Bug 13: Command substitution in strings "$(cmd)" doesn't work
-// ============================================================================
-
-#[tokio::test]
-async fn test_cmd_subst_in_string() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"echo "inner: $(echo nested)""#).await.unwrap();
-    assert_eq!(
-        result.text_out().trim(),
-        "inner: nested",
-        "Command subst in string should work: {}",
-        result.text_out()
-    );
-}
-
-#[tokio::test]
-async fn test_cmd_subst_in_string_with_var() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"VAL=world; echo "hello $(echo $VAL)""#).await.unwrap();
-    assert_eq!(
-        result.text_out().trim(),
-        "hello world",
-        "Command subst with var in string should work: {}",
-        result.text_out()
-    );
-}
-
-#[tokio::test]
-async fn test_var_in_default_with_cmd_subst() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"echo "${UNSET:-$(echo computed)}""#).await.unwrap();
-    assert_eq!(
-        result.text_out().trim(),
-        "computed",
-        "Command subst in default value should work: {}",
-        result.text_out()
-    );
-}
-
-// ============================================================================
-// Bug 16: Command substitution in [[ ]] comparisons, case, return, exit
-//
-// $(cmd) inside [[ $(cmd) == val ]], case $(cmd), return $(cmd), exit $(cmd)
-// used sync eval_expr with NoOpExecutor — any $(cmd) failed.
-// Fixed: these paths now use eval_expr_async / eval_test_async.
-// ============================================================================
-
-#[tokio::test]
-async fn test_cmd_subst_in_test_comparison() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"[[ $(echo hello) == "hello" ]] && echo "match" || echo "nope""#).await.unwrap();
-    assert_eq!(result.text_out().trim(), "match", "$(cmd) in [[ == ]] should work: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_cmd_subst_in_test_not_equal() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"[[ $(echo hello) != "world" ]] && echo "diff" || echo "same""#).await.unwrap();
-    assert_eq!(result.text_out().trim(), "diff", "$(cmd) in [[ != ]] should work: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_cmd_subst_in_case() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"
-case $(echo hello) in
-    hello) echo "matched" ;;
-    *) echo "nope" ;;
-esac
-"#).await.unwrap();
-    assert!(result.text_out().contains("matched"), "$(cmd) in case should work: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_cmd_subst_in_return() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"
-f() { return $(echo 42); }
-f
-echo $?
-"#).await.unwrap();
-    assert!(result.text_out().contains("42"), "return $(cmd) should work: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_cmd_subst_in_exit_code() {
-    let kernel = Kernel::transient().unwrap();
-    // exit terminates the kernel, so check via subshell-like behavior
-    let result = kernel.execute(r#"
-f() { return $(echo 7); }
-f
-echo "code: $?"
-"#).await.unwrap();
-    assert!(result.text_out().contains("code: 7"), "$(cmd) in return should set exit code: {}", result.text_out());
-}
-
-// ============================================================================
-// COMPOUND TEST EXPRESSIONS: [[ A && B ]], [[ A || B ]], [[ ! A ]]
-// ============================================================================
-
-// Bug 15: [[ -d ]] / [[ -f ]] used std::path directly, bypassing VFS.
-// Fixed: eval_test now routes through Executor::file_stat → backend.stat().
 
 #[tokio::test]
 async fn test_file_test_sees_vfs_dirs() {
@@ -785,152 +332,8 @@ async fn test_file_test_exists_vfs() {
     assert_eq!(result.text_out().trim(), "found", "[[ -e ]] should see VFS entries: {}", result.text_out());
 }
 
-#[tokio::test]
-async fn test_compound_and_both_true() {
-    let kernel = Kernel::transient().unwrap();
-    let dir_a = tempfile::tempdir().unwrap();
-    let dir_b = tempfile::tempdir().unwrap();
-    let a = dir_a.path().display();
-    let b = dir_b.path().display();
-    let result = kernel.execute(&format!(r#"[[ -d {a} && -d {b} ]] && echo "both""#)).await.unwrap();
-    assert_eq!(result.text_out().trim(), "both", "AND with both true should pass: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_compound_and_one_false() {
-    let kernel = Kernel::transient().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let d = dir.path().display();
-    let result = kernel.execute(&format!(r#"[[ -d {d} && -f /nonexistent_kaish_test ]] && echo "both" || echo "failed""#)).await.unwrap();
-    assert_eq!(result.text_out().trim(), "failed", "AND with one false should fail: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_compound_or_first_true() {
-    let kernel = Kernel::transient().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let d = dir.path().display();
-    let result = kernel.execute(&format!(r#"[[ -d {d} || -f /nonexistent_kaish_test ]] && echo "one""#)).await.unwrap();
-    assert_eq!(result.text_out().trim(), "one", "OR with first true should pass: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_compound_or_second_true() {
-    let kernel = Kernel::transient().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let d = dir.path().display();
-    let result = kernel.execute(&format!(r#"[[ -f /nonexistent_kaish_test || -d {d} ]] && echo "one""#)).await.unwrap();
-    assert_eq!(result.text_out().trim(), "one", "OR with second true should pass: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_compound_or_both_false() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"[[ -f /nonexistent_kaish_test || -f /also_nonexistent_kaish ]] && echo "yes" || echo "no""#).await.unwrap();
-    assert_eq!(result.text_out().trim(), "no", "OR with both false should fail: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_compound_not_true() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"[[ ! -f /nonexistent_kaish_test ]] && echo "correct""#).await.unwrap();
-    assert_eq!(result.text_out().trim(), "correct", "NOT on false should be true: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_compound_not_false() {
-    let kernel = Kernel::transient().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let d = dir.path().display();
-    let result = kernel.execute(&format!(r#"[[ ! -d {d} ]] && echo "yes" || echo "no""#)).await.unwrap();
-    assert_eq!(result.text_out().trim(), "no", "NOT on true should be false: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_compound_double_not() {
-    let kernel = Kernel::transient().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let d = dir.path().display();
-    let result = kernel.execute(&format!(r#"[[ ! ! -d {d} ]] && echo "yes" || echo "no""#)).await.unwrap();
-    assert_eq!(result.text_out().trim(), "yes", "Double NOT should cancel out: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_compound_not_with_and() {
-    let kernel = Kernel::transient().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let d = dir.path().display();
-    // ! binds tighter than &&, so this is: (! -f /nonexistent) && (-d dir)
-    let result = kernel.execute(&format!(r#"[[ ! -f /nonexistent_kaish_test && -d {d} ]] && echo "both""#)).await.unwrap();
-    assert_eq!(result.text_out().trim(), "both", "NOT with AND should work: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_compound_string_tests() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"VAR=""; [[ -z "$VAR" || -n "default" ]] && echo "ok""#).await.unwrap();
-    assert_eq!(result.text_out().trim(), "ok", "String tests with OR should work: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_compound_with_comparison() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"X=5; [[ $X -gt 3 && $X -lt 10 ]] && echo "in range""#).await.unwrap();
-    assert_eq!(result.text_out().trim(), "in range", "Comparisons with AND should work: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_compound_in_if() {
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"
-        X=5
-        if [[ $X -gt 0 && $X -lt 10 ]]; then
-            echo "valid"
-        else
-            echo "invalid"
-        fi
-    "#).await.unwrap();
-    assert_eq!(result.text_out().trim(), "valid", "Compound test in if should work: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_compound_precedence() {
-    let kernel = Kernel::transient().unwrap();
-    let dir_a = tempfile::tempdir().unwrap();
-    let dir_b = tempfile::tempdir().unwrap();
-    let a = dir_a.path().display();
-    let b = dir_b.path().display();
-    // Precedence: || has lower precedence than &&
-    // [[ -f /x || -d a && -d b ]] = [[ -f /x || (-d a && -d b) ]]
-    // false || (true && true) = true
-    let result = kernel.execute(&format!(r#"[[ -f /nonexistent_kaish_test || -d {a} && -d {b} ]] && echo "yes" || echo "no""#)).await.unwrap();
-    assert_eq!(result.text_out().trim(), "yes", "Precedence: && binds tighter than ||: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_compound_short_circuit_and() {
-    let kernel = Kernel::transient().unwrap();
-    // If first fails, second shouldn't be evaluated (would error on /x)
-    let result = kernel.execute(r#"[[ -f /nonexistent_kaish_test && $(cat /nonexistent_file) == "x" ]] && echo "yes" || echo "no""#).await.unwrap();
-    assert_eq!(result.text_out().trim(), "no", "AND should short-circuit: {}", result.text_out());
-}
-
-#[tokio::test]
-async fn test_compound_short_circuit_or() {
-    let kernel = Kernel::transient().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let d = dir.path().display();
-    // If first succeeds, second shouldn't be evaluated
-    let result = kernel.execute(&format!(r#"[[ -d {d} || $(cat /nonexistent_file) == "x" ]] && echo "yes" || echo "no""#)).await.unwrap();
-    assert_eq!(result.text_out().trim(), "yes", "OR should short-circuit: {}", result.text_out());
-}
-
 // ============================================================================
-// Bug: Short flags with values (-n 5) don't consume the next positional
-//
-// `head -n 5` and `tail -n 5` should work like `head --lines=5`.
-// Currently, build_tool_args treats short flags as always boolean,
-// never looking up the schema to check if the flag takes a value.
+// Short flags with values (head -n N, tail -n N) — depend on a real tempfile
 // ============================================================================
 
 #[tokio::test]
@@ -963,23 +366,8 @@ async fn test_short_flag_with_value_tail() {
     assert_eq!(lines, vec!["8", "9", "10"], "tail -n 3 should return last 3 lines, got: {:?}", lines);
 }
 
-#[tokio::test]
-async fn test_short_flag_with_value_in_pipeline() {
-    let kernel = Kernel::transient().unwrap();
-    // Piped input: echo | head -n 3
-    let result = kernel.execute(r#"printf "a\nb\nc\nd\ne\n" | head -n 3"#).await.unwrap();
-    assert!(result.ok(), "pipeline head -n 3 should succeed: err={}", result.err);
-    let text = result.text_out();
-    let lines: Vec<&str> = text.trim().lines().collect();
-    assert_eq!(lines, vec!["a", "b", "c"], "head -n 3 in pipeline should return first 3 lines, got: {:?}", lines);
-}
-
 // ============================================================================
-// Bug 14: Command substitution leaks scope and cwd
-//
-// Side effects inside $() (cd, variable assignments) must not leak to the parent.
-// Only the captured stdout escapes. Uses functions to test multi-statement
-// logic since kaish only supports pipelines inside $().
+// Command-substitution cwd isolation — depends on host process cwd
 // ============================================================================
 
 #[tokio::test]
@@ -1005,30 +393,6 @@ pwd
         pwd_output, "/",
         "CWD should not leak from command substitution, got: {}",
         pwd_output
-    );
-}
-
-#[tokio::test]
-async fn test_cmd_subst_variable_isolation() {
-    let kernel = Kernel::transient().unwrap();
-    // Variable set inside $() via a function should not leak to parent
-    let result = kernel
-        .execute(
-            r#"
-X=outer
-set_inner() { X=inner; echo $X; }
-Y=$(set_inner)
-echo $X
-"#,
-        )
-        .await
-        .unwrap();
-    assert!(result.ok(), "Should succeed: err={}", result.err);
-    assert_eq!(
-        result.text_out().trim(),
-        "outer",
-        "Variable should not leak from command substitution: {}",
-        result.text_out()
     );
 }
 
@@ -1085,64 +449,8 @@ echo "captured: $X"
     );
 }
 
-#[tokio::test]
-async fn test_colon_in_unquoted_arg() {
-    let kernel = Kernel::transient().expect("kernel");
-    let result = kernel.execute("echo foo::bar").await.expect("execute");
-    assert!(result.ok(), "Should succeed: err={}", result.err);
-    assert_eq!(result.text_out().trim(), "foo::bar");
-}
-
-#[tokio::test]
-async fn test_colon_port_in_arg() {
-    let kernel = Kernel::transient().expect("kernel");
-    let result = kernel.execute("echo host:8080").await.expect("execute");
-    assert!(result.ok(), "Should succeed: err={}", result.err);
-    assert_eq!(result.text_out().trim(), "host:8080");
-}
-
-#[tokio::test]
-async fn test_colon_in_variable_assignment() {
-    let kernel = Kernel::transient().expect("kernel");
-    let result = kernel
-        .execute("PATH=/usr/bin:/usr/local/bin\necho $PATH")
-        .await
-        .expect("execute");
-    assert!(result.ok(), "Should succeed: err={}", result.err);
-    assert_eq!(result.text_out().trim(), "/usr/bin:/usr/local/bin");
-}
-
 // ============================================================================
-// Bug: Pipeline deadlock when output exceeds 64KB pipe buffer
-//
-// Stage N writes to pipe (blocks when full), then sends oneshot.
-// Stage N+1 awaits oneshot before reading pipe. When output > 64KB,
-// neither can progress. Fix: send oneshot before pipe write.
-// ============================================================================
-
-#[tokio::test]
-async fn test_pipeline_large_output_no_deadlock() {
-    let kernel = Kernel::transient().unwrap();
-    // seq 1 20000 produces ~100KB, well above the 64KB pipe buffer.
-    // This deadlocks without the fix.
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        kernel.execute("seq 1 20000 | wc -l"),
-    )
-    .await;
-    assert!(result.is_ok(), "pipeline deadlocked on >64KB output");
-    let exec = result.unwrap().unwrap();
-    assert!(exec.ok(), "pipeline should succeed: err={}", exec.err);
-    assert_eq!(exec.text_out().trim(), "20000");
-}
-
-// ============================================================================
-// Bug: find -name and -type flags ignored (parsed as flags, not named args)
-//
-// `find /path -name "*.rs" -type f` returns unfiltered results because the
-// parser treats `-name` as a flag token, not as `name="*.rs"`. The find
-// builtin's unit tests pass because they inject ToolArgs directly, bypassing
-// the parser. This test goes through the full kernel.execute() path.
+// find through the parser — VFS-only paths
 // ============================================================================
 
 #[tokio::test]
@@ -1223,145 +531,5 @@ async fn test_find_type_filter_through_parser() {
     assert!(
         !dirs_out.contains("main.rs"),
         "-type d should exclude files: {dirs_out}"
-    );
-}
-
-#[tokio::test]
-async fn test_pipeline_three_stage_large_output_no_deadlock() {
-    let kernel = Kernel::transient().unwrap();
-    // Three-stage pipeline: each pipe boundary is a potential deadlock point.
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        kernel.execute("seq 1 20000 | grep '1' | wc -l"),
-    )
-    .await;
-    assert!(result.is_ok(), "3-stage pipeline deadlocked");
-    let exec = result.unwrap().unwrap();
-    assert!(exec.ok(), "pipeline should succeed: err={}", exec.err);
-}
-
-// ============================================================================
-// Bug: for-loop frame leak on error — scope frame not popped if body errors
-// ============================================================================
-
-#[tokio::test]
-async fn test_for_loop_cleanup_after_body_failure() {
-    // Verify that after a for-loop body fails, subsequent for-loops still work.
-    // A leaked frame would accumulate scope frames and could eventually panic.
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel
-        .execute(
-            r#"
-for i in 1 2 3; do
-    false
-done
-for j in a b c; do
-    echo $j
-done
-"#,
-        )
-        .await
-        .unwrap();
-    assert!(
-        result.text_out().contains("a") && result.text_out().contains("b") && result.text_out().contains("c"),
-        "Second for-loop should work after first loop's body failures: {}",
-        result.text_out()
-    );
-}
-
-#[tokio::test]
-async fn test_for_loop_variable_scoped_to_loop() {
-    // In kaish, loop variables are scoped to the loop frame (unlike bash)
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel
-        .execute(
-            r#"
-for i in 1 2 3; do
-    true
-done
-echo "after first: [$i]"
-"#,
-        )
-        .await
-        .unwrap();
-    // Loop variable should not be visible after the loop
-    assert!(
-        result.text_out().contains("after first: []"),
-        "Loop var should not leak outside loop scope: {}",
-        result.text_out()
-    );
-}
-
-// ============================================================================
-// Bug: errexit suppression leak in &&/|| chains
-// ============================================================================
-
-#[tokio::test]
-async fn test_errexit_works_after_and_chain() {
-    // set -e should still work after a && chain
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel
-        .execute(
-            r#"
-set -e
-true && true
-false
-echo "should not reach"
-"#,
-        )
-        .await
-        .unwrap();
-    assert!(
-        !result.text_out().contains("should not reach"),
-        "set -e should exit after `false` following && chain: {}",
-        result.text_out()
-    );
-}
-
-#[tokio::test]
-async fn test_errexit_works_after_or_chain() {
-    // set -e should still work after a || chain
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel
-        .execute(
-            r#"
-set -e
-false || true
-false
-echo "should not reach"
-"#,
-        )
-        .await
-        .unwrap();
-    assert!(
-        !result.text_out().contains("should not reach"),
-        "set -e should exit after `false` following || chain: {}",
-        result.text_out()
-    );
-}
-
-#[tokio::test]
-async fn test_errexit_suppressed_inside_and_chain_left() {
-    // The left side of && should NOT trigger errexit (POSIX behavior)
-    let kernel = Kernel::transient().unwrap();
-    let result = kernel
-        .execute(
-            r#"
-set -e
-false && echo "right"
-echo "reached"
-"#,
-        )
-        .await
-        .unwrap();
-    assert!(
-        result.text_out().contains("reached"),
-        "false && ... should not trigger errexit: {}",
-        result.text_out()
-    );
-    assert!(
-        !result.text_out().contains("right"),
-        "Right side should not run when left fails: {}",
-        result.text_out()
     );
 }

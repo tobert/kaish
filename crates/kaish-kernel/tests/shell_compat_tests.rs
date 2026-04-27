@@ -139,6 +139,12 @@ shell_compat! {
     eq: "42",
 }
 
+shell_compat! {
+    name: return_without_value,
+    script: "f() { echo hi; return; }\nX=$(f)\necho \"got: [$X]\"\n",
+    eq: "got: [hi]",
+}
+
 // ---- Positional params in arithmetic --------------------------------------
 
 shell_compat! {
@@ -290,6 +296,27 @@ shell_compat! {
     eq: "yes",
 }
 
+shell_compat! {
+    name: compound_short_circuit_and,
+    script: r#"[[ -f /nonexistent_kaish_test && $(cat /nonexistent_file) == "x" ]] && echo "yes" || echo "no""#,
+    eq: "no",
+}
+
+shell_compat! {
+    name: compound_not_with_and,
+    script: r#"[[ ! -f /nonexistent_kaish_test && -d / ]] && echo "both""#,
+    eq: "both",
+}
+
+// Precedence: && binds tighter than ||
+// [[ -f /nx || -d / && -d /tmp ]] = [[ -f /nx || (-d / && -d /tmp) ]]
+// false || (true && true) = true
+shell_compat! {
+    name: compound_precedence,
+    script: r#"[[ -f /nonexistent_kaish_test || -d / && -d /tmp ]] && echo "yes" || echo "no""#,
+    eq: "yes",
+}
+
 // ---- Tokenization edge cases ----------------------------------------------
 
 shell_compat! {
@@ -322,6 +349,12 @@ shell_compat! {
     name: head_n_in_pipeline,
     script: "printf 'a\\nb\\nc\\nd\\ne\\n' | head -n 3",
     eq: "a\nb\nc",
+}
+
+shell_compat! {
+    name: pipeline_three_stage_large_output_no_deadlock,
+    script: "seq 1 20000 | grep '1' | wc -l",
+    eq: "13439",
 }
 
 // ---- Command-substitution scope/cwd isolation -----------------------------
