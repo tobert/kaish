@@ -1,12 +1,11 @@
-//! Prototype: compat tests that run the same script through kaish AND bash,
-//! so we can spot where the two diverge.
+//! Compat tests that run the same script through kaish AND bash, so we can
+//! spot where the two diverge.
 //!
 //! Each `shell_compat!` invocation generates a submodule with two tests:
 //!   `<name>::kaish` — always runs, executes the script via the kaish kernel.
 //!   `<name>::bash`  — runs only when `KAISH_BASH_COMPAT=1` is set, executes
-//!                     the script via `bash -c` and applies the same
-//!                     assertions to bash's stdout. Otherwise it returns
-//!                     immediately as a no-op pass.
+//!                     the script via `bash -c` and applies the matching
+//!                     assertions to bash's stdout/exit code.
 //!
 //! Usage:
 //!   cargo test --test shell_compat_tests                     # kaish only
@@ -14,101 +13,18 @@
 //!
 //! `cargo test bash` filters to just the bash side and surfaces divergences.
 //!
-//! Caveats:
-//! - This file is a *prototype*. The macro and helper would move to
-//!   `tests/common/` before broader adoption (or to a small kaish-test crate
-//!   if other test binaries want it).
-//! - Tests with intended divergence from bash (no implicit word splitting,
-//!   structured-data iteration, `local x = v` syntax, kaish-only builtins)
-//!   are deliberately not included here. A future `bash_eq:` arm could
-//!   document and test divergence explicitly.
+//! Available clauses (mix and match in any order):
+//!   eq: "..."         — both sides: trimmed stdout equals the literal
+//!   kaish_eq: "..."   — kaish-only stdout assertion (pair with bash_eq:
+//!                       to capture an intended divergence)
+//!   bash_eq: "..."    — bash-only stdout assertion
+//!   contains: "..."   — both sides: stdout contains the substring
+//!   absent: "..."     — both sides: stdout does not contain the substring
+//!   exit: N           — both sides: process exit code equals N
 
-use kaish_kernel::Kernel;
-use std::process::Command;
+mod common;
 
-/// Run a script via `bash -c` if KAISH_BASH_COMPAT is set; otherwise return
-/// `None` and let the caller short-circuit. Panics if the user opted in but
-/// `bash` is missing or errored — they explicitly asked us to compare.
-fn run_bash_if_enabled(script: &str) -> Option<String> {
-    if std::env::var_os("KAISH_BASH_COMPAT").is_none() {
-        return None;
-    }
-    let output = Command::new("bash")
-        .arg("-c")
-        .arg(script)
-        .output()
-        .expect("KAISH_BASH_COMPAT set but failed to run bash; install bash or unset the var");
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// TT-muncher that turns the trailing `eq: / contains: / absent:` clauses of a
-/// `shell_compat!` invocation into a sequence of asserts against `$out`.
-macro_rules! shell_compat_assert {
-    ($out:expr,) => {};
-    ($out:expr, eq: $expected:expr $(, $($rest:tt)*)?) => {
-        assert_eq!(
-            $out.trim(),
-            $expected,
-            "stdout mismatch:\n--- got ---\n{}\n-----------",
-            $out,
-        );
-        $( shell_compat_assert!($out, $($rest)*); )?
-    };
-    ($out:expr, contains: $needle:expr $(, $($rest:tt)*)?) => {
-        assert!(
-            $out.contains($needle),
-            "missing substring {:?}:\n--- got ---\n{}\n-----------",
-            $needle,
-            $out,
-        );
-        $( shell_compat_assert!($out, $($rest)*); )?
-    };
-    ($out:expr, absent: $missing:expr $(, $($rest:tt)*)?) => {
-        assert!(
-            !$out.contains($missing),
-            "unexpected substring {:?}:\n--- got ---\n{}\n-----------",
-            $missing,
-            $out,
-        );
-        $( shell_compat_assert!($out, $($rest)*); )?
-    };
-}
-
-/// Generate a pair of tests for a single shell scenario.
-///
-/// The kaish side always runs. The bash side is gated on KAISH_BASH_COMPAT
-/// so the default `cargo test` run is unaffected.
-macro_rules! shell_compat {
-    (
-        name: $name:ident,
-        script: $script:expr,
-        $($body:tt)*
-    ) => {
-        mod $name {
-            use super::*;
-
-            fn check(out: &str) {
-                shell_compat_assert!(out, $($body)*);
-            }
-
-            #[tokio::test]
-            async fn kaish() {
-                let kernel = Kernel::transient().expect("transient kernel");
-                let result = kernel.execute($script).await.expect("kaish execute");
-                let out: String = result.text_out().into_owned();
-                check(&out);
-            }
-
-            #[test]
-            fn bash() {
-                let Some(out) = run_bash_if_enabled($script) else { return };
-                check(&out);
-            }
-        }
-    };
-}
-
-// ---- Example conversions from shell_bugs_tests.rs --------------------------
+// ---- Cases where kaish and bash agree -------------------------------------
 
 shell_compat! {
     name: braced_last_exit_code_after_success,
@@ -159,16 +75,29 @@ shell_compat! {
     eq: "42",
 }
 
-// ---- Demonstrator: a known divergence -------------------------------------
+// ---- Exit-code assertions -------------------------------------------------
+
+shell_compat! {
+    name: false_exits_one,
+    script: "false",
+    exit: 1,
+}
+
+shell_compat! {
+    name: explicit_exit_code,
+    script: "exit 7",
+    exit: 7,
+}
+
+// ---- Recorded divergences -------------------------------------------------
 //
-// kaish does *not* split $(...) on whitespace; bash does. The kaish side
-// passes (one iteration with the whole string); the bash side fails under
-// KAISH_BASH_COMPAT=1, surfacing the divergence as a test failure rather
-// than silent drift. A future `bash_eq:` arm could capture both expected
-// outputs in one place and turn this into a passing-but-divergent record.
+// kaish does NOT split $(...) on whitespace; bash does. Capturing both
+// expected outputs in one entry lets the test pass on each side AND fail
+// loudly if either side ever changes its behavior unexpectedly.
 
 shell_compat! {
     name: command_subst_no_implicit_split,
     script: "for x in $(echo \"a b c\"); do echo \"[$x]\"; done",
-    eq: "[a b c]",
+    kaish_eq: "[a b c]",
+    bash_eq: "[a]\n[b]\n[c]",
 }
