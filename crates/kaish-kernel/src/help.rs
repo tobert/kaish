@@ -130,72 +130,25 @@ fn format_tool_help(name: &str, schemas: &[ToolSchema]) -> String {
     }
 }
 
-/// Format a list of all tools grouped by category.
+/// Format a flat alphabetical list of all available tools.
+///
+/// Schemas arrive sorted from the registry; only registered tools appear,
+/// so feature-gated or unloaded builtins are omitted naturally.
 fn format_tool_list(schemas: &[ToolSchema]) -> String {
-    let mut output = String::new();
+    let mut output = String::from("# Available Builtins\n\n");
 
-    output.push_str("# Available Builtins\n\n");
-
-    // Find max name length for alignment
     let max_len = schemas.iter().map(|s| s.name.len()).max().unwrap_or(0);
 
-    // Group tools by category based on name.
-    // Keep in sync with actual builtins in tools/builtin/.
-    let mut text_tools = Vec::new();
-    let mut file_tools = Vec::new();
-    let mut system_tools = Vec::new();
-    let mut json_tools = Vec::new();
-    let mut parallel_tools = Vec::new();
-    let mut process_tools = Vec::new();
-    let mut introspection_tools = Vec::new();
-    let mut other_tools = Vec::new();
-
     for schema in schemas {
-        let entry = (schema.name.as_str(), schema.description.as_str());
-        match schema.name.as_str() {
-            "grep" | "sed" | "awk" | "cut" | "tr" | "sort" | "uniq" | "wc" | "head" | "tail"
-            | "split" | "diff" | "tac" | "xxd" | "base64" => text_tools.push(entry),
-            "cat" | "ls" | "tree" | "cd" | "pwd" | "mkdir" | "rm" | "cp" | "mv" | "touch"
-            | "ln" | "readlink" | "write" | "glob" | "find" | "stat" | "dirname" | "basename"
-            | "realpath" | "mktemp" | "patch" | "checksum" => file_tools.push(entry),
-            "alias" | "unalias" | "echo" | "printf" | "read" | "sleep" | "date" | "env"
-            | "export" | "set" | "unset" | "true" | "false" | "test" | "[" | "assert" | "seq"
-            | "tee" | "hostname" | "uname" | "which" => system_tools.push(entry),
-            "jq" => json_tools.push(entry),
-            "scatter" | "gather" => parallel_tools.push(entry),
-            "exec" | "spawn" | "jobs" | "wait" | "ps" | "git" | "bg" | "fg" | "kill"
-            | "timeout" => process_tools.push(entry),
-            "help" | "kaish-validate" | "kaish-vars" | "kaish-mounts" | "kaish-tools" | "tokens"
-            | "kaish-ast" | "kaish-clear" | "kaish-status" | "kaish-trash" | "kaish-version"
-            | "kaish-ignore" | "kaish-output-limit" => {
-                introspection_tools.push(entry)
-            }
-            _ => other_tools.push(entry),
-        }
+        output.push_str(&format!(
+            "  {:width$}  {}\n",
+            schema.name,
+            schema.description,
+            width = max_len
+        ));
     }
 
-    let format_group = |name: &str, tools: &[(&str, &str)], max: usize| -> String {
-        if tools.is_empty() {
-            return String::new();
-        }
-        let mut s = format!("## {}\n\n", name);
-        for (tool_name, desc) in tools {
-            s.push_str(&format!("  {:width$}  {}\n", tool_name, desc, width = max));
-        }
-        s.push('\n');
-        s
-    };
-
-    output.push_str(&format_group("Text Processing", &text_tools, max_len));
-    output.push_str(&format_group("Files & Directories", &file_tools, max_len));
-    output.push_str(&format_group("JSON", &json_tools, max_len));
-    output.push_str(&format_group("Processes & Jobs", &process_tools, max_len));
-    output.push_str(&format_group("Parallel (散/集)", &parallel_tools, max_len));
-    output.push_str(&format_group("Shell & System", &system_tools, max_len));
-    output.push_str(&format_group("Introspection", &introspection_tools, max_len));
-    output.push_str(&format_group("Other", &other_tools, max_len));
-
-    output.push_str("---\n");
+    output.push_str("\n---\n");
     output.push_str("Use 'help <tool>' for detailed help on a specific tool.\n");
     output.push_str("Use 'help syntax' for language syntax reference.\n");
 
