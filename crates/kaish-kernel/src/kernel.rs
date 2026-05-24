@@ -6218,9 +6218,9 @@ AFTER="yes"'"#)
         overlay.insert("OVERLAY_X".to_string(), Value::String("yes".into()));
 
         let result = kernel
-            .execute_with_vars(r#"echo "${OVERLAY_X}""#, overlay)
+            .execute_with_options(r#"echo "${OVERLAY_X}""#, ExecuteOptions::new().with_vars(overlay))
             .await
-            .expect("execute_with_vars failed");
+            .expect("execute failed");
 
         assert!(result.ok());
         assert_eq!(result.text_out().trim(), "yes");
@@ -6233,9 +6233,9 @@ AFTER="yes"'"#)
         overlay.insert("EPHEMERAL".to_string(), Value::String("transient".into()));
 
         kernel
-            .execute_with_vars("echo ignored", overlay)
+            .execute_with_options("echo ignored", ExecuteOptions::new().with_vars(overlay))
             .await
-            .expect("execute_with_vars failed");
+            .expect("execute failed");
 
         assert_eq!(kernel.get_var("EPHEMERAL").await, None);
         assert!(
@@ -6255,9 +6255,9 @@ AFTER="yes"'"#)
         let mut overlay = HashMap::new();
         overlay.insert("OUTER".to_string(), Value::String("inner".into()));
         let result = kernel
-            .execute_with_vars(r#"echo "${OUTER}""#, overlay)
+            .execute_with_options(r#"echo "${OUTER}""#, ExecuteOptions::new().with_vars(overlay))
             .await
-            .expect("execute_with_vars failed");
+            .expect("execute failed");
         assert_eq!(result.text_out().trim(), "inner");
 
         assert_eq!(
@@ -6282,12 +6282,12 @@ AFTER="yes"'"#)
         // We explicitly use `local FOO=...` style by relying on the pushed
         // frame; the assignment in the script body modifies the same frame.
         let result = kernel
-            .execute_with_vars(
+            .execute_with_options(
                 r#"LOCAL_FOO="reassigned"; echo "${LOCAL_FOO}""#,
-                overlay,
+                ExecuteOptions::new().with_vars(overlay),
             )
             .await
-            .expect("execute_with_vars failed");
+            .expect("execute failed");
         assert!(result.ok());
 
         // After the call the frame is popped, so LOCAL_FOO is gone regardless
@@ -6363,9 +6363,9 @@ AFTER="yes"'"#)
         overlay.insert("SUB_FOO".to_string(), Value::String("subproc".into()));
 
         let result = kernel
-            .execute_with_vars("printenv SUB_FOO", overlay)
+            .execute_with_options("printenv SUB_FOO", ExecuteOptions::new().with_vars(overlay))
             .await
-            .expect("execute_with_vars failed");
+            .expect("execute failed");
 
         assert!(
             result.ok(),
