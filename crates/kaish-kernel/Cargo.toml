@@ -14,8 +14,8 @@ readme = "../../README.md"
 exclude = ["tests/snapshots/"]
 
 [dependencies]
-kaish-glob = { path = "../kaish-glob", version = "0.6.0" }
-kaish-types = { path = "../kaish-types", version = "0.6.0", features = [] }
+kaish-glob = { path = "../kaish-glob", version = "0.7.0" }
+kaish-types = { path = "../kaish-types", version = "0.7.0", features = [] }
 
 # Async runtime — minimal features; native adds process/fs/rt-multi-thread/signal
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "io-util"] }
