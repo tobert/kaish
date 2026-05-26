@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use std::collections::HashSet;
 
-use crate::interpreter::{ExecResult, OutputFormat};
+use crate::interpreter::ExecResult;
 use crate::validator::{IssueCode, Severity, ValidationIssue};
 
 // Data types re-exported from kaish-types.
@@ -120,35 +120,20 @@ pub fn validate_against_schema(args: &ToolArgs, schema: &ToolSchema) -> Vec<Vali
 // ============================================================
 // Global Output Flags (--json)
 // ============================================================
+//
+// `--json` is now declared per-builtin via `GlobalFlags` flatten
+// (`crates/kaish-kernel/src/tools/global_flags.rs`). Builtins parse it
+// inside execute() and write `ctx.output_format`; the kernel applies the
+// format after execute() returns. See `docs/clap-migration.md`.
 
-/// Registry of global output format flags.
-const GLOBAL_OUTPUT_FLAGS: &[(&str, OutputFormat)] = &[
-    ("json", OutputFormat::Json),
-];
-
-/// Check if a flag name is a global output flag.
-pub fn is_global_output_flag(name: &str) -> bool {
-    GLOBAL_OUTPUT_FLAGS.iter().any(|(n, _)| *n == name)
-}
-
-/// Extract and remove a global output format flag from ToolArgs.
+/// Check if a flag name is the kernel-owned `--json` flag.
 ///
-/// Only applies to known tools with a schema. External commands
-/// (schema=None) must receive their flags untouched —
-/// `cargo --json` must not have --json stripped by the kernel.
-pub fn extract_output_format(
-    args: &mut ToolArgs,
-    schema: Option<&ToolSchema>,
-) -> Option<OutputFormat> {
-    // External commands keep their flags
-    let _schema = schema?;
-
-    for (flag_name, format) in GLOBAL_OUTPUT_FLAGS {
-        if args.flags.remove(*flag_name) {
-            return Some(*format);
-        }
-    }
-    None
+/// External commands (no schema) bypass clap entirely and the kernel
+/// doesn't touch their argv — `cargo --json` and similar work as
+/// expected. `is_global_output_flag` is retained for the validator's
+/// unknown-flag check.
+pub fn is_global_output_flag(name: &str) -> bool {
+    name == "json"
 }
 
 /// Check if a value is compatible with a type.

@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
+#[cfg(all(unix, feature = "native"))]
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
 #[cfg(all(unix, feature = "native"))]

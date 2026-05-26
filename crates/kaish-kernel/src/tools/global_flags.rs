@@ -1,12 +1,9 @@
 //! Global flags shared by every builtin via `#[command(flatten)]`.
 //!
-//! Today this is just `--json`. The kernel's pre-strip
-//! (`extract_output_format` in `traits.rs`) still removes `--json` from
-//! ToolArgs before clap sees it for builtins that are still on the old
-//! hand-rolled path. Once the sweep is complete, the pre-strip goes away and
-//! `--json` flows directly into each builtin's `GlobalFlags` flatten.
-//!
-//! See `docs/clap-migration.md`.
+//! Today this is just `--json`. Every builtin flattens `GlobalFlags` into its
+//! own clap struct and calls `parsed.global.apply(ctx)` after parsing; the
+//! kernel reads `ctx.output_format` after `execute()` returns and applies the
+//! format via `apply_output_format`. See `docs/clap-migration.md`.
 
 use clap::Args;
 

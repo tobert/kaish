@@ -56,7 +56,7 @@ use crate::parser::parse;
 use crate::scheduler::{is_bool_type, schema_param_lookup, stderr_stream, BoundedStream, JobManager, PipelineRunner, StderrReceiver};
 #[cfg(feature = "native")]
 use crate::scheduler::{drain_to_stream, DEFAULT_STREAM_MAX_SIZE};
-use crate::tools::{extract_output_format, register_builtins, ExecContext, ToolArgs, ToolRegistry};
+use crate::tools::{register_builtins, ExecContext, ToolArgs, ToolRegistry};
 #[cfg(feature = "native")]
 use crate::tools::resolve_in_path;
 use crate::validator::{Severity, Validator};
@@ -2174,8 +2174,7 @@ impl Kernel {
 
         // Build arguments (async to support command substitution, schema-aware for flag values)
         let schema = tool.schema();
-        let mut tool_args = self.build_args_async(args, Some(&schema)).await?;
-        let output_format = extract_output_format(&mut tool_args, Some(&schema));
+        let tool_args = self.build_args_async(args, Some(&schema)).await?;
 
         // --help / -h: show help unless the tool's schema claims that flag
         let schema_claims = |flag: &str| -> bool {
@@ -2266,15 +2265,9 @@ impl Kernel {
             ec.pipe_stdout = ctx.pipe_stdout.take();
         }
 
-        // Two paths feed the output format during the clap-migration sweep:
-        // (1) extract_output_format pre-strips `--json` from the legacy
-        //     hand-rolled args before the tool sees them (kernel-owned).
-        // (2) Migrated builtins parse `--json` via GlobalFlags flatten and
-        //     write to ctx.output_format inside execute().
-        // Union the two — whichever fires wins. After the full sweep, drop
-        // the pre-strip path entirely.
-        let effective_format = output_format.or(ctx.output_format);
-        let result = match effective_format {
+        // Builtins parse --json via the GlobalFlags flatten in their clap
+        // struct and write ctx.output_format. The kernel just applies it.
+        let result = match ctx.output_format {
             Some(format) => apply_output_format(result, format),
             None => result,
         };

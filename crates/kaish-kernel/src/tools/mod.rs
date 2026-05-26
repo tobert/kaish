@@ -26,4 +26,4 @@ pub use clap_schema::{params_from_clap, schema_from_clap};
 pub use context::{ExecContext, OutputContext};
 pub use global_flags::GlobalFlags;
 pub use registry::ToolRegistry;
-pub use traits::{extract_output_format, is_global_output_flag, validate_against_schema, Tool, ToolArgs, ToolSchema, ParamSchema};
+pub use traits::{is_global_output_flag, validate_against_schema, Tool, ToolArgs, ToolSchema, ParamSchema};

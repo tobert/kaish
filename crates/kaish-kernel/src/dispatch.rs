@@ -42,7 +42,7 @@ use crate::interpreter::apply_output_format;
 #[cfg(test)]
 use crate::scheduler::build_tool_args;
 #[cfg(test)]
-use crate::tools::{extract_output_format, ToolRegistry};
+use crate::tools::ToolRegistry;
 #[cfg(all(test, feature = "native"))]
 use crate::tools::resolve_in_path;
 
@@ -384,8 +384,7 @@ impl CommandDispatcher for BackendDispatcher {
 
         // Build tool args with schema-aware parsing (sync — no command substitution)
         let schema = self.tools.get(&cmd.name).map(|t| t.schema());
-        let mut tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
-        let output_format = extract_output_format(&mut tool_args, schema.as_ref());
+        let tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
 
         // Execute via backend
         let backend = ctx.backend.clone();
@@ -415,11 +414,9 @@ impl CommandDispatcher for BackendDispatcher {
             Err(e) => ExecResult::failure(127, e.to_string()),
         };
 
-        // Apply output format transform. Union of pre-strip (legacy hand-rolled
-        // path) and ctx.output_format (set by migrated builtins' GlobalFlags
-        // flatten). After the full sweep, the pre-strip path goes away.
-        let effective_format = output_format.or(ctx.output_format);
-        let result = match effective_format {
+        // Migrated builtins parse --json via the GlobalFlags flatten and
+        // write ctx.output_format. The kernel just applies it.
+        let result = match ctx.output_format {
             Some(format) => apply_output_format(result, format),
             None => result,
         };
