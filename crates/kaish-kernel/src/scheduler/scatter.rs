@@ -388,7 +388,7 @@ pub fn parse_scatter_options(args: &crate::tools::ToolArgs) -> ScatterOptions {
     opts
 }
 
-/// Upper bound on the concurrency `scatter limit=N` accepts. Users who
+/// Upper bound on the concurrency `scatter --limit N` accepts. Users who
 /// ask for more get a `tracing::warn` and are clamped to this value —
 /// silent clamping would violate the "no silent fallbacks" rule.
 pub const SCATTER_LIMIT_MAX: usize = 10_000;

@@ -3,23 +3,23 @@
 ## Syntax
 
 ```
-input | scatter [as=VAR] [limit=N] [timeout=DUR] | command | gather [first=N] [format=lines|json]
+input | scatter [--as VAR] [--limit N] [--timeout DUR] | command | gather [--first N] [--format lines|json]
 ```
 
 ## Parameters
 
-**scatter:** `as=VAR` (default: `ITEM`) — variable name per item. `limit=N` (default: 8, clamped to 1..=10000) — max concurrent workers. Requests above 10000 are clamped and emit a `tracing::warn` on the `kaish::scatter` target. `timeout=DUR` (default: none) — per-worker timeout (`30`, `5s`, `500ms`, `2m`, `1h`); cancels the worker and kills its external children with the kernel's `kill_grace`. Workers that hit the timeout are tagged `"timed_out": true` in `gather format=json` output.
+**scatter:** `--as VAR` (default: `ITEM`) — variable name per item. `--limit N` (default: 8, clamped to 1..=10000) — max concurrent workers. Requests above 10000 are clamped and emit a `tracing::warn` on the `kaish::scatter` target. `--timeout DUR` (default: none) — per-worker timeout (`30`, `5s`, `500ms`, `2m`, `1h`); cancels the worker and kills its external children with the kernel's `kill_grace`. Workers that hit the timeout are tagged `"timed_out": true` in `gather --format json` output.
 
-**gather:** `first=N` (default: 0/all) — take first N results. `format=lines|json` (default: `lines`) — output format. JSON output includes per-worker `timed_out` flag.
+**gather:** `--first N` (default: 0/all) — take first N results. `--format lines|json` (default: `lines`) — output format. JSON output includes per-worker `timed_out` flag.
 
 ## Example
 
 ```bash
 # Fan out to 4 workers, compute squares, collect first 5 as JSON
-seq 1 20 | scatter as=N limit=4 | echo "{\"id\": $N, \"square\": $((N * N))}" | gather first=5 format=json
+seq 1 20 | scatter --as N --limit 4 | echo "{\"id\": $N, \"square\": $((N * N))}" | gather --first 5 --format json
 
 # Process files in parallel
-glob "*.json" | scatter as=FILE limit=4 | jq ".name" $FILE | gather
+glob "*.json" | scatter --as FILE --limit 4 | jq ".name" $FILE | gather
 ```
 
 ## Behavior

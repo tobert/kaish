@@ -525,7 +525,7 @@ async fn scatter_timeout_kills_stuck_workers() {
     let kernel = kernel_for_test();
     let result = kernel
         .execute(
-            r#"echo "1\n2\n3" | split "\n" | scatter limit=3 timeout=300ms | bash -c "sleep 60" | gather format=json"#,
+            r#"echo "1\n2\n3" | split "\n" | scatter --limit 3 --timeout 300ms | bash -c "sleep 60" | gather --format json"#,
         )
         .await
         .expect("execute");

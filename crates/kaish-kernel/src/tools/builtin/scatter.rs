@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! split "a,b,c" "," | scatter | process ${ITEM} | gather
-//! seq 1 10 | scatter as=N limit=4 | process ${N} | gather
+//! seq 1 10 | scatter --as N --limit 4 | process ${N} | gather
 //! ```
 
 use async_trait::async_trait;
@@ -29,15 +29,15 @@ pub struct Scatter;
 #[command(name = "scatter", about = "Fan out input items for parallel processing")]
 struct ScatterArgs {
     /// Variable name to bind each item to.
-    #[arg(long = "as")]
+    #[arg(id = "as", long = "as")]
     _as: Option<String>,
 
     /// Maximum parallelism (concurrent workers).
-    #[arg(long = "limit")]
+    #[arg(id = "limit", long = "limit")]
     _limit: Option<String>,
 
     /// Per-worker timeout (30, 5s, 500ms, 2m, 1h). Cancels the worker and kills its external children.
-    #[arg(long = "timeout")]
+    #[arg(id = "timeout", long = "timeout")]
     _timeout: Option<String>,
 
     #[command(flatten)]
@@ -61,8 +61,8 @@ impl Tool for Scatter {
             "Fan out input items for parallel processing",
             [
                 ("Parallel processing", "seq 1 10 | scatter | echo ${ITEM} | gather"),
-                ("Custom variable name", "split \"a,b,c\" \",\" | scatter as=X | echo ${X} | gather"),
-                ("Per-worker timeout", "seq 1 5 | scatter timeout=2s | sleep 60 | gather"),
+                ("Custom variable name", "split \"a,b,c\" \",\" | scatter --as X | echo ${X} | gather"),
+                ("Per-worker timeout", "seq 1 5 | scatter --timeout 2s | sleep 60 | gather"),
             ],
         )
     }

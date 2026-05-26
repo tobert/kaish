@@ -58,15 +58,18 @@ echo 'hello $NAME'              # prints: hello $NAME
 # Positional
 echo "hello" "world"
 
-# Named (key=value, no spaces)
-tool arg1="value" count=10 enabled=true
-
 # Flags
 ls -l                           # short flag
 ls -la                          # combined short flags
 git commit -m "message"         # short flag with value
 git push --force                # long flag
-curl --header="Content-Type: json"  # long flag with value
+curl --header "Content-Type: json"  # long flag with value
+curl --header="Content-Type: json"  # long flag with value (equals form)
+
+# Bareword key=value — accepted for POSIX compat (`export FOO=bar`,
+# `alias greet='echo hi'`). Builtins should prefer `--key value`.
+export FOO=bar
+alias greet='echo hello'
 ```
 
 ## Pipes & Redirects
@@ -565,13 +568,13 @@ Fan-out parallelism:
 ```bash
 # 散 (scatter) - fan out to parallel workers
 # 集 (gather) - collect results back
-cat items.txt | scatter as=ITEM limit=8 | process $ITEM | gather > results.json
+cat items.txt | scatter --as ITEM --limit 8 | process $ITEM | gather > results.json
 
 # With progress
 cat big_list.txt \
-    | scatter as=ID limit=4 \
-    | slow-operation id=$ID \
-    | gather progress=true
+    | scatter --as ID --limit 4 \
+    | slow-operation --id $ID \
+    | gather --progress true
 ```
 
 Each **scatter worker** runs in its own **parallel kernel fork**. This means
@@ -585,7 +588,7 @@ other or the parent.
 Kaish has a single, uniform cancellation discipline that reaches every spawned external child:
 
 - **`timeout DURATION COMMAND`** (builtin) — runs `COMMAND` with a deadline. On elapsed, the child's process group receives **SIGTERM**, then after `kill_grace` (default 2s) **SIGKILL**, then `timeout` returns exit code **124** (coreutils convention).
-- **`scatter ... timeout=DUR ...`** — per-worker timeout. Hung workers are cancelled and their externals killed; the result is tagged `"timed_out": true` in `gather format=json`.
+- **`scatter ... --timeout DUR ...`** — per-worker timeout. Hung workers are cancelled and their externals killed; the result is tagged `"timed_out": true` in `gather --format json`.
 - **`Kernel::cancel()`** (embedder API) — fires the kernel's cancellation token; running externals get SIGTERM/SIGKILL via the same path. The REPL wires this to Ctrl-C.
 - **`KernelConfig::request_timeout`** (embedder default) and **`ExecuteOptions::timeout`** (per-call) — apply at the kernel-call boundary; same kill behaviour, return code 124.
 - **`ExecuteOptions::cancel_token`** (per-call) — embedders can pass an externally-owned `tokio_util::sync::CancellationToken` that's *raced* against the kernel's internal token. The kernel does not retain it past the call.

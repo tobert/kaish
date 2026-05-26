@@ -79,7 +79,7 @@ jq -n --argjson r "$RESULT" -r '$r.name'
 glob "**/*.rs" --exclude="*_test.rs"
 
 # Parallel execution with scatter/gather
-seq 1 10 | scatter as=N limit=4 | echo "processing $N" | gather
+seq 1 10 | scatter --as N --limit 4 | echo "processing $N" | gather
 ```
 
 ## Language Features
@@ -271,7 +271,7 @@ for f in *.json; do
 done
 
 # Parallel processing
-seq 1 10 | scatter as=N limit=4 | echo "processing $N" | gather
+seq 1 10 | scatter --as N --limit 4 | echo "processing $N" | gather
 ```
 
 The kernel runs builtins in-process (no fork/exec), making it fast and predictable.

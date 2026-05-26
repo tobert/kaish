@@ -617,7 +617,7 @@ async fn scatter_seq_structured_data() {
 async fn scatter_split_structured_data() {
     let kernel = make_kernel().await;
     // split produces structured JSON array, scatter consumes it
-    let result = kernel.execute(r#"split "a,b,c" "," | scatter as=X | echo "got $X" | gather"#).await;
+    let result = kernel.execute(r#"split "a,b,c" "," | scatter --as X | echo "got $X" | gather"#).await;
 
     assert!(result.is_ok(), "split | scatter | gather should pass: {:?}", result.err());
     let exec = result.unwrap();
@@ -631,7 +631,7 @@ async fn scatter_split_structured_data() {
 async fn scatter_split_stdin_pipe() {
     let kernel = make_kernel().await;
     // echo | split | scatter — split reads from stdin
-    let result = kernel.execute(r#"echo "x,y,z" | split "," | scatter as=V | echo "got $V" | gather"#).await;
+    let result = kernel.execute(r#"echo "x,y,z" | split "," | scatter --as V | echo "got $V" | gather"#).await;
 
     assert!(result.is_ok(), "echo | split | scatter should pass: {:?}", result.err());
     let exec = result.unwrap();

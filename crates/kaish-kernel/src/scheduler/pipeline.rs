@@ -1208,7 +1208,7 @@ mod tests {
         let data = Value::Json(serde_json::json!(["test1", "test2"]));
         ctx.set_stdin_with_data("test1\ntest2".to_string(), Some(data));
 
-        // scatter as=URL | echo ${URL} | gather
+        // scatter --as URL | echo ${URL} | gather
         let scatter_cmd = Command {
             name: "scatter".to_string(),
             args: vec![Arg::Named {

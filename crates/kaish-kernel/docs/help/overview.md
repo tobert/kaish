@@ -38,7 +38,7 @@ NAME="world"
 if [[ -n $NAME ]]; then echo "Hello, ${NAME}!"; fi
 
 # Parallel execution with scatter/gather
-seq 1 100 | scatter as=N limit=4 | process $N | gather
+seq 1 100 | scatter --as N --limit 4 | process $N | gather
 
 ```
 

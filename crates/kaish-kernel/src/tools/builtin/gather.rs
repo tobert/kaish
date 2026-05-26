@@ -8,7 +8,7 @@
 //! ```text
 //! echo "a\nb\nc" | scatter | process ${ITEM} | gather
 //! gather --json                               # output as JSON array
-//! gather first=5                              # take first 5 results
+//! gather --first 5                            # take first 5 results
 //! gather --progress                           # show progress
 //! ```
 
@@ -31,11 +31,11 @@ pub struct Gather;
 #[command(name = "gather", about = "Collect results from parallel scatter processing")]
 struct GatherArgs {
     /// Take first N results only (0 = all).
-    #[arg(long = "first")]
+    #[arg(id = "first", long = "first")]
     _first: Option<String>,
 
     /// Output format: 'lines' or 'json'.
-    #[arg(long = "format")]
+    #[arg(id = "format", long = "format")]
     _format: Option<String>,
 
     #[command(flatten)]
@@ -59,7 +59,7 @@ impl Tool for Gather {
             "Collect results from parallel scatter processing",
             [
                 ("Collect scatter results", "seq 1 10 | scatter | echo ${ITEM} | gather"),
-                ("Collect first 5 results", "gather first=5"),
+                ("Collect first 5 results", "gather --first 5"),
             ],
         )
     }

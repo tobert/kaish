@@ -8,7 +8,7 @@ git log --oneline | head -n 5
 echo ""
 echo "Lines of code per crate:"
 glob "crates/*/src/lib.rs" \
-    | scatter as=F limit=8 \
+    | scatter --as F --limit 8 \
     | wc -l "$F" \
     | gather \
     | sort -k 2 -rn
@@ -17,9 +17,9 @@ glob "crates/*/src/lib.rs" \
 echo ""
 echo "Squares (parallel, as JSON):"
 seq 1 6 \
-    | scatter as=N limit=4 \
+    | scatter --as N --limit 4 \
     | echo "{\"n\": $N, \"sq\": $((N * N))}" \
-    | gather format=json \
+    | gather --format json \
     | jq '[.[] | .out | fromjson] | sort_by(.n)' -r
 
 # for-in-$(glob) — now works! (was broken before v0.1.8)
