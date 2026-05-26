@@ -3,14 +3,31 @@
 //! Subcommands: list, restore, empty, config.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::trash::TrashBackend;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// KaishTrash tool: manage the system trash.
 pub struct KaishTrash;
+
+/// clap-derived argv layer for kaish-trash. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "kaish-trash", about = "Manage the freedesktop.org Trash")]
+struct KaishTrashArgs {
+    /// Confirmation nonce for empty (--confirm=NONCE).
+    #[arg(long = "confirm")]
+    _confirm: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — subcommand and argument read off args.positional to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for KaishTrash {
@@ -19,33 +36,30 @@ impl Tool for KaishTrash {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("kaish-trash", "Manage the freedesktop.org Trash")
-            .param(ParamSchema::required(
-                "subcommand",
-                "string",
-                "Subcommand: list, restore, empty, config",
-            ))
-            .param(ParamSchema::optional(
-                "arg",
-                "string",
-                Value::Null,
-                "Argument for the subcommand (filter for list, name for restore, max-size for config)",
-            ))
-            .param(ParamSchema::optional(
-                "confirm",
-                "string",
-                Value::Null,
-                "Confirmation nonce for empty (--confirm=NONCE)",
-            ))
-            .example("List trashed items", "kaish-trash list")
-            .example("List with filter", "kaish-trash list '*.log'")
-            .example("Restore a file", "kaish-trash restore myfile.txt")
-            .example("Show trash settings", "kaish-trash config")
-            .example("Set max size to 50MB", "kaish-trash config max-size 52428800")
-            .example("Empty trash", "kaish-trash empty")
+        schema_from_clap(
+            &KaishTrashArgs::command(),
+            "kaish-trash",
+            "Manage the freedesktop.org Trash",
+            [
+                ("List trashed items", "kaish-trash list"),
+                ("List with filter", "kaish-trash list '*.log'"),
+                ("Restore a file", "kaish-trash restore myfile.txt"),
+                ("Show trash settings", "kaish-trash config"),
+                ("Set max size to 50MB", "kaish-trash config max-size 52428800"),
+                ("Empty trash", "kaish-trash empty"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match KaishTrashArgs::try_parse_from(
+            std::iter::once("kaish-trash".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("kaish-trash: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let subcmd = match args.get_string("subcommand", 0) {
             Some(s) => s,
             None => return ExecResult::failure(1, "kaish-trash: missing subcommand (list, restore, empty, config)"),

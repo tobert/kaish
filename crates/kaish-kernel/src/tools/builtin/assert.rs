@@ -1,13 +1,26 @@
 //! assert — Assert conditions for testing.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Assert tool: verify conditions in tests.
 pub struct Assert;
+
+/// clap-derived argv layer for assert. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "assert", about = "Assert a condition is true (for testing)")]
+struct AssertArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — condition / message read off args.positional to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Assert {
@@ -16,23 +29,26 @@ impl Tool for Assert {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("assert", "Assert a condition is true (for testing)")
-            .param(ParamSchema::required(
-                "condition",
-                "any",
-                "Value to test for truthiness",
-            ))
-            .param(ParamSchema::optional(
-                "message",
-                "string",
-                Value::String("assertion failed".into()),
-                "Error message if assertion fails",
-            ))
-            .example("Assert a value is truthy", "assert $RESULT")
-            .example("Assert with custom message", "assert $OK \"deploy failed\"")
+        schema_from_clap(
+            &AssertArgs::command(),
+            "assert",
+            "Assert a condition is true (for testing)",
+            [
+                ("Assert a value is truthy", "assert $RESULT"),
+                ("Assert with custom message", "assert $OK \"deploy failed\""),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match AssertArgs::try_parse_from(
+            std::iter::once("assert".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("assert: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let condition = match args.get_positional(0) {
             Some(v) => v,
             None => return ExecResult::failure(1, "assert: missing condition argument"),

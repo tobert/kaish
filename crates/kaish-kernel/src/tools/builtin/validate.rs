@@ -8,17 +8,42 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::ast::{ToolDef, Value};
+use crate::ast::ToolDef;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::parser::parse;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::{Severity, Validator};
 
 /// Validate tool: check kaish scripts for errors before execution.
 pub struct Validate;
+
+/// clap-derived argv layer for kaish-validate. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "kaish-validate", about = "Validate kaish scripts without executing")]
+struct ValidateArgs {
+    /// Inline expression to validate.
+    #[arg(short = 'e', long = "expr")]
+    _expr: Option<String>,
+
+    /// Only return exit code, no output.
+    #[arg(short = 'q', long = "quiet")]
+    _quiet: bool,
+
+    /// Show warnings in addition to errors.
+    #[arg(short = 'w', long = "warnings")]
+    _warnings: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — path read off args.positional.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Validate {
@@ -27,37 +52,27 @@ impl Tool for Validate {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("kaish-validate", "Validate kaish scripts without executing")
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::Null,
-                "Script file to validate",
-            ))
-            .param(ParamSchema::optional(
-                "expr",
-                "string",
-                Value::Null,
-                "Inline expression to validate (-e)",
-            ).with_aliases(["-e"]))
-            .param(ParamSchema::optional(
-                "quiet",
-                "bool",
-                Value::Bool(false),
-                "Only return exit code, no output (-q)",
-            ).with_aliases(["-q"]))
-            .param(ParamSchema::optional(
-                "warnings",
-                "bool",
-                Value::Bool(true),
-                "Show warnings in addition to errors",
-            ).with_aliases(["-w"]))
-            .example("Validate a script file", "kaish-validate script.kai")
-            .example("Validate inline code", "kaish-validate -e 'grep \"[\" file.txt'")
-            .example("Check exit code only", "kaish-validate -q script.kai && echo 'valid'")
+        schema_from_clap(
+            &ValidateArgs::command(),
+            "kaish-validate",
+            "Validate kaish scripts without executing",
+            [
+                ("Validate a script file", "kaish-validate script.kai"),
+                ("Validate inline code", "kaish-validate -e 'grep \"[\" file.txt'"),
+                ("Check exit code only", "kaish-validate -q script.kai && echo 'valid'"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match ValidateArgs::try_parse_from(
+            std::iter::once("kaish-validate".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("kaish-validate: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Get registry from context
         let registry = match &ctx.tools {
             Some(r) => r.clone(),
@@ -149,6 +164,7 @@ impl Tool for Validate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::tools::{register_builtins, ToolRegistry};
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;

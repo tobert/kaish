@@ -9,13 +9,34 @@
 //!   read VAR1 VAR2 VAR3         # Split line into multiple variables
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Read tool: reads a line from stdin into variable(s).
 pub struct Read;
+
+/// clap-derived argv layer for read. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "read", about = "Read a line from standard input into variables")]
+struct ReadArgs {
+    /// Raw mode — do not process backslash escapes.
+    #[arg(short = 'r', long = "raw")]
+    _raw: bool,
+
+    /// Prompt to display before reading.
+    #[arg(short = 'p', long = "prompt")]
+    _prompt: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — variable names read off args.positional.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Read {
@@ -24,30 +45,26 @@ impl Tool for Read {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("read", "Read a line from standard input into variables")
-            .param(ParamSchema::optional(
-                "raw",
-                "bool",
-                Value::Bool(false),
-                "Raw mode - do not process backslash escapes (-r)",
-            ))
-            .param(ParamSchema::optional(
-                "prompt",
-                "string",
-                Value::Null,
-                "Prompt to display before reading (-p)",
-            ))
-            .param(ParamSchema::optional(
-                "vars",
-                "string",
-                Value::Null,
-                "Variable names to store input (space-separated if multiple)",
-            ))
-            .example("Read into variable", "read NAME")
-            .example("Read with prompt", "read -p 'Enter value: ' VAR")
+        schema_from_clap(
+            &ReadArgs::command(),
+            "read",
+            "Read a line from standard input into variables",
+            [
+                ("Read into variable", "read NAME"),
+                ("Read with prompt", "read -p 'Enter value: ' VAR"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match ReadArgs::try_parse_from(
+            std::iter::once("read".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("read: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let raw_mode = args.has_flag("r") || args.has_flag("raw");
 
         // Get prompt if provided (-p "prompt")

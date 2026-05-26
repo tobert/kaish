@@ -7,16 +7,35 @@
 //! token by killing the child process group with SIGTERM/grace/SIGKILL.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ast::{Arg, Command, Expr, Value};
 use crate::duration::parse_duration;
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Timeout tool: run a command with a deadline.
 pub struct Timeout;
+
+/// clap-derived argv layer for timeout. See docs/clap-migration.md.
+///
+/// `timeout` wraps a command — its positionals are `DURATION COMMAND ARGS...`.
+/// The inner command tokens may themselves look like flags (e.g. `timeout 5
+/// echo -n hello`), so the sink accepts arbitrary hyphenated values.
+#[derive(Parser, Debug)]
+#[command(name = "timeout", about = "Run a command with a time limit; kills the child on elapsed")]
+struct TimeoutArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — duration and inner command are read off args.positional. The
+    /// kernel has already done shell parsing, so the inner command's flag
+    /// tokens land here as raw strings after `--`.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Timeout {
@@ -25,26 +44,27 @@ impl Tool for Timeout {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new(
+        schema_from_clap(
+            &TimeoutArgs::command(),
             "timeout",
             "Run a command with a time limit; kills the child on elapsed",
+            [
+                ("With seconds", "timeout 5 sleep 10"),
+                ("With duration suffix", "timeout 500ms curl example.com"),
+                ("Minutes", "timeout 2m cargo build"),
+            ],
         )
-        .param(ParamSchema::required(
-            "duration",
-            "string",
-            "Time limit: 30 (seconds), 30s, 500ms, 5m, 1h",
-        ))
-        .param(ParamSchema::required(
-            "command",
-            "string",
-            "Command to run",
-        ))
-        .example("With seconds", "timeout 5 sleep 10")
-        .example("With duration suffix", "timeout 500ms curl example.com")
-        .example("Minutes", "timeout 2m cargo build")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match TimeoutArgs::try_parse_from(
+            std::iter::once("timeout".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("timeout: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         if args.positional.len() < 2 {
             return ExecResult::failure(
                 1,

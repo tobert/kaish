@@ -1,15 +1,31 @@
 //! tee — Read from stdin and write to both stdout and files.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
-use crate::ast::Value;
 use crate::backend::WriteMode;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Tee tool: duplicate stdin to stdout and files.
 pub struct Tee;
+
+/// clap-derived argv layer for tee. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "tee", about = "Read from stdin and write to stdout and files")]
+struct TeeArgs {
+    /// Append to file instead of overwriting.
+    #[arg(short = 'a', long = "append")]
+    _append: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — path read off args.positional to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Tee {
@@ -18,23 +34,26 @@ impl Tool for Tee {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("tee", "Read from stdin and write to stdout and files")
-            .param(ParamSchema::required(
-                "path",
-                "string",
-                "File to write to",
-            ))
-            .param(ParamSchema::optional(
-                "append",
-                "bool",
-                Value::Bool(false),
-                "Append to file instead of overwriting (-a)",
-            ))
-            .example("Save and display", "echo hello | tee output.txt")
-            .example("Append to log", "echo entry | tee -a log.txt")
+        schema_from_clap(
+            &TeeArgs::command(),
+            "tee",
+            "Read from stdin and write to stdout and files",
+            [
+                ("Save and display", "echo hello | tee output.txt"),
+                ("Append to log", "echo entry | tee -a log.txt"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match TeeArgs::try_parse_from(
+            std::iter::once("tee".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("tee: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let path_str = match args.get_string("path", 0) {
             Some(p) => p,
             None => return ExecResult::failure(1, "tee: missing file argument"),
@@ -73,6 +92,7 @@ impl Tool for Tee {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 

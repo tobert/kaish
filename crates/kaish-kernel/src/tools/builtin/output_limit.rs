@@ -1,13 +1,26 @@
 //! kaish-output-limit — Inspect and modify output size limit configuration.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::output_limit::{parse_size, OutputLimitConfig};
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Output limit tool: inspect and modify output size limit configuration.
 pub struct KaishOutputLimit;
+
+/// clap-derived argv layer for kaish-output-limit. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "kaish-output-limit", about = "Inspect or modify output size limit configuration")]
+struct KaishOutputLimitArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — subcommand / size read off args.positional to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for KaishOutputLimit {
@@ -16,16 +29,30 @@ impl Tool for KaishOutputLimit {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("kaish-output-limit", "Inspect or modify output size limit configuration")
-            .example("Show current config", "kaish-output-limit")
-            .example("Set limit to 64KB", "kaish-output-limit set 64K")
-            .example("Enable with default 8KB", "kaish-output-limit on")
-            .example("Disable (unlimited)", "kaish-output-limit off")
-            .example("Set head preview size", "kaish-output-limit head 2048")
-            .example("Set tail preview size", "kaish-output-limit tail 1024")
+        schema_from_clap(
+            &KaishOutputLimitArgs::command(),
+            "kaish-output-limit",
+            "Inspect or modify output size limit configuration",
+            [
+                ("Show current config", "kaish-output-limit"),
+                ("Set limit to 64KB", "kaish-output-limit set 64K"),
+                ("Enable with default 8KB", "kaish-output-limit on"),
+                ("Disable (unlimited)", "kaish-output-limit off"),
+                ("Set head preview size", "kaish-output-limit head 2048"),
+                ("Set tail preview size", "kaish-output-limit tail 1024"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match KaishOutputLimitArgs::try_parse_from(
+            std::iter::once("kaish-output-limit".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("kaish-output-limit: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let subcommand = args.get_string("", 0);
 
         match subcommand.as_deref() {

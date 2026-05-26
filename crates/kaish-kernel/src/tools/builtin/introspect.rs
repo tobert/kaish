@@ -3,9 +3,10 @@
 //! These builtins provide visibility into kernel state for context generation.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 // ============================================================================
 // kaish-tools — List available tools
@@ -14,6 +15,18 @@ use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 /// Tools builtin: lists all available tools and their schemas.
 pub struct Tools;
 
+/// clap-derived argv layer for kaish-tools. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "kaish-tools", about = "List available tools and their schemas")]
+struct ToolsArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — tool name read off args.positional / args.named.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
+
 #[async_trait]
 impl Tool for Tools {
     fn name(&self) -> &str {
@@ -21,18 +34,26 @@ impl Tool for Tools {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("kaish-tools", "List available tools and their schemas")
-            .param(ParamSchema::optional(
-                "name",
-                "string",
-                crate::ast::Value::Null,
-                "Show detailed schema for a specific tool",
-            ))
-            .example("List all tools", "kaish-tools")
-            .example("Show tool detail", "kaish-tools cat")
+        schema_from_clap(
+            &ToolsArgs::command(),
+            "kaish-tools",
+            "List available tools and their schemas",
+            [
+                ("List all tools", "kaish-tools"),
+                ("Show tool detail", "kaish-tools cat"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match ToolsArgs::try_parse_from(
+            std::iter::once("kaish-tools".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("kaish-tools: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let tool_name = args.get_string("name", 0);
 
         if let Some(name) = tool_name {
@@ -92,6 +113,14 @@ fn format_tool_detail(schemas: &[ToolSchema], name: &str) -> ExecResult {
 /// Mounts builtin: lists all VFS mount points.
 pub struct Mounts;
 
+/// clap-derived argv layer for kaish-mounts. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "kaish-mounts", about = "List VFS mount points")]
+struct MountsArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+}
+
 #[async_trait]
 impl Tool for Mounts {
     fn name(&self) -> &str {
@@ -99,11 +128,23 @@ impl Tool for Mounts {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("kaish-mounts", "List VFS mount points")
-            .example("Show mount points", "kaish-mounts")
+        schema_from_clap(
+            &MountsArgs::command(),
+            "kaish-mounts",
+            "List VFS mount points",
+            [("Show mount points", "kaish-mounts")],
+        )
     }
 
-    async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match MountsArgs::try_parse_from(
+            std::iter::once("kaish-mounts".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("kaish-mounts: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let mounts = ctx.backend.mounts();
 
         let headers = vec![

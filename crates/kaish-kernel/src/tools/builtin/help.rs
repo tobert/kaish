@@ -1,14 +1,26 @@
 //! help — Display help for topics and tools.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
-use crate::ast::Value;
 use crate::help::{get_help, HelpTopic};
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Help tool: display help for topics and tools.
 pub struct Help;
+
+/// clap-derived argv layer for help. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "help", about = "Display help for kaish topics and tools")]
+struct HelpArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — topic read off args.positional / args.named to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Help {
@@ -17,22 +29,27 @@ impl Tool for Help {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new(
+        schema_from_clap(
+            &HelpArgs::command(),
             "help",
             "Display help for kaish topics and tools",
+            [
+                ("Show overview", "help"),
+                ("Syntax reference", "help syntax"),
+                ("Help for a tool", "help cat"),
+            ],
         )
-        .param(ParamSchema::optional(
-            "topic",
-            "string",
-            Value::Null,
-            "Topic or tool name: overview, syntax, builtins, vfs, scatter, limits, or a tool name",
-        ))
-        .example("Show overview", "help")
-        .example("Syntax reference", "help syntax")
-        .example("Help for a tool", "help cat")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match HelpArgs::try_parse_from(
+            std::iter::once("help".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("help: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let topic_str = args.get_string("topic", 0).unwrap_or_default();
         let topic = HelpTopic::parse_topic(&topic_str);
         let content = get_help(&topic, &ctx.tool_schemas);
@@ -43,6 +60,8 @@ impl Tool for Help {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
+    use crate::tools::ParamSchema;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 

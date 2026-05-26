@@ -1,13 +1,26 @@
 //! ignore — Inspect and modify the ignore file configuration.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ignore_config::IgnoreScope;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Ignore tool: inspect and modify ignore file configuration.
 pub struct KaishIgnore;
+
+/// clap-derived argv layer for kaish-ignore. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "kaish-ignore", about = "Inspect or modify ignore file configuration")]
+struct KaishIgnoreArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — subcommand / argument read off args.positional to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for KaishIgnore {
@@ -16,17 +29,31 @@ impl Tool for KaishIgnore {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("kaish-ignore", "Inspect or modify ignore file configuration")
-            .example("Show current config", "kaish-ignore")
-            .example("Add a file", "kaish-ignore add .dockerignore")
-            .example("Remove a file", "kaish-ignore remove .gitignore")
-            .example("Clear all filtering", "kaish-ignore clear")
-            .example("Toggle defaults", "kaish-ignore defaults on")
-            .example("Toggle auto-gitignore", "kaish-ignore auto on")
-            .example("Change scope", "kaish-ignore scope enforced")
+        schema_from_clap(
+            &KaishIgnoreArgs::command(),
+            "kaish-ignore",
+            "Inspect or modify ignore file configuration",
+            [
+                ("Show current config", "kaish-ignore"),
+                ("Add a file", "kaish-ignore add .dockerignore"),
+                ("Remove a file", "kaish-ignore remove .gitignore"),
+                ("Clear all filtering", "kaish-ignore clear"),
+                ("Toggle defaults", "kaish-ignore defaults on"),
+                ("Toggle auto-gitignore", "kaish-ignore auto on"),
+                ("Change scope", "kaish-ignore scope enforced"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match KaishIgnoreArgs::try_parse_from(
+            std::iter::once("kaish-ignore".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("kaish-ignore: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let subcommand = args.get_string("", 0);
 
         match subcommand.as_deref() {

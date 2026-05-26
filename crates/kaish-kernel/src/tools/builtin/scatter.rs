@@ -11,11 +11,11 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::scheduler::{extract_items, parse_scatter_options};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Scatter tool: fan out items for parallel processing.
 ///
@@ -24,6 +24,30 @@ use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 /// detects scatter in a pipeline.
 pub struct Scatter;
 
+/// clap-derived argv layer for scatter. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "scatter", about = "Fan out input items for parallel processing")]
+struct ScatterArgs {
+    /// Variable name to bind each item to.
+    #[arg(long = "as")]
+    _as: Option<String>,
+
+    /// Maximum parallelism (concurrent workers).
+    #[arg(long = "limit")]
+    _limit: Option<String>,
+
+    /// Per-worker timeout (30, 5s, 500ms, 2m, 1h). Cancels the worker and kills its external children.
+    #[arg(long = "timeout")]
+    _timeout: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — option values read off args.named to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
+
 #[async_trait]
 impl Tool for Scatter {
     fn name(&self) -> &str {
@@ -31,32 +55,28 @@ impl Tool for Scatter {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("scatter", "Fan out input items for parallel processing")
-            .param(ParamSchema::optional(
-                "as",
-                "string",
-                Value::String("ITEM".to_string()),
-                "Variable name to bind each item to",
-            ))
-            .param(ParamSchema::optional(
-                "limit",
-                "int",
-                Value::Int(8),
-                "Maximum parallelism (concurrent workers)",
-            ))
-            .param(ParamSchema::optional(
-                "timeout",
-                "string",
-                Value::Null,
-                "Per-worker timeout (30, 5s, 500ms, 2m, 1h). Cancels the worker and kills its external children.",
-            ))
-            .example("Parallel processing", "seq 1 10 | scatter | echo ${ITEM} | gather")
-            .example("Custom variable name", "split \"a,b,c\" \",\" | scatter as=X | echo ${X} | gather")
-            .example("Per-worker timeout", "seq 1 5 | scatter timeout=2s | sleep 60 | gather")
+        schema_from_clap(
+            &ScatterArgs::command(),
+            "scatter",
+            "Fan out input items for parallel processing",
+            [
+                ("Parallel processing", "seq 1 10 | scatter | echo ${ITEM} | gather"),
+                ("Custom variable name", "split \"a,b,c\" \",\" | scatter as=X | echo ${X} | gather"),
+                ("Per-worker timeout", "seq 1 5 | scatter timeout=2s | sleep 60 | gather"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        // Parse options for reporting
+        let parsed = match ScatterArgs::try_parse_from(
+            std::iter::once("scatter".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("scatter: {e}")),
+        };
+        parsed.global.apply(ctx);
+
+        // Parse options for reporting (reads args.named to preserve Value::Int etc.)
         let opts = parse_scatter_options(&args);
 
         // Get structured data and text from stdin
@@ -89,6 +109,7 @@ impl Tool for Scatter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
 
     #[tokio::test]
     async fn test_scatter_with_structured_data() {

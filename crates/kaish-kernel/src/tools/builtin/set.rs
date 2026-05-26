@@ -1,10 +1,11 @@
 //! set — Set shell options (like set -e, set -o latch).
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Set tool: configure shell options.
 ///
@@ -16,6 +17,22 @@ use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 /// Unrecognized options are silently ignored for bash compatibility.
 pub struct Set;
 
+/// clap-derived argv layer for set. See docs/clap-migration.md.
+///
+/// `set` has bespoke argv handling — it reads `-e`/`+e`/`-o NAME` from
+/// args.flags and args.positional directly. clap is only used here as a
+/// schema sink and to honor the global `--json` flag.
+#[derive(Parser, Debug)]
+#[command(name = "set", about = "Set shell options")]
+struct SetArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — all option arguments are read off args.flags / args.positional.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
+
 #[async_trait]
 impl Tool for Set {
     fn name(&self) -> &str {
@@ -23,21 +40,36 @@ impl Tool for Set {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("set", "Set shell options")
-            .param(ParamSchema::optional(
-                "options",
-                "string",
-                Value::Null,
-                "Shell options (-e, +e, -o latch, -o trash, -o glob, etc.)",
-            ))
-            .example("Exit on error", "set -e")
-            .example("Disable exit on error", "set +e")
-            .example("Enable confirmation latch", "set -o latch")
-            .example("Enable trash-on-delete", "set -o trash")
-            .example("Disable glob expansion", "set +o glob")
+        schema_from_clap(
+            &SetArgs::command(),
+            "set",
+            "Set shell options",
+            [
+                ("Exit on error", "set -e"),
+                ("Disable exit on error", "set +e"),
+                ("Enable confirmation latch", "set -o latch"),
+                ("Enable trash-on-delete", "set -o trash"),
+                ("Disable glob expansion", "set +o glob"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        // set has bespoke argv handling — strip the user-provided -e / -o etc.
+        // tokens from the argv before handing to clap, otherwise clap would
+        // reject unknown flags. Only `--json` (global) needs to clap-parse.
+        let mut clap_argv: Vec<String> = Vec::new();
+        if args.flags.contains("json") {
+            clap_argv.push("--json".to_string());
+        }
+        let parsed = match SetArgs::try_parse_from(
+            std::iter::once("set".to_string()).chain(clap_argv),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("set: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // No arguments: show current settings
         if args.positional.is_empty() && args.flags.is_empty() {
             let mut output = String::new();

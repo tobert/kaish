@@ -14,13 +14,61 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Uname tool: print system identification.
 pub struct Uname;
+
+/// clap-derived argv layer for uname. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "uname", about = "Print system identification")]
+struct UnameArgs {
+    /// Print the system name (default).
+    #[arg(short = 's', long = "s")]
+    _s: bool,
+
+    /// Print the network node hostname.
+    #[arg(short = 'n', long = "n")]
+    _n: bool,
+
+    /// Print the kernel release.
+    #[arg(short = 'r', long = "r")]
+    _r: bool,
+
+    /// Print the kernel version string.
+    #[arg(short = 'v', long = "v")]
+    _v: bool,
+
+    /// Print the machine hardware name.
+    #[arg(short = 'm', long = "m")]
+    _m: bool,
+
+    /// Print the operating system.
+    #[arg(short = 'o', long = "o")]
+    _o: bool,
+
+    /// Print the processor type (alias for -m).
+    #[arg(short = 'p', long = "p")]
+    _p: bool,
+
+    /// Print the hardware platform (alias for -m).
+    #[arg(short = 'i', long = "i")]
+    _i: bool,
+
+    /// Print all information.
+    #[arg(short = 'a', long = "a")]
+    _a: bool,
+
+    /// Report host OS identity instead of kaish.
+    #[arg(long = "host")]
+    _host: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+}
 
 /// All six uname fields in GNU order.
 struct UnameInfo {
@@ -82,73 +130,27 @@ impl Tool for Uname {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("uname", "Print system identification")
-            .param(ParamSchema::optional(
-                "s",
-                "bool",
-                Value::Bool(false),
-                "Print the system name (default)",
-            ))
-            .param(ParamSchema::optional(
-                "n",
-                "bool",
-                Value::Bool(false),
-                "Print the network node hostname",
-            ))
-            .param(ParamSchema::optional(
-                "r",
-                "bool",
-                Value::Bool(false),
-                "Print the kernel release",
-            ))
-            .param(ParamSchema::optional(
-                "v",
-                "bool",
-                Value::Bool(false),
-                "Print the kernel version string",
-            ))
-            .param(ParamSchema::optional(
-                "m",
-                "bool",
-                Value::Bool(false),
-                "Print the machine hardware name",
-            ))
-            .param(ParamSchema::optional(
-                "o",
-                "bool",
-                Value::Bool(false),
-                "Print the operating system",
-            ))
-            .param(ParamSchema::optional(
-                "p",
-                "bool",
-                Value::Bool(false),
-                "Print the processor type (alias for -m)",
-            ))
-            .param(ParamSchema::optional(
-                "i",
-                "bool",
-                Value::Bool(false),
-                "Print the hardware platform (alias for -m)",
-            ))
-            .param(ParamSchema::optional(
-                "a",
-                "bool",
-                Value::Bool(false),
-                "Print all information",
-            ))
-            .param(ParamSchema::optional(
-                "host",
-                "bool",
-                Value::Bool(false),
-                "Report host OS identity instead of kaish",
-            ))
-            .example("System name", "uname")
-            .example("All info", "uname -a")
-            .example("Host OS identity", "uname --host")
+        schema_from_clap(
+            &UnameArgs::command(),
+            "uname",
+            "Print system identification",
+            [
+                ("System name", "uname"),
+                ("All info", "uname -a"),
+                ("Host OS identity", "uname --host"),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match UnameArgs::try_parse_from(
+            std::iter::once("uname".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("uname: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let host_mode = args.has_flag("host");
         let info = if host_mode {
             UnameInfo::host()

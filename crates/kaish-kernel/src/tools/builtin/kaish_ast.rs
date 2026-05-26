@@ -9,14 +9,34 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::parser::parse;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// kaish-ast: parse expressions and display their AST.
 pub struct KaishAst;
+
+/// clap-derived argv layer for kaish-ast. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "kaish-ast", about = "Parse and display AST without executing")]
+struct KaishAstArgs {
+    /// Enable AST mode (show AST for every command).
+    #[arg(long = "on")]
+    on: bool,
+
+    /// Disable AST mode.
+    #[arg(long = "off")]
+    off: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — expr read off args.positional / args.named to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for KaishAst {
@@ -25,37 +45,33 @@ impl Tool for KaishAst {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("kaish-ast", "Parse and display AST without executing")
-            .param(ParamSchema::optional(
-                "expr",
-                "string",
-                Value::Null,
-                "Expression to parse and display",
-            ))
-            .param(ParamSchema::optional(
-                "on",
-                "bool",
-                Value::Bool(false),
-                "Enable AST mode (show AST for every command)",
-            ))
-            .param(ParamSchema::optional(
-                "off",
-                "bool",
-                Value::Bool(false),
-                "Disable AST mode",
-            ))
-            .example("Parse an expression", "kaish-ast 'echo hello | grep h'")
-            .example("Enable AST mode", "kaish-ast -on")
-            .example("Disable AST mode", "kaish-ast -off")
+        schema_from_clap(
+            &KaishAstArgs::command(),
+            "kaish-ast",
+            "Parse and display AST without executing",
+            [
+                ("Parse an expression", "kaish-ast 'echo hello | grep h'"),
+                ("Enable AST mode", "kaish-ast -on"),
+                ("Disable AST mode", "kaish-ast -off"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match KaishAstArgs::try_parse_from(
+            std::iter::once("kaish-ast".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("kaish-ast: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Toggle mode
-        if args.has_flag("on") {
+        if parsed.on {
             ctx.scope.set_show_ast(true);
             return ExecResult::with_output(OutputData::text("AST mode: ON\n"));
         }
-        if args.has_flag("off") {
+        if parsed.off {
             ctx.scope.set_show_ast(false);
             return ExecResult::with_output(OutputData::text("AST mode: OFF\n"));
         }
@@ -88,6 +104,7 @@ impl Tool for KaishAst {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 

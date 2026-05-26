@@ -13,11 +13,11 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::scheduler::{parse_gather_options, GatherOptions};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Gather tool: collect results from parallel processing.
 ///
@@ -26,6 +26,26 @@ use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 /// detects gather in a pipeline.
 pub struct Gather;
 
+/// clap-derived argv layer for gather. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "gather", about = "Collect results from parallel scatter processing")]
+struct GatherArgs {
+    /// Take first N results only (0 = all).
+    #[arg(long = "first")]
+    _first: Option<String>,
+
+    /// Output format: 'lines' or 'json'.
+    #[arg(long = "format")]
+    _format: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — option values read off args.named to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
+
 #[async_trait]
 impl Tool for Gather {
     fn name(&self) -> &str {
@@ -33,25 +53,27 @@ impl Tool for Gather {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("gather", "Collect results from parallel scatter processing")
-            .param(ParamSchema::optional(
-                "first",
-                "int",
-                Value::Int(0),
-                "Take first N results only (0 = all)",
-            ))
-            .param(ParamSchema::optional(
-                "format",
-                "string",
-                Value::String("lines".to_string()),
-                "Output format: 'lines' or 'json'",
-            ))
-            .example("Collect scatter results", "seq 1 10 | scatter | echo ${ITEM} | gather")
-            .example("Collect first 5 results", "gather first=5")
+        schema_from_clap(
+            &GatherArgs::command(),
+            "gather",
+            "Collect results from parallel scatter processing",
+            [
+                ("Collect scatter results", "seq 1 10 | scatter | echo ${ITEM} | gather"),
+                ("Collect first 5 results", "gather first=5"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        // Parse options
+        let parsed = match GatherArgs::try_parse_from(
+            std::iter::once("gather".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("gather: {e}")),
+        };
+        parsed.global.apply(ctx);
+
+        // Parse options (still reads from args.named to preserve Value::Int etc.)
         let opts = parse_gather_options(&args);
 
         // Get input (in standalone mode, just pass through)
@@ -96,6 +118,7 @@ fn format_output(input: &str, opts: &GatherOptions) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
 
     #[test]
     fn test_format_output_lines() {
