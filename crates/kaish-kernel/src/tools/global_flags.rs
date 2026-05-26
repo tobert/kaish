@@ -1,0 +1,35 @@
+//! Global flags shared by every builtin via `#[command(flatten)]`.
+//!
+//! Today this is just `--json`. The kernel's pre-strip
+//! (`extract_output_format` in `traits.rs`) still removes `--json` from
+//! ToolArgs before clap sees it for builtins that are still on the old
+//! hand-rolled path. Once the sweep is complete, the pre-strip goes away and
+//! `--json` flows directly into each builtin's `GlobalFlags` flatten.
+//!
+//! See `docs/clap-migration.md`.
+
+use clap::Args;
+
+use crate::interpreter::OutputFormat;
+use crate::tools::ExecContext;
+
+/// Flags injected into every migrated builtin via `#[command(flatten)] global: GlobalFlags`.
+///
+/// Builtins call `parsed.global.apply(ctx)` after their own argv parse so the
+/// dispatcher can read `ctx.output_format` post-execute and apply the format.
+#[derive(Args, Debug, Clone, Default)]
+pub struct GlobalFlags {
+    /// Render structured output as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+impl GlobalFlags {
+    /// Apply the flags to `ctx` so the dispatcher can pick them up after the
+    /// builtin's `execute()` returns.
+    pub fn apply(&self, ctx: &mut ExecContext) {
+        if self.json {
+            ctx.output_format = Some(OutputFormat::Json);
+        }
+    }
+}

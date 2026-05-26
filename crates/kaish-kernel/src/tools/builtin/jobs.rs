@@ -1,22 +1,24 @@
 //! jobs — List and manage background jobs.
 
 use async_trait::async_trait;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Jobs tool: list and manage background jobs.
 pub struct Jobs;
 
 /// clap-derived argv layer for jobs. See docs/clap-migration.md.
 #[derive(Parser, Debug)]
-#[command(name = "jobs")]
+#[command(name = "jobs", about = "List and manage background jobs")]
 struct JobsArgs {
     /// Remove completed jobs from tracking.
     #[arg(long = "cleanup")]
     cleanup: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
 }
 
 #[async_trait]
@@ -26,15 +28,15 @@ impl Tool for Jobs {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("jobs", "List and manage background jobs")
-            .param(ParamSchema::optional(
-                "cleanup",
-                "bool",
-                Value::Bool(false),
-                "Remove completed jobs from tracking (--cleanup)",
-            ))
-            .example("List background jobs", "jobs")
-            .example("Clean up completed jobs", "jobs --cleanup")
+        schema_from_clap(
+            &JobsArgs::command(),
+            "jobs",
+            "List and manage background jobs",
+            [
+                ("List background jobs", "jobs"),
+                ("Clean up completed jobs", "jobs --cleanup"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -44,6 +46,7 @@ impl Tool for Jobs {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("jobs: {e}")),
         };
+        parsed.global.apply(ctx);
 
         let manager = match &ctx.job_manager {
             Some(m) => m,

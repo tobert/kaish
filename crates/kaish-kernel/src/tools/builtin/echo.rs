@@ -1,26 +1,29 @@
 //! echo — Print arguments to stdout.
 
 use async_trait::async_trait;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Echo tool: prints arguments to stdout.
 pub struct Echo;
 
 /// clap-derived argv layer for echo. See docs/clap-migration.md.
 #[derive(Parser, Debug)]
-#[command(name = "echo")]
+#[command(name = "echo", about = "Print arguments to standard output")]
 struct EchoArgs {
     /// Do not output trailing newline.
     #[arg(short = 'n', long = "no_newline")]
     no_newline: bool,
 
+    #[command(flatten)]
+    global: GlobalFlags,
+
     /// Sink — to_argv() always emits `--` before positionals, so clap accepts
-    /// arbitrary tokens here. Read the Value-typed positionals off
-    /// args.positional directly to preserve Int/Bool/Float rendering.
+    /// arbitrary tokens here. Read Value-typed positionals off args.positional
+    /// directly to preserve Int/Bool/Float rendering.
     #[arg(hide = true)]
     words: Vec<String>,
 }
@@ -32,24 +35,18 @@ impl Tool for Echo {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("echo", "Print arguments to standard output")
-            .param(ParamSchema::optional(
-                "args",
-                "any",
-                Value::Null,
-                "Values to print",
-            ))
-            .param(ParamSchema::optional(
-                "no_newline",
-                "bool",
-                Value::Bool(false),
-                "Do not output trailing newline (-n)",
-            ))
-            .example("Print a message", "echo hello world")
-            .example("No trailing newline", "echo -n \"prompt: \"")
+        schema_from_clap(
+            &EchoArgs::command(),
+            "echo",
+            "Print arguments to standard output",
+            [
+                ("Print a message", "echo hello world"),
+                ("No trailing newline", "echo -n \"prompt: \""),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         // Preserve the original Value rendering (true/false/3.14/etc.) before
         // collapsing through to_argv()'s string layer — echo formats numerics
         // specially and we don't want clap to re-stringify them.
@@ -61,6 +58,7 @@ impl Tool for Echo {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("echo: {e}")),
         };
+        parsed.global.apply(ctx);
 
         let mut output = words.join(" ");
         if !parsed.no_newline && !output.is_empty() {

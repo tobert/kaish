@@ -17,6 +17,8 @@ use crate::trash::TrashBackend;
 use crate::vfs::VfsRouter;
 use tokio_util::sync::CancellationToken;
 
+use crate::interpreter::OutputFormat;
+
 use super::traits::ToolSchema;
 
 /// Output context determines how command output should be formatted.
@@ -123,6 +125,13 @@ pub struct ExecContext {
     /// Default for stand-alone `ExecContext` constructors is a fresh, never-fired
     /// token so non-kernel test contexts behave as before.
     pub cancel: CancellationToken,
+    /// Per-execution output format override set by a builtin's GlobalFlags
+    /// flatten (e.g. `--json`). The dispatcher reads this after `tool.execute()`
+    /// returns and applies the format via `apply_output_format`.
+    ///
+    /// Builtins set this via `GlobalFlags::apply(ctx)`; external commands
+    /// don't touch it.
+    pub output_format: Option<OutputFormat>,
 }
 
 impl ExecContext {
@@ -156,6 +165,7 @@ impl ExecContext {
             terminal_state: None,
             dispatcher: None,
             cancel: CancellationToken::new(),
+            output_format: None,
         }
     }
 
@@ -189,6 +199,7 @@ impl ExecContext {
             terminal_state: None,
             dispatcher: None,
             cancel: CancellationToken::new(),
+            output_format: None,
         }
     }
 
@@ -219,6 +230,7 @@ impl ExecContext {
             terminal_state: None,
             dispatcher: None,
             cancel: CancellationToken::new(),
+            output_format: None,
         }
     }
 
@@ -249,6 +261,7 @@ impl ExecContext {
             terminal_state: None,
             dispatcher: None,
             cancel: CancellationToken::new(),
+            output_format: None,
         }
     }
 
@@ -282,6 +295,7 @@ impl ExecContext {
             terminal_state: None,
             dispatcher: None,
             cancel: CancellationToken::new(),
+            output_format: None,
         }
     }
 
@@ -312,6 +326,7 @@ impl ExecContext {
             terminal_state: None,
             dispatcher: None,
             cancel: CancellationToken::new(),
+            output_format: None,
         }
     }
 
@@ -430,6 +445,8 @@ impl ExecContext {
             terminal_state: self.terminal_state.clone(),
             dispatcher: self.dispatcher.clone(),
             cancel: self.cancel.clone(),
+            // Output format is per-execution; child pipeline stages start fresh.
+            output_format: None,
         }
     }
 

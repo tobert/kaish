@@ -1,23 +1,27 @@
 //! cat — Read and output file contents.
 
 use async_trait::async_trait;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
+#[cfg(test)]
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Cat tool: read and output file contents.
 pub struct Cat;
 
 /// clap-derived argv layer for cat. See docs/clap-migration.md.
 #[derive(Parser, Debug)]
-#[command(name = "cat")]
+#[command(name = "cat", about = "Read and output file contents")]
 struct CatArgs {
     /// Number output lines.
     #[arg(short = 'n', long = "number")]
     number: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
 
     /// Sink — to_argv() always emits `--` before positionals. Read paths
     /// off args.positional directly (kernel already glob-expanded them).
@@ -32,17 +36,16 @@ impl Tool for Cat {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("cat", "Read and output file contents")
-            .param(ParamSchema::required("path", "string", "File path(s) to read"))
-            .param(ParamSchema::optional(
-                "number",
-                "bool",
-                Value::Bool(false),
-                "Number output lines (-n)",
-            ).with_aliases(["-n"]))
-            .example("Read a file", "cat README.md")
-            .example("Show line numbers", "cat -n src/main.rs")
-            .example("Concatenate files", "cat header.txt body.txt")
+        schema_from_clap(
+            &CatArgs::command(),
+            "cat",
+            "Read and output file contents",
+            [
+                ("Read a file", "cat README.md"),
+                ("Show line numbers", "cat -n src/main.rs"),
+                ("Concatenate files", "cat header.txt body.txt"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -52,6 +55,7 @@ impl Tool for Cat {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("cat: {e}")),
         };
+        parsed.global.apply(ctx);
         let number_lines = parsed.number;
 
         // If no files specified, read from stdin (like POSIX cat)

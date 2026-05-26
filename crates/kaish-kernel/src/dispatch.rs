@@ -415,8 +415,11 @@ impl CommandDispatcher for BackendDispatcher {
             Err(e) => ExecResult::failure(127, e.to_string()),
         };
 
-        // Apply output format transform
-        let result = match output_format {
+        // Apply output format transform. Union of pre-strip (legacy hand-rolled
+        // path) and ctx.output_format (set by migrated builtins' GlobalFlags
+        // flatten). After the full sweep, the pre-strip path goes away.
+        let effective_format = output_format.or(ctx.output_format);
+        let result = match effective_format {
             Some(format) => apply_output_format(result, format),
             None => result,
         };

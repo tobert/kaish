@@ -1893,6 +1893,7 @@ impl Kernel {
                     let token = self.cancel_token.lock().expect("cancel_token poisoned");
                     token.clone()
                 },
+                output_format: None,
             }
         }; // locks released
 
@@ -2229,6 +2230,7 @@ impl Kernel {
                 // Falls back to the kernel's own token when ec.cancel is the
                 // default fresh token from a non-dispatch path.
                 cancel: ec.cancel.clone(),
+                output_format: None,
             }
         }; // both locks released — tool.execute can re-dispatch safely
 
@@ -2264,7 +2266,15 @@ impl Kernel {
             ec.pipe_stdout = ctx.pipe_stdout.take();
         }
 
-        let result = match output_format {
+        // Two paths feed the output format during the clap-migration sweep:
+        // (1) extract_output_format pre-strips `--json` from the legacy
+        //     hand-rolled args before the tool sees them (kernel-owned).
+        // (2) Migrated builtins parse `--json` via GlobalFlags flatten and
+        //     write to ctx.output_format inside execute().
+        // Union the two — whichever fires wins. After the full sweep, drop
+        // the pre-strip path entirely.
+        let effective_format = output_format.or(ctx.output_format);
+        let result = match effective_format {
             Some(format) => apply_output_format(result, format),
             None => result,
         };
