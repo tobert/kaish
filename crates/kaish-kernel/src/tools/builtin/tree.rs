@@ -1,15 +1,52 @@
 //! tree — Display directory structure.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Tree tool: display directory structure.
 pub struct Tree;
+
+/// clap-derived argv layer for tree. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "tree", about = "Display directory structure")]
+struct TreeArgs {
+    /// Maximum depth to display.
+    #[arg(short = 'L', long = "level")]
+    level: Option<String>,
+
+    /// Traditional tree format with box-drawing.
+    #[arg(long = "traditional")]
+    traditional: bool,
+
+    /// Flat indent format.
+    #[arg(long = "flat")]
+    flat: bool,
+
+    /// Show only files, no directory entries.
+    #[arg(short = 'f', long = "files_only")]
+    files_only: bool,
+
+    /// Show hidden files.
+    #[arg(short = 'a', long = "all")]
+    all: bool,
+
+    /// Include ignored directories.
+    #[arg(long = "no_ignore", visible_alias = "no-ignore")]
+    no_ignore: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 /// Node in the tree structure.
 #[derive(Debug, Default)]
@@ -112,57 +149,31 @@ impl Tool for Tree {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("tree", "Display directory structure")
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::String(".".into()),
-                "Directory to display",
-            ))
-            .param(ParamSchema::optional(
-                "level",
-                "int",
-                Value::Null,
-                "Maximum depth to display (-L)",
-            ))
-            .param(ParamSchema::optional(
-                "traditional",
-                "bool",
-                Value::Bool(false),
-                "Traditional tree format with box-drawing (--traditional)",
-            ))
-            .param(ParamSchema::optional(
-                "flat",
-                "bool",
-                Value::Bool(false),
-                "Flat indent format (--flat)",
-            ))
-            .param(ParamSchema::optional(
-                "files_only",
-                "bool",
-                Value::Bool(false),
-                "Show only files, no directory entries (-f)",
-            ))
-            .param(ParamSchema::optional(
-                "all",
-                "bool",
-                Value::Bool(false),
-                "Show hidden files (-a)",
-            ))
-            .param(ParamSchema::optional(
-                "no_ignore",
-                "bool",
-                Value::Bool(false),
-                "Include ignored directories (--no-ignore)",
-            ))
-            .example("Compact notation (default)", "tree src/")
-            .example("Traditional tree", "tree --traditional src/")
-            .example("Flat indent", "tree --flat src/")
-            .example("JSON output", "tree --json src/")
-            .example("Limited depth", "tree -L 2 src/")
+        schema_from_clap(
+            &TreeArgs::command(),
+            "tree",
+            "Display directory structure",
+            [
+                ("Compact notation (default)", "tree src/"),
+                ("Traditional tree", "tree --traditional src/"),
+                ("Flat indent", "tree --flat src/"),
+                ("JSON output", "tree --json src/"),
+                ("Limited depth", "tree -L 2 src/"),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        flagify_bool_named(&mut args);
+
+        let parsed = match TreeArgs::try_parse_from(
+            std::iter::once("tree".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("tree: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let path = args
             .get_string("path", 0)
             .unwrap_or_else(|| ".".to_string());
@@ -283,6 +294,22 @@ impl Tool for Tree {
             );
 
         ExecResult::with_output(OutputData::nodes(vec![root_node]))
+    }
+}
+
+/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
+/// clap doesn't reject `--traditional=true` for a bool field.
+fn flagify_bool_named(args: &mut ToolArgs) {
+    let bool_keys: Vec<String> = args
+        .named
+        .iter()
+        .filter(|(_, v)| matches!(v, Value::Bool(_)))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in bool_keys {
+        if let Some(Value::Bool(true)) = args.named.remove(&k) {
+            args.flags.insert(k);
+        }
     }
 }
 

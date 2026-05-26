@@ -6,6 +6,7 @@
 //! kaish builtin keeps its existing schema and exit-code semantics.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Encoding, SearcherBuilder};
 use regex::RegexBuilder;
@@ -15,12 +16,108 @@ use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::grep_engine::{AccumulatorSink, ContextKind, SearchEvent};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema, validate_against_schema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
 use crate::walker::{FileWalker, GlobPath, IncludeExclude, WalkOptions};
 
 /// Grep tool: search for patterns in text.
 pub struct Grep;
+
+/// clap-derived argv layer for grep. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "grep", about = "Search for patterns in files or stdin")]
+struct GrepArgs {
+    /// Case-insensitive matching.
+    #[arg(short = 'i', long = "ignore_case")]
+    ignore_case: bool,
+
+    /// Prefix output with line numbers.
+    #[arg(short = 'n', long = "line_number")]
+    line_number: bool,
+
+    /// Select non-matching lines.
+    #[arg(short = 'v', long = "invert")]
+    invert: bool,
+
+    /// Only print count of matching lines.
+    #[arg(short = 'c', long = "count")]
+    count: bool,
+
+    /// Print only the matched parts.
+    #[arg(short = 'o', long = "only_matching")]
+    only_matching: bool,
+
+    /// Quiet mode, only return exit code.
+    #[arg(short = 'q', long = "quiet")]
+    quiet: bool,
+
+    /// Print only filenames with matches.
+    #[arg(short = 'l', long = "files_with_matches")]
+    files_with_matches: bool,
+
+    /// Match whole words only.
+    #[arg(short = 'w', long = "word_regexp")]
+    word_regexp: bool,
+
+    /// Search directories recursively (lowercase).
+    #[arg(short = 'r', long = "recursive")]
+    recursive: bool,
+
+    /// Search directories recursively (uppercase, muscle memory alias).
+    #[arg(short = 'R')]
+    recursive_upper: bool,
+
+    /// Allow patterns to match across line boundaries.
+    #[arg(short = 'U', long = "multiline")]
+    multiline: bool,
+
+    /// Extended regex (POSIX compatibility — kaish always uses Rust regex,
+    /// which is already extended). Accepted and ignored.
+    #[arg(short = 'E', long = "extended_regexp")]
+    _extended: bool,
+
+    /// Fixed strings (POSIX compatibility, treats pattern literally).
+    /// Currently accepted and ignored — grep already supports literal
+    /// patterns via the regex crate's `escape` when patterns lack regex
+    /// metachars; full -F behavior is in rg.
+    #[arg(short = 'F', long = "fixed_strings")]
+    _fixed: bool,
+
+    /// Print NUM lines after match.
+    #[arg(short = 'A', long = "after_context")]
+    after_context: Option<String>,
+
+    /// Print NUM lines before match.
+    #[arg(short = 'B', long = "before_context")]
+    before_context: Option<String>,
+
+    /// Print NUM lines before and after match.
+    #[arg(short = 'C', long = "context")]
+    context: Option<String>,
+
+    /// Include only files matching pattern.
+    #[arg(long = "include")]
+    include: Option<String>,
+
+    /// Exclude files matching pattern.
+    #[arg(long = "exclude")]
+    exclude: Option<String>,
+
+    /// Force a specific text encoding.
+    #[arg(long = "encoding")]
+    encoding: Option<String>,
+
+    /// Binary handling: quit (default), text, without-match.
+    #[arg(long = "binary")]
+    binary: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Grep {
@@ -29,127 +126,20 @@ impl Tool for Grep {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("grep", "Search for patterns in files or stdin")
-            .param(ParamSchema::required(
-                "pattern",
-                "string",
-                "Regular expression pattern to search for",
-            ))
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::Null,
-                "File to search (reads stdin if not provided)",
-            ))
-            .param(ParamSchema::optional(
-                "ignore_case",
-                "bool",
-                Value::Bool(false),
-                "Case-insensitive matching (-i)",
-            ).with_aliases(["-i"]))
-            .param(ParamSchema::optional(
-                "line_number",
-                "bool",
-                Value::Bool(false),
-                "Prefix output with line numbers (-n)",
-            ).with_aliases(["-n"]))
-            .param(ParamSchema::optional(
-                "invert",
-                "bool",
-                Value::Bool(false),
-                "Select non-matching lines (-v)",
-            ).with_aliases(["-v"]))
-            .param(ParamSchema::optional(
-                "count",
-                "bool",
-                Value::Bool(false),
-                "Only print count of matching lines (-c)",
-            ).with_aliases(["-c"]))
-            .param(ParamSchema::optional(
-                "only_matching",
-                "bool",
-                Value::Bool(false),
-                "Print only the matched parts (-o)",
-            ).with_aliases(["-o"]))
-            .param(ParamSchema::optional(
-                "after_context",
-                "int",
-                Value::Null,
-                "Print NUM lines after match (-A)",
-            ).with_aliases(["-A"]))
-            .param(ParamSchema::optional(
-                "before_context",
-                "int",
-                Value::Null,
-                "Print NUM lines before match (-B)",
-            ).with_aliases(["-B"]))
-            .param(ParamSchema::optional(
-                "context",
-                "int",
-                Value::Null,
-                "Print NUM lines before and after match (-C)",
-            ).with_aliases(["-C"]))
-            .param(ParamSchema::optional(
-                "quiet",
-                "bool",
-                Value::Bool(false),
-                "Quiet mode, only return exit code (-q)",
-            ).with_aliases(["-q"]))
-            .param(ParamSchema::optional(
-                "files_with_matches",
-                "bool",
-                Value::Bool(false),
-                "Print only filenames with matches (-l)",
-            ).with_aliases(["-l"]))
-            .param(ParamSchema::optional(
-                "word_regexp",
-                "bool",
-                Value::Bool(false),
-                "Match whole words only (-w)",
-            ).with_aliases(["-w"]))
-            .param(ParamSchema::optional(
-                "recursive",
-                "bool",
-                Value::Bool(false),
-                "Search directories recursively (-r)",
-            ).with_aliases(["-r", "-R"]))
-            .param(ParamSchema::optional(
-                "include",
-                "string",
-                Value::Null,
-                "Include only files matching pattern (--include)",
-            ).with_aliases(["--include"]))
-            .param(ParamSchema::optional(
-                "exclude",
-                "string",
-                Value::Null,
-                "Exclude files matching pattern (--exclude)",
-            ).with_aliases(["--exclude"]))
-            .param(ParamSchema::optional(
-                "multiline",
-                "bool",
-                Value::Bool(false),
-                "Allow patterns to match across line boundaries (-U)",
-            ).with_aliases(["-U", "--multiline"]))
-            .param(ParamSchema::optional(
-                "encoding",
-                "string",
-                Value::Null,
-                "Force a specific text encoding (e.g. utf-16, latin-1)",
-            ).with_aliases(["--encoding"]))
-            .param(ParamSchema::optional(
-                "binary",
-                "string",
-                Value::String("quit".into()),
-                "Binary handling: quit (default), text, without-match",
-            ).with_aliases(["--binary"]))
-            .example("Search for pattern in file", "grep pattern file.txt")
-            .example("Case-insensitive search", "grep -i ERROR log.txt")
-            .example("Show line numbers", "grep -n TODO *.rs")
-            .example("Extract matched text only", "grep -o 'https://[^\"]*' file.html")
-            .example("Context around matches", "grep -C 2 error log.txt")
-            .example("Recursive search", "grep -r TODO src/")
-            .example("With file filter", "grep -rn TODO . --include='*.rs'")
+        schema_from_clap(
+            &GrepArgs::command(),
+            "grep",
+            "Search for patterns in files or stdin",
+            [
+                ("Search for pattern in file", "grep pattern file.txt"),
+                ("Case-insensitive search", "grep -i ERROR log.txt"),
+                ("Show line numbers", "grep -n TODO *.rs"),
+                ("Extract matched text only", "grep -o 'https://[^\"]*' file.html"),
+                ("Context around matches", "grep -C 2 error log.txt"),
+                ("Recursive search", "grep -r TODO src/"),
+                ("With file filter", "grep -rn TODO . --include='*.rs'"),
+            ],
+        )
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
@@ -170,7 +160,17 @@ impl Tool for Grep {
         issues
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        flagify_bool_named(&mut args);
+
+        let parsed = match GrepArgs::try_parse_from(
+            std::iter::once("grep".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let pattern = match args.get_string("pattern", 0) {
             Some(p) => p,
             None => return ExecResult::failure(1, "grep: missing pattern argument"),
@@ -542,6 +542,22 @@ impl Grep {
             let output = OutputData::table(headers, total_nodes)
                 .with_rich_json(serde_json::Value::Array(total_rich));
             ExecResult::with_output_and_text(output, total_output)
+        }
+    }
+}
+
+/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
+/// clap doesn't reject `--ignore_case=true` for a bool field.
+fn flagify_bool_named(args: &mut ToolArgs) {
+    let bool_keys: Vec<String> = args
+        .named
+        .iter()
+        .filter(|(_, v)| matches!(v, Value::Bool(_)))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in bool_keys {
+        if let Some(Value::Bool(true)) = args.named.remove(&k) {
+            args.flags.insert(k);
         }
     }
 }

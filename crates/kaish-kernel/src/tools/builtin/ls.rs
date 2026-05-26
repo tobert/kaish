@@ -1,17 +1,65 @@
 //! ls — List directory contents.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::cmp::Ordering;
 use std::path::Path;
 
 use crate::ast::Value;
 use crate::glob::contains_glob;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::vfs::DirEntry;
 
 /// Ls tool: list directory contents.
 pub struct Ls;
+
+/// clap-derived argv layer for ls. See docs/clap-migration.md.
+///
+/// `disable_help_flag = true` is required because `-h` is taken by `--human`,
+/// not by clap's auto-injected `--help`.
+#[derive(Parser, Debug)]
+#[command(name = "ls", about = "List directory contents", disable_help_flag = true)]
+struct LsArgs {
+    /// Use long format with details.
+    #[arg(short = 'l', long = "long")]
+    long: bool,
+
+    /// Show hidden files starting with `.`.
+    #[arg(short = 'a', long = "all")]
+    all: bool,
+
+    /// One entry per line.
+    #[arg(short = '1', long = "one")]
+    one: bool,
+
+    /// Human-readable sizes.
+    #[arg(short = 'h', long = "human")]
+    human: bool,
+
+    /// Sort by modification time.
+    #[arg(short = 't', long = "sort_time")]
+    sort_time: bool,
+
+    /// Reverse sort order.
+    #[arg(short = 'r', long = "reverse")]
+    reverse: bool,
+
+    /// Sort by file size.
+    #[arg(short = 'S', long = "sort_size")]
+    sort_size: bool,
+
+    /// List subdirectories recursively.
+    #[arg(short = 'R', long = "recursive")]
+    recursive: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Ls {
@@ -20,81 +68,47 @@ impl Tool for Ls {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("ls", "List directory contents")
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::String(".".into()),
-                "Directory path to list",
-            ))
-            .param(ParamSchema::optional(
-                "long",
-                "bool",
-                Value::Bool(false),
-                "Use long format with details (-l)",
-            ).with_aliases(["-l"]))
-            .param(ParamSchema::optional(
-                "all",
-                "bool",
-                Value::Bool(false),
-                "Show hidden files starting with . (-a)",
-            ).with_aliases(["-a", "-A"]))
-            .param(ParamSchema::optional(
-                "one",
-                "bool",
-                Value::Bool(false),
-                "One entry per line (-1)",
-            ).with_aliases(["-1"]))
-            .param(ParamSchema::optional(
-                "human",
-                "bool",
-                Value::Bool(false),
-                "Human-readable sizes (-h)",
-            ).with_aliases(["-h"]))
-            .param(ParamSchema::optional(
-                "sort_time",
-                "bool",
-                Value::Bool(false),
-                "Sort by modification time (-t)",
-            ).with_aliases(["-t"]))
-            .param(ParamSchema::optional(
-                "reverse",
-                "bool",
-                Value::Bool(false),
-                "Reverse sort order (-r)",
-            ).with_aliases(["-r"]))
-            .param(ParamSchema::optional(
-                "sort_size",
-                "bool",
-                Value::Bool(false),
-                "Sort by file size (-S)",
-            ).with_aliases(["-S"]))
-            .param(ParamSchema::optional(
-                "recursive",
-                "bool",
-                Value::Bool(false),
-                "List subdirectories recursively (-R)",
-            ).with_aliases(["-R"]))
-            .example("List current directory", "ls")
-            .example("Show hidden files with details", "ls -la /path")
-            .example("Sort by size, largest first", "ls -lS /path")
-            .example("Human-readable sizes", "ls -lh /path")
-            .example("Recursive listing", "ls -R src/")
+        schema_from_clap(
+            &LsArgs::command(),
+            "ls",
+            "List directory contents",
+            [
+                ("List current directory", "ls"),
+                ("Show hidden files with details", "ls -la /path"),
+                ("Sort by size, largest first", "ls -lS /path"),
+                ("Human-readable sizes", "ls -lh /path"),
+                ("Recursive listing", "ls -R src/"),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        // Tests poke args.named.insert("long", Value::Bool(true)); to_argv would
+        // emit `--long=true` which clap rejects for bool fields. Promote bool
+        // named entries to flag form before clap parsing.
+        flagify_bool_named(&mut args);
+
+        let parsed = match LsArgs::try_parse_from(
+            std::iter::once("ls".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("ls: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let path = args
             .get_string("path", 0)
             .unwrap_or_else(|| ".".to_string());
 
         let resolved = ctx.resolve_path(&path);
-        let long_format = args.has_flag("long") || args.has_flag("l");
-        let show_all = args.has_flag("all") || args.has_flag("a");
-        let human_readable = args.has_flag("human") || args.has_flag("h");
-        let sort_time = args.has_flag("sort_time") || args.has_flag("t");
-        let sort_size = args.has_flag("sort_size") || args.has_flag("S");
-        let reverse = args.has_flag("reverse") || args.has_flag("r");
-        let recursive = args.has_flag("recursive") || args.has_flag("R");
+        let long_format = parsed.long;
+        let show_all = parsed.all;
+        let human_readable = parsed.human;
+        let sort_time = parsed.sort_time;
+        let sort_size = parsed.sort_size;
+        let reverse = parsed.reverse;
+        let recursive = parsed.recursive;
+        let _one_per_line = parsed.one;
 
         let opts = ListOptions {
             long_format,
@@ -446,6 +460,22 @@ impl Ls {
             OutputData::nodes(dir_nodes)
         };
         ExecResult::with_output_and_text(output, text_output.trim_end().to_string())
+    }
+}
+
+/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
+/// clap doesn't reject `--long=true` as a value for a bool field.
+fn flagify_bool_named(args: &mut ToolArgs) {
+    let bool_keys: Vec<String> = args
+        .named
+        .iter()
+        .filter(|(_, v)| matches!(v, Value::Bool(_)))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in bool_keys {
+        if let Some(Value::Bool(true)) = args.named.remove(&k) {
+            args.flags.insert(k);
+        }
     }
 }
 

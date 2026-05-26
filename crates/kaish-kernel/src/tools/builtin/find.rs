@@ -12,6 +12,7 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -19,11 +20,48 @@ use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::ignore_config::IgnoreScope;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::walker::{EntryTypes, FileWalker, GlobPath, WalkOptions};
 
 /// Find tool: searches for files in directory hierarchy.
 pub struct Find;
+
+/// clap-derived argv layer for find. See docs/clap-migration.md.
+///
+/// Find's predicates (`-name`, `-type`, `-maxdepth`, etc.) are kaish-style
+/// named values, not real POSIX find predicates — they're declared here for
+/// schema reflection, but the body still reads them off args.named because
+/// Value-typed parsing (Int/String) is preserved by the existing helpers.
+#[derive(Parser, Debug)]
+#[command(name = "find", about = "Search for files in directory hierarchy")]
+struct FindArgs {
+    /// Pattern to match filename (glob syntax).
+    #[arg(long = "name")]
+    name: Option<String>,
+
+    /// Type filter: 'f' for files, 'd' for directories.
+    #[arg(id = "type", long = "type")]
+    type_: Option<String>,
+
+    /// Maximum depth to descend.
+    #[arg(long = "maxdepth")]
+    maxdepth: Option<String>,
+
+    /// Modified time filter: +N older than N days, -N newer than N days.
+    #[arg(long = "mtime")]
+    mtime: Option<String>,
+
+    /// Size filter: +N larger than N bytes, -N smaller than N bytes.
+    #[arg(long = "size")]
+    size: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Find {
@@ -32,49 +70,26 @@ impl Tool for Find {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("find", "Search for files in directory hierarchy")
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::String(".".into()),
-                "Starting directory (default: current directory)",
-            ))
-            .param(ParamSchema::optional(
-                "name",
-                "string",
-                Value::Null,
-                "Pattern to match filename (glob syntax)",
-            ))
-            .param(ParamSchema::optional(
-                "type",
-                "string",
-                Value::Null,
-                "Type filter: 'f' for files, 'd' for directories",
-            ))
-            .param(ParamSchema::optional(
-                "maxdepth",
-                "int",
-                Value::Null,
-                "Maximum depth to descend",
-            ))
-            .param(ParamSchema::optional(
-                "mtime",
-                "int",
-                Value::Null,
-                "Modified time filter: +N older than N days, -N newer than N days",
-            ))
-            .param(ParamSchema::optional(
-                "size",
-                "string",
-                Value::Null,
-                "Size filter: +N larger than N bytes, -N smaller than N bytes",
-            ))
-            .example("Find all files", "find .")
-            .example("Find by name pattern", "find src -name '*.rs'")
-            .example("Find directories only", "find . -type d")
+        schema_from_clap(
+            &FindArgs::command(),
+            "find",
+            "Search for files in directory hierarchy",
+            [
+                ("Find all files", "find ."),
+                ("Find by name pattern", "find src -name '*.rs'"),
+                ("Find directories only", "find . -type d"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match FindArgs::try_parse_from(
+            std::iter::once("find".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("find: {e}")),
+        };
+        parsed.global.apply(ctx);
         // Get starting path (positional or named)
         let start_path = args
             .get_string("path", 0)

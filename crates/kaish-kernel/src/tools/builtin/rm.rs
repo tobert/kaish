@@ -4,12 +4,41 @@
 //! (`set -o trash`) for safe autonomous operation.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
 use crate::backend::{BackendError, KernelBackend};
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+
+/// clap-derived argv layer for rm. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "rm", about = "Remove files and directories")]
+struct RmArgs {
+    /// Remove directories and their contents recursively.
+    #[arg(short = 'r', long = "recursive")]
+    recursive: bool,
+
+    /// Alias for -r (uppercase, muscle memory).
+    #[arg(short = 'R')]
+    recursive_upper: bool,
+
+    /// Ignore nonexistent files, never prompt.
+    #[arg(short = 'f', long = "force")]
+    force: bool,
+
+    /// Confirmation nonce for latch-gated operations.
+    #[arg(long = "confirm")]
+    confirm: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 /// Rm tool: remove files and directories.
 pub struct Rm;
@@ -76,43 +105,37 @@ impl Tool for Rm {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("rm", "Remove files and directories")
-            .param(ParamSchema::required("path", "string", "Path to remove"))
-            .param(ParamSchema::optional(
-                "recursive",
-                "bool",
-                Value::Bool(false),
-                "Remove directories and their contents recursively (-r)",
-            ).with_aliases(["-r", "-R"]))
-            .param(ParamSchema::optional(
-                "force",
-                "bool",
-                Value::Bool(false),
-                "Ignore nonexistent files, never prompt (-f)",
-            ).with_aliases(["-f"]))
-            .param(ParamSchema::optional(
-                "confirm",
-                "string",
-                Value::Null,
-                "Confirmation nonce for latch-gated operations (--confirm=NONCE)",
-            ))
-            .example("Remove a file", "rm temp.txt")
-            .example("Remove directory recursively", "rm -rf build/")
-            .example("Confirm latched removal", "rm --confirm=a3f7b2c1 bigfile.bin")
+        schema_from_clap(
+            &RmArgs::command(),
+            "rm",
+            "Remove files and directories",
+            [
+                ("Remove a file", "rm temp.txt"),
+                ("Remove directory recursively", "rm -rf build/"),
+                ("Confirm latched removal", "rm --confirm=a3f7b2c1 bigfile.bin"),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        flagify_bool_named(&mut args);
+
+        let parsed = match RmArgs::try_parse_from(
+            std::iter::once("rm".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("rm: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let path = match args.get_string("path", 0) {
             Some(p) => p,
             None => return ExecResult::failure(1, "rm: missing path argument"),
         };
 
-        let recursive = args.has_flag("recursive") || args.has_flag("r");
-        let force = args.has_flag("force") || args.has_flag("f");
-        let confirm = args.get_named("confirm").and_then(|v| match v {
-            Value::String(s) => Some(s.clone()),
-            _ => None,
-        });
+        let recursive = parsed.recursive || parsed.recursive_upper;
+        let force = parsed.force;
+        let confirm = parsed.confirm.clone();
         let resolved = ctx.resolve_path(&path);
 
         // Check existence first
@@ -183,6 +206,22 @@ impl Tool for Rm {
                     Err(e) => ExecResult::failure(1, format!("rm: {}: {}", path, e)),
                 }
             }
+        }
+    }
+}
+
+/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
+/// clap doesn't reject `--recursive=true` for a bool field.
+fn flagify_bool_named(args: &mut ToolArgs) {
+    let bool_keys: Vec<String> = args
+        .named
+        .iter()
+        .filter(|(_, v)| matches!(v, Value::Bool(_)))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in bool_keys {
+        if let Some(Value::Bool(true)) = args.named.remove(&k) {
+            args.flags.insert(k);
         }
     }
 }

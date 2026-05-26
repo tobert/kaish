@@ -1,15 +1,56 @@
 //! glob — Expand glob patterns to matching file paths.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::walker::{EntryTypes, FileWalker, GlobPath, IncludeExclude, WalkOptions};
 
 /// Glob tool: expand glob patterns to matching file paths.
 pub struct Glob;
+
+/// clap-derived argv layer for glob. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "glob", about = "Expand glob patterns to matching file paths")]
+struct GlobArgs {
+    /// Maximum depth to recurse.
+    #[arg(short = 'd', long = "depth")]
+    depth: Option<String>,
+
+    /// Include ignored files like .git, node_modules.
+    #[arg(long = "no_ignore", visible_alias = "no-ignore")]
+    no_ignore: bool,
+
+    /// Include hidden files starting with `.`.
+    #[arg(short = 'a', long = "hidden")]
+    hidden: bool,
+
+    /// Entry type: f=files, d=dirs, a=all.
+    #[arg(id = "type", short = 't', long = "type")]
+    type_: Option<String>,
+
+    /// Null-separated output.
+    #[arg(short = '0', long = "null")]
+    null: bool,
+
+    /// Include pattern (can be repeated).
+    #[arg(long = "include")]
+    include: Option<String>,
+
+    /// Exclude pattern (can be repeated).
+    #[arg(long = "exclude")]
+    exclude: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Glob {
@@ -18,67 +59,35 @@ impl Tool for Glob {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("glob", "Expand glob patterns to matching file paths")
-            .param(ParamSchema::required(
-                "pattern",
-                "string",
-                "Glob pattern (e.g., **/*.rs, src/**/*.go)",
-            ))
-            .param(ParamSchema::optional(
-                "depth",
-                "int",
-                Value::Null,
-                "Maximum depth to recurse (-d)",
-            ))
-            .param(ParamSchema::optional(
-                "no_ignore",
-                "bool",
-                Value::Bool(false),
-                "Include ignored files like .git, node_modules (--no-ignore)",
-            ))
-            .param(ParamSchema::optional(
-                "hidden",
-                "bool",
-                Value::Bool(false),
-                "Include hidden files starting with . (-a)",
-            ))
-            .param(ParamSchema::optional(
-                "type",
-                "string",
-                Value::String("f".into()),
-                "Entry type: f=files, d=dirs, a=all (-t)",
-            ))
-            .param(ParamSchema::optional(
-                "null",
-                "bool",
-                Value::Bool(false),
-                "Null-separated output (-0)",
-            ))
-            .param(ParamSchema::optional(
-                "include",
-                "string",
-                Value::Null,
-                "Include pattern (can be repeated) (--include)",
-            ))
-            .param(ParamSchema::optional(
-                "exclude",
-                "string",
-                Value::Null,
-                "Exclude pattern (can be repeated) (--exclude)",
-            ))
-            .example("Find all Rust files", "glob **/*.rs")
-            .example("Find in specific directory", "glob src/**/*.rs")
-            .example("Multiple extensions", "glob **/*.{rs,go,py}")
-            .example("With depth limit", "glob **/*.rs -d 3")
-            .example("Include hidden files", "glob **/*.rs -a")
-            .example("Null-separated for xargs", "glob **/*.rs -0")
-            .example(
-                "Exclude test files",
-                "glob **/*.rs --exclude='*_test.rs'",
-            )
+        schema_from_clap(
+            &GlobArgs::command(),
+            "glob",
+            "Expand glob patterns to matching file paths",
+            [
+                ("Find all Rust files", "glob **/*.rs"),
+                ("Find in specific directory", "glob src/**/*.rs"),
+                ("Multiple extensions", "glob **/*.{rs,go,py}"),
+                ("With depth limit", "glob **/*.rs -d 3"),
+                ("Include hidden files", "glob **/*.rs -a"),
+                ("Null-separated for xargs", "glob **/*.rs -0"),
+                ("Exclude test files", "glob **/*.rs --exclude='*_test.rs'"),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        // Tests poke args.named.insert("no_ignore", Value::Bool(true)); promote
+        // such bool-typed named entries to flag form so clap accepts them.
+        flagify_bool_named(&mut args);
+
+        let parsed = match GlobArgs::try_parse_from(
+            std::iter::once("glob".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("glob: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Get the pattern
         let pattern = match args.get_string("pattern", 0) {
             Some(p) => p,
@@ -219,6 +228,22 @@ impl Tool for Glob {
         let mut result = ExecResult::with_output(OutputData::nodes(nodes));
         result.data = Some(Value::Json(serde_json::Value::Array(json_array)));
         result
+    }
+}
+
+/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
+/// clap doesn't reject `--no_ignore=true` as a value for a bool field.
+fn flagify_bool_named(args: &mut ToolArgs) {
+    let bool_keys: Vec<String> = args
+        .named
+        .iter()
+        .filter(|(_, v)| matches!(v, Value::Bool(_)))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in bool_keys {
+        if let Some(Value::Bool(true)) = args.named.remove(&k) {
+            args.flags.insert(k);
+        }
     }
 }
 

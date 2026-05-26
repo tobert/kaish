@@ -20,14 +20,73 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::vfs::GitVfs;
 
 /// Git tool: version control operations via git2-rs.
 pub struct Git;
+
+/// clap-derived argv layer for git. See docs/clap-migration.md.
+///
+/// git multiplexes subcommands; rather than enumerate every subflag, the
+/// struct declares the flags / named values our handlers consult (-s, -m,
+/// -c, -b, -n, -f, --oneline, --short, --porcelain, --author, --reason)
+/// plus a trailing positional sink. Subcommand-specific argv is read off
+/// `args.positional` like before.
+#[derive(Parser, Debug)]
+#[command(name = "git", about = "Version control operations")]
+struct GitArgs {
+    /// Short status format (-s).
+    #[arg(short = 's', long = "short")]
+    short: bool,
+
+    /// Porcelain status format.
+    #[arg(long = "porcelain")]
+    porcelain: bool,
+
+    /// One-line log format.
+    #[arg(long = "oneline")]
+    oneline: bool,
+
+    /// Force flag (-f) for worktree remove etc.
+    #[arg(short = 'f', long = "force")]
+    force: bool,
+
+    /// Commit message.
+    #[arg(short = 'm', long = "message")]
+    message: Option<String>,
+
+    /// Number of entries / count.
+    #[arg(short = 'n', long = "count")]
+    count: Option<String>,
+
+    /// Branch name to create (-c).
+    #[arg(short = 'c')]
+    c: Option<String>,
+
+    /// Branch name to create and checkout (-b).
+    #[arg(short = 'b')]
+    b: Option<String>,
+
+    /// Author for commit.
+    #[arg(long = "author")]
+    author: Option<String>,
+
+    /// Reason for worktree lock.
+    #[arg(long = "reason")]
+    reason: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — positionals (subcommand + args) are read off args.positional.
+    #[arg(hide = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Git {
@@ -36,30 +95,29 @@ impl Tool for Git {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("git", "Version control operations")
-            .param(ParamSchema::required(
-                "subcommand",
-                "string",
-                "Git subcommand (init, clone, status, add, commit, log, diff, branch, checkout, worktree)",
-            ))
-            .param(ParamSchema::optional(
-                "args",
-                "array",
-                Value::Null,
-                "Additional arguments for the subcommand",
-            ))
-            .param(ParamSchema::optional(
-                "count",
-                "int",
-                Value::Null,
-                "Number of entries to show (-n)",
-            ).with_aliases(["-n"]))
-            .example("Show status", "git status")
-            .example("Stage and commit", "git add file.rs; git commit -m 'fix bug'")
-            .example("Recent log", "git log -n 5 --oneline")
+        schema_from_clap(
+            &GitArgs::command(),
+            "git",
+            "Version control operations",
+            [
+                ("Show status", "git status"),
+                ("Stage and commit", "git add file.rs; git commit -m 'fix bug'"),
+                ("Recent log", "git log -n 5 --oneline"),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        flagify_bool_named(&mut args);
+
+        let parsed = match GitArgs::try_parse_from(
+            std::iter::once("git".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("git: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Get subcommand
         let subcommand = match args.get_string("subcommand", 0) {
             Some(s) => s,
@@ -91,6 +149,22 @@ impl Tool for Git {
             "checkout" => git_checkout(&rest_args, ctx).await,
             "worktree" => git_worktree(&args, &rest_args, ctx).await,
             _ => ExecResult::failure(1, format!("git: unknown subcommand '{}'", subcommand)),
+        }
+    }
+}
+
+/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
+/// clap doesn't reject `--force=true` for a bool field.
+fn flagify_bool_named(args: &mut ToolArgs) {
+    let bool_keys: Vec<String> = args
+        .named
+        .iter()
+        .filter(|(_, v)| matches!(v, Value::Bool(_)))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in bool_keys {
+        if let Some(Value::Bool(true)) = args.named.remove(&k) {
+            args.flags.insert(k);
         }
     }
 }

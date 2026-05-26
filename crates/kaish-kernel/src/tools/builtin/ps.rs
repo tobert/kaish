@@ -4,11 +4,36 @@
 //! Covers the common 80% use case while being pipeline-friendly with `--json`.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::collections::HashMap;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+
+/// clap-derived argv layer for ps. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "ps", about = "List processes")]
+struct PsArgs {
+    /// Show all processes, not just current user's.
+    #[arg(short = 'a', long = "all")]
+    all: bool,
+
+    /// Filter to specific PID.
+    #[arg(short = 'p', long = "pid")]
+    pid: Option<String>,
+
+    /// Filter by username.
+    #[arg(short = 'u', long = "user")]
+    user: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 /// Process information for output.
 #[derive(Debug, Clone)]
@@ -36,30 +61,34 @@ impl Tool for Ps {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("ps", "List processes")
-            .param(
-                ParamSchema::optional("all", "bool", Value::Bool(false), "Show all processes, not just current user's (-a)")
-                    .with_aliases(["-a", "--all"]),
-            )
-            .param(
-                ParamSchema::optional("pid", "int", Value::Null, "Filter to specific PID (-p)")
-                    .with_aliases(["-p", "--pid"]),
-            )
-            .param(
-                ParamSchema::optional("user", "string", Value::Null, "Filter by username (-u)")
-                    .with_aliases(["-u", "--user"]),
-            )
-            .example("Current user's processes", "ps")
-            .example("All processes", "ps -a")
-            .example("Specific PID", "ps pid=1234 -a")
-            .example("Filter by user", "ps user=root -a")
-            .example("JSON output", "ps --json")
-            .example("All processes as JSON", "ps -a --json")
-            .example("JSON with jq", "ps -a --json | jq '.[].command'")
+        schema_from_clap(
+            &PsArgs::command(),
+            "ps",
+            "List processes",
+            [
+                ("Current user's processes", "ps"),
+                ("All processes", "ps -a"),
+                ("Specific PID", "ps pid=1234 -a"),
+                ("Filter by user", "ps user=root -a"),
+                ("JSON output", "ps --json"),
+                ("All processes as JSON", "ps -a --json"),
+                ("JSON with jq", "ps -a --json | jq '.[].command'"),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
-        let show_all = args.has_flag("all") || args.has_flag("a");
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        flagify_bool_named(&mut args);
+
+        let parsed = match PsArgs::try_parse_from(
+            std::iter::once("ps".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("ps: {e}")),
+        };
+        parsed.global.apply(ctx);
+
+        let show_all = parsed.all;
 
         let filter_pid = args
             .get("pid", usize::MAX)
@@ -183,6 +212,22 @@ impl Tool for Ps {
         processes.sort_by_key(|p| p.pid);
 
         format_table(&processes)
+    }
+}
+
+/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
+/// clap doesn't reject `--all=true` for a bool field.
+fn flagify_bool_named(args: &mut ToolArgs) {
+    let bool_keys: Vec<String> = args
+        .named
+        .iter()
+        .filter(|(_, v)| matches!(v, Value::Bool(_)))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in bool_keys {
+        if let Some(Value::Bool(true)) = args.named.remove(&k) {
+            args.flags.insert(k);
+        }
     }
 }
 

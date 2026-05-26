@@ -15,16 +15,53 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Spawn tool: runs an external command as a subprocess and captures output.
 pub struct Spawn;
+
+/// clap-derived argv layer for spawn. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "spawn", about = "Spawn an external command as a subprocess")]
+struct SpawnArgs {
+    /// Command to execute (name or path).
+    #[arg(long = "command")]
+    command: Option<String>,
+
+    /// Arguments as JSON array or single string.
+    #[arg(long = "argv")]
+    argv: Option<String>,
+
+    /// Environment variables as JSON object string.
+    #[arg(long = "env")]
+    env: Option<String>,
+
+    /// Working directory for the command.
+    #[arg(long = "cwd")]
+    cwd: Option<String>,
+
+    /// Timeout in milliseconds.
+    #[arg(long = "timeout")]
+    timeout: Option<String>,
+
+    /// Start with empty environment.
+    #[arg(long = "clear_env")]
+    clear_env: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Spawn {
@@ -33,47 +70,28 @@ impl Tool for Spawn {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("spawn", "Spawn an external command as a subprocess")
-            .param(ParamSchema::required(
-                "command",
-                "string",
-                "Command to execute (name or path)",
-            ))
-            .param(ParamSchema::optional(
-                "argv",
-                "string",
-                Value::Null,
-                "Arguments as JSON array (e.g. [\"arg1\", \"arg2\"]) or single string",
-            ))
-            .param(ParamSchema::optional(
-                "env",
-                "string",
-                Value::Null,
-                "Environment variables as JSON object string",
-            ))
-            .param(ParamSchema::optional(
-                "cwd",
-                "string",
-                Value::Null,
-                "Working directory for the command",
-            ))
-            .param(ParamSchema::optional(
-                "timeout",
-                "int",
-                Value::Null,
-                "Timeout in milliseconds (command killed if exceeded)",
-            ))
-            .param(ParamSchema::optional(
-                "clear_env",
-                "bool",
-                Value::Bool(false),
-                "Start with empty environment",
-            ))
-            .example("Run a command", "spawn command=\"cargo\" argv=[\"build\"]")
-            .example("With timeout", "spawn command=\"sleep\" argv=[\"10\"] timeout=1000")
+        schema_from_clap(
+            &SpawnArgs::command(),
+            "spawn",
+            "Spawn an external command as a subprocess",
+            [
+                ("Run a command", "spawn command=\"cargo\" argv=[\"build\"]"),
+                ("With timeout", "spawn command=\"sleep\" argv=[\"10\"] timeout=1000"),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        flagify_bool_named(&mut args);
+
+        let parsed = match SpawnArgs::try_parse_from(
+            std::iter::once("spawn".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("spawn: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         if !ctx.allow_external_commands {
             return ExecResult::failure(1,
                 "spawn: external commands are disabled (allow_external_commands=false)");
@@ -210,6 +228,22 @@ impl Tool for Spawn {
                 }
                 Err(e) => ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
             }
+        }
+    }
+}
+
+/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
+/// clap doesn't reject `--clear_env=true` for a bool field.
+fn flagify_bool_named(args: &mut ToolArgs) {
+    let bool_keys: Vec<String> = args
+        .named
+        .iter()
+        .filter(|(_, v)| matches!(v, Value::Bool(_)))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in bool_keys {
+        if let Some(Value::Bool(true)) = args.named.remove(&k) {
+            args.flags.insert(k);
         }
     }
 }

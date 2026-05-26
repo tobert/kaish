@@ -14,6 +14,7 @@
 //! behind `native` once the rest of the design settles.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Encoding, SearcherBuilder};
@@ -24,10 +25,126 @@ use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::grep_engine::{AccumulatorSink, ContextKind, SearchEvent};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::walker::{EntryTypes, FileWalker, IncludeExclude, WalkOptions};
 
 pub struct Rg;
+
+/// clap-derived argv layer for rg. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "rg", about = "ripgrep — recursive search with gitignore awareness")]
+struct RgArgs {
+    /// Case-insensitive matching.
+    #[arg(short = 'i', long = "ignore_case")]
+    ignore_case: bool,
+
+    /// Match whole words only.
+    #[arg(short = 'w', long = "word")]
+    word: bool,
+
+    /// Treat pattern as a literal string.
+    #[arg(short = 'F', long = "fixed_strings")]
+    fixed_strings: bool,
+
+    /// Select non-matching lines.
+    #[arg(short = 'v', long = "invert")]
+    invert: bool,
+
+    /// Show line numbers (default on).
+    #[arg(short = 'n', long = "line_number")]
+    line_number: bool,
+
+    /// Suppress line numbers.
+    #[arg(short = 'N', long = "no_line_number")]
+    no_line_number: bool,
+
+    /// Count matching lines per file.
+    #[arg(short = 'c', long = "count")]
+    count: bool,
+
+    /// List only filenames with matches.
+    #[arg(short = 'l', long = "files_with_matches")]
+    files_with_matches: bool,
+
+    /// Print only matched parts.
+    #[arg(short = 'o', long = "only_matching")]
+    only_matching: bool,
+
+    /// Print NUM lines after each match.
+    #[arg(short = 'A', long = "after_context")]
+    after_context: Option<String>,
+
+    /// Print NUM lines before each match.
+    #[arg(short = 'B', long = "before_context")]
+    before_context: Option<String>,
+
+    /// Print NUM lines before and after each match.
+    #[arg(short = 'C', long = "context")]
+    context: Option<String>,
+
+    /// Stop after NUM matches per file.
+    #[arg(short = 'm', long = "max_count", visible_alias = "max-count")]
+    max_count: Option<String>,
+
+    /// Limit directory recursion depth.
+    #[arg(long = "max_depth", visible_alias = "max-depth")]
+    max_depth: Option<String>,
+
+    /// Skip files larger than this many bytes.
+    #[arg(long = "max_filesize", visible_alias = "max-filesize")]
+    max_filesize: Option<String>,
+
+    /// Allow patterns to match across line boundaries.
+    #[arg(short = 'U', long = "multiline")]
+    multiline: bool,
+
+    /// Only search files matching the given type.
+    #[arg(id = "type", short = 't', long = "type")]
+    type_: Option<String>,
+
+    /// Skip files matching the given type.
+    #[arg(short = 'T', long = "type_not", visible_alias = "type-not")]
+    type_not: Option<String>,
+
+    /// Search hidden files and directories.
+    #[arg(long = "hidden")]
+    hidden: bool,
+
+    /// Don't honor .gitignore / .ignore / .rgignore.
+    #[arg(long = "no_ignore", visible_alias = "no-ignore")]
+    no_ignore: bool,
+
+    /// Include only files matching glob.
+    #[arg(long = "include")]
+    include: Option<String>,
+
+    /// Exclude files matching glob.
+    #[arg(long = "exclude")]
+    exclude: Option<String>,
+
+    /// Force a specific text encoding.
+    #[arg(long = "encoding")]
+    encoding: Option<String>,
+
+    /// Binary handling: quit (default), text, without-match.
+    #[arg(long = "binary")]
+    binary: Option<String>,
+
+    /// List files that would be searched, without searching them.
+    #[arg(long = "files")]
+    files: bool,
+
+    /// Use PCRE2 regex (requires --features pcre2).
+    #[arg(short = 'P', long = "pcre2")]
+    pcre2: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Rg {
@@ -36,176 +153,31 @@ impl Tool for Rg {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("rg", "ripgrep — recursive search with gitignore awareness")
-            .param(ParamSchema::required(
-                "pattern",
-                "string",
-                "Regular expression pattern to search for",
-            ))
-            .param(ParamSchema::optional(
-                "ignore_case",
-                "bool",
-                Value::Bool(false),
-                "Case-insensitive matching (-i)",
-            ).with_aliases(["-i"]))
-            .param(ParamSchema::optional(
-                "word",
-                "bool",
-                Value::Bool(false),
-                "Match whole words only (-w)",
-            ).with_aliases(["-w"]))
-            .param(ParamSchema::optional(
-                "fixed_strings",
-                "bool",
-                Value::Bool(false),
-                "Treat pattern as a literal string (-F)",
-            ).with_aliases(["-F"]))
-            .param(ParamSchema::optional(
-                "invert",
-                "bool",
-                Value::Bool(false),
-                "Select non-matching lines (-v)",
-            ).with_aliases(["-v"]))
-            .param(ParamSchema::optional(
-                "line_number",
-                "bool",
-                Value::Bool(true),
-                "Show line numbers (-n, default on)",
-            ).with_aliases(["-n"]))
-            .param(ParamSchema::optional(
-                "no_line_number",
-                "bool",
-                Value::Bool(false),
-                "Suppress line numbers (-N)",
-            ).with_aliases(["-N"]))
-            .param(ParamSchema::optional(
-                "count",
-                "bool",
-                Value::Bool(false),
-                "Count matching lines per file (-c)",
-            ).with_aliases(["-c"]))
-            .param(ParamSchema::optional(
-                "files_with_matches",
-                "bool",
-                Value::Bool(false),
-                "List only filenames with matches (-l)",
-            ).with_aliases(["-l"]))
-            .param(ParamSchema::optional(
-                "only_matching",
-                "bool",
-                Value::Bool(false),
-                "Print only matched parts (-o)",
-            ).with_aliases(["-o"]))
-            .param(ParamSchema::optional(
-                "after_context",
-                "int",
-                Value::Null,
-                "Print NUM lines after each match (-A)",
-            ).with_aliases(["-A"]))
-            .param(ParamSchema::optional(
-                "before_context",
-                "int",
-                Value::Null,
-                "Print NUM lines before each match (-B)",
-            ).with_aliases(["-B"]))
-            .param(ParamSchema::optional(
-                "context",
-                "int",
-                Value::Null,
-                "Print NUM lines before and after each match (-C)",
-            ).with_aliases(["-C"]))
-            .param(ParamSchema::optional(
-                "max_count",
-                "int",
-                Value::Null,
-                "Stop after NUM matches per file (-m)",
-            ).with_aliases(["-m", "--max-count"]))
-            .param(ParamSchema::optional(
-                "max_depth",
-                "int",
-                Value::Null,
-                "Limit directory recursion depth (--max-depth)",
-            ).with_aliases(["--max-depth"]))
-            .param(ParamSchema::optional(
-                "max_filesize",
-                "int",
-                Value::Null,
-                "Skip files larger than this many bytes (--max-filesize)",
-            ).with_aliases(["--max-filesize"]))
-            .param(ParamSchema::optional(
-                "multiline",
-                "bool",
-                Value::Bool(false),
-                "Allow patterns to match across line boundaries (-U)",
-            ).with_aliases(["-U", "--multiline"]))
-            .param(ParamSchema::optional(
-                "type",
-                "string",
-                Value::Null,
-                "Only search files matching the given type (-tjs, -trust)",
-            ).with_aliases(["-t", "--type"]))
-            .param(ParamSchema::optional(
-                "type_not",
-                "string",
-                Value::Null,
-                "Skip files matching the given type (-Tjs, -Trust)",
-            ).with_aliases(["-T", "--type-not"]))
-            .param(ParamSchema::optional(
-                "hidden",
-                "bool",
-                Value::Bool(false),
-                "Search hidden files and directories (--hidden)",
-            ).with_aliases(["--hidden"]))
-            .param(ParamSchema::optional(
-                "no_ignore",
-                "bool",
-                Value::Bool(false),
-                "Don't honor .gitignore / .ignore / .rgignore (--no-ignore)",
-            ).with_aliases(["--no-ignore"]))
-            .param(ParamSchema::optional(
-                "include",
-                "string",
-                Value::Null,
-                "Include only files matching glob (--include)",
-            ).with_aliases(["--include"]))
-            .param(ParamSchema::optional(
-                "exclude",
-                "string",
-                Value::Null,
-                "Exclude files matching glob (--exclude)",
-            ).with_aliases(["--exclude"]))
-            .param(ParamSchema::optional(
-                "encoding",
-                "string",
-                Value::Null,
-                "Force a specific text encoding (e.g. utf-16, latin-1)",
-            ).with_aliases(["--encoding"]))
-            .param(ParamSchema::optional(
-                "binary",
-                "string",
-                Value::String("quit".into()),
-                "Binary handling: quit (default), text, without-match",
-            ).with_aliases(["--binary"]))
-            .param(ParamSchema::optional(
-                "files",
-                "bool",
-                Value::Bool(false),
-                "List files that would be searched, without searching them (--files)",
-            ).with_aliases(["--files"]))
-            .param(ParamSchema::optional(
-                "pcre2",
-                "bool",
-                Value::Bool(false),
-                "Use PCRE2 regex (-P; requires --features pcre2)",
-            ).with_aliases(["-P"]))
-            .example("Recursive search", "rg pattern .")
-            .example("Type filter: only Rust files", "rg -trust 'fn main' .")
-            .example("Type filter: skip JS files", "rg -Tjs TODO .")
-            .example("Multiline match", "rg -U '(?s)foo.*bar' .")
-            .example("Search hidden files", "rg --hidden secret .")
+        schema_from_clap(
+            &RgArgs::command(),
+            "rg",
+            "ripgrep — recursive search with gitignore awareness",
+            [
+                ("Recursive search", "rg pattern ."),
+                ("Type filter: only Rust files", "rg -trust 'fn main' ."),
+                ("Type filter: skip JS files", "rg -Tjs TODO ."),
+                ("Multiline match", "rg -U '(?s)foo.*bar' ."),
+                ("Search hidden files", "rg --hidden secret ."),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        flagify_bool_named(&mut args);
+
+        let parsed = match RgArgs::try_parse_from(
+            std::iter::once("rg".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("rg: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let pattern = match args.get_string("pattern", 0) {
             Some(p) => p,
             None => return ExecResult::failure(2, "rg: missing pattern"),
@@ -413,6 +385,22 @@ fn run_stdin_search<M: Matcher>(matcher: &M, bytes: &[u8], opts: &RgOptions) -> 
     let output = OutputData::table(headers, render.nodes)
         .with_rich_json(serde_json::Value::Array(render.rich));
     ExecResult::with_output_and_text(output, render.text)
+}
+
+/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
+/// clap doesn't reject `--hidden=true` for a bool field.
+fn flagify_bool_named(args: &mut ToolArgs) {
+    let bool_keys: Vec<String> = args
+        .named
+        .iter()
+        .filter(|(_, v)| matches!(v, Value::Bool(_)))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in bool_keys {
+        if let Some(Value::Bool(true)) = args.named.remove(&k) {
+            args.flags.insert(k);
+        }
+    }
 }
 
 /// Parsed flags for one `rg` invocation. Centralizes the clamps and
