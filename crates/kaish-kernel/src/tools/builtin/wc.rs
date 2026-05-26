@@ -1,14 +1,43 @@
 //! wc — Word, line, character, and byte count.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Wc tool: count lines, words, characters, and bytes.
 pub struct Wc;
+
+/// clap-derived argv layer for wc. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "wc", about = "Print line, word, and byte counts")]
+struct WcArgs {
+    /// Print line count only (-l)
+    #[arg(short = 'l', long = "lines")]
+    lines: bool,
+
+    /// Print word count only (-w)
+    #[arg(short = 'w', long = "words")]
+    words: bool,
+
+    /// Print character count only (-m)
+    #[arg(short = 'm', long = "chars")]
+    chars: bool,
+
+    /// Print byte count only (-c)
+    #[arg(short = 'c', long = "bytes")]
+    bytes: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals. Read paths
+    /// off args.positional directly.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Wc {
@@ -17,47 +46,31 @@ impl Tool for Wc {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("wc", "Print line, word, and byte counts")
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::Null,
-                "File to count (reads stdin if not provided)",
-            ))
-            .param(ParamSchema::optional(
-                "lines",
-                "bool",
-                Value::Bool(false),
-                "Print line count only (-l)",
-            ).with_aliases(["-l"]))
-            .param(ParamSchema::optional(
-                "words",
-                "bool",
-                Value::Bool(false),
-                "Print word count only (-w)",
-            ).with_aliases(["-w"]))
-            .param(ParamSchema::optional(
-                "chars",
-                "bool",
-                Value::Bool(false),
-                "Print character count only (-m)",
-            ).with_aliases(["-m"]))
-            .param(ParamSchema::optional(
-                "bytes",
-                "bool",
-                Value::Bool(false),
-                "Print byte count only (-c)",
-            ).with_aliases(["-c"]))
-            .example("Count all (lines, words, bytes)", "wc file.txt")
-            .example("Count lines only", "wc -l file.txt")
-            .example("Count words from stdin", "echo 'hello world' | wc -w")
+        schema_from_clap(
+            &WcArgs::command(),
+            "wc",
+            "Print line, word, and byte counts",
+            [
+                ("Count all (lines, words, bytes)", "wc file.txt"),
+                ("Count lines only", "wc -l file.txt"),
+                ("Count words from stdin", "echo 'hello world' | wc -w"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        let lines_only = args.has_flag("lines") || args.has_flag("l");
-        let words_only = args.has_flag("words") || args.has_flag("w");
-        let chars_only = args.has_flag("chars") || args.has_flag("m");
-        let bytes_only = args.has_flag("bytes") || args.has_flag("c");
+        let parsed = match WcArgs::try_parse_from(
+            std::iter::once("wc".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("wc: {e}")),
+        };
+        parsed.global.apply(ctx);
+
+        let lines_only = parsed.lines;
+        let words_only = parsed.words;
+        let chars_only = parsed.chars;
+        let bytes_only = parsed.bytes;
         let show_all = !lines_only && !words_only && !chars_only && !bytes_only;
 
         // Collect all file paths from positional arguments, expanding globs
@@ -206,6 +219,7 @@ fn build_cells(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 

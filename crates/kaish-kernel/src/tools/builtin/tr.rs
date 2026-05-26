@@ -1,13 +1,34 @@
 //! tr — Translate or delete characters.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Tr tool: translate, squeeze, or delete characters.
 pub struct Tr;
+
+/// clap-derived argv layer for tr. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "tr", about = "Translate or delete characters")]
+struct TrArgs {
+    /// Delete characters in SET1 (-d)
+    #[arg(short = 'd', long = "delete")]
+    delete: bool,
+
+    /// Squeeze repeated characters (-s)
+    #[arg(short = 's', long = "squeeze")]
+    squeeze: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals. Read SET1/SET2
+    /// off args.positional directly.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Tr {
@@ -16,43 +37,34 @@ impl Tool for Tr {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("tr", "Translate or delete characters")
-            .param(ParamSchema::required(
-                "set1",
-                "string",
-                "Characters to translate from (or delete with -d)",
-            ))
-            .param(ParamSchema::optional(
-                "set2",
-                "string",
-                Value::Null,
-                "Characters to translate to",
-            ))
-            .param(ParamSchema::optional(
-                "delete",
-                "bool",
-                Value::Bool(false),
-                "Delete characters in SET1 (-d)",
-            ))
-            .param(ParamSchema::optional(
-                "squeeze",
-                "bool",
-                Value::Bool(false),
-                "Squeeze repeated characters (-s)",
-            ))
-            .example("Lowercase to uppercase", "echo hello | tr a-z A-Z")
-            .example("Delete characters", "echo 'a1b2c3' | tr -d 0-9")
+        schema_from_clap(
+            &TrArgs::command(),
+            "tr",
+            "Translate or delete characters",
+            [
+                ("Lowercase to uppercase", "echo hello | tr a-z A-Z"),
+                ("Delete characters", "echo 'a1b2c3' | tr -d 0-9"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match TrArgs::try_parse_from(
+            std::iter::once("tr".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("tr: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let set1 = match args.get_string("set1", 0) {
             Some(s) => s,
             None => return ExecResult::failure(1, "tr: missing SET1 argument"),
         };
 
         let set2 = args.get_string("set2", 1);
-        let delete = args.has_flag("delete") || args.has_flag("d");
-        let squeeze = args.has_flag("squeeze") || args.has_flag("s");
+        let delete = parsed.delete;
+        let squeeze = parsed.squeeze;
 
         let input = ctx.read_stdin_to_string().await.unwrap_or_default();
 
@@ -184,6 +196,7 @@ fn squeeze_chars(input: &str, squeeze_set: &[char]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 

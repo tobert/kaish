@@ -1,14 +1,35 @@
 //! tail — Output the last part of files.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Tail tool: output the last part of files or stdin.
 pub struct Tail;
+
+/// clap-derived argv layer for tail. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "tail", about = "Output the last part of files")]
+struct TailArgs {
+    /// Number of lines to output (-n)
+    #[arg(short = 'n', long = "lines")]
+    lines: Option<i64>,
+
+    /// Number of bytes to output (-c), overrides lines
+    #[arg(short = 'c', long = "bytes")]
+    bytes: Option<i64>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Tail {
@@ -17,28 +38,16 @@ impl Tool for Tail {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("tail", "Output the last part of files")
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::Null,
-                "File to read (reads stdin if not provided)",
-            ))
-            .param(ParamSchema::optional(
-                "lines",
-                "int",
-                Value::Int(10),
-                "Number of lines to output (-n)",
-            ).with_aliases(["-n"]))
-            .param(ParamSchema::optional(
-                "bytes",
-                "int",
-                Value::Null,
-                "Number of bytes to output (-c), overrides lines",
-            ).with_aliases(["-c"]))
-            .example("Last 10 lines (default)", "tail file.txt")
-            .example("Last 20 lines", "tail -n 20 log.txt")
-            .example("Last 1000 bytes", "tail -c 1000 file.txt")
+        schema_from_clap(
+            &TailArgs::command(),
+            "tail",
+            "Output the last part of files",
+            [
+                ("Last 10 lines (default)", "tail file.txt"),
+                ("Last 20 lines", "tail -n 20 log.txt"),
+                ("Last 1000 bytes", "tail -c 1000 file.txt"),
+            ],
+        )
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -51,6 +60,14 @@ impl Tool for Tail {
                 args.positional.remove(0);
             }
         }
+
+        let parsed = match TailArgs::try_parse_from(
+            std::iter::once("tail".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("tail: {e}")),
+        };
+        parsed.global.apply(ctx);
 
         // Collect all file paths, expanding globs
         let paths = match ctx.expand_paths(&args.positional).await {

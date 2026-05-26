@@ -1,6 +1,7 @@
 //! base64 — Encode or decode base64 data.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use base64::engine::general_purpose::STANDARD;
@@ -8,10 +9,30 @@ use base64::Engine;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Base64 tool: encode or decode base64 data.
 pub struct Base64Tool;
+
+/// clap-derived argv layer for base64. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "base64", about = "Encode or decode base64 data")]
+struct Base64Args {
+    /// Decode base64 input (-d)
+    #[arg(short = 'd', long = "decode")]
+    decode: bool,
+
+    /// Wrap encoded output at column N (0 = no wrap) (-w)
+    #[arg(short = 'w', long = "wrap")]
+    wrap: Option<i64>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Base64Tool {
@@ -20,44 +41,43 @@ impl Tool for Base64Tool {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("base64", "Encode or decode base64 data")
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::Null,
-                "File to read (reads stdin if not provided)",
-            ))
-            .param(
-                ParamSchema::optional(
-                    "decode",
-                    "bool",
-                    Value::Bool(false),
-                    "Decode base64 input (-d)",
-                )
-                .with_aliases(["-d"]),
-            )
-            .param(
-                ParamSchema::optional(
-                    "wrap",
-                    "int",
-                    Value::Int(76),
-                    "Wrap encoded output at column N (0 = no wrap) (-w)",
-                )
-                .with_aliases(["-w"]),
-            )
-            .example("Encode stdin", "echo hello | base64")
-            .example("Decode", "echo aGVsbG8K | base64 -d")
-            .example("Encode without wrapping", "base64 -w 0 file.bin")
+        schema_from_clap(
+            &Base64Args::command(),
+            "base64",
+            "Encode or decode base64 data",
+            [
+                ("Encode stdin", "echo hello | base64"),
+                ("Decode", "echo aGVsbG8K | base64 -d"),
+                ("Encode without wrapping", "base64 -w 0 file.bin"),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        let decode = args.has_flag("decode") || args.has_flag("d");
-        let wrap_col = args
-            .get("wrap", usize::MAX)
-            .and_then(|v| match v {
-                Value::Int(i) => Some(*i as usize),
-                Value::String(s) => s.parse().ok(),
-                _ => None,
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        // Tests poke `args.named.insert("decode", Value::Bool(true))` directly;
+        // to_argv would render that as `--decode=true` which clap won't accept
+        // for a bool field. Promote any Bool-typed named entries to flags so
+        // they hit the clap struct via the natural short/long form.
+        flagify_bool_named(&mut args);
+
+        let parsed = match Base64Args::try_parse_from(
+            std::iter::once("base64".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("base64: {e}")),
+        };
+        parsed.global.apply(ctx);
+
+        let decode = parsed.decode;
+        let wrap_col = parsed
+            .wrap
+            .map(|n| n as usize)
+            .or_else(|| {
+                args.get("wrap", usize::MAX).and_then(|v| match v {
+                    Value::Int(i) => Some(*i as usize),
+                    Value::String(s) => s.parse().ok(),
+                    _ => None,
+                })
             })
             .unwrap_or(76);
 
@@ -107,6 +127,24 @@ impl Tool for Base64Tool {
             };
 
             ExecResult::with_output(OutputData::text(output))
+        }
+    }
+}
+
+/// Promote `Value::Bool` entries from `args.named` to flag-form.
+/// Tests construct `args.named.insert("decode", Value::Bool(true))` but
+/// `to_argv()` renders that as `--decode=true`, which clap rejects for a
+/// bool field. Move them into `args.flags` so to_argv emits `--decode`.
+fn flagify_bool_named(args: &mut ToolArgs) {
+    let bool_keys: Vec<String> = args
+        .named
+        .iter()
+        .filter(|(_, v)| matches!(v, Value::Bool(_)))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in bool_keys {
+        if let Some(Value::Bool(true)) = args.named.remove(&k) {
+            args.flags.insert(k);
         }
     }
 }

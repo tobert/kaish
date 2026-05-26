@@ -1,14 +1,42 @@
 //! uniq — Report or filter out repeated lines.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Uniq tool: report or filter out repeated adjacent lines.
 pub struct Uniq;
+
+/// clap-derived argv layer for uniq. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "uniq", about = "Report or filter out repeated lines")]
+struct UniqArgs {
+    /// Prefix lines with occurrence count (-c)
+    #[arg(short = 'c', long = "count")]
+    count: bool,
+
+    /// Only print duplicate lines (-d)
+    #[arg(short = 'd', long = "repeated")]
+    repeated: bool,
+
+    /// Only print unique lines (-u)
+    #[arg(short = 'u', long = "unique")]
+    unique: bool,
+
+    /// Ignore case when comparing (-i)
+    #[arg(short = 'i', long = "ignore_case")]
+    ignore_case: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Uniq {
@@ -17,42 +45,26 @@ impl Tool for Uniq {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("uniq", "Report or filter out repeated lines")
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::Null,
-                "File to process (reads stdin if not provided)",
-            ))
-            .param(ParamSchema::optional(
-                "count",
-                "bool",
-                Value::Bool(false),
-                "Prefix lines with occurrence count (-c)",
-            ))
-            .param(ParamSchema::optional(
-                "repeated",
-                "bool",
-                Value::Bool(false),
-                "Only print duplicate lines (-d)",
-            ))
-            .param(ParamSchema::optional(
-                "unique",
-                "bool",
-                Value::Bool(false),
-                "Only print unique lines (-u)",
-            ))
-            .param(ParamSchema::optional(
-                "ignore_case",
-                "bool",
-                Value::Bool(false),
-                "Ignore case when comparing (-i)",
-            ))
-            .example("Remove adjacent duplicates", "sort data.txt | uniq")
-            .example("Count occurrences", "sort data.txt | uniq -c")
+        schema_from_clap(
+            &UniqArgs::command(),
+            "uniq",
+            "Report or filter out repeated lines",
+            [
+                ("Remove adjacent duplicates", "sort data.txt | uniq"),
+                ("Count occurrences", "sort data.txt | uniq -c"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match UniqArgs::try_parse_from(
+            std::iter::once("uniq".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("uniq: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Get input: from file or stdin
         let input = match args.get_string("path", 0) {
             Some(path) => {
@@ -73,10 +85,10 @@ impl Tool for Uniq {
             None => ctx.read_stdin_to_string().await.unwrap_or_default(),
         };
 
-        let show_count = args.has_flag("count") || args.has_flag("c");
-        let only_repeated = args.has_flag("repeated") || args.has_flag("d");
-        let only_unique = args.has_flag("unique") || args.has_flag("u");
-        let ignore_case = args.has_flag("ignore_case") || args.has_flag("i");
+        let show_count = parsed.count;
+        let only_repeated = parsed.repeated;
+        let only_unique = parsed.unique;
+        let ignore_case = parsed.ignore_case;
 
         let lines: Vec<&str> = input.lines().collect();
         if lines.is_empty() {
@@ -140,6 +152,7 @@ impl Tool for Uniq {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 

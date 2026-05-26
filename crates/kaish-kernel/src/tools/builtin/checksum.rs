@@ -1,16 +1,48 @@
 //! checksum — Compute file hashes (sha256, sha1, md5).
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use digest::Digest;
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Checksum tool: compute or verify file hashes.
 pub struct Checksum;
+
+/// clap-derived argv layer for checksum. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "checksum", about = "Compute or verify file hashes")]
+struct ChecksumArgs {
+    /// Hash algorithm: sha256, sha1, md5 (-a)
+    #[arg(short = 'a', long = "algo")]
+    algo: Option<String>,
+
+    /// Verify checksums from file (-c)
+    #[arg(short = 'c', long = "check")]
+    check: Option<String>,
+
+    /// Use SHA-256 (algorithm shortcut)
+    #[arg(long = "sha256")]
+    sha256: bool,
+
+    /// Use SHA-1 (algorithm shortcut)
+    #[arg(long = "sha1")]
+    sha1: bool,
+
+    /// Use MD5 (algorithm shortcut)
+    #[arg(long = "md5")]
+    md5: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Checksum {
@@ -19,40 +51,42 @@ impl Tool for Checksum {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("checksum", "Compute or verify file hashes")
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::Null,
-                "File(s) to hash (reads stdin if not provided)",
-            ))
-            .param(
-                ParamSchema::optional(
-                    "algo",
-                    "string",
-                    Value::String("sha256".into()),
-                    "Hash algorithm: sha256, sha1, md5 (-a)",
-                )
-                .with_aliases(["-a"]),
-            )
-            .param(
-                ParamSchema::optional(
-                    "check",
-                    "string",
-                    Value::Null,
-                    "Verify checksums from file (-c)",
-                )
-                .with_aliases(["-c"]),
-            )
-            .example("SHA256 of a file", "checksum README.md")
-            .example("MD5", "checksum -a md5 file.tar.gz")
-            .example("Hash stdin", "echo hello | checksum")
-            .example("Verify", "checksum -c checksums.txt")
+        schema_from_clap(
+            &ChecksumArgs::command(),
+            "checksum",
+            "Compute or verify file hashes",
+            [
+                ("SHA256 of a file", "checksum README.md"),
+                ("MD5", "checksum -a md5 file.tar.gz"),
+                ("Hash stdin", "echo hello | checksum"),
+                ("Verify", "checksum -c checksums.txt"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        let algo = args
-            .get_string("algo", usize::MAX)
+        let parsed = match ChecksumArgs::try_parse_from(
+            std::iter::once("checksum".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("checksum: {e}")),
+        };
+        parsed.global.apply(ctx);
+
+        let algo = parsed.algo.clone()
+            .or_else(|| args.get_string("algo", usize::MAX))
+            .or_else(|| {
+                // --sha256/--sha1/--md5 shortcuts
+                if parsed.sha256 {
+                    Some("sha256".into())
+                } else if parsed.sha1 {
+                    Some("sha1".into())
+                } else if parsed.md5 {
+                    Some("md5".into())
+                } else {
+                    None
+                }
+            })
             .unwrap_or_else(|| "sha256".to_string());
 
         // Validate algorithm
@@ -64,7 +98,7 @@ impl Tool for Checksum {
         }
 
         // Check mode: verify checksums from a file
-        if let Some(check_path) = args.get_string("check", usize::MAX) {
+        if let Some(check_path) = parsed.check.clone().or_else(|| args.get_string("check", usize::MAX)) {
             return self.verify_checksums(ctx, &check_path, &algo).await;
         }
 
@@ -218,6 +252,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 

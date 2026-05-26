@@ -1,14 +1,35 @@
 //! head — Output the first part of files.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Head tool: output the first part of files or stdin.
 pub struct Head;
+
+/// clap-derived argv layer for head. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "head", about = "Output the first part of files")]
+struct HeadArgs {
+    /// Number of lines to output (-n)
+    #[arg(short = 'n', long = "lines")]
+    lines: Option<i64>,
+
+    /// Number of bytes to output (-c), overrides lines
+    #[arg(short = 'c', long = "bytes")]
+    bytes: Option<i64>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Head {
@@ -17,31 +38,21 @@ impl Tool for Head {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("head", "Output the first part of files")
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::Null,
-                "File to read (reads stdin if not provided)",
-            ))
-            .param(ParamSchema::optional(
-                "lines",
-                "int",
-                Value::Int(10),
-                "Number of lines to output (-n)",
-            ).with_aliases(["-n"]))
-            .param(ParamSchema::optional(
-                "bytes",
-                "int",
-                Value::Null,
-                "Number of bytes to output (-c), overrides lines",
-            ).with_aliases(["-c"]))
-            .example("First 10 lines (default)", "head file.txt")
-            .example("First 5 lines", "head -n 5 file.txt")
-            .example("First 100 bytes", "head -c 100 file.txt")
+        schema_from_clap(
+            &HeadArgs::command(),
+            "head",
+            "Output the first part of files",
+            [
+                ("First 10 lines (default)", "head file.txt"),
+                ("First 5 lines", "head -n 5 file.txt"),
+                ("First 100 bytes", "head -c 100 file.txt"),
+            ],
+        )
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        // Pop the POSIX shorthand `-N` Int before we hand off to clap below.
+        // The pop transforms positional[0] = Int(-N) into named lines=N.
         // Handle POSIX shorthand: head -3 file → head -n 3 file
         // Lexer tokenizes "-3" as Int(-3), which lands in positional[0].
         if let Some(Value::Int(n)) = args.positional.first() {
@@ -51,6 +62,25 @@ impl Tool for Head {
                 args.positional.remove(0);
             }
         }
+
+        // Drop ambiguous flag-form duplicates: if a named value exists for the
+        // same key as a flag (e.g. flags={"n"} AND named={"n": 3}), the flag
+        // form is meaningless — clap would see `-n -n=3` and try to consume
+        // the second `-n=3` as the value for the first `-n`. The named form
+        // wins.
+        for key in ["n", "lines", "c", "bytes"] {
+            if args.named.contains_key(key) {
+                args.flags.remove(key);
+            }
+        }
+
+        let parsed = match HeadArgs::try_parse_from(
+            std::iter::once("head".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("head: {e}")),
+        };
+        parsed.global.apply(ctx);
 
         // Collect all file paths, expanding globs
         let paths = match ctx.expand_paths(&args.positional).await {

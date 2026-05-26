@@ -1,14 +1,43 @@
 //! xxd — Make a hex dump or reverse it.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Xxd tool: hex dump or reverse.
 pub struct Xxd;
+
+/// clap-derived argv layer for xxd. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "xxd", about = "Make a hex dump or reverse it")]
+struct XxdArgs {
+    /// Plain hex dump — no address, no ASCII (-p)
+    #[arg(short = 'p', long = "plain")]
+    plain: bool,
+
+    /// Reverse: convert hex dump back to binary (-r)
+    #[arg(short = 'r', long = "reverse")]
+    reverse: bool,
+
+    /// Limit output to N bytes (-l)
+    #[arg(short = 'l', long = "length")]
+    length: Option<i64>,
+
+    /// Skip N bytes from start (-s)
+    #[arg(short = 's', long = "seek")]
+    seek: Option<i64>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Xxd {
@@ -17,68 +46,50 @@ impl Tool for Xxd {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("xxd", "Make a hex dump or reverse it")
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::Null,
-                "File to read (reads stdin if not provided)",
-            ))
-            .param(
-                ParamSchema::optional(
-                    "plain",
-                    "bool",
-                    Value::Bool(false),
-                    "Plain hex dump — no address, no ASCII (-p)",
-                )
-                .with_aliases(["-p"]),
-            )
-            .param(
-                ParamSchema::optional(
-                    "reverse",
-                    "bool",
-                    Value::Bool(false),
-                    "Reverse: convert hex dump back to binary (-r)",
-                )
-                .with_aliases(["-r"]),
-            )
-            .param(
-                ParamSchema::optional(
-                    "length",
-                    "int",
-                    Value::Null,
-                    "Limit output to N bytes (-l)",
-                )
-                .with_aliases(["-l"]),
-            )
-            .param(
-                ParamSchema::optional(
-                    "seek",
-                    "int",
-                    Value::Null,
-                    "Skip N bytes from start (-s)",
-                )
-                .with_aliases(["-s"]),
-            )
-            .example("Hex dump", "xxd file.bin")
-            .example("Plain hex", "echo hello | xxd -p")
-            .example("Reverse hex", "echo 68656c6c6f | xxd -r -p")
+        schema_from_clap(
+            &XxdArgs::command(),
+            "xxd",
+            "Make a hex dump or reverse it",
+            [
+                ("Hex dump", "xxd file.bin"),
+                ("Plain hex", "echo hello | xxd -p"),
+                ("Reverse hex", "echo 68656c6c6f | xxd -r -p"),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        let plain = args.has_flag("plain") || args.has_flag("p");
-        let reverse = args.has_flag("reverse") || args.has_flag("r");
-        let length = args.get("length", usize::MAX).and_then(|v| match v {
-            Value::Int(i) => Some(*i as usize),
-            Value::String(s) => s.parse().ok(),
-            _ => None,
-        });
-        let seek = args
-            .get("seek", usize::MAX)
-            .and_then(|v| match v {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        // Tests poke args.named.insert("plain", Value::Bool(true)); to_argv would
+        // produce `--plain=true` which clap rejects for a bool field. Promote
+        // bool-typed named entries into flag form.
+        flagify_bool_named(&mut args);
+
+        let parsed = match XxdArgs::try_parse_from(
+            std::iter::once("xxd".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("xxd: {e}")),
+        };
+        parsed.global.apply(ctx);
+
+        let plain = parsed.plain;
+        let reverse = parsed.reverse;
+        let length = parsed.length.map(|n| n as usize).or_else(|| {
+            args.get("length", usize::MAX).and_then(|v| match v {
                 Value::Int(i) => Some(*i as usize),
                 Value::String(s) => s.parse().ok(),
                 _ => None,
+            })
+        });
+        let seek = parsed
+            .seek
+            .map(|n| n as usize)
+            .or_else(|| {
+                args.get("seek", usize::MAX).and_then(|v| match v {
+                    Value::Int(i) => Some(*i as usize),
+                    Value::String(s) => s.parse().ok(),
+                    _ => None,
+                })
             })
             .unwrap_or(0);
 
@@ -126,6 +137,21 @@ impl Tool for Xxd {
         };
 
         ExecResult::with_output(OutputData::text(output))
+    }
+}
+
+/// Promote `Value::Bool` entries from `args.named` to flag-form. See base64_tool.
+fn flagify_bool_named(args: &mut ToolArgs) {
+    let bool_keys: Vec<String> = args
+        .named
+        .iter()
+        .filter(|(_, v)| matches!(v, Value::Bool(_)))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in bool_keys {
+        if let Some(Value::Bool(true)) = args.named.remove(&k) {
+            args.flags.insert(k);
+        }
     }
 }
 

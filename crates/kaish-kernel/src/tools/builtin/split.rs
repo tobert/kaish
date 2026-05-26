@@ -29,14 +29,36 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use regex::Regex;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Split tool: split a string into an array.
 pub struct Split;
+
+/// clap-derived argv layer for split. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "split", about = "Split a string into an array")]
+struct SplitArgs {
+    /// Regex pattern to split on (-r)
+    #[arg(short = 'r', long = "regex")]
+    regex: Option<String>,
+
+    /// Maximum number of splits (0 = unlimited)
+    #[arg(long)]
+    limit: Option<i64>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals. Read string/delimiter
+    /// off args.positional directly.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Split {
@@ -45,40 +67,30 @@ impl Tool for Split {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("split", "Split a string into an array")
-            .param(ParamSchema::optional(
-                "string",
-                "string",
-                Value::Null,
-                "String to split (reads from stdin if omitted)",
-            ))
-            .param(ParamSchema::optional(
-                "delimiter",
-                "string",
-                Value::Null,
-                "Literal delimiter (default: whitespace)",
-            ))
-            .param(ParamSchema::optional(
-                "regex",
-                "string",
-                Value::Null,
-                "Regex pattern to split on (-r)",
-            ).with_aliases(["-r"]))
-            .param(ParamSchema::optional(
-                "limit",
-                "int",
-                Value::Int(0),
-                "Maximum number of splits (0 = unlimited)",
-            ))
-            .example("Split on whitespace", "split \"a b c\"")
-            .example("Split on delimiter", "split \"a:b:c\" \":\"")
-            .example("Split on regex", "split \"a1b2c3\" -r \"[0-9]\"")
-            .example("Limit splits", "split \"a:b:c:d\" \":\" --limit=2")
-            .example("Split stdin", "echo \"a,b,c\" | split \",\"")
-            .example("Split stdin on whitespace", "echo \"a b c\" | split")
+        schema_from_clap(
+            &SplitArgs::command(),
+            "split",
+            "Split a string into an array",
+            [
+                ("Split on whitespace", "split \"a b c\""),
+                ("Split on delimiter", "split \"a:b:c\" \":\""),
+                ("Split on regex", "split \"a1b2c3\" -r \"[0-9]\""),
+                ("Limit splits", "split \"a:b:c:d\" \":\" --limit=2"),
+                ("Split stdin", "echo \"a,b,c\" | split \",\""),
+                ("Split stdin on whitespace", "echo \"a b c\" | split"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match SplitArgs::try_parse_from(
+            std::iter::once("split".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("split: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Determine input string and delimiter position.
         // When stdin is available AND there's no explicit string= named arg,
         // read input from stdin and shift positionals so pos[0] = delimiter.

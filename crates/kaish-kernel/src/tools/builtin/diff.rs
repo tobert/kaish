@@ -10,15 +10,44 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use similar::TextDiff;
 use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Diff tool: compares two files line by line.
 pub struct Diff;
+
+/// clap-derived argv layer for diff. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "diff", about = "Compare files line by line")]
+struct DiffArgs {
+    /// Output unified diff format (default)
+    #[arg(short = 'u', long = "unified")]
+    _unified: bool,
+
+    /// Quiet mode: only report if files differ
+    #[arg(short = 'q', long = "quiet")]
+    quiet: bool,
+
+    /// Colorize output
+    #[arg(long = "color")]
+    color: bool,
+
+    /// Lines of context (default: 3)
+    #[arg(short = 'C', long = "context")]
+    context: Option<i64>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Diff {
@@ -27,46 +56,26 @@ impl Tool for Diff {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("diff", "Compare files line by line")
-            .param(ParamSchema::required(
-                "file1",
-                "string",
-                "First file to compare",
-            ))
-            .param(ParamSchema::required(
-                "file2",
-                "string",
-                "Second file to compare",
-            ))
-            .param(ParamSchema::optional(
-                "unified",
-                "bool",
-                Value::Bool(false),
-                "Output unified diff format (default)",
-            ).with_aliases(["-u"]))
-            .param(ParamSchema::optional(
-                "quiet",
-                "bool",
-                Value::Bool(false),
-                "Quiet mode: only report if files differ",
-            ).with_aliases(["-q"]))
-            .param(ParamSchema::optional(
-                "color",
-                "bool",
-                Value::Bool(false),
-                "Colorize output",
-            ).with_aliases(["--color"]))
-            .param(ParamSchema::optional(
-                "context",
-                "int",
-                Value::Int(3),
-                "Lines of context (default: 3)",
-            ).with_aliases(["-C"]))
-            .example("Compare two files", "diff file1.txt file2.txt")
-            .example("Quiet mode", "diff -q old.txt new.txt")
+        schema_from_clap(
+            &DiffArgs::command(),
+            "diff",
+            "Compare files line by line",
+            [
+                ("Compare two files", "diff file1.txt file2.txt"),
+                ("Quiet mode", "diff -q old.txt new.txt"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match DiffArgs::try_parse_from(
+            std::iter::once("diff".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("diff: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Get file paths
         let file1 = match args.get_string("file1", 0) {
             Some(f) => f,
@@ -93,13 +102,16 @@ impl Tool for Diff {
         };
 
         // Check options
-        let quiet = args.has_flag("q");
-        let colorize = args.has_flag("color");
-        let context_lines = args
-            .get_named("context")
-            .and_then(|v| match v {
-                Value::Int(i) => Some(*i as usize),
-                _ => None,
+        let quiet = parsed.quiet;
+        let colorize = parsed.color;
+        let context_lines = parsed
+            .context
+            .map(|n| n as usize)
+            .or_else(|| {
+                args.get_named("context").and_then(|v| match v {
+                    Value::Int(i) => Some(*i as usize),
+                    _ => None,
+                })
             })
             .unwrap_or(3);
 

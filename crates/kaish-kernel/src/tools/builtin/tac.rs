@@ -1,14 +1,27 @@
 //! tac — Reverse lines of files or stdin.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Tac tool: output lines in reverse order.
 pub struct Tac;
+
+/// clap-derived argv layer for tac. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "tac", about = "Reverse lines of files or stdin")]
+struct TacArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals. Read paths
+    /// off args.positional directly.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Tac {
@@ -17,18 +30,26 @@ impl Tool for Tac {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("tac", "Reverse lines of files or stdin")
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::Null,
-                "File(s) to reverse (reads stdin if not provided)",
-            ))
-            .example("Reverse a file", "tac log.txt")
-            .example("Reverse stdin", "seq 1 5 | tac")
+        schema_from_clap(
+            &TacArgs::command(),
+            "tac",
+            "Reverse lines of files or stdin",
+            [
+                ("Reverse a file", "tac log.txt"),
+                ("Reverse stdin", "seq 1 5 | tac"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match TacArgs::try_parse_from(
+            std::iter::once("tac".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("tac: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Collect file paths, expanding globs
         let paths = match ctx.expand_paths(&args.positional).await {
             Ok(p) => p,
@@ -93,6 +114,7 @@ impl Tool for Tac {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 

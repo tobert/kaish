@@ -1,15 +1,48 @@
 //! sort — Sort lines of text.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::cmp::Ordering;
 use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Sort tool: sort lines of text files or stdin.
 pub struct Sort;
+
+/// clap-derived argv layer for sort. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "sort", about = "Sort lines of text")]
+struct SortArgs {
+    /// Sort numerically (-n)
+    #[arg(short = 'n', long = "numeric")]
+    numeric: bool,
+
+    /// Reverse the sort order (-r)
+    #[arg(short = 'r', long = "reverse")]
+    reverse: bool,
+
+    /// Output only unique lines (-u)
+    #[arg(short = 'u', long = "unique")]
+    unique: bool,
+
+    /// Sort by field number, 1-indexed (-k)
+    #[arg(short = 'k', long = "key")]
+    key: Option<String>,
+
+    /// Field delimiter (-t)
+    #[arg(short = 't', long = "delimiter")]
+    delimiter: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Sort {
@@ -18,51 +51,29 @@ impl Tool for Sort {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("sort", "Sort lines of text")
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::Null,
-                "File to sort (reads stdin if not provided)",
-            ))
-            .param(ParamSchema::optional(
-                "numeric",
-                "bool",
-                Value::Bool(false),
-                "Sort numerically (-n)",
-            ).with_aliases(["-n"]))
-            .param(ParamSchema::optional(
-                "reverse",
-                "bool",
-                Value::Bool(false),
-                "Reverse the sort order (-r)",
-            ).with_aliases(["-r"]))
-            .param(ParamSchema::optional(
-                "key",
-                "int",
-                Value::Null,
-                "Sort by field number, 1-indexed (-k)",
-            ).with_aliases(["-k"]))
-            .param(ParamSchema::optional(
-                "delimiter",
-                "string",
-                Value::Null,
-                "Field delimiter (-t)",
-            ).with_aliases(["-t"]))
-            .param(ParamSchema::optional(
-                "unique",
-                "bool",
-                Value::Bool(false),
-                "Output only unique lines (-u)",
-            ).with_aliases(["-u"]))
-            .example("Alphabetical sort", "sort names.txt")
-            .example("Numeric sort", "sort -n numbers.txt")
-            .example("Reverse sort", "sort -r file.txt")
-            .example("Sort by second field", "sort -k 2 data.txt")
-            .example("Unique lines only", "sort -u file.txt")
+        schema_from_clap(
+            &SortArgs::command(),
+            "sort",
+            "Sort lines of text",
+            [
+                ("Alphabetical sort", "sort names.txt"),
+                ("Numeric sort", "sort -n numbers.txt"),
+                ("Reverse sort", "sort -r file.txt"),
+                ("Sort by second field", "sort -k 2 data.txt"),
+                ("Unique lines only", "sort -u file.txt"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match SortArgs::try_parse_from(
+            std::iter::once("sort".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("sort: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Get input: from file or stdin
         let input = match args.get_string("path", 0) {
             Some(path) => {
@@ -83,9 +94,9 @@ impl Tool for Sort {
             None => ctx.read_stdin_to_string().await.unwrap_or_default(),
         };
 
-        let numeric = args.has_flag("numeric") || args.has_flag("n");
-        let reverse = args.has_flag("reverse") || args.has_flag("r");
-        let unique = args.has_flag("unique") || args.has_flag("u");
+        let numeric = parsed.numeric;
+        let reverse = parsed.reverse;
+        let unique = parsed.unique;
 
         let key_field = args.get("key", usize::MAX).and_then(|v| match v {
             Value::Int(i) => Some(*i as usize),
@@ -93,8 +104,8 @@ impl Tool for Sort {
             _ => None,
         });
 
-        let delimiter = args
-            .get_string("delimiter", usize::MAX)
+        let delimiter = parsed.delimiter.clone()
+            .or_else(|| args.get_string("delimiter", usize::MAX))
             .or_else(|| args.get_string("t", usize::MAX));
 
         let mut lines: Vec<&str> = input.lines().collect();

@@ -1,22 +1,34 @@
 //! tokens — Count BPE tokens using tiktoken.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use tiktoken_rs::{cl100k_base, o200k_base, p50k_base};
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
-
-/// Helper to extract string from Value.
-fn value_as_string(v: &Value) -> Option<String> {
-    match v {
-        Value::String(s) => Some(s.clone()),
-        _ => None,
-    }
-}
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Tokens tool: count BPE tokens in text.
 pub struct Tokens;
+
+/// clap-derived argv layer for tokens. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "tokens", about = "Count BPE tokens using tiktoken tokenization")]
+struct TokensArgs {
+    /// Encoding: cl100k (Claude/GPT-4), o200k (GPT-4o), p50k (GPT-3)
+    #[arg(short = 'e', long = "encoding")]
+    encoding: Option<String>,
+
+    /// Show token IDs (-v)
+    #[arg(short = 'v', long = "verbose")]
+    verbose: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Tokens {
@@ -25,39 +37,29 @@ impl Tool for Tokens {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("tokens", "Count BPE tokens using tiktoken tokenization")
-            .param(ParamSchema::optional(
-                "text",
-                "string",
-                Value::Null,
-                "Text to tokenize (reads stdin if not provided)",
-            ))
-            .param(
-                ParamSchema::optional(
-                    "encoding",
-                    "string",
-                    Value::String("cl100k".into()),
-                    "Encoding: cl100k (Claude/GPT-4), o200k (GPT-4o), p50k (GPT-3)",
-                )
-                .with_aliases(["-e"]),
-            )
-            .param(
-                ParamSchema::optional(
-                    "verbose",
-                    "bool",
-                    Value::Bool(false),
-                    "Show token IDs (-v)",
-                )
-                .with_aliases(["-v"]),
-            )
-            .example("Count tokens (default: cl100k)", "tokens \"Hello, Kaijutsu! 会術\"")
-            .example("From stdin", "cat file.txt | tokens")
-            .example("Verbose (show token IDs)", "tokens -v \"Hello\"")
-            .example("Different encoding", "tokens -e o200k \"Hello\"")
-            .example("JSON output", "tokens --json \"Hello world\"")
+        schema_from_clap(
+            &TokensArgs::command(),
+            "tokens",
+            "Count BPE tokens using tiktoken tokenization",
+            [
+                ("Count tokens (default: cl100k)", "tokens \"Hello, Kaijutsu! 会術\""),
+                ("From stdin", "cat file.txt | tokens"),
+                ("Verbose (show token IDs)", "tokens -v \"Hello\""),
+                ("Different encoding", "tokens -e o200k \"Hello\""),
+                ("JSON output", "tokens --json \"Hello world\""),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match TokensArgs::try_parse_from(
+            std::iter::once("tokens".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("tokens: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Get text from positional arg or stdin
         let text = match args.get_string("text", 0) {
             Some(t) => t,
@@ -67,10 +69,9 @@ impl Tool for Tokens {
             },
         };
 
-        // Get encoding (check both named and -e alias via positional)
-        let encoding = args
-            .get_string("encoding", usize::MAX)
-            .or_else(|| args.named.get("e").and_then(value_as_string))
+        // Get encoding (named or -e)
+        let encoding = parsed.encoding.clone()
+            .or_else(|| args.get_string("encoding", usize::MAX))
             .unwrap_or_else(|| "cl100k".into());
 
         // Get the BPE encoder
@@ -102,7 +103,7 @@ impl Tool for Tokens {
         // Build structured output: full table of token IDs.
         // Default pipe output is just the count (for `cat file | tokens`),
         // but --json gets the full table via OutputData.
-        let verbose = args.has_flag("verbose") || args.has_flag("v");
+        let verbose = parsed.verbose;
 
         if verbose {
             let mut lines = format!("count: {}\nids: [", count);
@@ -132,6 +133,7 @@ impl Tool for Tokens {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 

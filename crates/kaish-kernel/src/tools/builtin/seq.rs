@@ -1,14 +1,35 @@
 //! seq — Print sequences of numbers.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema, validate_against_schema};
+use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::{IssueCode, ValidationIssue};
 
 /// Seq tool: print a sequence of numbers.
 pub struct Seq;
+
+/// clap-derived argv layer for seq. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "seq", about = "Print sequences of numbers")]
+struct SeqArgs {
+    /// Separator between numbers (-s)
+    #[arg(short = 's', long = "separator")]
+    separator: Option<String>,
+
+    /// Equalize width by padding with zeros (-w)
+    #[arg(short = 'w', long = "width")]
+    width: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Seq {
@@ -17,39 +38,16 @@ impl Tool for Seq {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("seq", "Print sequences of numbers")
-            .param(ParamSchema::required(
-                "last",
-                "number",
-                "Last number (or first if two args)",
-            ))
-            .param(ParamSchema::optional(
-                "first",
-                "number",
-                Value::Int(1),
-                "First number (default 1)",
-            ))
-            .param(ParamSchema::optional(
-                "increment",
-                "number",
-                Value::Int(1),
-                "Increment (default 1)",
-            ))
-            .param(ParamSchema::optional(
-                "separator",
-                "string",
-                Value::String("\n".into()),
-                "Separator between numbers (-s)",
-            ).with_aliases(["-s"]))
-            .param(ParamSchema::optional(
-                "width",
-                "bool",
-                Value::Bool(false),
-                "Equalize width by padding with zeros (-w)",
-            ).with_aliases(["-w"]))
-            .example("Count to 5", "seq 5")
-            .example("Range with step", "seq 1 2 10")
-            .example("Zero-padded", "seq -w 1 100")
+        schema_from_clap(
+            &SeqArgs::command(),
+            "seq",
+            "Print sequences of numbers",
+            [
+                ("Count to 5", "seq 5"),
+                ("Range with step", "seq 1 2 10"),
+                ("Zero-padded", "seq -w 1 100"),
+            ],
+        )
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
@@ -83,7 +81,15 @@ impl Tool for Seq {
         issues
     }
 
-    async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match SeqArgs::try_parse_from(
+            std::iter::once("seq".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("seq: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Parse the arguments - seq has unusual positional arg handling:
         // seq LAST           -> 1 to LAST
         // seq FIRST LAST     -> FIRST to LAST
@@ -116,12 +122,12 @@ impl Tool for Seq {
             return ExecResult::failure(1, "seq: increment cannot be zero");
         }
 
-        let separator = args
-            .get_string("separator", usize::MAX)
+        let separator = parsed.separator.clone()
+            .or_else(|| args.get_string("separator", usize::MAX))
             .or_else(|| args.get_string("s", usize::MAX))
             .unwrap_or_else(|| "\n".to_string());
 
-        let pad_width = args.has_flag("width") || args.has_flag("w");
+        let pad_width = parsed.width;
 
         // Generate sequence
         let mut numbers = Vec::new();

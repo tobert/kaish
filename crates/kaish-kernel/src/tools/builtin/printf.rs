@@ -1,14 +1,28 @@
 //! printf — Format and print data.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use super::format_string::{self, FormatArg};
 
 /// Printf tool: formatted output.
 pub struct Printf;
+
+/// clap-derived argv layer for printf. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "printf", about = "Format and print data")]
+struct PrintfArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals. Read positionals
+    /// off args.positional directly to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 impl FormatArg for Value {
     fn as_format_string(&self) -> String {
@@ -58,23 +72,26 @@ impl Tool for Printf {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("printf", "Format and print data")
-            .param(ParamSchema::required(
-                "format",
-                "string",
-                "Format string (supports %s, %d, %f, %x, %%)",
-            ))
-            .param(ParamSchema::optional(
-                "args",
-                "any",
-                Value::Null,
-                "Arguments for format string",
-            ))
-            .example("Formatted output", "printf \"%s is %d\\n\" name 42")
-            .example("Zero-padded number", "printf \"%08d\" 42")
+        schema_from_clap(
+            &PrintfArgs::command(),
+            "printf",
+            "Format and print data",
+            [
+                ("Formatted output", "printf \"%s is %d\\n\" name 42"),
+                ("Zero-padded number", "printf \"%08d\" 42"),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match PrintfArgs::try_parse_from(
+            std::iter::once("printf".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("printf: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let format = match args.get_string("format", 0) {
             Some(f) => f,
             None => return ExecResult::failure(1, "printf: missing format argument"),

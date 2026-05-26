@@ -1,14 +1,39 @@
 //! cut — Remove sections from each line of files.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Cut tool: select portions of each line.
 pub struct Cut;
+
+/// clap-derived argv layer for cut. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "cut", about = "Remove sections from each line")]
+struct CutArgs {
+    /// Field delimiter (-d)
+    #[arg(short = 'd', long = "delimiter")]
+    delimiter: Option<String>,
+
+    /// Select fields by number, e.g. '1,3' or '1-3' (-f)
+    #[arg(short = 'f', long = "fields")]
+    fields: Option<String>,
+
+    /// Select characters by position (-c)
+    #[arg(short = 'c', long = "characters")]
+    characters: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Cut {
@@ -17,37 +42,27 @@ impl Tool for Cut {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("cut", "Remove sections from each line")
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::Null,
-                "File to process (reads stdin if not provided)",
-            ))
-            .param(ParamSchema::optional(
-                "delimiter",
-                "string",
-                Value::String("\t".into()),
-                "Field delimiter (-d)",
-            ).with_aliases(["-d"]))
-            .param(ParamSchema::optional(
-                "fields",
-                "string",
-                Value::Null,
-                "Select fields by number, e.g. '1,3' or '1-3' (-f)",
-            ).with_aliases(["-f"]))
-            .param(ParamSchema::optional(
-                "characters",
-                "string",
-                Value::Null,
-                "Select characters by position (-c)",
-            ).with_aliases(["-c"]))
-            .example("Extract first field (CSV)", "cut -d ',' -f 1 data.csv")
-            .example("Extract fields 1 and 3", "cut -d ':' -f 1,3 /etc/passwd")
-            .example("Extract characters 1-10", "cut -c 1-10 file.txt")
+        schema_from_clap(
+            &CutArgs::command(),
+            "cut",
+            "Remove sections from each line",
+            [
+                ("Extract first field (CSV)", "cut -d ',' -f 1 data.csv"),
+                ("Extract fields 1 and 3", "cut -d ':' -f 1,3 /etc/passwd"),
+                ("Extract characters 1-10", "cut -c 1-10 file.txt"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match CutArgs::try_parse_from(
+            std::iter::once("cut".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("cut: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Get input: from file or stdin
         let input = match args.get_string("path", 0) {
             Some(path) => {
@@ -65,17 +80,17 @@ impl Tool for Cut {
             None => ctx.read_stdin_to_string().await.unwrap_or_default(),
         };
 
-        let delimiter = args
-            .get_string("delimiter", usize::MAX)
+        let delimiter = parsed.delimiter.clone()
+            .or_else(|| args.get_string("delimiter", usize::MAX))
             .or_else(|| args.get_string("d", usize::MAX))
             .unwrap_or_else(|| "\t".to_string());
 
-        let fields = args
-            .get_string("fields", usize::MAX)
+        let fields = parsed.fields.clone()
+            .or_else(|| args.get_string("fields", usize::MAX))
             .or_else(|| args.get_string("f", usize::MAX));
 
-        let characters = args
-            .get_string("characters", usize::MAX)
+        let characters = parsed.characters.clone()
+            .or_else(|| args.get_string("characters", usize::MAX))
             .or_else(|| args.get_string("c", usize::MAX));
 
         if delimiter.chars().count() > 1 {
