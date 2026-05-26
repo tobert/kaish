@@ -51,6 +51,7 @@ ariadne = "0.6"
 
 # CLI arg parsing (used inside builtins via the clap-migration recipe)
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 
 # REPL (L4)
 rustyline = "17"

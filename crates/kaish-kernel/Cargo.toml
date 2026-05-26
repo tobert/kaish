@@ -103,6 +103,8 @@ proptest = { workspace = true }
 rstest = { workspace = true }
 insta = { workspace = true }
 tempfile = { workspace = true }
+# Used by examples/gen_bash_completion.rs to generate contrib/echo.bash.
+clap_complete = { workspace = true }
 
 [lints]
 workspace = true
