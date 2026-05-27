@@ -20,7 +20,7 @@ struct CpArgs {
     recursive: bool,
 
     /// Do not overwrite existing files (-n)
-    #[arg(short = 'n', long = "no_clobber")]
+    #[arg(short = 'n', long = "no-clobber", visible_alias = "no_clobber")]
     no_clobber: bool,
 
     /// Preserve file attributes (-p)

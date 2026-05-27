@@ -28,11 +28,11 @@ pub struct Grep;
 #[command(name = "grep", about = "Search for patterns in files or stdin")]
 struct GrepArgs {
     /// Case-insensitive matching.
-    #[arg(short = 'i', long = "ignore_case")]
+    #[arg(short = 'i', long = "ignore-case", visible_alias = "ignore_case")]
     ignore_case: bool,
 
     /// Prefix output with line numbers.
-    #[arg(short = 'n', long = "line_number")]
+    #[arg(short = 'n', long = "line-number", visible_alias = "line_number")]
     line_number: bool,
 
     /// Select non-matching lines.
@@ -44,7 +44,7 @@ struct GrepArgs {
     count: bool,
 
     /// Print only the matched parts.
-    #[arg(short = 'o', long = "only_matching")]
+    #[arg(short = 'o', long = "only-matching", visible_alias = "only_matching")]
     only_matching: bool,
 
     /// Quiet mode, only return exit code.
@@ -52,11 +52,11 @@ struct GrepArgs {
     quiet: bool,
 
     /// Print only filenames with matches.
-    #[arg(short = 'l', long = "files_with_matches")]
+    #[arg(short = 'l', long = "files-with-matches", visible_alias = "files_with_matches")]
     files_with_matches: bool,
 
     /// Match whole words only.
-    #[arg(short = 'w', long = "word_regexp")]
+    #[arg(short = 'w', long = "word-regexp", visible_alias = "word_regexp")]
     word_regexp: bool,
 
     /// Search directories recursively (lowercase).
@@ -71,24 +71,23 @@ struct GrepArgs {
     #[arg(short = 'U', long = "multiline")]
     multiline: bool,
 
-    /// Extended regex (POSIX compatibility — kaish always uses Rust regex,
-    /// which is already extended). Accepted and ignored.
-    #[arg(short = 'E', long = "extended_regexp")]
+    /// Extended regex (POSIX -E). No-op: Rust's regex crate is always
+    /// extended (alternation, grouping, quantifiers without backslash);
+    /// accepted for POSIX/muscle-memory compatibility.
+    #[arg(short = 'E', long = "extended-regexp", visible_alias = "extended_regexp")]
     _extended: bool,
 
-    /// Fixed strings (POSIX compatibility, treats pattern literally).
-    /// Currently accepted and ignored — grep already supports literal
-    /// patterns via the regex crate's `escape` when patterns lack regex
-    /// metachars; full -F behavior is in rg.
-    #[arg(short = 'F', long = "fixed_strings")]
+    /// Fixed strings (POSIX -F): treat pattern as a literal string, not a
+    /// regex. Implemented by escaping every metachar via `regex::escape`.
+    #[arg(short = 'F', long = "fixed-strings", visible_alias = "fixed_strings")]
     _fixed: bool,
 
     /// Print NUM lines after match.
-    #[arg(short = 'A', long = "after_context")]
+    #[arg(short = 'A', long = "after-context", visible_alias = "after_context")]
     after_context: Option<String>,
 
     /// Print NUM lines before match.
-    #[arg(short = 'B', long = "before_context")]
+    #[arg(short = 'B', long = "before-context", visible_alias = "before_context")]
     before_context: Option<String>,
 
     /// Print NUM lines before and after match.
@@ -145,8 +144,9 @@ impl Tool for Grep {
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
         let mut issues = validate_against_schema(args, &self.schema());
 
-        // Check if the regex pattern is valid
-        if let Some(pattern) = args.get_string("pattern", 0) {
+        // Skip regex syntax check when -F is set: pattern will be escaped at runtime.
+        let fixed = args.has_flag("F") || args.has_flag("fixed-strings");
+        if !fixed && let Some(pattern) = args.get_string("pattern", 0) {
             // Don't validate if pattern looks dynamic (contains shell expansion markers)
             if !pattern.contains("<dynamic>")
                 && let Err(e) = regex::Regex::new(&pattern) {
@@ -161,7 +161,7 @@ impl Tool for Grep {
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        flagify_bool_named(&mut args);
+        args.flagify_bool_named();
 
         let parsed = match GrepArgs::try_parse_from(
             std::iter::once("grep".to_string()).chain(args.to_argv()),
@@ -176,15 +176,16 @@ impl Tool for Grep {
             None => return ExecResult::failure(1, "grep: missing pattern argument"),
         };
 
-        let ignore_case = args.has_flag("ignore_case") || args.has_flag("i");
-        let line_number = args.has_flag("line_number") || args.has_flag("n");
+        let ignore_case = args.has_flag("ignore-case") || args.has_flag("i");
+        let line_number = args.has_flag("line-number") || args.has_flag("n");
         let invert = args.has_flag("invert") || args.has_flag("v");
         let count_only = args.has_flag("count") || args.has_flag("c");
-        let only_matching = args.has_flag("only_matching") || args.has_flag("o");
+        let only_matching = args.has_flag("only-matching") || args.has_flag("o");
         let quiet = args.has_flag("quiet") || args.has_flag("q");
-        let files_only = args.has_flag("files_with_matches") || args.has_flag("l");
-        let word_regexp = args.has_flag("word_regexp") || args.has_flag("w");
+        let files_only = args.has_flag("files-with-matches") || args.has_flag("l");
+        let word_regexp = args.has_flag("word-regexp") || args.has_flag("w");
         let recursive = args.has_flag("recursive") || args.has_flag("r") || args.has_flag("R");
+        let fixed_strings = args.has_flag("F") || args.has_flag("fixed-strings");
 
         // Get context values
         let context = args.get("context", usize::MAX).and_then(|v| match v {
@@ -224,11 +225,14 @@ impl Tool for Grep {
             _ => BinaryDetection::quit(b'\x00'),
         };
 
-        // Modify pattern for word boundary matching
+        // -F: escape regex metachars so the pattern matches literally.
+        // -w wraps in word boundaries (regex syntax) AFTER escaping so
+        // `grep -Fw "192.168.1.1"` still anchors at word boundaries.
+        let escaped = if fixed_strings { regex::escape(&pattern) } else { pattern };
         let final_pattern = if word_regexp {
-            format!(r"\b{}\b", pattern)
+            format!(r"\b{}\b", escaped)
         } else {
-            pattern
+            escaped
         };
 
         // `regex::Regex` is still used by the streaming-stdin fast path
@@ -542,22 +546,6 @@ impl Grep {
             let output = OutputData::table(headers, total_nodes)
                 .with_rich_json(serde_json::Value::Array(total_rich));
             ExecResult::with_output_and_text(output, total_output)
-        }
-    }
-}
-
-/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
-/// clap doesn't reject `--ignore_case=true` for a bool field.
-fn flagify_bool_named(args: &mut ToolArgs) {
-    let bool_keys: Vec<String> = args
-        .named
-        .iter()
-        .filter(|(_, v)| matches!(v, Value::Bool(_)))
-        .map(|(k, _)| k.clone())
-        .collect();
-    for k in bool_keys {
-        if let Some(Value::Bool(true)) = args.named.remove(&k) {
-            args.flags.insert(k);
         }
     }
 }
@@ -1296,5 +1284,54 @@ mod tests {
         assert!(result.ok());
         assert!(result.text_out().contains("TODO"));
         assert!(result.text_out().contains("main.rs") || result.text_out().contains("lib.rs"));
+    }
+
+    async fn make_ctx_with(files: &[(&str, &[u8])]) -> ExecContext {
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        for (path, content) in files {
+            mem.write(Path::new(path), content).await.unwrap();
+        }
+        vfs.mount("/", mem);
+        ExecContext::new(Arc::new(vfs))
+    }
+
+    /// -F (fixed strings): pattern's regex metachars must be treated literally.
+    /// Regression guard: previous behavior silently accepted -F and matched
+    /// `1.168.1.1` against `1X168Y1Z1` because `.` was the regex any-char.
+    #[tokio::test]
+    async fn test_grep_fixed_strings_literal_dot() {
+        let mut ctx = make_ctx_with(&[(
+            "ips.txt",
+            b"192.168.1.1\n1X168Y1Z1\n10.0.0.1\n",
+        )])
+        .await;
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("192.168.1.1".into()));
+        args.positional.push(Value::String("/ips.txt".into()));
+        args.flags.insert("F".to_string());
+
+        let result = Grep.execute(args, &mut ctx).await;
+        assert!(result.ok(), "grep -F should succeed: {}", result.err);
+        let out = result.text_out();
+        assert!(out.contains("192.168.1.1"), "literal match missing: {}", out);
+        assert!(!out.contains("1X168Y1Z1"), "regex metachar leaked through -F: {}", out);
+    }
+
+    /// -F with regex metachars in the pattern must escape them, not error.
+    #[tokio::test]
+    async fn test_grep_fixed_strings_with_metachars() {
+        let mut ctx = make_ctx_with(&[("code.txt", b"foo[bar]\nfoobar\nbaz\n")]).await;
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("foo[bar]".into()));
+        args.positional.push(Value::String("/code.txt".into()));
+        args.flags.insert("fixed-strings".to_string());
+
+        let result = Grep.execute(args, &mut ctx).await;
+        assert!(result.ok(), "grep --fixed_strings should succeed: {}", result.err);
+        assert!(result.text_out().contains("foo[bar]"));
+        assert!(!result.text_out().contains("foobar\n"));
     }
 }

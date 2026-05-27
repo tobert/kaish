@@ -52,7 +52,7 @@ struct SpawnArgs {
     timeout: Option<String>,
 
     /// Start with empty environment.
-    #[arg(long = "clear_env")]
+    #[arg(long = "clear-env", visible_alias = "clear_env")]
     clear_env: bool,
 
     #[command(flatten)]
@@ -82,7 +82,7 @@ impl Tool for Spawn {
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        flagify_bool_named(&mut args);
+        args.flagify_bool_named();
 
         let parsed = match SpawnArgs::try_parse_from(
             std::iter::once("spawn".to_string()).chain(args.to_argv()),
@@ -146,7 +146,7 @@ impl Tool for Spawn {
             });
 
         // Get clear_env flag
-        let clear_env = args.has_flag("clear_env");
+        let clear_env = args.has_flag("clear-env");
 
         // Build command
         let mut cmd = Command::new(&command);
@@ -228,22 +228,6 @@ impl Tool for Spawn {
                 }
                 Err(e) => ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
             }
-        }
-    }
-}
-
-/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
-/// clap doesn't reject `--clear_env=true` for a bool field.
-fn flagify_bool_named(args: &mut ToolArgs) {
-    let bool_keys: Vec<String> = args
-        .named
-        .iter()
-        .filter(|(_, v)| matches!(v, Value::Bool(_)))
-        .map(|(k, _)| k.clone())
-        .collect();
-    for k in bool_keys {
-        if let Some(Value::Bool(true)) = args.named.remove(&k) {
-            args.flags.insert(k);
         }
     }
 }
@@ -399,7 +383,7 @@ mod tests {
             "env".to_string(),
             Value::String(r#"{"MY_TEST_VAR": "test_value"}"#.into()),
         );
-        args.flags.insert("clear_env".to_string());
+        args.flags.insert("clear-env".to_string());
 
         let result = Spawn.execute(args, &mut ctx).await;
         assert!(result.ok());

@@ -78,7 +78,7 @@ impl Tool for Ps {
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        flagify_bool_named(&mut args);
+        args.flagify_bool_named();
 
         let parsed = match PsArgs::try_parse_from(
             std::iter::once("ps".to_string()).chain(args.to_argv()),
@@ -212,22 +212,6 @@ impl Tool for Ps {
         processes.sort_by_key(|p| p.pid);
 
         format_table(&processes)
-    }
-}
-
-/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
-/// clap doesn't reject `--all=true` for a bool field.
-fn flagify_bool_named(args: &mut ToolArgs) {
-    let bool_keys: Vec<String> = args
-        .named
-        .iter()
-        .filter(|(_, v)| matches!(v, Value::Bool(_)))
-        .map(|(k, _)| k.clone())
-        .collect();
-    for k in bool_keys {
-        if let Some(Value::Bool(true)) = args.named.remove(&k) {
-            args.flags.insert(k);
-        }
     }
 }
 

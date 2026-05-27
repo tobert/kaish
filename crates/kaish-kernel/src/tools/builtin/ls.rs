@@ -38,7 +38,7 @@ struct LsArgs {
     human: bool,
 
     /// Sort by modification time.
-    #[arg(short = 't', long = "sort_time")]
+    #[arg(short = 't', long = "sort-time", visible_alias = "sort_time")]
     sort_time: bool,
 
     /// Reverse sort order.
@@ -46,7 +46,7 @@ struct LsArgs {
     reverse: bool,
 
     /// Sort by file size.
-    #[arg(short = 'S', long = "sort_size")]
+    #[arg(short = 'S', long = "sort-size", visible_alias = "sort_size")]
     sort_size: bool,
 
     /// List subdirectories recursively.
@@ -86,7 +86,7 @@ impl Tool for Ls {
         // Tests poke args.named.insert("long", Value::Bool(true)); to_argv would
         // emit `--long=true` which clap rejects for bool fields. Promote bool
         // named entries to flag form before clap parsing.
-        flagify_bool_named(&mut args);
+        args.flagify_bool_named();
 
         let parsed = match LsArgs::try_parse_from(
             std::iter::once("ls".to_string()).chain(args.to_argv()),
@@ -460,22 +460,6 @@ impl Ls {
             OutputData::nodes(dir_nodes)
         };
         ExecResult::with_output_and_text(output, text_output.trim_end().to_string())
-    }
-}
-
-/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
-/// clap doesn't reject `--long=true` as a value for a bool field.
-fn flagify_bool_named(args: &mut ToolArgs) {
-    let bool_keys: Vec<String> = args
-        .named
-        .iter()
-        .filter(|(_, v)| matches!(v, Value::Bool(_)))
-        .map(|(k, _)| k.clone())
-        .collect();
-    for k in bool_keys {
-        if let Some(Value::Bool(true)) = args.named.remove(&k) {
-            args.flags.insert(k);
-        }
     }
 }
 

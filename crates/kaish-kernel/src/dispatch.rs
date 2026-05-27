@@ -42,7 +42,7 @@ use crate::interpreter::apply_output_format;
 #[cfg(test)]
 use crate::scheduler::build_tool_args;
 #[cfg(test)]
-use crate::tools::ToolRegistry;
+use crate::tools::{GlobalFlags, ToolRegistry};
 #[cfg(all(test, feature = "native"))]
 use crate::tools::resolve_in_path;
 
@@ -389,6 +389,11 @@ impl CommandDispatcher for BackendDispatcher {
         // Build tool args with schema-aware parsing (sync — no command substitution)
         let schema = self.tools.get(&cmd.name).map(|t| t.schema());
         let tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
+
+        // Honor --json before the tool runs so a parse failure inside the
+        // builtin doesn't drop the format on the floor. See kernel.rs for the
+        // matching call in the production path.
+        GlobalFlags::apply_from_args(&tool_args, ctx);
 
         // Execute via backend
         let backend = ctx.backend.clone();

@@ -35,7 +35,7 @@ struct PatchArgs {
     reverse: bool,
 
     /// Show what would change without applying.
-    #[arg(long = "dry-run")]
+    #[arg(long = "dry-run", visible_alias = "dry_run")]
     dry_run: bool,
 
     /// Target file (overrides patch header).
@@ -74,7 +74,7 @@ impl Tool for Patch {
         // `-R` flag and `--dry-run` flag work directly. The `p=1` form lands as
         // a single-char named entry which to_argv renders as `-p=1`; clap's
         // `Option<i64>` with short='p' handles that natively.
-        flagify_bool_named(&mut args);
+        args.flagify_bool_named();
 
         let parsed = match PatchArgs::try_parse_from(
             std::iter::once("patch".to_string()).chain(args.to_argv()),
@@ -180,22 +180,6 @@ impl Tool for Patch {
         }
 
         ExecResult::with_output(OutputData::text(output.trim_end()))
-    }
-}
-
-/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
-/// clap doesn't reject `--R=true` for a bool field. See xxd.rs/grep.rs.
-fn flagify_bool_named(args: &mut ToolArgs) {
-    let bool_keys: Vec<String> = args
-        .named
-        .iter()
-        .filter(|(_, v)| matches!(v, Value::Bool(_)))
-        .map(|(k, _)| k.clone())
-        .collect();
-    for k in bool_keys {
-        if let Some(Value::Bool(true)) = args.named.remove(&k) {
-            args.flags.insert(k);
-        }
     }
 }
 

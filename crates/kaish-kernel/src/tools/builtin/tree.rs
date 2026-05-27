@@ -29,7 +29,7 @@ struct TreeArgs {
     flat: bool,
 
     /// Show only files, no directory entries.
-    #[arg(short = 'f', long = "files_only")]
+    #[arg(short = 'f', long = "files-only", visible_alias = "files_only")]
     files_only: bool,
 
     /// Show hidden files.
@@ -37,7 +37,7 @@ struct TreeArgs {
     all: bool,
 
     /// Include ignored directories.
-    #[arg(long = "no_ignore", visible_alias = "no-ignore")]
+    #[arg(long = "no-ignore", visible_alias = "no_ignore")]
     no_ignore: bool,
 
     #[command(flatten)]
@@ -164,7 +164,7 @@ impl Tool for Tree {
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        flagify_bool_named(&mut args);
+        args.flagify_bool_named();
 
         let parsed = match TreeArgs::try_parse_from(
             std::iter::once("tree".to_string()).chain(args.to_argv()),
@@ -198,9 +198,9 @@ impl Tool for Tree {
 
         let traditional = args.has_flag("traditional");
         let flat = args.has_flag("flat");
-        let files_only = args.has_flag("files_only") || args.has_flag("f");
+        let files_only = args.has_flag("files-only") || args.has_flag("f");
         let show_hidden = args.has_flag("all") || args.has_flag("a");
-        let no_ignore = args.has_flag("no_ignore") || args.has_flag("no-ignore");
+        let no_ignore = args.has_flag("no-ignore") || args.has_flag("no-ignore");
 
         // Build tree by walking directory
         let mut tree = TreeNode::default();
@@ -294,22 +294,6 @@ impl Tool for Tree {
             );
 
         ExecResult::with_output(OutputData::nodes(vec![root_node]))
-    }
-}
-
-/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
-/// clap doesn't reject `--traditional=true` for a bool field.
-fn flagify_bool_named(args: &mut ToolArgs) {
-    let bool_keys: Vec<String> = args
-        .named
-        .iter()
-        .filter(|(_, v)| matches!(v, Value::Bool(_)))
-        .map(|(k, _)| k.clone())
-        .collect();
-    for k in bool_keys {
-        if let Some(Value::Bool(true)) = args.named.remove(&k) {
-            args.flags.insert(k);
-        }
     }
 }
 

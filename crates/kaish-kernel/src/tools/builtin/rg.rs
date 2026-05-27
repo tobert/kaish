@@ -35,7 +35,7 @@ pub struct Rg;
 #[command(name = "rg", about = "ripgrep — recursive search with gitignore awareness")]
 struct RgArgs {
     /// Case-insensitive matching.
-    #[arg(short = 'i', long = "ignore_case")]
+    #[arg(short = 'i', long = "ignore-case", visible_alias = "ignore_case")]
     ignore_case: bool,
 
     /// Match whole words only.
@@ -43,7 +43,7 @@ struct RgArgs {
     word: bool,
 
     /// Treat pattern as a literal string.
-    #[arg(short = 'F', long = "fixed_strings")]
+    #[arg(short = 'F', long = "fixed-strings", visible_alias = "fixed_strings")]
     fixed_strings: bool,
 
     /// Select non-matching lines.
@@ -51,11 +51,11 @@ struct RgArgs {
     invert: bool,
 
     /// Show line numbers (default on).
-    #[arg(short = 'n', long = "line_number")]
+    #[arg(short = 'n', long = "line-number", visible_alias = "line_number")]
     line_number: bool,
 
     /// Suppress line numbers.
-    #[arg(short = 'N', long = "no_line_number")]
+    #[arg(short = 'N', long = "no-line-number", visible_alias = "no_line_number")]
     no_line_number: bool,
 
     /// Count matching lines per file.
@@ -63,19 +63,19 @@ struct RgArgs {
     count: bool,
 
     /// List only filenames with matches.
-    #[arg(short = 'l', long = "files_with_matches")]
+    #[arg(short = 'l', long = "files-with-matches", visible_alias = "files_with_matches")]
     files_with_matches: bool,
 
     /// Print only matched parts.
-    #[arg(short = 'o', long = "only_matching")]
+    #[arg(short = 'o', long = "only-matching", visible_alias = "only_matching")]
     only_matching: bool,
 
     /// Print NUM lines after each match.
-    #[arg(short = 'A', long = "after_context")]
+    #[arg(short = 'A', long = "after-context", visible_alias = "after_context")]
     after_context: Option<String>,
 
     /// Print NUM lines before each match.
-    #[arg(short = 'B', long = "before_context")]
+    #[arg(short = 'B', long = "before-context", visible_alias = "before_context")]
     before_context: Option<String>,
 
     /// Print NUM lines before and after each match.
@@ -83,15 +83,15 @@ struct RgArgs {
     context: Option<String>,
 
     /// Stop after NUM matches per file.
-    #[arg(short = 'm', long = "max_count", visible_alias = "max-count")]
+    #[arg(short = 'm', long = "max-count", visible_alias = "max_count")]
     max_count: Option<String>,
 
     /// Limit directory recursion depth.
-    #[arg(long = "max_depth", visible_alias = "max-depth")]
+    #[arg(long = "max-depth", visible_alias = "max_depth")]
     max_depth: Option<String>,
 
     /// Skip files larger than this many bytes.
-    #[arg(long = "max_filesize", visible_alias = "max-filesize")]
+    #[arg(long = "max-filesize", visible_alias = "max_filesize")]
     max_filesize: Option<String>,
 
     /// Allow patterns to match across line boundaries.
@@ -103,7 +103,7 @@ struct RgArgs {
     type_: Option<String>,
 
     /// Skip files matching the given type.
-    #[arg(short = 'T', long = "type_not", visible_alias = "type-not")]
+    #[arg(short = 'T', long = "type-not", visible_alias = "type_not")]
     type_not: Option<String>,
 
     /// Search hidden files and directories.
@@ -111,7 +111,7 @@ struct RgArgs {
     hidden: bool,
 
     /// Don't honor .gitignore / .ignore / .rgignore.
-    #[arg(long = "no_ignore", visible_alias = "no-ignore")]
+    #[arg(long = "no-ignore", visible_alias = "no_ignore")]
     no_ignore: bool,
 
     /// Include only files matching glob.
@@ -168,7 +168,7 @@ impl Tool for Rg {
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        flagify_bool_named(&mut args);
+        args.flagify_bool_named();
 
         let parsed = match RgArgs::try_parse_from(
             std::iter::once("rg".to_string()).chain(args.to_argv()),
@@ -387,22 +387,6 @@ fn run_stdin_search<M: Matcher>(matcher: &M, bytes: &[u8], opts: &RgOptions) -> 
     ExecResult::with_output_and_text(output, render.text)
 }
 
-/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
-/// clap doesn't reject `--hidden=true` for a bool field.
-fn flagify_bool_named(args: &mut ToolArgs) {
-    let bool_keys: Vec<String> = args
-        .named
-        .iter()
-        .filter(|(_, v)| matches!(v, Value::Bool(_)))
-        .map(|(k, _)| k.clone())
-        .collect();
-    for k in bool_keys {
-        if let Some(Value::Bool(true)) = args.named.remove(&k) {
-            args.flags.insert(k);
-        }
-    }
-}
-
 /// Parsed flags for one `rg` invocation. Centralizes the clamps and
 /// error messages so `execute` stays readable.
 struct RgOptions {
@@ -438,8 +422,8 @@ impl RgOptions {
         let after = int_arg(args, "after_context").or(context);
         let before = int_arg(args, "before_context").or(context);
 
-        let line_number = args.has_flag("line_number") || args.has_flag("n");
-        let no_line_number = args.has_flag("no_line_number") || args.has_flag("N");
+        let line_number = args.has_flag("line-number") || args.has_flag("n");
+        let no_line_number = args.has_flag("no-line-number") || args.has_flag("N");
         // -N wins over default-on -n.
         let show_line_numbers = line_number && !no_line_number;
 
@@ -454,13 +438,13 @@ impl RgOptions {
         };
 
         Ok(Self {
-            ignore_case: args.has_flag("ignore_case") || args.has_flag("i"),
+            ignore_case: args.has_flag("ignore-case") || args.has_flag("i"),
             word: args.has_flag("word") || args.has_flag("w"),
-            fixed_strings: args.has_flag("fixed_strings") || args.has_flag("F"),
+            fixed_strings: args.has_flag("fixed-strings") || args.has_flag("F"),
             invert: args.has_flag("invert") || args.has_flag("v"),
             show_line_numbers,
-            only_matching: args.has_flag("only_matching") || args.has_flag("o"),
-            files_with_matches: args.has_flag("files_with_matches") || args.has_flag("l"),
+            only_matching: args.has_flag("only-matching") || args.has_flag("o"),
+            files_with_matches: args.has_flag("files-with-matches") || args.has_flag("l"),
             count: args.has_flag("count") || args.has_flag("c"),
             after_context: after,
             before_context: before,
@@ -471,7 +455,7 @@ impl RgOptions {
             type_select: args.get_string("type", usize::MAX),
             type_negate: args.get_string("type_not", usize::MAX),
             hidden: args.has_flag("hidden"),
-            no_ignore: args.has_flag("no_ignore"),
+            no_ignore: args.has_flag("no-ignore"),
             include: args.get_string("include", usize::MAX),
             exclude: args.get_string("exclude", usize::MAX),
             encoding: args.get_string("encoding", usize::MAX),

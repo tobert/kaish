@@ -48,7 +48,7 @@ struct JqArgs {
     compact: bool,
 
     /// Use null as input instead of reading stdin (-n).
-    #[arg(short = 'n', long = "null-input")]
+    #[arg(short = 'n', long = "null-input", visible_alias = "null_input")]
     null_input: bool,
 
     /// Read from VFS file instead of stdin.

@@ -58,7 +58,7 @@ impl Tool for Base64Tool {
         // to_argv would render that as `--decode=true` which clap won't accept
         // for a bool field. Promote any Bool-typed named entries to flags so
         // they hit the clap struct via the natural short/long form.
-        flagify_bool_named(&mut args);
+        args.flagify_bool_named();
 
         let parsed = match Base64Args::try_parse_from(
             std::iter::once("base64".to_string()).chain(args.to_argv()),
@@ -127,24 +127,6 @@ impl Tool for Base64Tool {
             };
 
             ExecResult::with_output(OutputData::text(output))
-        }
-    }
-}
-
-/// Promote `Value::Bool` entries from `args.named` to flag-form.
-/// Tests construct `args.named.insert("decode", Value::Bool(true))` but
-/// `to_argv()` renders that as `--decode=true`, which clap rejects for a
-/// bool field. Move them into `args.flags` so to_argv emits `--decode`.
-fn flagify_bool_named(args: &mut ToolArgs) {
-    let bool_keys: Vec<String> = args
-        .named
-        .iter()
-        .filter(|(_, v)| matches!(v, Value::Bool(_)))
-        .map(|(k, _)| k.clone())
-        .collect();
-    for k in bool_keys {
-        if let Some(Value::Bool(true)) = args.named.remove(&k) {
-            args.flags.insert(k);
         }
     }
 }

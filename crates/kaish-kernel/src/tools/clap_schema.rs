@@ -87,6 +87,15 @@ fn arg_to_param(arg: &Arg) -> ParamSchema {
     if let Some(short) = arg.get_short() {
         aliases.push(short.to_string());
     }
+    // Expose the long-flag form whenever it differs from the canonical id
+    // (Rust field name, which is always snake_case). Without this, the
+    // validator and kernel-side `param_lookup` only know the snake form and
+    // would mis-classify a kebab `--ignore-case` as an unknown bool flag.
+    if let Some(long) = arg.get_long()
+        && long != arg.get_id().as_str()
+    {
+        aliases.push(long.to_string());
+    }
     if let Some(visible) = arg.get_visible_aliases() {
         for alias in visible {
             aliases.push(alias.to_string());

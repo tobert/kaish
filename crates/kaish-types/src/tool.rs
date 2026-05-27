@@ -227,6 +227,35 @@ impl ToolArgs {
         })
     }
 
+    /// Move bool entries from `named` into the appropriate set so a downstream
+    /// clap parser (with `#[arg(...)] field: bool`) accepts them.
+    ///
+    /// Tests routinely seed `args.named.insert(K, Value::Bool(true))` for the
+    /// schema-pre-clap path; `to_argv()` would emit those as `--K=true`, which
+    /// clap rejects for `bool` fields. Promote to:
+    /// - `Bool(true)` → presence in `flags` (clap sees `--K`).
+    /// - `Bool(false)` → dropped (clap treats absent flag and explicit false
+    ///   the same; preserving it would only resurface as `--K=false` and break
+    ///   the same parser).
+    ///
+    /// Idempotent. Non-bool named entries are left alone.
+    pub fn flagify_bool_named(&mut self) {
+        let bool_keys: Vec<String> = self
+            .named
+            .iter()
+            .filter(|(_, v)| matches!(v, Value::Bool(_)))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in bool_keys {
+            // Remove unconditionally so Bool(false) doesn't linger and break
+            // a `--K=false` rejection in clap. Only Bool(true) re-enters as a
+            // flag presence.
+            if let Some(Value::Bool(true)) = self.named.remove(&k) {
+                self.flags.insert(k);
+            }
+        }
+    }
+
     /// Reconstruct a clap-friendly argv vector from already-parsed ToolArgs.
     ///
     /// kaish has already done shell parsing (variables expanded, globs expanded,
@@ -387,5 +416,51 @@ mod to_argv_tests {
             args.to_argv(),
             vec!["--verbose", "--limit=10", "--", "file.txt"]
         );
+    }
+
+    #[test]
+    fn flagify_bool_named_promotes_true_to_flag() {
+        let mut args = ToolArgs::new();
+        args.named.insert("recursive".into(), Value::Bool(true));
+        args.named.insert("limit".into(), Value::Int(5));
+
+        args.flagify_bool_named();
+
+        assert!(args.flags.contains("recursive"));
+        assert!(!args.named.contains_key("recursive"));
+        // Non-bool entries are untouched.
+        assert_eq!(args.named.get("limit"), Some(&Value::Int(5)));
+    }
+
+    #[test]
+    fn flagify_bool_named_drops_false() {
+        let mut args = ToolArgs::new();
+        args.named.insert("recursive".into(), Value::Bool(false));
+
+        args.flagify_bool_named();
+
+        assert!(!args.flags.contains("recursive"));
+        assert!(!args.named.contains_key("recursive"));
+    }
+
+    #[test]
+    fn flagify_bool_named_is_idempotent() {
+        let mut args = ToolArgs::new();
+        args.named.insert("recursive".into(), Value::Bool(true));
+        args.flagify_bool_named();
+        args.flagify_bool_named();
+        assert!(args.flags.contains("recursive"));
+    }
+
+    /// Regression guard: argv emitted after flagify must round-trip through
+    /// a clap parser without `--K=true` showing up.
+    #[test]
+    fn flagify_bool_named_round_trips_through_to_argv() {
+        let mut args = ToolArgs::new();
+        args.named.insert("R".into(), Value::Bool(true));
+        args.flagify_bool_named();
+        let argv = args.to_argv();
+        assert!(argv.contains(&"-R".to_string()), "expected -R, got {:?}", argv);
+        assert!(!argv.iter().any(|s| s.contains('=')), "no =value should appear, got {:?}", argv);
     }
 }

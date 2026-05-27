@@ -112,6 +112,69 @@ inspect `positional[0]`. `cat`/`head`/`tail` etc. use
 roots. Tests pass because the unit tests pass raw glob strings to
 `Ls.execute` directly, bypassing the kernel's pre-expansion.
 
+### Schema fidelity + positional-index mismatch (clap migration, paired)
+**Both surfaced by code review on 2026-05-27 of commits 800a55b /
+189c8db / a5ea7e1.** Two paired regressions from the clap sweep:
+
+**(a) `schema_from_clap` excludes hidden positional sinks.**
+Every migrated builtin uses `#[arg(hide = true)] rest: Vec<String>` (or
+`paths`, `words`, etc.) to absorb positionals so clap doesn't reject
+them. `params_from_clap` skips hidden args, so the resulting
+`ToolSchema.params` contains **zero positional entries** for migrated
+builtins. `help cat` no longer documents the `path` parameter; MCP
+schema consumers learn nothing about what positionals each builtin
+accepts. Pre-sweep hand-written schemas DID declare positionals.
+
+**(b) `validate_against_schema` matches positionals by index in
+`schema.params`.** `traits.rs:46-66` walks `params.iter().enumerate()`
+and treats each index as both the param slot AND the positional slot.
+This worked when hand-written schemas put positionals first. If (a) is
+fixed by un-hiding the sinks, positionals now sit AFTER flags in
+clap-derived order — `mkdir foo` would falsely error "missing required
+positional" because the path field has index 1+ in the struct.
+
+**Right shape:** add `positional: bool` to `ParamSchema` (default
+false, serde-skipped). Have `params_from_clap` set it from
+`arg.get_index().is_some()`. Stop hiding positional sinks — declare
+them with descriptive names + doc comments. Refactor
+`validate_against_schema` to split params into positionals and flags;
+match positionals by their order among positionals only.
+
+Risk: some current hidden sinks are true sinks (e.g., `rest` in find,
+glob, rg) that swallow trailing args without modeling them. Those
+should keep the sink semantics but expose a positional param in the
+schema (`paths`, `pattern`, etc.) with a short description.
+
+### `apply_output_format` early-returns on empty stdout
+`kaish-types/src/output.rs:521-524`:
+```
+if !result.has_output() && result.text_out().is_empty() {
+    return result;
+}
+```
+The doc above the function claims it "serializes regardless of exit
+code." It doesn't — when the result is a failure with empty stdout and
+populated `err`, the early-return preserves stderr as text and skips
+JSON encoding entirely. For `grep --json --bogus-flag` and friends,
+the error message goes out as plain text even though `--json` was
+requested.
+
+Two ways forward: (1) when format=Json and stdout is empty but
+exit≠0, emit a JSON error object `{"error": <err>, "code": <code>}`
+to stdout; or (2) document the contract honestly as "--json applies
+to successful stdout only." Option (1) is the agent-friendly choice
+and matches the existing comment intent. Backward-compat audit
+needed for any test asserting err-via-stderr with --json present.
+
+### grep `-E` is pure no-op
+`crates/kaish-kernel/src/tools/builtin/grep.rs:74-78`. Rust's regex
+crate is always extended, so `-E` semantically aliases to default.
+Currently declared as `_extended: bool` accept-and-ignore. Options:
+(a) keep the no-op for POSIX/muscle-memory compatibility (current);
+(b) remove the field, let clap reject `-E` so users learn it's
+unnecessary; (c) note in the help text. (a) is lowest churn — leave
+unless someone reports surprise.
+
 ---
 
 ## P3 — Scheduler and infra
@@ -327,6 +390,35 @@ isn't lost when those files are deleted.
   `jq -r '.key' <<< "$R"` is bash-idiomatic, shellcheck-clean, and
   kaish's jq is built in (native jaq, no subprocess). Pointer:
   `docs/plan-here-string.md`.
+- **Clap-migration review fixes** — 2026-05-27. Five findings from a
+  code-review pass on commits 800a55b … 93fbd12 (clap sweep + parser
+  split) landed in a single batch:
+  1. `grep -F` no longer silently routes through regex matching;
+     pattern is now `regex::escape`'d when -F is set (was: `grep -F
+     "192.168.1.1"` matched `1X168Y1Z1`).
+  2. `--json` is honored before `tool.execute()` runs via
+     `GlobalFlags::apply_from_args(&tool_args, ctx)` in kernel.rs and
+     dispatch.rs, so a clap parse-failure path doesn't drop the format
+     on the floor. Per-builtin `parsed.global.apply(ctx)` is now
+     idempotent backup.
+  3. `validate_user_tool_args` in `validator/walker.rs` now counts
+     `Arg::WordAssign` as positional (user tools aren't on the
+     WordAssign allowlist, so runtime stringifies WA to positional —
+     validator must agree).
+  4. `flagify_bool_named()` hoisted from 12 byte-identical inline
+     copies to a `ToolArgs` method in kaish-types. Documented behavior:
+     `Bool(true)` → flag presence, `Bool(false)` dropped (matches
+     clap's "absent ≡ false" model).
+  5. Migrated builtins' long-flag names converted from snake to
+     kebab (`--ignore_case` → `--ignore-case`); both forms accepted
+     via `visible_alias` for back-compat. `params_from_clap` now
+     exposes the long-flag name as an alias so the validator and
+     kernel `schema_param_lookup` recognise the kebab form.
+
+  Two paired findings (schema fidelity + positional index mismatch)
+  and one limitation (`apply_output_format` empty-stdout early-return
+  suppressing --json on errors) recorded as new P2 entries.
+
 - **Heredoc span tracking** — 2026-04-16 (commits `c21e09c`
   source, `2490127` tests). Interpolated heredoc bodies now carry
   per-part byte offsets via `SpannedPart` and a new `Expr::HereDocBody`

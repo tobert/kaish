@@ -56,7 +56,7 @@ use crate::parser::parse;
 use crate::scheduler::{is_bool_type, schema_param_lookup, stderr_stream, BoundedStream, JobManager, PipelineRunner, StderrReceiver};
 #[cfg(feature = "native")]
 use crate::scheduler::{drain_to_stream, DEFAULT_STREAM_MAX_SIZE};
-use crate::tools::{register_builtins, ExecContext, ToolArgs, ToolRegistry};
+use crate::tools::{register_builtins, ExecContext, GlobalFlags, ToolArgs, ToolRegistry};
 #[cfg(feature = "native")]
 use crate::tools::resolve_in_path;
 use crate::validator::{Severity, Validator};
@@ -2246,6 +2246,12 @@ impl Kernel {
             ctx.pipe_stdin = ec.pipe_stdin.take();
             ctx.pipe_stdout = ec.pipe_stdout.take();
         }
+
+        // Honor --json before the builtin runs so its setting survives a clap
+        // parse failure (e.g. `cmd --json --bogus-flag` would otherwise drop
+        // --json on the floor when `try_parse_from` returns Err early).
+        // The builtin's own `parsed.global.apply(ctx)` becomes idempotent.
+        GlobalFlags::apply_from_args(&tool_args, &mut ctx);
 
         let result = tool.execute(tool_args, &mut ctx).await;
 

@@ -27,7 +27,7 @@ struct UniqArgs {
     unique: bool,
 
     /// Ignore case when comparing (-i)
-    #[arg(short = 'i', long = "ignore_case")]
+    #[arg(short = 'i', long = "ignore-case", visible_alias = "ignore_case")]
     ignore_case: bool,
 
     #[command(flatten)]

@@ -15,7 +15,7 @@ pub struct Echo;
 #[command(name = "echo", about = "Print arguments to standard output")]
 struct EchoArgs {
     /// Do not output trailing newline.
-    #[arg(short = 'n', long = "no_newline")]
+    #[arg(short = 'n', long = "no-newline", visible_alias = "no_newline")]
     no_newline: bool,
 
     #[command(flatten)]
@@ -157,7 +157,7 @@ mod tests {
         let mut ctx = make_ctx();
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("test".into()));
-        args.flags.insert("no_newline".to_string());
+        args.flags.insert("no-newline".to_string());
 
         let result = Echo.execute(args, &mut ctx).await;
         assert!(result.ok());

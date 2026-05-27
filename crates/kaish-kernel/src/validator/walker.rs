@@ -471,10 +471,16 @@ impl<'a> Validator<'a> {
     }
 
     /// Validate arguments against a user-defined tool's parameters.
+    ///
+    /// Counts bareword `key=value` (`Arg::WordAssign`) as positional: user
+    /// tools aren't on `WORD_ASSIGN_BUILTINS`, so at runtime the kernel
+    /// stringifies WordAssign into a positional `"key=value"` (matches bash).
+    /// Skipping it here would falsely error `mytool foo=bar` when mytool has
+    /// one required positional.
     fn validate_user_tool_args(&mut self, tool_def: &ToolDef, args: &[Arg]) {
         let positional_count = args
             .iter()
-            .filter(|a| matches!(a, Arg::Positional(_)))
+            .filter(|a| matches!(a, Arg::Positional(_) | Arg::WordAssign { .. }))
             .count();
 
         let required_count = tool_def
@@ -788,5 +794,76 @@ mod tests {
         let issues = validator.validate(&program);
         assert!(!issues.iter().any(|i| i.code == IssueCode::ScatterWithoutGather),
             "scatter with gather should pass: {:?}", issues);
+    }
+
+    fn make_user_tool_with_required_positional() -> HashMap<String, ToolDef> {
+        let mut user_tools = HashMap::new();
+        user_tools.insert(
+            "mytool".to_string(),
+            ToolDef {
+                name: "mytool".to_string(),
+                params: vec![crate::ast::ParamDef {
+                    name: "input".to_string(),
+                    param_type: None,
+                    default: None,
+                }],
+                body: vec![],
+            },
+        );
+        user_tools
+    }
+
+    /// `mytool foo=bar` should count the bareword `key=value` as a positional
+    /// because user tools aren't on the WordAssign allowlist — runtime
+    /// stringifies WordAssign to a positional. Validator must agree.
+    #[test]
+    fn user_tool_wordassign_counts_as_positional() {
+        let mut registry = ToolRegistry::new();
+        register_builtins(&mut registry);
+        let user_tools = make_user_tool_with_required_positional();
+        let validator = Validator::new(&registry, &user_tools);
+
+        let program = Program {
+            statements: vec![Stmt::Command(Command {
+                name: "mytool".to_string(),
+                args: vec![Arg::WordAssign {
+                    key: "foo".to_string(),
+                    value: Expr::Literal(Value::String("bar".to_string())),
+                }],
+                redirects: vec![],
+            })],
+        };
+
+        let issues = validator.validate(&program);
+        assert!(
+            !issues.iter().any(|i| i.code == IssueCode::MissingRequiredArg),
+            "WordAssign should satisfy required positional; got {:?}",
+            issues
+        );
+    }
+
+    /// Missing-required-arg still fires when no positional or WordAssign is
+    /// provided — regression guard so the fix doesn't silently skip the check.
+    #[test]
+    fn user_tool_no_args_still_errors() {
+        let mut registry = ToolRegistry::new();
+        register_builtins(&mut registry);
+        let user_tools = make_user_tool_with_required_positional();
+        let validator = Validator::new(&registry, &user_tools);
+
+        let program = Program {
+            statements: vec![Stmt::Command(Command {
+                name: "mytool".to_string(),
+                args: vec![],
+                redirects: vec![],
+            })],
+        };
+
+        let issues = validator.validate(&program);
+        assert!(
+            issues.iter().any(|i| i.code == IssueCode::MissingRequiredArg),
+            "missing positional should still error; got {:?}",
+            issues
+        );
     }
 }

@@ -26,7 +26,7 @@ pub struct Awk;
 #[command(name = "awk", about = "Pattern scanning and text processing language")]
 struct AwkArgs {
     /// Field separator regex (-F).
-    #[arg(short = 'F', long = "field_separator")]
+    #[arg(short = 'F', long = "field-separator", visible_alias = "field_separator")]
     field_separator: Option<String>,
 
     /// Variable assignment (-v NAME=VALUE).
