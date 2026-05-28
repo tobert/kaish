@@ -355,3 +355,36 @@ async fn checksum_emits_known_sha256() {
     );
     assert!(out.contains("c.bin"), "checksum missing filename: {out:?}");
 }
+
+#[tokio::test]
+async fn grep_searches_all_files_and_prefixes_filenames() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "a.txt", "match here\nother\n");
+    touch(dir.path(), "b.txt", "no\nmatch too\n");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "grep match a.txt b.txt").await;
+    assert_eq!(code, 0, "grep should succeed: {out:?}");
+    assert!(out.contains("match here"), "missed a.txt match: {out:?}");
+    assert!(
+        out.contains("match too"),
+        "missed b.txt match — only searched the first file? {out:?}"
+    );
+    // Multi-file grep must indicate which file each match came from.
+    assert!(
+        out.contains("a.txt") && out.contains("b.txt"),
+        "multi-file grep should prefix filenames: {out:?}"
+    );
+}
+
+#[tokio::test]
+async fn grep_glob_searches_all_matched_files() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "one.log", "needle\n");
+    touch(dir.path(), "two.log", "needle\n");
+    touch(dir.path(), "skip.txt", "needle\n");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "grep needle *.log").await;
+    assert_eq!(code, 0, "grep glob should succeed: {out:?}");
+    assert!(out.contains("one.log") && out.contains("two.log"), "grep glob: {out:?}");
+    assert!(!out.contains("skip.txt"), "grep glob leaked non-.log file: {out:?}");
+}

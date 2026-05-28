@@ -324,6 +324,31 @@ impl Tool for Grep {
                 .await;
         }
 
+        // Explicit multiple file operands: positional[1..]. The kernel
+        // pre-expands a bare glob into one positional per match, so
+        // `grep p *.rs` and `grep p a b c` both arrive as several file args.
+        // Search ALL of them (the old single `get_string("path", 1)` searched
+        // only the first and silently ignored the rest), reusing the
+        // filename-prefixing multi-file renderer.
+        let file_operands: Vec<String> = args
+            .positional
+            .iter()
+            .skip(1)
+            .map(crate::interpreter::value_to_string)
+            .collect();
+        if file_operands.len() > 1 {
+            let root = PathBuf::from(ctx.resolve_path("."));
+            let resolved: Vec<PathBuf> = file_operands
+                .iter()
+                .map(|f| PathBuf::from(ctx.resolve_path(f)))
+                .collect();
+            return self
+                .grep_multiple_files(
+                    ctx, &resolved, &root, &matcher, &grep_opts, quiet, files_only, count_only,
+                )
+                .await;
+        }
+
         // Streaming path: pipe_stdin → pipe_stdout, process line by line
         // Only for simple stdin grep (no context, no count, no quiet, no files-only, no only-matching)
         let can_stream = args.get_string("path", 1).is_none()

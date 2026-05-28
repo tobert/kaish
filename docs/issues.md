@@ -282,6 +282,13 @@ Optional but moderate leverage now that the loud cases are handled.
 Intentional (embedder owns lifecycle) but worth one doc line in
 `EMBEDDING.md`.
 
+### Multi-file `grep` silently skips unreadable explicit operands
+`grep_multiple_files` does `Err(_) => continue` per file — right for the
+recursive walk it was written for, but for explicit operands
+(`grep p real.txt typo.txt`) a missing/unreadable file should report
+`grep: typo.txt: …` and affect the exit code, like POSIX grep. Same
+silent-skip shape as the multi-arg `ls` entry below. Low priority.
+
 ### Multi-argument `ls` silently skips inaccessible paths
 `Ls::render_names` (`ls.rs`) skips any path that fails to `stat` — correct
 for the glob race it was written for (a match removed between walk and
@@ -296,6 +303,17 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`grep PATTERN f1 f2 …` searched only the first file — fixed 2026-05-28.**
+  Same multi-positional class as `ls`: grep read only `get_string("path", 1)`,
+  so `grep match a.txt b.txt` (and `grep p *.rs` after kernel glob
+  pre-expansion) silently ignored every file after the first — matches in
+  later files vanished from both text and `--json`. Now collects all
+  `positional[1..]` operands and routes ≥2 files through the existing
+  `grep_multiple_files` renderer (filename-prefixed, `show_filename: true`).
+  Single-file and stdin paths unchanged (no prefix, POSIX). Regression tests:
+  `builtin_kernel_tests::{grep_searches_all_files_and_prefixes_filenames,
+  grep_glob_searches_all_matched_files}`.
 
 - **Bare `.` argument parsed as `source` — fixed 2026-05-28 (parser).**
   Surfaced by the kernel-routed builtin breadth tests: `find .`, `ls .`,
