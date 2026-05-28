@@ -99,18 +99,6 @@ Tool-side blast radius is limited to builtins that re-dispatch —
 currently only `timeout`. External-command path and normal pipelines
 are unaffected (they don't re-enter the dispatcher from inside a tool).
 
-### `ls <glob>` only lists the first match under kernel pre-expansion
-Surfaced by the 2026-04-16 cleanup's smoke check: `ls crates/*/Cargo.toml`
-from the CLI returns only `crates/kaish-client/Cargo.toml`, not all 7.
-Root cause: the kernel pre-expands `GlobPattern` args into multiple
-`tool_args.positional` values (`kernel.rs:1851-1860`), but
-`ls.execute` reads only `positional[0]` via `args.get_string("path", 0)`
-(`ls.rs:86-88`). `ls` still needs the same `expand_paths` treatment
-the 2026-05-28 sweep gave to mkdir/rm/touch/etc., plus a decision on
-how to render multiple roots in the listing. Tests pass because the
-unit tests pass raw glob strings to `Ls.execute` directly, bypassing
-the kernel's pre-expansion.
-
 ### `apply_output_format` early-returns on empty stdout
 `kaish-types/src/output.rs:521-524`:
 ```
@@ -240,6 +228,16 @@ The lexer splits `.hidden.txt` into `Dot` + `Ident("hidden.txt")`
 rather than a single filename token. `DotSlashPath` (`./foo`) works;
 bare dot-prefixed names don't. Workaround: quote the name.
 
+### Bare `,` is a parse error — `cut -d,` / `cut -d ,` need quoting
+Surfaced 2026-05-28 by the kernel-routed builtin tests. A standalone
+comma is not lexed as a bareword, so the common bash idioms `cut -d,
+-f2` and `cut -d , -f2` both raise a parse error; only `cut -d ',' -f2`
+works. Same tokenization-gap family as the dot-prefixed-filename entry
+above. Low priority (quoting is a clean workaround and kaish is a POSIX
+*subset*), but a "did-you-mean: quote the delimiter" diagnostic would
+smooth bash porting. Decide whether `,` (and other lone punctuation
+agents reach for as delimiters) should tokenize as a bareword.
+
 ### Flag injection via glob expansion in `rm`
 `rm *` in a directory containing `-rf.txt` expands to `rm -rf.txt …`
 and kaish's structured flag parsing then flips `rm` behaviour.
@@ -284,12 +282,48 @@ Optional but moderate leverage now that the loud cases are handled.
 Intentional (embedder owns lifecycle) but worth one doc line in
 `EMBEDDING.md`.
 
+### Multi-argument `ls` silently skips inaccessible paths
+`Ls::render_names` (`ls.rs`) skips any path that fails to `stat` — correct
+for the glob race it was written for (a match removed between walk and
+stat), but for an explicit multi-arg call like `ls real.txt gone.txt` it
+drops `gone.txt` with no error, where bash prints `ls: cannot access`.
+Single-arg `ls gone.txt` still fails loudly (separate code path). Low
+priority; decide whether multi-arg should accumulate per-path errors.
+
 ---
 
 ## Resolved since previous lists
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`cp SRC... DST/` trailing-slash failure — fixed 2026-05-28 (lexer).**
+  Surfaced by the new kernel-routed builtin tests: `cp a.txt b.txt dest/`
+  failed with `cp: dest: is a directory (use -r to copy)` though `... dest`
+  worked. Root cause was the *lexer*, not `cp`: `RelativePath`'s bare form
+  (`lexer.rs:367`) required ≥1 char after the slash (`...]+`), so `dest/`
+  lexed as `Ident("dest")` + `Path("/")` — turning `cp a b dest/` into a
+  4-operand command where `cp` took `/` as the destination and `dest` as a
+  source. Changed the quantifier to `*` so a trailing slash stays attached
+  (absolute `Path` already allowed it). Same tokenization-gap family as the
+  dot-prefixed-filename and bare-`,` P4 entries. Regression tests:
+  `lexer_tests::lexer_navigation_tokens` (`dest/`, `src/kaish/`) and
+  `builtin_kernel_tests::cp_multiple_sources_into_directory_trailing_slash`.
+
+- **`ls` multi-positional / glob-drops-all-but-first — fixed 2026-05-28.**
+  The kernel pre-expands a bare glob into one `positional` per match, but
+  `Ls::execute` read only `positional[0]` via `get_string("path", 0)`, so
+  `ls crates/*/Cargo.toml` and `ls a.txt b.txt` listed only the first item.
+  `execute` now collects all positionals and branches: a single target keeps
+  the rich behavior (glob / file-as-name / dir contents / recursion) via a
+  new `list_one`; multiple targets render one node per argument (directories
+  shown by name, not expanded — the predictable structured-output choice)
+  via a new `render_names` shared with `list_glob`. The old direct-`.execute()`
+  unit tests never caught this because they passed raw glob strings straight
+  to the builtin, bypassing kernel pre-expansion. Fixed alongside a new
+  kernel-routed test harness (`tests/common::kernel_at`/`run`) and
+  `tests/ls_tests.rs` (13 tests through the full kernel pipeline over a
+  tempdir; 3 reproduced the bug red-first).
 
 - **Concurrency — done (2026-04-10).** `execute_lock` + `Kernel::fork`
   land; `BackendDispatcher` demoted to `#[cfg(test)]`. See

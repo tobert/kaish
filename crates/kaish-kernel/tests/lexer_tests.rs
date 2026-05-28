@@ -659,6 +659,10 @@ fn lexer_arithmetic_in_command_substitution(#[case] input: &str, #[case] expecte
 // traversing the first path component
 #[case::cd_bare_relative("cd src/kaish", &["IDENT(cd)", "RELPATH(src/kaish)"])]
 #[case::cd_bare_relative_nested("cd src/kaish/crates", &["IDENT(cd)", "RELPATH(src/kaish/crates)"])]
+// Trailing slash must stay attached to the path word. Splitting `dest/` into
+// `Ident(dest)` + `Path(/)` silently turned `cp a b dest/` into 4 operands.
+#[case::bare_relative_trailing_slash("cp a.txt dest/", &["IDENT(cp)", "IDENT(a.txt)", "RELPATH(dest/)"])]
+#[case::bare_relative_nested_trailing_slash("cd src/kaish/", &["IDENT(cd)", "RELPATH(src/kaish/)"])]
 fn lexer_navigation_tokens(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }

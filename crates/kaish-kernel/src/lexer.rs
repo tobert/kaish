@@ -362,9 +362,13 @@ pub enum Token {
     #[token("~")]
     Tilde,
 
-    /// Relative path: `../foo/bar` or bare `src/kaish` (ident containing `/`)
+    /// Relative path: `../foo/bar`, bare `src/kaish` (ident containing `/`),
+    /// or a directory reference with a trailing slash like `dest/`. The
+    /// trailing-slash form uses `*` (not `+`) after the slash so `dest/`
+    /// lexes as one token instead of `Ident("dest")` + `Path("/")` — the
+    /// latter split silently turned `cp a b dest/` into a 4-operand command.
     #[regex(r"\.\./[a-zA-Z0-9_./-]+", lex_relative_path, priority = 3)]
-    #[regex(r"[a-zA-Z_][a-zA-Z0-9_.-]*/[a-zA-Z0-9_./-]+", lex_relative_path, priority = 3)]
+    #[regex(r"[a-zA-Z_][a-zA-Z0-9_.-]*/[a-zA-Z0-9_./-]*", lex_relative_path, priority = 3)]
     RelativePath(String),
 
     /// Dot-slash path: `./foo`, `./script.sh`
