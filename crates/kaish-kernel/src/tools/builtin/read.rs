@@ -33,9 +33,8 @@ struct ReadArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — variable names read off args.positional.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Variable names to receive the words read from stdin.
+    names: Vec<String>,
 }
 
 #[async_trait]

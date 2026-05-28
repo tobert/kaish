@@ -32,6 +32,15 @@ pub struct ParamSchema {
     /// `Value::Json(Array(Array(...)))` listing every (N-tuple) occurrence.
     #[serde(default = "default_consumes")]
     pub consumes: usize,
+    /// True for positional arguments (`cat foo.txt`), false for flags
+    /// (`grep --ignore-case`). The validator matches positional params
+    /// against `args.positional` by their order *among positionals only*,
+    /// independent of where they sit in the clap struct. Default false so
+    /// hand-built `ParamSchema::required(...)` constructors keep flag
+    /// semantics; clap-reflected positionals set it via
+    /// `arg.get_index().is_some()`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub positional: bool,
 }
 
 impl ParamSchema {
@@ -45,6 +54,7 @@ impl ParamSchema {
             description: description.into(),
             aliases: Vec::new(),
             consumes: 1,
+            positional: false,
         }
     }
 
@@ -58,7 +68,17 @@ impl ParamSchema {
             description: description.into(),
             aliases: Vec::new(),
             consumes: 1,
+            positional: false,
         }
+    }
+
+    /// Mark this parameter as positional (matched by argv order rather than
+    /// by name). Used by `params_from_clap` for clap args with an assigned
+    /// index, and by hand-written schemas for positional parameters like
+    /// jq's `filter`.
+    pub fn positional(mut self) -> Self {
+        self.positional = true;
+        self
     }
 
     /// Add alternative names/flags for this parameter.

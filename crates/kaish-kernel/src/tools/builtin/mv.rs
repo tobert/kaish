@@ -22,9 +22,8 @@ struct MvArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — source/dest read off args.positional to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Source files followed by the destination path or directory.
+    paths: Vec<String>,
 }
 
 #[async_trait]

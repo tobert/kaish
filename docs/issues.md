@@ -1,7 +1,7 @@
 # Known Issues & Open Work
 
 Actionable punch list. Narrative context lives in [reviews.md](reviews.md).
-Last validation pass: 2026-04-16 (updated after heredoc-span work).
+Last validation pass: 2026-05-28 (after schema-fidelity / positional-index fix).
 
 Priorities follow the convention from `reviews.md`:
 
@@ -111,39 +111,6 @@ inspect `positional[0]`. `cat`/`head`/`tail` etc. use
 `ls` needs the same fix plus a decision on how to render multiple
 roots. Tests pass because the unit tests pass raw glob strings to
 `Ls.execute` directly, bypassing the kernel's pre-expansion.
-
-### Schema fidelity + positional-index mismatch (clap migration, paired)
-**Both surfaced by code review on 2026-05-27 of commits 800a55b /
-189c8db / a5ea7e1.** Two paired regressions from the clap sweep:
-
-**(a) `schema_from_clap` excludes hidden positional sinks.**
-Every migrated builtin uses `#[arg(hide = true)] rest: Vec<String>` (or
-`paths`, `words`, etc.) to absorb positionals so clap doesn't reject
-them. `params_from_clap` skips hidden args, so the resulting
-`ToolSchema.params` contains **zero positional entries** for migrated
-builtins. `help cat` no longer documents the `path` parameter; MCP
-schema consumers learn nothing about what positionals each builtin
-accepts. Pre-sweep hand-written schemas DID declare positionals.
-
-**(b) `validate_against_schema` matches positionals by index in
-`schema.params`.** `traits.rs:46-66` walks `params.iter().enumerate()`
-and treats each index as both the param slot AND the positional slot.
-This worked when hand-written schemas put positionals first. If (a) is
-fixed by un-hiding the sinks, positionals now sit AFTER flags in
-clap-derived order — `mkdir foo` would falsely error "missing required
-positional" because the path field has index 1+ in the struct.
-
-**Right shape:** add `positional: bool` to `ParamSchema` (default
-false, serde-skipped). Have `params_from_clap` set it from
-`arg.get_index().is_some()`. Stop hiding positional sinks — declare
-them with descriptive names + doc comments. Refactor
-`validate_against_schema` to split params into positionals and flags;
-match positionals by their order among positionals only.
-
-Risk: some current hidden sinks are true sinks (e.g., `rest` in find,
-glob, rg) that swallow trailing args without modeling them. Those
-should keep the sink semantics but expose a positional param in the
-schema (`paths`, `pattern`, etc.) with a short description.
 
 ### `apply_output_format` early-returns on empty stdout
 `kaish-types/src/output.rs:521-524`:
@@ -390,6 +357,37 @@ isn't lost when those files are deleted.
   `jq -r '.key' <<< "$R"` is bash-idiomatic, shellcheck-clean, and
   kaish's jq is built in (native jaq, no subprocess). Pointer:
   `docs/plan-here-string.md`.
+- **Schema fidelity + positional-index mismatch (clap migration)** —
+  2026-05-28. The paired P2 from 2026-05-27 landed in a single batch:
+  1. `ParamSchema` gained a `positional: bool` field (serde-skipped
+     when false). New `ParamSchema::positional()` builder for hand-
+     written schemas; jq_native's `filter` re-insert now uses it.
+  2. `params_from_clap` now exposes hidden *positional* sinks while
+     still skipping hidden *flag* args (clap's `is_positional()` is the
+     oracle — `get_index()` returns None for derived `Vec<String>`
+     positionals). Positional params are tagged accordingly.
+  3. `validate_against_schema` (`traits.rs:42-150`) was refactored to
+     split params into positional and flag groups and match positionals
+     by their order *among positionals only*, never by the struct-field
+     index. Required-positional and required-flag checks were split so
+     each goes through its own matching path.
+  4. `schema_param_lookup` (`scheduler/pipeline.rs:514`) now excludes
+     positional params from the flag-name lookup so the kernel doesn't
+     mis-route `cat --paths foo.txt` into named[paths]=foo.txt and
+     starve `cat`'s positional[0] read.
+  5. ~40 builtins' positional sinks were un-hidden with descriptive
+     names + user-facing doc comments (`paths`, `pattern`, `command`,
+     etc.). `help cat` now shows `paths : string` with description.
+     A handful that conflict with same-named flags (mktemp `--template`,
+     patch `--file`) or accept no real positionals (scatter, gather,
+     pwd, kaish-status, …) stay hidden — documented inline.
+
+  Unit-test coverage: clap_schema tests verify positional/flag
+  detection; traits validator tests pin the index-mismatch regression
+  (`required_positional_satisfied_when_positional_sits_after_flags`).
+  Full workspace 1543 unit + integration suites green; clippy clean
+  (--all and --no-default-features); WASI build OK.
+
 - **Clap-migration review fixes** — 2026-05-27. Five findings from a
   code-review pass on commits 800a55b … 93fbd12 (clap sweep + parser
   split) landed in a single batch:

@@ -34,9 +34,8 @@ struct XxdArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// File to read; reads stdin when omitted.
+    paths: Vec<String>,
 }
 
 #[async_trait]

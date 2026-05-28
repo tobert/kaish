@@ -35,9 +35,8 @@ struct ExportArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — names read off args.positional / args.named to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// `NAME=VALUE` assignments and/or bare `NAME` identifiers to export.
+    names: Vec<String>,
 }
 
 #[async_trait]

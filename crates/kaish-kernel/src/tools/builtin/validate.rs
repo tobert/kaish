@@ -40,9 +40,8 @@ struct ValidateArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — path read off args.positional.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Script file to validate; pass `--expr` instead for inline expressions.
+    path: Vec<String>,
 }
 
 #[async_trait]

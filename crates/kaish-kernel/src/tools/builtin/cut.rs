@@ -30,9 +30,8 @@ struct CutArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Files to read; reads stdin when none are given.
+    paths: Vec<String>,
 }
 
 #[async_trait]

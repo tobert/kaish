@@ -17,9 +17,8 @@ struct KaishIgnoreArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — subcommand / argument read off args.positional to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Subcommand (`add`, `remove`) followed by its argument.
+    args: Vec<String>,
 }
 
 #[async_trait]

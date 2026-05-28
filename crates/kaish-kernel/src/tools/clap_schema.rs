@@ -42,9 +42,15 @@ pub fn schema_from_clap(
 /// - `--help` / `-h` (auto-injected by clap)
 /// - `--version` / `-V` (auto-injected by clap when version is set)
 /// - `--json` (kernel-owned global flag)
-/// - Hidden args (`#[arg(hide = true)]`) — these are sink positionals used to
-///   absorb args after `--`; they're an internal clap detail, not part of the
-///   tool's public schema.
+/// - Hidden *flag* args (`#[arg(hide = true)]` without an index) — true
+///   internal helpers.
+///
+/// Hidden *positional* args are kept: many migrated builtins use
+/// `#[arg(hide = true)] paths: Vec<String>` purely so clap accepts the
+/// `--`-terminated positional tail emitted by `ToolArgs::to_argv()`. Those
+/// positionals ARE the tool's public surface (`cat paths…`, `mkdir paths…`),
+/// so they belong in the schema with a `positional: true` marker and ride
+/// the field's doc-comment for the description.
 pub fn params_from_clap(cmd: &Command) -> Vec<ParamSchema> {
     cmd.get_arguments()
         .filter(|arg| !is_skipped(arg))
@@ -57,7 +63,11 @@ fn is_skipped(arg: &Arg) -> bool {
     if matches!(id, "help" | "version" | "json") {
         return true;
     }
-    arg.is_hide_set()
+    // Keep hidden positionals (real user surface, just marked hidden to keep
+    // clap's --help tidy); drop hidden flag args (internal clap helpers).
+    // Use `is_positional()` — `get_index()` returns None for derived
+    // `Vec<String>` positionals even though they ARE positional.
+    arg.is_hide_set() && !arg.is_positional()
 }
 
 fn arg_to_param(arg: &Arg) -> ParamSchema {
@@ -116,6 +126,12 @@ fn arg_to_param(arg: &Arg) -> ParamSchema {
         None
     };
 
+    // `arg.is_positional()` is the right oracle: clap returns true for any
+    // positional arg, whereas `get_index()` returns None for derived
+    // `Vec<String>` positionals. Positional slot ordering is by appearance
+    // in `schema.params`, not by clap's internal index.
+    let positional = arg.is_positional();
+
     ParamSchema {
         name,
         param_type: param_type.to_string(),
@@ -124,6 +140,7 @@ fn arg_to_param(arg: &Arg) -> ParamSchema {
         description,
         aliases,
         consumes,
+        positional,
     }
 }
 
@@ -143,9 +160,21 @@ mod tests {
         #[arg(short = 'l', long = "lines", default_value_t = 10)]
         lines: i64,
 
-        /// Output sink — clap parses but tool ignores.
+        /// Files to read.
         #[arg(hide = true)]
-        rest: Vec<String>,
+        paths: Vec<String>,
+    }
+
+    /// A demo struct with a hidden internal flag (not positional) — those
+    /// should still be skipped from the schema.
+    #[derive(Parser, Debug)]
+    #[command(name = "demo-internal", about = "demo with internal flag")]
+    struct DemoInternalArgs {
+        #[arg(hide = true, long = "internal-only")]
+        internal: bool,
+
+        /// Files to read.
+        paths: Vec<String>,
     }
 
     #[test]
@@ -170,10 +199,36 @@ mod tests {
     }
 
     #[test]
-    fn hidden_args_excluded_from_schema() {
+    fn hidden_positional_is_kept_and_marked_positional() {
         let cmd = DemoArgs::command();
         let params = params_from_clap(&cmd);
-        assert!(params.iter().all(|p| p.name != "rest"));
+        let p = params.iter().find(|p| p.name == "paths").expect("paths param");
+        assert!(p.positional, "hidden positional sink should be exposed as positional");
+        assert_eq!(p.param_type, "string");
+        assert!(p.description.contains("Files to read"));
+    }
+
+    #[test]
+    fn hidden_flag_is_dropped() {
+        let cmd = DemoInternalArgs::command();
+        let params = params_from_clap(&cmd);
+        assert!(
+            params.iter().all(|p| p.name != "internal"),
+            "hidden non-positional flag should be skipped: {:?}",
+            params.iter().map(|p| &p.name).collect::<Vec<_>>()
+        );
+        // Non-hidden positional still appears.
+        assert!(params.iter().any(|p| p.name == "paths" && p.positional));
+    }
+
+    #[test]
+    fn flag_params_are_not_marked_positional() {
+        let cmd = DemoArgs::command();
+        let params = params_from_clap(&cmd);
+        let p = params.iter().find(|p| p.name == "number").unwrap();
+        assert!(!p.positional);
+        let p = params.iter().find(|p| p.name == "lines").unwrap();
+        assert!(!p.positional);
     }
 
     #[test]

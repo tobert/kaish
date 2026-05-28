@@ -45,7 +45,9 @@ struct PatchArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — positionals (explicit file) live on args.positional.
+    /// Sink — positional file path is the same value as `--file`; the kernel's
+    /// `args.get_string("file", 0)` falls back to positional[0], so users can
+    /// write either `patch --file foo.txt < diff` or `patch foo.txt < diff`.
     #[arg(hide = true)]
     rest: Vec<String>,
 }

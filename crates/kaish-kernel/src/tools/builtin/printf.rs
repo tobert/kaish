@@ -18,10 +18,8 @@ struct PrintfArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals. Read positionals
-    /// off args.positional directly to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Format string followed by arguments substituted into it.
+    format_args: Vec<String>,
 }
 
 impl FormatArg for Value {

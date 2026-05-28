@@ -29,9 +29,8 @@ struct Base64Args {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Input file; reads stdin when omitted.
+    paths: Vec<String>,
 }
 
 #[async_trait]

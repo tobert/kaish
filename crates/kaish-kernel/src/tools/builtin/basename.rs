@@ -19,10 +19,8 @@ struct BasenameArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals. Read paths and
-    /// suffix off args.positional / args.get_string directly.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Path followed by an optional suffix to strip.
+    paths: Vec<String>,
 }
 
 #[async_trait]

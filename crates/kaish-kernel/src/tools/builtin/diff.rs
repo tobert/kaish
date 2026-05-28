@@ -44,9 +44,8 @@ struct DiffArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Two files to compare.
+    files: Vec<String>,
 }
 
 #[async_trait]

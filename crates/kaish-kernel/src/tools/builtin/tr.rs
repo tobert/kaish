@@ -24,10 +24,8 @@ struct TrArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals. Read SET1/SET2
-    /// off args.positional directly.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// SET1 and SET2 — characters in SET1 are translated to SET2.
+    sets: Vec<String>,
 }
 
 #[async_trait]

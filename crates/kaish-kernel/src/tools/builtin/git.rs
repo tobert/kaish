@@ -83,9 +83,9 @@ struct GitArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — positionals (subcommand + args) are read off args.positional.
-    #[arg(hide = true, trailing_var_arg = true, allow_hyphen_values = true)]
-    rest: Vec<String>,
+    /// Subcommand (`status`, `commit`, `branch`, …) followed by its arguments.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    subcommand: Vec<String>,
 }
 
 #[async_trait]

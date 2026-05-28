@@ -33,10 +33,8 @@ struct WcArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals. Read paths
-    /// off args.positional directly.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Files to count; reads stdin when none are given.
+    paths: Vec<String>,
 }
 
 #[async_trait]

@@ -20,10 +20,8 @@ struct FgArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals. Read the job
-    /// id off args.positional directly to preserve Int.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Job specifier (e.g. `%1`) or PID; defaults to the most recent job.
+    job: Vec<String>,
 }
 
 #[async_trait]

@@ -30,11 +30,8 @@ struct TimeoutArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — duration and inner command are read off args.positional. The
-    /// kernel has already done shell parsing, so the inner command's flag
-    /// tokens land here as raw strings after `--`.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Duration (e.g. `5`, `5s`, `2m`) followed by the command and its arguments.
+    duration_and_command: Vec<String>,
 }
 
 #[async_trait]

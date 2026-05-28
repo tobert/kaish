@@ -141,9 +141,8 @@ struct RgArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Pattern to search for, followed by optional paths (defaults to `.`).
+    pattern_and_paths: Vec<String>,
 }
 
 #[async_trait]

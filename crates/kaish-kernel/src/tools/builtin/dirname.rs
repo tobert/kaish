@@ -17,10 +17,8 @@ struct DirnameArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals. Read paths off
-    /// args.positional directly.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Paths to extract the directory component from.
+    paths: Vec<String>,
 }
 
 #[async_trait]

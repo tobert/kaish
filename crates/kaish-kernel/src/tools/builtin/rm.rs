@@ -34,9 +34,8 @@ struct RmArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Files or directories to remove.
+    paths: Vec<String>,
 }
 
 /// Rm tool: remove files and directories.

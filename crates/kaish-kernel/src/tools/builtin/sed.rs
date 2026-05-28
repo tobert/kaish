@@ -33,9 +33,8 @@ struct SedArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — expression + path live on args.positional.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Expression to execute (when `-e` is not used), followed by file paths.
+    args: Vec<String>,
 }
 
 #[async_trait]

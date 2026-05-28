@@ -17,10 +17,8 @@ struct TacArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals. Read paths
-    /// off args.positional directly.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Files to read in reverse; reads stdin when none are given.
+    paths: Vec<String>,
 }
 
 #[async_trait]

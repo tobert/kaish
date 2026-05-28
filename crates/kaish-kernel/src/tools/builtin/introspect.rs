@@ -22,9 +22,8 @@ struct ToolsArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — tool name read off args.positional / args.named.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Tool name to introspect; lists all tools when empty.
+    tool: Vec<String>,
 }
 
 #[async_trait]

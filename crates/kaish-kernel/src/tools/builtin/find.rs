@@ -58,9 +58,8 @@ struct FindArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Starting paths for the search; defaults to the current directory.
+    paths: Vec<String>,
 }
 
 #[async_trait]

@@ -18,9 +18,9 @@ struct CdArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — path read off args.positional to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Directory to change to; defaults to `$HOME`, or `-` for the previous
+    /// directory.
+    path: Vec<String>,
 }
 
 #[async_trait]

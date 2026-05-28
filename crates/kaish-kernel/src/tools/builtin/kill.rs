@@ -24,9 +24,8 @@ struct KillArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — read target from args.positional to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Target PID(s) or job specifier(s) (e.g. `%1`).
+    targets: Vec<String>,
 }
 
 #[async_trait]

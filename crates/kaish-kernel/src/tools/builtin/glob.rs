@@ -47,9 +47,8 @@ struct GlobArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Glob pattern(s) to expand.
+    pattern: Vec<String>,
 }
 
 #[async_trait]

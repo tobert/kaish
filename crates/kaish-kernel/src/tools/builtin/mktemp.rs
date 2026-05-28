@@ -48,7 +48,9 @@ struct MktempArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — positional template read off args.positional.
+    /// Sink — the positional template is the same value as `--template`;
+    /// read off args.positional so users can write `mktemp TPL.XXXX` without
+    /// the flag. The `--template` flag in the schema covers both forms.
     #[arg(hide = true)]
     rest: Vec<String>,
 }

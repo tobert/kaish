@@ -22,10 +22,8 @@ struct MkdirArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals. Read paths off
-    /// args.positional / args.get_string directly.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Directory paths to create.
+    paths: Vec<String>,
 }
 
 #[async_trait]

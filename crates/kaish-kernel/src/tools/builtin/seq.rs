@@ -26,9 +26,8 @@ struct SeqArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Sequence bounds: `LAST`, `FIRST LAST`, or `FIRST INCREMENT LAST`.
+    range: Vec<String>,
 }
 
 #[async_trait]

@@ -27,10 +27,8 @@ struct WriteArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals. Path and content
-    /// are read off args.positional / args.named directly to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Destination path followed by the content to write.
+    args: Vec<String>,
 }
 
 #[async_trait]

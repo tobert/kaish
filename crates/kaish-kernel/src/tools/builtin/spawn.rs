@@ -58,9 +58,8 @@ struct SpawnArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Command and its arguments (alternative to `--command` / `--argv`).
+    command_argv: Vec<String>,
 }
 
 #[async_trait]

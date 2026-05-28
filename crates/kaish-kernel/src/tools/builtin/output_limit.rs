@@ -17,9 +17,8 @@ struct KaishOutputLimitArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — subcommand / size read off args.positional to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Subcommand (`config`, `set`) and its arguments.
+    args: Vec<String>,
 }
 
 #[async_trait]

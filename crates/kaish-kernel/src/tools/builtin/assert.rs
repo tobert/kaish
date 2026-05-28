@@ -17,9 +17,8 @@ struct AssertArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — condition / message read off args.positional to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Condition to assert, followed by an optional failure message.
+    args: Vec<String>,
 }
 
 #[async_trait]

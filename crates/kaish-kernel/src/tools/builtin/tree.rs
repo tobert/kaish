@@ -43,9 +43,8 @@ struct TreeArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Starting directory; defaults to the current directory.
+    paths: Vec<String>,
 }
 
 /// Node in the tree structure.

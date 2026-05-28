@@ -54,10 +54,8 @@ struct SplitArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals. Read string/delimiter
-    /// off args.positional directly.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// String to split, followed by the delimiter.
+    args: Vec<String>,
 }
 
 #[async_trait]

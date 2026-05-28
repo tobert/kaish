@@ -21,10 +21,7 @@ struct EchoArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals, so clap accepts
-    /// arbitrary tokens here. Read Value-typed positionals off args.positional
-    /// directly to preserve Int/Bool/Float rendering.
-    #[arg(hide = true)]
+    /// Tokens to print, separated by spaces.
     words: Vec<String>,
 }
 

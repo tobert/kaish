@@ -17,9 +17,8 @@ struct UnsetArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — names read off args.positional to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Variable names to remove from the current scope.
+    names: Vec<String>,
 }
 
 #[async_trait]

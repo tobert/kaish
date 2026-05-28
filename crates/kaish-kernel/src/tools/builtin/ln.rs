@@ -28,9 +28,8 @@ struct LnArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — target/link_name read off args.positional to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Target path followed by the link name.
+    paths: Vec<String>,
 }
 
 #[async_trait]

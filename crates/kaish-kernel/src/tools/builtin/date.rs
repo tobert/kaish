@@ -33,9 +33,8 @@ struct DateArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — format read off args.positional to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Optional `+FORMAT` and/or `@TIMESTAMP` arguments.
+    args: Vec<String>,
 }
 
 #[async_trait]

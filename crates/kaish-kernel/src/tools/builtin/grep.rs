@@ -113,9 +113,8 @@ struct GrepArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Pattern to search for, followed by optional file paths.
+    pattern: Vec<String>,
 }
 
 #[async_trait]

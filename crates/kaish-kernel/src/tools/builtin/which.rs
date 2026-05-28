@@ -30,9 +30,8 @@ struct WhichArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — command names read off args.positional.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Commands to locate on PATH.
+    commands: Vec<String>,
 }
 
 #[async_trait]

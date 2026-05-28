@@ -23,9 +23,7 @@ struct CatArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals. Read paths
-    /// off args.positional directly (kernel already glob-expanded them).
-    #[arg(hide = true)]
+    /// Files to read. Reads stdin when no files are given.
     paths: Vec<String>,
 }
 

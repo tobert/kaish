@@ -511,9 +511,13 @@ impl PipelineRunner {
 /// For short flags like `-n` aliased to `lines`, maps `"n"` → `("lines", "int", 1)`.
 /// The third tuple slot is `consumes`: how many positionals the flag pulls
 /// per occurrence (1 for standard `--flag value`, 2 for jq's `--arg NAME VAL`).
+///
+/// Positional params (`positional: true`) are excluded — they're not flags,
+/// and including them would mis-route `cat --paths foo.txt` from positional
+/// to named, regressing builtins that read from `args.positional`.
 pub fn schema_param_lookup(schema: &ToolSchema) -> HashMap<String, (&str, &str, usize)> {
     let mut map = HashMap::new();
-    for p in &schema.params {
+    for p in schema.params.iter().filter(|p| !p.positional) {
         map.insert(p.name.clone(), (p.name.as_str(), p.param_type.as_str(), p.consumes));
         for alias in &p.aliases {
             let stripped = alias.trim_start_matches('-');

@@ -17,9 +17,8 @@ struct HelpArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — topic read off args.positional / args.named to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Topic to show help for (`syntax`, `limits`, `builtins`, or a tool name).
+    topic: Vec<String>,
 }
 
 #[async_trait]

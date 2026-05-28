@@ -56,9 +56,8 @@ struct LsArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Paths to list; defaults to the current directory.
+    paths: Vec<String>,
 }
 
 #[async_trait]

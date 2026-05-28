@@ -25,9 +25,8 @@ struct TokensArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Text to count tokens for; reads stdin when omitted.
+    text: Vec<String>,
 }
 
 #[async_trait]

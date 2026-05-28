@@ -21,9 +21,8 @@ struct AliasArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — read args off args.positional / args.named directly.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Alias name to display, or `name=value` to define a new alias.
+    args: Vec<String>,
 }
 
 #[async_trait]
@@ -134,9 +133,8 @@ struct UnaliasArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — names read off args.positional to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Alias names to remove.
+    names: Vec<String>,
 }
 
 #[async_trait]

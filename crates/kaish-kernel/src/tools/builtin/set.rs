@@ -28,9 +28,8 @@ struct SetArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — all option arguments are read off args.flags / args.positional.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Shell option arguments (`-e`, `+e`, `-o NAME`, `+o NAME`).
+    options: Vec<String>,
 }
 
 #[async_trait]

@@ -17,10 +17,8 @@ struct RealpathArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals. Read paths off
-    /// args.positional / args.get_string directly.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Paths to canonicalize.
+    paths: Vec<String>,
 }
 
 #[async_trait]

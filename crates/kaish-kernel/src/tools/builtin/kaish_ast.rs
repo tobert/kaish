@@ -33,9 +33,8 @@ struct KaishAstArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — expr read off args.positional / args.named to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Source expression or file path to parse.
+    source: Vec<String>,
 }
 
 #[async_trait]

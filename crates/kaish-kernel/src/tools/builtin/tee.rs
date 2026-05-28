@@ -22,9 +22,8 @@ struct TeeArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — path read off args.positional to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Files to write to in addition to stdout.
+    paths: Vec<String>,
 }
 
 #[async_trait]

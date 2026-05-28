@@ -43,9 +43,8 @@ struct EnvArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — VAR=value pairs and command/argv read off args.positional.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// `VAR=VALUE` assignments followed by an optional command and its arguments.
+    args: Vec<String>,
 }
 
 #[async_trait]

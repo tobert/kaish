@@ -18,10 +18,8 @@ struct SleepArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals. Read the
-    /// duration off args.positional directly to preserve Int/Float.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Duration to sleep (e.g. `5`, `5s`, `2m`, `1h`).
+    duration: Vec<String>,
 }
 
 #[async_trait]

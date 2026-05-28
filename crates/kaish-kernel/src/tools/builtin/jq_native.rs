@@ -341,12 +341,11 @@ impl Tool for JqNative {
                 p.consumes = 2;
             }
         }
-        // Re-insert the required `filter` positional that clap can't model.
-        schema = schema.param(ParamSchema::required(
-            "filter",
-            "string",
-            "jq filter expression",
-        ));
+        // Re-insert the required `filter` positional that clap can't model
+        // (jq's filter expression is its first positional arg).
+        schema = schema.param(
+            ParamSchema::required("filter", "string", "jq filter expression").positional(),
+        );
         schema
     }
 

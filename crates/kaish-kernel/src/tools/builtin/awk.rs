@@ -36,9 +36,8 @@ struct AwkArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — program + path live on args.positional.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// AWK program body followed by optional input file paths.
+    program_and_paths: Vec<String>,
 }
 
 #[async_trait]

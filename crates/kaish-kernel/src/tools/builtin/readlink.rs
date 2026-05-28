@@ -24,9 +24,8 @@ struct ReadlinkArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — path read off args.positional to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Symlinks to read.
+    paths: Vec<String>,
 }
 
 #[async_trait]

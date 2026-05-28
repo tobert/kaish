@@ -36,9 +36,9 @@ struct ExecArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — command + argv read from args.positional to preserve Value typing.
-    #[arg(hide = true, trailing_var_arg = true, allow_hyphen_values = true)]
-    rest: Vec<String>,
+    /// Command to exec into, followed by its arguments.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    command_argv: Vec<String>,
 }
 
 #[async_trait]

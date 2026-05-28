@@ -24,9 +24,8 @@ struct KaishTrashArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — subcommand and argument read off args.positional to preserve Value typing.
-    #[arg(hide = true)]
-    rest: Vec<String>,
+    /// Subcommand (`list`, `restore`, `empty`, `config`) and its arguments.
+    args: Vec<String>,
 }
 
 #[async_trait]
