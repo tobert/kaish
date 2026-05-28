@@ -6,9 +6,35 @@
 //! test code, and is the only place in the workspace where we use a
 //! `mod.rs` (the project otherwise prefers `module_name.rs`).
 
+use std::path::Path;
 use std::process::Command;
 
+use kaish_kernel::{Kernel, KernelConfig};
+
+/// Build a kernel rooted at `dir` with passthrough (real-FS) access.
+///
+/// This is the harness for *kernel-routed* builtin tests: instead of
+/// constructing a builtin and calling `.execute()` directly (which skips
+/// glob pre-expansion, flag canonicalization, and validation), tests drive
+/// real command strings through `kernel.execute()` so the full pipeline
+/// runs — lex → parse → validate → glob pre-expansion → dispatch → builtin.
+///
+/// Pair with `tempfile::tempdir()` so each test owns an isolated real-FS
+/// root (per the project's no-hardcoded-system-paths rule).
+#[allow(dead_code)] // not every test binary that includes `common` uses this
+pub fn kernel_at(dir: &Path) -> Kernel {
+    Kernel::new(KernelConfig::repl().with_cwd(dir.to_path_buf())).expect("failed to create kernel")
+}
+
+/// Run a script through the kernel and return `(trimmed stdout, exit code)`.
+#[allow(dead_code)]
+pub async fn run(kernel: &Kernel, script: &str) -> (String, i64) {
+    let result = kernel.execute(script).await.expect("kernel execute");
+    (result.text_out().trim().to_string(), result.code)
+}
+
 /// What `bash -c` produced when we ran a script under it.
+#[allow(dead_code)] // only the compat-test binaries construct this
 pub struct BashOutput {
     pub stdout: String,
     // Each integration test binary is its own crate; some include compat
@@ -20,6 +46,7 @@ pub struct BashOutput {
 /// Run a script via `bash -c` if KAISH_BASH_COMPAT is set; otherwise return
 /// `None` and let the caller short-circuit. Panics if the user opted in but
 /// `bash` is missing or errored — they explicitly asked us to compare.
+#[allow(dead_code)] // only the compat-test binaries call this
 pub fn run_bash_if_enabled(script: &str) -> Option<BashOutput> {
     if std::env::var_os("KAISH_BASH_COMPAT").is_none() {
         return None;

@@ -95,11 +95,6 @@ impl Tool for Ls {
         };
         parsed.global.apply(ctx);
 
-        let path = args
-            .get_string("path", 0)
-            .unwrap_or_else(|| ".".to_string());
-
-        let resolved = ctx.resolve_path(&path);
         let long_format = parsed.long;
         let show_all = parsed.all;
         let human_readable = parsed.human;
@@ -120,23 +115,41 @@ impl Tool for Ls {
             },
         };
 
-        // If path contains glob characters, expand the pattern and list matches
-        if contains_glob(&path) {
-            return self.list_glob(ctx, &path, &opts).await;
+        // Collect every positional path. The kernel pre-expands bare globs
+        // into one positional per match, so a multi-element list is the norm
+        // for `ls *.rs` / `ls a b c`. The old `get_string("path", 0)` read
+        // only the first and silently dropped the rest.
+        let mut paths: Vec<String> = args
+            .positional
+            .iter()
+            .map(crate::interpreter::value_to_string)
+            .collect();
+        if paths.is_empty() {
+            paths.push(".".to_string());
         }
 
-        // Check if path is a file (not a directory)
-        // Real ls behavior: `ls file.txt` just outputs the filename
-        if let Ok(info) = ctx.backend.stat(Path::new(&resolved)).await
-            && !info.is_dir() {
-                // It's a file - just display it
-                return self.list_file(ctx, &path, &info, &opts);
+        match paths.as_slice() {
+            // Single target keeps the rich behavior: glob expansion,
+            // file-shown-as-name, directory contents, and recursion.
+            [path] => self.list_one(ctx, path, &opts, recursive).await,
+            // Multiple targets list one node per argument — directories are
+            // shown by name, not expanded — matching the predictable
+            // structured-output model. Any glob that reached here unexpanded
+            // (e.g. globbing disabled) is still expanded.
+            many => {
+                let mut names: Vec<String> = Vec::new();
+                for path in many {
+                    if contains_glob(path) {
+                        match ctx.expand_paths(&[Value::String(path.clone())]).await {
+                            Ok(expanded) => names.extend(expanded),
+                            Err(e) => return ExecResult::failure(1, format!("ls: {e}")),
+                        }
+                    } else {
+                        names.push(path.clone());
+                    }
+                }
+                self.render_names(ctx, names, &opts).await
             }
-
-        if recursive {
-            self.list_recursive(ctx, &resolved, &opts).await
-        } else {
-            self.list_single(ctx, &path, &resolved, &opts).await
         }
     }
 }
@@ -204,7 +217,44 @@ impl Ls {
             Ok(n) => n,
             Err(e) => return ExecResult::failure(1, format!("ls: {}", e)),
         };
+        self.render_names(ctx, names, opts).await
+    }
 
+    /// Single-target listing: glob expansion, a file shown as its own name,
+    /// directory contents, or a recursive walk.
+    async fn list_one(
+        &self,
+        ctx: &mut ExecContext,
+        path: &str,
+        opts: &ListOptions,
+        recursive: bool,
+    ) -> ExecResult {
+        if contains_glob(path) {
+            return self.list_glob(ctx, path, opts).await;
+        }
+        let resolved = ctx.resolve_path(path);
+        // Real `ls file.txt` just echoes the filename rather than erroring.
+        if let Ok(info) = ctx.backend.stat(Path::new(&resolved)).await
+            && !info.is_dir()
+        {
+            return self.list_file(ctx, path, &info, opts);
+        }
+        if recursive {
+            self.list_recursive(ctx, &resolved, opts).await
+        } else {
+            self.list_single(ctx, path, &resolved, opts).await
+        }
+    }
+
+    /// Stat each named path, sort, and render one node per name. Shared by
+    /// glob expansion and the multi-argument path. Names that fail to stat
+    /// (e.g. removed between walk and stat) are skipped.
+    async fn render_names(
+        &self,
+        ctx: &mut ExecContext,
+        names: Vec<String>,
+        opts: &ListOptions,
+    ) -> ExecResult {
         if names.is_empty() {
             return ExecResult::with_output(OutputData::new());
         }
