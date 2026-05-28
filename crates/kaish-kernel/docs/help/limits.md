@@ -6,7 +6,7 @@
 |---------|------------|
 | Shell brace expansion `{a,b,c}` | List items explicitly |
 | Process substitution `<(cmd)` | `cmd > /tmp/t.txt; cmd2 /tmp/t.txt` |
-| Backticks `` `cmd` `` | `$(cmd)` |
+| Backticks `` `cmd` `` (lexer error, not silently tolerated) | `$(cmd)` |
 | `eval` | Write explicit code |
 | Implicit word splitting on whitespace | `split "$VAR"` (for-loop `$(cmd)` does split on newlines — see Bash vs kaish below) |
 

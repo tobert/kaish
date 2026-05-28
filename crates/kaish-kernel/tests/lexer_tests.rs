@@ -140,6 +140,7 @@ fn format_token(token: &Token) -> String {
         // Invalid variants (should never be produced)
         Token::InvalidFloatNoLeading => "INVALID_FLOAT_NO_LEADING".to_string(),
         Token::InvalidFloatNoTrailing => "INVALID_FLOAT_NO_TRAILING".to_string(),
+        Token::BacktickRejected => "BACKTICK_REJECTED".to_string(),
     }
 }
 

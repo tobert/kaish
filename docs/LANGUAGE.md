@@ -622,7 +622,7 @@ These bash features are omitted because they're confusing, error-prone, or ambig
 |---------|--------|------------|
 | Shell brace expansion `echo {a,b,c}` | Tools support globs with braces internally | SC1083 |
 | Process substitution `<(cmd)` | Use temp files | — |
-| Backtick substitution `` `cmd` `` | Use `$(cmd)` | SC2006 |
+| Backtick substitution `` `cmd` `` | Use `$(cmd)` — a bare backtick is a lexer error, not silently accepted | SC2006 |
 | Single bracket tests `[ ]` | Supported; prefer `[[ ]]` | SC2039 |
 | Aliases, `eval` | Explicit is better | SC2091 |
 
@@ -634,7 +634,7 @@ Features that ShellCheck warns about (word splitting, backticks) don't exist in 
 
 | SC Code | Warning | Kaish Approach |
 |---------|---------|----------------|
-| SC2006 | Use `$()` instead of backticks | Backticks don't exist |
+| SC2006 | Use `$()` instead of backticks | Backticks don't exist — the lexer rejects them with a dedicated error |
 | SC2086 | Double quote to prevent word splitting | No implicit word splitting on whitespace; `$VAR` is always one value |
 | SC2046 | Quote this to prevent word splitting | `$(cmd)` is one value in argv/assignment/interp; for-loop iteration splits on newlines only |
 | SC2035 | Use `./*` so globs don't expand | Bare globs expand; use `set +o glob` to disable |

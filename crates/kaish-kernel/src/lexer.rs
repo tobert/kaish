@@ -117,6 +117,11 @@ pub enum LexerError {
     /// The user almost certainly meant to type the delimiter — silently using
     /// whatever was collected up to EOF would mask missing data.
     UnterminatedHeredoc { delimiter: String },
+    /// Backtick command substitution. Kaish drops backticks intentionally —
+    /// they're listed in `docs/LANGUAGE.md` and the help system as not supported.
+    /// We surface this as a dedicated error (rather than `UnexpectedCharacter`)
+    /// so the message can point users at the `$(cmd)` replacement.
+    BackticksNotSupported,
 }
 
 impl fmt::Display for LexerError {
@@ -139,6 +144,9 @@ impl fmt::Display for LexerError {
             LexerError::NestingTooDeep => write!(f, "nesting depth exceeded (max {})", MAX_PAREN_DEPTH),
             LexerError::UnterminatedHeredoc { delimiter } => {
                 write!(f, "unterminated heredoc, expected closing delimiter `{}` on its own line", delimiter)
+            }
+            LexerError::BackticksNotSupported => {
+                write!(f, "backticks are not supported in kaish; use $(cmd) instead")
             }
         }
     }
@@ -559,6 +567,17 @@ pub enum Token {
     /// Line continuation: backslash at end of line
     #[regex(r"\\[ \t]*(\n|\r\n)")]
     LineContinuation,
+
+    /// Backtick command substitution — explicitly rejected. Kaish drops
+    /// backticks; the callback always errors so users get a dedicated
+    /// `BackticksNotSupported` message instead of the generic
+    /// `UnexpectedCharacter` they would have hit before. Backticks inside
+    /// single/double-quoted strings, heredoc bodies, and comments don't
+    /// reach this match — those tokens are matched as a single unit
+    /// (strings) or extracted before logos runs (heredocs) or skipped to
+    /// EOL (comments).
+    #[token("`", reject_backtick)]
+    BacktickRejected,
 }
 
 /// Semantic category for syntax highlighting.
@@ -710,7 +729,8 @@ impl Token {
 
             // Errors
             Token::InvalidFloatNoLeading
-            | Token::InvalidFloatNoTrailing => TokenCategory::Error,
+            | Token::InvalidFloatNoTrailing
+            | Token::BacktickRejected => TokenCategory::Error,
         }
     }
 }
@@ -778,6 +798,13 @@ fn lex_dotted_ident(lex: &mut logos::Lexer<Token>) -> String {
 /// Always returns Err to produce a lexer error instead of a token.
 fn lex_invalid_float_no_leading(_lex: &mut logos::Lexer<Token>) -> Result<(), LexerError> {
     Err(LexerError::InvalidFloatNoLeading)
+}
+
+/// Reject a backtick — kaish doesn't support backtick command substitution.
+/// The dedicated error gives the user a `$(cmd)` hint instead of the generic
+/// `UnexpectedCharacter` they would have hit otherwise.
+fn reject_backtick(_lex: &mut logos::Lexer<Token>) -> Result<(), LexerError> {
+    Err(LexerError::BackticksNotSupported)
 }
 
 /// Lex an invalid float without trailing digit (like 5.).
@@ -956,6 +983,7 @@ impl fmt::Display for Token {
             // These variants should never be produced — their callbacks always return errors
             Token::InvalidFloatNoLeading => write!(f, "INVALID_FLOAT_NO_LEADING"),
             Token::InvalidFloatNoTrailing => write!(f, "INVALID_FLOAT_NO_TRAILING"),
+            Token::BacktickRejected => write!(f, "BACKTICK_REJECTED"),
         }
     }
 }
@@ -1225,6 +1253,22 @@ fn preprocess_arithmetic(source: &str) -> Result<ArithmeticPreprocessResult, Lex
                 i += 2;
                 continue;
             }
+        }
+
+        // Comment — copy verbatim from `#` through end-of-line so apostrophes
+        // and `$((..))` inside the comment body don't get processed. Logos's
+        // own comment regex `#[^\n\r]*` doesn't require a word boundary, so
+        // we match that: any `#` outside double quotes (and outside single
+        // quotes — those are consumed above as a single run) starts a comment.
+        // The newline is left for the next iteration so newline-significance
+        // and span tracking are preserved.
+        if ch == '#' && !in_double_quote {
+            while i < chars_vec.len() && chars_vec[i] != '\n' && chars_vec[i] != '\r' {
+                result.push(chars_vec[i]);
+                source_pos += chars_vec[i].len_utf8();
+                i += 1;
+            }
+            continue;
         }
 
         // Skip $(...) command substitutions — inner arithmetic belongs to the subcommand
@@ -3083,6 +3127,162 @@ mod tests {
         let source = "$((((1 + 2) * 3)))";
         let tokens = lex(source);
         assert_eq!(tokens, vec![Token::Arithmetic("((1 + 2) * 3)".to_string())]);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Arithmetic preprocessor + comment interaction
+    //
+    // The preprocessor used to walk raw characters tracking only quote
+    // state. An apostrophe inside a `#` comment would open single-quote
+    // mode and swallow real `$((..))` later in the file; `$((..))` *inside*
+    // a comment would itself be preprocessed into a marker, misplacing
+    // tokens. Surfaced from kaijutsu's seed scripts (see gotcha memory
+    // `gotcha-kaish-comment-arithmetic`).
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn arithmetic_after_apostrophe_in_comment() {
+        // The bare apostrophe in "doesn't" used to open single-quote mode
+        // in the preprocessor and swallow the $((..)) below.
+        let source = "# this doesn't work\necho $((1+2))";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![
+            Token::Newline,
+            Token::Ident("echo".to_string()),
+            Token::Arithmetic("1+2".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn arithmetic_inside_comment_is_not_expanded() {
+        // `$((y))` inside a `#` comment must stay comment text.
+        let source = "# the $((y)) syntax explained\necho hello";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![
+            Token::Newline,
+            Token::Ident("echo".to_string()),
+            Token::Ident("hello".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn backticked_arithmetic_in_comment_is_not_expanded() {
+        // The original kaijutsu repro: `$((x))` inside a comment.
+        // Backticks-in-comments used to leak the inner $((..)) to the
+        // preprocessor; with comment-skip they stay inert.
+        let source = "# the `$((x))` syntax explained\necho $((3+4))";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![
+            Token::Newline,
+            Token::Ident("echo".to_string()),
+            Token::Arithmetic("3+4".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn arithmetic_still_works_outside_comments() {
+        // Regression guard: comment-skip must not shrink the arithmetic
+        // preprocessor's scope on normal `$((..))` usages.
+        let source = "X=$((1+2)); Y=$((3*4))";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![
+            Token::Ident("X".to_string()),
+            Token::Eq,
+            Token::Arithmetic("1+2".to_string()),
+            Token::Semi,
+            Token::Ident("Y".to_string()),
+            Token::Eq,
+            Token::Arithmetic("3*4".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn arithmetic_inside_double_quotes_still_expands() {
+        // `#` inside a double-quoted string is a literal character, not a
+        // comment introducer — arithmetic must still expand around it.
+        let source = "echo \"# $((1+2))\"";
+        let tokens = lex(source);
+        // The string token contains the `#` and the arithmetic marker;
+        // the exact post-processing happens at interpret time. What we
+        // assert here is that lexing succeeds and produces a String token
+        // (i.e. the comment skip didn't trigger inside the string).
+        assert_eq!(tokens.len(), 2);
+        assert!(matches!(tokens[0], Token::Ident(_)));
+        assert!(matches!(tokens[1], Token::String(_)));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Backtick rejection
+    //
+    // Backticks are an explicitly dropped feature (see CLAUDE.md,
+    // docs/LANGUAGE.md, help/limits.md, help/overview.md). We surface a
+    // dedicated error rather than the generic `UnexpectedCharacter` so
+    // users get a hint to use `$(cmd)`. Comments, single-quoted strings,
+    // double-quoted strings, and heredoc bodies are all matched as single
+    // tokens (or extracted before logos runs), so the rejection only
+    // fires on bare backticks in source code.
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn backtick_in_source_is_rejected() {
+        let result = tokenize("echo `date`");
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.iter().any(|e| e.token == LexerError::BackticksNotSupported));
+    }
+
+    #[test]
+    fn backtick_in_comment_is_just_comment_text() {
+        // Backticks are only rejected when they reach the top-level
+        // lexer. Inside a comment they're part of the comment body.
+        let source = "# use `date` here\necho hi";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![
+            Token::Newline,
+            Token::Ident("echo".to_string()),
+            Token::Ident("hi".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn backtick_in_single_quoted_string_is_literal() {
+        // Single-quoted strings are matched as one token by logos; the
+        // backticks inside never reach the rejecting matcher.
+        let source = "echo '`date`'";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![
+            Token::Ident("echo".to_string()),
+            Token::SingleString("`date`".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn backtick_in_double_quoted_string_is_literal() {
+        // Kaish does not activate command substitution from backticks
+        // inside double-quoted strings either — clear divergence from
+        // POSIX but matches the "backticks don't exist" stance. The
+        // double-quoted string token absorbs them as literal characters.
+        let source = "echo \"`date`\"";
+        let tokens = lex(source);
+        assert_eq!(tokens.len(), 2);
+        assert!(matches!(tokens[0], Token::Ident(_)));
+        match &tokens[1] {
+            Token::String(s) => assert!(s.contains('`')),
+            other => panic!("expected Token::String, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn backtick_in_heredoc_body_is_preserved() {
+        // Heredoc bodies are extracted by preprocess_heredocs before
+        // logos runs, so backticks inside them survive as content.
+        let source = "cat <<EOF\n`date`\nEOF\n";
+        let tokens = lex(source);
+        let heredoc = tokens.iter().find(|t| matches!(t, Token::HereDoc(_)));
+        assert!(heredoc.is_some(), "expected a HereDoc token");
+        if let Some(Token::HereDoc(d)) = heredoc {
+            assert!(d.content.contains('`'));
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════
