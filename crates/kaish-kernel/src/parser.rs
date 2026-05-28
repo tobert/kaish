@@ -1830,6 +1830,12 @@ where
             // Bare words starting with + or - (date +%s, cat -)
             // Shell navigation tokens
             select! {
+                // Bare `.` in argument/expression position is the literal
+                // current-directory path (`find .`, `ls .`, `echo .`). The
+                // `source` alias is unaffected: `command_parser` consumes a
+                // *leading* `.` as the command name before args are parsed,
+                // so only a `.` that follows a command reaches here.
+                Token::Dot => Expr::Literal(Value::String(".".into())),
                 Token::DotDot => Expr::Literal(Value::String("..".into())),
                 Token::Tilde => Expr::Literal(Value::String("~".into())),
                 Token::TildePath(s) => Expr::Literal(Value::String(s)),

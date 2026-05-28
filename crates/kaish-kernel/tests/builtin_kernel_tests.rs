@@ -193,3 +193,165 @@ async fn tr_translates_from_pipeline() {
     assert_eq!(code, 0, "tr should succeed: {out:?}");
     assert_eq!(out, "heLLo", "tr translation wrong: {out:?}");
 }
+
+// ===========================================================================
+// Batch 2 — path-walking / FS-mutation / multi-file-text builtins, plus a
+// regression for the bare-`.` argument bug (a `.` arg was parsed as the
+// `source` builtin, breaking `find .`, `ls .`, `echo .`, etc.).
+// ===========================================================================
+
+#[tokio::test]
+async fn dot_argument_is_literal_not_source() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "echo .").await;
+    assert_eq!(code, 0, "echo . should succeed: {out:?}");
+    assert_eq!(out, ".", "bare . arg should be the literal dot: {out:?}");
+}
+
+#[tokio::test]
+async fn ls_dot_lists_current_directory() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "here.txt", "");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "ls .").await;
+    assert_eq!(code, 0, "ls . should succeed: {out:?}");
+    assert!(out.contains("here.txt"), "ls . missed entry: {out:?}");
+}
+
+#[tokio::test]
+async fn source_alias_still_works_in_command_position() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "script.kai", "echo from-source\n");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, ". script.kai").await;
+    assert_eq!(code, 0, ". (source) should succeed: {out:?}");
+    assert!(out.contains("from-source"), "source didn't run script: {out:?}");
+}
+
+#[tokio::test]
+async fn find_name_filters_to_matches_recursively() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "keep.log", "");
+    touch(dir.path(), "skip.txt", "");
+    touch(dir.path(), "sub/nested.log", "");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "find . -name '*.log'").await;
+    assert_eq!(code, 0, "find should succeed: {out:?}");
+    assert!(out.contains("keep.log"), "find missed keep.log: {out:?}");
+    assert!(out.contains("nested.log"), "find missed nested.log: {out:?}");
+    assert!(!out.contains("skip.txt"), "find leaked non-match: {out:?}");
+}
+
+#[tokio::test]
+async fn find_type_directory_filters() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "file.txt", "");
+    fs::create_dir(dir.path().join("adir")).unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "find . -type d").await;
+    assert_eq!(code, 0, "find -type d should succeed: {out:?}");
+    assert!(out.contains("adir"), "find -type d missed dir: {out:?}");
+    assert!(!out.contains("file.txt"), "find -type d leaked file: {out:?}");
+}
+
+#[tokio::test]
+async fn rm_glob_removes_only_matches() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "x.tmp", "");
+    touch(dir.path(), "y.tmp", "");
+    touch(dir.path(), "keep.txt", "");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "rm *.tmp").await;
+    assert_eq!(code, 0, "rm glob should succeed: {out:?}");
+    assert!(!dir.path().join("x.tmp").exists(), "x.tmp not removed");
+    assert!(!dir.path().join("y.tmp").exists(), "y.tmp not removed");
+    assert!(dir.path().join("keep.txt").exists(), "rm removed a non-match");
+}
+
+#[tokio::test]
+async fn tac_reverses_line_order() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "seq.txt", "one\ntwo\nthree\n");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "tac seq.txt").await;
+    assert_eq!(code, 0);
+    assert_eq!(out.lines().collect::<Vec<_>>(), vec!["three", "two", "one"], "tac: {out:?}");
+}
+
+#[tokio::test]
+async fn uniq_collapses_adjacent_duplicates() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "d.txt", "a\na\nb\na\n");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "uniq d.txt").await;
+    assert_eq!(code, 0);
+    assert_eq!(out.lines().collect::<Vec<_>>(), vec!["a", "b", "a"], "uniq: {out:?}");
+}
+
+#[tokio::test]
+async fn tee_writes_to_multiple_targets() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "echo payload | tee one.txt two.txt").await;
+    assert_eq!(code, 0, "tee should succeed: {out:?}");
+    assert_eq!(fs::read_to_string(dir.path().join("one.txt")).unwrap().trim(), "payload");
+    assert_eq!(fs::read_to_string(dir.path().join("two.txt")).unwrap().trim(), "payload");
+}
+
+#[tokio::test]
+async fn sed_substitutes_from_stdin() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "echo hello | sed 's/l/L/g'").await;
+    assert_eq!(code, 0, "sed should succeed: {out:?}");
+    assert_eq!(out, "heLLo");
+}
+
+#[tokio::test]
+async fn base64_round_trips_through_pipeline() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "echo secret | base64 | base64 -d").await;
+    assert_eq!(code, 0, "base64 roundtrip should succeed: {out:?}");
+    assert_eq!(out, "secret");
+}
+
+#[tokio::test]
+async fn ln_creates_symlink() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "target.txt", "data");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "ln -s target.txt link.txt").await;
+    assert_eq!(code, 0, "ln -s should succeed: {out:?}");
+    let meta = fs::symlink_metadata(dir.path().join("link.txt")).expect("link exists");
+    assert!(meta.file_type().is_symlink(), "link.txt should be a symlink");
+}
+
+#[tokio::test]
+async fn glob_builtin_lists_matches() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "m1.dat", "");
+    touch(dir.path(), "m2.dat", "");
+    touch(dir.path(), "no.txt", "");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "glob '*.dat'").await;
+    assert_eq!(code, 0);
+    assert!(out.contains("m1.dat") && out.contains("m2.dat"), "glob: {out:?}");
+    assert!(!out.contains("no.txt"), "glob leaked non-match: {out:?}");
+}
+
+#[tokio::test]
+async fn checksum_emits_known_sha256() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "c.bin", "abc");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "checksum c.bin").await;
+    assert_eq!(code, 0, "checksum should succeed: {out:?}");
+    // sha256("abc")
+    assert!(
+        out.contains("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+        "checksum is not sha256(abc): {out:?}"
+    );
+    assert!(out.contains("c.bin"), "checksum missing filename: {out:?}");
+}

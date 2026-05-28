@@ -297,6 +297,22 @@ priority; decide whether multi-arg should accumulate per-path errors.
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
 
+- **Bare `.` argument parsed as `source` — fixed 2026-05-28 (parser).**
+  Surfaced by the kernel-routed builtin breadth tests: `find .`, `ls .`,
+  `echo .`, `wc -l .` all misbehaved — `echo .` printed `source: missing
+  filename` instead of `.`. `primary_expr_parser` (every argument position)
+  omitted bare `Token::Dot`, so a `.` argument was never consumed; the
+  statement parser then started a fresh `source` (`.`) command. `find .`
+  became two statements: `find` (defaulting to cwd → an unfiltered recursive
+  listing) plus `.` (source, no file). Fix: accept `Token::Dot` as the
+  literal `"."` in expression/argument position. The `source` alias is
+  unaffected — `command_parser` consumes a *leading* `.` as the command name
+  before args are parsed. Regression tests:
+  `parser_tests::{bare_dot_argument_is_one_command, leading_dot_is_still_source}`
+  and `builtin_kernel_tests::{dot_argument_is_literal_not_source,
+  ls_dot_lists_current_directory, find_name_filters_to_matches_recursively,
+  source_alias_still_works_in_command_position}`.
+
 - **`cp SRC... DST/` trailing-slash failure — fixed 2026-05-28 (lexer).**
   Surfaced by the new kernel-routed builtin tests: `cp a.txt b.txt dest/`
   failed with `cp: dest: is a directory (use -r to copy)` though `... dest`

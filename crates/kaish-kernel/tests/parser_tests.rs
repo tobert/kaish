@@ -27,6 +27,41 @@ fn expect_parse_error(input: &str) {
     assert!(result.is_err(), "Expected error for input: {:?}", input);
 }
 
+/// Regression: a bare `.` *argument* must stay part of its command, not start
+/// a new `source` statement. `find .` used to parse as TWO statements —
+/// `find` (defaulting to cwd) plus `.` (source, no file) — which silently
+/// broke `find .`, `ls .`, `echo .`, etc.
+#[rstest]
+#[case("find .")]
+#[case("ls .")]
+#[case("echo .")]
+#[case("find . -name x")]
+fn bare_dot_argument_is_one_command(#[case] input: &str) {
+    let program = parse(input).expect("should parse");
+    assert_eq!(
+        program.statements.len(),
+        1,
+        "`{input}` must be a single statement, got {}: {}",
+        program.statements.len(),
+        format_program(&program),
+    );
+}
+
+/// The `.` source alias in *command* position must still parse as a single
+/// command (with its file argument attached), not split or error.
+#[rstest]
+#[case(". script.kai", "script.kai")]
+#[case(". /etc/profile", "/etc/profile")]
+fn leading_dot_is_still_source(#[case] input: &str, #[case] expected_file: &str) {
+    let program = parse(input).expect("should parse");
+    assert_eq!(program.statements.len(), 1, "`{input}` should be one statement");
+    let sexpr = format_program(&program);
+    assert!(
+        sexpr.contains(expected_file),
+        "source's file argument should attach to the command: {sexpr}",
+    );
+}
+
 // =============================================================================
 // ASSIGNMENTS
 // =============================================================================

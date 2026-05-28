@@ -23,7 +23,13 @@ use kaish_kernel::{Kernel, KernelConfig};
 /// root (per the project's no-hardcoded-system-paths rule).
 #[allow(dead_code)] // not every test binary that includes `common` uses this
 pub fn kernel_at(dir: &Path) -> Kernel {
-    Kernel::new(KernelConfig::repl().with_cwd(dir.to_path_buf())).expect("failed to create kernel")
+    // Force latch/trash off so `rm`-style tests are deterministic regardless of
+    // the developer's KAISH_LATCH / KAISH_TRASH env (which `repl()` reads).
+    let config = KernelConfig::repl()
+        .with_cwd(dir.to_path_buf())
+        .with_latch(false)
+        .with_trash(false);
+    Kernel::new(config).expect("failed to create kernel")
 }
 
 /// Run a script through the kernel and return `(trimmed stdout, exit code)`.
