@@ -26,15 +26,15 @@ pub struct Validate;
 #[command(name = "kaish-validate", about = "Validate kaish scripts without executing")]
 struct ValidateArgs {
     /// Inline expression to validate.
-    #[arg(short = 'e', long = "expr")]
+    #[arg(id = "expr", short = 'e', long = "expr")]
     _expr: Option<String>,
 
     /// Only return exit code, no output.
-    #[arg(short = 'q', long = "quiet")]
+    #[arg(id = "quiet", short = 'q', long = "quiet")]
     _quiet: bool,
 
     /// Show warnings in addition to errors.
-    #[arg(short = 'w', long = "warnings")]
+    #[arg(id = "warnings", short = 'w', long = "warnings")]
     _warnings: bool,
 
     #[command(flatten)]

@@ -23,11 +23,11 @@ pub struct Read;
 #[command(name = "read", about = "Read a line from standard input into variables")]
 struct ReadArgs {
     /// Raw mode — do not process backslash escapes.
-    #[arg(short = 'r', long = "raw")]
+    #[arg(id = "raw", short = 'r', long = "raw")]
     _raw: bool,
 
     /// Prompt to display before reading.
-    #[arg(short = 'p', long = "prompt")]
+    #[arg(id = "prompt", short = 'p', long = "prompt")]
     _prompt: Option<String>,
 
     #[command(flatten)]

@@ -48,19 +48,21 @@ impl Tool for Realpath {
         };
         parsed.global.apply(ctx);
 
-        let path_str = match args.get_string("path", 0) {
-            Some(p) => p,
-            None => return ExecResult::failure(1, "realpath: missing path argument"),
-        };
+        if args.positional.is_empty() {
+            return ExecResult::failure(1, "realpath: missing path argument");
+        }
 
-        // Resolve the path using the context (handles relative paths)
-        let resolved = ctx.resolve_path(&path_str);
-        let resolved_str = resolved.to_string_lossy();
-
-        // Normalize the path (remove . and ..)
-        let normalized = normalize_path(&resolved_str);
-
-        ExecResult::with_output(OutputData::text(format!("{}\n", normalized)))
+        // GNU: `realpath a b c` prints one resolved path per line.
+        let mut output = String::new();
+        for value in &args.positional {
+            let path_str = crate::interpreter::value_to_string(value);
+            let resolved = ctx.resolve_path(&path_str);
+            let resolved_str = resolved.to_string_lossy();
+            let normalized = normalize_path(&resolved_str);
+            output.push_str(&normalized);
+            output.push('\n');
+        }
+        ExecResult::with_output(OutputData::text(output))
     }
 }
 

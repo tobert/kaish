@@ -48,27 +48,29 @@ impl Tool for Dirname {
         };
         parsed.global.apply(ctx);
 
-        let path_str = match args.get_string("path", 0) {
-            Some(p) => p,
-            None => return ExecResult::failure(1, "dirname: missing path argument"),
-        };
-
-        let path = Path::new(&path_str);
-
-        // Special case: root "/" has itself as parent
-        if path_str == "/" {
-            return ExecResult::with_output(OutputData::text("/\n"));
+        if args.positional.is_empty() {
+            return ExecResult::failure(1, "dirname: missing path argument");
         }
 
-        let parent = path
-            .parent()
-            .and_then(|p| p.to_str())
-            .unwrap_or(".");
-
-        // Handle empty parent (happens for relative paths like "file")
-        let result = if parent.is_empty() { "." } else { parent };
-
-        ExecResult::with_output(OutputData::text(format!("{}\n", result)))
+        // POSIX: `dirname a/b c/d` prints one parent per line.
+        let mut output = String::new();
+        for value in &args.positional {
+            let path_str = crate::interpreter::value_to_string(value);
+            // Special case: root "/" has itself as parent.
+            let result = if path_str == "/" {
+                "/".to_string()
+            } else {
+                let parent = Path::new(&path_str)
+                    .parent()
+                    .and_then(|p| p.to_str())
+                    .unwrap_or(".");
+                // Empty parent (relative paths like "file") → "."
+                if parent.is_empty() { ".".to_string() } else { parent.to_string() }
+            };
+            output.push_str(&result);
+            output.push('\n');
+        }
+        ExecResult::with_output(OutputData::text(output))
     }
 }
 

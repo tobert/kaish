@@ -16,7 +16,7 @@ pub struct Mkdir;
 struct MkdirArgs {
     /// Create parent directories as needed. Accepted for POSIX compatibility;
     /// the backend always creates parent directories.
-    #[arg(short = 'p', long = "parents")]
+    #[arg(id = "parents", short = 'p', long = "parents")]
     _parents: bool,
 
     #[command(flatten)]
@@ -53,16 +53,23 @@ impl Tool for Mkdir {
         };
         parsed.global.apply(ctx);
 
-        let path = match args.get_string("path", 0) {
-            Some(p) => p,
-            None => return ExecResult::failure(1, "mkdir: missing path argument"),
-        };
+        if args.positional.is_empty() {
+            return ExecResult::failure(1, "mkdir: missing path argument");
+        }
 
-        let resolved = ctx.resolve_path(&path);
-
-        match ctx.backend.mkdir(Path::new(&resolved)).await {
-            Ok(()) => ExecResult::success(""),
-            Err(e) => ExecResult::failure(1, format!("mkdir: {}: {}", path, e)),
+        // POSIX: `mkdir a b c` creates each. Continue past errors so users see
+        // every failure rather than just the first; exit non-zero if any failed.
+        let mut last_err: Option<String> = None;
+        for value in &args.positional {
+            let path = crate::interpreter::value_to_string(value);
+            let resolved = ctx.resolve_path(&path);
+            if let Err(e) = ctx.backend.mkdir(Path::new(&resolved)).await {
+                last_err = Some(format!("mkdir: {}: {}", path, e));
+            }
+        }
+        match last_err {
+            Some(msg) => ExecResult::failure(1, msg),
+            None => ExecResult::success(""),
         }
     }
 }

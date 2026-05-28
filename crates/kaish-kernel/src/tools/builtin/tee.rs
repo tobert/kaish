@@ -16,7 +16,7 @@ pub struct Tee;
 #[command(name = "tee", about = "Read from stdin and write to stdout and files")]
 struct TeeArgs {
     /// Append to file instead of overwriting.
-    #[arg(short = 'a', long = "append")]
+    #[arg(id = "append", short = 'a', long = "append")]
     _append: bool,
 
     #[command(flatten)]
@@ -53,38 +53,52 @@ impl Tool for Tee {
         };
         parsed.global.apply(ctx);
 
-        let path_str = match args.get_string("path", 0) {
-            Some(p) => p,
-            None => return ExecResult::failure(1, "tee: missing file argument"),
-        };
+        if args.positional.is_empty() {
+            return ExecResult::failure(1, "tee: missing file argument");
+        }
 
         let append = args.has_flag("append") || args.has_flag("a");
         let input = ctx.read_stdin_to_string().await.unwrap_or_default();
+        let input_bytes = input.as_bytes();
 
-        let resolved = ctx.resolve_path(&path_str);
-        // Note: kaish VFS doesn't support append mode directly
-        // For append, we need to read existing content and concatenate
-        let final_content = if append {
-            match ctx.backend.read(Path::new(&resolved), None).await {
-                Ok(existing) => {
-                    let mut combined = existing;
-                    combined.extend_from_slice(input.as_bytes());
-                    combined
+        // POSIX: tee writes stdin to every file AND to stdout. Continue past
+        // per-file errors (matches POSIX `tee` semantics) and report the last
+        // failure as a non-zero exit so callers can detect partial failure.
+        let mut last_err: Option<String> = None;
+        for value in &args.positional {
+            let path_str = crate::interpreter::value_to_string(value);
+            let resolved = ctx.resolve_path(&path_str);
+            let path = Path::new(&resolved);
+
+            let final_content = if append {
+                // kaish VFS lacks an append mode — read-modify-write.
+                match ctx.backend.read(path, None).await {
+                    Ok(existing) => {
+                        let mut combined = existing;
+                        combined.extend_from_slice(input_bytes);
+                        combined
+                    }
+                    Err(_) => input_bytes.to_vec(),
                 }
-                Err(_) => input.as_bytes().to_vec(),
-            }
-        } else {
-            input.as_bytes().to_vec()
-        };
+            } else {
+                input_bytes.to_vec()
+            };
 
-        match ctx
-            .backend
-            .write(Path::new(&resolved), &final_content, WriteMode::Overwrite)
-            .await
-        {
-            Ok(()) => ExecResult::with_output(OutputData::text(input)),
-            Err(e) => ExecResult::failure(1, format!("tee: {}: {}", path_str, e)),
+            if let Err(e) = ctx
+                .backend
+                .write(path, &final_content, WriteMode::Overwrite)
+                .await
+            {
+                last_err = Some(format!("tee: {}: {}", path_str, e));
+            }
         }
+
+        let mut result = ExecResult::with_output(OutputData::text(input));
+        if let Some(msg) = last_err {
+            result.err = msg;
+            result = result.with_code(1);
+        }
+        result
     }
 }
 

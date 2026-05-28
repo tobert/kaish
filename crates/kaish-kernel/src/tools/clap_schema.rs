@@ -221,6 +221,44 @@ mod tests {
         assert!(params.iter().any(|p| p.name == "paths" && p.positional));
     }
 
+    /// A field named `_foo` (Rust convention for unused) used to leak its
+    /// leading underscore into the schema `id`. The kernel's flag
+    /// canonicalization would then route `--foo VALUE` through as
+    /// `--_foo=VALUE`, which clap rejects. Callers must override with
+    /// `#[arg(id = "foo", ...)]` to keep the schema name clean. This test
+    /// pins both pre-fix and post-fix behavior on a small sample so the
+    /// convention stays load-bearing.
+    #[derive(Parser, Debug)]
+    #[command(name = "demo-id-override")]
+    struct DemoIdOverrideArgs {
+        /// Without an id override, the leading `_` leaks through.
+        #[arg(short = 'b', long = "bare")]
+        _bare: Option<String>,
+
+        /// With `id = "..."`, the schema name is clean.
+        #[arg(id = "clean", short = 'c', long = "clean")]
+        _clean: Option<String>,
+    }
+
+    #[test]
+    fn id_override_strips_leading_underscore_from_schema_name() {
+        let cmd = DemoIdOverrideArgs::command();
+        let params = params_from_clap(&cmd);
+
+        // Without override: schema name keeps the `_` prefix — this is the
+        // regression to guard against. If we ever auto-strip, flip this
+        // assertion + update the builtins to drop the explicit `id =`.
+        let bare = params.iter().find(|p| p.name == "_bare")
+            .expect("_bare still leaks without an id override");
+        assert_eq!(bare.aliases, vec!["b".to_string(), "bare".to_string()]);
+
+        // With override: schema name is the override.
+        let clean = params.iter().find(|p| p.name == "clean")
+            .expect("id override should set the schema name to `clean`");
+        assert_eq!(clean.aliases, vec!["c".to_string()]);
+        // No `clean` alias because the long matches the id now.
+    }
+
     #[test]
     fn flag_params_are_not_marked_positional() {
         let cmd = DemoArgs::command();

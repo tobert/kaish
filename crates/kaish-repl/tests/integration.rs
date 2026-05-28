@@ -1474,3 +1474,110 @@ fn herestring_multiple_is_parse_error() {
         joined
     );
 }
+
+// ============================================================================
+// Clap-migration: id override for `_underscored` fields (regression for the
+// canonicalization bug where `-e EXPR` would route through `--_expr=EXPR` and
+// clap would reject it).
+// ============================================================================
+
+#[test]
+fn kaish_validate_dash_e_short_flag_routes_to_expr() {
+    let outputs = run_script(r#"kaish-validate -e 'echo hello'"#);
+    let joined = outputs.join("\n");
+    assert!(
+        joined.contains("valid"),
+        "kaish-validate -e EXPR should reach the expression and report valid; got: {:?}",
+        joined
+    );
+    assert!(
+        !joined.contains("--_expr"),
+        "the canonicalization bug is back: --_expr leaked into the argv; got: {:?}",
+        joined
+    );
+}
+
+#[test]
+fn kaish_validate_long_expr_space_form_routes_clean() {
+    let outputs = run_script(r#"kaish-validate --expr 'echo hello'"#);
+    let joined = outputs.join("\n");
+    assert!(
+        joined.contains("valid"),
+        "kaish-validate --expr VALUE (space form) should route clean; got: {:?}",
+        joined
+    );
+}
+
+// ============================================================================
+// Multi-positional builtins: regression for the `args.get_string("path", 0)`
+// pattern that only ever read positional[0] and silently dropped the rest.
+// ============================================================================
+
+#[test]
+fn mkdir_multi_positional_creates_each() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a");
+    let b = dir.path().join("b");
+    let c = dir.path().join("c");
+
+    let script = format!(
+        "mkdir {} {} {}",
+        a.display(), b.display(), c.display()
+    );
+    let outputs = run_script(&script);
+    let joined = outputs.join("\n");
+    assert!(a.is_dir(), "a not created (output: {:?})", joined);
+    assert!(b.is_dir(), "b not created (output: {:?})", joined);
+    assert!(c.is_dir(), "c not created (output: {:?})", joined);
+}
+
+#[test]
+fn touch_multi_positional_creates_each() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a");
+    let b = dir.path().join("b");
+    let c = dir.path().join("c");
+
+    let script = format!(
+        "touch {} {} {}",
+        a.display(), b.display(), c.display()
+    );
+    let outputs = run_script(&script);
+    let joined = outputs.join("\n");
+    assert!(a.is_file(), "a not created (output: {:?})", joined);
+    assert!(b.is_file(), "b not created (output: {:?})", joined);
+    assert!(c.is_file(), "c not created (output: {:?})", joined);
+}
+
+#[test]
+fn rm_multi_positional_removes_each() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a");
+    let b = dir.path().join("b");
+    let c = dir.path().join("c");
+    std::fs::write(&a, b"").unwrap();
+    std::fs::write(&b, b"").unwrap();
+    std::fs::write(&c, b"").unwrap();
+
+    let script = format!(
+        "rm {} {} {}",
+        a.display(), b.display(), c.display()
+    );
+    let _ = run_script(&script);
+    assert!(!a.exists(), "a still exists after rm");
+    assert!(!b.exists(), "b still exists after rm");
+    assert!(!c.exists(), "c still exists after rm");
+}
+
+#[test]
+fn dirname_multi_positional_prints_each() {
+    let outputs = run_script(r#"dirname /a/b/c /x/y /one"#);
+    let joined = outputs.join("\n");
+    let lines: Vec<&str> = joined.lines().collect();
+    // GNU dirname prints one line per arg: /a/b, /x, /
+    assert!(
+        lines.contains(&"/a/b") && lines.contains(&"/x") && lines.contains(&"/"),
+        "expected /a/b, /x, / on separate lines; got: {:?}",
+        lines
+    );
+}

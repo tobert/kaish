@@ -55,39 +55,50 @@ impl Tool for Readlink {
         };
         parsed.global.apply(ctx);
 
-        let path_str = match args.get_string("path", 0) {
-            Some(p) => p,
-            None => return ExecResult::failure(1, "readlink: missing path argument"),
-        };
-
-        let canonicalize = parsed.canonicalize;
-        let resolved = ctx.resolve_path(&path_str);
-
-        if canonicalize {
-            // Normalize the path (resolve . and ..)
-            let resolved_str = resolved.to_string_lossy();
-            let normalized = normalize_path(&resolved_str);
-            return ExecResult::with_output(OutputData::text(format!("{}\n", normalized)));
+        if args.positional.is_empty() {
+            return ExecResult::failure(1, "readlink: missing path argument");
         }
 
-        // Without -f, read the raw symlink target
-        match ctx.backend.read_link(Path::new(&resolved)).await {
-            Ok(target) => ExecResult::with_output(OutputData::text(format!("{}\n", target.display()))),
-            Err(e) => {
-                use crate::backend::BackendError;
-                match &e {
-                    BackendError::Io(msg) if msg.contains("not a symbolic link") => {
-                        ExecResult::failure(1, format!("readlink: {}: not a symbolic link", path_str))
-                    }
-                    BackendError::NotFound(_) => {
-                        ExecResult::failure(1, format!("readlink: {}: No such file or directory", path_str))
-                    }
-                    _ => {
-                        ExecResult::failure(1, format!("readlink: {}: {}", path_str, e))
-                    }
+        let canonicalize = parsed.canonicalize;
+        let mut output = String::new();
+        let mut last_err: Option<String> = None;
+
+        for value in &args.positional {
+            let path_str = crate::interpreter::value_to_string(value);
+            let resolved = ctx.resolve_path(&path_str);
+
+            if canonicalize {
+                let resolved_str = resolved.to_string_lossy();
+                output.push_str(&normalize_path(&resolved_str));
+                output.push('\n');
+                continue;
+            }
+
+            match ctx.backend.read_link(Path::new(&resolved)).await {
+                Ok(target) => {
+                    output.push_str(&target.display().to_string());
+                    output.push('\n');
+                }
+                Err(e) => {
+                    use crate::backend::BackendError;
+                    last_err = Some(match &e {
+                        BackendError::Io(msg) if msg.contains("not a symbolic link") => {
+                            format!("readlink: {}: not a symbolic link", path_str)
+                        }
+                        BackendError::NotFound(_) => {
+                            format!("readlink: {}: No such file or directory", path_str)
+                        }
+                        _ => format!("readlink: {}: {}", path_str, e),
+                    });
                 }
             }
         }
+        let mut result = ExecResult::with_output(OutputData::text(output));
+        if let Some(msg) = last_err {
+            result.err = msg;
+            result = result.with_code(1);
+        }
+        result
     }
 }
 

@@ -27,43 +27,43 @@ pub struct Uname;
 #[command(name = "uname", about = "Print system identification")]
 struct UnameArgs {
     /// Print the system name (default).
-    #[arg(short = 's', long = "s")]
+    #[arg(id = "s", short = 's', long = "s")]
     _s: bool,
 
     /// Print the network node hostname.
-    #[arg(short = 'n', long = "n")]
+    #[arg(id = "n", short = 'n', long = "n")]
     _n: bool,
 
     /// Print the kernel release.
-    #[arg(short = 'r', long = "r")]
+    #[arg(id = "r", short = 'r', long = "r")]
     _r: bool,
 
     /// Print the kernel version string.
-    #[arg(short = 'v', long = "v")]
+    #[arg(id = "v", short = 'v', long = "v")]
     _v: bool,
 
     /// Print the machine hardware name.
-    #[arg(short = 'm', long = "m")]
+    #[arg(id = "m", short = 'm', long = "m")]
     _m: bool,
 
     /// Print the operating system.
-    #[arg(short = 'o', long = "o")]
+    #[arg(id = "o", short = 'o', long = "o")]
     _o: bool,
 
     /// Print the processor type (alias for -m).
-    #[arg(short = 'p', long = "p")]
+    #[arg(id = "p", short = 'p', long = "p")]
     _p: bool,
 
     /// Print the hardware platform (alias for -m).
-    #[arg(short = 'i', long = "i")]
+    #[arg(id = "i", short = 'i', long = "i")]
     _i: bool,
 
     /// Print all information.
-    #[arg(short = 'a', long = "a")]
+    #[arg(id = "a", short = 'a', long = "a")]
     _a: bool,
 
     /// Report host OS identity instead of kaish.
-    #[arg(long = "host")]
+    #[arg(id = "host", long = "host")]
     _host: bool,
 
     #[command(flatten)]

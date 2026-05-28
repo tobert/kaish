@@ -26,7 +26,7 @@ pub struct Diff;
 #[command(name = "diff", about = "Compare files line by line")]
 struct DiffArgs {
     /// Output unified diff format (default)
-    #[arg(short = 'u', long = "unified")]
+    #[arg(id = "unified", short = 'u', long = "unified")]
     _unified: bool,
 
     /// Quiet mode: only report if files differ

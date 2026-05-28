@@ -53,23 +53,44 @@ impl Tool for Mv {
         };
         parsed.global.apply(ctx);
 
-        let source = match args.get_string("source", 0) {
-            Some(s) => s,
-            None => return ExecResult::failure(1, "mv: missing source argument"),
-        };
-
-        let dest = match args.get_string("dest", 1) {
-            Some(d) => d,
-            None => return ExecResult::failure(1, "mv: missing destination argument"),
-        };
-
         let no_clobber = parsed.no_clobber;
-        let src_path = ctx.resolve_path(&source);
+
+        // POSIX: `mv SRC DST` for one source, `mv SRC... DIR/` for many.
+        // Last positional is the destination.
+        let (sources, dest_value) = match args.positional.split_last() {
+            Some((last, rest)) if !rest.is_empty() => (rest, last),
+            _ => return ExecResult::failure(1, "mv: missing file operand (need source and destination)"),
+        };
+        let dest = crate::interpreter::value_to_string(dest_value);
         let dst_path = ctx.resolve_path(&dest);
 
-        match move_path(&*ctx.backend, &src_path, &dst_path, no_clobber).await {
-            Ok(()) => ExecResult::success(""),
-            Err(e) => ExecResult::failure(1, format!("mv: {}", e)),
+        // Multiple sources require destination to be an existing directory.
+        if sources.len() > 1 {
+            let is_dir = ctx
+                .backend
+                .stat(Path::new(&dst_path))
+                .await
+                .map(|info| info.is_dir())
+                .unwrap_or(false);
+            if !is_dir {
+                return ExecResult::failure(
+                    1,
+                    format!("mv: target '{}' is not a directory", dest),
+                );
+            }
+        }
+
+        let mut last_err: Option<String> = None;
+        for src_value in sources {
+            let source = crate::interpreter::value_to_string(src_value);
+            let src_path = ctx.resolve_path(&source);
+            if let Err(e) = move_path(&*ctx.backend, &src_path, &dst_path, no_clobber).await {
+                last_err = Some(format!("mv: {}", e));
+            }
+        }
+        match last_err {
+            Some(msg) => ExecResult::failure(1, msg),
+            None => ExecResult::success(""),
         }
     }
 }

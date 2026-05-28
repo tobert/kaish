@@ -126,84 +126,114 @@ impl Tool for Rm {
         };
         parsed.global.apply(ctx);
 
-        let path = match args.get_string("path", 0) {
-            Some(p) => p,
-            None => return ExecResult::failure(1, "rm: missing path argument"),
-        };
+        if args.positional.is_empty() {
+            return ExecResult::failure(1, "rm: missing path argument");
+        }
 
         let recursive = parsed.recursive || parsed.recursive_upper;
         let force = parsed.force;
         let confirm = parsed.confirm.clone();
-        let resolved = ctx.resolve_path(&path);
-
-        // Check existence first
-        let stat = match ctx.backend.stat(Path::new(&resolved)).await {
-            Ok(info) => Some(info),
-            Err(BackendError::NotFound(_)) if force => return ExecResult::success(""),
-            Err(BackendError::NotFound(_)) => return ExecResult::failure(1, format!("rm: {}: No such file or directory", path)),
-            Err(e) => return ExecResult::failure(1, format!("rm: {}: {}", path, e)),
-        };
 
         let trash_enabled = ctx.scope.trash_enabled();
         let latch_enabled = ctx.scope.latch_enabled();
         let trash_max_size = ctx.scope.trash_max_size();
 
-        // Resolve real filesystem path (None for virtual paths like /v/*)
-        let real_path = ctx.backend.resolve_real_path(Path::new(&resolved));
-        let file_size = stat.as_ref().map(|s| s.size);
-
-        let is_dir = stat.as_ref().is_some_and(|s| s.is_dir());
-        let action = decide_rm_action(
-            trash_enabled,
-            latch_enabled,
-            real_path.as_deref(),
-            file_size,
-            trash_max_size,
-            is_dir,
-        );
-
-        match action {
-            RmAction::Trash(real) => {
-                let trash_backend = match ctx.trash_backend.as_ref() {
-                    Some(tb) => tb,
-                    None => return ExecResult::failure(1, "rm: trash backend not available"),
-                };
-                let real_display = real.display().to_string();
-                match trash_backend.trash(&real).await {
-                    Ok(()) => ExecResult::success(""),
-                    Err(e) => {
-                        ExecResult::failure(1, format!(
-                            "rm: {}: trash failed: {} (use `set +o trash` to delete permanently)",
-                            real_display, e
-                        ))
-                    }
+        // Collect per-path decisions in one pass so latch can issue ONE nonce
+        // that authorizes the whole batch (NonceScope.paths is a set; one
+        // nonce validates any subset). Stat-failures short-circuit unless -f.
+        struct Decision {
+            path: String,
+            resolved: PathBuf,
+            action: RmAction,
+        }
+        let mut decisions: Vec<Decision> = Vec::with_capacity(args.positional.len());
+        for value in &args.positional {
+            let path = crate::interpreter::value_to_string(value);
+            let resolved = ctx.resolve_path(&path);
+            let stat = match ctx.backend.stat(Path::new(&resolved)).await {
+                Ok(info) => Some(info),
+                Err(BackendError::NotFound(_)) if force => continue, // -f skips missing
+                Err(BackendError::NotFound(_)) => {
+                    return ExecResult::failure(1, format!("rm: {}: No such file or directory", path));
                 }
+                Err(e) => return ExecResult::failure(1, format!("rm: {}: {}", path, e)),
+            };
+            let real_path = ctx.backend.resolve_real_path(Path::new(&resolved));
+            let file_size = stat.as_ref().map(|s| s.size);
+            let is_dir = stat.as_ref().is_some_and(|s| s.is_dir());
+            let action = decide_rm_action(
+                trash_enabled,
+                latch_enabled,
+                real_path.as_deref(),
+                file_size,
+                trash_max_size,
+                is_dir,
+            );
+            decisions.push(Decision { path, resolved, action });
+        }
+
+        if decisions.is_empty() {
+            // All paths were missing under -f; nothing to do.
+            return ExecResult::success("");
+        }
+
+        // If ANY decision is Latch, issue one nonce for the full set of
+        // latched paths so the user can re-run with `--confirm=NONCE` on the
+        // same argv. Without a valid nonce, return the latch error listing
+        // every path that triggered it.
+        let latched_paths: Vec<&str> = decisions
+            .iter()
+            .filter(|d| matches!(d.action, RmAction::Latch))
+            .map(|d| d.path.as_str())
+            .collect();
+        if !latched_paths.is_empty() {
+            if let Some(nonce) = &confirm {
+                if let Err(e) = ctx.verify_nonce(nonce, "rm", &latched_paths) {
+                    return ExecResult::failure(1, format!("rm: {}", e));
+                }
+                // Nonce valid — fall through and execute each decision.
+            } else {
+                let joined = latched_paths.join(" ");
+                return ctx.latch_result("rm", &latched_paths, "latch enabled", |nonce| {
+                    format!("rm --confirm=\"{}\" {}", nonce, joined)
+                });
             }
-            RmAction::Latch => {
-                // Check if a valid confirmation nonce was provided
-                if let Some(nonce) = &confirm {
-                    match ctx.verify_nonce(nonce, "rm", &[&path]) {
-                        Ok(()) => {
-                            // Nonce valid — proceed with delete
-                            match remove_path(&*ctx.backend, Path::new(&resolved), recursive, force).await {
-                                Ok(()) => ExecResult::success(""),
-                                Err(e) => ExecResult::failure(1, format!("rm: {}: {}", path, e)),
-                            }
+        }
+
+        // Execute each decision. Continue past per-path errors so users see
+        // every failure rather than just the first; final exit reflects the
+        // last failure.
+        let mut last_err: Option<String> = None;
+        for d in &decisions {
+            let result = match &d.action {
+                RmAction::Trash(real) => {
+                    let trash_backend = match ctx.trash_backend.as_ref() {
+                        Some(tb) => tb,
+                        None => {
+                            last_err = Some("rm: trash backend not available".to_string());
+                            continue;
                         }
-                        Err(e) => ExecResult::failure(1, format!("rm: {}: {}", path, e)),
-                    }
-                } else {
-                    ctx.latch_result("rm", &[&path], "latch enabled", |nonce| {
-                        format!("rm --confirm=\"{}\" {}", nonce, path)
+                    };
+                    trash_backend.trash(real).await.map_err(|e| {
+                        format!(
+                            "rm: {}: trash failed: {} (use `set +o trash` to delete permanently)",
+                            real.display(), e
+                        )
                     })
                 }
-            }
-            RmAction::Delete => {
-                match remove_path(&*ctx.backend, Path::new(&resolved), recursive, force).await {
-                    Ok(()) => ExecResult::success(""),
-                    Err(e) => ExecResult::failure(1, format!("rm: {}: {}", path, e)),
+                RmAction::Latch | RmAction::Delete => {
+                    remove_path(&*ctx.backend, &d.resolved, recursive, force)
+                        .await
+                        .map_err(|e| format!("rm: {}: {}", d.path, e))
                 }
+            };
+            if let Err(msg) = result {
+                last_err = Some(msg);
             }
+        }
+        match last_err {
+            Some(msg) => ExecResult::failure(1, msg),
+            None => ExecResult::success(""),
         }
     }
 }

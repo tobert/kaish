@@ -105,12 +105,11 @@ from the CLI returns only `crates/kaish-client/Cargo.toml`, not all 7.
 Root cause: the kernel pre-expands `GlobPattern` args into multiple
 `tool_args.positional` values (`kernel.rs:1851-1860`), but
 `ls.execute` reads only `positional[0]` via `args.get_string("path", 0)`
-(`ls.rs:86-88`). Same shape may affect other builtins that only
-inspect `positional[0]`. `cat`/`head`/`tail` etc. use
-`expand_paths(&args.positional)` so they loop over all positionals;
-`ls` needs the same fix plus a decision on how to render multiple
-roots. Tests pass because the unit tests pass raw glob strings to
-`Ls.execute` directly, bypassing the kernel's pre-expansion.
+(`ls.rs:86-88`). `ls` still needs the same `expand_paths` treatment
+the 2026-05-28 sweep gave to mkdir/rm/touch/etc., plus a decision on
+how to render multiple roots in the listing. Tests pass because the
+unit tests pass raw glob strings to `Ls.execute` directly, bypassing
+the kernel's pre-expansion.
 
 ### `apply_output_format` early-returns on empty stdout
 `kaish-types/src/output.rs:521-524`:
@@ -357,6 +356,40 @@ isn't lost when those files are deleted.
   `jq -r '.key' <<< "$R"` is bash-idiomatic, shellcheck-clean, and
   kaish's jq is built in (native jaq, no subprocess). Pointer:
   `docs/plan-here-string.md`.
+- **Clap-migration underscore-id leak + multi-positional sweep** —
+  2026-05-28. Two clap-migration follow-ups found by post-fix audit.
+
+  (a) **Underscore-id routing bug.** Builtins with `_field` (Rust's
+  unused-field convention) leaked `_field` as the clap id, so the
+  kernel's flag canonicalization emitted `--_field=value` and clap
+  rejected it. Broke `kaish-validate -e EXPR`, `kaish-validate --expr
+  VALUE` (space form), `read -p PROMPT`, `kaish-trash --confirm VALUE`
+  (space form). Bool flags worked because the short-flag branch inserts
+  the short char directly. Fix: added `#[arg(id = "name", ...)]` to ~21
+  fields across diff/grep/kaish-trash/mkdir/read/tee/uname/validate.
+  Side benefit: `help mkdir` / `help uname` no longer show `_parents`
+  / `_s` etc. — schema names are clean. Regression test in
+  `clap_schema::tests::id_override_strips_leading_underscore_from_schema_name`
+  + integration tests for `kaish-validate -e` / `--expr` round-trip.
+
+  (b) **Multi-positional sweep.** The pre-existing
+  `args.get_string("path", 0)` pattern only read positional[0]; `mkdir
+  a b c` silently dropped `b` and `c`. Converted mkdir/touch/rm/tee/cut
+  /sort/stat/dirname/realpath/readlink to iterate `args.positional` via
+  `crate::interpreter::value_to_string`. rm batches multi-path latch
+  into a single nonce (NonceScope.paths is a set; one nonce validates
+  any subset). cp/mv adopted POSIX `SRC... DST/` semantics: when more
+  than one source is given, dest must be an existing directory. basename
+  / uniq / validate kept single-positional per POSIX. Integration tests
+  cover mkdir / touch / rm / dirname multi-arg behavior.
+
+  Note: `ls <glob>` still has the same `positional[0]`-only shape and
+  needs a paired fix that also decides how to render multiple roots —
+  see the surviving P2 entry above.
+
+  Workspace 1554 kernel unit + 129 REPL integration tests green; clippy
+  clean (--all and --no-default-features); WASI build OK.
+
 - **Schema fidelity + positional-index mismatch (clap migration)** —
   2026-05-28. The paired P2 from 2026-05-27 landed in a single batch:
   1. `ParamSchema` gained a `positional: bool` field (serde-skipped

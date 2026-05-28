@@ -49,32 +49,32 @@ impl Tool for Touch {
         };
         parsed.global.apply(ctx);
 
-        let path_str = match args.get_string("path", 0) {
-            Some(p) => p,
-            None => return ExecResult::failure(1, "touch: missing path argument"),
-        };
+        if args.positional.is_empty() {
+            return ExecResult::failure(1, "touch: missing path argument");
+        }
 
-        let resolved = ctx.resolve_path(&path_str);
-        let path = Path::new(&resolved);
+        // POSIX: `touch a b c` touches each. Continue past errors and report
+        // the last failure rather than bailing at the first.
+        let mut last_err: Option<String> = None;
+        for value in &args.positional {
+            let path_str = crate::interpreter::value_to_string(value);
+            let resolved = ctx.resolve_path(&path_str);
+            let path = Path::new(&resolved);
 
-        // Check if file exists
-        if ctx.backend.exists(path).await {
-            // File exists, update timestamp
-            // Try to use real filesystem path if available
-            if let Some(real_path) = ctx.backend.resolve_real_path(path) {
-                // Update mtime to current time
-                if let Err(e) = update_mtime(&real_path) {
-                    return ExecResult::failure(1, format!("touch: {}: {}", path_str, e));
-                }
+            if ctx.backend.exists(path).await {
+                // File exists, update timestamp via real-FS path when available.
+                if let Some(real_path) = ctx.backend.resolve_real_path(path)
+                    && let Err(e) = update_mtime(&real_path) {
+                        last_err = Some(format!("touch: {}: {}", path_str, e));
+                    }
+                // Virtual filesystems (MemoryFs): no-op.
+            } else if let Err(e) = ctx.backend.write(path, &[], WriteMode::CreateNew).await {
+                last_err = Some(format!("touch: {}: {}", path_str, e));
             }
-            // For virtual filesystems (MemoryFs), this is a no-op
-            ExecResult::success("")
-        } else {
-            // Create empty file
-            match ctx.backend.write(path, &[], WriteMode::CreateNew).await {
-                Ok(()) => ExecResult::success(""),
-                Err(e) => ExecResult::failure(1, format!("touch: {}: {}", path_str, e)),
-            }
+        }
+        match last_err {
+            Some(msg) => ExecResult::failure(1, msg),
+            None => ExecResult::success(""),
         }
     }
 }

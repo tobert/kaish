@@ -73,24 +73,24 @@ impl Tool for Sort {
         };
         parsed.global.apply(ctx);
 
-        // Get input: from file or stdin
-        let input = match args.get_string("path", 0) {
-            Some(path) => {
+        // POSIX: sort accepts multiple files and merge-sorts their contents.
+        // When no file is given, read stdin.
+        let input = if args.positional.is_empty() {
+            ctx.read_stdin_to_string().await.unwrap_or_default()
+        } else {
+            let mut acc = String::new();
+            for value in &args.positional {
+                let path = crate::interpreter::value_to_string(value);
                 let resolved = ctx.resolve_path(&path);
                 match ctx.backend.read(Path::new(&resolved), None).await {
                     Ok(data) => match String::from_utf8(data) {
-                        Ok(s) => s,
-                        Err(_) => {
-                            return ExecResult::failure(
-                                1,
-                                format!("sort: {}: invalid UTF-8", path),
-                            )
-                        }
+                        Ok(s) => acc.push_str(&s),
+                        Err(_) => return ExecResult::failure(1, format!("sort: {}: invalid UTF-8", path)),
                     },
                     Err(e) => return ExecResult::failure(1, format!("sort: {}: {}", path, e)),
                 }
             }
-            None => ctx.read_stdin_to_string().await.unwrap_or_default(),
+            acc
         };
 
         let numeric = parsed.numeric;

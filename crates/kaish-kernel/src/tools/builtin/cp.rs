@@ -61,27 +61,47 @@ impl Tool for Cp {
         };
         parsed.global.apply(ctx);
 
-        let source = match args.get_string("source", 0) {
-            Some(s) => s,
-            None => return ExecResult::failure(1, "cp: missing source argument"),
-        };
-
-        let dest = match args.get_string("dest", 1) {
-            Some(d) => d,
-            None => return ExecResult::failure(1, "cp: missing destination argument"),
-        };
-
         let recursive = parsed.recursive;
         let no_clobber = parsed.no_clobber;
         // preserve flag is recognized but VFS doesn't support attributes
         let _preserve = parsed.preserve;
 
-        let src_path = ctx.resolve_path(&source);
+        // POSIX: `cp SRC DST` for one source, `cp SRC... DIR/` for many.
+        // Last positional is the destination.
+        let (sources, dest_value) = match args.positional.split_last() {
+            Some((last, rest)) if !rest.is_empty() => (rest, last),
+            _ => return ExecResult::failure(1, "cp: missing file operand (need source and destination)"),
+        };
+        let dest = crate::interpreter::value_to_string(dest_value);
         let dst_path = ctx.resolve_path(&dest);
 
-        match copy_path(&*ctx.backend, &src_path, &dst_path, recursive, no_clobber).await {
-            Ok(()) => ExecResult::success(""),
-            Err(e) => ExecResult::failure(1, format!("cp: {}", e)),
+        // Multiple sources require destination to be an existing directory.
+        if sources.len() > 1 {
+            let is_dir = ctx
+                .backend
+                .stat(Path::new(&dst_path))
+                .await
+                .map(|info| info.is_dir())
+                .unwrap_or(false);
+            if !is_dir {
+                return ExecResult::failure(
+                    1,
+                    format!("cp: target '{}' is not a directory", dest),
+                );
+            }
+        }
+
+        let mut last_err: Option<String> = None;
+        for src_value in sources {
+            let source = crate::interpreter::value_to_string(src_value);
+            let src_path = ctx.resolve_path(&source);
+            if let Err(e) = copy_path(&*ctx.backend, &src_path, &dst_path, recursive, no_clobber).await {
+                last_err = Some(format!("cp: {}", e));
+            }
+        }
+        match last_err {
+            Some(msg) => ExecResult::failure(1, msg),
+            None => ExecResult::success(""),
         }
     }
 }

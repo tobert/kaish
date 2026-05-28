@@ -74,12 +74,12 @@ struct GrepArgs {
     /// Extended regex (POSIX -E). No-op: Rust's regex crate is always
     /// extended (alternation, grouping, quantifiers without backslash);
     /// accepted for POSIX/muscle-memory compatibility.
-    #[arg(short = 'E', long = "extended-regexp", visible_alias = "extended_regexp")]
+    #[arg(id = "extended_regexp", short = 'E', long = "extended-regexp", visible_alias = "extended_regexp")]
     _extended: bool,
 
     /// Fixed strings (POSIX -F): treat pattern as a literal string, not a
     /// regex. Implemented by escaping every metachar via `regex::escape`.
-    #[arg(short = 'F', long = "fixed-strings", visible_alias = "fixed_strings")]
+    #[arg(id = "fixed_strings", short = 'F', long = "fixed-strings", visible_alias = "fixed_strings")]
     _fixed: bool,
 
     /// Print NUM lines after match.

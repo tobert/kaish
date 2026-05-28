@@ -52,54 +52,57 @@ impl Tool for Stat {
         };
         parsed.global.apply(ctx);
 
-        let path_str = match args.get_string("path", 0) {
-            Some(p) => p,
-            None => return ExecResult::failure(1, "stat: missing path argument"),
-        };
+        if args.positional.is_empty() {
+            return ExecResult::failure(1, "stat: missing path argument");
+        }
 
-        let resolved = ctx.resolve_path(&path_str);
         let format = args
             .get_string("format", usize::MAX)
             .or_else(|| args.get_string("c", usize::MAX));
 
-        match ctx.backend.stat(Path::new(&resolved)).await {
-            Ok(info) => {
-                if let Some(fmt) = format {
-                    // Custom format mode: return plain text
-                    let output = format_stat(&fmt, &path_str, &info);
-                    ExecResult::with_output(OutputData::text(output))
-                } else {
-                    // Default output: use structured OutputData
-                    let is_dir = info.is_dir();
-                    let file_type = if is_dir {
-                        "directory"
+        // GNU: `stat a b c` stats each. Format mode prints one line per
+        // file; default mode collects rows into one table. Continue past
+        // errors and report the last failure so users see what worked.
+        let mut nodes: Vec<OutputNode> = Vec::with_capacity(args.positional.len());
+        let mut format_output = String::new();
+        let mut last_err: Option<String> = None;
+
+        for value in &args.positional {
+            let path_str = crate::interpreter::value_to_string(value);
+            let resolved = ctx.resolve_path(&path_str);
+            match ctx.backend.stat(Path::new(&resolved)).await {
+                Ok(info) => {
+                    if let Some(fmt) = &format {
+                        format_output.push_str(&format_stat(fmt, &path_str, &info));
                     } else {
-                        "regular file"
-                    };
-                    let entry_type = if is_dir {
-                        EntryType::Directory
-                    } else {
-                        EntryType::File
-                    };
-
-                    let node = OutputNode::new(&path_str)
-                        .with_cells(vec![
-                            info.size.to_string(),
-                            file_type.to_string(),
-                        ])
-                        .with_entry_type(entry_type);
-
-                    let headers = vec![
-                        "FILE".to_string(),
-                        "SIZE".to_string(),
-                        "TYPE".to_string(),
-                    ];
-
-                    ExecResult::with_output(OutputData::table(headers, vec![node]))
+                        let is_dir = info.is_dir();
+                        let file_type = if is_dir { "directory" } else { "regular file" };
+                        let entry_type = if is_dir { EntryType::Directory } else { EntryType::File };
+                        nodes.push(
+                            OutputNode::new(&path_str)
+                                .with_cells(vec![info.size.to_string(), file_type.to_string()])
+                                .with_entry_type(entry_type),
+                        );
+                    }
+                }
+                Err(e) => {
+                    last_err = Some(format!("stat: {}: {}", path_str, e));
                 }
             }
-            Err(e) => ExecResult::failure(1, format!("stat: {}: {}", path_str, e)),
         }
+
+        // Emit accumulated output even when some paths failed (matches GNU).
+        let mut result = if format.is_some() {
+            ExecResult::with_output(OutputData::text(format_output))
+        } else {
+            let headers = vec!["FILE".to_string(), "SIZE".to_string(), "TYPE".to_string()];
+            ExecResult::with_output(OutputData::table(headers, nodes))
+        };
+        if let Some(msg) = last_err {
+            result.err = msg;
+            result = result.with_code(1);
+        }
+        result
     }
 }
 

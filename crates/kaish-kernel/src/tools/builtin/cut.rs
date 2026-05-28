@@ -62,21 +62,24 @@ impl Tool for Cut {
         };
         parsed.global.apply(ctx);
 
-        // Get input: from file or stdin
-        let input = match args.get_string("path", 0) {
-            Some(path) => {
+        // POSIX: cut accepts multiple files and concatenates their content.
+        // When no file is given, read stdin.
+        let input = if args.positional.is_empty() {
+            ctx.read_stdin_to_string().await.unwrap_or_default()
+        } else {
+            let mut acc = String::new();
+            for value in &args.positional {
+                let path = crate::interpreter::value_to_string(value);
                 let resolved = ctx.resolve_path(&path);
                 match ctx.backend.read(Path::new(&resolved), None).await {
                     Ok(data) => match String::from_utf8(data) {
-                        Ok(s) => s,
-                        Err(_) => {
-                            return ExecResult::failure(1, format!("cut: {}: invalid UTF-8", path))
-                        }
+                        Ok(s) => acc.push_str(&s),
+                        Err(_) => return ExecResult::failure(1, format!("cut: {}: invalid UTF-8", path)),
                     },
                     Err(e) => return ExecResult::failure(1, format!("cut: {}: {}", path, e)),
                 }
             }
-            None => ctx.read_stdin_to_string().await.unwrap_or_default(),
+            acc
         };
 
         let delimiter = parsed.delimiter.clone()
@@ -438,24 +441,29 @@ mod tests {
         assert!(result.err.contains("single character"));
     }
 
+    /// POSIX: `cut FILE1 FILE2` reads from both files in order and applies
+    /// the same field/character selection to the concatenated input.
     #[tokio::test]
-    async fn test_cut_single_file_only() {
-        // 80/20 design: only first positional argument is used.
-        // Extra file arguments are silently ignored.
-        let mut ctx = make_ctx().await;
+    async fn test_cut_multiple_files_concatenate() {
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(Path::new("a.csv"), b"alice,25\nbob,30\n").await.unwrap();
+        mem.write(Path::new("b.csv"), b"carol,40\n").await.unwrap();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
         let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/csv.txt".into()));
-        args.positional.push(Value::String("/tsv.txt".into())); // ignored
+        args.positional.push(Value::String("/a.csv".into()));
+        args.positional.push(Value::String("/b.csv".into()));
         args.named
             .insert("delimiter".to_string(), Value::String(",".into()));
         args.named
             .insert("fields".to_string(), Value::String("1".into()));
 
         let result = Cut.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        // Should only read from first file (csv.txt has "alice,25,engineer" etc.)
+        assert!(result.ok(), "cut multi-file should succeed: {}", result.err);
         let text = result.text_out();
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines, vec!["alice", "bob"]);
+        assert_eq!(lines, vec!["alice", "bob", "carol"], "expected concat of both files");
     }
 }

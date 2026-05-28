@@ -18,7 +18,7 @@ pub struct KaishTrash;
 #[command(name = "kaish-trash", about = "Manage the freedesktop.org Trash")]
 struct KaishTrashArgs {
     /// Confirmation nonce for empty (--confirm=NONCE).
-    #[arg(long = "confirm")]
+    #[arg(id = "confirm", long = "confirm")]
     _confirm: Option<String>,
 
     #[command(flatten)]
