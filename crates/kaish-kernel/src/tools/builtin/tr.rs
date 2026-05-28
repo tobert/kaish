@@ -41,7 +41,7 @@ impl Tool for Tr {
             "Translate or delete characters",
             [
                 ("Lowercase to uppercase", "echo hello | tr a-z A-Z"),
-                ("Delete characters", "echo 'a1b2c3' | tr -d 0-9"),
+                ("Delete characters", "echo 'a1b2c3' | tr -d '0-9'"),
             ],
         )
     }

@@ -388,3 +388,103 @@ async fn grep_glob_searches_all_matched_files() {
     assert!(out.contains("one.log") && out.contains("two.log"), "grep glob: {out:?}");
     assert!(!out.contains("skip.txt"), "grep glob leaked non-.log file: {out:?}");
 }
+
+// ===========================================================================
+// Batch 3 — multi-file text filters that already handle all positionals
+// correctly (regression guards), plus stdin filters. These lock in behavior
+// the direct-.execute() tests never exercised through the kernel.
+// ===========================================================================
+
+#[tokio::test]
+async fn sort_merges_and_orders_multiple_files() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "f1.txt", "b\nd\n");
+    touch(dir.path(), "f2.txt", "a\nc\n");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "sort f1.txt f2.txt").await;
+    assert_eq!(code, 0, "sort multi-file should succeed: {out:?}");
+    assert_eq!(out.lines().collect::<Vec<_>>(), vec!["a", "b", "c", "d"], "sort: {out:?}");
+}
+
+#[tokio::test]
+async fn head_multi_file_emits_filename_headers() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "f1.txt", "1a\n1b\n");
+    touch(dir.path(), "f2.txt", "2a\n2b\n");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "head -n 1 f1.txt f2.txt").await;
+    assert_eq!(code, 0, "head multi-file should succeed: {out:?}");
+    assert!(out.contains("f1.txt") && out.contains("f2.txt"), "head headers: {out:?}");
+    assert!(out.contains("1a") && out.contains("2a"), "head content: {out:?}");
+    assert!(!out.contains("1b"), "head should bound to 1 line/file: {out:?}");
+}
+
+#[tokio::test]
+async fn wc_no_flag_reports_lines_words_bytes_per_file_plus_total() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "f1.txt", "a\nb\n"); // 2 lines
+    touch(dir.path(), "f2.txt", "c\nd\ne\n"); // 3 lines
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "wc f1.txt f2.txt").await;
+    assert_eq!(code, 0, "wc multi-file should succeed: {out:?}");
+    assert!(out.contains("f1.txt") && out.contains("f2.txt"), "wc per-file rows: {out:?}");
+    assert!(out.contains("total"), "wc should emit a total row: {out:?}");
+    assert!(out.contains('5'), "wc total should be 5 lines: {out:?}");
+}
+
+#[tokio::test]
+async fn uniq_count_flag_prefixes_counts() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "printf 'a\\na\\nb\\n' | uniq -c").await;
+    assert_eq!(code, 0, "uniq -c should succeed: {out:?}");
+    assert!(out.contains('2') && out.contains('a'), "uniq -c missing count for a: {out:?}");
+    assert!(out.contains('1') && out.contains('b'), "uniq -c missing count for b: {out:?}");
+}
+
+#[tokio::test]
+async fn tr_deletes_quoted_range_from_stdin() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "echo a1b2c3 | tr -d '0-9'").await;
+    assert_eq!(code, 0, "tr -d should succeed: {out:?}");
+    assert_eq!(out, "abc", "tr -d should strip digits: {out:?}");
+}
+
+#[tokio::test]
+async fn tr_translates_letter_range() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "echo hello | tr a-z A-Z").await;
+    assert_eq!(code, 0);
+    assert_eq!(out, "HELLO", "tr range: {out:?}");
+}
+
+#[tokio::test]
+async fn awk_prints_selected_field() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "printf 'x y z\\n' | awk '{print $2}'").await;
+    assert_eq!(code, 0, "awk should succeed: {out:?}");
+    assert_eq!(out, "y", "awk field: {out:?}");
+}
+
+#[tokio::test]
+async fn realpath_resolves_multiple_operands() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "p.txt", "");
+    touch(dir.path(), "q.txt", "");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "realpath p.txt q.txt").await;
+    assert_eq!(code, 0, "realpath multi should succeed: {out:?}");
+    assert!(out.contains("p.txt") && out.contains("q.txt"), "realpath: {out:?}");
+}
+
+#[tokio::test]
+async fn printf_formats_int_and_string() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "printf '%d-%s' 42 hi").await;
+    assert_eq!(code, 0, "printf should succeed: {out:?}");
+    assert_eq!(out, "42-hi", "printf format: {out:?}");
+}

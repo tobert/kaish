@@ -228,15 +228,30 @@ The lexer splits `.hidden.txt` into `Dot` + `Ident("hidden.txt")`
 rather than a single filename token. `DotSlashPath` (`./foo`) works;
 bare dot-prefixed names don't. Workaround: quote the name.
 
-### Bare `,` is a parse error — `cut -d,` / `cut -d ,` need quoting
-Surfaced 2026-05-28 by the kernel-routed builtin tests. A standalone
-comma is not lexed as a bareword, so the common bash idioms `cut -d,
--f2` and `cut -d , -f2` both raise a parse error; only `cut -d ',' -f2`
-works. Same tokenization-gap family as the dot-prefixed-filename entry
-above. Low priority (quoting is a clean workaround and kaish is a POSIX
-*subset*), but a "did-you-mean: quote the delimiter" diagnostic would
-smooth bash porting. Decide whether `,` (and other lone punctuation
-agents reach for as delimiters) should tokenize as a bareword.
+### Bare `,` / numeric ranges parse oddly — `cut -d,`, `tr -d 0-9` need quoting
+Surfaced 2026-05-28 by the kernel-routed builtin tests. Two related
+tokenization gaps in the same family as the dot-prefixed-filename entry
+above:
+- A standalone comma isn't a bareword, so `cut -d, -f2` and `cut -d , -f2`
+  both raise a parse error; only `cut -d ',' -f2` works.
+- A numeric range like `0-9` lexes as `Int(0)` + `Int(-9)` (the `-` starts
+  a negative int), so `tr -d 0-9` is a silent no-op — only `tr -d '0-9'`
+  works. Letter ranges (`tr a-z A-Z`) work because `-` is inside the Ident
+  char class. (The `tr` help example was fixed 2026-05-28 to quote `'0-9'`.)
+Low priority — quoting is a clean workaround and kaish is a POSIX *subset* —
+but a "did-you-mean: quote it" diagnostic would smooth bash porting. Decide
+whether lone punctuation / digit-ranges that agents reach for as set/delim
+arguments should tokenize as barewords.
+
+### `printf` does not cycle its format over extra arguments
+Surfaced 2026-05-28. POSIX printf reuses the format string until all
+operands are consumed: `printf '%s\n' a b c` → `a\nb\nc\n`. kaish makes a
+single pass (`printf.rs:99` calls `format_string` once), so it prints only
+`a`, and `printf '%s-%s ' a b c d` prints `a-b ` (drops `c d`). Likely an
+80%-rule simplification, but agents porting `printf '%s\n' "$@"`-style
+loops will be surprised. Decide whether to add cycling (loop the format,
+chunking args by the conversion count per pass; guard the zero-conversion
+case to avoid an infinite loop) or document the single-pass contract.
 
 ### Flag injection via glob expansion in `rm`
 `rm *` in a directory containing `-rf.txt` expands to `rm -rf.txt …`
