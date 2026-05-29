@@ -22,6 +22,10 @@ pub use kaish_types::{JobId, JobInfo, JobStatus};
 pub struct Job {
     /// Job ID.
     pub id: JobId,
+    /// Owning manager's session ID — disambiguates output file paths between
+    /// JobManager instances that share the process (and thus the same job ID
+    /// space, since IDs restart at 1 per manager).
+    session_id: u64,
     /// Command description.
     pub command: String,
     /// Task handle (None if already awaited).
@@ -46,9 +50,10 @@ pub struct Job {
 
 impl Job {
     /// Create a new job from a task handle.
-    pub fn new(id: JobId, command: String, handle: JoinHandle<ExecResult>) -> Self {
+    pub fn new(id: JobId, session_id: u64, command: String, handle: JoinHandle<ExecResult>) -> Self {
         Self {
             id,
+            session_id,
             command,
             handle: Some(handle),
             result_rx: None,
@@ -63,9 +68,10 @@ impl Job {
     }
 
     /// Create a new job from a result channel.
-    pub fn from_channel(id: JobId, command: String, rx: oneshot::Receiver<ExecResult>) -> Self {
+    pub fn from_channel(id: JobId, session_id: u64, command: String, rx: oneshot::Receiver<ExecResult>) -> Self {
         Self {
             id,
+            session_id,
             command,
             handle: None,
             result_rx: Some(rx),
@@ -84,6 +90,7 @@ impl Job {
     /// The streams provide live access to job output via `/v/jobs/{id}/stdout` and `/stderr`.
     pub fn with_streams(
         id: JobId,
+        session_id: u64,
         command: String,
         rx: oneshot::Receiver<ExecResult>,
         stdout: Arc<BoundedStream>,
@@ -91,6 +98,7 @@ impl Job {
     ) -> Self {
         Self {
             id,
+            session_id,
             command,
             handle: None,
             result_rx: Some(rx),
@@ -105,9 +113,10 @@ impl Job {
     }
 
     /// Create a stopped job (from Ctrl-Z on a foreground process).
-    pub fn stopped(id: JobId, command: String, pid: u32, pgid: u32) -> Self {
+    pub fn stopped(id: JobId, session_id: u64, command: String, pid: u32, pgid: u32) -> Self {
         Self {
             id,
+            session_id,
             command,
             handle: None,
             result_rx: None,
@@ -223,7 +232,7 @@ impl Job {
             return None;
         }
 
-        let filename = format!("job_{}.txt", self.id.0);
+        let filename = format!("session_{}_job_{}.txt", self.session_id, self.id.0);
         let path = tmp_dir.join(filename);
 
         let mut content = String::new();
@@ -327,8 +336,15 @@ impl Job {
     }
 }
 
+/// Process-wide counter handing each JobManager a distinct session ID. Job IDs
+/// restart at 1 per manager, so the session ID is what keeps output file paths
+/// from colliding between managers sharing a process (concurrent tests, forks).
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
+
 /// Manager for background jobs.
 pub struct JobManager {
+    /// Process-unique ID for this manager, mixed into job output file paths.
+    session_id: u64,
     /// Counter for generating unique job IDs.
     next_id: AtomicU64,
     /// Map of job ID to job.
@@ -339,6 +355,7 @@ impl JobManager {
     /// Create a new job manager.
     pub fn new() -> Self {
         Self {
+            session_id: NEXT_SESSION_ID.fetch_add(1, Ordering::SeqCst),
             next_id: AtomicU64::new(1),
             jobs: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -354,7 +371,7 @@ impl JobManager {
     {
         let id = JobId(self.next_id.fetch_add(1, Ordering::SeqCst));
         let handle = tokio::spawn(future);
-        let job = Job::new(id, command, handle);
+        let job = Job::new(id, self.session_id, command, handle);
 
         // Spin on try_lock to guarantee the job is in the map on return.
         // The lock is tokio::sync::Mutex which is only held briefly during
@@ -380,7 +397,7 @@ impl JobManager {
     /// Spawn a job that's already running and communicate via channel.
     pub async fn register(&self, command: String, rx: oneshot::Receiver<ExecResult>) -> JobId {
         let id = JobId(self.next_id.fetch_add(1, Ordering::SeqCst));
-        let job = Job::from_channel(id, command, rx);
+        let job = Job::from_channel(id, self.session_id, command, rx);
 
         let mut jobs = self.jobs.lock().await;
         jobs.insert(id, job);
@@ -399,7 +416,7 @@ impl JobManager {
         stderr: Arc<BoundedStream>,
     ) -> JobId {
         let id = JobId(self.next_id.fetch_add(1, Ordering::SeqCst));
-        let job = Job::with_streams(id, command, rx, stdout, stderr);
+        let job = Job::with_streams(id, self.session_id, command, rx, stdout, stderr);
 
         let mut jobs = self.jobs.lock().await;
         jobs.insert(id, job);
@@ -538,7 +555,7 @@ impl JobManager {
     /// Register a stopped job (from Ctrl-Z on a foreground process).
     pub async fn register_stopped(&self, command: String, pid: u32, pgid: u32) -> JobId {
         let id = JobId(self.next_id.fetch_add(1, Ordering::SeqCst));
-        let job = Job::stopped(id, command, pid, pgid);
+        let job = Job::stopped(id, self.session_id, command, pid, pgid);
         let mut jobs = self.jobs.lock().await;
         jobs.insert(id, job);
         id
@@ -721,23 +738,24 @@ mod tests {
         let result = manager.wait(id).await;
         assert!(result.is_some());
 
-        // Get the output file path before cleanup
+        // Get the output file path before cleanup. The job produced output, so
+        // a temp file must have been written — otherwise this test would pass
+        // vacuously.
         let output_file = {
             let jobs = manager.jobs.lock().await;
             jobs.get(&id).and_then(|j| j.output_file().cloned())
         };
+        let path = output_file.expect("job with output should have written a temp file");
+        assert!(path.exists(), "temp file should exist before cleanup: {}", path.display());
 
-        // Cleanup should remove the job and its files
+        // Cleanup should remove the job and its files.
         manager.cleanup().await;
 
-        // If an output file was created, it should be gone now
-        if let Some(path) = output_file {
-            assert!(
-                !path.exists(),
-                "temp file should be removed after cleanup: {}",
-                path.display()
-            );
-        }
+        assert!(
+            !path.exists(),
+            "temp file should be removed after cleanup: {}",
+            path.display()
+        );
     }
 
     #[tokio::test]
