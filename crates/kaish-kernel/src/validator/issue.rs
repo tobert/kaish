@@ -57,8 +57,6 @@ pub enum IssueCode {
     ExtraPositionalArgs,
     /// Bare scalar variable in for loop (no word splitting in kaish).
     ForLoopScalarVar,
-    /// Unquoted glob pattern that won't expand (kaish has no implicit globbing).
-    ShellGlobPattern,
     /// scatter without gather — parallel results would be lost.
     ScatterWithoutGather,
     /// Field access on `$?` (e.g. `${?.data}`, `${?.ok}`) was removed.
@@ -87,7 +85,6 @@ impl IssueCode {
             IssueCode::RecursiveWithoutFlag => "W004",
             IssueCode::ExtraPositionalArgs => "W005",
             IssueCode::ForLoopScalarVar => "E012",
-            IssueCode::ShellGlobPattern => "E013",
             IssueCode::ScatterWithoutGather => "E014",
             IssueCode::LastResultFieldAccess => "E015",
         }
@@ -106,7 +103,6 @@ impl IssueCode {
             | IssueCode::InvalidCount
             | IssueCode::DiffNeedsTwoFiles
             | IssueCode::ForLoopScalarVar
-            | IssueCode::ShellGlobPattern
             | IssueCode::ScatterWithoutGather
             | IssueCode::LastResultFieldAccess => Severity::Error,
 
