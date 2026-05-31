@@ -996,7 +996,7 @@ impl Kernel {
     /// Equivalent to `execute_with_options(input, ExecuteOptions::default())`.
     /// Returns the result of the last statement executed.
     pub async fn execute(&self, input: &str) -> Result<ExecResult> {
-        self.execute_with_options_inner(input, ExecuteOptions::default(), None).await
+        self.run_inner(input, ExecuteOptions::default(), None).await
     }
 
     /// Execute with per-call options. The primary entry point for embedders
@@ -1023,7 +1023,7 @@ impl Kernel {
         input: &str,
         opts: ExecuteOptions,
     ) -> Result<ExecResult> {
-        self.execute_with_options_inner(input, opts, None).await
+        self.run_inner(input, opts, None).await
     }
 
     /// Same as [`Self::execute_with_options`] but with a per-statement output
@@ -1035,7 +1035,7 @@ impl Kernel {
         opts: ExecuteOptions,
         on_output: &mut (dyn FnMut(&ExecResult) + Send),
     ) -> Result<ExecResult> {
-        self.execute_with_options_inner(input, opts, Some(on_output)).await
+        self.run_inner(input, opts, Some(on_output)).await
     }
 
     /// Execute kaish source code with a transient overlay of exported variables.
@@ -1049,7 +1049,7 @@ impl Kernel {
         input: &str,
         vars: HashMap<String, Value>,
     ) -> Result<ExecResult> {
-        self.execute_with_options_inner(input, ExecuteOptions::new().with_vars(vars), None).await
+        self.run_inner(input, ExecuteOptions::new().with_vars(vars), None).await
     }
 
     /// Execute kaish source code with a per-statement callback.
@@ -1062,7 +1062,34 @@ impl Kernel {
         input: &str,
         on_output: &mut (dyn FnMut(&ExecResult) + Send),
     ) -> Result<ExecResult> {
-        self.execute_with_options_inner(input, ExecuteOptions::default(), Some(on_output)).await
+        self.run_inner(input, ExecuteOptions::default(), Some(on_output)).await
+    }
+
+    /// Link embedder trace context, then run [`Self::execute_with_options_inner`].
+    ///
+    /// The `#[instrument]` execution span resolves its parent from the *current*
+    /// OpenTelemetry context (see `tracing-opentelemetry`'s `parent_context`),
+    /// captured when the span is first entered — not when the future is
+    /// constructed. So a thread-local `attach()` scoped to construction is too
+    /// early to be seen (the integration test confirms this). `with_context`
+    /// re-attaches the embedder's context on *every* poll of the inner future,
+    /// so the context is current at first-enter and survives runtime thread
+    /// hops. With no embedder trace context, the future runs unwrapped.
+    async fn run_inner(
+        &self,
+        input: &str,
+        opts: ExecuteOptions,
+        on_output: Option<&mut (dyn FnMut(&ExecResult) + Send)>,
+    ) -> Result<ExecResult> {
+        use opentelemetry::context::FutureExt;
+
+        match crate::telemetry::extract_parent(&opts) {
+            Some(parent) => self
+                .execute_with_options_inner(input, opts, on_output)
+                .with_context(parent)
+                .await,
+            None => self.execute_with_options_inner(input, opts, on_output).await,
+        }
     }
 
     /// Shared body for `execute`, `execute_with_options(_streaming)`, and

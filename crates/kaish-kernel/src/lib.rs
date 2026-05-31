@@ -29,6 +29,7 @@ pub mod paths;
 #[cfg(all(unix, feature = "native"))]
 pub mod pidfd;
 pub mod scheduler;
+pub(crate) mod telemetry;
 pub mod tools;
 pub mod trash;
 #[cfg(feature = "native")]

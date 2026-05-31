@@ -33,8 +33,12 @@ serde_json = { workspace = true }
 # Optional: JSON Schema generation (used by MCP server for outputSchema)
 schemars = { version = "1", optional = true }
 
-# Logging
+# Logging / Telemetry. opentelemetry + its SDK propagators turn the
+# embedder-supplied W3C trace context on ExecuteOptions into an OTel Context
+# that the execution span parents onto. See src/telemetry.rs.
 tracing = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
 
 # Lexer/Parser
 logos = { workspace = true }
@@ -105,6 +109,12 @@ insta = { workspace = true }
 tempfile = { workspace = true }
 # Used by examples/gen_bash_completion.rs to generate contrib/echo.bash.
 clap_complete = { workspace = true }
+# Trace-context integration test: an in-memory OTel exporter + the
+# tracing-opentelemetry bridge layer to assert the execution span parents onto
+# a supplied traceparent. `testing` adds InMemorySpanExporter.
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

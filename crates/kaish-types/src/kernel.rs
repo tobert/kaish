@@ -4,7 +4,7 @@
 //! the per-call knobs (variables, timeout, cancellation) so embedders don't need
 //! to manage half a dozen execute-method overloads.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -53,6 +53,20 @@ pub struct ExecuteOptions {
     /// run scripts in workspace contexts (notebook cells, per-tool dirs)
     /// without polluting the long-lived kernel's cwd.
     pub cwd: Option<PathBuf>,
+    /// W3C `traceparent` of the embedder's active span, e.g.
+    /// `"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"`. When set,
+    /// the kernel's execution span parents onto it, so kaish's spans appear as
+    /// children of the embedder's trace rather than as orphan roots.
+    pub traceparent: Option<String>,
+    /// W3C `tracestate` (vendor-specific list) that rides alongside
+    /// `traceparent`. Per the W3C spec, `tracestate` is meaningless without a
+    /// `traceparent`, so the kernel ignores it unless `traceparent` is also set.
+    pub tracestate: Option<String>,
+    /// W3C baggage — cross-cutting identifiers (owner, connection, tenant, …)
+    /// the embedder wants stamped onto the trace. Propagated to every child
+    /// span. Independent of `traceparent`: baggage with no trace context starts
+    /// a fresh root that still carries the identifiers.
+    pub baggage: BTreeMap<String, String>,
 }
 
 impl ExecuteOptions {
@@ -86,6 +100,31 @@ impl ExecuteOptions {
     /// restored on return.
     pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
         self.cwd = Some(cwd);
+        self
+    }
+
+    /// Set the W3C `traceparent` the kernel's execution span should parent onto.
+    pub fn with_traceparent(mut self, traceparent: impl Into<String>) -> Self {
+        self.traceparent = Some(traceparent.into());
+        self
+    }
+
+    /// Set the W3C `tracestate` that rides alongside `traceparent`. Ignored by
+    /// the kernel unless a `traceparent` is also present.
+    pub fn with_tracestate(mut self, tracestate: impl Into<String>) -> Self {
+        self.tracestate = Some(tracestate.into());
+        self
+    }
+
+    /// Replace the entire baggage map with the given identifiers.
+    pub fn with_baggage(mut self, baggage: BTreeMap<String, String>) -> Self {
+        self.baggage = baggage;
+        self
+    }
+
+    /// Add a single baggage identifier (extending; last write wins).
+    pub fn with_baggage_entry(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.baggage.insert(key.into(), value.into());
         self
     }
 }

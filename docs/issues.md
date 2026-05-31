@@ -56,6 +56,25 @@ tasks in line format; JSON format (`:284-290`) includes them with an
 match JSON behaviour with an explicit failure marker, or fail loudly
 when results are dropped.
 
+### Wire frontends to populate `ExecuteOptions` trace context
+The kernel ingress exists — `ExecuteOptions::{traceparent, tracestate,
+baggage}` parent the execution span onto the embedder's trace via
+`telemetry::extract_parent` + `run_inner`'s `with_context`
+(`trace_context_tests.rs` guards it). What's missing is the frontends
+actually *filling those fields*. The MCP `execute` handler
+(`kaish-mcp/src/server/handler.rs`) logs the call but ignores any
+`traceparent`/`baggage` on the incoming request metadata; it should
+extract them (rmcp request extensions / tool-call metadata) and set
+them on the `ExecuteOptions` it builds, so MCP-client traces span the
+kaish boundary. REPL is lower-value (no upstream trace) but could read
+`TRACEPARENT`/`OTEL_*` env for parity. Egress symmetry — copying OTel
+baggage back onto `ExecResult.baggage` — is a separate decision (the
+field already exists for tool-emitted baggage). Also: the
+`with_context` wrapper only covers the foreground execute future, so
+background jobs / scatter workers spawned via `Kernel::fork` start
+fresh task-locals and currently lose the trace context — propagating it
+into forked tasks is a follow-up if linked job spans are wanted.
+
 ---
 
 ## P2 — Focused refactors & real bugs

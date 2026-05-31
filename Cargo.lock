@@ -1323,6 +1323,8 @@ dependencies = [
  "logos",
  "md-5",
  "nix 0.29.0",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "procfs",
  "proptest",
  "regex",
@@ -1339,6 +1341,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
  "trash",
 ]
 
