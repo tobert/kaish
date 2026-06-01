@@ -117,7 +117,10 @@ fn run_script(path: &str) -> Result<ExitCode> {
     let rt = tokio::runtime::Runtime::new()?;
     // Set $0 to the script path
     rt.block_on(client.kernel().set_positional(path, vec![]));
-    let result = rt.block_on(client.execute_streaming(&source, &mut |r| {
+    // Forward any upstream W3C trace context (TRACEPARENT/TRACESTATE/BAGGAGE)
+    // so e.g. `otel-cli exec -- kaish script.kai` traces across the boundary.
+    let opts = kaish_repl::trace_options_from_env();
+    let result = rt.block_on(client.execute_with_options_streaming(&source, opts, &mut |r| {
         let text = r.text_out();
         if !text.is_empty() {
             print!("{}", text);
@@ -148,7 +151,10 @@ fn run_command(cmd: &str) -> Result<ExitCode> {
     let client = EmbeddedClient::new(kernel);
 
     let rt = tokio::runtime::Runtime::new()?;
-    let result = rt.block_on(client.execute_streaming(cmd, &mut |r| {
+    // Forward any upstream W3C trace context (TRACEPARENT/TRACESTATE/BAGGAGE)
+    // so e.g. `otel-cli exec -- kaish -c '…'` traces across the boundary.
+    let opts = kaish_repl::trace_options_from_env();
+    let result = rt.block_on(client.execute_with_options_streaming(cmd, opts, &mut |r| {
         let text = r.text_out();
         if !text.is_empty() {
             print!("{}", text);

@@ -1083,13 +1083,22 @@ impl Kernel {
     ) -> Result<ExecResult> {
         use opentelemetry::context::FutureExt;
 
-        match crate::telemetry::extract_parent(&opts) {
+        // Capture the embedder's baggage before `opts` is consumed so it can be
+        // echoed back onto the result on egress (see `merge_egress_baggage`).
+        let embedder_baggage = opts.baggage.clone();
+
+        let result = match crate::telemetry::extract_parent(&opts) {
             Some(parent) => self
                 .execute_with_options_inner(input, opts, on_output)
                 .with_context(parent)
                 .await,
             None => self.execute_with_options_inner(input, opts, on_output).await,
-        }
+        };
+
+        result.map(|mut r| {
+            crate::telemetry::merge_egress_baggage(&mut r, embedder_baggage);
+            r
+        })
     }
 
     /// Shared body for `execute`, `execute_with_options(_streaming)`, and

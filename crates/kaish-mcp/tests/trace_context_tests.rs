@@ -48,6 +48,13 @@ async fn mcp_execute_forwards_traceparent_into_kernel() {
         .await
         .expect("execute should succeed");
     assert_eq!(result.code, 0, "`true` should exit 0");
+    // Egress: the client's baggage is echoed back onto the result so it can be
+    // surfaced on the response `_meta` (symmetric with the ingress lift).
+    assert_eq!(
+        result.baggage.get("owner").map(String::as_str),
+        Some("atobey"),
+        "client baggage must round-trip back onto the MCP result",
+    );
 
     provider.force_flush().expect("flush spans");
     let spans = exporter.get_finished_spans().expect("collect finished spans");

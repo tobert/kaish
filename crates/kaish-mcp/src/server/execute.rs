@@ -85,6 +85,13 @@ pub struct ExecuteResult {
     /// MIME content type hint. When set, MCP handler uses this for response MIME type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
+
+    /// W3C baggage carried back out of execution (trace-context egress): the
+    /// embedder's incoming baggage merged with any tool-emitted entries
+    /// (tool wins on collision). The MCP handler also surfaces this on the
+    /// response `_meta` so clients can read trace identifiers off the result.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub baggage: BTreeMap<String, String>,
 }
 
 impl ExecuteResult {
@@ -98,6 +105,7 @@ impl ExecuteResult {
             ok: true,
             output: None,
             content_type: None,
+            baggage: BTreeMap::new(),
         }
     }
 
@@ -111,6 +119,7 @@ impl ExecuteResult {
             ok: false,
             output: None,
             content_type: None,
+            baggage: BTreeMap::new(),
         }
     }
 
@@ -126,6 +135,7 @@ impl ExecuteResult {
             ok: result.ok(),
             output: result.output().cloned(),
             content_type: result.content_type.clone(),
+            baggage: result.baggage.clone(),
         }
     }
 }
@@ -414,6 +424,31 @@ mod tests {
         assert!(!result.ok);
         assert_eq!(result.code, 42);
         assert_eq!(result.stderr, "error message");
+    }
+
+    #[test]
+    fn from_exec_result_carries_baggage() {
+        use kaish_kernel::interpreter::ExecResult;
+
+        let mut exec_result = ExecResult::success("ok");
+        exec_result
+            .baggage
+            .insert("owner".to_string(), "atobey".to_string());
+
+        let result = ExecuteResult::from_exec_result(&exec_result);
+        assert_eq!(result.baggage.get("owner").map(String::as_str), Some("atobey"));
+    }
+
+    #[test]
+    fn empty_baggage_is_omitted_from_serialization() {
+        use kaish_kernel::interpreter::ExecResult;
+
+        let result = ExecuteResult::from_exec_result(&ExecResult::success("ok"));
+        let json = serde_json::to_value(&result).expect("serialize");
+        assert!(
+            json.get("baggage").is_none(),
+            "empty baggage must not appear on the wire",
+        );
     }
 
     #[test]

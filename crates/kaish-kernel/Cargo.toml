@@ -39,6 +39,9 @@ schemars = { version = "1", optional = true }
 tracing = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
+# Bridge to read the active tracing span's OTel context at fork-spawn sites, so
+# forked work nests under the foreground execute span (not the remote parent).
+tracing-opentelemetry = { workspace = true }
 
 # Lexer/Parser
 logos = { workspace = true }
@@ -109,11 +112,10 @@ insta = { workspace = true }
 tempfile = { workspace = true }
 # Used by examples/gen_bash_completion.rs to generate contrib/echo.bash.
 clap_complete = { workspace = true }
-# Trace-context integration test: an in-memory OTel exporter + the
-# tracing-opentelemetry bridge layer to assert the execution span parents onto
-# a supplied traceparent. `testing` adds InMemorySpanExporter.
+# Trace-context integration test: an in-memory OTel exporter to assert the
+# execution span parents onto a supplied traceparent. `testing` adds
+# InMemorySpanExporter. (tracing-opentelemetry is a normal dependency above.)
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
-tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [lints]

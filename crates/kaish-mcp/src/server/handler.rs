@@ -338,11 +338,28 @@ impl KaishServerHandler {
             Some(structured)
         };
 
+        // Trace-context egress: mirror the result's baggage onto the response
+        // `_meta` (as a `baggage` object), symmetric with how `trace_from_meta`
+        // lifts incoming baggage off the request `_meta`. Clients that sent
+        // trace context can read the merged identifiers back off the result.
+        let meta = if result.baggage.is_empty() {
+            None
+        } else {
+            let baggage = result
+                .baggage
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect::<serde_json::Map<String, serde_json::Value>>();
+            let mut m = rmcp::model::Meta::new();
+            m.insert("baggage".to_string(), serde_json::Value::Object(baggage));
+            Some(m)
+        };
+
         Ok(CallToolResult {
             content,
             structured_content,
             is_error: Some(!result.ok),
-            meta: None,
+            meta,
         })
     }
 }
@@ -922,6 +939,54 @@ mod tests {
 
         // is_error should be false for success
         assert_eq!(result.is_error, Some(false));
+    }
+
+    #[tokio::test]
+    async fn execute_echoes_baggage_onto_response_meta() {
+        // Trace-context egress: baggage lifted off the request `_meta` rides
+        // through execution and comes back out on the response `_meta`, so a
+        // client can read the merged identifiers off the result.
+        let config = McpServerConfig::default();
+        let handler = KaishServerHandler::new(config, vec![]).expect("handler creation failed");
+
+        let input = Parameters(ExecuteInput {
+            script: "true".to_string(),
+            cwd: None,
+            env: None,
+            timeout_ms: None,
+        });
+        let meta = meta_from(serde_json::json!({
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "baggage": { "owner": "atobey", "tenant": "acme" },
+        }));
+
+        let result = handler.execute(input, meta).await.expect("execute failed");
+
+        let response_meta = result.meta.expect("response should carry _meta with baggage");
+        let baggage = response_meta
+            .get("baggage")
+            .and_then(|v| v.as_object())
+            .expect("baggage object on response _meta");
+        assert_eq!(baggage.get("owner").and_then(|v| v.as_str()), Some("atobey"));
+        assert_eq!(baggage.get("tenant").and_then(|v| v.as_str()), Some("acme"));
+    }
+
+    #[tokio::test]
+    async fn execute_without_baggage_leaves_meta_unset() {
+        let config = McpServerConfig::default();
+        let handler = KaishServerHandler::new(config, vec![]).expect("handler creation failed");
+
+        let input = Parameters(ExecuteInput {
+            script: "true".to_string(),
+            cwd: None,
+            env: None,
+            timeout_ms: None,
+        });
+        let result = handler
+            .execute(input, rmcp::model::Meta::default())
+            .await
+            .expect("execute failed");
+        assert!(result.meta.is_none(), "no baggage in, no _meta out");
     }
 
     #[tokio::test]

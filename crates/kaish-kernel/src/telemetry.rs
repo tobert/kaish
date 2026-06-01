@@ -23,7 +23,9 @@ use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry::{Context, KeyValue};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 
-use kaish_types::ExecuteOptions;
+use std::collections::BTreeMap;
+
+use kaish_types::{ExecResult, ExecuteOptions};
 
 /// Build an OpenTelemetry context from the trace fields on `opts`, or `None`
 /// when the embedder supplied no trace context at all (nothing to attach).
@@ -62,20 +64,63 @@ pub(crate) fn extract_parent(opts: &ExecuteOptions) -> Option<Context> {
     Some(cx)
 }
 
+/// Echo embedder-supplied baggage back onto the result on the way out
+/// (trace-context *egress*).
+///
+/// Ingress carries the embedder's W3C baggage *into* execution
+/// ([`extract_parent`]); on the way out the same identifiers are merged onto
+/// [`ExecResult::baggage`] so the embedder can read a single, complete view of
+/// the baggage that rode along with this call. Tool-emitted entries are the
+/// freshest, execution-time values, so they **win** on key collision: an
+/// embedder entry is only added when no tool already set that key. The
+/// embedder already holds its own copy of what it sent, so overwriting a tool
+/// value with it would discard information rather than add it.
+pub(crate) fn merge_egress_baggage(result: &mut ExecResult, embedder: BTreeMap<String, String>) {
+    for (key, value) in embedder {
+        result.baggage.entry(key).or_insert(value);
+    }
+}
+
 /// Re-bind the current OpenTelemetry context onto a future that is about to
 /// cross a `tokio::spawn` boundary.
 ///
 /// Spawned tasks start with an empty OTel current-context, so forked work
 /// (background jobs, scatter workers, concurrent pipeline stages) would emit
 /// spans detached from the embedder's trace. Call this at the spawn site — on
-/// the parent task, where `Kernel::run_inner`'s `with_context` has made the
-/// embedder context current — so the spawned future re-attaches that same
-/// context on every poll and its spans stay in the embedder's trace.
+/// the parent task, while the foreground execution span is still entered — so
+/// the spawned future re-attaches the captured context on every poll and its
+/// spans stay in the trace.
 ///
-/// `Context::current()` is captured eagerly here (synchronously at the spawn
-/// site), not inside the spawned task where it would already be empty.
+/// The context is captured eagerly here (synchronously at the spawn site), not
+/// inside the spawned task where it would already be empty. See
+/// [`fork_parent_context`] for *which* context is captured and why.
 pub(crate) fn bind_current_context<F: Future>(fut: F) -> WithContext<F> {
-    fut.with_context(Context::current())
+    fut.with_context(fork_parent_context())
+}
+
+/// The OTel context forked work should inherit.
+///
+/// Prefer the **foreground execution span's** context (read from the active
+/// `tracing` span via the `tracing-opentelemetry` bridge) so forked spans nest
+/// *under* the execute span rather than becoming siblings of it under the
+/// embedder's remote parent. The span's context still carries the embedder's
+/// baggage — the bridge stores it as `parent_cx.with_span(span)` — so trace and
+/// baggage propagation are both preserved.
+///
+/// When no `tracing-opentelemetry` layer is installed, `Span::context()`
+/// returns an empty default; fall back to the ambient `Context::current()`,
+/// which under `run_inner`'s `with_context` is the embedder's remote parent —
+/// the previous behaviour, so propagation is never *lost*, only made shallower.
+fn fork_parent_context() -> Context {
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    let span_cx = tracing::Span::current().context();
+    if span_cx.span().span_context().is_valid() {
+        span_cx
+    } else {
+        Context::current()
+    }
 }
 
 #[cfg(test)]
@@ -157,5 +202,50 @@ mod tests {
 
         assert_eq!(cx.span().span_context().trace_id().to_string(), TRACE_ID);
         assert_eq!(cx.baggage().get("owner").map(|v| v.as_str()), Some("atobey"));
+    }
+
+    fn embedder_baggage(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn egress_echoes_embedder_baggage_when_no_tool_set_it() {
+        let mut result = ExecResult::success("ok");
+        merge_egress_baggage(&mut result, embedder_baggage(&[("owner", "atobey")]));
+        assert_eq!(result.baggage.get("owner").map(String::as_str), Some("atobey"));
+    }
+
+    #[test]
+    fn egress_tool_emitted_baggage_wins_on_collision() {
+        // A tool already emitted `owner` during execution; the embedder also
+        // sent `owner`. The tool's execution-time value must survive.
+        let mut result = ExecResult::success("ok");
+        result.baggage.insert("owner".to_string(), "tool-value".to_string());
+        merge_egress_baggage(
+            &mut result,
+            embedder_baggage(&[("owner", "embedder-value"), ("tenant", "acme")]),
+        );
+        assert_eq!(
+            result.baggage.get("owner").map(String::as_str),
+            Some("tool-value"),
+            "tool-emitted baggage must win on key collision",
+        );
+        assert_eq!(
+            result.baggage.get("tenant").map(String::as_str),
+            Some("acme"),
+            "non-colliding embedder keys are still echoed back",
+        );
+    }
+
+    #[test]
+    fn egress_empty_embedder_baggage_is_a_noop() {
+        let mut result = ExecResult::success("ok");
+        result.baggage.insert("owner".to_string(), "tool-value".to_string());
+        merge_egress_baggage(&mut result, BTreeMap::new());
+        assert_eq!(result.baggage.len(), 1);
+        assert_eq!(result.baggage.get("owner").map(String::as_str), Some("tool-value"));
     }
 }

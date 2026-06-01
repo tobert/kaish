@@ -27,7 +27,7 @@ use tokio::runtime::Runtime;
 
 use kaish_kernel::ast::Value;
 use kaish_kernel::interpreter::ExecResult;
-use kaish_kernel::{Kernel, KernelConfig};
+use kaish_kernel::{ExecuteOptions, Kernel, KernelConfig};
 
 /// Snapshot the OS environment as a map of `String` → `Value::String`.
 ///
@@ -39,6 +39,67 @@ pub fn os_env_vars() -> std::collections::HashMap<String, Value> {
     std::env::vars()
         .map(|(k, v)| (k, Value::String(v)))
         .collect()
+}
+
+/// Build per-call trace context from the W3C environment variables an upstream
+/// tracer sets before invoking kaish: `TRACEPARENT`, `TRACESTATE`, and
+/// `BAGGAGE` (the W3C `baggage` header format, `key1=value1,key2=value2`).
+///
+/// This is the REPL frontend's analogue of the MCP server lifting trace context
+/// off the request `_meta`. The kernel is hermetic and never reads env, so a
+/// frontend must hand it the context explicitly via [`ExecuteOptions`]. Used by
+/// the non-interactive entry points (`kaish script.kai`, `kaish -c '…'`) so a
+/// wrapper like `otel-cli exec -- kaish …` traces across the kaish boundary.
+pub fn trace_options_from_env() -> ExecuteOptions {
+    parse_trace_env(|key| std::env::var(key).ok())
+}
+
+/// Pure core of [`trace_options_from_env`], parameterised on the env lookup so
+/// it is testable without mutating process-global environment.
+fn parse_trace_env(get: impl Fn(&str) -> Option<String>) -> ExecuteOptions {
+    let mut opts = ExecuteOptions::new();
+
+    // `tracestate` is meaningless without a `traceparent` (W3C), and the kernel
+    // drops it in that case anyway, so only read it alongside a traceparent.
+    if let Some(traceparent) = get("TRACEPARENT").filter(|s| !s.is_empty()) {
+        opts = opts.with_traceparent(traceparent);
+        if let Some(tracestate) = get("TRACESTATE").filter(|s| !s.is_empty()) {
+            opts = opts.with_tracestate(tracestate);
+        }
+    }
+
+    if let Some(raw) = get("BAGGAGE").filter(|s| !s.is_empty()) {
+        let baggage = parse_w3c_baggage(&raw);
+        if !baggage.is_empty() {
+            opts = opts.with_baggage(baggage);
+        }
+    }
+
+    opts
+}
+
+/// Parse a W3C `baggage` header value (`k1=v1,k2=v2`) into a map.
+///
+/// Entries without a `=` are skipped (malformed — not silently turned into a
+/// key with an empty value). Surrounding whitespace is trimmed. W3C allows
+/// `;`-delimited properties after a value (`k=v;meta`); those are dropped,
+/// keeping just the value. Percent-encoded values are taken verbatim —
+/// identifiers in practice don't need decoding.
+fn parse_w3c_baggage(raw: &str) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = entry.split_once('=') else {
+            tracing::debug!(entry, "skipping malformed BAGGAGE entry (no '=')");
+            continue;
+        };
+        let value = value.split(';').next().unwrap_or(value);
+        map.insert(key.trim().to_string(), value.trim().to_string());
+    }
+    map
 }
 
 // ── Process result ──────────────────────────────────────────────────
@@ -707,6 +768,70 @@ pub fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build an env getter over a fixed set of pairs — keeps trace-env tests
+    /// off the process-global environment (which races under `cargo test`).
+    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn trace_env_empty_yields_default_options() {
+        let opts = parse_trace_env(env_of(&[]));
+        assert!(opts.traceparent.is_none());
+        assert!(opts.tracestate.is_none());
+        assert!(opts.baggage.is_empty());
+    }
+
+    #[test]
+    fn trace_env_reads_traceparent_and_tracestate() {
+        let opts = parse_trace_env(env_of(&[
+            ("TRACEPARENT", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+            ("TRACESTATE", "vendor=opaque"),
+        ]));
+        assert_eq!(
+            opts.traceparent.as_deref(),
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+        );
+        assert_eq!(opts.tracestate.as_deref(), Some("vendor=opaque"));
+    }
+
+    #[test]
+    fn trace_env_drops_tracestate_without_traceparent() {
+        let opts = parse_trace_env(env_of(&[("TRACESTATE", "vendor=opaque")]));
+        assert!(opts.traceparent.is_none());
+        assert!(opts.tracestate.is_none(), "tracestate alone is meaningless");
+    }
+
+    #[test]
+    fn trace_env_treats_empty_string_as_unset() {
+        let opts = parse_trace_env(env_of(&[("TRACEPARENT", ""), ("BAGGAGE", "")]));
+        assert!(opts.traceparent.is_none());
+        assert!(opts.baggage.is_empty());
+    }
+
+    #[test]
+    fn trace_env_parses_baggage() {
+        let opts = parse_trace_env(env_of(&[("BAGGAGE", "owner=atobey,tenant=acme")]));
+        assert_eq!(opts.baggage.get("owner").map(String::as_str), Some("atobey"));
+        assert_eq!(opts.baggage.get("tenant").map(String::as_str), Some("acme"));
+    }
+
+    #[test]
+    fn baggage_drops_properties_and_skips_malformed() {
+        // `k=v;prop` keeps only `v`; a member with no `=` is skipped; whitespace
+        // around members and around `=` is trimmed.
+        let map = parse_w3c_baggage("owner=atobey;ttl=60 , broken , tenant = acme ");
+        assert_eq!(map.get("owner").map(String::as_str), Some("atobey"));
+        assert_eq!(map.get("tenant").map(String::as_str), Some("acme"));
+        assert!(!map.contains_key("broken"), "member without '=' is skipped");
+        assert_eq!(map.len(), 2);
+    }
 
     #[test]
     fn test_shell_words_simple() {

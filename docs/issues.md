@@ -56,30 +56,6 @@ tasks in line format; JSON format (`:284-290`) includes them with an
 match JSON behaviour with an explicit failure marker, or fail loudly
 when results are dropped.
 
-### Trace-context egress — copy OTel baggage onto `ExecResult.baggage`
-Ingress is wired end-to-end: `ExecuteOptions::{traceparent, tracestate,
-baggage}` (kernel), the MCP `execute` handler lifting W3C context from
-the request `_meta` via `trace_from_meta` → `McpTraceContext` →
-`ExecuteOptions`, and `telemetry::bind_current_context` propagating the
-context across `tokio::spawn` so background jobs / scatter workers /
-concurrent pipeline stages stay in the trace (all covered by
-`trace_context_tests.rs` in kaish-kernel and kaish-mcp).
-
-What's left is **egress**: the OTel baggage attached on the way in is
-not copied back onto `ExecResult.baggage` (that field currently only
-carries tool-emitted baggage — see the `traceparent` round-trip test in
-`kaish-types/src/backend.rs`). Deciding the merge semantics — does
-embedder baggage echo back, and does it win over or merge with
-tool-emitted entries — was deliberately deferred. Pick this up when an
-embedder actually needs to read trace identifiers off the result.
-
-Minor remaining: REPL doesn't read `TRACEPARENT`/`OTEL_*` from env for
-parity (low value — no upstream trace in interactive use). And forked
-spans currently parent onto the embedder's remote span (same trace, via
-`Context::current()` at the spawn site) rather than nesting under the
-foreground execute span — a cosmetic depth difference, not a broken
-trace.
-
 ---
 
 ## P2 — Focused refactors & real bugs
@@ -342,6 +318,42 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **Trace-context egress + the two minor OTel leftovers — done 2026-06-01.**
+  The remaining OTel work landed in one batch:
+  1. **Egress baggage merge (kernel).** `Kernel::run_inner` now echoes the
+     embedder's incoming `ExecuteOptions.baggage` back onto the returned
+     `ExecResult.baggage` via `telemetry::merge_egress_baggage`. Merge
+     semantics: **tool-emitted entries win** on key collision (freshest
+     execution-time value; the embedder already holds its own copy), and
+     non-colliding embedder keys are added so the result is a single complete
+     view. Unit tests in `telemetry.rs` + an egress assertion in
+     `trace_context_tests.rs`.
+  2. **MCP round-trip.** `ExecuteResult` gained a `baggage` field
+     (`from_exec_result` carries it, omitted from the wire when empty), and the
+     `execute` handler mirrors it onto the response `_meta` as a `baggage`
+     object — symmetric with `trace_from_meta`'s ingress lift. Tests:
+     `from_exec_result_carries_baggage`,
+     `execute_echoes_baggage_onto_response_meta`,
+     `execute_without_baggage_leaves_meta_unset`.
+  3. **REPL env parity.** `kaish-repl::trace_options_from_env` reads
+     `TRACEPARENT` / `TRACESTATE` / `BAGGAGE` (W3C baggage-header format) and
+     the non-interactive entry points (`kaish script.kai`, `kaish -c '…'`) now
+     route through `execute_with_options_streaming`, so `otel-cli exec -- kaish
+     …` traces across the boundary. Interactive REPL still doesn't (no upstream
+     trace in interactive use). Pure parser unit-tested via an injected env
+     getter. (Exposing these in Kaijutsu's embedding is tracked there, not in
+     the kernel.)
+  4. **Forked spans nest under the execute span.** `bind_current_context` now
+     captures the active execute span's OTel context (via the
+     `tracing-opentelemetry` bridge, now a normal kernel dep) instead of the
+     ambient `Context::current()`, so forked work (background jobs, scatter
+     workers, concurrent pipeline stages) nests under the foreground span
+     rather than becoming a sibling under the embedder's remote parent. Baggage
+     propagation is preserved (the bridge stores `parent_cx.with_span(span)`);
+     falls back to `Context::current()` when no bridge layer is installed.
+     `trace_context_tests.rs` asserts workers parent onto a kaish-local span,
+     not the remote parent.
 
 - **`grep PATTERN f1 f2 …` searched only the first file — fixed 2026-05-28.**
   Same multi-positional class as `ls`: grep read only `get_string("path", 1)`,

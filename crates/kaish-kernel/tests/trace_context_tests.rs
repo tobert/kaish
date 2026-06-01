@@ -49,6 +49,13 @@ async fn embedder_trace_context_reaches_foreground_and_forked_spans() {
         .await
         .expect("execute should succeed");
     assert_eq!(result.code, 0, "`true` should exit 0");
+    // Egress: embedder baggage is echoed back onto the result so the embedder
+    // can read a complete view of the identifiers that rode along with the call.
+    assert_eq!(
+        result.baggage.get("owner").map(String::as_str),
+        Some("atobey"),
+        "embedder baggage must be echoed back onto ExecResult.baggage",
+    );
 
     // 2. Forked scatter workers stay in the same trace. `gather` blocks until
     //    every worker finishes, so the worker spans are flushed by the time
@@ -91,6 +98,12 @@ async fn embedder_trace_context_reaches_foreground_and_forked_spans() {
         !worker_spans.is_empty(),
         "expected scatter_worker spans to be exported",
     );
+    // Every span kaish emitted in this trace, by span id — a worker that nests
+    // under a kaish span parents onto one of these, not onto the remote parent.
+    let local_span_ids: std::collections::HashSet<String> = spans
+        .iter()
+        .map(|s| s.span_context.span_id().to_string())
+        .collect();
     for worker in &worker_spans {
         assert_eq!(
             worker.span_context.trace_id().to_string(),
@@ -100,6 +113,19 @@ async fn embedder_trace_context_reaches_foreground_and_forked_spans() {
         assert!(
             worker.span_context.is_sampled(),
             "worker span should inherit the sampled decision from the remote parent",
+        );
+        // Nesting: workers parent under a kaish-local span (the foreground
+        // execution span or a descendant), NOT directly onto the embedder's
+        // remote span — `bind_current_context` captures the active execute
+        // span's context rather than the ambient remote parent.
+        assert_ne!(
+            worker.parent_span_id.to_string(),
+            PARENT_SPAN_ID,
+            "forked worker must nest under a kaish span, not the remote parent",
+        );
+        assert!(
+            local_span_ids.contains(&worker.parent_span_id.to_string()),
+            "worker's parent must be one of kaish's own exported spans",
         );
     }
 }
