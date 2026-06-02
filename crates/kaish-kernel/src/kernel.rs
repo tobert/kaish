@@ -3866,6 +3866,13 @@ impl Kernel {
         scope.all()
     }
 
+    /// List exported variables (name, value), sorted by name. These are the
+    /// vars a child process would see (see `dispatch`'s hermetic env build).
+    pub async fn exported_vars(&self) -> Vec<(String, Value)> {
+        let scope = self.scope.read().await;
+        scope.exported_vars()
+    }
+
     // --- CWD ---
 
     /// Get current working directory.
