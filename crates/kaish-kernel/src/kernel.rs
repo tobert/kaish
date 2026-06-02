@@ -3886,6 +3886,22 @@ impl Kernel {
         ctx.set_cwd(path);
     }
 
+    /// Set the working directory only if `path` resolves to a directory in the
+    /// kernel's backend — the same namespace `cd` validates against. Unlike a
+    /// raw host-FS `is_dir()` check, this correctly accepts virtual mounts
+    /// (`/v/docs`, in-memory scratch, …) and rejects real paths that have since
+    /// disappeared. Returns whether the cwd was changed.
+    pub async fn try_set_cwd(&self, path: PathBuf) -> bool {
+        // Clone the backend Arc out before the stat so we never hold the
+        // exec_ctx lock across the await.
+        let backend = self.exec_ctx.read().await.backend.clone();
+        let is_dir = matches!(backend.stat(&path).await, Ok(entry) if entry.is_dir());
+        if is_dir {
+            self.exec_ctx.write().await.set_cwd(path);
+        }
+        is_dir
+    }
+
     // --- Last Result ---
 
     /// Get the last result ($?).
