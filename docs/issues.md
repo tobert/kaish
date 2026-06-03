@@ -112,10 +112,17 @@ host `HOME` leaked into scope, and can override but not *suppress* it. This is
 the biggest remaining host-info leak for the "minimal attack surface by default"
 goal — larger than anything `uname`/`hostname` exposed. Fix: move `HOME` into the
 `initial_vars` path so the frontend owns it (REPL/MCP already seed env there).
-Surfaced by dpal review 2026-06-03; folds into the Phase 1 hermetic pass of the
+Surfaced by dpal review 2026-06-03; folds into the hermetic pass of the
 `native`→capability-feature split. (Frontend-side, `kaish-mcp` `server/execute.rs:238`
 seeds `initial_vars` from `std::env::vars()` wholesale — that's by-design env
 passthrough for the interactive MCP, but the read-only MCP frontend must opt out.)
+
+The same hermetic fix must cover the other direct `std::env::var("HOME")` reads
+found 2026-06-03: tilde expansion in `interpreter/eval.rs` (`~`/`~/path` at
+:563,:565 and the dup at :1182,:1224) and `cd` with no args (`cd.rs:62`). These
+bypass the scope's `HOME` and read the host env directly; they should consult the
+kernel scope var instead. (The `~user` → `/etc/passwd` read in eval.rs was the one
+true *new* leak and is now gated behind `host` as of the capability split.)
 
 ### Split `kernel.rs::execute_stmt_flow`
 ~L1007–L1443 is an 18-arm async match. Each arm reaches into `scope`,

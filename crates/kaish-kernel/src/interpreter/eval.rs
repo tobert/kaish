@@ -575,7 +575,10 @@ pub fn expand_tilde(s: &str) -> String {
 }
 
 /// Expand ~user to the user's home directory by reading /etc/passwd.
-#[cfg(unix)]
+///
+/// Reading the system user database is host introspection, so it requires the
+/// `host` capability; without it `~user` is left unexpanded (same as non-Unix).
+#[cfg(all(unix, feature = "host"))]
 fn expand_tilde_user(s: &str) -> String {
     // Extract username from ~user or ~user/path
     let (username, rest) = if let Some(slash_pos) = s[1..].find('/') {
@@ -611,9 +614,10 @@ fn expand_tilde_user(s: &str) -> String {
     s.to_string()
 }
 
-#[cfg(not(unix))]
+#[cfg(not(all(unix, feature = "host")))]
 fn expand_tilde_user(s: &str) -> String {
-    // ~user expansion not supported on non-Unix
+    // ~user expansion needs the host user database (/etc/passwd), which is
+    // gated behind the `host` capability and only meaningful on Unix.
     s.to_string()
 }
 
@@ -1195,7 +1199,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "host"))]
     fn expand_tilde_user() {
         // Test ~root expansion (root user exists on all Unix systems)
         let expanded = expand_tilde("~root");
