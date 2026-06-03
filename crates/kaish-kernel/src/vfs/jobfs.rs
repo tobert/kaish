@@ -19,7 +19,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::traits::{DirEntry, DirEntryKind, Filesystem};
+use super::{DirEntry, DirEntryKind, Filesystem};
 use crate::scheduler::{JobId, JobManager};
 
 /// Virtual filesystem providing job observability.

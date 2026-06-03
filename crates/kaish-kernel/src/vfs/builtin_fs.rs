@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::tools::ToolRegistry;
-use super::traits::{DirEntry, Filesystem};
+use super::{DirEntry, Filesystem};
 
 /// A read-only filesystem that exposes registered builtins as entries.
 pub struct BuiltinFs {

@@ -2,7 +2,7 @@
 //!
 //! Provides access to real filesystem paths, with optional read-only mode.
 
-use super::traits::{DirEntry, DirEntryKind, Filesystem};
+use crate::traits::{DirEntry, DirEntryKind, Filesystem};
 use async_trait::async_trait;
 use std::io;
 use std::path::{Path, PathBuf};

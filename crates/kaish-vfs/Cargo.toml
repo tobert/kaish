@@ -1,0 +1,33 @@
+[package]
+name = "kaish-vfs"
+description = "kaish VFS contract: the Filesystem trait and the LocalFs backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+kaish-types = { path = "../kaish-types", version = "0.8.0", features = [] }
+async-trait = { workspace = true }
+
+# Only `LocalFs` needs an async filesystem; the trait itself is runtime-free.
+# Gated so the wasm/sandbox build (no `localfs`) never pulls tokio/fs.
+tokio = { version = "1", features = [], optional = true }
+
+[features]
+default = []
+# The real-filesystem backend. Off → only the `Filesystem` trait + `DirEntry`,
+# which is what the in-memory/wasm sandbox needs.
+localfs = ["dep:tokio", "tokio/fs"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[lints]
+workspace = true

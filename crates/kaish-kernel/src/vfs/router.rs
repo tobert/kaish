@@ -2,7 +2,7 @@
 //!
 //! Routes filesystem operations to the appropriate backend based on path.
 
-use super::traits::{DirEntry, Filesystem};
+use super::{DirEntry, Filesystem};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::io;
@@ -506,9 +506,10 @@ mod tests {
         assert!(!router.read_only());
     }
 
+    #[cfg(feature = "localfs")]
     #[tokio::test]
     async fn read_only_all_read_only_mounts_returns_true() {
-        use crate::vfs::local::LocalFs;
+        use crate::vfs::LocalFs;
 
         let t1 = tempfile::tempdir().unwrap();
         let t2 = tempfile::tempdir().unwrap();
@@ -520,9 +521,10 @@ mod tests {
         assert!(router.read_only());
     }
 
+    #[cfg(feature = "localfs")]
     #[tokio::test]
     async fn read_only_mixed_mounts_returns_false() {
-        use crate::vfs::local::LocalFs;
+        use crate::vfs::LocalFs;
 
         let t1 = tempfile::tempdir().unwrap();
 

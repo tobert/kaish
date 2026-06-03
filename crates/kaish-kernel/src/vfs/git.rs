@@ -22,8 +22,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use super::local::LocalFs;
-use super::traits::{DirEntry, Filesystem};
+use super::LocalFs;
+use super::{DirEntry, Filesystem};
 
 /// Git-aware filesystem backend.
 ///

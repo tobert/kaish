@@ -4,6 +4,7 @@ members = [
     "crates/kaish-glob",
     "crates/kaish-types",
     "crates/kaish-tool-api",
+    "crates/kaish-vfs",
     "crates/kaish-kernel",
     "crates/kaish-mcp",
     "crates/kaish-client",
