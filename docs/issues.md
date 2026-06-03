@@ -208,6 +208,20 @@ Currently declared as `_extended: bool` accept-and-ignore. Options:
 unnecessary; (c) note in the help text. (a) is lowest churn — leave
 unless someone reports surprise.
 
+### `kaish-tool-api` public types lack `#[non_exhaustive]`
+Surfaced by the dpal boundary review on 2026-06-03, after the tool-plugin API
+became a real public surface (two out-of-tree bundles now consume it:
+`kaish-tools-git`, `kaish-tools-host`). The data types third-party tools pattern-
+match and construct — `ExecResult`, `ToolArgs`, `ToolSchema`, `ParamSchema`,
+`OutputData`/`OutputFormat`, `ValidationIssue`, the `BackendError` family (all in
+`kaish-types`, re-exported from `kaish-tool-api`) — are not `#[non_exhaustive]`.
+Adding a field or variant in a minor release would break downstream exhaustive
+matches/struct literals. These were "public" before, but only `kaish-kernel`
+consumed them in-tree, so churn was free. Now that the contract is meant to be
+stable for out-of-tree authors, audit the exported surface and add
+`#[non_exhaustive]` (plus constructors where direct struct literals are common).
+Do this *before* the first external tool author pins a version.
+
 ---
 
 ## P3 — Scheduler and infra
@@ -297,6 +311,30 @@ parallel test runs. Passes in isolation, fails intermittently under
 `/tmp/kaish/jobs/` persist indefinitely" entry above. Switch the
 JobManager test path to `tempfile::tempdir()` (each test gets its own
 root) until the GC fix lands.
+
+### `ToolCtx::backend()` forces a full `KernelBackend` mock for out-of-tree tests
+`crates/kaish-tool-api/src/ctx.rs`. `backend()` returns a non-optional
+`&Arc<dyn KernelBackend>`, so a third-party tool author who wants to unit-test
+their tool must construct a complete `KernelBackend` mock (~16 async methods)
+even if the tool never touches I/O. We sidestepped this in-tree by relocating
+the git/host tool tests to kernel-routed integration tests — which doesn't help
+external authors. Surfaced by the dpal review 2026-06-03. Options: (a) ship a
+`#[cfg(feature = "test-util")]` no-op `KernelBackend` + `ToolCtx` harness from
+`kaish-tool-api` so any tool crate can spin up a context in one line; (b) make
+`backend()` return `Option<&Arc<dyn KernelBackend>>` (kernel always `Some`,
+pure-compute/test contexts `None`). (a) is less invasive and keeps the common
+path honest. Revisit when the first external tool bundle wants unit tests.
+
+### `ToolCtx::as_any`/`as_any_mut` are a public downcast hatch
+`crates/kaish-tool-api/src/ctx.rs`. The escape hatch that lets in-tree builtins
+recover the concrete `ExecContext` is exposed on the public trait, so an
+out-of-tree tool could in principle downcast to a kernel type — though only if
+it deliberately takes a dependency on `kaish-kernel` to name `ExecContext`
+(impossible from the leaf API alone), so the practical risk is low. Cheap
+hardening flagged by dpal 2026-06-03: mark both methods `#[doc(hidden)]` so they
+don't advertise themselves as part of the supported surface. A heavier option (a
+kernel-internal extension trait carrying the downcast, keeping `ToolCtx` itself
+hatch-free) is more churn than the current need justifies.
 
 ---
 
