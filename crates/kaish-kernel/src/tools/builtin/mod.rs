@@ -60,8 +60,6 @@ mod mktemp;
 mod mv;
 mod output_limit;
 mod printf;
-#[cfg(all(target_os = "linux", feature = "host"))]
-mod ps;
 mod pwd;
 mod read;
 mod readlink;
@@ -159,7 +157,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(patch::Patch);
     registry.register(printf::Printf);
     #[cfg(all(target_os = "linux", feature = "host"))]
-    registry.register(ps::Ps);
+    registry.register(kaish_tools_host::Ps);
     registry.register(pwd::Pwd);
     registry.register(read::Read);
     registry.register(readlink::Readlink);

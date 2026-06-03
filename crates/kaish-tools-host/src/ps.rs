@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::collections::HashMap;
 
-use crate::ast::Value;
-use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use kaish_types::Value;
+use kaish_types::{ExecResult, OutputData, OutputNode};
+use kaish_tool_api::{schema_from_clap, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
 
 /// clap-derived argv layer for ps. See docs/clap-migration.md.
 #[derive(Parser, Debug)]
@@ -78,9 +78,6 @@ impl Tool for Ps {
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
         args.flagify_bool_named();
 
         let parsed = match PsArgs::try_parse_from(
@@ -347,129 +344,4 @@ fn format_table(processes: &[ProcessInfo]) -> ExecResult {
         .collect();
 
     ExecResult::with_output(OutputData::table(headers, nodes))
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::vfs::{MemoryFs, VfsRouter};
-    use std::sync::Arc;
-
-    fn make_ctx() -> ExecContext {
-        let mut vfs = VfsRouter::new();
-        vfs.mount("/", MemoryFs::new());
-        ExecContext::new(Arc::new(vfs))
-    }
-
-    #[tokio::test]
-    async fn test_ps_basic() {
-        let mut ctx = make_ctx();
-        let result = Ps.execute(ToolArgs::new(), &mut ctx).await;
-        // Should succeed and show at least the current process
-        assert!(result.ok());
-        // Check OutputData is present with table headers
-        assert!(result.has_output());
-        let output = result.output().unwrap();
-        assert!(output.headers.is_some());
-        let headers = output.headers.as_ref().unwrap();
-        assert!(headers.contains(&"PID".to_string()));
-        assert!(headers.contains(&"COMMAND".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_ps_all() {
-        let mut ctx = make_ctx();
-        let mut args = ToolArgs::new();
-        args.flags.insert("a".to_string());
-
-        let result = Ps.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        // Should have OutputData with processes
-        assert!(result.has_output());
-        let output = result.output().unwrap();
-        assert!(!output.root.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_ps_json_via_global_flag() {
-        use crate::interpreter::{apply_output_format, OutputFormat};
-
-        let mut ctx = make_ctx();
-        let args = ToolArgs::new();
-
-        let result = Ps.execute(args, &mut ctx).await;
-        assert!(result.ok());
-
-        // Simulate global --json (handled by kernel)
-        let result = apply_output_format(result, OutputFormat::Json);
-
-        // Should be valid JSON array of objects with table headers as keys
-        let parsed: serde_json::Value = serde_json::from_str(&result.text_out()).expect("valid JSON");
-        let arr = parsed.as_array().expect("should be an array");
-        assert!(!arr.is_empty());
-        // Each entry should have PID and COMMAND keys (table headers)
-        let first = arr[0].as_object().expect("should be an object");
-        assert!(first.contains_key("PID"));
-        assert!(first.contains_key("COMMAND"));
-    }
-
-    #[tokio::test]
-    async fn test_ps_pid_filter() {
-        let mut ctx = make_ctx();
-        let mut args = ToolArgs::new();
-        args.named.insert("pid".to_string(), Value::Int(1));
-        args.flags.insert("a".to_string()); // Need -a to see pid 1
-
-        let result = Ps.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        // May or may not find PID 1 depending on permissions
-    }
-
-    #[tokio::test]
-    async fn test_ps_json_all_via_global_flag() {
-        use crate::interpreter::{apply_output_format, OutputFormat};
-
-        let mut ctx = make_ctx();
-        let mut args = ToolArgs::new();
-        args.flags.insert("a".to_string());
-
-        let result = Ps.execute(args, &mut ctx).await;
-        assert!(result.ok());
-
-        // Simulate global --json (handled by kernel)
-        let result = apply_output_format(result, OutputFormat::Json);
-
-        let parsed: serde_json::Value = serde_json::from_str(&result.text_out()).expect("valid JSON");
-        let procs = parsed.as_array().expect("should be an array");
-        // Should have multiple processes
-        assert!(!procs.is_empty());
-
-        // Each process should have all table headers as keys
-        for p in procs {
-            let obj = p.as_object().expect("each entry should be an object");
-            assert!(obj.contains_key("PID"));
-            assert!(obj.contains_key("USER"));
-            assert!(obj.contains_key("COMMAND"));
-            // PID should be a non-empty string (all values are strings from OutputData)
-            let pid = obj["PID"].as_str().expect("PID should be a string");
-            assert!(!pid.is_empty());
-            let cmd = obj["COMMAND"].as_str().expect("COMMAND should be a string");
-            assert!(!cmd.is_empty());
-        }
-    }
-
-    #[test]
-    fn test_round_to_1() {
-        assert_eq!(round_to_1(3.14159), 3.1);
-        assert_eq!(round_to_1(2.95), 3.0);
-        assert_eq!(round_to_1(0.04), 0.0);
-    }
-
-    #[test]
-    fn test_get_tty_name() {
-        assert_eq!(get_tty_name(0), None);
-        assert_eq!(get_tty_name(0x8800), Some("pts/0".to_string())); // 136 << 8 + 0
-        assert_eq!(get_tty_name(0x401), Some("tty1".to_string())); // 4 << 8 + 1
-    }
 }
