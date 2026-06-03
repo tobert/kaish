@@ -17,7 +17,7 @@ use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData};
 use crate::scheduler::{parse_gather_options, GatherOptions};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Gather tool: collect results from parallel processing.
 ///
@@ -64,7 +64,10 @@ impl Tool for Gather {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         let parsed = match GatherArgs::try_parse_from(
             std::iter::once("gather".to_string()).chain(args.to_argv()),
         ) {

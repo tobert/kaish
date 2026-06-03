@@ -17,7 +17,7 @@ use std::path::Path;
 use crate::ast::Value;
 use crate::backend::PatchOp;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Patch tool: applies unified diffs to files.
 pub struct Patch;
@@ -71,7 +71,10 @@ impl Tool for Patch {
         )
     }
 
-    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         // Tests poke args.flags.insert("dry-run") and args.named.insert("p", Int(1)).
         // `-R` flag and `--dry-run` flag work directly. The `p=1` form lands as
         // a single-char named entry which to_argv renders as `-p=1`; clap's

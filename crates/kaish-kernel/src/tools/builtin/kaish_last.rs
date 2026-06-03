@@ -16,7 +16,7 @@ use clap::{CommandFactory, Parser};
 
 use crate::dispatch::PipelinePosition;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use kaish_types::value_to_json;
 
 pub struct KaishLast;
@@ -54,7 +54,10 @@ impl Tool for KaishLast {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         let parsed = match KaishLastArgs::try_parse_from(
             std::iter::once("kaish-last".to_string()).chain(args.to_argv()),
         ) {

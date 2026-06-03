@@ -9,7 +9,7 @@ use base64::Engine;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Base64 tool: encode or decode base64 data.
 pub struct Base64Tool;
@@ -52,7 +52,10 @@ impl Tool for Base64Tool {
         )
     }
 
-    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         // Tests poke `args.named.insert("decode", Value::Bool(true))` directly;
         // to_argv would render that as `--decode=true` which clap won't accept
         // for a bool field. Promote any Bool-typed named entries to flags so

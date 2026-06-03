@@ -22,7 +22,7 @@ use tokio::process::Command;
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Spawn tool: runs an external command as a subprocess and captures output.
 pub struct Spawn;
@@ -80,7 +80,10 @@ impl Tool for Spawn {
         )
     }
 
-    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         args.flagify_bool_named();
 
         let parsed = match SpawnArgs::try_parse_from(

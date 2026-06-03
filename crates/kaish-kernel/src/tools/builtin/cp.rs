@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::{BackendError, KernelBackend, WriteMode};
 use crate::interpreter::ExecResult;
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Cp tool: copy files and directories.
 pub struct Cp;
@@ -52,7 +52,10 @@ impl Tool for Cp {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         let parsed = match CpArgs::try_parse_from(
             std::iter::once("cp".to_string()).chain(args.to_argv()),
         ) {

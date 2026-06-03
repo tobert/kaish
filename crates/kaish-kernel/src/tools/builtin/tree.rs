@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Tree tool: display directory structure.
 pub struct Tree;
@@ -162,7 +162,10 @@ impl Tool for Tree {
         )
     }
 
-    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         args.flagify_bool_named();
 
         let parsed = match TreeArgs::try_parse_from(

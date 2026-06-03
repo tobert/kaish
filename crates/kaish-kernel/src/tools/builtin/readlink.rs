@@ -8,7 +8,7 @@ use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Readlink tool: read symlink target or canonicalize a path.
 pub struct Readlink;
@@ -46,7 +46,10 @@ impl Tool for Readlink {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         let parsed = match ReadlinkArgs::try_parse_from(
             std::iter::once("readlink".to_string()).chain(args.to_argv()),
         ) {

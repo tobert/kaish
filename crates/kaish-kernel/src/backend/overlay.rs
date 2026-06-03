@@ -26,7 +26,7 @@ use super::{
     BackendError, BackendResult, KernelBackend, LocalBackend, PatchOp, ReadRange,
     ToolInfo, ToolResult, WriteMode,
 };
-use crate::tools::{ExecContext, ToolArgs};
+use crate::tools::{ToolArgs, ToolCtx};
 use crate::vfs::{DirEntry, Filesystem, MountInfo, VfsRouter};
 
 /// Backend that overlays virtual paths (`/v/*`) on top of a custom backend.
@@ -284,7 +284,7 @@ impl KernelBackend for VirtualOverlayBackend {
         &self,
         name: &str,
         args: ToolArgs,
-        ctx: &mut ExecContext,
+        ctx: &mut dyn ToolCtx,
     ) -> BackendResult<ToolResult> {
         // Tools are dispatched through the inner backend
         self.inner.call_tool(name, args, ctx).await

@@ -26,7 +26,7 @@ pub use clap_schema::{params_from_clap, schema_from_clap};
 pub use context::{ExecContext, OutputContext};
 pub use global_flags::GlobalFlags;
 pub use registry::ToolRegistry;
-pub use traits::{is_global_output_flag, validate_against_schema, Tool, ToolArgs, ToolSchema, ParamSchema};
+pub use traits::{is_global_output_flag, validate_against_schema, Tool, ToolArgs, ToolCtx, ToolSchema, ParamSchema};
 
 /// Commands that consume bareword `key=value` argv (Arg::WordAssign) as
 /// shell-assignment pairs and route them through `tool_args.named`. For every

@@ -2188,7 +2188,7 @@ impl Kernel {
                     ctx.scope = scope.clone();
                 }
                 let backend = ctx.backend.clone();
-                match backend.call_tool(name, tool_args, &mut ctx).await {
+                match backend.call_tool(name, tool_args, &mut *ctx).await {
                     Ok(tool_result) => {
                         let mut scope = self.scope.write().await;
                         *scope = ctx.scope.clone();

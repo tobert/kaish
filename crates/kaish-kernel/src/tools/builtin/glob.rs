@@ -6,7 +6,7 @@ use clap::{CommandFactory, Parser};
 use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::walker::{EntryTypes, FileWalker, GlobPath, IncludeExclude, WalkOptions};
 
 /// Glob tool: expand glob patterns to matching file paths.
@@ -74,7 +74,10 @@ impl Tool for Glob {
         )
     }
 
-    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         // Tests poke args.named.insert("no-ignore", Value::Bool(true)); promote
         // such bool-typed named entries to flag form so clap accepts them.
         args.flagify_bool_named();

@@ -76,7 +76,7 @@ impl std::fmt::Debug for ToolRegistry {
 mod tests {
     use super::*;
     use crate::interpreter::ExecResult;
-    use crate::tools::{ExecContext, ToolArgs};
+    use crate::tools::{ToolArgs, ToolCtx};
     use async_trait::async_trait;
 
     struct DummyTool;
@@ -91,7 +91,7 @@ mod tests {
             ToolSchema::new("dummy", "A test tool")
         }
 
-        async fn execute(&self, _args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+        async fn execute(&self, _args: ToolArgs, _ctx: &mut dyn ToolCtx) -> ExecResult {
             ExecResult::success("dummy output")
         }
     }
@@ -117,7 +117,7 @@ mod tests {
         impl Tool for ToolA {
             fn name(&self) -> &str { "aaa" }
             fn schema(&self) -> ToolSchema { ToolSchema::new("aaa", "") }
-            async fn execute(&self, _: ToolArgs, _: &mut ExecContext) -> ExecResult {
+            async fn execute(&self, _: ToolArgs, _: &mut dyn ToolCtx) -> ExecResult {
                 ExecResult::success("")
             }
         }
@@ -126,7 +126,7 @@ mod tests {
         impl Tool for ToolZ {
             fn name(&self) -> &str { "zzz" }
             fn schema(&self) -> ToolSchema { ToolSchema::new("zzz", "") }
-            async fn execute(&self, _: ToolArgs, _: &mut ExecContext) -> ExecResult {
+            async fn execute(&self, _: ToolArgs, _: &mut dyn ToolCtx) -> ExecResult {
                 ExecResult::success("")
             }
         }

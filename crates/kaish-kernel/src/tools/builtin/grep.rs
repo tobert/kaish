@@ -16,7 +16,7 @@ use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::grep_engine::{AccumulatorSink, ContextKind, SearchEvent};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema, validate_against_schema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
 use crate::walker::{FileWalker, GlobPath, IncludeExclude, WalkOptions};
 
@@ -159,7 +159,10 @@ impl Tool for Grep {
         issues
     }
 
-    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         args.flagify_bool_named();
 
         let parsed = match GrepArgs::try_parse_from(

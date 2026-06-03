@@ -8,7 +8,7 @@ use std::path::Path;
 use crate::ast::Value;
 use crate::glob::contains_glob;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::vfs::DirEntry;
 
 /// Ls tool: list directory contents.
@@ -81,7 +81,10 @@ impl Tool for Ls {
         )
     }
 
-    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         // Tests poke args.named.insert("long", Value::Bool(true)); to_argv would
         // emit `--long=true` which clap rejects for bool fields. Promote bool
         // named entries to flag form before clap parsing.

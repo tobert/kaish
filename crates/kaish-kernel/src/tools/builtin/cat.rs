@@ -7,7 +7,7 @@ use std::path::Path;
 #[cfg(test)]
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Cat tool: read and output file contents.
 pub struct Cat;
@@ -46,7 +46,10 @@ impl Tool for Cat {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         let parsed = match CatArgs::try_parse_from(
             std::iter::once("cat".to_string()).chain(args.to_argv()),
         ) {

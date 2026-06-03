@@ -32,139 +32,24 @@ pub mod testing;
 #[cfg(test)]
 pub use testing::MockBackend;
 
-use async_trait::async_trait;
-use std::path::{Path, PathBuf};
-
 // Data types re-exported from kaish-types.
 pub use kaish_types::backend::{
-    BackendError, BackendResult, ConflictError, PatchOp, ReadRange, ToolInfo, ToolResult, WriteMode,
+    BackendError, BackendResult, ConflictError, MountInfo, PatchOp, ReadRange, ToolInfo,
+    ToolResult, WriteMode,
 };
 
-use crate::tools::{ExecContext, ToolArgs};
-use crate::vfs::{DirEntry, MountInfo};
-
-/// Abstract backend interface for file operations and tool dispatch.
-///
-/// This trait abstracts kaish's I/O layer, enabling different backends:
-/// - `LocalBackend`: Default implementation using VfsRouter
-/// - `KaijutsuBackend`: CRDT-backed implementation for collaborative editing
-#[async_trait]
-pub trait KernelBackend: Send + Sync {
-    // ═══════════════════════════════════════════════════════════════════════════
-    // File Operations
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    /// Read file contents, optionally with a range specification.
-    async fn read(&self, path: &Path, range: Option<ReadRange>) -> BackendResult<Vec<u8>>;
-
-    /// Write content to a file with the specified mode.
-    async fn write(&self, path: &Path, content: &[u8], mode: WriteMode) -> BackendResult<()>;
-
-    /// Append content to a file.
-    async fn append(&self, path: &Path, content: &[u8]) -> BackendResult<()>;
-
-    /// Apply patch operations to a file.
-    ///
-    /// Patch operations support compare-and-set (CAS) for conflict detection.
-    /// If an operation's `expected` field doesn't match the actual content,
-    /// returns `BackendError::Conflict`.
-    async fn patch(&self, path: &Path, ops: &[PatchOp]) -> BackendResult<()>;
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Directory Operations
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    /// List directory contents.
-    async fn list(&self, path: &Path) -> BackendResult<Vec<DirEntry>>;
-
-    /// Get file or directory metadata.
-    async fn stat(&self, path: &Path) -> BackendResult<DirEntry>;
-
-    /// Create a directory (and parent directories if needed).
-    async fn mkdir(&self, path: &Path) -> BackendResult<()>;
-
-    /// Remove a file or directory.
-    ///
-    /// If `recursive` is true, removes directories and their contents.
-    async fn remove(&self, path: &Path, recursive: bool) -> BackendResult<()>;
-
-    /// Rename (move) a file or directory.
-    ///
-    /// This is an atomic operation when source and destination are on the same
-    /// filesystem. Cross-mount renames are not supported.
-    async fn rename(&self, from: &Path, to: &Path) -> BackendResult<()>;
-
-    /// Check if a path exists.
-    async fn exists(&self, path: &Path) -> bool;
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Symlink Operations
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    /// Get metadata for a path without following symlinks.
-    ///
-    /// Unlike `stat`, this returns metadata about the symlink itself,
-    /// not the target it points to.
-    async fn lstat(&self, path: &Path) -> BackendResult<DirEntry>;
-
-    /// Read the target of a symbolic link.
-    ///
-    /// Returns the path the symlink points to without following it.
-    async fn read_link(&self, path: &Path) -> BackendResult<PathBuf>;
-
-    /// Create a symbolic link.
-    ///
-    /// Creates a symlink at `link` pointing to `target`.
-    async fn symlink(&self, target: &Path, link: &Path) -> BackendResult<()>;
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Tool Dispatch
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    /// Call a tool by name with the given arguments and execution context.
-    ///
-    /// For local backends, this executes the tool directly via ToolRegistry.
-    /// For remote backends (e.g., kaijutsu), this may serialize the call
-    /// and forward it to the parent process.
-    async fn call_tool(
-        &self,
-        name: &str,
-        args: ToolArgs,
-        ctx: &mut ExecContext,
-    ) -> BackendResult<ToolResult>;
-
-    /// List available external tools.
-    async fn list_tools(&self) -> BackendResult<Vec<ToolInfo>>;
-
-    /// Get information about a specific tool.
-    async fn get_tool(&self, name: &str) -> BackendResult<Option<ToolInfo>>;
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Backend Information
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    /// Returns true if this backend is read-only.
-    fn read_only(&self) -> bool;
-
-    /// Returns the backend type identifier (e.g., "local", "kaijutsu").
-    fn backend_type(&self) -> &str;
-
-    /// List all mount points.
-    fn mounts(&self) -> Vec<MountInfo>;
-
-    /// Resolve a VFS path to a real filesystem path.
-    ///
-    /// Returns `Some(path)` if the VFS path maps to a real filesystem (like LocalFs),
-    /// or `None` if the path is in a virtual filesystem (like MemoryFs).
-    ///
-    /// This is needed for tools like `git` that must use real paths with external libraries.
-    fn resolve_real_path(&self, path: &Path) -> Option<std::path::PathBuf>;
-}
+// The `KernelBackend` trait moved to the leaf `kaish-tool-api` crate (its
+// `call_tool` takes the portable `&mut dyn ToolCtx`, and tools reach it through
+// `ctx.backend()`). Re-exported here so existing `crate::backend::KernelBackend`
+// paths — and the `LocalBackend` / overlay / testing impls below — keep working.
+pub use kaish_tool_api::KernelBackend;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use super::testing::MockBackend;
+    use crate::tools::{ExecContext, ToolArgs};
+    use crate::vfs::DirEntry;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 

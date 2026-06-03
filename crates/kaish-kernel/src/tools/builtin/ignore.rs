@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser};
 
 use crate::ignore_config::IgnoreScope;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Ignore tool: inspect and modify ignore file configuration.
 pub struct KaishIgnore;
@@ -44,7 +44,10 @@ impl Tool for KaishIgnore {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         let parsed = match KaishIgnoreArgs::try_parse_from(
             std::iter::once("kaish-ignore".to_string()).chain(args.to_argv()),
         ) {

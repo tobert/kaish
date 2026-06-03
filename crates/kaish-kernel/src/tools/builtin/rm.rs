@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::{BackendError, KernelBackend};
 use crate::interpreter::ExecResult;
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// clap-derived argv layer for rm. See docs/clap-migration.md.
 #[derive(Parser, Debug)]
@@ -115,7 +115,10 @@ impl Tool for Rm {
         )
     }
 
-    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         args.flagify_bool_named();
 
         let parsed = match RmArgs::try_parse_from(

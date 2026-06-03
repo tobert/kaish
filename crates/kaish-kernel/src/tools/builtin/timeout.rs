@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::ast::{Arg, Command, Expr, Value};
 use crate::duration::parse_duration;
 use crate::interpreter::ExecResult;
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Timeout tool: run a command with a deadline.
 pub struct Timeout;
@@ -53,7 +53,10 @@ impl Tool for Timeout {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         let parsed = match TimeoutArgs::try_parse_from(
             std::iter::once("timeout".to_string()).chain(args.to_argv()),
         ) {

@@ -1,0 +1,24 @@
+[package]
+name = "kaish-tool-api"
+description = "Stable plugin API for kaish tools: Tool/ToolCtx/KernelBackend traits, schema reflection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+kaish-types = { path = "../kaish-types", version = "0.8.0", features = [] }
+
+async-trait = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

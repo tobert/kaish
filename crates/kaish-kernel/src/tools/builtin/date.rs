@@ -5,7 +5,7 @@ use chrono::{Local, Utc};
 use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Date tool: display current date/time.
 pub struct Date;
@@ -56,7 +56,10 @@ impl Tool for Date {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         let parsed = match DateArgs::try_parse_from(
             std::iter::once("date".to_string()).chain(args.to_argv()),
         ) {

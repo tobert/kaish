@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Tail tool: output the last part of files or stdin.
 pub struct Tail;
@@ -49,7 +49,10 @@ impl Tool for Tail {
         )
     }
 
-    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         // Handle POSIX shorthand: tail -3 file → tail -n 3 file
         // Lexer tokenizes "-3" as Int(-3), which lands in positional[0].
         if let Some(Value::Int(n)) = args.positional.first() {

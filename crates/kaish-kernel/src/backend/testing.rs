@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use super::{
     BackendError, BackendResult, KernelBackend, PatchOp, ReadRange, ToolInfo, ToolResult, WriteMode,
 };
-use crate::tools::{ExecContext, ToolArgs};
+use crate::tools::{ToolArgs, ToolCtx};
 use crate::vfs::{DirEntry, MountInfo};
 
 /// Mock backend that counts call_tool invocations.
@@ -84,7 +84,7 @@ impl KernelBackend for MockBackend {
         &self,
         name: &str,
         _args: ToolArgs,
-        _ctx: &mut ExecContext,
+        _ctx: &mut dyn ToolCtx,
     ) -> BackendResult<ToolResult> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         Ok(ToolResult::success(format!("mock executed: {}", name)))

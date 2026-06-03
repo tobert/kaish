@@ -27,7 +27,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputFormat};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Test tool: evaluates conditional expressions.
 pub struct Test;
@@ -68,7 +68,10 @@ impl Tool for Test {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         apply_json_if_present(&args, ctx);
         evaluate_test(args, ctx, false).await
     }
@@ -92,7 +95,10 @@ impl Tool for Bracket {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         apply_json_if_present(&args, ctx);
         evaluate_test(args, ctx, true).await
     }

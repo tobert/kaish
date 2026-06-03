@@ -571,6 +571,47 @@ impl ExecContext {
     }
 }
 
+/// The kernel's full execution context satisfies the trimmed portable
+/// [`ToolCtx`](kaish_tool_api::ToolCtx) contract that out-of-tree tools see.
+///
+/// Trusted in-tree builtins recover the concrete `ExecContext` (job control,
+/// pipes, dispatcher) through [`ToolCtx::as_any_mut`].
+impl kaish_tool_api::ToolCtx for ExecContext {
+    fn backend(&self) -> &Arc<dyn KernelBackend> {
+        &self.backend
+    }
+
+    fn cwd(&self) -> &std::path::Path {
+        self.cwd.as_path()
+    }
+
+    fn resolve_path(&self, path: &str) -> PathBuf {
+        // Inherent methods shadow trait methods in call syntax, so the
+        // fully-qualified inherent call here is not recursive.
+        ExecContext::resolve_path(self, path)
+    }
+
+    fn var(&self, name: &str) -> Option<Value> {
+        self.scope.get(name).cloned()
+    }
+
+    fn set_var(&mut self, name: &str, value: Value) {
+        self.scope.set(name, value);
+    }
+
+    fn set_output_format(&mut self, format: OutputFormat) {
+        self.output_format = Some(format);
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
 /// Normalize a path by resolving `.` and `..` components lexically (no filesystem access).
 fn normalize_path(path: &std::path::Path) -> PathBuf {
     let mut parts: Vec<Component> = Vec::new();

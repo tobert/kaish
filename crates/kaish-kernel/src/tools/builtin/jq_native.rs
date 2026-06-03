@@ -25,7 +25,7 @@ use jaq_json::Val;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Native jq tool using jaq (pure Rust jq implementation).
 pub struct JqNative;
@@ -349,7 +349,10 @@ impl Tool for JqNative {
         schema
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         let parsed = match JqArgs::try_parse_from(
             std::iter::once("jq".to_string()).chain(args.to_argv()),
         ) {

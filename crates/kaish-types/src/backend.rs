@@ -4,6 +4,7 @@
 //! The trait itself lives in kaish-kernel (it depends on async_trait and ExecContext).
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde_json::Value as JsonValue;
 use thiserror::Error;
@@ -14,6 +15,18 @@ use crate::tool::ToolSchema;
 
 /// Result type for backend operations.
 pub type BackendResult<T> = Result<T, BackendError>;
+
+/// Information about a mount point.
+///
+/// Returned by `KernelBackend::mounts`. Pure data so it can live in the leaf
+/// types crate alongside the rest of the backend contract.
+#[derive(Debug, Clone)]
+pub struct MountInfo {
+    /// The mount path (e.g., "/mnt/project").
+    pub path: PathBuf,
+    /// Whether this mount is read-only.
+    pub read_only: bool,
+}
 
 /// Backend operation errors.
 #[derive(Debug, Clone, Error)]

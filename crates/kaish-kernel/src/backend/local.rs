@@ -11,7 +11,7 @@ use super::{
     BackendError, BackendResult, ConflictError, KernelBackend, PatchOp, ReadRange,
     ToolInfo, ToolResult, WriteMode,
 };
-use crate::tools::{ExecContext, ToolArgs, ToolRegistry};
+use crate::tools::{ToolArgs, ToolCtx, ToolRegistry};
 use crate::vfs::{DirEntry, Filesystem, MountInfo, VfsRouter};
 
 /// Local backend implementation using VfsRouter and ToolRegistry.
@@ -378,7 +378,7 @@ impl KernelBackend for LocalBackend {
         &self,
         name: &str,
         args: ToolArgs,
-        ctx: &mut ExecContext,
+        ctx: &mut dyn ToolCtx,
     ) -> BackendResult<ToolResult> {
         let registry = self.tools.as_ref().ok_or_else(|| {
             BackendError::ToolNotFound(format!("no tool registry configured for: {}", name))

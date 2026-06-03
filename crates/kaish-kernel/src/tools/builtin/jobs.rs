@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Jobs tool: list and manage background jobs.
 pub struct Jobs;
@@ -39,7 +39,10 @@ impl Tool for Jobs {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         let parsed = match JobsArgs::try_parse_from(
             std::iter::once("jobs".to_string()).chain(args.to_argv()),
         ) {

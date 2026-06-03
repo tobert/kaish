@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// clap-derived argv layer for ps. See docs/clap-migration.md.
 #[derive(Parser, Debug)]
@@ -77,7 +77,10 @@ impl Tool for Ps {
         )
     }
 
-    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         args.flagify_bool_named();
 
         let parsed = match PsArgs::try_parse_from(

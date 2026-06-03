@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Realpath tool: resolve path to absolute, canonical form.
 pub struct Realpath;
@@ -39,7 +39,10 @@ impl Tool for Realpath {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         let parsed = match RealpathArgs::try_parse_from(
             std::iter::once("realpath".to_string()).chain(args.to_argv()),
         ) {

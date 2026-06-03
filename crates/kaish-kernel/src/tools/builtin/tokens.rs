@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser};
 use tiktoken_rs::{cl100k_base, o200k_base, p50k_base};
 
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Tokens tool: count BPE tokens in text.
 pub struct Tokens;
@@ -50,7 +50,10 @@ impl Tool for Tokens {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         let parsed = match TokensArgs::try_parse_from(
             std::iter::once("tokens".to_string()).chain(args.to_argv()),
         ) {

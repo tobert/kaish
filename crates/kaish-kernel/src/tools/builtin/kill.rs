@@ -8,7 +8,7 @@ use crate::ast::Value;
 use crate::interpreter::ExecResult;
 #[cfg(all(unix, feature = "subprocess"))]
 use crate::scheduler::JobId;
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Kill tool: send signals to processes or jobs.
 pub struct Kill;
@@ -46,7 +46,10 @@ impl Tool for Kill {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         #[cfg(not(all(unix, feature = "subprocess")))]
         {
             let _ = (args, ctx);

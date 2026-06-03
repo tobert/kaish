@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::ast::Value;
 use crate::backend::WriteMode;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Write tool: write content to a file.
 pub struct Write;
@@ -49,7 +49,10 @@ impl Tool for Write {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         let parsed = match WriteArgs::try_parse_from(
             std::iter::once("write".to_string()).chain(args.to_argv()),
         ) {

@@ -9,14 +9,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Information about a mount point.
-#[derive(Debug, Clone)]
-pub struct MountInfo {
-    /// The mount path (e.g., "/mnt/project").
-    pub path: PathBuf,
-    /// Whether this mount is read-only.
-    pub read_only: bool,
-}
+// `MountInfo` now lives in kaish-types::backend (pure data, part of the
+// KernelBackend contract). Re-exported here so existing `vfs::MountInfo`
+// paths keep working.
+pub use kaish_types::backend::MountInfo;
 
 /// Routes filesystem operations to mounted backends.
 ///

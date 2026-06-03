@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
 use crate::interpreter::ExecResult;
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// True builtin: always succeeds (exit code 0).
 pub struct True;
@@ -43,7 +43,10 @@ impl Tool for True {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         let parsed = match TrueArgs::try_parse_from(
             std::iter::once("true".to_string()).chain(args.to_argv()),
         ) {
@@ -87,7 +90,10 @@ impl Tool for False {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         let parsed = match FalseArgs::try_parse_from(
             std::iter::once("false".to_string()).chain(args.to_argv()),
         ) {

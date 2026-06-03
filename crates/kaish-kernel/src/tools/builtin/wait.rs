@@ -6,7 +6,7 @@ use clap::{CommandFactory, Parser};
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::scheduler::JobId;
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Wait tool: wait for background jobs.
 pub struct Wait;
@@ -40,7 +40,10 @@ impl Tool for Wait {
         )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
         let parsed = match WaitArgs::try_parse_from(
             std::iter::once("wait".to_string()).chain(args.to_argv()),
         ) {
