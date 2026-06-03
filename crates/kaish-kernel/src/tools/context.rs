@@ -105,7 +105,7 @@ pub struct ExecContext {
     /// regardless of the trash flag).
     pub trash_backend: Option<Arc<dyn TrashBackend>>,
     /// Terminal state for job control (interactive mode, Unix only).
-    #[cfg(all(unix, feature = "native"))]
+    #[cfg(all(unix, feature = "subprocess"))]
     pub terminal_state: Option<std::sync::Arc<crate::terminal::TerminalState>>,
     /// Command dispatcher for re-dispatching through the full resolution chain.
     ///
@@ -161,7 +161,7 @@ impl ExecContext {
             allow_external_commands: true,
             nonce_store: NonceStore::new(),
             trash_backend: None,
-            #[cfg(all(unix, feature = "native"))]
+            #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
             dispatcher: None,
             cancel: CancellationToken::new(),
@@ -195,7 +195,7 @@ impl ExecContext {
             allow_external_commands: true,
             nonce_store: NonceStore::new(),
             trash_backend: None,
-            #[cfg(all(unix, feature = "native"))]
+            #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
             dispatcher: None,
             cancel: CancellationToken::new(),
@@ -226,7 +226,7 @@ impl ExecContext {
             allow_external_commands: true,
             nonce_store: NonceStore::new(),
             trash_backend: None,
-            #[cfg(all(unix, feature = "native"))]
+            #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
             dispatcher: None,
             cancel: CancellationToken::new(),
@@ -257,7 +257,7 @@ impl ExecContext {
             allow_external_commands: true,
             nonce_store: NonceStore::new(),
             trash_backend: None,
-            #[cfg(all(unix, feature = "native"))]
+            #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
             dispatcher: None,
             cancel: CancellationToken::new(),
@@ -291,7 +291,7 @@ impl ExecContext {
             allow_external_commands: true,
             nonce_store: NonceStore::new(),
             trash_backend: None,
-            #[cfg(all(unix, feature = "native"))]
+            #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
             dispatcher: None,
             cancel: CancellationToken::new(),
@@ -322,7 +322,7 @@ impl ExecContext {
             allow_external_commands: true,
             nonce_store: NonceStore::new(),
             trash_backend: None,
-            #[cfg(all(unix, feature = "native"))]
+            #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
             dispatcher: None,
             cancel: CancellationToken::new(),
@@ -441,7 +441,7 @@ impl ExecContext {
             allow_external_commands: self.allow_external_commands,
             nonce_store: self.nonce_store.clone(),
             trash_backend: self.trash_backend.clone(),
-            #[cfg(all(unix, feature = "native"))]
+            #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: self.terminal_state.clone(),
             dispatcher: self.dispatcher.clone(),
             cancel: self.cancel.clone(),

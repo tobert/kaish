@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use crate::interpreter::ExecResult;
-#[cfg(feature = "native")]
+#[cfg(feature = "localfs")]
 use crate::paths;
 
 /// Default output limit for MCP mode (8KB).
@@ -116,7 +116,7 @@ pub async fn spill_if_needed(
 ) -> Option<SpillResult> {
     let max = config.max_bytes?;
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "localfs")]
     {
         // If result.out is already populated (external commands), check it directly
         if !result.text_out().is_empty() && !result.has_output() {
@@ -148,7 +148,7 @@ pub async fn spill_if_needed(
     }
 
     // Without native: in-memory head+tail truncation (no disk I/O)
-    #[cfg(not(feature = "native"))]
+    #[cfg(not(feature = "localfs"))]
     {
         // Materialize structured OutputData if present
         if result.has_output() {
@@ -173,7 +173,7 @@ pub async fn spill_if_needed(
 }
 
 /// Spill an already-materialized string in result.out.
-#[cfg(feature = "native")]
+#[cfg(feature = "localfs")]
 async fn spill_string(
     result: &mut ExecResult,
     config: &OutputLimitConfig,
@@ -202,7 +202,7 @@ async fn spill_string(
 }
 
 /// Stream OutputData directly to a spill file without materializing the full String.
-#[cfg(feature = "native")]
+#[cfg(feature = "localfs")]
 async fn spill_output_data(
     result: &mut ExecResult,
     config: &OutputLimitConfig,
@@ -269,7 +269,10 @@ async fn spill_output_data(
 /// 2. If still running after 1s and over limit: stream to spill file
 ///
 /// Returns `(stdout_string, stderr_string, did_spill)`.
-#[cfg(feature = "native")]
+///
+/// Handles child-process stdio, so it lives on the `subprocess` axis (which
+/// implies `localfs`); the pure disk-spill helpers below stay on `localfs`.
+#[cfg(feature = "subprocess")]
 pub async fn spill_aware_collect(
     mut stdout: tokio::process::ChildStdout,
     mut stderr_reader: tokio::process::ChildStderr,
@@ -290,7 +293,7 @@ pub async fn spill_aware_collect(
 }
 
 /// Collect stderr (same pattern as existing dispatch code).
-#[cfg(feature = "native")]
+#[cfg(feature = "subprocess")]
 async fn collect_stderr(
     reader: &mut tokio::process::ChildStderr,
     stream: Option<&crate::scheduler::StderrStream>,
@@ -325,7 +328,7 @@ async fn collect_stderr(
 /// and `DuplexStream` in tests.
 ///
 /// Returns `(stdout_string, did_spill)`.
-#[cfg(feature = "native")]
+#[cfg(feature = "subprocess")]
 async fn collect_stdout_with_spill<R: tokio::io::AsyncRead + Unpin>(
     stdout: &mut R,
     max_bytes: usize,
@@ -421,7 +424,7 @@ async fn collect_stdout_with_spill<R: tokio::io::AsyncRead + Unpin>(
 /// Write buffered data + remaining stdout to a spill file, return truncated result.
 ///
 /// Generic over `AsyncRead + Unpin` for testability.
-#[cfg(feature = "native")]
+#[cfg(feature = "subprocess")]
 async fn stream_to_spill<R: tokio::io::AsyncRead + Unpin>(
     buffer: &[u8],
     stdout: &mut R,
@@ -475,7 +478,7 @@ async fn stream_to_spill<R: tokio::io::AsyncRead + Unpin>(
 }
 
 /// Write output bytes to a new spill file. Returns (path, bytes_written).
-#[cfg(feature = "native")]
+#[cfg(feature = "localfs")]
 async fn write_spill_file(data: &[u8]) -> Result<(PathBuf, usize), std::io::Error> {
     let dir = paths::spill_dir();
     tokio::fs::create_dir_all(&dir).await?;
@@ -487,7 +490,7 @@ async fn write_spill_file(data: &[u8]) -> Result<(PathBuf, usize), std::io::Erro
 }
 
 /// Build the truncated output string with head, tail, and pointer.
-#[cfg(feature = "native")]
+#[cfg(feature = "localfs")]
 fn build_truncated_output(
     full: &str,
     config: &OutputLimitConfig,
@@ -530,7 +533,7 @@ fn tail_from_str(s: &str, max_bytes: usize) -> &str {
 }
 
 /// Read the first N bytes from a file for head preview.
-#[cfg(feature = "native")]
+#[cfg(feature = "localfs")]
 async fn read_head_from_file(path: &std::path::Path, max_bytes: usize) -> Result<String, std::io::Error> {
     use tokio::io::AsyncReadExt;
 
@@ -546,7 +549,7 @@ async fn read_head_from_file(path: &std::path::Path, max_bytes: usize) -> Result
 }
 
 /// Read the last N bytes from a file for tail preview.
-#[cfg(feature = "native")]
+#[cfg(feature = "localfs")]
 async fn read_tail_from_file(path: &std::path::Path, max_bytes: usize) -> Result<String, std::io::Error> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -572,7 +575,7 @@ async fn read_tail_from_file(path: &std::path::Path, max_bytes: usize) -> Result
 }
 
 /// Generate a unique spill filename using timestamp, PID, and monotonic counter.
-#[cfg(feature = "native")]
+#[cfg(feature = "localfs")]
 fn generate_spill_filename() -> String {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::SystemTime;
@@ -610,7 +613,7 @@ pub fn parse_size(s: &str) -> Result<usize, String> {
     Ok(num * multiplier)
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(all(test, feature = "localfs"))]
 mod tests {
     use super::*;
 
@@ -946,7 +949,10 @@ mod tests {
     }
 
     // ── Streaming collector tests (using tokio::io::duplex) ──
+    // These exercise `collect_stdout_with_spill`, the child-stdout path, so
+    // they live on the `subprocess` axis.
 
+    #[cfg(feature = "subprocess")]
     #[tokio::test]
     async fn test_collect_small_output_no_spill() {
         let (mut writer, reader) = tokio::io::duplex(1024);
@@ -967,6 +973,7 @@ mod tests {
         assert!(!did_spill);
     }
 
+    #[cfg(feature = "subprocess")]
     #[tokio::test]
     async fn test_collect_large_output_spills() {
         let (mut writer, reader) = tokio::io::duplex(64 * 1024);
@@ -989,6 +996,7 @@ mod tests {
         assert!(result.contains("full output at"));
     }
 
+    #[cfg(feature = "subprocess")]
     #[tokio::test]
     async fn test_collect_exact_boundary_no_spill() {
         let (mut writer, reader) = tokio::io::duplex(1024);
@@ -1011,6 +1019,7 @@ mod tests {
         assert_eq!(result.len(), 100);
     }
 
+    #[cfg(feature = "subprocess")]
     #[tokio::test]
     async fn test_collect_broken_pipe() {
         let (writer, reader) = tokio::io::duplex(1024);

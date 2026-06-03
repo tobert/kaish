@@ -35,7 +35,7 @@
 
 use std::path::PathBuf;
 
-#[cfg(feature = "native")]
+#[cfg(feature = "os-integration")]
 use directories::BaseDirs;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -75,9 +75,9 @@ pub fn xdg_data_home() -> PathBuf {
         .map(PathBuf::from)
         .ok()
         .or({
-            #[cfg(feature = "native")]
+            #[cfg(feature = "os-integration")]
             { BaseDirs::new().map(|d| d.data_dir().to_path_buf()) }
-            #[cfg(not(feature = "native"))]
+            #[cfg(not(feature = "os-integration"))]
             { None }
         })
         .unwrap_or_else(|| home_dir().join(".local").join("share"))
@@ -98,9 +98,9 @@ pub fn xdg_config_home() -> PathBuf {
         .map(PathBuf::from)
         .ok()
         .or({
-            #[cfg(feature = "native")]
+            #[cfg(feature = "os-integration")]
             { BaseDirs::new().map(|d| d.config_dir().to_path_buf()) }
-            #[cfg(not(feature = "native"))]
+            #[cfg(not(feature = "os-integration"))]
             { None }
         })
         .unwrap_or_else(|| home_dir().join(".config"))
@@ -121,9 +121,9 @@ pub fn xdg_cache_home() -> PathBuf {
         .map(PathBuf::from)
         .ok()
         .or({
-            #[cfg(feature = "native")]
+            #[cfg(feature = "os-integration")]
             { BaseDirs::new().map(|d| d.cache_dir().to_path_buf()) }
-            #[cfg(not(feature = "native"))]
+            #[cfg(not(feature = "os-integration"))]
             { None }
         })
         .unwrap_or_else(|| home_dir().join(".cache"))

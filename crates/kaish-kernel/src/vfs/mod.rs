@@ -20,20 +20,20 @@
 //! The router finds the longest matching mount point and delegates operations.
 
 mod builtin_fs;
-#[cfg(feature = "native")]
+#[cfg(feature = "git")]
 mod git;
 mod jobfs;
-#[cfg(feature = "native")]
+#[cfg(feature = "localfs")]
 mod local;
 mod memory;
 mod router;
 mod traits;
 
 pub use builtin_fs::BuiltinFs;
-#[cfg(feature = "native")]
+#[cfg(feature = "git")]
 pub use git::{FileStatus, GitVfs, LogEntry, StatusSummary, WorktreeInfo};
 pub use jobfs::JobFs;
-#[cfg(feature = "native")]
+#[cfg(feature = "localfs")]
 pub use local::LocalFs;
 pub use memory::MemoryFs;
 pub use router::{MountInfo, VfsRouter};

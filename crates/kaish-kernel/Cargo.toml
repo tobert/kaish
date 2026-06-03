@@ -14,10 +14,11 @@ readme = "../../README.md"
 exclude = ["tests/snapshots/"]
 
 [dependencies]
-kaish-glob = { path = "../kaish-glob", version = "0.7.0" }
-kaish-types = { path = "../kaish-types", version = "0.7.0", features = [] }
+kaish-glob = { path = "../kaish-glob", version = "0.8.0" }
+kaish-types = { path = "../kaish-types", version = "0.8.0", features = [] }
 
-# Async runtime — minimal features; native adds process/fs/rt-multi-thread/signal
+# Async runtime — minimal base; `localfs` adds tokio/fs, `subprocess` adds
+# tokio/process + tokio/rt-multi-thread (see [features]).
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "io-util"] }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }
@@ -76,7 +77,8 @@ jaq-core = { workspace = true }
 jaq-std = { workspace = true }
 jaq-json = { workspace = true }
 
-# Optional OS-specific deps (gated behind "native" feature)
+# Optional deps, each pulled in by its capability feature:
+#   git2 → git, trash/directories → os-integration, tiktoken-rs → tokens.
 git2 = { workspace = true, optional = true }
 trash = { workspace = true, optional = true }
 directories = { workspace = true, optional = true }
@@ -93,12 +95,40 @@ nix = { version = "0.29", features = ["signal", "process", "term"], optional = t
 procfs = { workspace = true, optional = true }
 
 [features]
-default = ["native"]
-native = [
-    "dep:git2", "dep:trash", "dep:directories", "dep:tiktoken-rs",
-    "dep:nix", "dep:procfs",
-    "tokio/process", "tokio/fs", "tokio/rt-multi-thread", "tokio/signal",
-]
+# Default is the minimal "on-the-fly text processing" surface: real-file I/O
+# through the backend, but NO process execution, host introspection, git,
+# desktop integration, or tokenizer. Each of those is an opt-in capability so
+# the dangerous surface is named, not inherited. Read-only-ness is a runtime
+# backend mode on top of this, not a missing feature.
+default = ["localfs"]
+
+# Real local filesystem: LocalFs backend, passthrough/sandboxed VFS mount modes,
+# and output spill-to-disk. Off → in-memory/VFS only (the wasm32-wasip1 sandbox).
+localfs = ["tokio/fs"]
+
+# External process execution + job control: exec/spawn/which/bg/fg/kill, PATH
+# resolution, OS signals, controlling-terminal job control, pidfd. The single
+# largest attack-surface axis. Implies localfs (external output is spill-collected
+# and children run against real paths).
+subprocess = ["localfs", "dep:nix", "tokio/process", "tokio/rt-multi-thread"]
+
+# Host/OS introspection: ps (Linux), `uname --host`, hostname (/proc reads).
+host = ["dep:procfs"]
+
+# git builtin + GitVfs backend (libgit2, a C dependency).
+git = ["localfs", "dep:git2"]
+
+# Desktop/OS integration: freedesktop trash + XDG base directories.
+os-integration = ["localfs", "dep:trash", "dep:directories"]
+
+# BPE tokenization (the `tokens` builtin; embeds tiktoken data).
+tokens = ["dep:tiktoken-rs"]
+
+# Everything — the full native surface (what the old monolithic `native` was).
+full = ["localfs", "subprocess", "host", "git", "os-integration", "tokens"]
+# Ergonomic alias for the REPL/CLI and muscle memory; not a compatibility shim.
+native = ["full"]
+
 schema = ["dep:schemars", "kaish-types/schema"]
 # Opt-in PCRE2 backend for the `rg` builtin's `-P` flag.
 pcre2 = ["dep:grep-pcre2"]

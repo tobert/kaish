@@ -4,7 +4,7 @@
 //! can be swapped (system trash, WASI, pure-Rust disk trash, etc.)
 //! without changing builtins.
 
-#[cfg(feature = "native")]
+#[cfg(feature = "os-integration")]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -26,16 +26,16 @@ pub struct TrashId(pub(crate) TrashIdInner);
 
 pub(crate) enum TrashIdInner {
     /// System trash: wraps the `trash` crate's `OsString` ID.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "os-integration")]
     System(OsString),
     /// Placeholder — TrashId is opaque and never constructed without a backend.
-    #[cfg(not(feature = "native"))]
+    #[cfg(not(feature = "os-integration"))]
     _Unavailable,
 }
 
 impl TrashId {
     /// Create a TrashId wrapping a system trash item ID.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "os-integration")]
     pub(crate) fn system(id: OsString) -> Self {
         Self(TrashIdInner::System(id))
     }
@@ -44,9 +44,9 @@ impl TrashId {
 impl std::fmt::Debug for TrashId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.0 {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "os-integration")]
             TrashIdInner::System(_) => f.write_str("TrashId::System(..)"),
-            #[cfg(not(feature = "native"))]
+            #[cfg(not(feature = "os-integration"))]
             TrashIdInner::_Unavailable => f.write_str("TrashId::Unavailable"),
         }
     }

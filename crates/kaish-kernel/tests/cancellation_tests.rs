@@ -6,7 +6,7 @@
 //! `tokio::time::pause` is intentionally avoided because `nix::kill` and OS
 //! signal delivery do not honor the tokio test clock.
 
-#![cfg(all(unix, feature = "native"))]
+#![cfg(all(unix, feature = "subprocess"))]
 
 use std::path::Path;
 use std::sync::Arc;

@@ -13,7 +13,7 @@
 //! On non-Linux unix targets, [`KillTarget`] degrades gracefully to PID-based
 //! `kill()` so the call sites stay portable.
 
-#![cfg(all(unix, feature = "native"))]
+#![cfg(all(unix, feature = "subprocess"))]
 
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};

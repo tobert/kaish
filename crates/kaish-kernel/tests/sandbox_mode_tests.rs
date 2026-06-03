@@ -133,8 +133,8 @@ async fn sandbox_help_builtins_lists_available() {
     // the negative case.
 }
 
-/// When compiled without native, native-only builtins must not appear.
-#[cfg(not(feature = "native"))]
+/// When the capability axes are off, their builtins must not appear.
+#[cfg(not(any(feature = "subprocess", feature = "git", feature = "tokens")))]
 #[tokio::test]
 async fn sandbox_no_native_builtins() {
     let k = sandbox_kernel().await;

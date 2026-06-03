@@ -17,7 +17,9 @@ name = "kaish-mcp"
 path = "src/main.rs"
 
 [dependencies]
-kaish-kernel = { path = "../kaish-kernel", version = "0.7.0", features = ["schema"] }
+# The general MCP server preserves the full shell surface today; the planned
+# read-only MCP agent will instead take the minimal default (localfs only).
+kaish-kernel = { path = "../kaish-kernel", version = "0.8.0", features = ["schema", "full"] }
 rmcp = { workspace = true, features = [
     "server", "transport-io", "macros",
 ] }

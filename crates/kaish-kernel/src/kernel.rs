@@ -54,13 +54,13 @@ use crate::dispatch::{CommandDispatcher, PipelinePosition};
 use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value, value_to_bool, value_to_string, ControlFlow, ExecResult, Scope};
 use crate::parser::parse;
 use crate::scheduler::{is_bool_type, schema_param_lookup, stderr_stream, BoundedStream, JobManager, PipelineRunner, StderrReceiver};
-#[cfg(feature = "native")]
+#[cfg(feature = "subprocess")]
 use crate::scheduler::{drain_to_stream, DEFAULT_STREAM_MAX_SIZE};
 use crate::tools::{register_builtins, ExecContext, GlobalFlags, ToolArgs, ToolRegistry};
-#[cfg(feature = "native")]
+#[cfg(feature = "subprocess")]
 use crate::tools::resolve_in_path;
 use crate::validator::{Severity, Validator};
-#[cfg(feature = "native")]
+#[cfg(feature = "localfs")]
 use crate::vfs::LocalFs;
 use crate::vfs::{BuiltinFs, JobFs, MemoryFs, VfsRouter};
 
@@ -80,7 +80,7 @@ pub enum VfsMountMode {
     /// Mounts:
     /// - `/` → LocalFs("/")
     /// - `/v` → MemoryFs (blob storage)
-    #[cfg(feature = "native")]
+    #[cfg(feature = "localfs")]
     Passthrough,
 
     /// Transparent sandbox — paths look native but access is restricted.
@@ -97,7 +97,7 @@ pub enum VfsMountMode {
     /// - `{root}` → LocalFs(root)  (e.g., `/home/user` → LocalFs)
     /// - `/tmp` → LocalFs("/tmp")
     /// - `/v` → MemoryFs (blob storage)
-    #[cfg(feature = "native")]
+    #[cfg(feature = "localfs")]
     Sandboxed {
         /// Root path for local filesystem. Defaults to `$HOME`.
         /// Can be restricted further, e.g., `~/src`.
@@ -119,9 +119,9 @@ pub enum VfsMountMode {
 #[allow(clippy::derivable_impls)] // native has multiple variants; not derivable cross-feature
 impl Default for VfsMountMode {
     fn default() -> Self {
-        #[cfg(feature = "native")]
+        #[cfg(feature = "localfs")]
         { VfsMountMode::Sandboxed { root: None } }
-        #[cfg(not(feature = "native"))]
+        #[cfg(not(feature = "localfs"))]
         { VfsMountMode::NoLocal }
     }
 }
@@ -214,7 +214,7 @@ pub struct KernelConfig {
 }
 
 /// Get the default sandbox root ($HOME).
-#[cfg(feature = "native")]
+#[cfg(feature = "localfs")]
 fn default_sandbox_root() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
@@ -223,7 +223,7 @@ fn default_sandbox_root() -> PathBuf {
 
 impl Default for KernelConfig {
     fn default() -> Self {
-        #[cfg(feature = "native")]
+        #[cfg(feature = "localfs")]
         {
             let home = default_sandbox_root();
             Self {
@@ -234,7 +234,7 @@ impl Default for KernelConfig {
                 interactive: false,
                 ignore_config: crate::ignore_config::IgnoreConfig::none(),
                 output_limit: crate::output_limit::OutputLimitConfig::none(),
-                allow_external_commands: true,
+                allow_external_commands: cfg!(feature = "subprocess"),
                 latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
                 trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
                 nonce_store: None,
@@ -243,7 +243,7 @@ impl Default for KernelConfig {
                 kill_grace: Duration::from_secs(2),
             }
         }
-        #[cfg(not(feature = "native"))]
+        #[cfg(not(feature = "localfs"))]
         {
             Self {
                 name: "default".to_string(),
@@ -267,7 +267,7 @@ impl Default for KernelConfig {
 
 impl KernelConfig {
     /// Create a transient kernel config (sandboxed, for temporary use).
-    #[cfg(feature = "native")]
+    #[cfg(feature = "localfs")]
     pub fn transient() -> Self {
         let home = default_sandbox_root();
         Self {
@@ -278,7 +278,7 @@ impl KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
-            allow_external_commands: true,
+            allow_external_commands: cfg!(feature = "subprocess"),
             latch_enabled: false,
             trash_enabled: false,
             nonce_store: None,
@@ -289,13 +289,13 @@ impl KernelConfig {
     }
 
     /// Create a transient kernel config (isolated, no-default-features).
-    #[cfg(not(feature = "native"))]
+    #[cfg(not(feature = "localfs"))]
     pub fn transient() -> Self {
         Self::isolated()
     }
 
     /// Create a kernel config with the given name (sandboxed by default).
-    #[cfg(feature = "native")]
+    #[cfg(feature = "localfs")]
     pub fn named(name: &str) -> Self {
         let home = default_sandbox_root();
         Self {
@@ -306,7 +306,7 @@ impl KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
-            allow_external_commands: true,
+            allow_external_commands: cfg!(feature = "subprocess"),
             latch_enabled: false,
             trash_enabled: false,
             nonce_store: None,
@@ -317,7 +317,7 @@ impl KernelConfig {
     }
 
     /// Create a kernel config with the given name (isolated, no-default-features).
-    #[cfg(not(feature = "native"))]
+    #[cfg(not(feature = "localfs"))]
     pub fn named(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -329,7 +329,7 @@ impl KernelConfig {
     ///
     /// Native paths like `/home/user/project` work directly.
     /// The cwd is set to the actual current working directory.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "localfs")]
     pub fn repl() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         Self {
@@ -340,7 +340,7 @@ impl KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
-            allow_external_commands: true,
+            allow_external_commands: cfg!(feature = "subprocess"),
             latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
             nonce_store: None,
@@ -356,7 +356,7 @@ impl KernelConfig {
     /// but sandboxed to `$HOME`. Paths outside the sandbox are not accessible
     /// through builtins. External commands still access the real filesystem —
     /// use `.with_allow_external_commands(false)` to block them.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "localfs")]
     pub fn mcp() -> Self {
         let home = default_sandbox_root();
         Self {
@@ -367,7 +367,7 @@ impl KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::mcp(),
             output_limit: crate::output_limit::OutputLimitConfig::mcp(),
-            allow_external_commands: true,
+            allow_external_commands: cfg!(feature = "subprocess"),
             latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
             nonce_store: None,
@@ -380,7 +380,7 @@ impl KernelConfig {
     /// Create an MCP server config with a custom sandbox root.
     ///
     /// Use this to restrict access to a subdirectory like `~/src`.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "localfs")]
     pub fn mcp_with_root(root: PathBuf) -> Self {
         Self {
             name: "mcp".to_string(),
@@ -390,7 +390,7 @@ impl KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::mcp(),
             output_limit: crate::output_limit::OutputLimitConfig::mcp(),
-            allow_external_commands: true,
+            allow_external_commands: cfg!(feature = "subprocess"),
             latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
             nonce_store: None,
@@ -569,7 +569,7 @@ pub struct Kernel {
     /// `cancel()` cancels the current token and replaces it.
     cancel_token: std::sync::Mutex<tokio_util::sync::CancellationToken>,
     /// Terminal state for job control (interactive mode only, Unix only).
-    #[cfg(all(unix, feature = "native"))]
+    #[cfg(all(unix, feature = "subprocess"))]
     terminal_state: Option<Arc<crate::terminal::TerminalState>>,
     /// Weak self-reference for handing out `Arc<dyn CommandDispatcher>`.
     ///
@@ -603,14 +603,14 @@ impl Kernel {
         let mut vfs = VfsRouter::new();
 
         match &config.vfs_mode {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "localfs")]
             VfsMountMode::Passthrough => {
                 // LocalFs at "/" — native paths work directly
                 vfs.mount("/", LocalFs::new(PathBuf::from("/")));
                 // Memory for blobs
                 vfs.mount("/v", MemoryFs::new());
             }
-            #[cfg(feature = "native")]
+            #[cfg(feature = "localfs")]
             VfsMountMode::Sandboxed { root } => {
                 // Memory at root for safety (catches paths outside sandbox)
                 vfs.mount("/", MemoryFs::new());
@@ -745,7 +745,7 @@ impl Kernel {
         exec_ctx.set_job_manager(jobs.clone());
         exec_ctx.set_tool_schemas(tools.schemas());
         exec_ctx.set_tools(tools.clone());
-        #[cfg(feature = "native")]
+        #[cfg(feature = "os-integration")]
         exec_ctx.set_trash_backend(Arc::new(crate::trash_system::SystemTrash));
         exec_ctx.stderr = Some(stderr_writer);
         exec_ctx.ignore_config = ignore_config;
@@ -787,7 +787,7 @@ impl Kernel {
             kill_grace,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
             cancel_token: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
-            #[cfg(all(unix, feature = "native"))]
+            #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
             self_weak: std::sync::OnceLock::new(),
             execute_lock: tokio::sync::Mutex::new(()),
@@ -878,7 +878,7 @@ impl Kernel {
         fork_ctx.dispatcher = None;
         fork_ctx.interactive = false;
         fork_ctx.cancel = cancel.clone();
-        #[cfg(all(unix, feature = "native"))]
+        #[cfg(all(unix, feature = "subprocess"))]
         {
             fork_ctx.terminal_state = None;
         }
@@ -900,7 +900,7 @@ impl Kernel {
             kill_grace: self.kill_grace,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
             cancel_token: std::sync::Mutex::new(cancel),
-            #[cfg(all(unix, feature = "native"))]
+            #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
             self_weak: std::sync::OnceLock::new(),
             execute_lock: tokio::sync::Mutex::new(()),
@@ -924,7 +924,7 @@ impl Kernel {
     ///
     /// Call this after kernel creation when running as an interactive REPL
     /// and stdin is a TTY. Sets up process groups and signal handling.
-    #[cfg(all(unix, feature = "native"))]
+    #[cfg(all(unix, feature = "subprocess"))]
     pub fn init_terminal(&mut self) {
         if !self.interactive {
             return;
@@ -1921,7 +1921,7 @@ impl Kernel {
                 allow_external_commands: self.allow_external_commands,
                 nonce_store: ec.nonce_store.clone(),
                 trash_backend: ec.trash_backend.clone(),
-                #[cfg(all(unix, feature = "native"))]
+                #[cfg(all(unix, feature = "subprocess"))]
                 terminal_state: ec.terminal_state.clone(),
                 dispatcher: self.dispatcher(),
                 cancel: {
@@ -2260,7 +2260,7 @@ impl Kernel {
                 allow_external_commands: self.allow_external_commands,
                 nonce_store: ec.nonce_store.clone(),
                 trash_backend: ec.trash_backend.clone(),
-                #[cfg(all(unix, feature = "native"))]
+                #[cfg(all(unix, feature = "subprocess"))]
                 terminal_state: ec.terminal_state.clone(),
                 dispatcher: self.dispatcher(),
                 // Use ec.cancel (set by dispatch_command from the runner's
@@ -2617,7 +2617,7 @@ impl Kernel {
     /// - `key=value` stays as `key=value`
     ///
     /// This is what external commands expect in their argv.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "subprocess")]
     async fn build_args_flat(&self, args: &[Arg]) -> Result<Vec<String>> {
         let mut argv = Vec::new();
         for arg in args {
@@ -3398,13 +3398,13 @@ impl Kernel {
     /// - `Ok(Some(result))` if command was found and executed
     /// - `Ok(None)` if command was not found in PATH
     /// - `Err` on execution errors
-    #[cfg(not(feature = "native"))]
+    #[cfg(not(feature = "subprocess"))]
     async fn try_execute_external(&self, _name: &str, _args: &[Arg]) -> Result<Option<ExecResult>> {
         Ok(None)
     }
 
     /// Try to execute an external command from PATH.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "subprocess")]
     #[tracing::instrument(level = "debug", skip(self, args), fields(command = %name))]
     async fn try_execute_external(&self, name: &str, args: &[Arg]) -> Result<Option<ExecResult>> {
         // Read the cancel token from `self.exec_ctx`, which `dispatch_command`
@@ -4129,7 +4129,7 @@ fn apply_tilde_expansion(value: Value) -> Value {
 /// `target` carries a Linux pidfd (when available) for race-free direct-child
 /// kill; fall-through to PID-based kill otherwise. On non-unix targets the
 /// parameter is ignored and we use tokio's cross-platform `start_kill`.
-#[cfg(all(unix, feature = "native"))]
+#[cfg(all(unix, feature = "subprocess"))]
 pub(crate) async fn wait_or_kill(
     child: &mut tokio::process::Child,
     target: Option<&crate::pidfd::KillTarget>,
@@ -4143,7 +4143,7 @@ pub(crate) async fn wait_or_kill(
     }
 }
 
-#[cfg(all(not(unix), feature = "native"))]
+#[cfg(all(not(unix), feature = "subprocess"))]
 pub(crate) async fn wait_or_kill(
     child: &mut tokio::process::Child,
     _target: Option<&()>,
@@ -4165,7 +4165,7 @@ pub(crate) async fn wait_or_kill(
 /// Direct-child kill goes through `target.signal()`, which on Linux uses a
 /// pidfd (immune to PID reuse). Process-group kill uses `killpg` — there is
 /// no PGID-equivalent of pidfd, so grandchildren retain a small reuse window.
-#[cfg(all(unix, feature = "native"))]
+#[cfg(all(unix, feature = "subprocess"))]
 pub(crate) async fn kill_with_grace(
     child: &mut tokio::process::Child,
     target: Option<&crate::pidfd::KillTarget>,
@@ -4187,7 +4187,7 @@ pub(crate) async fn kill_with_grace(
     child.wait().await
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(all(test, feature = "subprocess"))]
 mod tests {
     use super::*;
 

@@ -7,7 +7,7 @@ mod assert;
 mod awk;
 mod base64_tool;
 mod basename;
-#[cfg(feature = "native")]
+#[cfg(feature = "subprocess")]
 mod bg;
 mod cat;
 mod cd;
@@ -20,20 +20,20 @@ mod dirname;
 mod patch;
 mod echo;
 mod env;
-#[cfg(feature = "native")]
+#[cfg(feature = "subprocess")]
 mod exec;
-#[cfg(feature = "native")]
+#[cfg(feature = "subprocess")]
 mod spawn;
-#[cfg(feature = "native")]
+#[cfg(feature = "subprocess")]
 pub use spawn::resolve_in_path;
 mod export;
-#[cfg(feature = "native")]
+#[cfg(feature = "subprocess")]
 mod fg;
 mod glob;
 mod find;
 pub(crate) mod format_string;
 mod gather;
-#[cfg(feature = "native")]
+#[cfg(feature = "git")]
 mod git;
 mod grep;
 mod grep_engine;
@@ -43,7 +43,7 @@ mod ignore;
 mod help;
 // `hostname` is pure host introspection (reads /proc) — gated behind the host
 // capability. `uname` stays available and reports kaish identity instead.
-#[cfg(feature = "native")]
+#[cfg(feature = "host")]
 mod hostname;
 mod introspect;
 mod jobs;
@@ -62,7 +62,7 @@ mod mktemp;
 mod mv;
 mod output_limit;
 mod printf;
-#[cfg(all(target_os = "linux", feature = "native"))]
+#[cfg(all(target_os = "linux", feature = "host"))]
 mod ps;
 mod pwd;
 mod read;
@@ -82,7 +82,7 @@ mod tail;
 mod tee;
 mod test_builtin;
 mod timeout;
-#[cfg(feature = "native")]
+#[cfg(feature = "tokens")]
 mod tokens;
 mod touch;
 mod tr;
@@ -95,7 +95,7 @@ mod validate;
 mod vars;
 mod wait;
 mod wc;
-#[cfg(feature = "native")]
+#[cfg(feature = "subprocess")]
 mod which;
 mod write;
 mod xxd;
@@ -110,7 +110,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(awk::Awk);
     registry.register(base64_tool::Base64Tool);
     registry.register(basename::Basename);
-    #[cfg(feature = "native")]
+    #[cfg(feature = "subprocess")]
     registry.register(bg::Bg);
     registry.register(cat::Cat);
     registry.register(cd::Cd);
@@ -122,24 +122,24 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(dirname::Dirname);
     registry.register(echo::Echo);
     registry.register(env::Env);
-    #[cfg(feature = "native")]
+    #[cfg(feature = "subprocess")]
     registry.register(exec::Exec);
-    #[cfg(feature = "native")]
+    #[cfg(feature = "subprocess")]
     registry.register(spawn::Spawn);
     registry.register(export::Export);
-    #[cfg(feature = "native")]
+    #[cfg(feature = "subprocess")]
     registry.register(fg::Fg);
     registry.register(glob::Glob);
     registry.register(find::Find);
     registry.register(gather::Gather);
-    #[cfg(feature = "native")]
+    #[cfg(feature = "git")]
     registry.register(git::Git);
     registry.register(grep::Grep);
     registry.register(rg::Rg);
     registry.register(head::Head);
     registry.register(help::Help);
     registry.register(ignore::KaishIgnore);
-    #[cfg(feature = "native")]
+    #[cfg(feature = "host")]
     registry.register(hostname::Hostname);
     registry.register(introspect::Mounts);
     registry.register(introspect::Tools);
@@ -160,7 +160,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(output_limit::KaishOutputLimit);
     registry.register(patch::Patch);
     registry.register(printf::Printf);
-    #[cfg(all(target_os = "linux", feature = "native"))]
+    #[cfg(all(target_os = "linux", feature = "host"))]
     registry.register(ps::Ps);
     registry.register(pwd::Pwd);
     registry.register(read::Read);
@@ -181,7 +181,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(test_builtin::Test);
     registry.register(test_builtin::Bracket);
     registry.register(timeout::Timeout);
-    #[cfg(feature = "native")]
+    #[cfg(feature = "tokens")]
     registry.register(tokens::Tokens);
     registry.register(touch::Touch);
     registry.register(tr::Tr);
@@ -195,7 +195,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(vars::Vars);
     registry.register(wait::Wait);
     registry.register(wc::Wc);
-    #[cfg(feature = "native")]
+    #[cfg(feature = "subprocess")]
     registry.register(which::Which);
     registry.register(write::Write);
     registry.register(xxd::Xxd);

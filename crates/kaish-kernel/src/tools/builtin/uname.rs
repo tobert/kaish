@@ -80,7 +80,7 @@ struct UnameArgs {
     /// compiled in) while still parsed, so `uname --host` returns the curated
     /// "unavailable" error instead of an unknown-argument complaint.
     #[arg(id = "host", long = "host")]
-    #[cfg_attr(not(feature = "native"), arg(hide = true))]
+    #[cfg_attr(not(feature = "host"), arg(hide = true))]
     _host: bool,
 
     #[command(flatten)]
@@ -121,7 +121,7 @@ impl UnameInfo {
     ///
     /// Host introspection is a capability gated behind the `native` feature;
     /// the minimal/hermetic build has no path to the real host here.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "host")]
     fn host() -> Self {
         let read = |name: &str| {
             std::fs::read_to_string(format!("/proc/sys/kernel/{name}"))
@@ -153,7 +153,7 @@ fn kaish_nodename(ctx: &ExecContext) -> String {
 /// Read the real hostname from `/proc/sys/kernel/hostname`.
 ///
 /// Host introspection — only compiled in with the `native` feature.
-#[cfg(feature = "native")]
+#[cfg(feature = "host")]
 pub(super) fn read_hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|s| s.trim().to_string())
@@ -190,11 +190,11 @@ impl Tool for Uname {
 
         let host_mode = args.has_flag("host");
         let info = if host_mode {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "host")]
             {
                 UnameInfo::host()
             }
-            #[cfg(not(feature = "native"))]
+            #[cfg(not(feature = "host"))]
             {
                 return ExecResult::failure(
                     2,
@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(parts[0], "kaish");
     }
 
-    #[cfg(all(target_os = "linux", feature = "native"))]
+    #[cfg(all(target_os = "linux", feature = "host"))]
     #[tokio::test]
     async fn test_host_mode() {
         let mut ctx = make_ctx();
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(&*result.text_out(), "Linux");
     }
 
-    #[cfg(all(target_os = "linux", feature = "native"))]
+    #[cfg(all(target_os = "linux", feature = "host"))]
     #[tokio::test]
     async fn test_host_all() {
         let mut ctx = make_ctx();
@@ -429,7 +429,7 @@ mod tests {
 
     /// Without the host capability, `--host` must fail loudly rather than
     /// silently report kaish identity.
-    #[cfg(not(feature = "native"))]
+    #[cfg(not(feature = "host"))]
     #[tokio::test]
     async fn test_host_unavailable_without_native() {
         let mut ctx = make_ctx();

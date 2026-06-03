@@ -3,10 +3,10 @@
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
-#[cfg(all(unix, feature = "native"))]
+#[cfg(all(unix, feature = "subprocess"))]
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
-#[cfg(all(unix, feature = "native"))]
+#[cfg(all(unix, feature = "subprocess"))]
 use crate::scheduler::JobId;
 use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -47,13 +47,13 @@ impl Tool for Kill {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        #[cfg(not(all(unix, feature = "native")))]
+        #[cfg(not(all(unix, feature = "subprocess")))]
         {
             let _ = (args, ctx);
             return ExecResult::failure(1, "kill: not supported on this platform");
         }
 
-        #[cfg(all(unix, feature = "native"))]
+        #[cfg(all(unix, feature = "subprocess"))]
         {
             let parsed = match KillArgs::try_parse_from(
                 std::iter::once("kill".to_string()).chain(args.to_argv()),
@@ -137,7 +137,7 @@ impl Tool for Kill {
 }
 
 /// Parse a signal name or number to a Signal value.
-#[cfg(all(unix, feature = "native"))]
+#[cfg(all(unix, feature = "subprocess"))]
 fn parse_signal(name: &str) -> Option<nix::sys::signal::Signal> {
     use nix::sys::signal::Signal;
 

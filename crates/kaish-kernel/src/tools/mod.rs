@@ -20,7 +20,7 @@ mod registry;
 mod traits;
 
 pub use builtin::register_builtins;
-#[cfg(feature = "native")]
+#[cfg(feature = "subprocess")]
 pub use builtin::resolve_in_path;
 pub use clap_schema::{params_from_clap, schema_from_clap};
 pub use context::{ExecContext, OutputContext};

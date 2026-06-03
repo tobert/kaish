@@ -1,7 +1,10 @@
 //! Tests for external command execution via PATH lookup.
 //!
 //! These tests verify that kaish correctly falls back to PATH resolution
-//! when no builtin tool matches a command name.
+//! when no builtin tool matches a command name. They spawn real processes, so
+//! the whole suite requires the `subprocess` capability.
+
+#![cfg(feature = "subprocess")]
 
 use kaish_kernel::{Kernel, KernelConfig};
 

@@ -33,7 +33,7 @@ use crate::tools::ExecContext;
 // The following imports are only used by the test-only `BackendDispatcher`.
 #[cfg(test)]
 use crate::ast::{Arg, Value};
-#[cfg(all(test, feature = "native"))]
+#[cfg(all(test, feature = "subprocess"))]
 use crate::ast::Expr;
 #[cfg(test)]
 use crate::backend::BackendError;
@@ -43,7 +43,7 @@ use crate::interpreter::apply_output_format;
 use crate::scheduler::build_tool_args;
 #[cfg(test)]
 use crate::tools::{GlobalFlags, ToolRegistry};
-#[cfg(all(test, feature = "native"))]
+#[cfg(all(test, feature = "subprocess"))]
 use crate::tools::resolve_in_path;
 
 /// Position of a command within a pipeline.
@@ -130,7 +130,7 @@ impl BackendDispatcher {
     /// Used as fallback when no builtin/backend tool matches. Returns None if
     /// the command is not found in PATH. Always captures stdout/stderr (never
     /// inherits terminal — pipeline stages don't need interactive I/O).
-    #[cfg(not(feature = "native"))]
+    #[cfg(not(feature = "subprocess"))]
     async fn try_external(
         &self,
         _name: &str,
@@ -141,7 +141,7 @@ impl BackendDispatcher {
     }
 
     /// Try to execute an external command (PATH lookup + process spawn).
-    #[cfg(feature = "native")]
+    #[cfg(feature = "subprocess")]
     async fn try_external(
         &self,
         name: &str,
