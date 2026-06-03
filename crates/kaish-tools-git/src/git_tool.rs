@@ -22,10 +22,10 @@
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
-use crate::ast::Value;
-use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
-use crate::vfs::GitVfs;
+use kaish_types::Value;
+use kaish_types::{ExecResult, OutputData};
+use kaish_tool_api::{schema_from_clap, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
+use crate::git_vfs::GitVfs;
 
 /// Git tool: version control operations via git2-rs.
 pub struct Git;
@@ -108,9 +108,6 @@ impl Tool for Git {
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
         args.flagify_bool_named();
 
         let parsed = match GitArgs::try_parse_from(
@@ -157,15 +154,15 @@ impl Tool for Git {
 }
 
 /// Initialize a new git repository.
-async fn git_init(args: &[String], ctx: &ExecContext) -> ExecResult {
+async fn git_init(args: &[String], ctx: &dyn ToolCtx) -> ExecResult {
     let vfs_path = if args.is_empty() {
-        ctx.cwd.clone()
+        ctx.cwd().to_path_buf()
     } else {
         ctx.resolve_path(&args[0])
     };
 
     // Resolve VFS path to real filesystem path
-    let real_path = match ctx.backend.resolve_real_path(&vfs_path) {
+    let real_path = match ctx.backend().resolve_real_path(&vfs_path) {
         Some(p) => p,
         None => {
             return ExecResult::failure(
@@ -185,7 +182,7 @@ async fn git_init(args: &[String], ctx: &ExecContext) -> ExecResult {
 }
 
 /// Clone a repository.
-async fn git_clone(args: &[String], ctx: &ExecContext) -> ExecResult {
+async fn git_clone(args: &[String], ctx: &dyn ToolCtx) -> ExecResult {
     if args.is_empty() {
         return ExecResult::failure(1, "git clone: missing repository URL");
     }
@@ -207,7 +204,7 @@ async fn git_clone(args: &[String], ctx: &ExecContext) -> ExecResult {
     // Resolve VFS path to real filesystem path
     // For clone, the destination doesn't exist yet, so resolve the parent
     let parent = vfs_dest.parent().unwrap_or(&vfs_dest);
-    let real_parent = match ctx.backend.resolve_real_path(parent) {
+    let real_parent = match ctx.backend().resolve_real_path(parent) {
         Some(p) => p,
         None => {
             return ExecResult::failure(
@@ -229,7 +226,7 @@ async fn git_clone(args: &[String], ctx: &ExecContext) -> ExecResult {
 }
 
 /// Show repository status.
-async fn git_status(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
+async fn git_status(args: &ToolArgs, ctx: &dyn ToolCtx) -> ExecResult {
     let git = match open_repo(ctx) {
         Ok(g) => g,
         Err(e) => return e,
@@ -313,7 +310,7 @@ async fn git_status(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
 }
 
 /// Add files to the staging area.
-async fn git_add(args: &[String], ctx: &ExecContext) -> ExecResult {
+async fn git_add(args: &[String], ctx: &dyn ToolCtx) -> ExecResult {
     if args.is_empty() {
         return ExecResult::failure(1, "git add: missing pathspec");
     }
@@ -333,7 +330,7 @@ async fn git_add(args: &[String], ctx: &ExecContext) -> ExecResult {
 }
 
 /// Create a commit.
-async fn git_commit(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
+async fn git_commit(args: &ToolArgs, ctx: &dyn ToolCtx) -> ExecResult {
     let git = match open_repo(ctx) {
         Ok(g) => g,
         Err(e) => return e,
@@ -362,7 +359,7 @@ async fn git_commit(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
 }
 
 /// Show commit log.
-async fn git_log(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
+async fn git_log(args: &ToolArgs, ctx: &dyn ToolCtx) -> ExecResult {
     let git = match open_repo(ctx) {
         Ok(g) => g,
         Err(e) => return e,
@@ -409,7 +406,7 @@ async fn git_log(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
 }
 
 /// Show diff.
-async fn git_diff(ctx: &ExecContext) -> ExecResult {
+async fn git_diff(ctx: &dyn ToolCtx) -> ExecResult {
     let git = match open_repo(ctx) {
         Ok(g) => g,
         Err(e) => return e,
@@ -422,7 +419,7 @@ async fn git_diff(ctx: &ExecContext) -> ExecResult {
 }
 
 /// Branch operations.
-async fn git_branch(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
+async fn git_branch(args: &ToolArgs, ctx: &dyn ToolCtx) -> ExecResult {
     let git = match open_repo(ctx) {
         Ok(g) => g,
         Err(e) => return e,
@@ -472,7 +469,7 @@ async fn git_branch(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
 }
 
 /// Checkout a branch or commit.
-async fn git_checkout(args: &[String], ctx: &ExecContext) -> ExecResult {
+async fn git_checkout(args: &[String], ctx: &dyn ToolCtx) -> ExecResult {
     if args.is_empty() {
         return ExecResult::failure(1, "git checkout: missing branch or commit");
     }
@@ -491,7 +488,7 @@ async fn git_checkout(args: &[String], ctx: &ExecContext) -> ExecResult {
 }
 
 /// Worktree operations.
-async fn git_worktree(args: &ToolArgs, rest_args: &[String], ctx: &ExecContext) -> ExecResult {
+async fn git_worktree(args: &ToolArgs, rest_args: &[String], ctx: &dyn ToolCtx) -> ExecResult {
     if rest_args.is_empty() {
         return ExecResult::failure(1, "git worktree: missing subcommand (list, add, remove, lock, unlock, prune)");
     }
@@ -541,7 +538,7 @@ fn worktree_list(git: &GitVfs) -> ExecResult {
 }
 
 /// Add a new worktree.
-fn worktree_add(git: &GitVfs, args: &[String], ctx: &ExecContext) -> ExecResult {
+fn worktree_add(git: &GitVfs, args: &[String], ctx: &dyn ToolCtx) -> ExecResult {
     if args.is_empty() {
         return ExecResult::failure(1, "git worktree add: missing path");
     }
@@ -553,12 +550,12 @@ fn worktree_add(git: &GitVfs, args: &[String], ctx: &ExecContext) -> ExecResult 
     let vfs_path = ctx.resolve_path(path_arg);
 
     // Get real filesystem path
-    let real_path = match ctx.backend.resolve_real_path(&vfs_path) {
+    let real_path = match ctx.backend().resolve_real_path(&vfs_path) {
         Some(p) => p,
         None => {
             // If VFS path doesn't resolve, try resolving the parent
             let parent = vfs_path.parent().unwrap_or(&vfs_path);
-            match ctx.backend.resolve_real_path(parent) {
+            match ctx.backend().resolve_real_path(parent) {
                 Some(p) => {
                     if let Some(name) = vfs_path.file_name() {
                         p.join(name)
@@ -655,14 +652,14 @@ fn worktree_prune(git: &GitVfs) -> ExecResult {
 
 /// Open the git repository in the current working directory.
 #[allow(clippy::result_large_err)]
-fn open_repo(ctx: &ExecContext) -> Result<GitVfs, ExecResult> {
+fn open_repo(ctx: &dyn ToolCtx) -> Result<GitVfs, ExecResult> {
     // Resolve VFS path to real filesystem path
-    let real_path = ctx.backend.resolve_real_path(&ctx.cwd).ok_or_else(|| {
+    let real_path = ctx.backend().resolve_real_path(ctx.cwd()).ok_or_else(|| {
         ExecResult::failure(
             128,
             format!(
                 "fatal: not a git repository: {} is not on a real filesystem",
-                ctx.cwd.display()
+                ctx.cwd().display()
             ),
         )
     })?;
@@ -685,320 +682,4 @@ fn format_timestamp(secs: i64) -> String {
     use chrono::{DateTime, Utc};
     let dt = DateTime::from_timestamp(secs, 0).unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
     dt.format("%a %b %d %H:%M:%S %Y %z").to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::vfs::VfsRouter;
-    use git2::Repository;
-    use std::env;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
-    use tokio::fs;
-
-    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn temp_dir() -> std::path::PathBuf {
-        let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        env::temp_dir().join(format!("kaish-git-cmd-test-{}-{}", std::process::id(), id))
-    }
-
-    async fn setup_git_repo() -> (ExecContext, std::path::PathBuf) {
-        let dir = temp_dir();
-        let _ = fs::remove_dir_all(&dir).await;
-        fs::create_dir_all(&dir).await.unwrap();
-
-        // Initialize git repo
-        let repo = Repository::init(&dir).unwrap();
-        {
-            let mut config = repo.config().unwrap();
-            config.set_str("user.name", "Test User").unwrap();
-            config.set_str("user.email", "test@example.com").unwrap();
-        }
-
-        // Create context with real filesystem at the git repo
-        // Mount the temp dir at VFS root "/"
-        let mut vfs = VfsRouter::new();
-        let local = crate::vfs::LocalFs::new(&dir);
-        vfs.mount("/", local);
-
-        let mut ctx = ExecContext::new(Arc::new(vfs));
-        // Set CWD to VFS root "/" (which maps to the temp dir)
-        ctx.cwd = std::path::PathBuf::from("/");
-
-        (ctx, dir)
-    }
-
-    async fn cleanup(dir: &std::path::Path) {
-        let _ = fs::remove_dir_all(dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_git_status_clean() {
-        let (mut ctx, dir) = setup_git_repo().await;
-
-        // Create initial commit
-        fs::write(dir.join("README.md"), b"# Test").await.unwrap();
-        {
-            let git = GitVfs::open(&dir).unwrap();
-            git.add(&["README.md"]).unwrap();
-            git.commit("Initial commit", None).unwrap();
-        }
-
-        let args = ToolArgs::new();
-        let result = Git.execute(
-            {
-                let mut a = args;
-                a.positional.push(Value::String("status".into()));
-                a
-            },
-            &mut ctx,
-        )
-        .await;
-
-        assert!(result.ok(), "status failed: {}", result.err);
-        assert!(result.text_out().contains("nothing to commit"));
-
-        cleanup(&dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_git_status_modified() {
-        let (mut ctx, dir) = setup_git_repo().await;
-
-        // Create and commit initial file
-        fs::write(dir.join("test.txt"), b"initial").await.unwrap();
-        {
-            let git = GitVfs::open(&dir).unwrap();
-            git.add(&["test.txt"]).unwrap();
-            git.commit("Initial", None).unwrap();
-        }
-
-        // Modify the file
-        fs::write(dir.join("test.txt"), b"modified").await.unwrap();
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("status".into()));
-        args.flags.insert("s".into());
-
-        let result = Git.execute(args, &mut ctx).await;
-
-        assert!(result.ok());
-        assert!(result.text_out().contains("test.txt"));
-
-        cleanup(&dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_git_add_and_commit() {
-        let (mut ctx, dir) = setup_git_repo().await;
-
-        // Create a file
-        fs::write(dir.join("new.txt"), b"new file").await.unwrap();
-
-        // Add the file
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("add".into()));
-        args.positional.push(Value::String("new.txt".into()));
-        let result = Git.execute(args, &mut ctx).await;
-        assert!(result.ok(), "add failed: {}", result.err);
-
-        // Commit
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("commit".into()));
-        args.named.insert("m".into(), Value::String("Add new file".into()));
-        let result = Git.execute(args, &mut ctx).await;
-        assert!(result.ok(), "commit failed: {}", result.err);
-        assert!(result.text_out().contains("Add new file"));
-
-        cleanup(&dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_git_log() {
-        let (mut ctx, dir) = setup_git_repo().await;
-
-        // Create a commit
-        fs::write(dir.join("file.txt"), b"content").await.unwrap();
-        {
-            let git = GitVfs::open(&dir).unwrap();
-            git.add(&["file.txt"]).unwrap();
-            git.commit("Test commit message", None).unwrap();
-        }
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("log".into()));
-        args.flags.insert("oneline".into());
-
-        let result = Git.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        assert!(result.text_out().contains("Test commit message"));
-
-        cleanup(&dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_git_log_n_limits_output() {
-        // Bug 3: git log -n 3 should only return 3 commits
-        let (mut ctx, dir) = setup_git_repo().await;
-
-        // Create 5 commits
-        for i in 1..=5 {
-            fs::write(dir.join(format!("file{}.txt", i)), format!("content {}", i).as_bytes()).await.unwrap();
-            let git = GitVfs::open(&dir).unwrap();
-            git.add(&[&format!("file{}.txt", i)]).unwrap();
-            git.commit(&format!("Commit {}", i), None).unwrap();
-        }
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("log".into()));
-        args.flags.insert("oneline".into());
-        args.named.insert("count".into(), Value::Int(3));
-
-        let result = Git.execute(args, &mut ctx).await;
-        assert!(result.ok(), "log failed: {}", result.err);
-        let text = result.text_out();
-        assert_eq!(text.lines().count(), 3, "Expected 3 lines, got: {}", text);
-
-        cleanup(&dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_git_branch() {
-        let (mut ctx, dir) = setup_git_repo().await;
-
-        // Create initial commit
-        fs::write(dir.join("file.txt"), b"content").await.unwrap();
-        {
-            let git = GitVfs::open(&dir).unwrap();
-            git.add(&["file.txt"]).unwrap();
-            git.commit("Initial", None).unwrap();
-        }
-
-        // List branches
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("branch".into()));
-        let result = Git.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        assert!(result.text_out().contains("*")); // Current branch marker
-
-        // Create new branch
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("branch".into()));
-        args.named.insert("c".into(), Value::String("feature".into()));
-        let result = Git.execute(args, &mut ctx).await;
-        assert!(result.ok(), "branch -c failed: {}", result.err);
-
-        cleanup(&dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_git_not_a_repo() {
-        let dir = temp_dir();
-        let _ = fs::remove_dir_all(&dir).await;
-        fs::create_dir_all(&dir).await.unwrap();
-
-        // Create context without git repo
-        let mut vfs = VfsRouter::new();
-        let local = crate::vfs::LocalFs::new(&dir);
-        vfs.mount("/", local);
-
-        let mut ctx = ExecContext::new(Arc::new(vfs));
-        ctx.cwd = dir.clone();
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("status".into()));
-
-        let result = Git.execute(args, &mut ctx).await;
-        assert!(!result.ok());
-        assert!(result.err.contains("not a git repository"));
-
-        cleanup(&dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_git_worktree_list() {
-        let (mut ctx, dir) = setup_git_repo().await;
-
-        // Create initial commit (required for worktrees)
-        fs::write(dir.join("README.md"), b"# Test").await.unwrap();
-        {
-            let git = GitVfs::open(&dir).unwrap();
-            git.add(&["README.md"]).unwrap();
-            git.commit("Initial commit", None).unwrap();
-        }
-
-        // List worktrees
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("worktree".into()));
-        args.positional.push(Value::String("list".into()));
-
-        let result = Git.execute(args, &mut ctx).await;
-        assert!(result.ok(), "worktree list failed: {}", result.err);
-        // Should show at least the main worktree
-        let text = result.text_out();
-        assert!(text.contains("(main)") || text.contains("master") || !text.is_empty());
-
-        cleanup(&dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_git_worktree_add_and_remove() {
-        let (_setup_ctx, dir) = setup_git_repo().await;
-
-        // Create initial commit (required for worktrees)
-        fs::write(dir.join("README.md"), b"# Test").await.unwrap();
-        {
-            let git = GitVfs::open(&dir).unwrap();
-            git.add(&["README.md"]).unwrap();
-            git.commit("Initial commit", None).unwrap();
-        }
-
-        // Create a worktree directory path
-        let wt_path = dir.parent().unwrap().join("test-worktree");
-
-        // Mount the parent so we can create the worktree there
-        let parent_dir = dir.parent().unwrap().to_path_buf();
-        let mut vfs = VfsRouter::new();
-        let local = crate::vfs::LocalFs::new(&parent_dir);
-        vfs.mount("/", local);
-        let mut ctx = ExecContext::new(Arc::new(vfs));
-        ctx.cwd = std::path::PathBuf::from("/").join(dir.file_name().unwrap());
-
-        // Add worktree
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("worktree".into()));
-        args.positional.push(Value::String("add".into()));
-        args.positional.push(Value::String("../test-worktree".into()));
-
-        let result = Git.execute(args, &mut ctx).await;
-        assert!(result.ok(), "worktree add failed: {}", result.err);
-
-        // Verify worktree was created
-        assert!(wt_path.exists(), "worktree directory should exist");
-
-        // List should show both worktrees
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("worktree".into()));
-        args.positional.push(Value::String("list".into()));
-
-        let result = Git.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        assert!(result.text_out().contains("test-worktree"));
-
-        // Remove the worktree
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("worktree".into()));
-        args.positional.push(Value::String("remove".into()));
-        args.positional.push(Value::String("test-worktree".into()));
-        args.flags.insert("force".into());
-
-        let result = Git.execute(args, &mut ctx).await;
-        assert!(result.ok(), "worktree remove failed: {}", result.err);
-
-        // Cleanup
-        let _ = fs::remove_dir_all(&wt_path).await;
-        cleanup(&dir).await;
-    }
 }

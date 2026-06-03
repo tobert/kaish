@@ -1309,7 +1309,6 @@ dependencies = [
  "digest",
  "directories",
  "getrandom 0.3.4",
- "git2",
  "grep-matcher",
  "grep-pcre2",
  "grep-regex",
@@ -1321,6 +1320,7 @@ dependencies = [
  "jaq-std",
  "kaish-glob",
  "kaish-tool-api",
+ "kaish-tools-git",
  "kaish-types",
  "kaish-vfs",
  "logos",
@@ -1406,6 +1406,21 @@ dependencies = [
  "clap",
  "kaish-types",
  "serde_json",
+]
+
+[[package]]
+name = "kaish-tools-git"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "clap",
+ "git2",
+ "kaish-tool-api",
+ "kaish-types",
+ "kaish-vfs",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

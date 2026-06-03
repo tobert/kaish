@@ -80,8 +80,9 @@ jaq-std = { workspace = true }
 jaq-json = { workspace = true }
 
 # Optional deps, each pulled in by its capability feature:
-#   git2 → git, trash/directories → os-integration, tiktoken-rs → tokens.
-git2 = { workspace = true, optional = true }
+#   kaish-tools-git → git, trash/directories → os-integration,
+#   tiktoken-rs → tokens. libgit2 now lives entirely in kaish-tools-git.
+kaish-tools-git = { path = "../kaish-tools-git", version = "0.8.0", optional = true }
 trash = { workspace = true, optional = true }
 directories = { workspace = true, optional = true }
 tiktoken-rs = { workspace = true, optional = true }
@@ -117,8 +118,9 @@ subprocess = ["localfs", "dep:nix", "tokio/process", "tokio/rt-multi-thread"]
 # Host/OS introspection: ps (Linux), `uname --host`, hostname (/proc reads).
 host = ["dep:procfs"]
 
-# git builtin + GitVfs backend (libgit2, a C dependency).
-git = ["localfs", "dep:git2"]
+# git builtin + GitVfs backend, both in the kaish-tools-git crate (libgit2, a
+# C dependency, never enters the kernel build).
+git = ["localfs", "dep:kaish-tools-git"]
 
 # Desktop/OS integration: freedesktop trash + XDG base directories.
 os-integration = ["localfs", "dep:trash", "dep:directories"]

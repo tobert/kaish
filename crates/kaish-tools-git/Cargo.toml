@@ -1,0 +1,31 @@
+[package]
+name = "kaish-tools-git"
+description = "kaish git tool bundle: the GitVfs backend and the git builtin (libgit2)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+kaish-types = { path = "../kaish-types", version = "0.8.0", features = [] }
+kaish-tool-api = { path = "../kaish-tool-api", version = "0.8.0" }
+# GitVfs wraps a LocalFs working tree, so the localfs backend is required.
+kaish-vfs = { path = "../kaish-vfs", version = "0.8.0", features = ["localfs"] }
+
+async-trait = { workspace = true }
+git2 = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }
+tokio = { version = "1", features = ["rt", "io-util"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[lints]
+workspace = true

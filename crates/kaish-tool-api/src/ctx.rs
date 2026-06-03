@@ -15,9 +15,11 @@ use crate::backend::KernelBackend;
 /// trait; trusted in-tree builtins that need deeper state (job control,
 /// streaming pipes, the dispatcher) downcast through [`ToolCtx::as_any_mut`].
 ///
-/// `Send` is a supertrait because tool execution is async and the context is
-/// held across await points whose futures must be `Send`.
-pub trait ToolCtx: Send {
+/// `Send + Sync` are supertraits because tool execution is async: a `&dyn
+/// ToolCtx` shared with an async helper is held across await points, and for
+/// the resulting future to be `Send` the referent must be `Sync`. The kernel's
+/// `ExecContext` already satisfies both.
+pub trait ToolCtx: Send + Sync {
     /// The backend for file I/O and tool dispatch.
     ///
     /// Tools reach the VFS (and re-dispatch other tools) through this handle.

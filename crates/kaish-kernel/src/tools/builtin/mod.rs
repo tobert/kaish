@@ -33,8 +33,6 @@ mod glob;
 mod find;
 pub(crate) mod format_string;
 mod gather;
-#[cfg(feature = "git")]
-mod git;
 mod grep;
 mod grep_engine;
 mod rg;
@@ -133,7 +131,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(find::Find);
     registry.register(gather::Gather);
     #[cfg(feature = "git")]
-    registry.register(git::Git);
+    registry.register(kaish_tools_git::Git);
     registry.register(grep::Grep);
     registry.register(rg::Rg);
     registry.register(head::Head);

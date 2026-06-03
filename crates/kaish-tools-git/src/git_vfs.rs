@@ -22,8 +22,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use super::LocalFs;
-use super::{DirEntry, Filesystem};
+use kaish_vfs::LocalFs;
+use kaish_vfs::{DirEntry, Filesystem};
 
 /// Git-aware filesystem backend.
 ///

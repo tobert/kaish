@@ -20,15 +20,15 @@
 //! The router finds the longest matching mount point and delegates operations.
 
 mod builtin_fs;
-#[cfg(feature = "git")]
-mod git;
 mod jobfs;
 mod memory;
 mod router;
 
 pub use builtin_fs::BuiltinFs;
+// GitVfs + git types live in the kaish-tools-git crate (keeps libgit2 out
+// of the kernel). Re-exported so `crate::vfs::GitVfs` paths keep working.
 #[cfg(feature = "git")]
-pub use git::{FileStatus, GitVfs, LogEntry, StatusSummary, WorktreeInfo};
+pub use kaish_tools_git::{FileStatus, GitVfs, LogEntry, StatusSummary, WorktreeInfo};
 pub use jobfs::JobFs;
 pub use memory::MemoryFs;
 pub use router::{MountInfo, VfsRouter};
