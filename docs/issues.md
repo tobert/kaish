@@ -85,6 +85,21 @@ tasks in line format; JSON format (`:284-290`) includes them with an
 match JSON behaviour with an explicit failure marker, or fail loudly
 when results are dropped.
 
+### Output disk-spill bypasses the VFS — defeats a runtime read-only kaish
+`output_limit.rs` writes overflow output to spill files via `paths::spill_dir()`
++ `tokio::fs` directly, NOT through `ctx.backend`. So the spill path ignores the
+VFS mount mode entirely: a kaish configured *read-only at runtime* (the whole
+premise of the read-only MCP agent) can still write files to the host temp/cache
+dir just by producing large output — usable for data-exfil staging, disk-fill
+DoS, or leaving persistent artifacts, with no feature beyond the default
+`localfs`. The compile-time capability split can't catch this (it's a runtime
+path), and it directly undermines the project's core driver. Fix when building
+the read-only mode: route spill through the backend (so a read-only backend
+refuses it) or disable spill / fall back to in-memory truncation when the mount
+is read-only. Related: `host`'s `/proc` and `/etc` reads also bypass the VFS by
+design — if "read-only" is ever marketed as "no host observation," those need a
+runtime gate too. Surfaced by dpal design review 2026-06-03.
+
 ---
 
 ## P2 — Focused refactors & real bugs
