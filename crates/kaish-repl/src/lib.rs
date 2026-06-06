@@ -726,7 +726,10 @@ fn resolve_prompt(repl: &Repl) -> String {
 /// Run the REPL.
 pub fn run() -> Result<()> {
     println!("会sh — kaish v{}", env!("CARGO_PKG_VERSION"));
-    println!("Type help for commands, exit to quit.");
+    // Welcome text comes from the canonical kaish-help corpus (via the kernel
+    // re-export), so it stays in sync with the MCP/embedder instructions.
+    use kaish_kernel::help::{compose, Recipe, SchemaContent};
+    println!("{}", compose(&Recipe::repl_welcome(), &SchemaContent::new(&[])));
 
     let mut repl = Repl::new()?;
 

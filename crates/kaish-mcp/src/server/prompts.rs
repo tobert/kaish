@@ -118,6 +118,22 @@ mod tests {
         assert!(!result.messages.is_empty());
     }
 
+    #[tokio::test]
+    async fn server_instructions_compose_core_and_keep_mcp_tail() {
+        use rmcp::ServerHandler;
+        let handler = make_handler();
+        let info = handler.get_info();
+        let instr = info.instructions.expect("instructions present");
+        // The shared core comes from the kaish-help corpus (a Foundations guarantee).
+        assert!(
+            instr.contains("No word splitting"),
+            "instructions should carry the composed core, got:\n{instr}"
+        );
+        // The MCP-specific tail stays in the handler (frontend, not language).
+        assert!(instr.contains("kaish://vfs"), "should keep the MCP resource hint");
+        assert!(instr.contains("--init"), "should keep the MCP --init hint");
+    }
+
     #[test]
     fn test_prompt_router_lists_all() {
         let prompts = KaishServerHandler::prompt_router().list_all();

@@ -115,11 +115,12 @@ should preserve the real exit code. Surfaced by dpal design review 2026-06-03.
 WASI green. **Remaining:**
 - **Phase 2:** decompose `LANGUAGE.md`/`syntax.md` into `Syntax` fragments; make both
   *generated* from fragments with a drift-check test.
-- **Phase 3:** wire `Recipe::{agent_onboarding,tool_description,repl_welcome}` into
-  the MCP `instructions:` (`handler.rs:472`), the `execute` tool description
-  (`handler.rs:243`), and the REPL welcome (`lib.rs:727`) — kills the hand-rolled
-  prose that drifts from `overview.md`. Generate the MCP prompt set from the topic
-  list instead of the hand-maintained 6.
+- **Phase 3 (mostly done 2026-06-06):** MCP `instructions:` and the REPL welcome now
+  compose from recipes (hand-rolled prose gone from both). **Residual:** the `execute`
+  **tool description** is still a `#[tool(description="…")]` macro literal — needs an
+  rmcp runtime list-tools override to source it from `compose()`; deferred. The 6 MCP
+  prompts already route through `get_help` (canonical, not drift); auto-generating them
+  from the topic list is `#[prompt]`-macro-bound polish, deferred.
 - **Phase 4:** publish; kaijutsu/kaibo adopt `kaish-help`.
 - **Phase 5:** i18n scaffolding + first `ja` fragments.
 

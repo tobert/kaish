@@ -8,7 +8,7 @@
 //!
 //! Design + resolved decisions: `docs/composable-help.md`.
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use kaish_types::ToolSchema;
 
@@ -126,6 +126,9 @@ pub struct Selector {
     pub depth: Depth,
     /// Requested locale; falls back to [`DEFAULT_LOCALE`] per slot.
     pub locale: String,
+    /// Emit `## <concept title>` section headers. Markdown-rendering clients want
+    /// them; a plain-terminal REPL banner does not.
+    pub headers: bool,
 }
 
 /// Live, schema-derived content the static fragments can't hold.
@@ -173,32 +176,39 @@ fn applicable(fragment: &Fragment, selector: &Selector) -> bool {
     variant_ok && depth_ok && audience_ok
 }
 
-/// Choose the fragments for one concept: filter, then resolve each (key, variant)
-/// slot to the requested locale, falling back to English.
+/// Choose the fragments for one concept: filter, preserve **registry order** (it's
+/// author-controlled and pedagogical — not key-sorted), and resolve each
+/// (key, variant) slot to the requested locale, falling back to English.
 fn select_for_concept<'f>(concept: Concept, selector: &Selector) -> Vec<&'f Fragment> {
-    let mut slots: BTreeMap<(&str, u8), &Fragment> = BTreeMap::new();
+    // Slot order = first appearance in the registry; `chosen` holds the best
+    // locale match per slot (replacing in place keeps the slot's position).
+    let mut order: Vec<(&str, u8)> = Vec::new();
+    let mut chosen: HashMap<(&str, u8), &Fragment> = HashMap::new();
 
     for fragment in FRAGMENTS
         .iter()
         .filter(|f| f.concept == concept && applicable(f, selector))
     {
         let slot = (fragment.key, fragment.variant.order());
-        match slots.get(&slot) {
-            // First candidate for this slot wins by default.
+        match chosen.get(&slot) {
             None => {
-                slots.insert(slot, fragment);
+                order.push(slot);
+                chosen.insert(slot, fragment);
             }
             // Prefer the requested locale; otherwise keep what we have (English
-            // base, by construction of the registry).
+            // base, by construction of the registry). Position is unchanged.
             Some(existing) => {
                 if fragment.locale == selector.locale && existing.locale != selector.locale {
-                    slots.insert(slot, fragment);
+                    chosen.insert(slot, fragment);
                 }
             }
         }
     }
 
-    slots.into_values().collect()
+    order
+        .iter()
+        .filter_map(|slot| chosen.get(slot).copied())
+        .collect()
 }
 
 /// Compose canonical kaish guidance into a single markdown document.
@@ -235,7 +245,12 @@ pub fn compose(selector: &Selector, generated: &dyn GeneratedContent) -> String 
             }
         }
 
-        sections.push(format!("## {}\n\n{}", concept.title(), body.trim_end()));
+        let body = body.trim_end();
+        if selector.headers {
+            sections.push(format!("## {}\n\n{}", concept.title(), body));
+        } else {
+            sections.push(body.to_string());
+        }
     }
 
     sections.join("\n\n")
@@ -293,17 +308,20 @@ impl Recipe {
             audience: Audience::Agent,
             depth: Depth::Summary,
             locale: DEFAULT_LOCALE.to_string(),
+            headers: true,
         }
     }
 
-    /// The REPL startup welcome: model + operating contract, human-flavored.
+    /// The REPL startup welcome: model + the welcome line, human-flavored. Terse
+    /// (no Foundations dump, no section headers) — it's a one-time banner.
     pub fn repl_welcome() -> Selector {
         Selector {
-            concepts: vec![Concept::Model, Concept::Foundations],
+            concepts: vec![Concept::Model],
             variants: Vec::new(),
             audience: Audience::Human,
             depth: Depth::Summary,
             locale: DEFAULT_LOCALE.to_string(),
+            headers: false,
         }
     }
 
@@ -315,6 +333,7 @@ impl Recipe {
             audience: Audience::Agent,
             depth: Depth::Summary,
             locale: DEFAULT_LOCALE.to_string(),
+            headers: false,
         }
     }
 }
@@ -381,6 +400,39 @@ mod tests {
         // Reference is a superset: at least as long, and contains an example block.
         assert!(reference.len() >= summary.len());
         assert!(reference.contains("```"), "reference depth should include example fragments");
+    }
+
+    #[test]
+    fn fragments_render_in_registry_order_not_alphabetical() {
+        let out = compose(&Recipe::agent_onboarding(), &no_content());
+        let nws = out.find("No word splitting").expect("has no-word-splitting");
+        let fail = out.find("Fail loud").expect("has crash-not-corrupt");
+        assert!(
+            nws < fail,
+            "registry order should lead with no-word-splitting, not alphabetical:\n{out}"
+        );
+    }
+
+    #[test]
+    fn repl_welcome_intro_precedes_help_line() {
+        let out = compose(&Recipe::repl_welcome(), &no_content());
+        let intro = out.find("Bourne-like").expect("has intro");
+        let help_line = out.find("Type `help`").expect("has welcome line");
+        assert!(intro < help_line, "intro should precede the help/exit line:\n{out}");
+    }
+
+    #[test]
+    fn repl_welcome_is_headerless_and_terse() {
+        let out = compose(&Recipe::repl_welcome(), &no_content());
+        assert!(!out.contains("##"), "REPL banner must not carry markdown headers:\n{out}");
+        assert!(out.contains("help"), "welcome should point at help");
+        assert!(out.contains("exit"), "welcome should mention exit");
+    }
+
+    #[test]
+    fn agent_onboarding_renders_section_headers() {
+        let out = compose(&Recipe::agent_onboarding(), &no_content());
+        assert!(out.contains("## "), "markdown clients want section headers:\n{out}");
     }
 
     #[test]

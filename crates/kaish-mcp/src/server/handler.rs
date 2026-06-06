@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
-use kaish_kernel::help::{get_help, HelpTopic};
+use kaish_kernel::help::{compose, get_help, HelpTopic, Recipe, SchemaContent};
 use kaish_kernel::nonce::NonceStore;
 use kaish_kernel::tools::ToolSchema;
 use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
@@ -469,22 +469,20 @@ impl rmcp::ServerHandler for KaishServerHandler {
                 .enable_logging()
                 .build(),
             server_info: Implementation::from_build_env(),
-            instructions: Some(
-                "kaish (会sh) — Shell with pre-validation and structured output for MCP tool orchestration.\n\n\
-                 Why use kaish instead of a raw shell:\n\
-                 • Syntax errors are caught before execution — no half-run commands\n\
-                 • No word splitting — $VAR with spaces just works\n\
-                 • `for line in $(cmd)` iterates per line (newline split only) — no IFS gymnastics\n\
-                 • All builtins support --json for structured output (no parsing ls/ps text)\n\
-                 • Destructive operations can require confirmation nonces (set -o latch)\n\
-                 • External commands work via PATH (cargo build, git status, etc.)\n\n\
-                 Tools:\n\
+            // The shared core (what kaish is + the operating contract) comes from
+            // the canonical kaish-help corpus, so it stays in sync with the REPL and
+            // embedders. Builtins are listed on demand via `help builtins`, so we
+            // compose with empty schemas (skips the inline index). The MCP-specific
+            // tail (tools, --init, resources) stays here — it's frontend, not language.
+            instructions: Some(format!(
+                "{}\n\n\
+                 ## Tools\n\
                  • execute — Run commands. First time? Run `help builtins` to see what's available.\n\n\
-                 Configuration:\n\
+                 ## Configuration\n\
                  • --init <path> — load a .kai script before each command (set defaults, aliases, etc.). Repeatable.\n\n\
-                 Resources available via `kaish://vfs/{path}` URIs."
-                    .to_string(),
-            ),
+                 Resources available via `kaish://vfs/{{path}}` URIs.",
+                compose(&Recipe::agent_onboarding(), &SchemaContent::new(&[])),
+            )),
         }
     }
 

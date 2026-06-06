@@ -265,8 +265,20 @@ for a human reader. Visibility lives at build/introspection time instead:
    that's Phase 3.)
 2. Decompose LANGUAGE.md into fragments; make LANGUAGE.md and syntax.md generated;
    add the drift-check test.
-3. Rewire MCP instructions + tool description + REPL welcome to recipes; generate
-   the MCP prompt set.
+3. 🟡 **MOSTLY DONE (2026-06-06).** Wired the two runtime surfaces:
+   - MCP `instructions:` (`handler.rs` `get_info`) → `compose(Recipe::agent_onboarding,
+     SchemaContent::new(&[]))` (empty schemas → skips the inline builtin dump; clients
+     run `help builtins`) + the MCP-specific tail (tools / `--init` / `kaish://vfs`),
+     which stays in the handler per the frontend boundary.
+   - REPL welcome (`lib.rs`) → `compose(Recipe::repl_welcome, …)` (headerless, terse).
+   - Added `Selector.headers` (markdown clients want `##` headers; the REPL banner
+     doesn't) and fixed compose to render in **registry order**, not key-sort.
+   - **Deferred:** the `execute` **tool description** is a compile-time
+     `#[tool(description="…")]` macro literal — `compose()` is runtime, so it can't be
+     sourced that way without an rmcp list-tools override. Left as-is for now (the
+     `instructions:` field is the primary agent-facing guidance). The 6 MCP **prompts**
+     already route through `get_help` (canonical, not drift); auto-generating them from
+     the topic list is `#[prompt]`-macro-bound polish, also deferred.
 4. Publish; kaijutsu/kaibo adopt `kaish-help`.
 5. (Later) i18n scaffolding + first `ja` fragments.
 
