@@ -1,121 +1,156 @@
-//! MCP prompt implementations.
+//! MCP prompt surface.
 //!
-//! Each kaish help topic becomes an MCP prompt. Uses the same content
-//! as the `help` builtin via `kaish_kernel::help::get_help()`.
-//!
-//! The `#[prompt_router]` impl block lives in `handler.rs` alongside
-//! `#[tool_router]` so both routers share the same module visibility.
-
-use rmcp::schemars::{self, JsonSchema};
-use serde::{Deserialize, Serialize};
-
-/// Parameters for the builtins prompt (accepts optional tool name filter).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct BuiltinsParams {
-    /// Specific tool name to get detailed help for (optional).
-    #[schemars(description = "Specific tool name for detailed help (optional)")]
-    pub tool: Option<String>,
-}
+//! The prompt set is single-sourced from the kaish-help topic registry
+//! (`kaish_kernel::help::list_topics`): one `kaish-<topic>` prompt per help
+//! topic, rendered through the same `get_help` content the `help` builtin uses.
+//! The list/render logic lives on `KaishServerHandler` (`build_prompts` /
+//! `render_prompt`) so it shares the handler's cached tool schemas; this module
+//! holds the tests that pin the behavior.
 
 #[cfg(test)]
 mod tests {
     use crate::server::config::McpServerConfig;
     use crate::server::handler::KaishServerHandler;
-    use rmcp::handler::server::wrapper::Parameters;
     use rmcp::model::PromptMessageContent;
-
-    use super::*;
+    use serde_json::{Map, Value};
 
     fn make_handler() -> KaishServerHandler {
         let config = McpServerConfig::default();
         KaishServerHandler::new(config, vec![]).expect("handler creation failed")
     }
 
+    /// Extract the rendered text of a prompt's first message.
+    fn first_text(result: &rmcp::model::GetPromptResult) -> &str {
+        match &result.messages[0].content {
+            PromptMessageContent::Text { text } => text.as_str(),
+            _ => panic!("expected text content"),
+        }
+    }
+
     #[tokio::test]
-    async fn test_prompt_overview() {
+    async fn prompt_list_is_sourced_from_topic_registry() {
+        let handler = make_handler();
+        let prompts = handler.build_prompts();
+
+        // One prompt per help topic, all `kaish-`-prefixed.
+        let topics = kaish_kernel::help::list_topics();
+        assert_eq!(
+            prompts.len(),
+            topics.len(),
+            "prompt count should track the topic registry"
+        );
+        for prompt in &prompts {
+            assert!(
+                prompt.name.starts_with("kaish-"),
+                "prompt name should be kaish-prefixed: {}",
+                prompt.name
+            );
+            assert!(prompt.description.is_some(), "every prompt has a description");
+        }
+
+        let names: Vec<&str> = prompts.iter().map(|p| p.name.as_str()).collect();
+        // Spot-check the well-known topics carry over.
+        for expected in [
+            "kaish-overview",
+            "kaish-syntax",
+            "kaish-builtins",
+            "kaish-vfs",
+            "kaish-scatter",
+            "kaish-limits",
+        ] {
+            assert!(names.contains(&expected), "missing prompt {expected}");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_builtins_prompt_advertises_the_tool_argument() {
+        let handler = make_handler();
+        for prompt in handler.build_prompts() {
+            match prompt.name.as_str() {
+                "kaish-builtins" => {
+                    let args = prompt
+                        .arguments
+                        .as_ref()
+                        .expect("builtins prompt should advertise arguments");
+                    assert_eq!(args.len(), 1);
+                    assert_eq!(args[0].name, "tool");
+                    assert_eq!(args[0].required, Some(false));
+                }
+                _ => assert!(
+                    prompt.arguments.is_none(),
+                    "{} should not advertise arguments",
+                    prompt.name
+                ),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn render_overview_mentions_kaish() {
         let handler = make_handler();
         let result = handler
-            .prompt_overview()
-            .await
-            .expect("prompt_overview failed");
+            .render_prompt("kaish-overview", None)
+            .expect("overview should render");
         assert!(result.description.is_some());
-        assert!(!result.messages.is_empty());
-        if let PromptMessageContent::Text { ref text } = result.messages[0].content {
-            assert!(text.contains("kaish"), "overview should mention kaish");
-        } else {
-            panic!("Expected text content");
-        }
+        assert!(first_text(&result).contains("kaish"));
     }
 
     #[tokio::test]
-    async fn test_prompt_syntax() {
+    async fn render_syntax_mentions_variables() {
         let handler = make_handler();
         let result = handler
-            .prompt_syntax()
-            .await
-            .expect("prompt_syntax failed");
-        assert!(!result.messages.is_empty());
-        if let PromptMessageContent::Text { ref text } = result.messages[0].content {
-            assert!(text.contains("Variables"), "syntax should mention Variables");
-        } else {
-            panic!("Expected text content");
-        }
+            .render_prompt("kaish-syntax", None)
+            .expect("syntax should render");
+        assert!(first_text(&result).contains("Variables"));
     }
 
     #[tokio::test]
-    async fn test_prompt_builtins_all() {
-        let handler = make_handler();
-        let params = Parameters(BuiltinsParams { tool: None });
-        let result = handler
-            .prompt_builtins(params)
-            .await
-            .expect("prompt_builtins failed");
-        assert!(!result.messages.is_empty());
-        if let PromptMessageContent::Text { ref text } = result.messages[0].content {
-            assert!(text.contains("echo"), "builtins should list echo");
-        } else {
-            panic!("Expected text content");
-        }
-    }
-
-    #[tokio::test]
-    async fn test_prompt_builtins_specific_tool() {
-        let handler = make_handler();
-        let params = Parameters(BuiltinsParams {
-            tool: Some("echo".to_string()),
-        });
-        let result = handler
-            .prompt_builtins(params)
-            .await
-            .expect("prompt_builtins failed");
-        assert!(!result.messages.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_prompt_vfs() {
-        let handler = make_handler();
-        let result = handler.prompt_vfs().await.expect("prompt_vfs failed");
-        assert!(!result.messages.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_prompt_scatter() {
+    async fn render_builtins_without_tool_lists_commands() {
         let handler = make_handler();
         let result = handler
-            .prompt_scatter()
-            .await
-            .expect("prompt_scatter failed");
+            .render_prompt("kaish-builtins", None)
+            .expect("builtins should render");
+        assert!(first_text(&result).contains("echo"), "should list echo");
+    }
+
+    #[tokio::test]
+    async fn render_builtins_with_tool_gives_tool_help() {
+        let handler = make_handler();
+        let mut args = Map::new();
+        args.insert("tool".to_string(), Value::String("echo".to_string()));
+        let result = handler
+            .render_prompt("kaish-builtins", Some(&args))
+            .expect("builtins(tool) should render");
+        assert_eq!(
+            result.description.as_deref(),
+            Some("Help for builtin: echo")
+        );
         assert!(!result.messages.is_empty());
     }
 
     #[tokio::test]
-    async fn test_prompt_limits() {
+    async fn render_builtins_with_empty_tool_falls_back_to_index() {
+        // An empty `tool` argument must not become Tool("") help.
         let handler = make_handler();
+        let mut args = Map::new();
+        args.insert("tool".to_string(), Value::String(String::new()));
         let result = handler
-            .prompt_limits()
-            .await
-            .expect("prompt_limits failed");
-        assert!(!result.messages.is_empty());
+            .render_prompt("kaish-builtins", Some(&args))
+            .expect("builtins(empty tool) should render the index");
+        assert!(first_text(&result).contains("echo"));
+    }
+
+    #[tokio::test]
+    async fn render_rejects_unknown_prompt() {
+        let handler = make_handler();
+        let err = handler
+            .render_prompt("kaish-bogus", None)
+            .expect_err("unknown prompt should fail loudly");
+        assert!(
+            err.message.contains("unknown prompt"),
+            "error should name the failure: {}",
+            err.message
+        );
     }
 
     #[tokio::test]
@@ -132,19 +167,5 @@ mod tests {
         // The MCP-specific tail stays in the handler (frontend, not language).
         assert!(instr.contains("kaish://vfs"), "should keep the MCP resource hint");
         assert!(instr.contains("--init"), "should keep the MCP --init hint");
-    }
-
-    #[test]
-    fn test_prompt_router_lists_all() {
-        let prompts = KaishServerHandler::prompt_router().list_all();
-        assert_eq!(prompts.len(), 6, "should have 6 prompts");
-
-        let names: Vec<&str> = prompts.iter().map(|p| p.name.as_str()).collect();
-        assert!(names.contains(&"kaish-overview"));
-        assert!(names.contains(&"kaish-syntax"));
-        assert!(names.contains(&"kaish-builtins"));
-        assert!(names.contains(&"kaish-vfs"));
-        assert!(names.contains(&"kaish-scatter"));
-        assert!(names.contains(&"kaish-limits"));
     }
 }

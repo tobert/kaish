@@ -1,7 +1,10 @@
 # Composable Help & Instructions — Design Proposal
 
-**Status:** Phase 1 landed (2026-06-06) — `kaish-help` crate built, content moved,
-`kaish_kernel::help` is a shim, all tests/clippy/WASI green. Phases 2–5 pending (§10).
+**Status:** Phases 1–3 landed (2026-06-06) — `kaish-help` crate built, content moved,
+`kaish_kernel::help` is a shim, `syntax.md` generated + drift-tested, and every runtime
+surface (kernel `help`, REPL welcome, MCP `instructions:`, MCP `execute` tool
+description, MCP prompt set) composes from the corpus. All tests/clippy/WASI green.
+Phases 4–5 (publish + i18n) pending (§10).
 **Driver:** Embedders (kaijutsu, kaibo), the REPL, and the MCP server should all
 build the instructions they hand to humans and agents on top of *one* canonical
 kaish content library, so that a kaish release pushes updated guidance everywhere
@@ -272,7 +275,7 @@ for a human reader. Visibility lives at build/introspection time instead:
    moved to fragments. `LANGUAGE.md` stays hand-authored; a test guards that it
    still covers the syntax surface. (Full decomposition of LANGUAGE.md itself was
    declined — preserve its prose flow.)
-3. 🟡 **MOSTLY DONE (2026-06-06).** Wired the two runtime surfaces:
+3. ✅ **DONE (2026-06-06).** Wired every runtime surface to the corpus:
    - MCP `instructions:` (`handler.rs` `get_info`) → `compose(Recipe::agent_onboarding,
      SchemaContent::new(&[]))` (empty schemas → skips the inline builtin dump; clients
      run `help builtins`) + the MCP-specific tail (tools / `--init` / `kaish://vfs`),
@@ -280,12 +283,17 @@ for a human reader. Visibility lives at build/introspection time instead:
    - REPL welcome (`lib.rs`) → `compose(Recipe::repl_welcome, …)` (headerless, terse).
    - Added `Selector.headers` (markdown clients want `##` headers; the REPL banner
      doesn't) and fixed compose to render in **registry order**, not key-sort.
-   - **Deferred:** the `execute` **tool description** is a compile-time
-     `#[tool(description="…")]` macro literal — `compose()` is runtime, so it can't be
-     sourced that way without an rmcp list-tools override. Left as-is for now (the
-     `instructions:` field is the primary agent-facing guidance). The 6 MCP **prompts**
-     already route through `get_help` (canonical, not drift); auto-generating them from
-     the topic list is `#[prompt]`-macro-bound polish, also deferred.
+   - **`execute` tool description** → the rmcp `list_tools` runtime override now sets it
+     from `compose(Recipe::tool_description, …)` plus MCP-frontend framing (lead,
+     unsupported-syntax note, paths, `help builtins` pointer), via the testable
+     `composed_execute_description()` helper. The `#[tool(description="…")]` macro
+     literal is reduced to a stable one-line fallback (real surface is `list_tools`).
+   - **MCP prompts** → dropped the `#[prompt_router]`/`#[prompt]` macros entirely.
+     `list_prompts`/`get_prompt` are manual and single-source from `help::list_topics()`
+     (`build_prompts`/`render_prompt` on the handler): one `kaish-<topic>` prompt per
+     topic, content via `get_help`. Adding a topic to the corpus now yields a prompt for
+     free; `ignore`/`output-limit` are exposed for the first time (6 → 8); unknown prompt
+     names fail loudly (`invalid_params`) instead of serving generic help.
 4. Publish; kaijutsu/kaibo adopt `kaish-help`.
 5. (Later) i18n scaffolding + first `ja` fragments.
 

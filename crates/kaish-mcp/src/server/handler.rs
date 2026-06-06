@@ -9,7 +9,6 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::Context as _;
 
-use rmcp::handler::server::router::prompt::PromptRouter;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
@@ -17,21 +16,21 @@ use rmcp::model::{
     Annotated, CallToolRequestParams, CallToolResult, Content, GetPromptRequestParams,
     GetPromptResult, Implementation, ListPromptsResult, ListResourceTemplatesResult,
     ListResourcesResult, ListToolsResult, LoggingLevel, LoggingMessageNotificationParam,
-    PaginatedRequestParams, ProgressNotificationParam, ProtocolVersion, RawResource,
-    RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
-    ServerCapabilities, ServerInfo, SetLevelRequestParams, SubscribeRequestParams,
-    ToolAnnotations, UnsubscribeRequestParams,
+    PaginatedRequestParams, ProgressNotificationParam, Prompt, PromptArgument, ProtocolVersion,
+    RawResource, RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult,
+    ResourceContents, ServerCapabilities, ServerInfo, SetLevelRequestParams,
+    SubscribeRequestParams, ToolAnnotations, UnsubscribeRequestParams,
 };
 use rmcp::schemars::{self, JsonSchema};
 use rmcp::service::{NotificationContext, Peer, RequestContext, RoleServer};
 use rmcp::ErrorData as McpError;
 use rmcp::model::{PromptMessage, PromptMessageRole};
-use rmcp::{prompt, prompt_router, tool, tool_router};
+use rmcp::{tool, tool_router};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
-use kaish_kernel::help::{compose, get_help, HelpTopic, Recipe, SchemaContent};
+use kaish_kernel::help::{compose, get_help, list_topics, HelpTopic, Recipe, SchemaContent};
 use kaish_kernel::nonce::NonceStore;
 use kaish_kernel::tools::ToolSchema;
 use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
@@ -50,8 +49,6 @@ pub struct KaishServerHandler {
     vfs: Arc<RwLock<VfsRouter>>,
     /// Tool router.
     tool_router: ToolRouter<Self>,
-    /// Prompt router.
-    prompt_router: PromptRouter<Self>,
     /// Resource watcher (subscription tracking + file watching).
     watcher: Arc<ResourceWatcher>,
     /// MCP peer handle, shared with ResourceWatcher.
@@ -65,6 +62,26 @@ pub struct KaishServerHandler {
     /// Paths to init scripts loaded before each execute() call.
     /// Re-read from disk on each call so edits take effect without restart.
     init_paths: Vec<PathBuf>,
+}
+
+/// The client-facing description of the `execute` tool, composed at runtime.
+///
+/// The operating contract comes from the canonical `kaish-help` corpus
+/// (`Recipe::tool_description`) so it never drifts from the REPL welcome or the
+/// `instructions:` field. The MCP-frontend framing — the lead sentence, the
+/// unsupported-syntax note, the path hint, and the `help builtins` pointer —
+/// stays local, mirroring how `get_info` keeps its MCP-specific tail.
+fn composed_execute_description() -> String {
+    format!(
+        "Run shell commands with pre-validation — syntax errors are caught before \
+         anything executes. Each call runs in a fresh kernel (variables and cwd \
+         reset); confirmation nonces persist across calls.\n\n\
+         {}\n\n\
+         Not supported: process substitution <(), backticks, eval.\n\
+         Paths: native paths work within $HOME; /v/ = ephemeral memory.\n\n\
+         First time? Run: help builtins",
+        compose(&Recipe::tool_description(), &SchemaContent::new(&[])),
+    )
 }
 
 /// Map LoggingLevel to a numeric severity for comparison.
@@ -127,7 +144,6 @@ impl KaishServerHandler {
             config,
             vfs: Arc::new(RwLock::new(vfs)),
             tool_router: Self::tool_router(),
-            prompt_router: Self::prompt_router(),
             watcher: ResourceWatcher::new(peer.clone()),
             peer,
             log_level: Arc::new(RwLock::new(None)),
@@ -244,7 +260,13 @@ impl KaishServerHandler {
     ///
     /// Each call runs in a fresh, isolated environment. Supports restricted/modified
     /// Bourne syntax plus kaish extensions (scatter/gather, typed params, MCP tool calls).
-    #[tool(description = "Run shell commands with pre-validation — syntax errors are caught before anything executes.\n\nEach call runs in a fresh kernel (variables reset, cwd reset). Confirmation nonces persist across calls.\n\nKey advantages over bash:\n• No word splitting — $VAR with spaces just works, no quoting bugs\n• `for line in $(cmd)` splits on newlines only — line iteration works without IFS dance; whitespace within a line is never split\n• Bare glob expansion — *.txt expands to matching files (disable: set +o glob)\n• All builtins support --json for structured output (ls --json, ps --json, etc.)\n• Destructive commands (rm) can be gated behind confirmation nonces (set -o latch)\n\nBuiltins: grep, jq, git, find, sed, awk, cat, ls, tree, stat, diff, and 50+ more.\nAlso supports: pipes, redirects, here-docs, if/for/while, functions, ${VAR:-default}, $((arithmetic)).\n\nNot supported: process substitution <(), backticks, eval.\n\nPaths: Native paths work within $HOME. /v/ = ephemeral memory.\n\nFirst time? Run: help builtins")]
+    // The static description here is a minimal, stable fallback. The real
+    // client-facing description is composed at runtime in `list_tools` from the
+    // canonical `kaish-help` corpus (`Recipe::tool_description`) so the operating
+    // contract stays in sync with the REPL welcome and the `instructions:` field.
+    #[tool(
+        description = "Run kaish shell commands with pre-validation — syntax errors are caught before anything runs. Run `help builtins` to list available commands."
+    )]
     async fn execute(
         &self,
         input: Parameters<ExecuteInput>,
@@ -364,92 +386,82 @@ impl KaishServerHandler {
     }
 }
 
-#[prompt_router(vis = "pub(crate)")]
 impl KaishServerHandler {
-    #[prompt(
-        name = "kaish-overview",
-        description = "What kaish is, topic list, quick examples"
-    )]
-    pub(crate) async fn prompt_overview(&self) -> Result<GetPromptResult, McpError> {
-        let content = get_help(&HelpTopic::Overview, &[]);
-        Ok(GetPromptResult {
-            description: Some("kaish overview and quick reference".to_string()),
-            messages: vec![PromptMessage::new_text(PromptMessageRole::User, content)],
-        })
+    /// Build the MCP prompt list, single-sourced from the kaish-help topic
+    /// registry. One prompt per help topic (`kaish-<topic>`), so adding a topic
+    /// to the corpus exposes a prompt for free — no hand-maintained parallel list.
+    /// The `builtins` prompt advertises an optional `tool` argument for per-tool help.
+    pub(crate) fn build_prompts(&self) -> Vec<Prompt> {
+        list_topics()
+            .into_iter()
+            .map(|(topic, description)| {
+                let arguments = (topic == "builtins").then(|| {
+                    vec![PromptArgument {
+                        name: "tool".to_string(),
+                        title: None,
+                        description: Some(
+                            "Specific tool name for detailed help (optional)".to_string(),
+                        ),
+                        required: Some(false),
+                    }]
+                });
+                Prompt {
+                    name: format!("kaish-{topic}"),
+                    title: None,
+                    description: Some(description.to_string()),
+                    arguments,
+                    icons: None,
+                    meta: None,
+                }
+            })
+            .collect()
     }
 
-    #[prompt(
-        name = "kaish-syntax",
-        description = "Variables, quoting, pipes, control flow reference"
-    )]
-    pub(crate) async fn prompt_syntax(&self) -> Result<GetPromptResult, McpError> {
-        let content = get_help(&HelpTopic::Syntax, &[]);
-        Ok(GetPromptResult {
-            description: Some("kaish language syntax reference".to_string()),
-            messages: vec![PromptMessage::new_text(PromptMessageRole::User, content)],
-        })
-    }
-
-    #[prompt(
-        name = "kaish-builtins",
-        description = "List of all available builtins with descriptions"
-    )]
-    pub(crate) async fn prompt_builtins(
+    /// Render a prompt by its `kaish-<topic>` name. Routes through the same
+    /// `get_help` content the `help` builtin uses, so prompts never drift from
+    /// the canonical corpus. Unknown names fail loudly rather than falling back
+    /// to generic help.
+    pub(crate) fn render_prompt(
         &self,
-        Parameters(params): Parameters<super::prompts::BuiltinsParams>,
+        name: &str,
+        arguments: Option<&serde_json::Map<String, Value>>,
     ) -> Result<GetPromptResult, McpError> {
-        let (topic, description) = if let Some(tool_name) = params.tool {
-            (
-                HelpTopic::Tool(tool_name.clone()),
-                format!("Help for builtin: {}", tool_name),
-            )
+        let topic_str = name.strip_prefix("kaish-").unwrap_or(name);
+
+        // Validate against the registry: parse_topic maps anything unknown to
+        // Tool(name), which would silently serve "tool not found" text for a
+        // bogus prompt name. Reject up front instead.
+        let entry = list_topics().into_iter().find(|(t, _)| *t == topic_str);
+        let Some((_, catalog_description)) = entry else {
+            return Err(McpError::invalid_params(
+                format!("unknown prompt: {name}"),
+                None,
+            ));
+        };
+
+        // The builtins prompt accepts an optional `tool` argument for per-tool help.
+        let (topic, description) = if topic_str == "builtins" {
+            match arguments
+                .and_then(|a| a.get("tool"))
+                .and_then(|v| v.as_str())
+                .filter(|t| !t.is_empty())
+            {
+                Some(tool_name) => (
+                    HelpTopic::Tool(tool_name.to_string()),
+                    format!("Help for builtin: {tool_name}"),
+                ),
+                None => (HelpTopic::Builtins, catalog_description.to_string()),
+            }
         } else {
             (
-                HelpTopic::Builtins,
-                "All available kaish builtins".to_string(),
+                HelpTopic::parse_topic(topic_str),
+                catalog_description.to_string(),
             )
         };
 
         let content = get_help(&topic, &self.tool_schemas);
-
         Ok(GetPromptResult {
             description: Some(description),
-            messages: vec![PromptMessage::new_text(PromptMessageRole::User, content)],
-        })
-    }
-
-    #[prompt(
-        name = "kaish-vfs",
-        description = "Virtual filesystem mounts, paths, backends"
-    )]
-    pub(crate) async fn prompt_vfs(&self) -> Result<GetPromptResult, McpError> {
-        let content = get_help(&HelpTopic::Vfs, &[]);
-        Ok(GetPromptResult {
-            description: Some("kaish VFS (virtual filesystem) reference".to_string()),
-            messages: vec![PromptMessage::new_text(PromptMessageRole::User, content)],
-        })
-    }
-
-    #[prompt(
-        name = "kaish-scatter",
-        description = "Parallel processing with scatter/gather (散/集)"
-    )]
-    pub(crate) async fn prompt_scatter(&self) -> Result<GetPromptResult, McpError> {
-        let content = get_help(&HelpTopic::Scatter, &[]);
-        Ok(GetPromptResult {
-            description: Some("Scatter/gather parallel processing reference".to_string()),
-            messages: vec![PromptMessage::new_text(PromptMessageRole::User, content)],
-        })
-    }
-
-    #[prompt(
-        name = "kaish-limits",
-        description = "Known limitations and workarounds"
-    )]
-    pub(crate) async fn prompt_limits(&self) -> Result<GetPromptResult, McpError> {
-        let content = get_help(&HelpTopic::Limits, &[]);
-        Ok(GetPromptResult {
-            description: Some("Known limitations and workarounds".to_string()),
             messages: vec![PromptMessage::new_text(PromptMessageRole::User, content)],
         })
     }
@@ -541,6 +553,9 @@ impl rmcp::ServerHandler for KaishServerHandler {
 
         for tool in &mut tools {
             if tool.name == "execute" {
+                // Operating contract single-sourced from the kaish-help corpus
+                // (stays in sync with the REPL welcome and `instructions:`).
+                tool.description = Some(composed_execute_description().into());
                 // Output schema: lets clients validate/type-check the response
                 match rmcp::handler::server::tool::schema_for_output::<ExecuteResult>() {
                     Ok(schema) => tool.output_schema = Some(schema),
@@ -655,7 +670,7 @@ impl rmcp::ServerHandler for KaishServerHandler {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, McpError> {
         Ok(ListPromptsResult {
-            prompts: self.prompt_router.list_all(),
+            prompts: self.build_prompts(),
             meta: None,
             next_cursor: None,
         })
@@ -664,15 +679,9 @@ impl rmcp::ServerHandler for KaishServerHandler {
     async fn get_prompt(
         &self,
         request: GetPromptRequestParams,
-        context: RequestContext<RoleServer>,
+        _context: RequestContext<RoleServer>,
     ) -> Result<GetPromptResult, McpError> {
-        let prompt_context = rmcp::handler::server::prompt::PromptContext::new(
-            self,
-            request.name,
-            request.arguments,
-            context,
-        );
-        self.prompt_router.get_prompt(prompt_context).await
+        self.render_prompt(&request.name, request.arguments.as_ref())
     }
 
     // -- Resources --
@@ -1127,6 +1136,26 @@ mod tests {
         assert!(schema_str.contains("stderr"), "schema should include stderr field");
         assert!(schema_str.contains("code"), "schema should include code field");
         assert!(schema_str.contains("ok"), "schema should include ok field");
+    }
+
+    #[test]
+    fn execute_description_composes_contract_and_keeps_mcp_framing() {
+        let desc = composed_execute_description();
+        // The operating contract comes from the kaish-help corpus (a Foundations
+        // guarantee), so the description tracks the canonical source.
+        assert!(
+            desc.contains("No word splitting"),
+            "description should carry the composed contract, got:\n{desc}"
+        );
+        // The MCP-frontend framing stays local.
+        assert!(
+            desc.contains("First time? Run: help builtins"),
+            "should keep the help-builtins pointer"
+        );
+        assert!(
+            desc.contains("process substitution"),
+            "should keep the unsupported-syntax note"
+        );
     }
 
     #[tokio::test]

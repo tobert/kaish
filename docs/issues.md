@@ -108,7 +108,7 @@ should preserve the real exit code. Surfaced by dpal design review 2026-06-03.
 
 ## P2 — Focused refactors & real bugs
 
-### Composable help/instructions library (`kaish-help` crate) — Phase 1 done
+### Composable help/instructions library (`kaish-help` crate) — Phases 1–3 done
 **Phase 1 landed 2026-06-06:** `kaish-help` crate created (concept fragment model +
 `compose`/recipes + byte-stable `get_help` compat surface); help content moved to
 `crates/kaish-help/content/en/`; `kaish_kernel::help` is now a shim. Tests/clippy/
@@ -117,12 +117,18 @@ WASI green. **Remaining:**
   `Syntax` fragments (`render_syntax_reference()` + `regen_syntax` example),
   drift-tested; byte-identical to the old file. `LANGUAGE.md` stays hand-authored
   (full decomposition declined) with a coverage test.
-- **Phase 3 (mostly done 2026-06-06):** MCP `instructions:` and the REPL welcome now
-  compose from recipes (hand-rolled prose gone from both). **Residual:** the `execute`
-  **tool description** is still a `#[tool(description="…")]` macro literal — needs an
-  rmcp runtime list-tools override to source it from `compose()`; deferred. The 6 MCP
-  prompts already route through `get_help` (canonical, not drift); auto-generating them
-  from the topic list is `#[prompt]`-macro-bound polish, deferred.
+- **Phase 3 (done 2026-06-06):** MCP `instructions:`, the REPL welcome, the `execute`
+  **tool description**, and the MCP **prompt set** all compose from the canonical
+  `kaish-help` corpus — no hand-rolled prose or hand-maintained lists left in the MCP
+  frontend.
+  - The tool description is now built in the `list_tools` runtime override from
+    `compose(Recipe::tool_description, …)` plus MCP-frontend framing (the
+    `#[tool(description=…)]` macro literal is reduced to a stable one-line fallback).
+  - The prompts dropped the `#[prompt_router]`/`#[prompt]` macros: `list_prompts`/
+    `get_prompt` are manual and single-source from `help::list_topics()` (one
+    `kaish-<topic>` prompt per topic, rendered via `get_help`). This also exposes the
+    previously-omitted `ignore` and `output-limit` topics as prompts (6 → 8), and
+    unknown prompt names now fail loudly instead of serving generic help.
 - **Phase 4:** publish; kaijutsu/kaibo adopt `kaish-help`.
 - **Phase 5:** i18n scaffolding + first `ja` fragments.
 
