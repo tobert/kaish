@@ -1294,6 +1294,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaish-help"
+version = "0.8.0"
+dependencies = [
+ "kaish-types",
+]
+
+[[package]]
 name = "kaish-kernel"
 version = "0.8.0"
 dependencies = [
@@ -1319,6 +1326,7 @@ dependencies = [
  "jaq-json",
  "jaq-std",
  "kaish-glob",
+ "kaish-help",
  "kaish-tool-api",
  "kaish-tools-git",
  "kaish-tools-host",

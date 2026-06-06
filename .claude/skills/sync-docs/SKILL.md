@@ -41,7 +41,7 @@ Each document has a primary audience. Optimize for that audience:
 | Help categorization | `crates/kaish-kernel/src/help.rs` → `format_tool_list()` match arms |
 | Language syntax | `crates/kaish-kernel/src/` (lexer, parser, interpreter) |
 | VFS mounts | `crates/kaish-kernel/src/vfs/` |
-| Help content (compiled in) | `crates/kaish-kernel/docs/help/*.md` |
+| Help content (compiled in) | `crates/kaish-help/content/en/*.md` |
 
 ## Category Mapping — Do Not Unify
 
@@ -195,9 +195,10 @@ For detailed mappings, consult `references/sync-map.md`.
 When a new builtin is added, update all of these:
 
 1. `crates/kaish-kernel/src/tools/builtin/mod.rs` — register it
-2. `crates/kaish-kernel/src/help.rs` — add to correct category match arm
+2. `crates/kaish-help/src/topic.rs` — only if it needs a non-generated help topic
+   (the `help builtins` list is generated from tool schemas; no per-builtin edit)
 3. `README.md` — add to builtin table in appropriate category
-4. `crates/kaish-kernel/docs/help/limits.md` — if it has known limitations
+4. `crates/kaish-help/content/en/limits.md` — if it has known limitations
 5. `docs/LANGUAGE.md` — if it introduces new syntax or concepts
 6. `CLAUDE.md` — if it changes the language key points or architecture
 

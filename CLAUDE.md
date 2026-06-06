@@ -21,6 +21,7 @@ Eagerly read the `crates/kaish-types/` crate in full.
 ```
 crates/
 ├── kaish-types/     # Pure-data leaf crate: OutputData, ExecResult, Value, DirEntry, etc.
+├── kaish-help/      # Composable help & instructions content (fragments + recipes); content/en/*.md
 ├── kaish-glob/      # Glob matching and async file walking with gitignore support
 ├── kaish-kernel/    # Core: lexer, parser, interpreter, tools, VFS, validator
 ├── kaish-mcp/       # MCP server (expose kaish as an MCP tool)
@@ -92,7 +93,12 @@ Tests live in `crates/kaish-kernel/tests/`. Snapshots in `crates/kaish-kernel/te
 ## Documentation
 
 - `docs/LANGUAGE.md` — complete language reference
-- `crates/kaish-kernel/docs/help/*.md` — help system content, embedded at compile time into the kernel
+- `crates/kaish-help/content/en/*.md` — help system content, embedded at compile time
+  via the `kaish-help` crate (repo-root `docs/help` symlinks here). Shared by the
+  kernel `help` builtin, the REPL, the MCP server, and embedders.
+- `crates/kaish-help/src/` — composition surface: `fragments.rs` (the English
+  fragment registry, concept-organized) + `compose.rs` (recipes). Design:
+  `docs/composable-help.md`.
 
 **Keep in sync:** When adding builtins or changing syntax, update the relevant help files.
 The builtin list in `help builtins` is generated dynamically from tool schemas, but

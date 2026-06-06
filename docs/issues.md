@@ -98,11 +98,32 @@ the read-only mode: route spill through the backend (so a read-only backend
 refuses it) or disable spill / fall back to in-memory truncation when the mount
 is read-only. Related: `host`'s `/proc` and `/etc` reads also bypass the VFS by
 design — if "read-only" is ever marketed as "no host observation," those need a
-runtime gate too. Surfaced by dpal design review 2026-06-03.
+runtime gate too. A second, caller-facing wrinkle confirmed live from kaibo's
+read-only `run_kaish` (2026-06-06): on spill the result `code` is remapped to `3`
+(with the real code in `original_code`), so a successful big `cat` (real code 0)
+reads as a failure to an automated MCP caller — the in-memory-truncation fix
+should preserve the real exit code. Surfaced by dpal design review 2026-06-03.
 
 ---
 
 ## P2 — Focused refactors & real bugs
+
+### Composable help/instructions library (`kaish-help` crate) — Phase 1 done
+**Phase 1 landed 2026-06-06:** `kaish-help` crate created (concept fragment model +
+`compose`/recipes + byte-stable `get_help` compat surface); help content moved to
+`crates/kaish-help/content/en/`; `kaish_kernel::help` is now a shim. Tests/clippy/
+WASI green. **Remaining:**
+- **Phase 2:** decompose `LANGUAGE.md`/`syntax.md` into `Syntax` fragments; make both
+  *generated* from fragments with a drift-check test.
+- **Phase 3:** wire `Recipe::{agent_onboarding,tool_description,repl_welcome}` into
+  the MCP `instructions:` (`handler.rs:472`), the `execute` tool description
+  (`handler.rs:243`), and the REPL welcome (`lib.rs:727`) — kills the hand-rolled
+  prose that drifts from `overview.md`. Generate the MCP prompt set from the topic
+  list instead of the hand-maintained 6.
+- **Phase 4:** publish; kaijutsu/kaibo adopt `kaish-help`.
+- **Phase 5:** i18n scaffolding + first `ja` fragments.
+
+Full design + resolved decisions: [composable-help.md](composable-help.md).
 
 ### Minimal build (`--no-default-features`) test suite does not compile
 `cargo check -p kaish-kernel --no-default-features` compiles the **lib**, but
@@ -318,6 +339,34 @@ hatch-free) is more churn than the current need justifies.
 ---
 
 ## P4 — Eventually
+
+### Soften the "sh subset that passes shellcheck" framing
+CLAUDE.md (and the README) describe kaish as "a `sh` subset that passes
+`shellcheck --enable=all`." That framing is now more aspirational than accurate
+and undersells what kaish actually is. The skeleton is sh-shaped — `if/then/fi`,
+`for…in…do/done`, `case…esac`, `NAME=value`, `$()`, `$(())`, `${VAR:-}`, pipes,
+heredocs — but:
+
+- The dominant test form is `[[ ]]` (LANGUAGE.md:173), which is a bash-ism, not
+  POSIX: shellcheck flags it **SC3010** under `sh` dialect. kaish then extends it
+  past bash too (quoted-regex `=~ "\.rs$"`, `!~`). Here-strings `<<<` are bash
+  (SC3011).
+- Core shell *semantics* are deliberately dropped: word splitting, `eval`,
+  backticks, process substitution.
+- Typed data (floats, strict booleans, JSON), structured `$()`, the `split`
+  builtin, E-code diagnostics, and the proposed collections
+  ([arrays-and-hashes.md](arrays-and-hashes.md)) are modelled by **no** shellcheck
+  dialect at all.
+
+Net: kaish is neither a strict POSIX-`sh` subset nor a bash subset. "Passes
+`shellcheck --enable=all`" holds only for the genuinely-shared core and only under
+`bash` dialect. Recommend reframing the docs to something like *"inspired by POSIX
+sh and bash, and informed by shellcheck's lints"* rather than implying compliance.
+Corollary worth stating in the same place: shellcheck offers **zero** coverage for
+kaish's extensions by construction, so the kaish validator is the sole safety net
+for them (e.g. discarded-`append`, `len`/`in` type mismatches). One nice point in
+kaish's favour — bare `$arr` = whole value is exactly the bash footgun shellcheck
+warns about with SC2128 ("expanding an array without an index"), designed out.
 
 ### `mktemp` random suffix has slight modulo bias
 `random_suffix` (`tools/builtin/mktemp.rs`) maps random bytes onto a 36-char

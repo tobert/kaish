@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/kaish-glob",
     "crates/kaish-types",
+    "crates/kaish-help",
     "crates/kaish-tool-api",
     "crates/kaish-vfs",
     "crates/kaish-tools-git",

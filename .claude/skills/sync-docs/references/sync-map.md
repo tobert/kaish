@@ -99,8 +99,9 @@ States what's auto-generated vs manual. Keep accurate.
 
 ## Help Files (compiled into binary)
 
-All under `crates/kaish-kernel/docs/help/`. Embedded at compile time via
-`include_str!` in `help.rs`.
+All under `crates/kaish-help/content/en/` (repo-root `docs/help` symlinks here).
+Embedded at compile time via `include_str!` in `kaish-help`'s `content.rs`;
+`kaish_kernel::help` re-exports the surface.
 
 ### overview.md
 
