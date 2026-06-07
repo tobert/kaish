@@ -70,14 +70,6 @@ A `SyncPipeReader` adapter (sync `std::io::Read` over async
 would stream chunks. Expected modest payoff; defer until a real
 workload pushes against the buffer.
 
-### Here-string `<<<` — parse-error message polish
-`parser.rs` command_parser `.try_map(...)` emits
-"multiple stdin redirects on one command are ambiguous" when two of
-`<`, `<<`, `<<<` appear on the same command. Chumsky's alternative
-backtracking surfaces a less specific "expected '=', or '('" at the
-first redirect instead. Behaviour is correct (loud parse error);
-message should be narrowed so the actionable reason is surfaced.
-
 ### Output disk-spill bypasses the VFS — defeats a runtime read-only kaish
 **Core fix landed 2026-06-06.** `OutputLimitConfig` now carries a runtime
 `SpillMode` (`Disk` | `Memory`). `Memory` mode (builder: `OutputLimitConfig::mcp().in_memory()`)
@@ -499,6 +491,24 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **Here-string `<<<` ambiguity now surfaces an actionable parse error — fixed 2026-06-07.**
+  Two stdin sources on one command (`cat < a <<< b`, `cat <<< a <<< b`) used to
+  fail with the generic "expected '=', or '('" — the error from the competing
+  statement-level *assignment* alternative. Empirically confirmed that a
+  `try_map` rejection inside `command_parser` cannot win this: chumsky's
+  `choice` merge keeps the assignment alternative's error regardless of the
+  span our custom error carries (even a valid `cat foo`, forced to error in
+  `try_map`, surfaced the assignment message at 4..7, not ours at the command
+  span). So the rule moved to a **post-parse structural scan** in
+  `parse()` (`first_ambiguous_stdin`): `command_parser` now always builds the
+  command, and `parse()` rejects any command with >1 stdin source with a clear
+  message. Kept at parse time (not the validator) because validation is
+  skippable (`skip_validation`) while `setup_stdin_redirects` is silently
+  last-wins — parsing is the non-bypassable gate. Span is best-effort
+  (start-of-source; redirects carry no AST span — precise columns would need
+  spanning `Redirect`, deferred). Test:
+  `parser_tests::ambiguous_stdin_surfaces_actionable_message`.
 
 - **`gather` line-format no longer silently drops failures — fixed 2026-06-07.**
   `scheduler/scatter.rs` line format dropped failed workers via

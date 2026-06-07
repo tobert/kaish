@@ -247,6 +247,28 @@ fn parser_herestring_errors(#[case] input: &str) {
     expect_parse_error(input);
 }
 
+/// When two stdin sources appear on one command, the actionable
+/// "multiple stdin redirects" message must surface — not the generic
+/// "expected '=', or '('" from a competing statement-level alternative.
+/// Chumsky keeps the furthest-position error, so the custom error must be
+/// anchored at the offending (second) redirect to win the merge.
+#[rstest]
+#[case("cat <<< a <<< b")]
+#[case("cat < /in <<< hi")]
+#[case("cat <<< hi < /in")]
+fn ambiguous_stdin_surfaces_actionable_message(#[case] input: &str) {
+    let errors = parse(input).expect_err("expected a parse error");
+    let joined = errors
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(
+        joined.contains("multiple stdin redirects"),
+        "`{input}` should surface the multiple-stdin message, got: {joined}"
+    );
+}
+
 // =============================================================================
 // CONTROL FLOW
 // =============================================================================

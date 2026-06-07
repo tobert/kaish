@@ -731,14 +731,32 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     let parser = program_parser();
     let result = parser.parse(tokens.as_slice().map(end_span, |(t, s)| (t, s)));
 
-    result.into_result().map_err(|errs| {
+    let program = result.into_result().map_err(|errs| {
         errs.into_iter()
             .map(|e| ParseError {
                 span: *e.span(),
                 message: e.to_string(),
             })
-            .collect()
-    })
+            .collect::<Vec<_>>()
+    })?;
+
+    // Structural well-formedness checks that chumsky's grammar can't surface a
+    // clean message for. A command with two stdin sources (`<`/`<<`/`<<<`)
+    // would silently depend on redirect ordering at execution time, so reject
+    // it here — at parse time, which (unlike validation) can never be skipped.
+    if first_ambiguous_stdin(&program.statements) {
+        return Err(vec![ParseError {
+            // Redirects carry no AST span, so anchor at the start of the
+            // source; the message is the actionable part. Precise columns
+            // would require spanning `Redirect` (deferred — see docs/issues.md).
+            span: (0..0).into(),
+            message: "multiple stdin redirects on one command are ambiguous; \
+                      use exactly one of `<`, `<<`, or `<<<`"
+                .to_string(),
+        }]);
+    }
+
+    Ok(program)
 }
 
 /// Parse a single statement (useful for REPL).
@@ -1329,39 +1347,75 @@ where
         just(Token::Dot).to(".".to_string()),
     ));
 
+    // NB: the "at most one stdin source per command" rule is enforced by a
+    // post-parse scan in `parse()` (see `first_ambiguous_stdin`), NOT here.
+    // A `try_map` rejection at this level cannot surface its own message: a
+    // command like `cat <<< a <<< b` also fails the competing statement-level
+    // assignment/function alternative ("expected '=', or '('"), and chumsky's
+    // `choice` merge keeps that alternative's error regardless of which span
+    // our custom error carries. So we accept the command here and reject it
+    // structurally after parsing, where the message is fully under our control
+    // (verified empirically 2026-06-07; see docs/issues.md).
     command_name
         .then(args_list_parser())
         .then(redirect_parser().repeated().collect::<Vec<_>>())
-        .try_map(|((name, args), redirects), span| {
-            // At most one stdin-source redirect per command. Multiple `<<<`,
-            // or mixing `<` with `<<` or `<<<`, would silently depend on
-            // ordering — reject loudly instead.
-            let stdin_sources = redirects
-                .iter()
-                .filter(|r| {
-                    matches!(
-                        r.kind,
-                        RedirectKind::Stdin
-                            | RedirectKind::HereDoc
-                            | RedirectKind::HereString
-                    )
-                })
-                .count();
-            if stdin_sources > 1 {
-                return Err(Rich::custom(
-                    span,
-                    "multiple stdin redirects on one command are ambiguous; \
-                     use exactly one of `<`, `<<`, or `<<<`",
-                ));
-            }
-            Ok(Command {
-                name,
-                args,
-                redirects,
-            })
+        .map(|((name, args), redirects)| Command {
+            name,
+            args,
+            redirects,
         })
         .labelled("command")
         .boxed()
+}
+
+/// True if `cmd` has more than one stdin source (`<`, `<<`, `<<<`). Such a
+/// command would silently depend on redirect ordering at execution time
+/// (`setup_stdin_redirects` is last-wins), so `parse()` rejects it loudly.
+fn command_has_ambiguous_stdin(cmd: &Command) -> bool {
+    cmd.redirects
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.kind,
+                RedirectKind::Stdin | RedirectKind::HereDoc | RedirectKind::HereString
+            )
+        })
+        .count()
+        > 1
+}
+
+/// Find the first command anywhere in `stmts` (recursing into pipelines,
+/// control-flow bodies, chains, and tool definitions) that has more than one
+/// stdin source. Used by `parse()` to reject the ambiguity after parsing.
+fn first_ambiguous_stdin(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_has_ambiguous_stdin)
+}
+
+fn stmt_has_ambiguous_stdin(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Command(c) => command_has_ambiguous_stdin(c),
+        Stmt::Pipeline(p) => p.commands.iter().any(command_has_ambiguous_stdin),
+        Stmt::If(i) => {
+            first_ambiguous_stdin(&i.then_branch)
+                || i.else_branch
+                    .as_deref()
+                    .is_some_and(first_ambiguous_stdin)
+        }
+        Stmt::For(f) => first_ambiguous_stdin(&f.body),
+        Stmt::While(w) => first_ambiguous_stdin(&w.body),
+        Stmt::Case(c) => c.branches.iter().any(|b| first_ambiguous_stdin(&b.body)),
+        Stmt::ToolDef(t) => first_ambiguous_stdin(&t.body),
+        Stmt::AndChain { left, right } | Stmt::OrChain { left, right } => {
+            stmt_has_ambiguous_stdin(left) || stmt_has_ambiguous_stdin(right)
+        }
+        Stmt::Assignment(_)
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Return(_)
+        | Stmt::Exit(_)
+        | Stmt::Test(_)
+        | Stmt::Empty => false,
+    }
 }
 
 /// Arguments list parser that handles `--` flag terminator.
