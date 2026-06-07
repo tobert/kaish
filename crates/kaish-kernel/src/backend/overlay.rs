@@ -130,6 +130,15 @@ impl KernelBackend for VirtualOverlayBackend {
         }
     }
 
+    async fn set_mtime(&self, path: &Path, mtime: std::time::SystemTime) -> BackendResult<()> {
+        if Self::is_virtual_path(path) {
+            self.vfs.set_mtime(path, mtime).await?;
+            Ok(())
+        } else {
+            self.inner.set_mtime(path, mtime).await
+        }
+    }
+
     async fn append(&self, path: &Path, content: &[u8]) -> BackendResult<()> {
         if Self::is_virtual_path(path) {
             let mut existing = match self.vfs.read(path).await {

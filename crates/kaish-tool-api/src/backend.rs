@@ -48,6 +48,13 @@ pub trait KernelBackend: Send + Sync {
     /// Create a directory.
     async fn mkdir(&self, path: &Path) -> BackendResult<()>;
 
+    /// Set the modification time of an existing path.
+    ///
+    /// Read-only or purely-virtual mounts reject rather than silently
+    /// succeeding — `touch` on an existing file must route through here, never
+    /// escape to the host via `resolve_real_path`.
+    async fn set_mtime(&self, path: &Path, mtime: std::time::SystemTime) -> BackendResult<()>;
+
     /// Remove a file or directory.
     async fn remove(&self, path: &Path, recursive: bool) -> BackendResult<()>;
 

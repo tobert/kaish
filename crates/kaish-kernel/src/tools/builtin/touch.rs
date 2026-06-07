@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::path::Path;
+use std::time::SystemTime;
 
 use crate::backend::WriteMode;
 use crate::interpreter::ExecResult;
@@ -64,14 +65,16 @@ impl Tool for Touch {
             let resolved = ctx.resolve_path(&path_str);
             let path = Path::new(&resolved);
 
-            if ctx.backend.exists(path).await {
-                // File exists, update timestamp via real-FS path when available.
-                if let Some(real_path) = ctx.backend.resolve_real_path(path)
-                    && let Err(e) = update_mtime(&real_path) {
-                        last_err = Some(format!("touch: {}: {}", path_str, e));
-                    }
-                // Virtual filesystems (MemoryFs): no-op.
-            } else if let Err(e) = ctx.backend.write(path, &[], WriteMode::CreateNew).await {
+            // Always route through the VFS — never escape to the host via
+            // resolve_real_path. The backend updates the mtime where it can
+            // (local + memory mounts) and rejects on read-only/virtual mounts
+            // rather than silently reporting a success it didn't deliver.
+            let result = if ctx.backend.exists(path).await {
+                ctx.backend.set_mtime(path, SystemTime::now()).await
+            } else {
+                ctx.backend.write(path, &[], WriteMode::CreateNew).await
+            };
+            if let Err(e) = result {
                 last_err = Some(format!("touch: {}: {}", path_str, e));
             }
         }
@@ -80,19 +83,6 @@ impl Tool for Touch {
             None => ExecResult::success(""),
         }
     }
-}
-
-/// Update modification time of a file to the current time.
-///
-/// Uses File::set_modified() which calls futimens/utimensat on Unix.
-fn update_mtime(path: &Path) -> std::io::Result<()> {
-    use std::time::SystemTime;
-
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)?;
-
-    file.set_modified(SystemTime::now())
 }
 
 #[cfg(test)]
@@ -154,5 +144,72 @@ mod tests {
         let mut ctx = make_ctx().await;
         let result = Touch.execute(ToolArgs::new(), &mut ctx).await;
         assert!(!result.ok());
+    }
+
+    /// touch on an existing file must update its mtime *through the VFS*, not
+    /// no-op. A MemoryFs tracks per-entry timestamps, so a regression that
+    /// reinstated the silent virtual no-op would leave the mtime unchanged.
+    #[tokio::test]
+    async fn test_touch_updates_memory_mtime() {
+        let mut ctx = make_ctx().await;
+        let before = ctx
+            .backend
+            .stat(Path::new("/existing.txt"))
+            .await
+            .unwrap()
+            .modified
+            .expect("MemoryFs records mtime");
+
+        // Pin the mtime to a known *past* instant. Reading it back proves
+        // set_mtime actually wrote through the VFS.
+        let past = before - std::time::Duration::from_secs(3600);
+        ctx.backend
+            .set_mtime(Path::new("/existing.txt"), past)
+            .await
+            .expect("set_mtime via VFS");
+        let pinned = ctx
+            .backend
+            .stat(Path::new("/existing.txt"))
+            .await
+            .unwrap()
+            .modified
+            .unwrap();
+        assert_eq!(pinned, past, "set_mtime did not record the timestamp");
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/existing.txt".into()));
+        let result = Touch.execute(args, &mut ctx).await;
+        assert!(result.ok());
+
+        let after = ctx
+            .backend
+            .stat(Path::new("/existing.txt"))
+            .await
+            .unwrap()
+            .modified
+            .unwrap();
+        // touch set it to "now", later than the pinned past — proving touch
+        // advanced the mtime rather than silently no-opping.
+        assert!(after > past, "touch did not advance the mtime");
+    }
+
+    /// touch on a read-only mount must fail loudly, never silently succeed by
+    /// escaping to the host filesystem.
+    #[tokio::test]
+    async fn test_touch_existing_readonly_rejects() {
+        use crate::vfs::LocalFs;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ro.txt"), b"x").unwrap();
+
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", LocalFs::read_only(dir.path().to_path_buf()));
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/ro.txt".into()));
+        let result = Touch.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "touch on read-only mount must fail");
     }
 }

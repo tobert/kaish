@@ -68,6 +68,10 @@ impl KernelBackend for MockBackend {
         Ok(())
     }
 
+    async fn set_mtime(&self, _path: &Path, _mtime: std::time::SystemTime) -> BackendResult<()> {
+        Ok(())
+    }
+
     async fn remove(&self, _path: &Path, _recursive: bool) -> BackendResult<()> {
         Ok(())
     }

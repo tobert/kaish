@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 // DirEntry and DirEntryKind live in kaish-types.
 pub use kaish_types::{DirEntry, DirEntryKind};
@@ -37,6 +38,20 @@ pub trait Filesystem: Send + Sync {
     ///
     /// Returns `Err` if the filesystem is read-only.
     async fn remove(&self, path: &Path) -> io::Result<()>;
+
+    /// Set the modification time of an existing path.
+    ///
+    /// The default errors with `Unsupported`. Writable filesystems that track
+    /// timestamps override this; read-only mounts reject. There is deliberately
+    /// **no silent no-op** — a `touch` that cannot record the time must say so
+    /// rather than report success it didn't deliver.
+    async fn set_mtime(&self, path: &Path, mtime: SystemTime) -> io::Result<()> {
+        let _ = mtime;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("set_mtime not supported for {}", path.display()),
+        ))
+    }
 
     /// Returns true if this filesystem is read-only.
     fn read_only(&self) -> bool;

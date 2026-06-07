@@ -246,6 +246,11 @@ impl Filesystem for VfsRouter {
         fs.mkdir(&relative).await
     }
 
+    async fn set_mtime(&self, path: &Path, mtime: std::time::SystemTime) -> io::Result<()> {
+        let (fs, relative) = self.find_mount(path)?;
+        fs.set_mtime(&relative, mtime).await
+    }
+
     async fn remove(&self, path: &Path) -> io::Result<()> {
         let (fs, relative) = self.find_mount(path)?;
         fs.remove(&relative).await

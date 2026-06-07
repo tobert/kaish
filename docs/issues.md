@@ -339,6 +339,19 @@ On `wasm32-wasip1`, a `getrandom::fill` failure surfaces an opaque
 add a `cfg!(target_arch = "wasm32")` hint to the message if it ever matters.
 Flagged by dpal review 2026-06-03.
 
+### `touch <dir>` on a local mount fails (EISDIR); memory mounts succeed
+Hardening on 2026-06-07 routed `touch`-on-existing through the VFS via a new
+`set_mtime` op (Filesystem + KernelBackend), removing the old
+`resolve_real_path` escape to the host and its silent no-op on virtual mounts
+(read-only mounts now reject loudly; `MemoryFs` updates its per-entry mtime).
+Residual: `LocalFs::set_mtime` opens the path with `write(true)` (preserving the
+old `update_mtime` semantics), so `touch existing_directory/` fails with EISDIR
+on a local mount, while `MemoryFs::set_mtime` updates a directory's mtime fine.
+POSIX `touch` works on directories. Fix is to bump the time via `utimensat`/an
+O_RDONLY fd (works on dir fds; on Linux futimens needs only ownership/write
+perm, not a write-mode handle) instead of opening for write — deferred to keep
+the cross-platform `File::set_modified` contract unchanged for now.
+
 ### `touch .hidden.txt` fails — dot-prefixed filenames mis-tokenized
 The lexer splits `.hidden.txt` into `Dot` + `Ident("hidden.txt")`
 rather than a single filename token. `DotSlashPath` (`./foo`) works;

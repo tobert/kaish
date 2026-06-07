@@ -3,11 +3,16 @@
 //! # Examples
 //!
 //! ```kaish
-//! mktemp                        # Create temp file in /tmp
+//! mktemp                        # Create temp file in $TMPDIR (default /tmp)
 //! mktemp -d                     # Create temp directory
-//! mktemp -p /workspace          # Create in specified directory
+//! mktemp -p /workspace          # Create in specified directory (overrides $TMPDIR)
 //! mktemp -t myapp.XXXXXX        # Use template (X's replaced with random chars)
 //! ```
+//!
+//! Parent-directory precedence: explicit `-p` → the `$TMPDIR` kaish var → `/tmp`.
+//! All paths route through the VFS, so where temp files land follows the active
+//! mount mode (real `/tmp`, an in-memory mount, …) — kaish never reads the
+//! host environment directly.
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
@@ -83,9 +88,18 @@ impl Tool for Mktemp {
 
         let is_dir = parsed.directory;
 
-        // Get parent directory
-        let parent_dir = args
-            .get_string("p", usize::MAX)
+        // Parent directory precedence (POSIX): explicit `-p` wins, then the
+        // `$TMPDIR` kaish var (embedder/REPL-controlled via initial_vars — the
+        // hermetic-env pattern), then `/tmp`. We never read the host's
+        // environment directly.
+        let parent_dir = parsed
+            .p
+            .clone()
+            .or_else(|| {
+                ctx.var("TMPDIR")
+                    .map(|v| crate::interpreter::value_to_string(&v))
+            })
+            .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "/tmp".to_string());
 
         // Get template
@@ -289,6 +303,43 @@ mod tests {
         assert!(result.ok());
         assert!(result.text_out().starts_with("/tmp/myapp."));
         assert_eq!(result.text_out().len(), "/tmp/myapp.".len() + 5);
+    }
+
+    /// mktemp honors the `$TMPDIR` kaish var when no explicit `-p` is given,
+    /// falling back to /tmp only when unset. An explicit `-p` still wins.
+    #[tokio::test]
+    async fn test_mktemp_honors_tmpdir() {
+        let mut ctx = make_ctx();
+        ctx.backend.mkdir(Path::new("/customtmp")).await.unwrap();
+        ctx.scope.set("TMPDIR", Value::String("/customtmp".into()));
+
+        let result = Mktemp.execute(ToolArgs::new(), &mut ctx).await;
+        assert!(result.ok());
+        assert!(
+            result.text_out().starts_with("/customtmp/tmp."),
+            "expected $TMPDIR to steer the temp file, got {}",
+            result.text_out()
+        );
+    }
+
+    /// An explicit -p overrides $TMPDIR (POSIX precedence).
+    #[tokio::test]
+    async fn test_mktemp_p_overrides_tmpdir() {
+        let mut ctx = make_ctx();
+        ctx.backend.mkdir(Path::new("/customtmp")).await.unwrap();
+        ctx.backend.mkdir(Path::new("/explicit")).await.unwrap();
+        ctx.scope.set("TMPDIR", Value::String("/customtmp".into()));
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("p".to_string(), Value::String("/explicit".into()));
+        let result = Mktemp.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(
+            result.text_out().starts_with("/explicit/tmp."),
+            "expected -p to win over $TMPDIR, got {}",
+            result.text_out()
+        );
     }
 
     #[tokio::test]

@@ -246,6 +246,23 @@ impl Filesystem for MemoryFs {
         Ok(())
     }
 
+    async fn set_mtime(&self, path: &Path, mtime: SystemTime) -> io::Result<()> {
+        let normalized = Self::normalize(path);
+        let mut entries = self.entries.write().await;
+        match entries.get_mut(&normalized) {
+            Some(Entry::File { modified, .. })
+            | Some(Entry::Directory { modified })
+            | Some(Entry::Symlink { modified, .. }) => {
+                *modified = mtime;
+                Ok(())
+            }
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no such file or directory: {}", path.display()),
+            )),
+        }
+    }
+
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
         let normalized = Self::normalize(path);
         let entries = self.entries.read().await;
@@ -581,6 +598,23 @@ mod tests {
         fs.write(Path::new("test.txt"), b"hello world").await.unwrap();
         let data = fs.read(Path::new("test.txt")).await.unwrap();
         assert_eq!(data, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn test_set_mtime_updates_existing() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("t.txt"), b"x").await.unwrap();
+        let pinned = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs.set_mtime(Path::new("t.txt"), pinned).await.unwrap();
+        let entry = fs.stat(Path::new("t.txt")).await.unwrap();
+        assert_eq!(entry.modified, Some(pinned));
+    }
+
+    #[tokio::test]
+    async fn test_set_mtime_missing_errors() {
+        let fs = MemoryFs::new();
+        let result = fs.set_mtime(Path::new("nope.txt"), SystemTime::now()).await;
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
     }
 
     #[tokio::test]

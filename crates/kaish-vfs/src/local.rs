@@ -182,6 +182,20 @@ impl Filesystem for LocalFs {
         fs::write(&full_path, data).await
     }
 
+    async fn set_mtime(&self, path: &Path, mtime: std::time::SystemTime) -> io::Result<()> {
+        self.check_writable()?;
+        let full_path = self.resolve(path)?;
+        // `set_modified` calls futimens(2) on the fd. Run it on the blocking
+        // pool — std file I/O must not occupy an async worker. We open with
+        // write access because that is what POSIX touch-to-update requires.
+        tokio::task::spawn_blocking(move || {
+            let file = std::fs::OpenOptions::new().write(true).open(&full_path)?;
+            file.set_modified(mtime)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
         let full_path = self.resolve(path)?;
         let mut entries = Vec::new();

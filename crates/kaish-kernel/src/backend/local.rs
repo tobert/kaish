@@ -318,6 +318,11 @@ impl KernelBackend for LocalBackend {
         Ok(self.vfs.stat(path).await?)
     }
 
+    async fn set_mtime(&self, path: &Path, mtime: std::time::SystemTime) -> BackendResult<()> {
+        self.vfs.set_mtime(path, mtime).await?;
+        Ok(())
+    }
+
     async fn mkdir(&self, path: &Path) -> BackendResult<()> {
         self.vfs.mkdir(path).await?;
         Ok(())
