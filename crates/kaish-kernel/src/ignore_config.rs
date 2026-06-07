@@ -579,9 +579,12 @@ mod tests {
         async fn test_build_filter_global_gitignore_honored() {
             let tmp = tempfile::tempdir().expect("tempdir");
             let global_path = tmp.path().join("git_ignore");
-            tokio::fs::write(&global_path, b"*.global_secret\n")
-                .await
-                .expect("write global gitignore");
+            // Write the fixture with std::fs (not tokio::fs) so this test
+            // compiles in the minimal `--no-default-features` build, which
+            // doesn't enable tokio's `fs` feature. Production reads this file
+            // with `std::fs::read_to_string` too (see build_filter), so this
+            // stays faithful to the real path.
+            std::fs::write(&global_path, b"*.global_secret\n").expect("write global gitignore");
 
             let mut config = IgnoreConfig::none();
             config.set_use_global_gitignore(true);

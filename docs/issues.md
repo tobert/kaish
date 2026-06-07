@@ -144,18 +144,24 @@ WASI green. **Remaining:**
 
 Full design + resolved decisions: [composable-help.md](composable-help.md).
 
-### Minimal build (`--no-default-features`) test suite does not compile
-`cargo check -p kaish-kernel --no-default-features` compiles the **lib**, but
-`cargo test -p kaish-kernel --no-default-features` fails: test modules such as
-`ignore_config.rs` (~L582) call `tokio::fs::write` directly, which is only in
-the `native` feature's tokio set. So the sandbox/hermetic build cannot be
-*tested* in CI, only type-checked. This matters now that a read-only kaish is
-the intended sole tool of an MCP agent — we want the minimal surface to be a
-first-class, tested configuration. Fix: gate the offending test helpers behind
-`#[cfg(feature = "native")]`, or route them through `ctx.backend.write` like
-production code. Surfaced 2026-06-03 while gating `uname`/`hostname` and adding
-the minimal-build `--host` error test (which currently can't run for this
-reason). Folds naturally into the planned `native`→capability-feature split.
+### Minimal build (`--no-default-features`) — integration test binaries don't compile
+**Lib unit tests fixed 2026-06-07.** The cited blocker (`ignore_config.rs` L582
+calling `tokio::fs::write`, which needs tokio's `fs` feature, off in the minimal
+build) is resolved — the fixture now uses `std::fs::write`, faithful to the
+production read (`build_filter` uses `std::fs::read_to_string`). `cargo test
+-p kaish-kernel --lib --no-default-features` now passes (1320 tests).
+
+**Remaining:** the *integration* test binaries (`tests/*.rs`) still don't
+compile minimally. 8 of 23 files use `KernelConfig::repl()` / the `kernel_at`
+harness, both `#[cfg(feature = "localfs")]` (real-FS) — so `cargo test
+-p kaish-kernel --no-default-features` (which builds the integration binaries
+too) fails to compile those. Options: (a) file-level `#![cfg(feature =
+"localfs")]` on the inherently real-FS binaries so they're skipped minimally;
+(b) convert the ones that don't actually need real FS (e.g. `validation_tests`)
+to `KernelConfig::isolated()` (memory VFS) so they *run* minimally — strictly
+better coverage. `hermetic_home_tests.rs` already uses `isolated()` and runs in
+both modes as the pattern to follow. Surfaced 2026-06-03; partially resolved
+2026-06-07. Folds naturally into the planned `native`→capability-feature split.
 
 ### Split `kernel.rs::execute_stmt_flow`
 ~L1007–L1443 is an 18-arm async match. Each arm reaches into `scope`,

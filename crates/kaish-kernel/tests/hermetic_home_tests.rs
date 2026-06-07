@@ -14,12 +14,15 @@ use kaish_kernel::{Kernel, KernelConfig};
 fn kernel_with_home(home: &str) -> Kernel {
     let mut vars = HashMap::new();
     vars.insert("HOME".to_string(), Value::String(home.into()));
-    Kernel::new(KernelConfig::repl().with_initial_vars(vars)).expect("kernel")
+    // `isolated()` (memory VFS) rather than `repl()` so this runs in the
+    // minimal `--no-default-features` build too — tilde/HOME logic is
+    // VFS-independent (echo is a builtin; no real FS needed).
+    Kernel::new(KernelConfig::isolated().with_initial_vars(vars)).expect("kernel")
 }
 
 /// A hermetic kernel with empty `initial_vars` (what a sandboxed embedder does).
 fn hermetic_kernel() -> Kernel {
-    Kernel::new(KernelConfig::repl().with_initial_vars(HashMap::new())).expect("kernel")
+    Kernel::new(KernelConfig::isolated().with_initial_vars(HashMap::new())).expect("kernel")
 }
 
 #[tokio::test]
