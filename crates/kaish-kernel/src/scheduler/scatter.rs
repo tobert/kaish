@@ -159,7 +159,24 @@ impl ScatterGatherRunner {
             .await;
 
         // Gather results
-        let gathered = gather_results(&results, &gather_opts);
+        let GatherOutput {
+            text: gathered,
+            dropped_failures,
+        } = gather_results(&results, &gather_opts);
+
+        // The line format can't carry a failed worker as a row. Rather than
+        // silently omit it (data corruption — the caller sees fewer rows than
+        // items scattered), fail loud: a non-zero exit plus an err naming the
+        // failed items. Feeding the truncated set into post-gather would
+        // propagate the corruption, so we short-circuit before running it.
+        if !dropped_failures.is_empty() {
+            let err = format!(
+                "gather: {} task(s) failed and were omitted from line output: {} (use --json to capture per-task status)",
+                dropped_failures.len(),
+                dropped_failures.join(", ")
+            );
+            return ExecResult::from_output(1, gathered, err);
+        }
 
         // Run post-gather commands if any
         if post_gather.is_empty() {
@@ -311,8 +328,24 @@ pub fn extract_items(data: Option<&Value>, text: &str) -> Result<Vec<String>, St
     Ok(vec![trimmed.to_string()])
 }
 
+/// Rendered gather output plus the names of any failed tasks that the
+/// line format could not represent as a row.
+struct GatherOutput {
+    text: String,
+    /// Items whose worker failed and were omitted from `text`. Only the
+    /// line format populates this — the JSON format carries every task as a
+    /// row with an explicit `"ok"` field, so nothing is dropped there.
+    dropped_failures: Vec<String>,
+}
+
 /// Gather results into output string.
-fn gather_results(results: &[ScatterResult], opts: &GatherOptions) -> String {
+///
+/// The JSON format emits every task as a row (`"ok"` discriminates success
+/// from failure). The line format can only carry stdout, so it returns the
+/// successful rows in `text` and reports the failed items in
+/// `dropped_failures` — the caller (`run`) turns that into a loud non-zero
+/// exit rather than letting the failures vanish (see `docs/issues.md`).
+fn gather_results(results: &[ScatterResult], opts: &GatherOptions) -> GatherOutput {
     let results_to_use = if opts.first > 0 && opts.first < results.len() {
         &results[..opts.first]
     } else {
@@ -335,16 +368,31 @@ fn gather_results(results: &[ScatterResult], opts: &GatherOptions) -> String {
             })
             .collect();
 
-        serde_json::to_string_pretty(&json_results).unwrap_or_default()
+        GatherOutput {
+            text: serde_json::to_string_pretty(&json_results).unwrap_or_default(),
+            dropped_failures: Vec::new(),
+        }
     } else {
-        // Output as lines (stdout from each, separated by newlines)
-        results_to_use
+        // Output as lines (stdout from each successful worker, separated by
+        // newlines). Failed workers can't be represented as a stdout row, so
+        // we collect their items and let `run` fail loud instead of dropping
+        // them silently.
+        let text = results_to_use
             .iter()
             .filter(|r| r.result.ok())
             .map(|r| r.result.text_out())
             .map(|t| t.trim().to_string())
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n");
+        let dropped_failures = results_to_use
+            .iter()
+            .filter(|r| !r.result.ok())
+            .map(|r| r.item.clone())
+            .collect();
+        GatherOutput {
+            text,
+            dropped_failures,
+        }
     }
 }
 
@@ -484,7 +532,50 @@ mod tests {
 
         let opts = GatherOptions::default();
         let output = gather_results(&results, &opts);
-        assert_eq!(output, "result_a\nresult_b");
+        assert_eq!(output.text, "result_a\nresult_b");
+        assert!(output.dropped_failures.is_empty());
+    }
+
+    #[test]
+    fn test_gather_results_lines_reports_dropped_failures() {
+        // A failed worker must not vanish from line output: it is reported in
+        // `dropped_failures` so the caller can fail loud (docs/issues.md).
+        let results = vec![
+            ScatterResult {
+                item: "a".to_string(),
+                result: ExecResult::success("result_a"),
+                timed_out: false,
+            },
+            ScatterResult {
+                item: "b".to_string(),
+                result: ExecResult::failure(1, "boom"),
+                timed_out: false,
+            },
+        ];
+
+        let opts = GatherOptions::default();
+        let output = gather_results(&results, &opts);
+        // Successful rows still render; the failure is reported, not dropped.
+        assert_eq!(output.text, "result_a");
+        assert_eq!(output.dropped_failures, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn test_gather_results_json_keeps_failures_as_rows() {
+        // JSON carries failures as rows (ok: false), so it drops nothing.
+        let results = vec![ScatterResult {
+            item: "b".to_string(),
+            result: ExecResult::failure(2, "boom"),
+            timed_out: false,
+        }];
+        let opts = GatherOptions {
+            format: "json".to_string(),
+            ..Default::default()
+        };
+        let output = gather_results(&results, &opts);
+        assert!(output.dropped_failures.is_empty());
+        assert!(output.text.contains("\"ok\": false"));
+        assert!(output.text.contains("\"code\": 2"));
     }
 
     #[test]
@@ -500,8 +591,8 @@ mod tests {
             ..Default::default()
         };
         let output = gather_results(&results, &opts);
-        assert!(output.contains("\"item\": \"test\""));
-        assert!(output.contains("\"ok\": true"));
+        assert!(output.text.contains("\"item\": \"test\""));
+        assert!(output.text.contains("\"ok\": true"));
     }
 
     #[test]
@@ -529,7 +620,7 @@ mod tests {
             ..Default::default()
         };
         let output = gather_results(&results, &opts);
-        assert_eq!(output, "1\n2");
+        assert_eq!(output.text, "1\n2");
     }
 
     #[test]

@@ -78,13 +78,6 @@ backtracking surfaces a less specific "expected '=', or '('" at the
 first redirect instead. Behaviour is correct (loud parse error);
 message should be narrowed so the actionable reason is surfaced.
 
-### `gather` line-format silently drops failures
-`scheduler/scatter.rs:299` — `.filter(|r| r.result.ok())` drops failed
-tasks in line format; JSON format (`:284-290`) includes them with an
-`"ok"` field. Same data, different rows depending on `--json`. Either
-match JSON behaviour with an explicit failure marker, or fail loudly
-when results are dropped.
-
 ### Output disk-spill bypasses the VFS — defeats a runtime read-only kaish
 **Core fix landed 2026-06-06.** `OutputLimitConfig` now carries a runtime
 `SpillMode` (`Disk` | `Memory`). `Memory` mode (builder: `OutputLimitConfig::mcp().in_memory()`)
@@ -506,6 +499,21 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`gather` line-format no longer silently drops failures — fixed 2026-06-07.**
+  `scheduler/scatter.rs` line format dropped failed workers via
+  `.filter(|r| r.result.ok())` while JSON kept them as rows with an `"ok"`
+  field — same data, fewer rows depending on `--json`, and a caller iterating
+  `for x in $(gather)` saw fewer items than it scattered (silent data
+  corruption). `gather_results` now returns a `GatherOutput { text,
+  dropped_failures }`: the line format still renders only successful stdout
+  rows (clean iteration data) but reports the failed item names, and `run`
+  turns a non-empty `dropped_failures` into a loud non-zero exit (`code 1`)
+  with an err naming the failed items, short-circuiting before post-gather so
+  the truncated set isn't propagated downstream. JSON is unchanged (it already
+  carries failures as rows, so `dropped_failures` stays empty). Tests:
+  `scheduler::scatter::tests::{test_gather_results_lines_reports_dropped_failures,
+  test_gather_results_json_keeps_failures_as_rows}`.
 
 - **Non-finite `Value::Float` no longer collapses to null — fixed 2026-06-04.**
   `value_to_json` mapped NaN/Infinity to `null` (JSON has no representation for
