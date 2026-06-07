@@ -286,13 +286,6 @@ diff against previous snapshot before notifying.
 `subscriptions.rs:33` bounds the file-watch channel; high-churn
 environments drop events silently.
 
-### `MemoryFs` lock-splitting TOCTOU in `ensure_parents`
-`vfs/memory.rs:179` acquires a write lock, drops it, then the actual
-mutation acquires a new write lock. Concurrent task can invalidate the
-parent setup between the two. Affects `rename`, `write`, `mkdir`,
-`symlink`. Fix: hold one lock across both operations, or inline
-`ensure_parents`.
-
 ### `scheduler::job::tests::test_cleanup_removes_temp_files` flake
 Test reaches into the shared real-FS `/tmp/kaish/jobs/` path and races
 parallel test runs. Passes in isolation, fails intermittently under
@@ -461,6 +454,18 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`MemoryFs` `ensure_parents` TOCTOU closed — fixed 2026-06-07.**
+  `ensure_parents` took and released its own write lock, then the caller
+  re-locked for the mutation — a window where a concurrent task could remove or
+  replace a parent dir between setup and mutation (`write`, `mkdir`, `symlink`,
+  `rename`). Replaced it with a sync `ensure_parents_locked(&mut entries, path)`
+  that operates on the caller's already-held guard, so each op does
+  parent-creation + mutation atomically under one lock. `rename` keeps its
+  intentional error-ignore (`let _ =`). The fix is structural (single guard) —
+  a deterministic race test isn't feasible without flakiness, which this project
+  avoids; the 37 existing `vfs::memory` tests cover the parent-creation
+  behavior. clippy + `--all` tests green.
 
 - **Builtin `sleep` honors cancellation — verified/pinned 2026-06-07.**
   `tools/builtin/sleep.rs` already raced `tokio::time::sleep(d)` against

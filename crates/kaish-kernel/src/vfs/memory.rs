@@ -175,10 +175,20 @@ impl MemoryFs {
         })
     }
 
-    /// Ensure all parent directories exist.
-    async fn ensure_parents(&self, path: &Path) -> io::Result<()> {
-        let mut entries = self.entries.write().await;
-
+    /// Ensure all parent directories of `path` exist, operating on an
+    /// already-held write guard.
+    ///
+    /// Callers acquire `self.entries.write()` once and perform both the
+    /// parent-creation and the actual mutation (insert/remove) under that
+    /// single guard. Previously `ensure_parents` took and released its own
+    /// lock, leaving a TOCTOU window in which a concurrent task could remove
+    /// or replace a parent directory between the setup and the mutation
+    /// (affected `write`, `mkdir`, `symlink`, `rename`). Folding it into the
+    /// caller's guard closes that window.
+    fn ensure_parents_locked(
+        entries: &mut HashMap<PathBuf, Entry>,
+        path: &Path,
+    ) -> io::Result<()> {
         let mut current = PathBuf::new();
         for component in path.parent().into_iter().flat_map(|p| p.components()) {
             if let std::path::Component::Normal(s) = component {
@@ -213,10 +223,10 @@ impl Filesystem for MemoryFs {
     async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
         let normalized = Self::normalize(path);
 
-        // Ensure parent directories exist
-        self.ensure_parents(&normalized).await?;
-
         let mut entries = self.entries.write().await;
+
+        // Ensure parent directories exist (under the same guard — no TOCTOU)
+        Self::ensure_parents_locked(&mut entries, &normalized)?;
 
         // Check we're not overwriting a directory
         if let Some(Entry::Directory { .. }) = entries.get(&normalized) {
@@ -384,10 +394,10 @@ impl Filesystem for MemoryFs {
     async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
         let normalized = Self::normalize(link);
 
-        // Ensure parent directories exist
-        self.ensure_parents(&normalized).await?;
-
         let mut entries = self.entries.write().await;
+
+        // Ensure parent directories exist (under the same guard — no TOCTOU)
+        Self::ensure_parents_locked(&mut entries, &normalized)?;
 
         // Check if something already exists at this path
         if entries.contains_key(&normalized) {
@@ -410,10 +420,10 @@ impl Filesystem for MemoryFs {
     async fn mkdir(&self, path: &Path) -> io::Result<()> {
         let normalized = Self::normalize(path);
 
-        // Ensure parent directories exist
-        self.ensure_parents(&normalized).await?;
-
         let mut entries = self.entries.write().await;
+
+        // Ensure parent directories exist (under the same guard — no TOCTOU)
+        Self::ensure_parents_locked(&mut entries, &normalized)?;
 
         // Check if something already exists
         if let Some(existing) = entries.get(&normalized) {
@@ -494,10 +504,12 @@ impl Filesystem for MemoryFs {
             ));
         }
 
-        // Ensure parent directories exist for destination
-        drop(self.ensure_parents(&to_normalized).await);
-
         let mut entries = self.entries.write().await;
+
+        // Ensure parent directories exist for destination (under the same
+        // guard — no TOCTOU). Error is intentionally ignored: a missing or
+        // file-shaped parent surfaces below as a normal rename failure.
+        let _ = Self::ensure_parents_locked(&mut entries, &to_normalized);
 
         // Get the source entry
         let entry = entries.remove(&from_normalized).ok_or_else(|| {
