@@ -18,6 +18,7 @@
 |-----------|---------|------------|
 | `[[ ]]` parsed as two brackets | Two separate `[` tokens, not a compound keyword | Works for tests; kaish will never have `[]` array syntax |
 | Keywords as bare arguments | `echo done` may fail because `done` is a keyword token | Quote: `echo "done"` |
+| No token-pasting of adjacent unquoted words | `$VAR`/`$(cmd)`/globs are separate words; `echo $dir/f` → 2 args, `echo /tmp/$(id -u).x` → 3 args (silent). Bare interpolated redirect target (`> $dir/f`) is a parse error. | **Quote the whole word**: `"$dir/f"`, `"/tmp/$(id -u).x"`. See `help syntax` → Quoting. |
 
 ## Builtin Constraints
 
@@ -39,7 +40,7 @@
 - **Pipeline stages run concurrently** with isolated scopes (like bash subshells). Variable assignments in one stage aren't visible in others. Last stage syncs back to parent.
 - **User functions and .kai scripts cannot run inside pipeline stages, scatter workers, or background jobs (`&`).** Only builtins and external commands work in these contexts. Future: per-worker kernel instances.
 - **Scatter results in completion order**, not input order.
-- **No command substitution in redirect targets** — `cmd > $(...)` not supported. Evaluate path first.
+- **Command substitution runs in redirect targets and here-doc bodies** — `cmd > $(gen-path)`, `cat < $(find-cfg)`, and `$(...)` inside a here-doc body all work. The target is a single word, so quote it when it mixes text with an expansion: `> "/tmp/$(id -u).log"`, not `> /tmp/$(id -u).log`.
 - **Preprocessor is context-unaware** — `$(( ))` and heredoc markers replaced before parsing.
 
 ## External Commands

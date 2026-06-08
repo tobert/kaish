@@ -46,6 +46,18 @@ cd -                      # previous directory
 "hello $NAME"             # double quotes — interpolation
 "literal \$X"             # escape $ to prevent expansion
 'hello $NAME'             # single quotes — literal, no interpolation
+
+# Quote to JOIN text with interpolation — kaish does not paste adjacent
+# unquoted tokens into one word (no implicit concatenation):
+"$dir/file.txt"           # one path
+"out-$(date +%s).log"     # one filename (text + command substitution)
+echo "/tmp/$(id -u).sock" # one argument
+
+# Unquoted, adjacent tokens stay SEPARATE — usually not what you want:
+echo $dir/file.txt        # TWO args: "$dir" and "/file.txt"
+echo /tmp/$(id -u).sock   # THREE args: "/tmp/", "$(id -u)", ".sock"
+cmd > "$dir/out.txt"      # redirect target MUST be one word — quote it
+cmd > $dir/out.txt        # parse error (target is a single word slot)
 ```
 
 ## Pipes & Redirects
@@ -64,7 +76,14 @@ content with $VAR
 EOF
 
 jq -r '.name' <<< "$R"    # here-string — feed expanded word to stdin
+
+cmd > "$dir/out.log"      # quote interpolated targets — one word required
+cat < "$(find-config)"    # command substitution works in a quoted target
 ```
+
+A redirect target is a single word: quote it when it interpolates
+(`> "$dir/f"`, not `> $dir/f`). Bare command substitution as the whole
+target (`> $(cmd)`) works; bare text-plus-interpolation does not.
 
 One stdin source per command: `<`, `<<`, and `<<<` cannot be combined.
 jq is built-in (native jaq), so `<<<` + jq replaces `echo … | jq`

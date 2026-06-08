@@ -102,17 +102,45 @@ Currently declared as `_extended: bool` accept-and-ignore. Options:
 unnecessary; (c) note in the help text. (a) is lowest churn — leave
 unless someone reports surprise.
 
-### Redirect targets parse as a single primary expr — no interpolated paths
-`crates/kaish-kernel/src/parser.rs:1540` (`redirect_parser`) binds the target
-with `primary_expr_parser()`, which matches exactly one primary expression. So
-`> $(echo /tmp/x)` and `> $FILE` work, but a target that *interpolates* literal
-text with a substitution/variable — `> /tmp/$(echo x).txt` or `> $dir/out` — is
-a parse error (`found '$(' expected redirect, …`). Bash treats a redirect target
-as a single word that undergoes expansion, so `/tmp/$(…).txt` is one word. Fix:
-parse the target as a word/interpolation (the same machinery argv operands use)
-rather than a lone primary expr, then evaluate via the now-async
-`eval_redirect_target`. Surfaced 2026-06-08 while adding command-substitution
-support to redirect targets; the bare-subst form is a working workaround.
+### No unquoted token-pasting — adjacent bare lexemes are not one word
+kaish's lexer/parser does **no token pasting**: a run of adjacent *unquoted*
+lexemes is never concatenated into a single word. `/tmp/$(echo x).txt` lexes as
+three tokens (`RelativePath` `/tmp/`, `CommandSubst $(…)`, `DottedIdent .txt`)
+and `$dir/out.txt` as two (`SimpleVarRef`, path) — there is no word-assembly
+step that joins them. The **quoted** form is the supported idiom and works
+everywhere because a double-quoted string lexes as one `Interpolated` token:
+`"/tmp/$(echo x).txt"`, `"$dir/out.txt"`. This aligns with the
+`shellcheck --enable=all` north star, which already requires `"$var"`/`"$(cmd)"`
+quoting (SC2086). **Decision (2026-06-08): keep the quoting requirement; do not
+add bare word-pasting.** kaish is not aiming to be a human REPL (bash/zsh/fish
+fill that niche) — the goal is to guide agents to write reliable scripts, and
+"always quote interpolated words" is a simpler, lint-aligned rule than bash's
+implicit pasting. Two surfaces expose the no-pasting behavior differently:
+
+- **Redirect target** (`crates/kaish-kernel/src/parser.rs:1540`, `redirect_parser`)
+  binds with a single `primary_expr_parser()`, so `> /tmp/$(echo x).txt` is a
+  hard parse error (`found '$(' expected redirect, …`). Bare-subst
+  (`> $(echo /tmp/x)`) and quoted (`> "/tmp/$(echo x).txt"`) both work.
+  *Polish (P4, deferred):* turn the parse error into a "quote the redirect
+  target" hint instead of the generic expected-token list.
+- **Argv** (next entry) silently splats into multiple args instead of erroring —
+  the more dangerous of the two.
+
+Surfaced 2026-06-08 while adding command-substitution support to redirect
+targets.
+
+### Unquoted interpolated argv word silently splats into multiple args
+Because there is no token-pasting (see previous entry), `echo /tmp/$(echo gen).txt`
+parses as **three** positional args and prints `/tmp/ gen .txt` (space-joined),
+and `echo $dir/out.txt` prints `/tmp /out.txt` — two args. `command_parser` uses
+`primary_expr_parser().repeated()`, so adjacent exprs are each accepted as their
+own `Arg::Positional` with no diagnostic. This is worse than the redirect case
+because it *silently* produces wrong argv rather than failing. Given the
+keep-quoting decision, the right fix is a **validator diagnostic**: flag adjacent
+argv exprs with no intervening whitespace (lexer would need to preserve adjacency
+spans) and tell the agent to quote — e.g. `E0xx: '/tmp/' and '$(…)' are adjacent;
+quote the word as "/tmp/$(…)"`. Until then, the quoting rule in the docs is the
+mitigation. Deferred (needs adjacency tracking in the lexer).
 
 ---
 

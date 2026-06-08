@@ -52,6 +52,31 @@ echo "literal \$X"              # escaped = no interpolation
 echo 'hello $NAME'              # prints: hello $NAME
 ```
 
+### Quote to join — kaish does not paste adjacent tokens
+
+kaish never concatenates adjacent *unquoted* tokens into one word. `$VAR`,
+`$(cmd)`, and globs are each their own word; to build a single word from text
+plus interpolation, **quote the whole thing**:
+
+```bash
+# Correct — one word each:
+"$dir/file.txt"                # path
+"out-$(date +%s).log"          # filename: text + command substitution
+cat "$HOME/.config/app.toml"
+
+# Surprising — unquoted, these are MULTIPLE words:
+echo $dir/file.txt             # two args: "$dir" and "/file.txt"
+echo /tmp/$(id -u).sock        # three args: "/tmp/", "$(id -u)", ".sock"
+```
+
+This is the complement of the no-word-splitting rule: kaish neither splits a
+variable's value **nor** pastes neighbouring words. The "always quote
+interpolated words" habit is exactly what `shellcheck --enable=all` enforces
+(SC2086), so quoted kaish stays lint-clean. When in doubt, quote.
+
+> **Agents:** treat unquoted text adjacent to `$VAR`/`$(…)`/globs as a bug.
+> Any filename or path that contains an expansion should be a quoted word.
+
 ## Arguments
 
 ```bash
@@ -86,6 +111,14 @@ tool 2> file                    # redirect stderr
 tool &> file                    # stdout + stderr
 tool 2>&1                       # merge stderr into stdout
 cmd 2>&1 | tee log.txt          # capture both streams
+
+# A redirect target is a SINGLE word — quote it when it interpolates.
+# Command substitution runs in the target (and in here-doc bodies).
+echo hi > "$dir/out.log"        # correct
+echo hi > "/tmp/$(id -u).log"   # correct — quoted text + substitution
+echo hi > $(echo /tmp/x.log)    # ok — bare substitution IS the whole word
+echo hi > /tmp/$(id -u).log     # parse error — bare text + substitution
+cat < "$(find-config)"          # substitution in a stdin target
 
 # Here-docs
 cat <<EOF
@@ -676,7 +709,7 @@ These are documented limitations of the current implementation:
 ### Execution
 
 - **Scatter results in completion order** — The 散 (scatter) construct returns results in the order jobs complete, not input order. This is inherent to parallel execution—first done, first returned.
-- **Command substitution in redirect targets** — Constructs like `cmd > $(...)` are not supported. Evaluate the target path separately first.
+- **Redirect targets are a single word** — Command substitution *works* in redirect targets and here-doc bodies (`cmd > $(gen-path)`, `cat < $(find-cfg)`). Because the target is one word and kaish doesn't paste adjacent tokens, quote any target that mixes literal text with an expansion: `> "/tmp/$(id -u).log"`, not the unquoted `> /tmp/$(id -u).log` (which is a parse error). See [Quoting](#quoting).
 
 ### Performance
 

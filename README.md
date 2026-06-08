@@ -23,6 +23,7 @@ that's in our muscle/model memory, while providing better pre-execution syntax c
 easy embedding, and a VFS abstraction to help with sandboxing.
 
 - **No implicit word splitting** — `$VAR` is always one value, never split on spaces
+- **Quote to join** — kaish doesn't paste adjacent unquoted tokens; quote interpolated words: `"$dir/file.txt"`, `"out-$(date +%s).log"`
 - **Bare glob expansion** — `ls *.txt` works; opt out with `set +o glob`
 - **Structured iteration** — `for i in $(seq 1 5)` works via structured data, not word splitting
 - **Line iteration in for-loops** — `for line in $(cat file)` splits on `\n` only; whitespace within a line is never split
