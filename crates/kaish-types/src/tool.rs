@@ -204,6 +204,15 @@ pub struct ToolSchema {
     /// which name *flags*.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+    /// The tool renders its **own** output, including `--json` — the kernel
+    /// must not re-format its `ExecResult` through `apply_output_format`.
+    ///
+    /// Default false: a tool returns typed [`crate::OutputData`] and the kernel
+    /// renders the requested format uniformly. Set true for tools with bespoke
+    /// JSON envelopes (e.g. an embedder's `kj`): they consume `--json`
+    /// themselves and emit final bytes. See [`ToolSchema::with_owned_output`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owns_output: bool,
 }
 
 impl ToolSchema {
@@ -217,6 +226,7 @@ impl ToolSchema {
             map_positionals: false,
             subcommands: Vec::new(),
             aliases: Vec::new(),
+            owns_output: false,
         }
     }
 
@@ -256,6 +266,31 @@ impl ToolSchema {
     /// command-level `aliases`. Used when routing a positional to a child.
     pub fn matches_command(&self, word: &str) -> bool {
         self.name == word || self.aliases.iter().any(|a| a == word)
+    }
+
+    /// Declare that this tool renders its own output (including `--json`), so
+    /// the kernel won't re-format its result.
+    ///
+    /// Applies to the whole tree: every subcommand is marked too, and a `json`
+    /// param is advertised on each node that doesn't already declare one.
+    /// Reflection skips `json` as the kernel-global output flag, so this
+    /// re-advertises it for tools that genuinely own it — closing the loop so
+    /// `help <tool> <sub>` lists `--json` where the tool actually handles it.
+    pub fn with_owned_output(mut self) -> Self {
+        self.mark_owned_output();
+        self
+    }
+
+    fn mark_owned_output(&mut self) {
+        self.owns_output = true;
+        if !self.params.iter().any(|p| p.name == "json") {
+            self.params.push(
+                ParamSchema::new("json", "bool").with_description("Render output as JSON"),
+            );
+        }
+        for child in &mut self.subcommands {
+            child.mark_owned_output();
+        }
     }
 }
 
@@ -493,6 +528,50 @@ mod schema_serde_tests {
         let schema: ToolSchema = serde_json::from_value(flat).expect("deserialize flat form");
         assert!(schema.subcommands.is_empty());
         assert!(schema.aliases.is_empty());
+    }
+
+    /// `with_owned_output` marks the whole tree and advertises `json` on each
+    /// node that didn't already declare it.
+    #[test]
+    fn with_owned_output_marks_tree_and_advertises_json() {
+        let schema = ToolSchema::new("kj", "kaijutsu")
+            .subcommand(
+                ToolSchema::new("context", "ctx")
+                    .subcommand(ToolSchema::new("list", "list contexts")),
+            )
+            .with_owned_output();
+
+        assert!(schema.owns_output, "root marked");
+        assert!(schema.params.iter().any(|p| p.name == "json"), "root advertises json");
+        let context = &schema.subcommands[0];
+        assert!(context.owns_output, "child marked");
+        let list = &context.subcommands[0];
+        assert!(list.owns_output, "grandchild marked");
+        assert!(list.params.iter().any(|p| p.name == "json"), "leaf advertises json");
+    }
+
+    /// `with_owned_output` doesn't duplicate an already-declared `json` param.
+    #[test]
+    fn with_owned_output_does_not_double_add_json() {
+        let schema = ToolSchema::new("kj", "kaijutsu")
+            .param(ParamSchema::new("json", "bool"))
+            .with_owned_output();
+        let json_count = schema.params.iter().filter(|p| p.name == "json").count();
+        assert_eq!(json_count, 1, "json should appear exactly once");
+    }
+
+    /// `owns_output` round-trips and is omitted from the wire when false.
+    #[test]
+    fn owns_output_serde() {
+        let flat = ToolSchema::new("ls", "list");
+        let json = serde_json::to_value(&flat).expect("serialize");
+        let obj = json.as_object().expect("object");
+        assert!(!obj.contains_key("owns_output"), "false omitted: {json}");
+
+        let owned = ToolSchema::new("kj", "kaijutsu").with_owned_output();
+        let wire = serde_json::to_string(&owned).expect("serialize");
+        let back: ToolSchema = serde_json::from_str(&wire).expect("deserialize");
+        assert!(back.owns_output);
     }
 
     /// A subcommand tree round-trips through serde with names and aliases intact.

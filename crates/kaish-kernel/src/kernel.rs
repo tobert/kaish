@@ -2337,11 +2337,10 @@ impl Kernel {
         }
 
         // Builtins parse --json via the GlobalFlags flatten in their clap
-        // struct and write ctx.output_format. The kernel just applies it.
-        let result = match ctx.output_format {
-            Some(format) => apply_output_format(result, format),
-            None => result,
-        };
+        // struct and write ctx.output_format. The kernel applies it — unless the
+        // tool owns its own output (renders --json itself), in which case we
+        // leave its bytes untouched.
+        let result = finalize_output(result, ctx.output_format, schema.owns_output);
 
         Ok(result)
     }
@@ -4156,6 +4155,25 @@ impl CommandDispatcher for Kernel {
     async fn fork_attached(&self) -> Arc<dyn CommandDispatcher> {
         let fork: Arc<Kernel> = Kernel::fork_attached(self).await;
         fork
+    }
+}
+
+/// Apply the requested output format to a builtin's result, unless the tool
+/// owns its own output.
+///
+/// `format` is `ctx.output_format` (set from `--json`). When `owns_output` is
+/// true the tool already rendered its bytes (bespoke JSON envelope), so the
+/// kernel leaves the result untouched rather than re-formatting its
+/// `OutputData`. Otherwise the kernel renders the typed `OutputData` uniformly.
+fn finalize_output(
+    result: ExecResult,
+    format: Option<crate::interpreter::OutputFormat>,
+    owns_output: bool,
+) -> ExecResult {
+    match format {
+        Some(_) if owns_output => result,
+        Some(format) => apply_output_format(result, format),
+        None => result,
     }
 }
 
@@ -6579,6 +6597,34 @@ AFTER="yes"'"#)
             err.to_string().contains("subcommand name is required"),
             "got: {err}"
         );
+    }
+
+    // ── finalize_output: --json rendering vs. owns_output opt-out ───────────
+
+    #[test]
+    fn finalize_output_renders_when_kernel_owns_it() {
+        use crate::interpreter::{OutputData, OutputFormat};
+        let r = ExecResult::with_output(OutputData::text("RAW"));
+        let out = finalize_output(r, Some(OutputFormat::Json), false);
+        // Kernel renders the typed OutputData → JSON; text is no longer bare.
+        assert_ne!(out.text_out(), "RAW", "kernel should reformat to JSON");
+    }
+
+    #[test]
+    fn finalize_output_skips_when_tool_owns_output() {
+        use crate::interpreter::{OutputData, OutputFormat};
+        let r = ExecResult::with_output(OutputData::text("RAW"));
+        let out = finalize_output(r, Some(OutputFormat::Json), true);
+        // owns_output: the tool already rendered; kernel leaves bytes untouched.
+        assert_eq!(out.text_out(), "RAW", "owned output must be left as-is");
+    }
+
+    #[test]
+    fn finalize_output_no_format_is_noop() {
+        use crate::interpreter::OutputData;
+        let r = ExecResult::with_output(OutputData::text("RAW"));
+        let out = finalize_output(r, None, false);
+        assert_eq!(out.text_out(), "RAW");
     }
 
     // ── initial_vars + execute_with_vars + hermetic env ───────────────────
