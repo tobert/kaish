@@ -2454,7 +2454,16 @@ impl Kernel {
             Some(s) => Some(select_leaf(s, args)?),
             None => None,
         };
-        let param_lookup = leaf.map(schema_param_lookup).unwrap_or_default();
+        // Bind against the leaf's params, but MERGE the root schema's params on
+        // top as "global" flags: a value-flag declared at the tool's top level
+        // (e.g. kj's `--confirm <nonce>`) must bind at every leaf, including when
+        // it trails the subcommand path (`kj context retag a b --confirm <n>`).
+        // The leaf wins on name conflicts. For a flat tool, leaf == root, so the
+        // merge is a harmless no-op.
+        let mut param_lookup = schema.map(schema_param_lookup).unwrap_or_default();
+        if let Some(l) = leaf {
+            param_lookup.extend(schema_param_lookup(l));
+        }
         // accepts_word_assign keys off the root tool name (the WORD_ASSIGN list),
         // not the leaf — it's a property of the command, not the subcommand.
         let accepts_word_assign = schema

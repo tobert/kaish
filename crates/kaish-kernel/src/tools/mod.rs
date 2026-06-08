@@ -22,7 +22,7 @@ mod traits;
 pub use builtin::register_builtins;
 #[cfg(feature = "subprocess")]
 pub use builtin::resolve_in_path;
-pub use clap_schema::{params_from_clap, schema_from_clap};
+pub use clap_schema::{params_from_clap, schema_from_clap, schema_tree_from_clap};
 pub use context::{ExecContext, OutputContext};
 pub use global_flags::GlobalFlags;
 pub use registry::ToolRegistry;

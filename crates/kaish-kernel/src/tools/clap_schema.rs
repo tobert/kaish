@@ -5,4 +5,4 @@
 //! Re-exported here so existing `crate::tools::{schema_from_clap, …}` paths
 //! keep working. See `docs/clap-migration.md`.
 
-pub use kaish_tool_api::{params_from_clap, schema_from_clap};
+pub use kaish_tool_api::{params_from_clap, schema_from_clap, schema_tree_from_clap};

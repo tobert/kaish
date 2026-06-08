@@ -126,7 +126,17 @@ fn is_skipped(arg: &Arg) -> bool {
 }
 
 fn arg_to_param(arg: &Arg) -> ParamSchema {
-    let name = arg.get_id().as_str().to_string();
+    let id = arg.get_id().as_str();
+    // Canonical name: prefer the long flag (the user-facing, kebab-cased form).
+    // Every tool that consumes a bound `ToolArgs` reconstructs argv via
+    // `ToolArgs::to_argv()` and re-parses it with clap (kj, cat, tail, …). That
+    // reconstruction emits `--<name>`, so the param name MUST equal the clap
+    // long, or the rebuilt flag is unknown to clap: a snake field id like
+    // `system_prompt` would render as `--system_prompt`, but clap only accepts
+    // the derived long `--system-prompt`. Positionals have no long and keep the
+    // field id. (Previously the id was canonical and the long an alias, which
+    // worked only because no builtin had a field-name ≠ long-name flag.)
+    let name = arg.get_long().unwrap_or(id).to_string();
     let action = arg.get_action();
     let is_bool = matches!(action, ArgAction::SetTrue | ArgAction::SetFalse);
 
@@ -152,14 +162,11 @@ fn arg_to_param(arg: &Arg) -> ParamSchema {
     if let Some(short) = arg.get_short() {
         aliases.push(short.to_string());
     }
-    // Expose the long-flag form whenever it differs from the canonical id
-    // (Rust field name, which is always snake_case). Without this, the
-    // validator and kernel-side `param_lookup` only know the snake form and
-    // would mis-classify a kebab `--ignore-case` as an unknown bool flag.
-    if let Some(long) = arg.get_long()
-        && long != arg.get_id().as_str()
-    {
-        aliases.push(long.to_string());
+    // Keep the snake-case field id reachable as an alias when it differs from
+    // the canonical long, so a consumer (or script) that addresses the arg by
+    // its Rust field name still matches. The long is now the canonical `name`.
+    if id != name {
+        aliases.push(id.to_string());
     }
     if let Some(visible) = arg.get_visible_aliases() {
         for alias in visible {
@@ -297,18 +304,24 @@ mod tests {
         let cmd = DemoIdOverrideArgs::command();
         let params = params_from_clap(&cmd);
 
-        // Without override: schema name keeps the `_` prefix — this is the
-        // regression to guard against. If we ever auto-strip, flip this
-        // assertion + update the builtins to drop the explicit `id =`.
-        let bare = params.iter().find(|p| p.name == "_bare")
-            .expect("_bare still leaks without an id override");
-        assert_eq!(bare.aliases, vec!["b".to_string(), "bare".to_string()]);
+        // The canonical name is the LONG flag (`bare`), NOT the snake field id
+        // (`_bare`). Tools reconstruct argv as `--<name>` and re-parse with clap,
+        // so the name must equal the clap long. The field id rides as an alias so
+        // it stays addressable. (Previously the id was canonical and the leading
+        // `_` leaked into the schema name — that's the bug this now guards.)
+        let bare = params.iter().find(|p| p.name == "bare")
+            .expect("name should be the long flag `bare`, not the field id `_bare`");
+        assert_eq!(bare.aliases, vec!["b".to_string(), "_bare".to_string()]);
+        assert!(
+            !params.iter().any(|p| p.name == "_bare"),
+            "the snake field id must not be the canonical name"
+        );
 
-        // With override: schema name is the override.
+        // With an explicit `id = "clean"` matching the long: name is `clean` and
+        // there's no redundant id alias (id == long == name).
         let clean = params.iter().find(|p| p.name == "clean")
-            .expect("id override should set the schema name to `clean`");
+            .expect("name should be the long flag `clean`");
         assert_eq!(clean.aliases, vec!["c".to_string()]);
-        // No `clean` alias because the long matches the id now.
     }
 
     #[test]
