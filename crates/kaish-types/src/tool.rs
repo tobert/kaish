@@ -187,6 +187,23 @@ pub struct ToolSchema {
     /// Only for MCP/external tools that expect named JSON params.
     /// Builtins handle their own positionals and should leave this false.
     pub map_positionals: bool,
+    /// Child schemas for subcommand-aware tools (`kj context list`, …).
+    ///
+    /// Empty for flat tools (`cat`, `grep`, `ls`) — they take the flat binding
+    /// path. When non-empty, the kernel walks leading positionals to pick the
+    /// active leaf and binds flags against *that leaf's* `params` (see
+    /// `select_leaf` in the kernel).
+    ///
+    /// `skip_serializing_if` keeps the wire compact for the many flat tools
+    /// (no `"subcommands":[]` noise); `default` is then required so a flat
+    /// tool's payload (key absent) deserializes back to empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subcommands: Vec<ToolSchema>,
+    /// Command-level aliases (`ls` → `list`, `rm` → `remove`), matched when
+    /// routing a positional to a child. Distinct from [`ParamSchema::aliases`],
+    /// which name *flags*.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
 
 impl ToolSchema {
@@ -198,6 +215,8 @@ impl ToolSchema {
             params: Vec::new(),
             examples: Vec::new(),
             map_positionals: false,
+            subcommands: Vec::new(),
+            aliases: Vec::new(),
         }
     }
 
@@ -217,6 +236,26 @@ impl ToolSchema {
     pub fn example(mut self, description: impl Into<String>, code: impl Into<String>) -> Self {
         self.examples.push(Example::new(description, code));
         self
+    }
+
+    /// Add a child schema, making this a subcommand-aware tool.
+    pub fn subcommand(mut self, child: ToolSchema) -> Self {
+        self.subcommands.push(child);
+        self
+    }
+
+    /// Set command-level aliases (e.g. `ls` for a `list` subcommand). These
+    /// name the *command*, not its flags; flag aliases live on each
+    /// [`ParamSchema`].
+    pub fn with_command_aliases(mut self, aliases: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.aliases = aliases.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// True if `word` names this command — its `name` or any of its
+    /// command-level `aliases`. Used when routing a positional to a child.
+    pub fn matches_command(&self, word: &str) -> bool {
+        self.name == word || self.aliases.iter().any(|a| a == word)
     }
 }
 
@@ -420,6 +459,59 @@ fn json_value_to_token(value: &serde_json::Value) -> String {
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod schema_serde_tests {
+    use super::*;
+
+    /// A flat tool (no subcommands/aliases) must serialize byte-identically to
+    /// the pre-subcommand wire format: the two new fields are skipped entirely.
+    #[test]
+    fn flat_schema_omits_new_fields_on_wire() {
+        let schema = ToolSchema::new("cat", "concatenate")
+            .param(ParamSchema::required("path", "string", "file to read").positional());
+        let json = serde_json::to_value(&schema).expect("serialize");
+        let obj = json.as_object().expect("object");
+        assert!(!obj.contains_key("subcommands"), "flat tool leaks subcommands: {json}");
+        assert!(!obj.contains_key("aliases"), "flat tool leaks command aliases: {json}");
+    }
+
+    /// Round-trip the skip: a flat tool serializes *without* the keys, so the
+    /// deserializer must `default` them back to empty. (This is what lets us
+    /// skip-serialize empties without breaking our own flat tools' payloads.)
+    #[test]
+    fn flat_wire_form_deserializes_to_empty() {
+        let flat = serde_json::json!({
+            "name": "cat",
+            "description": "concatenate",
+            "params": [],
+            "examples": [],
+            "map_positionals": false
+        });
+        let schema: ToolSchema = serde_json::from_value(flat).expect("deserialize flat form");
+        assert!(schema.subcommands.is_empty());
+        assert!(schema.aliases.is_empty());
+    }
+
+    /// A subcommand tree round-trips through serde with names and aliases intact.
+    #[test]
+    fn subcommand_tree_round_trips() {
+        let schema = ToolSchema::new("kj", "kaijutsu")
+            .subcommand(
+                ToolSchema::new("context", "context ops")
+                    .with_command_aliases(["ctx"])
+                    .subcommand(ToolSchema::new("list", "list contexts").with_command_aliases(["ls"])),
+            );
+        let json = serde_json::to_string(&schema).expect("serialize");
+        let back: ToolSchema = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.subcommands.len(), 1);
+        let context = &back.subcommands[0];
+        assert!(context.matches_command("context"));
+        assert!(context.matches_command("ctx"));
+        assert_eq!(context.subcommands.len(), 1);
+        assert!(context.subcommands[0].matches_command("ls"));
     }
 }
 

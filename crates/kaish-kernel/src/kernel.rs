@@ -53,7 +53,7 @@ use kaish_glob::glob_match;
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
 use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value, value_to_bool, value_to_string, ControlFlow, ExecResult, Scope};
 use crate::parser::parse;
-use crate::scheduler::{is_bool_type, schema_param_lookup, stderr_stream, BoundedStream, JobManager, PipelineRunner, StderrReceiver};
+use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_stream, BoundedStream, JobManager, PipelineRunner, StderrReceiver};
 #[cfg(feature = "subprocess")]
 use crate::scheduler::{drain_to_stream, DEFAULT_STREAM_MAX_SIZE};
 use crate::tools::{register_builtins, ExecContext, GlobalFlags, ToolArgs, ToolRegistry};
@@ -2196,7 +2196,14 @@ impl Kernel {
                 let backend = self.exec_ctx.read().await.backend.clone();
                 let tool_schema = backend.get_tool(name).await.ok().flatten().map(|t| {
                     let mut s = t.schema;
-                    s.map_positionals = true;
+                    // Flat backend/MCP tools expect named JSON params, so map
+                    // bare positionals onto named params. Subcommand-aware tools
+                    // route positionals through the subcommand path and declare
+                    // map_positionals per leaf (kj keeps it false so it re-parses
+                    // the argv with its own clap) — don't blanket-override them.
+                    if s.subcommands.is_empty() {
+                        s.map_positionals = true;
+                    }
                     s
                 });
                 let tool_args = self.build_args_async(args, tool_schema.as_ref()).await?;
@@ -2439,7 +2446,18 @@ impl Kernel {
     async fn build_args_async(&self, args: &[Arg], schema: Option<&crate::tools::ToolSchema>) -> Result<ToolArgs> {
         let mut tool_args = ToolArgs::new();
         let home = self.scope_home().await;
-        let param_lookup = schema.map(schema_param_lookup).unwrap_or_default();
+        // Subcommand-aware tools (e.g. `kj context list`) expose a tree of
+        // schemas; pick the leaf the leading positionals route to and bind
+        // flags against *its* params. Flat tools return the root. select_leaf
+        // errors (fail loud) if a computed positional sits where a subcommand
+        // selector is required.
+        let leaf = match schema {
+            Some(s) => Some(select_leaf(s, args)?),
+            None => None,
+        };
+        let param_lookup = leaf.map(schema_param_lookup).unwrap_or_default();
+        // accepts_word_assign keys off the root tool name (the WORD_ASSIGN list),
+        // not the leaf — it's a property of the command, not the subcommand.
         let accepts_word_assign = schema
             .map(|s| crate::tools::accepts_word_assign(s.name.as_str()))
             .unwrap_or(false);
@@ -2578,7 +2596,7 @@ impl Kernel {
                         // — a privilege-escalation-by-typo against deny-by-default
                         // embedders (docs/issues.md). Fail loud instead of guessing.
                         let ambiguous_value = (lookup.is_none()
-                            && schema.is_some_and(|s| s.map_positionals)
+                            && leaf.is_some_and(|s| s.map_positionals)
                             && !consumed.contains(&(i + 1)))
                             .then(|| match args.get(i + 1) {
                                 // Echo a concrete value for a copy-pasteable fix
@@ -2591,7 +2609,7 @@ impl Kernel {
                             })
                             .flatten();
                         if let Some(val) = ambiguous_value {
-                            let tool = schema.map(|s| s.name.as_str()).unwrap_or("command");
+                            let tool = leaf.map(|s| s.name.as_str()).unwrap_or("command");
                             anyhow::bail!(
                                 "{tool}: --{name} is not a declared flag, so the \
                                  space-separated value would be silently dropped. \
@@ -2628,7 +2646,9 @@ impl Kernel {
         // This enables `drift_push "abc" "hello"` → named["target_ctx"] = "abc", named["content"] = "hello"
         // Positionals that appeared after `--` are never mapped (they're raw data).
         // Only for backend/external tools (map_positionals=true). Builtins handle their own positionals.
-        if let Some(schema) = schema.filter(|s| s.map_positionals) {
+        // Keyed off the routed leaf so a subcommand tool maps against the active
+        // leaf's params (kj leaves keep map_positionals=false → block skipped).
+        if let Some(schema) = leaf.filter(|s| s.map_positionals) {
             let pre_dash_count = if past_double_dash {
                 let dash_pos = args.iter().position(|a| matches!(a, Arg::DoubleDash)).unwrap_or(args.len());
                 positional_indices.iter()
@@ -6460,6 +6480,105 @@ AFTER="yes"'"#)
         let args = vec![Arg::LongFlag("frob".into()), pos("value")];
         let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
         assert!(built.flags.contains("frob"));
+    }
+
+    // ── subcommand-aware binding (select_leaf wired into build_args_async) ──
+    //
+    // A tool exposing a subcommand tree binds flags against the *routed leaf's*
+    // params, not the root's. The subcommand-path positionals stay positional
+    // (kj re-parses them with its own clap), and a value flag declared only on
+    // a deep leaf still binds in space form.
+
+    /// kj → context (alias ctx) → create{--type value, --force bool}.
+    /// map_positionals defaults false on every node (builtin/kj style).
+    fn kj_tree_schema() -> ToolSchema {
+        ToolSchema::new("kj", "subcommand tool").subcommand(
+            ToolSchema::new("context", "context ops")
+                .with_command_aliases(["ctx"])
+                .subcommand(
+                    ToolSchema::new("create", "create context")
+                        .param(ParamSchema::new("type", "string").with_aliases(["t"]))
+                        .param(ParamSchema::new("force", "bool")),
+                ),
+        )
+    }
+
+    #[tokio::test]
+    async fn build_args_binds_deep_leaf_value_flag_space_form() {
+        let kernel = Kernel::transient().expect("kernel");
+        let schema = kj_tree_schema();
+        // kj context create --type explorer
+        let args = vec![
+            pos("context"),
+            pos("create"),
+            Arg::LongFlag("type".into()),
+            pos("explorer"),
+        ];
+        let built = kernel.build_args_async(&args, Some(&schema)).await.expect("build_args");
+        // --type (declared only on the create leaf) binds in space form.
+        assert_eq!(built.named.get("type"), Some(&Value::String("explorer".into())));
+        // The subcommand path survives as positionals for kj to re-parse.
+        let positionals: Vec<&str> = built
+            .positional
+            .iter()
+            .filter_map(|v| if let Value::String(s) = v { Some(s.as_str()) } else { None })
+            .collect();
+        assert_eq!(positionals, vec!["context", "create"]);
+    }
+
+    #[tokio::test]
+    async fn build_args_leaf_bool_flag_does_not_swallow_positional() {
+        let kernel = Kernel::transient().expect("kernel");
+        let schema = kj_tree_schema();
+        // kj context create --force somearg  → --force is a leaf bool flag,
+        // it must NOT consume `somearg`.
+        let args = vec![
+            pos("context"),
+            pos("create"),
+            Arg::LongFlag("force".into()),
+            pos("somearg"),
+        ];
+        let built = kernel.build_args_async(&args, Some(&schema)).await.expect("build_args");
+        assert!(built.flags.contains("force"), "force should be a bare flag");
+        let positionals: Vec<&str> = built
+            .positional
+            .iter()
+            .filter_map(|v| if let Value::String(s) = v { Some(s.as_str()) } else { None })
+            .collect();
+        assert_eq!(positionals, vec!["context", "create", "somearg"]);
+    }
+
+    #[tokio::test]
+    async fn build_args_alias_routed_leaf_binds_value_flag() {
+        let kernel = Kernel::transient().expect("kernel");
+        let schema = kj_tree_schema();
+        // kj ctx create -t explorer  → command alias + short flag alias.
+        let args = vec![
+            pos("ctx"),
+            pos("create"),
+            Arg::ShortFlag("t".into()),
+            pos("explorer"),
+        ];
+        let built = kernel.build_args_async(&args, Some(&schema)).await.expect("build_args");
+        assert_eq!(built.named.get("type"), Some(&Value::String("explorer".into())));
+    }
+
+    #[tokio::test]
+    async fn build_args_computed_subcommand_selector_fails_loud() {
+        let kernel = Kernel::transient().expect("kernel");
+        let schema = kj_tree_schema();
+        // kj $(echo context) — routing can't see the value; fail loud.
+        let args = vec![Arg::Positional(Expr::CommandSubst(Box::new(
+            crate::ast::Pipeline { commands: vec![], background: false },
+        )))];
+        let err = kernel
+            .build_args_async(&args, Some(&schema))
+            .await
+            .expect_err("computed subcommand selector must error");
+        assert!(
+            err.to_string().contains("subcommand name is required"),
+            "got: {err}"
+        );
     }
 
     // ── initial_vars + execute_with_vars + hermetic env ───────────────────

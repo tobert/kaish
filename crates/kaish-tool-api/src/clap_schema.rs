@@ -35,6 +35,62 @@ pub fn schema_from_clap(
     schema
 }
 
+/// Build a recursive [`ToolSchema`] from a composed clap [`Command`] tree.
+///
+/// Like [`schema_from_clap`] for the top level, but also descends into
+/// `cmd.get_subcommands()`, so a subcommand-aware tool (`kj context list …`)
+/// reflects as a tree the kernel can walk with `select_leaf` to bind flags
+/// against the active leaf.
+///
+/// Each child's `name`/`description` come from the clap subcommand itself
+/// (`get_name`/`get_about`) and its command-level aliases from
+/// `get_all_aliases()`. Examples belong to the top level only — clap doesn't
+/// model per-subcommand usage examples. Flat tools (no `get_subcommands()`)
+/// produce a schema with empty `subcommands`, identical to [`schema_from_clap`].
+pub fn schema_tree_from_clap(
+    cmd: &Command,
+    name: &str,
+    description: &str,
+    examples: impl IntoIterator<Item = (&'static str, &'static str)>,
+) -> ToolSchema {
+    let mut schema = ToolSchema::new(name, description);
+    for param in params_from_clap(cmd) {
+        schema = schema.param(param);
+    }
+    for (desc, code) in examples {
+        schema = schema.example(desc, code);
+    }
+    for sub in cmd.get_subcommands() {
+        schema = schema.subcommand(child_schema_from_clap(sub));
+    }
+    schema
+}
+
+/// Reflect a clap subcommand (and its descendants) into a child [`ToolSchema`].
+///
+/// Name and description are taken from the clap command; command-level aliases
+/// from `get_all_aliases()` (visible *and* hidden, so every routable name is
+/// known to `select_leaf`).
+fn child_schema_from_clap(cmd: &Command) -> ToolSchema {
+    let name = cmd.get_name().to_string();
+    let description = cmd
+        .get_about()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let mut schema = ToolSchema::new(name, description);
+    for param in params_from_clap(cmd) {
+        schema = schema.param(param);
+    }
+    let aliases: Vec<String> = cmd.get_all_aliases().map(|s| s.to_string()).collect();
+    if !aliases.is_empty() {
+        schema = schema.with_command_aliases(aliases);
+    }
+    for sub in cmd.get_subcommands() {
+        schema = schema.subcommand(child_schema_from_clap(sub));
+    }
+    schema
+}
+
 /// Reflect each [`Arg`] in a clap [`Command`] into a [`ParamSchema`].
 ///
 /// Skips:
@@ -270,5 +326,48 @@ mod tests {
         let cmd = DemoArgs::command();
         let params = params_from_clap(&cmd);
         assert!(params.iter().all(|p| !matches!(p.name.as_str(), "help" | "version" | "json")));
+    }
+
+    /// A composed two-level command tree reflects into a recursive schema:
+    /// child names, command aliases, and leaf params all land on the right node.
+    #[test]
+    fn schema_tree_reflects_subcommands_and_aliases() {
+        // Build a `kj`-shaped tree by hand: kj → context (alias ctx) → list.
+        let list = Command::new("list").about("list contexts").visible_alias("ls");
+        let context = Command::new("context")
+            .about("context ops")
+            .visible_alias("ctx")
+            .arg(Arg::new("type").long("type").short('t').action(ArgAction::Set))
+            .subcommand(list);
+        let kj = Command::new("kj").about("kaijutsu").subcommand(context);
+
+        let schema = schema_tree_from_clap(&kj, "kj", "kaijutsu", []);
+
+        assert_eq!(schema.subcommands.len(), 1, "kj should have one child");
+        let context = &schema.subcommands[0];
+        assert!(context.matches_command("context"));
+        assert!(context.matches_command("ctx"), "command alias should route");
+        // The `--type`/`-t` value flag lives on the context leaf, not root.
+        let type_param = context.params.iter().find(|p| p.name == "type").expect("type on context");
+        assert_eq!(type_param.param_type, "string");
+        assert_eq!(type_param.aliases, vec!["t".to_string()]);
+        assert!(schema.params.iter().all(|p| p.name != "type"), "leaf flag must not leak to root");
+
+        assert_eq!(context.subcommands.len(), 1);
+        let list = &context.subcommands[0];
+        assert!(list.matches_command("list"));
+        assert!(list.matches_command("ls"));
+    }
+
+    /// A flat command (no subcommands) reflects with empty `subcommands`,
+    /// identical to `schema_from_clap`.
+    #[test]
+    fn schema_tree_of_flat_command_has_no_subcommands() {
+        let cmd = DemoArgs::command();
+        let schema = schema_tree_from_clap(&cmd, "demo", "demo tool", []);
+        assert!(schema.subcommands.is_empty());
+        assert!(schema.aliases.is_empty());
+        // Same params as the flat reflection.
+        assert_eq!(schema.params.len(), params_from_clap(&cmd).len());
     }
 }

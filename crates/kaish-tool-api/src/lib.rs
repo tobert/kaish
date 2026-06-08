@@ -33,7 +33,7 @@ mod issue;
 mod tool;
 
 pub use backend::KernelBackend;
-pub use clap_schema::{params_from_clap, schema_from_clap};
+pub use clap_schema::{params_from_clap, schema_from_clap, schema_tree_from_clap};
 pub use ctx::ToolCtx;
 pub use global_flags::GlobalFlags;
 pub use issue::{IssueCode, Severity, Span, ValidationIssue};

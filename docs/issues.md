@@ -177,6 +177,22 @@ only production callers are scatter/gather option parsing (builtin schemas,
 `map_positionals` backend tool in production, add the same guard (lift a shared
 helper) to keep the two builders in sync.
 
+### Eliminate the sync `build_tool_args` twin entirely
+Bigger than the guard above: retire the sync arg builder so there's one path to
+reason about. Real commands already bind through the async `build_args_async`
+(foreground via `execute_command`; in pipelines via `Kernel::dispatch` →
+`dispatch_command`). The sync `build_tool_args` survives only in (a) scatter/gather
+*option* parsing in `run_scatter_gather` (`scheduler/pipeline.rs`, an `async fn`
+that already holds a `&dyn CommandDispatcher`, so it could `await
+dispatcher.eval_expr`) and (b) the `#[cfg(test)]` `BackendDispatcher`, plus ~27
+in-module test call sites. Eliminating it means giving the scheduler an async
+arg-builder (e.g. a `CommandDispatcher::build_args` trait method, or a free
+`build_tool_args_async` that routes `$(...)` through `eval_expr`) and converting
+those test sites to async. Deferred 2026-06-08 while landing per-subcommand tool
+schemas — `select_leaf` lives only in the async builder, so the twin never sees a
+subcommand tool and routing isn't at risk; this is purely a "fewer paths to
+reason about" cleanup. Doing it would also subsume the guard-parity item above.
+
 ### Undeclared space-flag guard covers long flags only (`-t val` still divorces)
 The 2026-06-08 fix errors on undeclared `--type value` but not single-char
 `-t value`, because short flags followed by a positional (`-r path`, `-f file`)

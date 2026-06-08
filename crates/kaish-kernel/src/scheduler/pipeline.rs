@@ -569,6 +569,115 @@ impl PipelineRunner {
 /// Positional params (`positional: true`) are excluded — they're not flags,
 /// and including them would mis-route `cat --paths foo.txt` from positional
 /// to named, regressing builtins that read from `args.positional`.
+/// Walk leading positionals to select the active subcommand leaf of a schema.
+///
+/// A flat tool (`schema.subcommands` empty) returns the root immediately —
+/// today's single-leaf behavior. For a subcommand-aware tool each leading
+/// positional, in order, must name a child (by `name` or a command-level
+/// alias) to descend; the first positional that names no child is the leaf's
+/// own argument, and selection stops there. Multi-level trees fall out by
+/// construction (`block edit insert` → two descents).
+///
+/// Routing is **literal-only**: a subcommand selector must be a bareword or
+/// quoted string (both parse to `Expr::Literal(Value::String)`). A *computed*
+/// positional (`$(…)`, `$VAR`, a glob) sitting where a subcommand is required
+/// is an **error**, not a silent guess — kaish can't see its value at parse
+/// time, so picking a leaf from it would misroute the flags that bind against
+/// the leaf's params. The fix is to spell the subcommand out, or use the
+/// `--flag=value` form (which binds without any schema lookup).
+///
+/// Returned leaf borrows from `schema`, so its `params`/`subcommands` outlive
+/// any `schema_param_lookup` taken from it.
+///
+/// **Global value flags.** A space-form value flag declared on the *root*
+/// (e.g. kj's global `--confirm <nonce>`) can legitimately precede the
+/// subcommand path. Its value is a positional in the AST, so routing must not
+/// mistake it for a subcommand selector — `select_leaf` skips the value of any
+/// root-declared non-bool flag it sees. Leaf-specific value flags can't precede
+/// their own subcommand by construction, so only the root's flags need this.
+pub fn select_leaf<'a>(schema: &'a ToolSchema, args: &[Arg]) -> anyhow::Result<&'a ToolSchema> {
+    // Names + aliases of root-declared value (non-bool, non-positional) flags,
+    // whose space-form value is a positional we must skip while routing.
+    let root_lookup = schema_param_lookup(schema);
+    let is_root_value_flag = |name: &str| -> bool {
+        root_lookup.get(name).is_some_and(|(_, typ, _)| !is_bool_type(typ))
+    };
+
+    let mut node = schema;
+    let mut skip_next_positional = false;
+    for arg in args {
+        match arg {
+            // Tokens past `--` are raw data, never subcommand selectors.
+            Arg::DoubleDash => break,
+            // A root value flag in space form consumes the next positional as
+            // its value — don't route on that positional.
+            Arg::LongFlag(name) if is_root_value_flag(name) => skip_next_positional = true,
+            Arg::ShortFlag(name) if is_root_value_flag(name) => skip_next_positional = true,
+            Arg::Positional(expr) => {
+                if skip_next_positional {
+                    skip_next_positional = false;
+                    continue; // this positional is the preceding flag's value
+                }
+                if node.subcommands.is_empty() {
+                    break; // leaf reached — remaining positionals are its args
+                }
+                match classify_subcommand_positional(expr) {
+                    SubcommandWord::Word(word) => {
+                        match node.subcommands.iter().find(|c| c.matches_command(word)) {
+                            Some(child) => node = child, // descend
+                            None => break,               // not a subcommand → leaf's own arg
+                        }
+                    }
+                    // A non-string literal (number/bool) can't be a subcommand
+                    // name but its value *is* known; treat it as the leaf's own
+                    // positional and stop — no misroute risk.
+                    SubcommandWord::OtherLiteral => break,
+                    SubcommandWord::Computed(kind) => anyhow::bail!(
+                        "{}: a subcommand name is required here, but got {kind}. \
+                         Subcommands must be literal words — spell it out \
+                         (e.g. `{} <subcommand> …`) or use the `--flag=value` form.",
+                        node.name,
+                        schema.name
+                    ),
+                }
+            }
+            // Flags are skipped during routing; they bind against the leaf.
+            _ => {}
+        }
+    }
+    Ok(node)
+}
+
+/// How a positional reads when a subcommand selector is expected.
+enum SubcommandWord<'a> {
+    /// A literal word that may name a child.
+    Word(&'a str),
+    /// A literal but non-string value — a known value, never a subcommand.
+    OtherLiteral,
+    /// A value computed at runtime; `kind` describes it for the error.
+    Computed(&'static str),
+}
+
+fn classify_subcommand_positional(expr: &Expr) -> SubcommandWord<'_> {
+    match expr {
+        Expr::Literal(Value::String(s)) => SubcommandWord::Word(s),
+        Expr::Literal(_) => SubcommandWord::OtherLiteral,
+        Expr::CommandSubst(_) | Expr::Command(_) => SubcommandWord::Computed("a command substitution `$(…)`"),
+        Expr::VarRef(_)
+        | Expr::VarWithDefault { .. }
+        | Expr::VarLength(_)
+        | Expr::Positional(_)
+        | Expr::AllArgs
+        | Expr::ArgCount
+        | Expr::CurrentPid
+        | Expr::LastExitCode => SubcommandWord::Computed("a variable reference"),
+        Expr::Interpolated(_) | Expr::HereDocBody { .. } => SubcommandWord::Computed("an interpolated string"),
+        Expr::GlobPattern(_) => SubcommandWord::Computed("a glob pattern"),
+        Expr::Arithmetic(_) => SubcommandWord::Computed("an arithmetic expansion"),
+        _ => SubcommandWord::Computed("a value computed at runtime"),
+    }
+}
+
 pub fn schema_param_lookup(schema: &ToolSchema) -> HashMap<String, (&str, &str, usize)> {
     let mut map = HashMap::new();
     for p in schema.params.iter().filter(|p| !p.positional) {
@@ -969,6 +1078,163 @@ fn find_scatter_gather(commands: &[Command]) -> Option<(usize, usize)> {
         Some((scatter_idx, gather_idx))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod select_leaf_tests {
+    use super::*;
+    use crate::tools::ParamSchema;
+
+    /// `kj`-shaped tree: kj → context (alias ctx) → {list (alias ls), create}.
+    /// Root carries a global `--confirm <nonce>` value flag and a `--verbose`
+    /// bool; `create` carries a leaf `--type` value flag — enough to exercise
+    /// global-flag skipping and leaf binding.
+    fn kj_schema() -> ToolSchema {
+        ToolSchema::new("kj", "kaijutsu")
+            .param(ParamSchema::new("confirm", "string"))
+            .param(ParamSchema::new("verbose", "bool"))
+            .subcommand(
+                ToolSchema::new("context", "context ops")
+                    .with_command_aliases(["ctx"])
+                    .subcommand(ToolSchema::new("list", "list").with_command_aliases(["ls"]))
+                    .subcommand(
+                        ToolSchema::new("create", "create").param(
+                            ParamSchema::new("type", "string").with_aliases(["t"]),
+                        ),
+                    ),
+            )
+    }
+
+    fn word(s: &str) -> Arg {
+        Arg::Positional(Expr::Literal(Value::String(s.to_string())))
+    }
+
+    #[test]
+    fn flat_tool_returns_root() {
+        let schema = ToolSchema::new("cat", "concat")
+            .param(ParamSchema::required("path", "string", "f").positional());
+        let leaf = select_leaf(&schema, &[word("foo.txt")]).expect("flat ok");
+        assert_eq!(leaf.name, "cat");
+    }
+
+    #[test]
+    fn single_hop() {
+        let schema = kj_schema();
+        let leaf = select_leaf(&schema, &[word("context")]).expect("ok");
+        assert_eq!(leaf.name, "context");
+    }
+
+    #[test]
+    fn two_hops() {
+        let schema = kj_schema();
+        let leaf = select_leaf(&schema, &[word("context"), word("create")]).expect("ok");
+        assert_eq!(leaf.name, "create");
+        assert!(leaf.params.iter().any(|p| p.name == "type"), "leaf has --type");
+    }
+
+    #[test]
+    fn alias_hops_route() {
+        let schema = kj_schema();
+        // `kj ctx ls` → context.list via command aliases.
+        let leaf = select_leaf(&schema, &[word("ctx"), word("ls")]).expect("ok");
+        assert_eq!(leaf.name, "list");
+    }
+
+    #[test]
+    fn unknown_subcommand_stops_at_current_node() {
+        let schema = kj_schema();
+        // `context nonesuch` — `nonesuch` names no child, so context is the leaf
+        // and `nonesuch` is context's own positional. No error.
+        let leaf = select_leaf(&schema, &[word("context"), word("nonesuch")]).expect("ok");
+        assert_eq!(leaf.name, "context");
+    }
+
+    #[test]
+    fn root_bool_flag_before_path_does_not_disrupt_routing() {
+        let schema = kj_schema();
+        // `kj --verbose context create` — a root bool flag is skipped, both
+        // positionals route to create.
+        let args = vec![Arg::LongFlag("verbose".into()), word("context"), word("create")];
+        let leaf = select_leaf(&schema, &args).expect("ok");
+        assert_eq!(leaf.name, "create");
+    }
+
+    #[test]
+    fn root_value_flag_space_form_before_path_skips_its_value() {
+        let schema = kj_schema();
+        // `kj --confirm nonce context create` — `nonce` is --confirm's value,
+        // NOT a subcommand selector; routing skips it and reaches create.
+        let args = vec![
+            Arg::LongFlag("confirm".into()),
+            word("nonce"),
+            word("context"),
+            word("create"),
+        ];
+        let leaf = select_leaf(&schema, &args).expect("ok");
+        assert_eq!(leaf.name, "create");
+    }
+
+    #[test]
+    fn leaf_value_flag_after_path_routes_to_leaf() {
+        let schema = kj_schema();
+        // `kj context create --type x` — the natural form: path first, leaf flag
+        // after. Routing reaches create; --type then binds against create.
+        let args = vec![
+            word("context"),
+            word("create"),
+            Arg::LongFlag("type".into()),
+            word("x"),
+        ];
+        let leaf = select_leaf(&schema, &args).expect("ok");
+        assert_eq!(leaf.name, "create");
+        assert!(leaf.params.iter().any(|p| p.name == "type"));
+    }
+
+    #[test]
+    fn double_dash_stops_routing() {
+        let schema = kj_schema();
+        // `kj -- context` — after `--`, `context` is raw data, not a subcommand.
+        let leaf = select_leaf(&schema, &[Arg::DoubleDash, word("context")]).expect("ok");
+        assert_eq!(leaf.name, "kj");
+    }
+
+    #[test]
+    fn computed_subcommand_selector_errors() {
+        let schema = kj_schema();
+        // `kj $(echo context)` — a command substitution where a subcommand name
+        // is required must fail loud, not silently pick a leaf.
+        let args = vec![Arg::Positional(Expr::CommandSubst(Box::new(
+            crate::ast::Pipeline { commands: vec![], background: false },
+        )))];
+        let err = select_leaf(&schema, &args).expect_err("must error");
+        let msg = err.to_string();
+        assert!(msg.contains("subcommand name is required"), "got: {msg}");
+        assert!(msg.contains("command substitution"), "names the cause: {msg}");
+    }
+
+    #[test]
+    fn variable_subcommand_selector_errors() {
+        let schema = kj_schema();
+        let args = vec![Arg::Positional(Expr::VarRef(crate::ast::VarPath::simple("sub")))];
+        let err = select_leaf(&schema, &args).expect_err("must error");
+        assert!(err.to_string().contains("variable reference"), "got: {err}");
+    }
+
+    #[test]
+    fn computed_positional_after_leaf_is_fine() {
+        let schema = kj_schema();
+        // `kj context list $(echo x)` — once at a leaf (list has no children),
+        // a computed positional is just an argument; routing already stopped.
+        let args = vec![
+            word("context"),
+            word("list"),
+            Arg::Positional(Expr::CommandSubst(Box::new(
+                crate::ast::Pipeline { commands: vec![], background: false },
+            ))),
+        ];
+        let leaf = select_leaf(&schema, &args).expect("ok");
+        assert_eq!(leaf.name, "list");
     }
 }
 
