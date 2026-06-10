@@ -24,29 +24,28 @@ subprocess capture, arithmetic token leak) **all validate as fixed** on
 
 ## P1 — High-leverage features and diagnostics
 
-### OverlayFs hunk 2+ — inspection API and kernel surface (2026-06-10)
-Hunk 1 landed (`69c42e3` MemoryFs lift, `2a62a72` overlay core). Hunk 2 landed
-(`6fe2225` inspection API: changes/is_dirty/reset/reset_all/commit_into/
-fork_into, dirty-symlink loud-Unsupported tracking, Drop credits the budget).
-Remaining, per `docs/kaish-overlayfs.md`:
-- **Hunk 3 — kernel surface**: mount OverlayFs via VfsRouter, `--overlay`
-  session mode (kaish-mcp likely default-on, REPL opt-in), `vfs-diff` /
-  `vfs-commit` builtins, and doc test 12 (strict-glob over a merged dir,
-  kernel-routed).
-- **Byte accounting, kernel half** (vfs half DONE `dddc85d`: trait
-  `resident_bytes`, ByteBudget, MemoryFs/OverlayFs counting+budgets):
-  JobFs counting; profile-defaulted budgets (`KernelConfig::mcp()`
-  conservative by default — a **loud polarity flip for embedders**, pick
-  default sizes deliberately, pattern: `OutputLimitConfig`); `df --json`-style
-  per-mount introspection (mount resident_bytes + budget used/remaining)
-  feeding `workspace list --json` and eviction. Inspection-API hooks
-  (`reset`/`reset_all`/`fork_into`) must credit bases via the existing
-  `credit_base` or the counter panics.
+### OverlayFs — ALL HUNKS LANDED 2026-06-10; residuals only
+Hunk 1 `69c42e3`+`2a62a72` (MemoryFs lift, overlay core), accounting vfs half
+`dddc85d` (resident_bytes, ByteBudget), hunk 2 `6fe2225` (inspection API),
+hunk 3 + accounting kernel half `d0e0deb` (64 MiB mcp budget "vfs-memory",
+MountInfo.resident_bytes + kaish-mounts, --overlay opt-in REPL/MCP/embedder,
+kaish-vfs builtin status/diff/commit/reset). Residuals:
+- **MCP overlay persistence**: MCP kernels are fresh per execute call, so an
+  MCP overlay is a per-call transaction (commit in the same script). Cross-call
+  overlays need a session map in kaish-mcp — revisit if a consumer wants it;
+  would also unlock the originally-floated default-on for MCP. (P3)
+- **External commands under overlay** fail with exit 127 inside the overlay
+  mount (real_path=None, accidental but correct guard); cd /tmp escapes. A
+  friendlier in-band error naming the overlay would help. (P3)
+- **JobFs resident counting skipped deliberately**: synthesized fs over
+  JobManager's already-bounded BoundedStream ring buffers — nothing unbounded
+  to count. Revisit only if job buffers become configurable/unbounded. (P4)
+- **kaish-mounts --json shape changed** (breaking): was a bare array, now
+  {mounts, budget?}. Flag in next release notes. (P2 — release-notes item)
 - **Punted in core** (revisit if a consumer hits them): cross-layer symlink
-  resolution is layer-local (an upper symlink can't point into lower);
-  whiteout of a directory is per-file only. Naming proximity note:
-  `VirtualOverlayBackend` (backend/overlay.rs) is unrelated prefix routing —
-  consider a doc cross-reference when wiring the kernel.
+  resolution is layer-local; whiteout of a directory is per-file only;
+  commit_into doesn't propagate mtimes. `VirtualOverlayBackend`
+  (backend/overlay.rs) is unrelated prefix routing, not CoW.
 
 ### Documentation accuracy sweep — LANGUAGE.md + help content (2026-06-09)
 Every claim in LANGUAGE.md was executed against the v0.8.0 binary; help content
