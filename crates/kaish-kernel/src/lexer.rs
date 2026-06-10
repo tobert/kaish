@@ -434,8 +434,13 @@ pub enum Token {
     #[regex(r"--[a-zA-Z][a-zA-Z0-9-]*", lex_long_flag, priority = 3)]
     LongFlag(String),
 
-    /// Short flag: `-l` or `-la` (combined short flags)
-    #[regex(r"-[a-zA-Z][a-zA-Z0-9]*", lex_short_flag, priority = 3)]
+    /// Short flag: `-l`, `-la` (combined short flags), or a dash-word with
+    /// internal hyphens like `-not-a-flag`. Internal hyphens are part of the
+    /// single shell word — without them the word fragments into separate flag
+    /// tokens, which breaks `echo -- -not-a-flag` and the like. A leading `--`
+    /// is still `DoubleDash` (the second char must be a letter here), and
+    /// whether the word is a flag or a literal is the binding layer's call.
+    #[regex(r"-[a-zA-Z][a-zA-Z0-9-]*", lex_short_flag, priority = 3)]
     ShortFlag(String),
 
     /// Plus flag: `+e` or `+x` (for set +e to disable options)
@@ -2624,6 +2629,22 @@ mod tests {
         // Combined short flags like -la
         assert_eq!(lex("-la"), vec![Token::ShortFlag("la".to_string())]);
         assert_eq!(lex("-vvv"), vec![Token::ShortFlag("vvv".to_string())]);
+    }
+
+    #[test]
+    fn short_flag_with_internal_hyphens_is_one_token() {
+        // A dash-word with internal hyphens is ONE shell word, not three
+        // flags — `-not-a-flag` must not fragment into `-not` `-a` `-flag`.
+        // (Whether it's a flag or a literal is the binding layer's call.)
+        assert_eq!(
+            lex("-not-a-flag"),
+            vec![Token::ShortFlag("not-a-flag".to_string())]
+        );
+        // The two-char terminator `--` is still DoubleDash, and a lone `-`
+        // is still MinusAlone — the second char must be a letter to start a
+        // short flag.
+        assert_eq!(lex("--"), vec![Token::DoubleDash]);
+        assert_eq!(lex("-"), vec![Token::MinusAlone]);
     }
 
     #[test]

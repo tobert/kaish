@@ -166,21 +166,6 @@ Remaining open work:
 
 ## P2 — Focused refactors & real bugs
 
-### `--` does not protect dash-words with internal hyphens; snapshot blesses the bug
-`echo -- -not-a-flag` prints `-not -a -flag` (three args; external argv gets
-four: `[--][-not][-a][-flag]`). Mechanism: `ShortFlag` regex
-(`lexer.rs:438`, `-[a-zA-Z][a-zA-Z0-9]*`) disallows internal hyphens so the
-word lexes as three flag tokens, and the post-`--` arm of `args_list_parser`
-(`parser.rs:1440-1448`) maps each to its own positional with no rejoin.
-**Scope (verified):** only short-dash words with internal hyphens split —
-`git checkout -- -file` and `-- --weird-name` survive as one arg each; quoting
-is a clean workaround. The snapshot test `parser_double_dash_ends_flags`
-(`parser_tests.rs:694-699` + its .snap) pins the *broken* behavior — fixing the
-lexer will fail the test rather than the bug failing it. Same tokenization-gap
-family as the bare-`,`/digit-range P4 entry. Fix: rejoin dash-bearing words
-after DoubleDash (or document the divergence), update the snapshot, and add an
-end-to-end `echo -- -not-a-flag` assertion so the contract is explicit.
-
 ### `;` sequences bypass the newline output separator — doc's own example is false
 `LANGUAGE.md:170` claims kaish separates statement outputs by newlines, with
 example `printf "a"; printf "b"` → `a\nb`. Observed: `ab` via the CLI — exactly
@@ -678,6 +663,22 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`--` now protects dash-words with internal hyphens — fixed 2026-06-10.**
+  `echo -- -not-a-flag` printed `-not -a -flag` because the `ShortFlag` lexer
+  regex (`-[a-zA-Z][a-zA-Z0-9]*`) excluded internal hyphens, fragmenting one
+  shell word into three flag tokens before the parser saw it. Fix (maintainer
+  chose the lexer route over a post-`--` parser rejoin): add `-` to the regex
+  char class (`-[a-zA-Z][a-zA-Z0-9-]*`) so the whole word is one token; `--`
+  stays `DoubleDash` (second char must be a letter) and `-` stays `MinusAlone`.
+  The `parser_double_dash_ends_flags` snapshot that blessed the bug was
+  re-blessed (now one positional). Tests: lexer
+  `short_flag_with_internal_hyphens_is_one_token` (+`--`/`-` guards) and e2e
+  `test_double_dash_protects_internal_hyphen_word` /
+  `_multiple_dash_words` in shell_bugs_tests.rs. Blast radius: a no-space
+  `-x-y` now lexes as one flag `x-y` rather than two; no test or builtin
+  depended on the split. Sibling tokenization-gap (`bare ,` / digit-ranges)
+  stays P4.
 
 - **`break N` / `continue N` no longer discard pre-signal output — fixed 2026-06-10.**
   A nested loop printing before `break 2` printed nothing: the Break signal

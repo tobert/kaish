@@ -693,8 +693,8 @@ fn parser_short_flag_then_value() {
 
 #[test]
 fn parser_double_dash_ends_flags() {
-    // Note: -not-a-flag is split by the lexer into three tokens due to hyphens
-    // After --, these become positional string arguments instead of flags
+    // `-not-a-flag` is a single shell word (the lexer keeps internal hyphens),
+    // so after `--` it is one positional string argument, not three.
     parse_and_snapshot("double_dash_ends_flags", "cmd -- -not-a-flag");
 }
 

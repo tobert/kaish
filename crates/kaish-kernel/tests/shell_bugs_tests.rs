@@ -730,3 +730,26 @@ async fn test_bang_single_term_unaffected() {
     // Double negation still chains at the unary level.
     assert!(test_truthy(r#"! ! "a" == "a""#).await, "!!(a==a) is true");
 }
+
+// ============================================================================
+// `--` end-of-flags protects dash-words with internal hyphens.
+//
+// `-not-a-flag` is one shell word; it used to fragment into three flag tokens
+// (`-not` `-a` `-flag`) at the lexer, so `echo -- -not-a-flag` printed
+// `-not -a -flag`. kaish consumes the `--` terminator (a deliberate divergence
+// from bash's echo, which keeps it), so this is kaish-specific.
+// ============================================================================
+
+#[tokio::test]
+async fn test_double_dash_protects_internal_hyphen_word() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute("echo -- -not-a-flag").await.unwrap();
+    assert_eq!(result.text_out().trim(), "-not-a-flag");
+}
+
+#[tokio::test]
+async fn test_double_dash_protects_multiple_dash_words() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute("echo -- -a-b -c-d").await.unwrap();
+    assert_eq!(result.text_out().trim(), "-a-b -c-d");
+}
