@@ -362,3 +362,40 @@ async fn wait_jobspec_percent_form_end_to_end() {
         result.text_out()
     );
 }
+
+/// Phase 1: `kill %N` stops a pure-builtin background job (no OS process
+/// group) via its cancellation token, and removes it from the table.
+/// (`kill` is gated on the `subprocess` feature.)
+#[cfg(feature = "subprocess")]
+#[tokio::test]
+async fn kill_terminates_builtin_background_job() {
+    let kernel = setup().await;
+    // Background a long builtin sleep, then kill it. The kill must succeed and
+    // drop the job — a follow-up kill reports it gone.
+    let r = kernel.execute("sleep 30 & kill %1").await.expect("execute");
+    assert_eq!(r.code, 0, "kill %1 of a builtin job should succeed: {}", r.err);
+
+    let again = kernel.execute("kill %1").await.expect("execute");
+    assert!(!again.ok(), "job should be gone after kill");
+    assert!(again.err.contains("not found"), "got: {}", again.err);
+}
+
+/// A non-terminating signal to a pure-builtin job is refused loudly (there is
+/// no process group to deliver SIGUSR1 to), rather than silently terminating.
+#[cfg(feature = "subprocess")]
+#[tokio::test]
+async fn kill_nonterminating_signal_on_builtin_job_errors() {
+    let kernel = setup().await;
+    let r = kernel
+        .execute("sleep 30 & kill --signal USR1 %1")
+        .await
+        .expect("execute");
+    assert!(!r.ok());
+    assert!(
+        r.err.contains("in-process task") && r.err.contains("USR1"),
+        "expected in-process-task error, got: {}",
+        r.err
+    );
+    // Clean up the still-running job.
+    let _ = kernel.execute("kill %1").await;
+}

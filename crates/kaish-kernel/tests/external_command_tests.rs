@@ -331,3 +331,31 @@ async fn minus_alone_lexes_correctly() {
     assert!(result.ok(), "echo should succeed: {:?}", result);
     assert!(result.text_out().contains("- foo -"), "Should include dashes: {}", result.text_out());
 }
+
+/// Phase 2: a background *external* job records its child's process group, so
+/// `kill -<sig> %N` can deliver an arbitrary signal (STOP/CONT), not just
+/// terminate. If the PGID weren't recorded, `kill --signal STOP %1` would be
+/// refused as an "in-process task" — so its exit 0 proves the killpg path.
+///
+/// The foreground builtin `sleep` gives the backgrounded external time to
+/// spawn and register its PGID before the signals fire.
+#[tokio::test]
+async fn kill_signals_external_background_job_process_group() {
+    let kernel = repl_kernel();
+    let result = kernel
+        .execute(
+            "/usr/bin/sleep 30 & sleep 0.3; \
+             kill --signal STOP %1; kill --signal CONT %1; kill %1",
+        )
+        .await
+        .expect("execute");
+    assert_eq!(
+        result.code, 0,
+        "STOP/CONT/TERM via process group should all succeed: {}",
+        result.err
+    );
+
+    // The job is gone after the terminating kill.
+    let again = kernel.execute("kill %1").await.expect("execute");
+    assert!(again.err.contains("not found"), "job should be gone: {}", again.err);
+}

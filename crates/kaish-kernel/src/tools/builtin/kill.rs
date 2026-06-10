@@ -105,22 +105,54 @@ impl Tool for Kill {
                     None => return ExecResult::failure(1, "kill: no job manager"),
                 };
 
-                let (_pid, pgid) = match manager.get_process_info(job_id).await {
-                    Some(info) => info,
-                    None => return ExecResult::failure(1, format!("kill: job {} not found", job_id)),
-                };
+                use nix::sys::signal::Signal;
+                let terminating = matches!(
+                    signal,
+                    Signal::SIGTERM | Signal::SIGKILL | Signal::SIGINT | Signal::SIGHUP | Signal::SIGQUIT
+                );
 
-                let pgid = nix::unistd::Pid::from_raw(pgid as i32);
-                if let Err(e) = nix::sys::signal::killpg(pgid, signal) {
-                    return ExecResult::failure(1, format!("kill: {}", e));
+                // Prefer signalling the real process group(s) the job spawned —
+                // this delivers ANY signal faithfully (STOP/CONT/USR1/…), which
+                // is what job control needs.
+                let pgids = manager.job_pgids(job_id).await;
+                if !pgids.is_empty() {
+                    let mut last_err = None;
+                    for pg in &pgids {
+                        let pgid = nix::unistd::Pid::from_raw(*pg as i32);
+                        if let Err(e) = nix::sys::signal::killpg(pgid, signal) {
+                            last_err = Some(e);
+                        }
+                    }
+                    // A terminating signal also unwinds the wrapping task and
+                    // drops the job from the table.
+                    if terminating {
+                        manager.cancel(job_id).await;
+                        manager.remove(job_id).await;
+                    }
+                    return match last_err {
+                        Some(e) => ExecResult::failure(1, format!("kill: {}", e)),
+                        None => ExecResult::success(""),
+                    };
                 }
 
-                // If SIGKILL or SIGTERM, remove the job
-                if signal == nix::sys::signal::Signal::SIGKILL || signal == nix::sys::signal::Signal::SIGTERM {
-                    manager.remove(job_id).await;
+                // No process group recorded — a pure in-process job (e.g.
+                // `sleep &`, a kaish builtin) or an external whose PGID hasn't
+                // registered yet. The cancellation token is the only lever;
+                // it can stop the job but cannot deliver an arbitrary signal.
+                if terminating {
+                    if manager.cancel(job_id).await {
+                        manager.remove(job_id).await;
+                        ExecResult::success("")
+                    } else {
+                        ExecResult::failure(1, format!("kill: job {} not found", job_id))
+                    }
+                } else {
+                    ExecResult::failure(1, format!(
+                        "kill: job {} is an in-process task with no process group; \
+                         only termination signals (TERM/KILL/INT/HUP/QUIT) can be delivered, not {}",
+                        job_id, signal_name
+                    ))
                 }
-
-                ExecResult::success("")
             } else {
                 // PID reference
                 let pid_num: i32 = match target_str.parse() {

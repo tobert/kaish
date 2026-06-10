@@ -176,24 +176,19 @@ comment-arithmetic preprocessor gotcha). Decide whether `$()` should accept the
 full statement grammar (sequences/newlines/comments) or document the
 single-pipeline restriction loudly.
 
-### `kill %N` cannot signal a still-running background job (no PGID recorded)
-Uncovered while fixing the jobspec lexer error (see Resolved). `%N` now lexes
-and `kill %N` parses and reaches the job lookup, but `JobManager::get_process_info`
-only returns `Some` once a job has a recorded PGID, and a PGID is currently set
-**only when a job is stopped** (`register_stopped`/`stop_job`). A normal
-background `&` job — `sleep 5 & kill %1` — is "job N not found" even though
-`jobs` lists it Running. Root: background jobs are async tasks (a builtin job
-has no OS process group at all; an external job's child PGID is known inside the
-spawned task but never plumbed back to the `Job` record). Options: (a) record
-the external child's PGID into the `Job` when `execute_background` spawns it
-(timing: PGID known only after the child spawns, after job registration — needs
-a back-channel); (b) give `kill %N` a cancellation-token path per job (works for
-builtin jobs too, cascades to externals via the existing cancellation cascade) —
-this is probably the right model since kaish jobs are tasks, not processes.
-`wait %N` is unaffected (it joins the task, doesn't signal). LANGUAGE.md:635
-documents the gap.
+### `kill -<sig>` bash shorthand (`kill -9 %1`, `kill -STOP %1`) isn't accepted
+`kill` takes the signal via `--signal NAME` / `-s NAME` only; the bash idioms
+`kill -9 %1`, `kill -KILL %1`, `kill -STOP %1` fail at clap arg parsing (`-9`
+lexes as `Int(-9)`, `-STOP`/`-KILL` as a `ShortFlag`, neither a declared flag).
+Job-control-heavy users reach for these constantly. Fix: give `kill` bespoke
+argv handling (à la `set.rs`) that strips a leading `-<signum>` / `-<SIGNAME>`
+token and maps it to the signal before clap sees the rest. The signal *delivery*
+mechanism is already in place (see Resolved `kill %N` entry); this is purely the
+front-door syntax.
 
 ### scatter does not fan out plain-text stdin — the docs' canonical examples run one worker
+`cat items.txt | scatter --as ITEM ...` (`LANGUAGE.md:607`, `:611-613`) binds
+the **entire** stdin to one item — one worker, exit 0, silent. Structured input
 `cat items.txt | scatter --as ITEM ...` (`LANGUAGE.md:607`, `:611-613`) binds
 the **entire** stdin to one item — one worker, exit 0, silent. Structured input
 fans out correctly (`split ... | scatter` works as documented). The behavior is
@@ -671,6 +666,29 @@ isn't lost when those files are deleted.
   `cargo test -p kaish-kernel --lib --no-default-features --no-run` to the
   build-command gate list so a test-only import can't slip past `check` again.
   Integration-binary minimal compile is still open (separate, larger; see P2).
+
+- **`kill %N` now signals running background jobs (builtin *and* external) — fixed 2026-06-10.**
+  Previously `kill %N` only worked for *stopped* jobs (PGID recorded via Ctrl-Z);
+  a running `sleep 5 & kill %1` was "job N not found". Two unifying mechanisms,
+  matching kaish's "jobs are tasks, not processes" model:
+  - **Per-job cancellation token (Phase 1).** `execute_background` now forks via
+    `fork_for_background(cancel, job_id)` and records the fork's `CancellationToken`
+    on the `Job` (`JobManager::set_cancel_token`/`cancel`). `kill %N` with a
+    terminating signal cancels it — stopping pure-builtin jobs (`sleep &`, no OS
+    process group) and cascading SIGTERM→SIGKILL to any external children.
+  - **Recorded process groups (Phase 2).** The background fork is stamped with
+    `bg_job_id` (propagated through the fork tree); when `try_execute_external`
+    spawns a child it records the child's PGID on the job
+    (`JobManager::add_pgid`/`job_pgids`). `kill --signal STOP/CONT/USR1/… %N`
+    then `killpg`s the real process group(s) for full signal fidelity. A
+    non-terminating signal to a pure-builtin job is refused loudly.
+  Tests: `JobManager` unit (`test_cancel_token_fires`, `test_pgids_recorded_and_deduped`,
+  `test_cancel_without_token_returns_false`), builtin e2e
+  (`kill_terminates_builtin_background_job`,
+  `kill_nonterminating_signal_on_builtin_job_errors`), external e2e
+  (`kill_signals_external_background_job_process_group` — STOP/CONT/TERM).
+  LANGUAGE.md:635 re-trued. Residual: the bash `kill -9`/`-STOP` shorthand still
+  isn't parsed (separate kill-argv entry, P2); `kill --signal NAME %N` is the form.
 
 - **`wait %N` / `kill %N` jobspec syntax no longer a lexer error — fixed 2026-06-10.**
   `%` had no token, so `wait %1` / `kill %N` were "lexer error: unexpected

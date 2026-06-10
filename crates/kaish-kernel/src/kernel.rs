@@ -581,6 +581,12 @@ pub struct Kernel {
     /// Set by `into_arc()`. Allows builtins to re-dispatch inner commands
     /// through the full Kernel resolution chain.
     self_weak: std::sync::OnceLock<std::sync::Weak<Self>>,
+    /// Background job this kernel (a fork) is executing on behalf of, if any.
+    /// Set on the fork created by `execute_background` and inherited by all its
+    /// sub-forks (pipeline stages, scatter workers), so an external command
+    /// spawned anywhere under a background job can record its process group on
+    /// that job for `kill -<sig> %N`. `None` for foreground execution.
+    bg_job_id: Option<crate::scheduler::JobId>,
     /// Serializes concurrent `execute()` / `execute_streaming()` callers on
     /// this Kernel instance. Tokio's Mutex is fair (FIFO) and acts as the
     /// queue. Background jobs, scatter workers, and concurrent pipeline
@@ -825,6 +831,7 @@ impl Kernel {
             terminal_state: None,
             self_weak: std::sync::OnceLock::new(),
             execute_lock: tokio::sync::Mutex::new(()),
+            bg_job_id: None,
         })
     }
 
@@ -874,7 +881,8 @@ impl Kernel {
     /// stages, `$(...)` cmdsubs) where parent timeout/cancel must cascade
     /// into the fork's external children, use [`Self::fork_attached`].
     pub async fn fork(&self) -> Arc<Self> {
-        self.fork_inner(tokio_util::sync::CancellationToken::new()).await
+        self.fork_inner(tokio_util::sync::CancellationToken::new(), self.bg_job_id)
+            .await
     }
 
     /// Fork attached to the parent's cancellation.
@@ -890,11 +898,28 @@ impl Kernel {
             let parent = self.cancel_token.lock().expect("cancel_token poisoned");
             parent.child_token()
         };
-        self.fork_inner(child_token).await
+        self.fork_inner(child_token, self.bg_job_id).await
     }
 
-    /// Shared fork implementation. Caller decides the cancellation token.
-    async fn fork_inner(&self, cancel: tokio_util::sync::CancellationToken) -> Arc<Self> {
+    /// Fork for a background job, stamping the job id so external commands
+    /// spawned anywhere beneath it record their process groups on that job
+    /// (for `kill -<sig> %N`). The caller owns `cancel` so it can also drive
+    /// `JobManager::cancel`.
+    pub async fn fork_for_background(
+        &self,
+        cancel: tokio_util::sync::CancellationToken,
+        job_id: crate::scheduler::JobId,
+    ) -> Arc<Self> {
+        self.fork_inner(cancel, Some(job_id)).await
+    }
+
+    /// Shared fork implementation. Caller decides the cancellation token and
+    /// which background job (if any) this fork runs on behalf of.
+    async fn fork_inner(
+        &self,
+        cancel: tokio_util::sync::CancellationToken,
+        bg_job_id: Option<crate::scheduler::JobId>,
+    ) -> Arc<Self> {
         let scope_snapshot = self.scope.read().await.clone();
         let user_tools_snapshot = self.user_tools.read().await.clone();
 
@@ -938,6 +963,7 @@ impl Kernel {
             terminal_state: None,
             self_weak: std::sync::OnceLock::new(),
             execute_lock: tokio::sync::Mutex::new(()),
+            bg_job_id,
         };
 
         fork.into_arc()
@@ -2040,7 +2066,14 @@ impl Kernel {
         // while sharing the job manager, VFS, and tool registry. The fork's
         // full dispatch chain (user tools, .kai scripts, `$(...)` in args)
         // is available here — something BackendDispatcher couldn't provide.
-        let fork = self.fork().await;
+        //
+        // The fork gets its own cancellation token (recorded on the job so
+        // `kill %N` can stop the job — including a pure-builtin job with no OS
+        // process group) and is stamped with the job id so any external
+        // command it spawns records its process group for `kill -<sig> %N`.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.jobs.set_cancel_token(job_id, cancel.clone()).await;
+        let fork = self.fork_for_background(cancel, job_id).await;
         let runner = self.runner.clone();
         let commands = pipeline.commands.clone();
 
@@ -3720,6 +3753,16 @@ impl Kernel {
             }
         };
         let kill_target = crate::pidfd::KillTarget::from_child(&child);
+
+        // If this external runs on behalf of a background job, record its
+        // process group on the job so `kill -<sig> %N` can signal the real
+        // process directly (STOP/CONT/USR1/…, not just terminate). The child
+        // did `setpgid(0, 0)` in pre_exec, so its PGID equals its PID.
+        if let Some(job_id) = self.bg_job_id
+            && let Some(pid) = child.id()
+        {
+            self.jobs.add_pgid(job_id, pid).await;
+        }
 
         // Write stdin if present
         if let Some(data) = stdin_data

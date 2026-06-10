@@ -54,6 +54,17 @@ pub struct Job {
     pgid: Option<u32>,
     /// Whether this job is stopped (SIGTSTP).
     stopped: bool,
+    /// Cancellation token of the background fork running this job. Cancelling
+    /// it stops the job whether it is an in-process builtin future or wraps
+    /// external children (the cancellation cascade SIGTERM→SIGKILLs their
+    /// process groups). This is how `kill %N` reaches a job that has no OS
+    /// process group of its own (e.g. `sleep &`, a kaish builtin).
+    cancel: Option<tokio_util::sync::CancellationToken>,
+    /// Process groups of external children spawned while running this job.
+    /// Lets `kill -<sig> %N` deliver an arbitrary signal (STOP/CONT/USR1/…)
+    /// straight to the real processes via `killpg`, not just terminate. Empty
+    /// for a pure-builtin job (nothing with a PGID ran).
+    pgids: Vec<u32>,
 }
 
 impl Job {
@@ -73,6 +84,8 @@ impl Job {
             pid: None,
             pgid: None,
             stopped: false,
+            cancel: None,
+            pgids: Vec::new(),
         }
     }
 
@@ -92,6 +105,8 @@ impl Job {
             pid: None,
             pgid: None,
             stopped: false,
+            cancel: None,
+            pgids: Vec::new(),
         }
     }
 
@@ -120,6 +135,8 @@ impl Job {
             pid: None,
             pgid: None,
             stopped: false,
+            cancel: None,
+            pgids: Vec::new(),
         }
     }
 
@@ -139,6 +156,8 @@ impl Job {
             pid: Some(pid),
             pgid: Some(pgid),
             stopped: true,
+            cancel: None,
+            pgids: Vec::new(),
         }
     }
 
@@ -667,6 +686,60 @@ impl JobManager {
         })
     }
 
+    /// Record the cancellation token of the fork running a background job, so
+    /// `kill %N` can stop the job even when it has no OS process group of its
+    /// own (e.g. a pure builtin like `sleep &`).
+    pub async fn set_cancel_token(&self, id: JobId, token: tokio_util::sync::CancellationToken) {
+        let mut jobs = self.jobs.lock().await;
+        if let Some(job) = jobs.get_mut(&id) {
+            job.cancel = Some(token);
+        }
+    }
+
+    /// Cancel a job by its token. Returns `true` if a token was recorded and
+    /// cancelled. The cancellation cascade stops in-process builtin futures and
+    /// SIGTERM→SIGKILLs any external children's process groups.
+    pub async fn cancel(&self, id: JobId) -> bool {
+        let jobs = self.jobs.lock().await;
+        match jobs.get(&id).and_then(|job| job.cancel.clone()) {
+            Some(token) => {
+                token.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Record a process group spawned while running a background job. Lets
+    /// `kill -<sig> %N` deliver an arbitrary signal directly to the real
+    /// processes. Deduplicated (a job may spawn several externals).
+    pub async fn add_pgid(&self, id: JobId, pgid: u32) {
+        let mut jobs = self.jobs.lock().await;
+        if let Some(job) = jobs.get_mut(&id) {
+            if !job.pgids.contains(&pgid) {
+                job.pgids.push(pgid);
+            }
+        }
+    }
+
+    /// The process groups recorded for a job (empty for a pure-builtin job).
+    /// Includes the legacy single `pgid` recorded for *stopped* jobs (Ctrl-Z),
+    /// so `kill %N` signals a stopped foreground job's group too.
+    pub async fn job_pgids(&self, id: JobId) -> Vec<u32> {
+        let jobs = self.jobs.lock().await;
+        jobs.get(&id)
+            .map(|job| {
+                let mut v = job.pgids.clone();
+                if let Some(pg) = job.pgid {
+                    if !v.contains(&pg) {
+                        v.push(pg);
+                    }
+                }
+                v
+            })
+            .unwrap_or_default()
+    }
+
     /// Remove a job from tracking.
     pub async fn remove(&self, id: JobId) {
         let mut jobs = self.jobs.lock().await;
@@ -884,5 +957,44 @@ mod tests {
         let manager = JobManager::new();
         let result = manager.wait(JobId(999)).await;
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_token_fires() {
+        // A recorded cancel token can be tripped by id — this is how `kill %N`
+        // stops a pure-builtin job that has no OS process group.
+        let manager = JobManager::new();
+        let token = tokio_util::sync::CancellationToken::new();
+        let id = manager.spawn("bg".to_string(), async { ExecResult::success("") });
+        manager.set_cancel_token(id, token.clone()).await;
+
+        assert!(!token.is_cancelled());
+        assert!(manager.cancel(id).await, "cancel should report success");
+        assert!(token.is_cancelled(), "the job's token must be tripped");
+    }
+
+    #[tokio::test]
+    async fn test_cancel_without_token_returns_false() {
+        let manager = JobManager::new();
+        let id = manager.spawn("bg".to_string(), async { ExecResult::success("") });
+        // No token recorded → nothing to cancel.
+        assert!(!manager.cancel(id).await);
+        // Unknown id → also false.
+        assert!(!manager.cancel(JobId(999)).await);
+    }
+
+    #[tokio::test]
+    async fn test_pgids_recorded_and_deduped() {
+        let manager = JobManager::new();
+        let id = manager.spawn("bg".to_string(), async { ExecResult::success("") });
+        assert!(manager.job_pgids(id).await.is_empty());
+
+        manager.add_pgid(id, 4242).await;
+        manager.add_pgid(id, 4243).await;
+        manager.add_pgid(id, 4242).await; // duplicate ignored
+        assert_eq!(manager.job_pgids(id).await, vec![4242, 4243]);
+
+        // Unknown id → empty, no panic.
+        assert!(manager.job_pgids(JobId(999)).await.is_empty());
     }
 }
