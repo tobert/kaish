@@ -61,4 +61,4 @@
 | `for i in "$(cmd)"` iterates once | Same — quoted substitution suppresses the per-line split |
 | `*.txt` expands at shell | Bare globs expand (disable with `set +o glob`) |
 | Regex in `=~` is unquoted | Quotes allowed: `=~ "\.rs$"` |
-| `printf "a"; printf "b"` → `ab` | → `a\nb` (line-separated, intentional) |
+| `printf "a"; printf "b"` → `ab` | Same — `ab` (no separator inserted; `&&` chains match too) |

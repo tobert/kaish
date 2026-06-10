@@ -4217,22 +4217,18 @@ fn finalize_output(
 
 /// Accumulate output from one result into another.
 ///
-/// This appends stdout and stderr (with newlines as separators) and updates
-/// the exit code to match the new result. Used to preserve output from
-/// multiple statements, loop iterations, and command chains.
+/// Appends stdout and stderr verbatim and updates the exit code to match the
+/// new result. Used to preserve output from multiple statements, loop
+/// iterations, and command chains. No separator is inserted between outputs —
+/// each command's output concatenates raw, matching bash (`printf a; printf b`
+/// and `printf a && printf b` both yield `ab`; a trailing newline only appears
+/// when a command emits its own, as `echo` does).
 fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     // Materialize lazy OutputData into .out before accumulating.
     // Without this, the first command's output stays in .output while
     // the second's text gets appended to .out, losing the first.
     accumulated.materialize();
-    let new_text = new.text_out();
-    if !accumulated.text_out().is_empty() && !new_text.is_empty() && !accumulated.text_out().ends_with('\n') {
-        accumulated.push_out("\n");
-    }
-    accumulated.push_out(&new_text);
-    if !accumulated.err.is_empty() && !new.err.is_empty() && !accumulated.err.ends_with('\n') {
-        accumulated.err.push('\n');
-    }
+    accumulated.push_out(&new.text_out());
     accumulated.err.push_str(&new.err);
     accumulated.code = new.code;
     accumulated.data = new.data.clone();
@@ -6280,8 +6276,9 @@ AFTER="yes"'"#)
     // -- accumulate_result / newline tests --
 
     #[test]
-    fn test_accumulate_no_double_newlines() {
-        // When output already ends with \n, accumulate should not add another
+    fn test_accumulate_preserves_own_newlines() {
+        // Outputs concatenate verbatim — a command's own trailing newline is
+        // kept, none is invented.
         let mut acc = ExecResult::success("line1\n");
         let new = ExecResult::success("line2\n");
         accumulate_result(&mut acc, &new);
@@ -6290,12 +6287,13 @@ AFTER="yes"'"#)
     }
 
     #[test]
-    fn test_accumulate_adds_separator_when_needed() {
-        // When output does NOT end with \n, accumulate adds one
+    fn test_accumulate_inserts_no_separator() {
+        // No artificial separator: `printf a; printf b` style concatenates to
+        // `ab`, matching bash (regression for the 2026-06-09 finding).
         let mut acc = ExecResult::success("line1");
         let new = ExecResult::success("line2");
         accumulate_result(&mut acc, &new);
-        assert_eq!(&*acc.text_out(), "line1\nline2");
+        assert_eq!(&*acc.text_out(), "line1line2");
     }
 
     #[test]

@@ -589,3 +589,40 @@ shell_compat! {
     script: "for i in 1 2; do for j in a b; do echo \"i${i}j${j}\"; continue 2; done; done",
     eq: "i1ja\ni2ja",
 }
+
+// =============================================================================
+// Statement-output joining inserts no artificial separator — `;` and `&&` both
+// concatenate raw output, matching bash. `printf` (no trailing newline) is the
+// discriminator; `echo` brings its own newline. Regression for the 2026-06-09
+// finding that `;` gave `ab` while `&&` gave `a\nb`.
+// =============================================================================
+
+shell_compat! {
+    name: semicolon_sequence_no_separator,
+    script: r#"printf "a"; printf "b""#,
+    eq: "ab",
+}
+
+shell_compat! {
+    name: and_chain_no_separator,
+    script: r#"printf "a" && printf "b""#,
+    eq: "ab",
+}
+
+shell_compat! {
+    name: semicolon_and_and_chain_agree,
+    script: r#"printf "x" && printf "y"; printf "z""#,
+    eq: "xyz",
+}
+
+shell_compat! {
+    name: echo_sequence_keeps_own_newlines,
+    script: "echo a; echo b",
+    eq: "a\nb",
+}
+
+shell_compat! {
+    name: printf_loop_no_separator,
+    script: "for i in 1 2 3; do printf \"$i\"; done",
+    eq: "123",
+}

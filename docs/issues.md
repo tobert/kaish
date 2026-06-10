@@ -166,19 +166,15 @@ Remaining open work:
 
 ## P2 — Focused refactors & real bugs
 
-### `;` sequences bypass the newline output separator — doc's own example is false
-`LANGUAGE.md:170` claims kaish separates statement outputs by newlines, with
-example `printf "a"; printf "b"` → `a\nb`. Observed: `ab` via the CLI — exactly
-the bash behavior the doc disclaims. `&&` chains DO separate (`a\nb`).
-Subtlety from verification: `accumulate_result` (`kernel.rs:~4216`) *does*
-insert newline separators — the `;`-sequence path evidently bypasses it.
-Decide intent (make `;` match `&&`, or scope the doc claim and fix
-`limits.md:64`'s matching row). Related undocumented limit found by the same
-probe: `$(printf a; printf b)` is a parse error — `;` is not accepted inside
-`$()` at all; multi-line `$( )` and `#` comments inside `$()` are also parse
-errors with no test pinning either behavior (`skip_command_substitution`,
+### `$()` rejects `;` sequences, multi-line bodies, and `#` comments
+Residual from the 2026-06-09 `;`-separator probe (the separator half is fixed —
+see Resolved). `$(printf a; printf b)` is a parse error: `;` is not accepted
+inside `$()` at all; multi-line `$( )` and `#` comments inside `$()` are also
+parse errors, with no test pinning either behavior (`skip_command_substitution`,
 `lexer.rs:1096`, skips quotes but not comments — same family as the
-comment-arithmetic preprocessor gotcha).
+comment-arithmetic preprocessor gotcha). Decide whether `$()` should accept the
+full statement grammar (sequences/newlines/comments) or document the
+single-pipeline restriction loudly.
 
 ### `wait %1` / `kill %N` — documented jobspec syntax is a lexer error
 `LANGUAGE.md:481` (`wait %1 %2`) and `:635` (`kill %N`), plus generated
@@ -663,6 +659,19 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **Statement-output joining inserts no separator (`;`/`&&` consistent, bash-matching) — fixed 2026-06-10.**
+  `accumulate_result` inserted a newline between outputs that didn't already end
+  in one, so `printf "a" && printf "b"` gave `a\nb` while `printf "a"; printf "b"`
+  (which bypassed it) gave `ab`, and the doc claimed the `a\nb` form as a feature.
+  Decision (maintainer): match bash — drop the artificial separator so both give
+  `ab`; a newline appears only when a command emits its own (`echo`). Removed the
+  stdout+stderr separator insertion in `accumulate_result` (affects all callers:
+  sequences, `&&`/`||` chains, loops, function bodies — all now bash-consistent).
+  `LANGUAGE.md` output-model note and `limits.md` row re-trued; inline tests
+  updated; 5 bash-cross-checked compat cases (`semicolon_*`, `and_chain_*`,
+  `printf_loop_no_separator`, `echo_sequence_keeps_own_newlines`). Residual `$()`
+  parse limits split into their own (still-open) entry.
 
 - **`--` now protects dash-words with internal hyphens — fixed 2026-06-10.**
   `echo -- -not-a-flag` printed `-not -a -flag` because the `ShortFlag` lexer
