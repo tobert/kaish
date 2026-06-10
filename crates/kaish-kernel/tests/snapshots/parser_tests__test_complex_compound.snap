@@ -2,4 +2,4 @@
 source: crates/kaish-kernel/tests/parser_tests.rs
 expression: sexpr
 ---
-(test (not (or (and (string -z (interpolated (varref X))) (cmp == (varref Y) (string "value"))) (file -f (string "/tmp/flag")))))
+(test (or (and (not (string -z (interpolated (varref X)))) (cmp == (varref Y) (string "value"))) (file -f (string "/tmp/flag"))))

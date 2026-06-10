@@ -673,3 +673,60 @@ async fn test_source_alias_with_space_still_works() {
         result.err,
     );
 }
+
+// ============================================================================
+// `!` precedence in `[[ ]]` — `!` binds tighter than `&&`/`||`
+//
+// Regression for the 2026-06-09 finding: the parser bound `!` to the entire
+// rest of the expression (`!(A || B)`) instead of just the next term
+// (`(!A) || B`), contradicting both LANGUAGE.md and the grammar comment in
+// `parser.rs`. String tests keep these filesystem-independent.
+// ============================================================================
+
+/// Run `[[ <expr> ]]` and return true iff it evaluates true (if-branch taken).
+async fn test_truthy(expr: &str) -> bool {
+    let kernel = Kernel::transient().unwrap();
+    let script = format!("if [[ {expr} ]]; then echo Y; else echo N; fi");
+    let out = kernel.execute(&script).await.unwrap();
+    match out.text_out().trim() {
+        "Y" => true,
+        "N" => false,
+        other => panic!("unexpected output {other:?} for [[ {expr} ]]"),
+    }
+}
+
+#[tokio::test]
+async fn test_bang_binds_tighter_than_or() {
+    // (!false) || true  == true.  Buggy `!(false || true)` == false.
+    assert!(
+        test_truthy(r#"! "a" == "b" || "a" == "a""#).await,
+        "`! A || B` must parse as `(!A) || B`"
+    );
+    // (!true) || true == true.  Buggy `!(true || true)` == false.
+    assert!(
+        test_truthy(r#"! "a" == "a" || "b" == "b""#).await,
+        "`! A || B` with A true must still be `(!A) || B`"
+    );
+}
+
+#[tokio::test]
+async fn test_bang_binds_tighter_than_and() {
+    // (!true) && true == false.
+    assert!(
+        !test_truthy(r#"! "a" == "a" && "b" == "b""#).await,
+        "`! A && B` must parse as `(!A) && B`"
+    );
+    // (!false) && true == true.
+    assert!(
+        test_truthy(r#"! "a" == "b" && "b" == "b""#).await,
+        "`! A && B` with A false is `(!A) && B` == true"
+    );
+}
+
+#[tokio::test]
+async fn test_bang_single_term_unaffected() {
+    assert!(test_truthy(r#"! "a" == "b""#).await, "!(a==b) is true");
+    assert!(!test_truthy(r#"! "a" == "a""#).await, "!(a==a) is false");
+    // Double negation still chains at the unary level.
+    assert!(test_truthy(r#"! ! "a" == "a""#).await, "!!(a==a) is true");
+}

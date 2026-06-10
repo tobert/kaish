@@ -166,18 +166,6 @@ Remaining open work:
 
 ## P2 — Focused refactors & real bugs
 
-### `[[ ! A || B ]]` — `!` binds loosest, backwards from doc and the parser's own comment
-Found 2026-06-09, adversarially verified. `parser.rs:1718-1719` has
-`just(Token::Bang).ignore_then(compound.clone())` where `compound` is the full
-or-level recursive parser — so `!` negates the **entire rest** of the
-expression. The grammar comment directly above (`parser.rs:1711-1713`,
-`unary_expr = "!" unary_expr | primary_test; Precedence: ! (highest)`) and
-`LANGUAGE.md:202-203` both specify the opposite. Empirical:
-`[[ ! -f /nonexistent || -d /etc ]]` evaluates **false** (should be true —
-`(!false) || true`). `&&`-over-`||` precedence is correct; only `!` is wrong.
-Fix: make the bang arm recurse at the unary level only; regression test
-`[[ ! -f missing || -d /etc ]]` == true. Doc is correct as written.
-
 ### `break 2` silently discards output accumulated before the break
 Verified 2026-06-09: a nested loop printing before `break 2` prints **nothing**
 (exit 0); single-level `break` keeps its output. `ControlFlow::break_n`
@@ -707,6 +695,17 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`[[ ! A || B ]]` precedence — fixed 2026-06-10.** `!` was parsed by
+  `ignore_then(compound)` where `compound` is the full or-level parser, so it
+  negated the entire rest of the expression (`!(A || B)`) instead of just the
+  next term. Empirically `[[ ! -f /nonexistent || -d /etc ]]` returned false
+  (should be true). Fix: a nested `recursive` makes the bang arm recurse at the
+  unary level only (`(!A) || B`), matching the grammar comment and
+  `LANGUAGE.md`. Two parser snapshots (`test_not_with_and`,
+  `test_complex_compound`) had blessed the buggy AST and were re-blessed to the
+  correct precedence; behavioural regressions in `shell_bugs_tests.rs`
+  (`test_bang_binds_tighter_than_or/_and`, `test_bang_single_term_unaffected`).
 
 - **Output-limit runtime control is now reachable from the shell — fixed 2026-06-10.**
   The four-part bug cluster the 2026-06-09 doc-accuracy pass surfaced is closed,

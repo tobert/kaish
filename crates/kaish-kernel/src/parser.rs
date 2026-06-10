@@ -1742,34 +1742,34 @@ where
     //
     // Precedence: ! (highest) > && > ||
 
-    // Use recursive for the unary NOT operator
-    let compound_test = recursive(|compound| {
-        // Unary NOT: ! expr (can be chained: ! ! expr)
+    // Unary NOT binds tighter than `&&`/`||`, so it must recurse at the
+    // unary level — `! A || B` is `(!A) || B`, NOT `!(A || B)`. The inner
+    // `recursive` lets `!` chain (`! ! expr`) while bottoming out at a
+    // primary test, so the bang never swallows a following `&&`/`||` operand.
+    let unary = recursive(|unary| {
         let not_expr = just(Token::Bang)
-            .ignore_then(compound.clone())
+            .ignore_then(unary)
             .map(|expr| TestExpr::Not { expr: Box::new(expr) });
-
-        // Unary level: ! or primary
-        let unary = choice((not_expr, primary_test.clone()));
-
-        // AND level: unary && unary && ...
-        let and_expr = unary.clone().foldl(
-            just(Token::And).ignore_then(unary).repeated(),
-            |left, right| TestExpr::And {
-                left: Box::new(left),
-                right: Box::new(right),
-            },
-        );
-
-        // OR level: and_expr || and_expr || ...
-        and_expr.clone().foldl(
-            just(Token::Or).ignore_then(and_expr).repeated(),
-            |left, right| TestExpr::Or {
-                left: Box::new(left),
-                right: Box::new(right),
-            },
-        )
+        choice((not_expr, primary_test.clone()))
     });
+
+    // AND level: unary && unary && ...
+    let and_expr = unary.clone().foldl(
+        just(Token::And).ignore_then(unary).repeated(),
+        |left, right| TestExpr::And {
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+    );
+
+    // OR level: and_expr || and_expr || ...
+    let compound_test = and_expr.clone().foldl(
+        just(Token::Or).ignore_then(and_expr).repeated(),
+        |left, right| TestExpr::Or {
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+    );
 
     // [[ ]] is two consecutive bracket tokens (not a single TestStart token)
     // to avoid conflicts with nested array syntax like [[1, 2], [3, 4]]

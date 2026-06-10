@@ -2,4 +2,4 @@
 source: crates/kaish-kernel/tests/parser_tests.rs
 expression: sexpr
 ---
-(test (not (and (file -f (string "a")) (file -d (string "b")))))
+(test (and (not (file -f (string "a"))) (file -d (string "b"))))
