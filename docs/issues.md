@@ -25,14 +25,10 @@ subprocess capture, arithmetic token leak) **all validate as fixed** on
 ## P1 — High-leverage features and diagnostics
 
 ### OverlayFs hunk 2+ — inspection API and kernel surface (2026-06-10)
-Hunk 1 landed (`69c42e3` MemoryFs lift, `2a62a72` overlay core). Remaining, per
-`docs/kaish-overlayfs.md`:
-- **Hunk 2 — inspection API**: `changes()` / `is_dirty()` / `reset(path)` /
-  `reset_all()` / `commit_into(target)` (pre-flight stale-base checks, loud
-  partial failure) / `fork_into(fresh_upper)`. Plus the `max_bytes` write-path
-  quota (bases count toward it) and a cheap `bytes()` accounting accessor.
-  Doc tests 7–10 cover this hunk; test 4's base-survives-remove assertion
-  (behavioral half already tested) gets its `changes()` half here.
+Hunk 1 landed (`69c42e3` MemoryFs lift, `2a62a72` overlay core). Hunk 2 landed
+(`6fe2225` inspection API: changes/is_dirty/reset/reset_all/commit_into/
+fork_into, dirty-symlink loud-Unsupported tracking, Drop credits the budget).
+Remaining, per `docs/kaish-overlayfs.md`:
 - **Hunk 3 — kernel surface**: mount OverlayFs via VfsRouter, `--overlay`
   session mode (kaish-mcp likely default-on, REPL opt-in), `vfs-diff` /
   `vfs-commit` builtins, and doc test 12 (strict-glob over a merged dir,
