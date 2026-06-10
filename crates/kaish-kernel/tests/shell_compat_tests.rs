@@ -510,3 +510,51 @@ shell_compat! {
     kaish_eq: "after: []",
     bash_eq: "after: [3]",
 }
+
+// =============================================================================
+// `${VAR:-WORD}` default-word quote removal — the quotes are shell syntax,
+// not data, so `${X:-"default"}` yields `default` (no literal quotes), same
+// as bash. Regression for the 2026-06-09 finding.
+// =============================================================================
+
+shell_compat! {
+    name: default_word_double_quoted_strips_quotes,
+    script: r#"echo ${NAME:-"default"}"#,
+    eq: "default",
+}
+
+shell_compat! {
+    name: default_word_single_quoted_strips_quotes,
+    script: "echo ${NAME:-'default'}",
+    eq: "default",
+}
+
+shell_compat! {
+    name: default_word_bare_unchanged,
+    script: "echo ${NAME:-default}",
+    eq: "default",
+}
+
+shell_compat! {
+    name: default_word_double_quoted_with_spaces,
+    script: r#"echo ${NAME:-"a b c"}"#,
+    eq: "a b c",
+}
+
+shell_compat! {
+    name: default_word_double_quoted_interpolates,
+    script: r#"X=hi; echo ${NAME:-"$X there"}"#,
+    eq: "hi there",
+}
+
+shell_compat! {
+    name: default_word_single_quoted_suppresses_interpolation,
+    script: "X=hi; echo ${NAME:-'$X there'}",
+    eq: "$X there",
+}
+
+shell_compat! {
+    name: default_word_set_value_wins_over_quoted_default,
+    script: r#"NAME=actual; echo ${NAME:-"default"}"#,
+    eq: "actual",
+}

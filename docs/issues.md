@@ -175,14 +175,6 @@ merged. Bash prints the pre-break output. `LANGUAGE.md:240` documents `break 2`
 with no caveat. Fix: merge the loop's accumulated output into the propagating
 Break result; kernel-routed test asserting pre-break output survives.
 
-### `${NAME:-"default"}` keeps the quote characters literally
-`LANGUAGE.md:32`'s own example yields `"default"` **with literal quotes** in
-the value; `${NAME:-default}` works. In POSIX the quotes in a default word are
-syntax, not data; multi-word defaults are currently inexpressible cleanly.
-Fix in `parse_var_expr` (strip quoting in the default-word, bash-compatible) or
-change the doc and document the literal behavior. Prefer the code fix —
-agents will copy bash idioms here.
-
 ### `--` does not protect dash-words with internal hyphens; snapshot blesses the bug
 `echo -- -not-a-flag` prints `-not -a -flag` (three args; external argv gets
 four: `[--][-not][-a][-flag]`). Mechanism: `ShortFlag` regex
@@ -695,6 +687,17 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`${VAR:-"default"}` default-word quote removal — fixed 2026-06-10.** The
+  default word was passed verbatim to `parse_interpolated_string`, so quote
+  characters survived into the value (`${NAME:-"default"}` → `"default"`). The
+  quotes are shell syntax, not data. Added `unquote_default_word` in `parser.rs`
+  (drops quote delimiters; double quotes keep interpolation, single quotes
+  suppress it via the `__KAISH_ESCAPED_DOLLAR__` marker) applied at all three
+  default-word sites (`parse_var_expr` + the two interpolated-string parsers).
+  Bash-cross-checked compat tests in `shell_compat_tests.rs`
+  (`default_word_*`, 7 cases incl. single-quote interpolation suppression and
+  value-wins). `LANGUAGE.md:32`'s example now reads true.
 
 - **`[[ ! A || B ]]` precedence — fixed 2026-06-10.** `!` was parsed by
   `ignore_then(compound)` where `compound` is the full or-level parser, so it

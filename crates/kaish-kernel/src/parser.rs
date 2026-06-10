@@ -36,14 +36,42 @@ fn parse_var_expr(raw: &str) -> Expr {
     if let Some(colon_idx) = find_default_separator(raw) {
         // Extract variable name (between ${ and :-)
         let name = raw[2..colon_idx].to_string();
-        // Extract default value (between :- and }) and recursively parse it
+        // Extract default value (between :- and }) and recursively parse it,
+        // after stripping shell quoting from the word (quotes are syntax).
         let default_str = &raw[colon_idx + 2..raw.len() - 1];
-        let default = parse_interpolated_string(default_str);
+        let default = parse_interpolated_string(&unquote_default_word(default_str));
         return Expr::VarWithDefault { name, default };
     }
 
     // Regular variable path
     Expr::VarRef(parse_varpath(raw))
+}
+
+/// Remove shell quoting from a `${VAR:-WORD}` default word, bash-style, before
+/// the word is parsed for interpolation.
+///
+/// The quotes around a default word are syntax, not data: `${X:-"default"}`
+/// yields `default`, not `"default"`. Double quotes are stripped but `$`-style
+/// interpolation inside them stays active; single quotes are stripped and
+/// suppress interpolation (their `$` becomes a literal, via the lexer's
+/// `__KAISH_ESCAPED_DOLLAR__` marker that `parse_interpolated_string` turns
+/// back into a bare `$`). Unquoted text passes through unchanged.
+fn unquote_default_word(word: &str) -> String {
+    let mut out = String::with_capacity(word.len());
+    let mut in_single = false;
+    let mut in_double = false;
+    for ch in word.chars() {
+        match ch {
+            // A quote delimiter toggles its mode and is itself dropped; the
+            // other quote kind is literal data while inside one.
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            // `$` inside single quotes must not interpolate downstream.
+            '$' if in_single => out.push_str("__KAISH_ESCAPED_DOLLAR__"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Find the position of :- in a ${VAR:-default} expression, accounting for nested ${...}.
@@ -346,7 +374,7 @@ fn parse_interpolated_string_spanned(s: &str, base_offset: usize) -> Vec<Spanned
                     // outer body — the inner parts get their own offsets via
                     // the recursive call when needed. For now, the default's
                     // parts are stored without spans (default is a Vec<StringPart>).
-                    let default = parse_interpolated_string(default_str);
+                    let default = parse_interpolated_string(&unquote_default_word(default_str));
                     StringPart::VarWithDefault { name, default }
                 } else {
                     StringPart::Var(parse_varpath(&format!("${{{}}}", var_content)))
@@ -572,7 +600,7 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
                     // Variable with default: ${VAR:-default} - recursively parse the default
                     let name = var_content[..colon_idx].to_string();
                     let default_str = &var_content[colon_idx + 2..];
-                    let default = parse_interpolated_string(default_str);
+                    let default = parse_interpolated_string(&unquote_default_word(default_str));
                     StringPart::VarWithDefault { name, default }
                 } else {
                     // Regular variable: ${VAR} or ${VAR.field}
