@@ -34,7 +34,7 @@ pub use memory::MemoryFs;
 #[cfg(feature = "overlay")]
 mod overlay;
 #[cfg(feature = "overlay")]
-pub use overlay::OverlayFs;
+pub use overlay::{ChangeKind, OverlayChange, OverlayFs};
 
 #[cfg(any(feature = "memory", feature = "overlay"))]
 mod paths;

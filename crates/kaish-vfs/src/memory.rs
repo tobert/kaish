@@ -259,6 +259,23 @@ impl MemoryFs {
     }
 }
 
+/// Credit resident content bytes back to the shared budget when the
+/// filesystem is dropped. Without this, dropping a budgeted `MemoryFs` (e.g.
+/// the upper inside a dropped `over_with_budget` overlay, or a fork's fresh
+/// upper) strands its charge: repeated create-then-drop cycles drain the
+/// shared `ByteBudget` toward spurious `StorageFull` with zero actual RAM
+/// held. Mirrors `OverlayFs`'s drop of its base-snapshot bytes.
+impl Drop for MemoryFs {
+    fn drop(&mut self) {
+        let bytes = self.resident.load(Ordering::Acquire);
+        if bytes > 0
+            && let Some(budget) = &self.budget
+        {
+            budget.credit(bytes);
+        }
+    }
+}
+
 #[async_trait]
 impl Filesystem for MemoryFs {
     async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
@@ -1209,6 +1226,18 @@ mod tests {
         fs.write(Path::new("a.txt"), b"0123").await.unwrap();
         assert_eq!(budget.used(), 4);
         fs.remove(Path::new("a.txt")).await.unwrap();
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_drop_credits_budget() {
+        let budget = Arc::new(ByteBudget::new(100));
+        {
+            let fs = MemoryFs::with_budget(budget.clone());
+            fs.write(Path::new("a.txt"), b"0123456789").await.unwrap();
+            assert_eq!(budget.used(), 10);
+        }
+        // The dropped filesystem returned its bytes to the pool.
         assert_eq!(budget.used(), 0);
     }
 

@@ -84,14 +84,14 @@ disk-backed upper is a later concern; note it, don't build it.)
 | `set_mtime` | upper-resident → upper. Lower-resident → treat as a mutation: copy up (content + base), then set on upper. No silent no-op, per the trait's contract. |
 | `read_only` | `false` — that's the point. |
 | `real_path` | **`None`, always.** Returning lower's real path for clean files would hand a tool a host path that bypasses the overlay (git and friends write through real paths). Correctness beats convenience here; a consumer that needs real paths materializes (below). Named casualty: `kaish-tools-git` (GitVfs wraps a LocalFs worktree via real paths), so git operations over an overlay mount won't work — correct and intended, since committing *through* the overlay is exactly what it exists to prevent. |
-| `read_link` / `symlink` / `lstat` | delegate by the same precedence; `symlink` goes to upper (errors if upper doesn't support it, e.g. MemoryFs today). Symlinked *escape* is the lower's problem (`LocalFs::read_only` already polices its root), not the overlay's. |
+| `read_link` / `symlink` / `lstat` | delegate by the same precedence; `symlink` goes to upper (`MemoryFs` supports symlinks). Symlinked *escape* is the lower's problem (`LocalFs::read_only` already polices its root), not the overlay's. Symlinks created in the upper are tracked as dirty state that blocks `changes()`/`commit_into` (Unsupported, loud, never silent). |
 
 ## Inspection API (the consumer-driven part — this is why it's not just MemoryFs)
 
 ```rust
-pub enum ChangeKind { Added, Modified, Removed }
+pub enum ChangeKind { Added, Modified, Removed }   // Debug, Clone, Copy, PartialEq, Eq
 
-pub struct OverlayChange {
+pub struct OverlayChange {                          // Debug, Clone
     pub path: PathBuf,
     pub kind: ChangeKind,
     /// Lower content at first touch; None for Added.
@@ -101,22 +101,24 @@ pub struct OverlayChange {
 }
 
 impl OverlayFs {
-    pub async fn changes(&self) -> Vec<OverlayChange>;
+    /// Returns Err(Unsupported) if dirty symlinks are present.
+    pub async fn changes(&self) -> io::Result<Vec<OverlayChange>>;
     pub async fn is_dirty(&self) -> bool;
-    /// Drop one path's edits (restore lower visibility) / drop everything.
+    /// Drop one path's edits (restore lower visibility).
     pub async fn reset(&self, path: &Path) -> io::Result<()>;
-    pub async fn reset_all(&self);
+    /// Drop all edits; returns Err on I/O failure (overlay stays consistent).
+    pub async fn reset_all(&self) -> io::Result<()>;
     /// Write the dirty set into a writable target (e.g. the real tree for
     /// `vfs-commit`, or a scratch dir for materialization). Refuses if a base
     /// snapshot no longer matches the target's current content — stale-base
     /// detection is a loud error, not a silent overwrite. For Added files the
     /// check inverts: the target path must not exist (a file appearing where
     /// we added one is a conflict, reported loudly).
+    /// target must not be this overlay or wrap it (deadlock via held read lock).
     pub async fn commit_into(&self, target: &dyn Filesystem) -> io::Result<()>;
     /// Fork: shared lower, dirty set copied into a caller-supplied fresh upper
-    /// (kaijutsu's context fork). The upper is `Arc<dyn Filesystem>`, so the
-    /// overlay cannot clone it generically — the caller picks the new upper's
-    /// cost model and we copy O(dirty set) through trait methods.
+    /// (kaijutsu's context fork). fresh_upper must be empty and must not be
+    /// the same Arc as self.upper. Charges the budget for cloned bases up-front.
     pub async fn fork_into(&self, fresh_upper: Arc<dyn Filesystem>) -> io::Result<OverlayFs>;
 }
 ```
@@ -126,12 +128,37 @@ vectors, so `changes()` reports *files only*. `commit_into` creates parent
 directories implicitly; empty added directories are not committed. A dirty
 symlink (`MemoryFs` supports them, so this is reachable) makes `commit_into`
 and `changes()` error `Unsupported` loudly — upgradeable later, never silent.
+This covers both symlinks created in the upper via `symlink()` and lower-resident
+symlinks removed via `remove()`.
 
 **Commit atomicity (pinned).** `commit_into` is not transactional: it
 pre-flights *all* base checks first, then writes. A mid-write failure is still
 possible (target mutates between check and write, I/O error); it fails loudly
 reporting which paths landed. Narrowing the window without pretending the trait
 gives us transactions.
+
+**Consumer note.** `commit_into` does NOT mutate overlay state — the overlay
+stays dirty after a successful commit. Callers that want a clean overlay call
+`reset_all()` after a successful commit. `commit_into` writes file content only;
+timestamps are not propagated — the target's mtime becomes "now" for written
+files. A `set_mtime`-only `Modified` (base == current) commits identical bytes
+without transferring the pinned time.
+
+**Directory asymmetry.** `is_dirty()` returns `true` if any whiteouts are
+present, even if `changes()` would return an empty `Vec` (e.g. a whiteouted
+lower *directory* has no base entry). A `mkdir`-only session reports clean
+(no whiteouts, no bases). `commit_into` never deletes directories in the target
+and never adds empty added directories.
+
+**`fork_into` budget.** Forked bases charge the inherited budget up-front —
+forked bases are real RAM drawn from the same pool as the parent. `base_bytes`
+counts unconditionally (even without a budget): it always equals the sum of all
+`Some(base)` lengths in `bases`.
+
+**Drop credits the budget.** Dropping a budgeted `OverlayFs` credits its base
+bytes; dropping a budgeted `MemoryFs` credits its content bytes. Without this,
+fork-then-drop and workspace create-then-drop cycles would drain the shared
+pool toward spurious `StorageFull` with zero actual RAM held.
 
 Diff *rendering* (unified diff text) stays out of the core: kaibo renders with the
 `similar` crate; a kaish `vfs-diff` builtin would render kernel-side. The overlay's
