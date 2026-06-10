@@ -9,8 +9,10 @@
 //! `DirEntry`/`DirEntryKind` (the data the trait traffics in) live one layer
 //! down in `kaish-types` and are re-exported here for convenience.
 
+mod budget;
 mod traits;
 
+pub use budget::ByteBudget;
 pub use traits::{DirEntry, DirEntryKind, Filesystem};
 
 // `LocalFs` pulls in `tokio/fs`; gated so the in-memory/wasm sandbox build

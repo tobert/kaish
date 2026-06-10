@@ -2,11 +2,14 @@
 //!
 //! Used for `/v` and testing. All data is ephemeral.
 
+use crate::budget::ByteBudget;
 use crate::traits::{DirEntry, DirEntryKind, Filesystem};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use tokio::sync::RwLock;
 
@@ -21,9 +24,14 @@ enum Entry {
 /// In-memory filesystem.
 ///
 /// Thread-safe via internal `RwLock`. All data is lost when dropped.
+/// Tracks its resident content bytes exactly (net: an overwrite charges the
+/// delta, a remove credits) and optionally draws them from a shared
+/// [`ByteBudget`].
 #[derive(Debug)]
 pub struct MemoryFs {
     entries: RwLock<HashMap<PathBuf, Entry>>,
+    resident: AtomicU64,
+    budget: Option<Arc<ByteBudget>>,
 }
 
 impl Default for MemoryFs {
@@ -35,6 +43,16 @@ impl Default for MemoryFs {
 impl MemoryFs {
     /// Create a new empty in-memory filesystem.
     pub fn new() -> Self {
+        Self::build(None)
+    }
+
+    /// Create a filesystem whose content bytes draw on a shared budget.
+    /// Writes that would exceed it fail loudly, ENOSPC-style.
+    pub fn with_budget(budget: Arc<ByteBudget>) -> Self {
+        Self::build(Some(budget))
+    }
+
+    fn build(budget: Option<Arc<ByteBudget>>) -> Self {
         let mut entries = HashMap::new();
         // Root directory always exists
         entries.insert(
@@ -45,6 +63,47 @@ impl MemoryFs {
         );
         Self {
             entries: RwLock::new(entries),
+            resident: AtomicU64::new(0),
+            budget,
+        }
+    }
+
+    /// Content bytes of a file entry; directories and symlinks count zero.
+    fn file_len(entry: Option<&Entry>) -> u64 {
+        match entry {
+            Some(Entry::File { data, .. }) => data.len() as u64,
+            _ => 0,
+        }
+    }
+
+    /// Reserve budget for a growth *before* mutating, so a refused charge
+    /// leaves the filesystem untouched.
+    fn charge_grow(&self, old: u64, new: u64) -> io::Result<()> {
+        if new > old
+            && let Some(budget) = &self.budget
+        {
+            budget.try_charge(new - old)?;
+        }
+        Ok(())
+    }
+
+    /// Apply the net byte delta after a successful mutation: bump the
+    /// resident counter and return shrinkage to the budget.
+    fn settle(&self, old: u64, new: u64) {
+        if new >= old {
+            self.resident.fetch_add(new - old, Ordering::AcqRel);
+        } else {
+            let shrink = old - new;
+            let previous = self.resident.fetch_sub(shrink, Ordering::AcqRel);
+            assert!(
+                previous >= shrink,
+                "MemoryFs resident counter underflow: {} - {} — accounting bug",
+                previous,
+                shrink
+            );
+            if let Some(budget) = &self.budget {
+                budget.credit(shrink);
+            }
         }
     }
 
@@ -222,6 +281,10 @@ impl Filesystem for MemoryFs {
             ));
         }
 
+        let old_len = Self::file_len(entries.get(&normalized));
+        let new_len = data.len() as u64;
+        self.charge_grow(old_len, new_len)?;
+
         entries.insert(
             normalized,
             Entry::File {
@@ -229,6 +292,7 @@ impl Filesystem for MemoryFs {
                 modified: SystemTime::now(),
             },
         );
+        self.settle(old_len, new_len);
         Ok(())
     }
 
@@ -474,12 +538,13 @@ impl Filesystem for MemoryFs {
             }
         }
 
-        entries.remove(&normalized).ok_or_else(|| {
+        let removed = entries.remove(&normalized).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("not found: {}", path.display()),
             )
         })?;
+        self.settle(Self::file_len(Some(&removed)), 0);
         Ok(())
     }
 
@@ -544,6 +609,10 @@ impl Filesystem for MemoryFs {
             }
         }
 
+        // A rename moves bytes, net zero — but inserting over an existing
+        // dest entry destroys its content, which must be credited back.
+        let mut clobbered: u64 = 0;
+
         // For directories, we need to rename all children too
         if matches!(entry, Entry::Directory { .. }) {
             // Collect paths to rename (can't modify while iterating)
@@ -560,17 +629,24 @@ impl Filesystem for MemoryFs {
                     continue;
                 };
                 let new_path = to_normalized.join(relative);
+                clobbered += Self::file_len(entries.get(&new_path));
                 entries.insert(new_path, child_entry);
             }
         }
 
         // Insert at new location
+        clobbered += Self::file_len(entries.get(&to_normalized));
         entries.insert(to_normalized, entry);
+        self.settle(clobbered, 0);
         Ok(())
     }
 
     fn read_only(&self) -> bool {
         false
+    }
+
+    fn resident_bytes(&self) -> Option<u64> {
+        Some(self.resident.load(Ordering::Acquire))
     }
 }
 
@@ -1072,6 +1148,84 @@ mod tests {
         // Data should still be there
         let data = fs.read(Path::new("a")).await.unwrap();
         assert_eq!(data, b"data");
+    }
+
+    // --- Byte accounting tests ---
+
+    #[tokio::test]
+    async fn test_resident_bytes_net_accounting() {
+        let fs = MemoryFs::new();
+        assert_eq!(fs.resident_bytes(), Some(0));
+
+        fs.write(Path::new("a.txt"), b"0123456789").await.unwrap();
+        assert_eq!(fs.resident_bytes(), Some(10));
+
+        // Overwrite charges the delta, not the gross.
+        fs.write(Path::new("a.txt"), b"0123").await.unwrap();
+        assert_eq!(fs.resident_bytes(), Some(4));
+
+        // Directories and symlinks count zero.
+        fs.mkdir(Path::new("dir")).await.unwrap();
+        fs.symlink(Path::new("a.txt"), Path::new("link")).await.unwrap();
+        assert_eq!(fs.resident_bytes(), Some(4));
+
+        // A move is net zero; removing credits.
+        fs.rename(Path::new("a.txt"), Path::new("b.txt")).await.unwrap();
+        assert_eq!(fs.resident_bytes(), Some(4));
+        fs.remove(Path::new("b.txt")).await.unwrap();
+        assert_eq!(fs.resident_bytes(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_rename_over_existing_file_credits_clobbered_bytes() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("src.txt"), b"123").await.unwrap();
+        fs.write(Path::new("dest.txt"), b"1234567").await.unwrap();
+        assert_eq!(fs.resident_bytes(), Some(10));
+
+        fs.rename(Path::new("src.txt"), Path::new("dest.txt")).await.unwrap();
+        assert_eq!(fs.resident_bytes(), Some(3));
+    }
+
+    #[tokio::test]
+    async fn test_budget_refusal_leaves_fs_untouched() {
+        let budget = Arc::new(ByteBudget::labeled(10, "test-budget"));
+        let fs = MemoryFs::with_budget(budget.clone());
+
+        fs.write(Path::new("a.txt"), b"01234567").await.unwrap();
+        assert_eq!(budget.used(), 8);
+
+        let error = fs.write(Path::new("b.txt"), b"012").await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        assert!(error.to_string().contains("test-budget"));
+
+        // Nothing changed: no b.txt, a.txt intact, counters steady.
+        assert!(!fs.exists(Path::new("b.txt")).await);
+        assert_eq!(fs.read(Path::new("a.txt")).await.unwrap(), b"01234567");
+        assert_eq!(fs.resident_bytes(), Some(8));
+        assert_eq!(budget.used(), 8);
+
+        // Shrinking and removing return bytes to the budget.
+        fs.write(Path::new("a.txt"), b"0123").await.unwrap();
+        assert_eq!(budget.used(), 4);
+        fs.remove(Path::new("a.txt")).await.unwrap();
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_budget_shared_across_filesystems() {
+        let budget = Arc::new(ByteBudget::new(10));
+        let fs_one = MemoryFs::with_budget(budget.clone());
+        let fs_two = MemoryFs::with_budget(budget.clone());
+
+        fs_one.write(Path::new("a"), b"012345").await.unwrap();
+        let error = fs_two.write(Path::new("b"), b"01234").await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+
+        fs_two.write(Path::new("b"), b"0123").await.unwrap();
+        assert_eq!(budget.used(), 10);
+        assert_eq!(fs_one.resident_bytes(), Some(6));
+        assert_eq!(fs_two.resident_bytes(), Some(4));
     }
 
     #[tokio::test]

@@ -56,6 +56,20 @@ pub trait Filesystem: Send + Sync {
     /// Returns true if this filesystem is read-only.
     fn read_only(&self) -> bool;
 
+    /// Memory-resident content bytes this filesystem is holding, if it
+    /// tracks them.
+    ///
+    /// Memory-backed filesystems (`MemoryFs`, `OverlayFs` and its base
+    /// snapshots) keep an exact net counter — an overwrite charges the
+    /// delta, a remove credits — and return `Some`. Disk-backed filesystems
+    /// keep the default `None`: disk residency is the host's concern (page
+    /// cache, `df`); this counter is about RAM. Counts file content only,
+    /// not directory/symlink metadata. Feeds per-mount introspection and
+    /// eviction decisions.
+    fn resident_bytes(&self) -> Option<u64> {
+        None
+    }
+
     /// Check if a path exists.
     async fn exists(&self, path: &Path) -> bool {
         self.stat(path).await.is_ok()
