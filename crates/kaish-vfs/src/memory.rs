@@ -50,21 +50,7 @@ impl MemoryFs {
 
     /// Normalize a path: remove leading `/`, resolve `.` and `..`.
     fn normalize(path: &Path) -> PathBuf {
-        let mut result = PathBuf::new();
-        for component in path.components() {
-            match component {
-                std::path::Component::RootDir => {}
-                std::path::Component::CurDir => {}
-                std::path::Component::ParentDir => {
-                    result.pop();
-                }
-                std::path::Component::Normal(s) => {
-                    result.push(s);
-                }
-                std::path::Component::Prefix(_) => {}
-            }
-        }
-        result
+        crate::paths::normalize(path)
     }
 
     /// Maximum symlink follow depth (matches Linux ELOOP limit).

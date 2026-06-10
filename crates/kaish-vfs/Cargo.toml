@@ -29,6 +29,9 @@ default = []
 localfs = ["dep:tokio", "tokio/fs", "tokio/rt"]
 # The in-memory backend (`/v`, tests, conventional overlay upper).
 memory = ["dep:tokio", "tokio/sync"]
+# Copy-on-write OverlayFs (docs/kaish-overlayfs.md). Pair with `memory` for
+# the conventional `OverlayFs::over(lower)` constructor.
+overlay = ["dep:tokio", "tokio/sync"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

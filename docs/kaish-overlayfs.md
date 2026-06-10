@@ -1,0 +1,248 @@
+# OverlayFs for kaish-vfs — design proposal
+
+Drafted in kaibo (解剖), destined for kaish: a copy-on-write overlay filesystem for
+`kaish-vfs`, sitting beside `LocalFs` and composing with `MemoryFs`. Writes land in
+an upper layer; the lower layer is never touched. The overlay knows exactly what
+changed, when, and from what — so a consumer can render a patch, commit, fork, or
+discard.
+
+The one-line pitch: **an overlay makes any kaish session a transaction.**
+
+## Motivating consumers (three, today)
+
+1. **kaibo coder workspaces.** kaibo's planned `coder` tool lets a model edit code
+   in a sandbox and return a unified diff, without ever weakening kaibo's
+   "read-only is the product" invariant. The model edits the overlay; kaish reads
+   (`cat`/`rg`) see the edited state; the real tree stays byte-identical. The
+   driver reviews and applies the patch with its own tools. Needs: copy-up with
+   **base snapshots** (the diff must be computed against the content as it was at
+   first edit, so the patch stays coherent even if the real tree moves underneath —
+   and `git apply` then fails loudly on a moved tree, which is the right failure).
+2. **kaijutsu context forking.** kaijutsu's kernel forks contexts in a DAG; a
+   forkable overlay is the filesystem twin — fork a context, fork its overlay, and
+   parallel agents each see their own pending edits without merging raw bytes.
+   Needs: a cheap `fork()` (shared lower, cloned upper).
+3. **kaish `--overlay` session mode.** Run a destructive-looking pipeline, inspect
+   what it *would have* done (`vfs-diff`), then commit or drop. Probably default-on
+   for agent-facing surfaces (kaish-mcp) and explicit for the REPL — silently
+   making writes virtual would surprise a human user, and surprise is what kaish
+   exists to remove. Needs: `vfs-diff` / `vfs-commit` builtins riding the
+   inspection API.
+
+## Where it sits
+
+- **Crate: `kaish-vfs`** (the trait's home, leaf, runtime-light). Not the kernel:
+  consumers like kaijutsu shouldn't need the kernel to get the overlay.
+- **Generic upper.** `OverlayFs::new(lower: Arc<dyn Filesystem>, upper: Arc<dyn Filesystem>)`
+  with `MemoryFs` as the conventional upper. The overlay tracks dirtiness itself
+  (it sees every mutation pass through its own methods), so the upper needs no
+  special hooks — and a `LocalFs` scratch-dir upper gets you a disk-backed
+  (restart-surviving) overlay for free later. Note: `MemoryFs` currently lives in
+  `kaish-kernel/src/vfs/memory.rs`; either lift it into `kaish-vfs` (its only
+  non-std dep is `tokio::sync`, already optional in the crate) or leave it and let
+  the kernel wire the conventional pairing. **Decided: lift it** — new `memory`
+  feature on `kaish-vfs` (= `tokio/sync`), kernel re-exports it the same way it
+  already re-exports `LocalFs`. Enables an `OverlayFs::over(lower)` convenience
+  constructor with the conventional `MemoryFs` upper.
+- **Mounting.** Consumers mount it like any `Filesystem` via `VfsRouter` (longest
+  prefix). kaibo would replace its `LocalFs::read_only` project mount with
+  `OverlayFs::over(LocalFs::read_only(root))` when a workspace wants writes.
+
+## State
+
+```rust
+pub struct OverlayFs {
+    lower: Arc<dyn Filesystem>,
+    upper: Arc<dyn Filesystem>,            // writable; MemoryFs by convention
+    state: RwLock<OverlayState>,
+}
+
+struct OverlayState {
+    /// Paths deleted relative to lower. A later write clears the whiteout.
+    whiteouts: HashSet<PathBuf>,
+    /// First-touch snapshots: lower content at the moment a path first became
+    /// dirty. `None` = the path did not exist in lower (it's an Added file).
+    bases: HashMap<PathBuf, Option<Vec<u8>>>,
+}
+```
+
+`bases` is the inspection API's ground truth and is owned by the overlay, not the
+upper — the upper holds *current* content only. (Persisting `bases` alongside a
+disk-backed upper is a later concern; note it, don't build it.)
+
+## Semantics, per trait method
+
+| op | behavior |
+|---|---|
+| `read` | whiteout → `NotFound`; upper hit → upper; else lower. |
+| `write` | first touch of a lower path → record base snapshot; clear any whiteout; write upper. |
+| `list` | union(lower, upper) minus whiteouts; upper wins name collisions. Dirs may exist in either layer. |
+| `stat` / `exists` | same precedence as `read`. |
+| `mkdir` | upper only. (A dir that exists in lower is already visible; mkdir-over-it is the usual `Ok` for create-parents semantics.) |
+| `remove` | upper-resident → remove from upper; lower-resident → record base, add whiteout. Removing a non-empty dir follows lower's error contract. |
+| `rename` | copy-up source (read through overlay), write dest, remove source (which whiteouts a lower source). The trait's default copy+delete fallback is nearly right already; an explicit impl keeps base bookkeeping correct: dest gets `base=None` *unless dest already existed* (then its base snapshots first). Directories: `Unsupported` initially, matching the trait default. |
+| `set_mtime` | upper-resident → upper. Lower-resident → treat as a mutation: copy up (content + base), then set on upper. No silent no-op, per the trait's contract. |
+| `read_only` | `false` — that's the point. |
+| `real_path` | **`None`, always.** Returning lower's real path for clean files would hand a tool a host path that bypasses the overlay (git and friends write through real paths). Correctness beats convenience here; a consumer that needs real paths materializes (below). Named casualty: `kaish-tools-git` (GitVfs wraps a LocalFs worktree via real paths), so git operations over an overlay mount won't work — correct and intended, since committing *through* the overlay is exactly what it exists to prevent. |
+| `read_link` / `symlink` / `lstat` | delegate by the same precedence; `symlink` goes to upper (errors if upper doesn't support it, e.g. MemoryFs today). Symlinked *escape* is the lower's problem (`LocalFs::read_only` already polices its root), not the overlay's. |
+
+## Inspection API (the consumer-driven part — this is why it's not just MemoryFs)
+
+```rust
+pub enum ChangeKind { Added, Modified, Removed }
+
+pub struct OverlayChange {
+    pub path: PathBuf,
+    pub kind: ChangeKind,
+    /// Lower content at first touch; None for Added.
+    pub base: Option<Vec<u8>>,
+    /// Current overlay content; None for Removed.
+    pub current: Option<Vec<u8>>,
+}
+
+impl OverlayFs {
+    pub async fn changes(&self) -> Vec<OverlayChange>;
+    pub async fn is_dirty(&self) -> bool;
+    /// Drop one path's edits (restore lower visibility) / drop everything.
+    pub async fn reset(&self, path: &Path) -> io::Result<()>;
+    pub async fn reset_all(&self);
+    /// Write the dirty set into a writable target (e.g. the real tree for
+    /// `vfs-commit`, or a scratch dir for materialization). Refuses if a base
+    /// snapshot no longer matches the target's current content — stale-base
+    /// detection is a loud error, not a silent overwrite. For Added files the
+    /// check inverts: the target path must not exist (a file appearing where
+    /// we added one is a conflict, reported loudly).
+    pub async fn commit_into(&self, target: &dyn Filesystem) -> io::Result<()>;
+    /// Fork: shared lower, dirty set copied into a caller-supplied fresh upper
+    /// (kaijutsu's context fork). The upper is `Arc<dyn Filesystem>`, so the
+    /// overlay cannot clone it generically — the caller picks the new upper's
+    /// cost model and we copy O(dirty set) through trait methods.
+    pub async fn fork_into(&self, fresh_upper: Arc<dyn Filesystem>) -> io::Result<OverlayFs>;
+}
+```
+
+**File-content scope (pinned for v1).** `OverlayChange.base/current` are byte
+vectors, so `changes()` reports *files only*. `commit_into` creates parent
+directories implicitly; empty added directories are not committed. A dirty
+symlink (`MemoryFs` supports them, so this is reachable) makes `commit_into`
+and `changes()` error `Unsupported` loudly — upgradeable later, never silent.
+
+**Commit atomicity (pinned).** `commit_into` is not transactional: it
+pre-flights *all* base checks first, then writes. A mid-write failure is still
+possible (target mutates between check and write, I/O error); it fails loudly
+reporting which paths landed. Narrowing the window without pretending the trait
+gives us transactions.
+
+Diff *rendering* (unified diff text) stays out of the core: kaibo renders with the
+`similar` crate; a kaish `vfs-diff` builtin would render kernel-side. The overlay's
+job is to hand back `(base, current)` pairs that make rendering trivial.
+
+Mutation-during-`changes()` is torn-read territory: take the state lock for the
+whole snapshot.
+
+`fork_into()` cost is `O(dirty set)` (copy the upper's dirty files + clone the
+state maps). Fine for code-editing workloads; if kaijutsu ever forks overlays
+with huge dirty sets, an `im`-style persistent map upper is the upgrade path —
+don't pre-build it.
+
+## Failing-first tests (the boundary gets teeth)
+
+The read-only guarantee below the overlay must be *proved*, kaibo-style — including
+at least one test that demonstrates the harness can fail (e.g. point it at a
+writable lower and watch the byte-identical assertion trip).
+
+1. Write through overlay → **real file on disk byte-identical** (the invariant).
+2. Read-after-write coherence: `cat` sees the edit; `rg` finds the new symbol.
+3. `remove` a lower file → `exists` false, `list` omits it, disk untouched.
+4. Write after remove → whiteout cleared, kind = Modified, base = the original
+   (**pinned**: the user-visible story is "I replaced the file", so the base
+   survives the remove/re-create round trip and the diff is against the
+   original).
+5. `mkdir` + write into a new dir; merged `list` shows both layers; collision →
+   upper wins.
+6. Rename lower → new path: dest readable, source whiteouted, disk untouched,
+   bases correct on both ends.
+7. `changes()` kinds and bases exact: Added (no lower), Modified (snapshot, not
+   current lower), Removed (base = content at remove time).
+8. Lower drifts after copy-up → `changes()` still reports the *snapshot* base;
+   `commit_into` a drifted target → loud stale-base error.
+9. `reset(path)` restores lower visibility; `reset_all` leaves `is_dirty()` false.
+10. `fork_into()` independence: edits after the fork don't bleed either direction.
+11. `set_mtime` on a lower file copies up rather than erroring or silently lying.
+12. Strict-glob interaction: a glob over a merged dir matches union-minus-whiteouts
+    (globs resolve through `list`, so this should fall out — prove it anyway).
+13. Path normalization: whiteouts and bases key on `PathBuf`, so `foo/./bar` and
+    `foo/bar` must hit the same entry — a whiteout recorded under one spelling
+    must not be missed under another.
+
+## Performance notes
+
+- Reads of clean files are one upper miss + one lower read — negligible over
+  `LocalFs`.
+- Memory is `O(dirty content + base snapshots)` ≈ 2× the edited bytes — **never
+  O(tree)**; the lower layer is the live disk, read on demand. Code edits are
+  small; a workload that rewrites a 500 MB asset through the overlay is holding
+  ~1 GB with a `MemoryFs` upper — see Storage & memory below for the escape.
+
+## Storage & memory
+
+The generic upper is the whole memory strategy — pick the upper to pick the
+cost model:
+
+- **`MemoryFs` upper**: zero disk writes, strictly ephemeral, RAM = 2× edited
+  bytes. Right default for one-shot/audit-sensitive uses.
+- **`LocalFs` upper** rooted in consumer-owned state (e.g.
+  `$XDG_STATE_HOME/<app>/workspaces/<id>/upper/`, bases beside it): dirty set
+  lives on disk, hot files ride the OS page cache (RAM-speed reads, eviction
+  under pressure, kernel-managed). This is deliberately *not* a custom mmap
+  arena — plain files + page cache give the same residency behavior without
+  growing-file/free-space/crash-consistency machinery. Side effect: overlays
+  survive a restart, which consumers wanting durable workspaces get for free.
+- **Tree copies (reflink or otherwise) are a non-goal** for the overlay: copying
+  changes semantics (snapshot isolation — reads stop tracking the live lower),
+  and the one place a real materialized tree is needed (running compilers over
+  the merged view) is `O(dirty)` anyway: expose the lower read-only and bind the
+  dirty set over it; `commit_into(scratch)` is the overlay-side half.
+
+Two guards belong in the overlay regardless of upper choice:
+
+- **`max_bytes` quota**, enforced in the write path (the overlay sees every
+  mutation): exceeding it fails the write loudly, ENOSPC-style — fail loud over
+  quietly eating RAM. Bases count toward the quota (they're the hidden 2×).
+- **Accounting**: a cheap `bytes()` (dirty + bases) so consumers can surface
+  per-overlay footprint (`workspace list --json`) and run LRU/idle eviction on
+  real numbers.
+
+One adjacent kaish wrinkle, out of scope for the overlay itself but worth fixing
+in the same era: `with_backend` kernels force output **spill in-memory** (the
+hermeticity guard), so a pipeline that buffers big output puts unquota'd bytes
+in RAM no matter what the upper is. Routing spill through the VFS (it lands in
+the controlled upper/scratch — still no host side channel) or quota-ing the
+spill buffer closes the last unbounded in-memory path.
+- Compilers/linters can't read a VFS. Consumers that need one **materialize**: the
+  cheap shape is the real tree exposed read-only (bind mount or as-is) with only
+  the dirty set written to a scratch dir overlaid on top — `O(dirty)`, not
+  `O(tree)`, so big projects cost what they edited, not what they are.
+  `commit_into(scratch LocalFs)` is the overlay-side half of that story.
+
+## Settled forks (2026-06-10)
+
+- **MemoryFs's home**: lifted into `kaish-vfs` behind a `memory` feature
+  (= `tokio/sync`); kernel re-exports, same pattern as `LocalFs`.
+- **Fork API**: `fork_into(fresh_upper)` — caller supplies the empty upper
+  (a `dyn Filesystem` can't be cloned generically); O(dirty) copy via trait
+  methods.
+- **Remove-then-rewrite**: kind = Modified, base = original (test 4).
+- **changes()/commit_into scope**: files only; implicit parent dirs; dirty
+  symlinks error `Unsupported` loudly.
+- **Commit atomicity**: pre-flight all base checks, then write; loud partial
+  failure, not transactional.
+
+## Open forks (still)
+
+- **Whiteout of a directory**: whole-subtree whiteout vs. per-file (per-file is
+  simpler and matches `remove`'s empty-dir contract; subtree can come later).
+- **`--overlay` surface**: which kaish frontends default to it (kaish-mcp likely
+  yes, REPL opt-in) and the `vfs-diff` / `vfs-commit` builtin names.
+- **Base persistence** for disk-backed uppers (only matters when someone wants
+  restart-surviving overlays; kaibo will, eventually — "backing store later").

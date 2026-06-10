@@ -26,3 +26,13 @@ pub use local::LocalFs;
 mod memory;
 #[cfg(feature = "memory")]
 pub use memory::MemoryFs;
+
+// Copy-on-write overlay: writes land in an upper layer, the lower is never
+// touched. Design: docs/kaish-overlayfs.md.
+#[cfg(feature = "overlay")]
+mod overlay;
+#[cfg(feature = "overlay")]
+pub use overlay::OverlayFs;
+
+#[cfg(any(feature = "memory", feature = "overlay"))]
+mod paths;
