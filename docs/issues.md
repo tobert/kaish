@@ -37,6 +37,15 @@ Hunk 1 landed (`69c42e3` MemoryFs lift, `2a62a72` overlay core). Remaining, per
   session mode (kaish-mcp likely default-on, REPL opt-in), `vfs-diff` /
   `vfs-commit` builtins, and doc test 12 (strict-glob over a merged dir,
   kernel-routed).
+- **Byte accounting, kernel half** (vfs half DONE `dddc85d`: trait
+  `resident_bytes`, ByteBudget, MemoryFs/OverlayFs counting+budgets):
+  JobFs counting; profile-defaulted budgets (`KernelConfig::mcp()`
+  conservative by default — a **loud polarity flip for embedders**, pick
+  default sizes deliberately, pattern: `OutputLimitConfig`); `df --json`-style
+  per-mount introspection (mount resident_bytes + budget used/remaining)
+  feeding `workspace list --json` and eviction. Inspection-API hooks
+  (`reset`/`reset_all`/`fork_into`) must credit bases via the existing
+  `credit_base` or the counter panics.
 - **Punted in core** (revisit if a consumer hits them): cross-layer symlink
   resolution is layer-local (an upper symlink can't point into lower);
   whiteout of a directory is per-file only. Naming proximity note:
