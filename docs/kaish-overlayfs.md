@@ -204,21 +204,46 @@ cost model:
   the merged view) is `O(dirty)` anyway: expose the lower read-only and bind the
   dirty set over it; `commit_into(scratch)` is the overlay-side half.
 
-Two guards belong in the overlay regardless of upper choice:
+### Byte accounting: always-on counting, profile-defaulted limits
 
-- **`max_bytes` quota**, enforced in the write path (the overlay sees every
-  mutation): exceeding it fails the write loudly, ENOSPC-style — fail loud over
-  quietly eating RAM. Bases count toward the quota (they're the hidden 2×).
-- **Accounting**: a cheap `bytes()` (dirty + bases) so consumers can surface
-  per-overlay footprint (`workspace list --json`) and run LRU/idle eviction on
-  real numbers.
+Counting and limiting are different concerns; split them:
 
-One adjacent kaish wrinkle, out of scope for the overlay itself but worth fixing
-in the same era: `with_backend` kernels force output **spill in-memory** (the
-hermeticity guard), so a pipeline that buffers big output puts unquota'd bytes
-in RAM no matter what the upper is. Routing spill through the VFS (it lands in
-the controlled upper/scratch — still no host side channel) or quota-ing the
-spill buffer closes the last unbounded in-memory path.
+- **Counting is always on, inside each memory-resident fs.** The trait grows
+  `fn resident_bytes(&self) -> Option<u64>` (default `None`); `MemoryFs`,
+  `OverlayFs`, and `JobFs` maintain an exact internal counter — *net*, not
+  gross: an overwrite charges the delta, a remove credits, all under the lock
+  that already guards the entry map (only the fs itself knows the old size, so
+  counting anywhere else — router, wrapper — is racy or gross-only). Cost is an
+  integer update next to a `HashMap` insert: noise. `LocalFs` stays `None` —
+  disk residency is the host's concern (page cache, `df`); this counter is
+  about RAM. `OverlayFs` counts its **base snapshots** too — overlay-owned RAM
+  regardless of upper choice, the hidden 2×. Zero config, no wrapper to
+  remember: unbounded growth becomes structurally impossible to *miss*, which
+  is the kaish way.
+- **Limiting is a shared `ByteBudget`** (`Arc`: atomic used + limit), accepted
+  at construction (`MemoryFs::with_budget`, `OverlayFs::with_budget`) and
+  charged by every fs holding it — one handle across a kernel's `/` scratch and
+  a workspace upper gives one number per kernel. Exceeding it fails the write
+  loudly, ENOSPC-style (`StorageFull`, message naming the budget and the knob)
+  — an in-band error a model reads and adapts to; fail loud over quietly eating
+  RAM. Defaults ride kernel profiles exactly like `OutputLimitConfig` already
+  does: `KernelConfig::mcp()` gets a conservative default budget,
+  interactive/host profiles generous or none. That flips the polarity —
+  embedders are protected by default and opt *out* knowingly — at the cost of
+  one loud, documented behavior change for existing embedders.
+- **Introspection rides the counters**: a `df --json`-style surface (per mount:
+  `resident_bytes`, budget used/remaining) feeds `workspace list --json`,
+  LRU/idle eviction on real numbers, and lets a driving agent manage its own
+  footprint.
+
+Evidence this isn't theoretical: kaibo's live probe pushed 17.4 MB into an
+unquota'd `/` `MemoryFs` in ~1 s, exit 0, via a redirect loop (kaibo
+`docs/issues.md` P2, 2026-06-10). The same probe *cleared* the output-spill
+path: `SpillMode::Memory` truncates (bounded), so scratch writes are the one
+unbounded path. This design supersedes the `QuotaFs` wrapper idea from the
+first draft: a wrapper undercounts (it can't see overlay bases), stacks
+identity-obscuring layers, and is opt-in — exactly the kind of guard that
+drifts.
 - Compilers/linters can't read a VFS. Consumers that need one **materialize**: the
   cheap shape is the real tree exposed read-only (bind mount or as-is) with only
   the dirty set written to a scratch dir overlaid on top — `O(dirty)`, not
