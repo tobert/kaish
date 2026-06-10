@@ -176,15 +176,22 @@ comment-arithmetic preprocessor gotcha). Decide whether `$()` should accept the
 full statement grammar (sequences/newlines/comments) or document the
 single-pipeline restriction loudly.
 
-### `wait %1` / `kill %N` — documented jobspec syntax is a lexer error
-`LANGUAGE.md:481` (`wait %1 %2`) and `:635` (`kill %N`), plus generated
-`syntax.md:233`, document syntax that cannot be typed: `%` has no token, so
-both are "lexer error: unexpected character". Inconsistent workarounds:
-`wait 1` works, `wait "%1"` fails (wait doesn't strip `%`), `kill "%1"` parses
-(kill.rs strips `%`) but the `-c` probe couldn't find the job. Fix: lex `%N`
-as a jobspec token (preferred — it's what agents' bash priors write) or align
-wait/kill on quoted-`%` handling and rewrite the three doc sites to verified
-recipes.
+### `kill %N` cannot signal a still-running background job (no PGID recorded)
+Uncovered while fixing the jobspec lexer error (see Resolved). `%N` now lexes
+and `kill %N` parses and reaches the job lookup, but `JobManager::get_process_info`
+only returns `Some` once a job has a recorded PGID, and a PGID is currently set
+**only when a job is stopped** (`register_stopped`/`stop_job`). A normal
+background `&` job — `sleep 5 & kill %1` — is "job N not found" even though
+`jobs` lists it Running. Root: background jobs are async tasks (a builtin job
+has no OS process group at all; an external job's child PGID is known inside the
+spawned task but never plumbed back to the `Job` record). Options: (a) record
+the external child's PGID into the `Job` when `execute_background` spawns it
+(timing: PGID known only after the child spawns, after job registration — needs
+a back-channel); (b) give `kill %N` a cancellation-token path per job (works for
+builtin jobs too, cascades to externals via the existing cancellation cascade) —
+this is probably the right model since kaish jobs are tasks, not processes.
+`wait %N` is unaffected (it joins the task, doesn't signal). LANGUAGE.md:635
+documents the gap.
 
 ### scatter does not fan out plain-text stdin — the docs' canonical examples run one worker
 `cat items.txt | scatter --as ITEM ...` (`LANGUAGE.md:607`, `:611-613`) binds
@@ -659,6 +666,18 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`wait %N` / `kill %N` jobspec syntax no longer a lexer error — fixed 2026-06-10.**
+  `%` had no token, so `wait %1` / `kill %N` were "lexer error: unexpected
+  character" despite being documented. Added a `JobSpec` lexer token
+  (`%[0-9]+`, keeps the `%` — kill uses it to tell a job from a PID), wired into
+  `primary_expr_parser` as a literal string. `wait` now strips the optional `%`
+  and waits for **each** positional (the doc's `wait %1 %2` waited only the
+  first before); `kill` already stripped `%`. Tests: lexer
+  `job_spec_lexes_as_one_token`, `wait` unit (`%N` + multi-job), e2e
+  `wait_jobspec_percent_form_end_to_end`. Arithmetic `%` (modulo, preprocessed
+  inside `$(())`) is unaffected. Residual: `kill %N` still can't signal a
+  running background job — separate PGID-tracking gap, now its own P3 entry.
 
 - **Statement-output joining inserts no separator (`;`/`&&` consistent, bash-matching) — fixed 2026-06-10.**
   `accumulate_result` inserted a newline between outputs that didn't already end

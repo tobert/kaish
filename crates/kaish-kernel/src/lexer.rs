@@ -462,6 +462,12 @@ pub enum Token {
     #[regex(r"-[^a-zA-Z0-9\s\-][^\s]*", lex_minus_bare, priority = 1)]
     MinusBare(String),
 
+    /// Job specifier: `%1`, `%2` — the bash idiom for `wait`/`kill` targets.
+    /// Keeps the leading `%` (kill uses it to distinguish a job from a PID;
+    /// wait strips it). Without this token a bare `%1` is a lexer error.
+    #[regex(r"%[0-9]+", lex_job_spec)]
+    JobSpec(String),
+
     /// Standalone - (stdin indicator for cat -, diff - -, etc.)
     /// Only matches when followed by whitespace or end.
     /// This is handled specially in the parser as a positional arg.
@@ -734,7 +740,8 @@ impl Token {
             | Token::MinusBare(_)
             | Token::MinusAlone
             | Token::NumberIdent(_)
-            | Token::DottedIdent(_) => TokenCategory::Command,
+            | Token::DottedIdent(_)
+            | Token::JobSpec(_) => TokenCategory::Command,
 
             // Errors
             Token::InvalidFloatNoLeading
@@ -871,6 +878,11 @@ fn lex_minus_bare(lex: &mut logos::Lexer<Token>) -> String {
     lex.slice().to_string()
 }
 
+/// Lex a job specifier: `%1` → `%1` (keep the leading `%`).
+fn lex_job_spec(lex: &mut logos::Lexer<Token>) -> String {
+    lex.slice().to_string()
+}
+
 /// Lex an absolute path: `/tmp/out` → `/tmp/out`
 fn lex_path(lex: &mut logos::Lexer<Token>) -> String {
     lex.slice().to_string()
@@ -968,6 +980,7 @@ impl fmt::Display for Token {
             Token::DoubleDash => write!(f, "--"),
             Token::PlusBare(s) => write!(f, "{}", s),
             Token::MinusBare(s) => write!(f, "{}", s),
+            Token::JobSpec(s) => write!(f, "{}", s),
             Token::MinusAlone => write!(f, "-"),
             Token::String(s) => write!(f, "STRING({:?})", s),
             Token::SingleString(s) => write!(f, "SINGLESTRING({:?})", s),
@@ -2629,6 +2642,21 @@ mod tests {
         // Combined short flags like -la
         assert_eq!(lex("-la"), vec![Token::ShortFlag("la".to_string())]);
         assert_eq!(lex("-vvv"), vec![Token::ShortFlag("vvv".to_string())]);
+    }
+
+    #[test]
+    fn job_spec_lexes_as_one_token() {
+        // `%N` is the bash jobspec for wait/kill — used to be a lexer error.
+        assert_eq!(lex("%1"), vec![Token::JobSpec("%1".to_string())]);
+        assert_eq!(lex("%12"), vec![Token::JobSpec("%12".to_string())]);
+        assert_eq!(
+            lex("wait %1 %2"),
+            vec![
+                Token::Ident("wait".to_string()),
+                Token::JobSpec("%1".to_string()),
+                Token::JobSpec("%2".to_string()),
+            ]
+        );
     }
 
     #[test]

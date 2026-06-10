@@ -1965,6 +1965,9 @@ where
                 // matches a bare `.` and requires whitespace before its file
                 // argument.
                 Token::DottedIdent(s) => Expr::Literal(Value::String(s)),
+                // Job specifier `%1` for wait/kill — flows as the literal
+                // string "%1"; the builtins interpret the leading `%`.
+                Token::JobSpec(s) => Expr::Literal(Value::String(s)),
             },
             plus_minus_bare,
             // Keywords can be used as barewords in argument position

@@ -632,9 +632,9 @@ Kaish has a single, uniform cancellation discipline that reaches every spawned e
 Cascade rules:
 
 - **Foreground forks** (concurrent pipeline stages, scatter workers, `$(...)` cmdsubs) inherit the parent kernel's cancellation via `fork_attached`. A parent timeout/cancel kills externals running in any stage.
-- **Background `&` jobs** are *detached* — they survive parent cancellation. Kill them explicitly with `kill %N` (sends SIGTERM to the job's process group).
+- **Background `&` jobs** are *detached* — they survive parent cancellation. Signal them explicitly with `kill %N`, which sends SIGTERM to the job's process group once the job has a recorded process group. (A job's PGID is currently tracked only after it is *stopped*; signalling a still-running background job by `%N` is a known gap — see issues.md.)
 
-The kill always targets the spawned child's **process group**, so shell wrappers like `bash -c '...'` do not protect their grandchildren. SIGTERM-trapping processes are escalated to SIGKILL after `kill_grace`.
+When `kill %N` does target a job, it targets the spawned child's **process group**, so shell wrappers like `bash -c '...'` do not protect their grandchildren. SIGTERM-trapping processes are escalated to SIGKILL after `kill_grace`.
 
 ## Virtual Filesystem
 

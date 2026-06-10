@@ -57,25 +57,46 @@ impl Tool for Wait {
             None => return ExecResult::with_output(OutputData::text("(no job manager)\n")),
         };
 
-        // Check if a specific job ID was provided
-        if let Some(job_id) = args.get_positional(0) {
-            let id = match job_id {
-                Value::Int(i) => JobId(*i as u64),
-                Value::String(s) => {
-                    match s.parse::<u64>() {
-                        Ok(i) => JobId(i),
-                        Err(_) => return ExecResult::failure(1, format!("wait: invalid job id: {}", s)),
-                    }
-                }
-                _ => return ExecResult::failure(1, "wait: job id must be a number"),
-            };
+        // Wait for the specific job ids provided (`wait 1`, `wait %1 %2`).
+        if !args.positional.is_empty() {
+            let mut output = String::new();
+            let mut any_failed = false;
 
-            match manager.wait(id).await {
-                Some(result) => {
-                    let status = if result.ok() { "Done" } else { "Failed" };
-                    ExecResult::with_output(OutputData::text(format!("[{}] {}\n", id, status)))
+            for spec in &args.positional {
+                let id = match spec {
+                    Value::Int(i) => JobId(*i as u64),
+                    Value::String(s) => {
+                        // Accept the bash jobspec form `%N` as well as a bare
+                        // number; the `%` is a job marker, not part of the id.
+                        let digits = s.strip_prefix('%').unwrap_or(s);
+                        match digits.parse::<u64>() {
+                            Ok(i) => JobId(i),
+                            Err(_) => return ExecResult::failure(1, format!("wait: invalid job id: {}", s)),
+                        }
+                    }
+                    _ => return ExecResult::failure(1, "wait: job id must be a number"),
+                };
+
+                match manager.wait(id).await {
+                    Some(result) => {
+                        let status = if result.ok() {
+                            "Done"
+                        } else {
+                            any_failed = true;
+                            "Failed"
+                        };
+                        output.push_str(&format!("[{}] {}\n", id, status));
+                    }
+                    None => return ExecResult::failure(1, format!("wait: job {} not found", id)),
                 }
-                None => ExecResult::failure(1, format!("wait: job {} not found", id)),
+            }
+
+            if any_failed {
+                let mut result = ExecResult::from_output(1, output.clone(), "");
+                result.set_output(Some(OutputData::text(output)));
+                result
+            } else {
+                ExecResult::with_output(OutputData::text(output))
             }
         } else {
             // Wait for all jobs
@@ -188,6 +209,54 @@ mod tests {
         let result = Wait.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.text_out().contains(&format!("[{}]", id)));
+    }
+
+    #[tokio::test]
+    async fn test_wait_jobspec_percent_form() {
+        // `wait %1` — the `%` is a job marker, stripped before lookup.
+        let mut ctx = make_ctx();
+        let manager = Arc::new(JobManager::new());
+        ctx.set_job_manager(manager.clone());
+
+        let id = manager.spawn("test".to_string(), async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            ExecResult::success("")
+        });
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String(format!("%{}", id.0)));
+
+        let result = Wait.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.text_out().contains(&format!("[{}]", id)));
+    }
+
+    #[tokio::test]
+    async fn test_wait_multiple_jobspecs() {
+        // `wait %1 %2` waits for each named job, not just the first.
+        let mut ctx = make_ctx();
+        let manager = Arc::new(JobManager::new());
+        ctx.set_job_manager(manager.clone());
+
+        let id1 = manager.spawn("j1".to_string(), async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            ExecResult::success("")
+        });
+        let id2 = manager.spawn("j2".to_string(), async {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            ExecResult::success("")
+        });
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String(format!("%{}", id1.0)));
+        args.positional.push(Value::String(format!("%{}", id2.0)));
+
+        let result = Wait.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.text_out().contains(&format!("[{}]", id1)));
+        assert!(result.text_out().contains(&format!("[{}]", id2)));
     }
 
     #[tokio::test]

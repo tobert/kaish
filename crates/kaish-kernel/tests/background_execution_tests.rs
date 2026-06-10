@@ -345,3 +345,20 @@ async fn test_jobs_builtin_shows_background_job() {
         result.text_out()
     );
 }
+
+/// `wait %N` — the bash jobspec form — must parse (it was a lexer error) and
+/// wait for the named background job end-to-end.
+#[tokio::test]
+async fn wait_jobspec_percent_form_end_to_end() {
+    let kernel = setup().await;
+    let result = kernel
+        .execute("sleep 0.05 & wait %1")
+        .await
+        .expect("wait %1 should parse and run");
+    assert!(result.ok(), "wait %1 failed: {}", result.err);
+    assert!(
+        result.text_out().contains("[1]"),
+        "expected job 1 status, got: {}",
+        result.text_out()
+    );
+}

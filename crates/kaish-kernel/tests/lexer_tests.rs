@@ -102,6 +102,7 @@ fn format_token(token: &Token) -> String {
         // Bare words starting with + or -
         Token::PlusBare(s) => format!("PLUSBARE({})", s),
         Token::MinusBare(s) => format!("MINUSBARE({})", s),
+        Token::JobSpec(s) => format!("JOBSPEC({})", s),
         Token::MinusAlone => "MINUSALONE".to_string(),
 
         // Literals
