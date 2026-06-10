@@ -248,18 +248,12 @@ left in the MCP frontend). Remaining:
 Full design + resolved decisions: [composable-help.md](composable-help.md).
 
 ### Minimal build (`--no-default-features`) — integration test binaries don't compile
-**REGRESSED 2026-06-09:** lib unit tests no longer compile minimally either —
-`test_touch_existing_readonly_rejects` (`touch.rs:199-214`) does
-`use crate::vfs::LocalFs;` at `touch.rs:200` with no `localfs` gate (E0432).
-The documented gate `cargo check -p kaish-kernel --no-default-features` still
-passes because check doesn't build `#[cfg(test)]` code — add
-`cargo test -p kaish-kernel --lib --no-default-features --no-run` to the gate
-list so this can't slip again. Consequence flagged by the safety-test audit:
-`sandbox_no_native_builtins` (`sandbox_mode_tests.rs:217-229`) only compiles in
-the exact configuration that doesn't build, so it is dead code, and the
-sandbox configuration is certified by check/clippy only (and there is no CI).
-Pre-regression state: lib tests passed minimally as of 2026-06-07
-(`cargo test -p kaish-kernel --lib --no-default-features`, 1320 tests).
+(The lib-unit-test regression in this entry is **fixed 2026-06-10** — see
+Resolved; the `--lib --no-default-features --no-run` gate is now in the build-
+command list. Consequence still standing: `sandbox_no_native_builtins`
+(`sandbox_mode_tests.rs:217-229`) only compiles in the minimal config, so it's
+exercised only when someone runs the minimal gate, and the sandbox config has no
+CI.)
 Still open: the *integration* test binaries
 (`tests/*.rs`) don't compile minimally. 8 of 23 files use `KernelConfig::repl()` /
 the `kernel_at` harness, both `#[cfg(feature = "localfs")]` (real-FS) — so `cargo
@@ -666,6 +660,17 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **Minimal-build lib-test regression — fixed 2026-06-10.** `touch.rs`'s
+  `test_touch_existing_readonly_rejects` did an ungated `use crate::vfs::LocalFs;`,
+  breaking `cargo test -p kaish-kernel --lib --no-default-features` (E0432). The
+  documented `cargo check --no-default-features` gate missed it because check
+  doesn't build `#[cfg(test)]` code. Gated the test under
+  `#[cfg(feature = "localfs")]` (it needs `LocalFs::read_only`); minimal lib
+  tests compile and run again (1347 pass). Added
+  `cargo test -p kaish-kernel --lib --no-default-features --no-run` to the
+  build-command gate list so a test-only import can't slip past `check` again.
+  Integration-binary minimal compile is still open (separate, larger; see P2).
 
 - **`wait %N` / `kill %N` jobspec syntax no longer a lexer error — fixed 2026-06-10.**
   `%` had no token, so `wait %1` / `kill %N` were "lexer error: unexpected

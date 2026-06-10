@@ -195,6 +195,10 @@ mod tests {
 
     /// touch on a read-only mount must fail loudly, never silently succeed by
     /// escaping to the host filesystem.
+    ///
+    /// Gated on `localfs`: `LocalFs` only exists with that feature, and without
+    /// the gate the import broke `cargo test --lib --no-default-features`.
+    #[cfg(feature = "localfs")]
     #[tokio::test]
     async fn test_touch_existing_readonly_rejects() {
         use crate::vfs::LocalFs;
