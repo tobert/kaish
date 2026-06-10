@@ -360,3 +360,158 @@ kaijutsu integration test matter more than the language polish.
 Picking one tightens the followup queue considerably.
 
 頑張って！
+
+---
+
+## Systemic review: test effectiveness · doc accuracy · doc resonance (June 2026)
+
+**Date:** 2026-06-09
+**Reviewer:** Claude (Fable 5), orchestrating a 61-agent fleet, with
+DeepSeek-V4-Pro and Gemini 3 Pro as an external resonance panel
+**Scope:** would the tests fail when we're wrong? do the docs tell the truth?
+do the docs *land* for their audiences?
+**Method:** seven parallel analysis dimensions (3 test, 4 doc); every P1–P3
+finding handed to an adversarial verifier instructed to refute it; LANGUAGE.md
+claims verified by *executing* them against the v0.8.0 binary; the resonance
+panel read five docs cold from two personas (fresh MCP agent, evaluating staff
+engineer). 52 findings verified: 49 confirmed, 3 refuted. Concrete follow-ups
+are all in [issues.md](issues.md); panel report in
+[resonance-2026-06.md](resonance-2026-06.md). This is the tradition pass —
+done each model generation, after the April 2026 Opus 4.7 fresh-eyes review.
+
+### TL;DR
+
+kaish's core discipline is real and has *improved*: the builtin coverage gap
+flagged in May (55/85 without kernel-routed tests) is down to ~20/89
+inline-only, the bash-compat dual-run harness genuinely detects divergence,
+SpillMode/cancellation/concurrency are tested at the level the April review
+asked for, and 037aa63's host-side-channel refusal is pinned at three layers.
+The README builtin table matches the registry exactly and the generated
+syntax.md passes its drift test — the *generated* doc pipeline works.
+
+The two systemic weaknesses are mirror images of each other:
+
+1. **Tests guard the layer below the one that changes.** The latch/trash
+   safety rails, all 43 "realworld" builtin tests, and rg's 27-flag surface
+   are tested by hand-building `ToolArgs` — below the lex→parse→clap-binding
+   pipeline that the last three schema commits reworked. The machinery works
+   (verified by hand at HEAD); nothing pins it.
+2. **Hand-written docs drift; nobody executes them.** Running LANGUAGE.md
+   against the binary surfaced ~15 verified falsehoods — including three real
+   semantic bugs the doc examples *exposed* (`[[ ! ... || ... ]]` precedence
+   inverted from the parser's own grammar comment; `break 2` discarding
+   accumulated output; `${NAME:-"default"}` keeping literal quotes). The doc
+   wasn't just stale — it was the best bug-finding tool in this review.
+
+### Test effectiveness
+
+**What's strong.** The inline lexer suite pins the preprocessor fixes,
+backtick rejection in four contexts, and heredoc contracts. The
+`shell_compat!` kaish_eq/bash_eq macro is excellent design — intended
+divergence is *recorded*, and the bash leg actually passes when enabled
+(71+27 green, verified). Cancellation tests kill real PIDs and verify
+SIGTERM→SIGKILL escalation. The flagship guarantees — no word splitting (in
+for-loops and builtins), newline-only substitution split, strict-glob errors,
+backtick rejection — are all deterministically pinned somewhere.
+
+**Where the suite lies to us.**
+- A parser snapshot **blesses a real bug**: `echo -- -not-a-flag` → three
+  args, comment acknowledging the lexer split, snapshot approving it. Fixing
+  the bug will fail the test. That's the inversion of what a test is for.
+- `tests/common` forces latch and trash **off** for every harness kernel, so
+  the destructive-op rails — the features that justify "fail loud, not
+  silent" — have zero kernel-routed coverage, and the
+  `RmAction::Trash`-failure invariant ("never fall through to permanent
+  delete") is pinned by nothing.
+- `realworld_builtin_tests.rs` is named for the property it doesn't have.
+- Tautologies exist (`is_ok() || is_err()`; a sandbox assert whose second
+  clause is implied by its first), 7 of 20 advertised validator codes are
+  never emitted by any code path, and `background_job_snapshot_isolation`
+  backgrounds the echo but not the sleep, so it never exercises its race.
+- The minimal build **regressed silently**: an ungated test import broke
+  `--lib --no-default-features` and the `cargo check` gate can't see test
+  code. The sandbox configuration is currently certified by check/clippy
+  only — and there is still no CI to notice.
+
+**Refutations worth keeping** (the verifiers earned their tokens):
+- "Strict-glob zero-match is unpinned" — refuted; a deterministic inline test
+  (`test_bare_glob_no_matches_errors`) exists, though only for one of three
+  "no matches" sites. The surrounding environment-dependent tests are still
+  weak, but the guarantee holds.
+- "kill has no tests at all" — refuted; a real PTY test kills a stopped job
+  end-to-end. The honest residual is that it's PTY-only and unix-gated.
+- "printf line-separation was removed" — refuted; `accumulate_result` still
+  inserts separators — the `;`-sequence path *bypasses* it, which is a more
+  precise (and more interesting) bug than the claim.
+
+### Doc accuracy
+
+Executing the docs found: three semantic bugs (above), four hard parse errors
+documented as working syntax (`wait %1`, `kill %N`, `set -o output-limit=8K`,
+`[ expr ]`), one feature whose documented runtime control is entirely
+unreachable (output-limit: parse error + `set`-keyword collision + a
+persistence bug + a wrong default, all in one help topic), scatter's canonical
+examples silently degrading to one worker, a `/git/` VFS mount that has never
+existed at HEAD documented in two files plus CLAUDE.md, and `limits.md`
+contradicting `scatter.md` about what works in workers (limits.md lost —
+the fork refactor landed; the help corpus didn't notice).
+
+EMBEDDING.md is the worst single file: it predates the 0.8.0 capability
+split, four of its eight samples don't compile (private `result.out`, removed
+`Tool::execute` signature, zero-arg `LocalBackend::new()`, `&str`-for-`&Path`),
+it promotes a deprecated entry point, and it never mentions cargo features,
+`ExecuteOptions`, or `with_backend` hermeticity — the three things a 2026
+embedder must know. Meanwhile the *generated* docs passed every spot-check.
+The lesson is structural, not moral: **docs that compile from code stay true;
+docs that narrate code rot in ~5 weeks.** More of LANGUAGE.md and
+EMBEDDING.md should become generated or doc-tested (the `result.out` snippet
+would be caught by a single doctest).
+
+issues.md itself validated well: all P1s accurate, every spot-checked
+Resolved entry genuinely resolved, four citations drifted (refreshed), two
+entries were fixed-but-listed-open (closed), one had regressed (reopened
+louder). The punch-list discipline works.
+
+### Doc resonance
+
+Full report in [resonance-2026-06.md](resonance-2026-06.md). The convergent
+signal — both model families, independently, ranked first — is that the
+README MCP section contradicts itself about JSON output and never states the
+`execute()` return contract; the accuracy pass found the same section
+documents a `help` tool that doesn't exist. One section, three failure modes,
+first thing an integrator reads.
+
+The panel's sharpest observation: kaish's strongest security engineering
+(capability features, `allow_external_commands`, `with_backend` hermeticity)
+is **invisible** in the docs they read — Gemini reconstructed the external-
+command path as an undisclosed sandbox escape. The work is done; only the
+telling is missing. Cheapest credibility win available.
+
+What resonates, per both models: the ShellCheck-aligned divergence framing,
+quote-to-join's paired explanation, latch/trash nonce lifecycle, the
+cancellation cascade, hermetic env. The pattern: the beloved sections state
+*contracts* (tables, codes, exhaustive lists); the weak ones narrate
+features. DeepSeek's framing is worth adopting as a doc style rule: *"tie
+every divergence from bash to a specific ShellCheck code."*
+
+### Closing
+
+The April review said kaish was "asymptoting on 1.0" and the remaining work
+was polish. This review sharpens that: the *code* is asymptoting; the
+**contract surfaces** — tests that pin the arg-binding layer, docs that state
+return shapes and lifecycles — are a release behind. Every finding here is
+the same finding at different altitudes: kaish's behavior is better than its
+own description of itself. For a shell whose entire thesis is predictability
+for agents that can only read the description, closing that gap *is* the 1.0
+work.
+
+Kaizen note for the next model-generation pass: the doc-accuracy dimension
+(execute every example) and the adversarial-verify stage both paid for
+themselves — three findings refuted before they could pollute the punch list,
+three bugs found by running documentation. Keep both. Add: run the bash-compat
+leg, and `cargo test --lib --no-default-features --no-run`, as part of the
+review preflight — both regressions this round were invisible to the default
+gates.
+
+また次のモデルで会いましょう。
+

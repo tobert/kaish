@@ -1,7 +1,12 @@
 # Known Issues & Open Work
 
 Actionable punch list. Narrative context lives in [reviews.md](reviews.md).
-Last validation pass: 2026-05-28 (after schema-fidelity / positional-index fix).
+Last validation pass: 2026-06-09 (Fable 5 systemic review — 61-agent fleet with
+adversarial verification + DeepSeek/Gemini resonance panel; narrative in
+[reviews.md](reviews.md), panel report in [resonance-2026-06.md](resonance-2026-06.md)).
+Path note: the 0.8.0 crate split moved some cited files — `vfs/local.rs` →
+`kaish-vfs`, host `ps` → `kaish-tools-host/src/ps.rs`, Tool/ToolCtx/KernelBackend
+→ `kaish-tool-api`.
 
 Priorities follow the convention from `reviews.md`:
 
@@ -18,6 +23,127 @@ subprocess capture, arithmetic token leak) **all validate as fixed** on
 ---
 
 ## P1 — High-leverage features and diagnostics
+
+### Output-limit runtime control is unreachable from the shell (bug cluster, 2026-06-09)
+Every documented way to adjust the output limit at runtime fails:
+- `set -o output-limit=8K` is a **parse error** — the set-statement grammar
+  (`parser.rs:835-857`) accepts only flag tokens and bare identifiers, so the
+  `output-limit=SIZE` handling in `set.rs:130-138` is unreachable. Quoted form
+  also fails. Only the valueless toggles `set -o output-limit` / `set +o` parse.
+- `kaish-output-limit set 1K` is a **parse error** — the `set` *keyword* token
+  hijacks the subcommand position ("found 'NUMIDENT(1K)'"); the builtin's own
+  error hint ("try: set, on, off, head, tail") is partly unusable. `head`/`tail`
+  subcommands work.
+- The doc-exposure finding behind this: `output-limit.md:10/:43/:44` documents a
+  64K default; code default is **8K** (`DEFAULT_MCP_LIMIT`, `output_limit.rs:27`).
+- Related persistence bug surfaced by the same probe: `ExecContext.output_limit`
+  mutations don't persist past the current statement, so even the paths that
+  parse don't stick.
+Fix direction: rename or special-case the `set` subcommand collision, make
+`set -o output-limit=SIZE` parseable (or stop documenting it), make the limit
+mutation persist via the dispatch ctx-sync, then re-true the docs (8K vs 64K:
+pick one). Found by the 2026-06-09 doc-accuracy pass (output-limit.md exposed
+all four). Also reconcile `LANGUAGE.md:419-425` and `:704`.
+
+### Documentation accuracy sweep — LANGUAGE.md + help content (2026-06-09)
+Every claim in LANGUAGE.md was executed against the v0.8.0 binary; help content
+checked against code. Verified falsehoods to fix (each needs a "fix doc vs fix
+code" decision; bugs with their own entries are cross-referenced):
+- `LANGUAGE.md:206`/`:659` vs `:674` — three mutually contradictory statements
+  about `[ ]`. Binary truth: `[ expr ]` does **not** parse (`found '-f' expected
+  '['`); `test` builtin works; only `[[ ]]` is test syntax. The `:661`
+  intentionally-missing row also lists "Aliases" while `:96-100` documents them.
+- `LANGUAGE.md:643-648`/`:686` — VFS table lists a `/git/` mount that does not
+  exist anywhere (`ls /git` → not found; no GitFs mount in `setup_vfs`); git
+  ships as the `git` *builtin* via kaish-tools-git. Table also says `/` is
+  "kernel root (cwd)" while `ls /` lists the host root, and omits `/v/`
+  entirely. Same stale `/git` story in `vfs.md:21` + `:42-49` (whole section of
+  `cat /git/status` examples) and in repo CLAUDE.md's "VFS Router (local,
+  memory, git backends)".
+- `LANGUAGE.md:707` + `limits.md:33` — claim `head`/`tail -c` counts UTF-8
+  characters; implementation is deliberate POSIX **bytes** (`head.rs:163`
+  comment says exactly that). Doc records the opposite of a code decision.
+- `LANGUAGE.md:720` — "parser combinator library is sourced from git" is now
+  false; chumsky is crates.io `1.0.0-alpha.8` (see P4 chumsky entry). The
+  resonance panel independently cited this line as adoption risk.
+- `limits.md:41` — claims user functions/.kai scripts cannot run in pipeline
+  stages, scatter workers, or background jobs. All three work since the fork
+  refactor; `scatter.md:33` documents the opposite. Two help topics from one
+  corpus disagree.
+- `limits.md:64` — printf row documents `a\nb` for `printf "a"; printf "b"`;
+  CLI emits `ab`. Mechanism subtlety: `accumulate_result` *does* insert newline
+  separators between statement outputs but the `;`-sequence path bypasses it —
+  see the P2 entry before editing either side.
+- `limits.md:20` — keyword-bareword row's own example (`echo done`) works now.
+- `limits.md:28` — `set` options row omits `-o output-limit`.
+- `rg.md:12` — `rg -trust` glued short-flag example fails under clap
+  ("unexpected argument '-r'"); spaced `-t rust` works. `:48` references
+  nonexistent `kaish-jq` (builtin is `jq`).
+- `README.md:253-258` — documents a `help` **MCP tool**; the server exposes
+  exactly one tool, `execute` (`handler.rs` tool_router); help is a builtin +
+  MCP prompts. Topic list also stale (missing ignore, output-limit). The
+  resonance panel's #1 convergent finding (MCP JSON contradiction) lives in
+  this same section — rewrite it once, fixing both.
+- `README.md:189-192` — embedding snippet reads `result.out`, a private field
+  (`pub` accessor is `text_out()`); first Rust sample an embedder sees fails to
+  compile. Same bug in EMBEDDING.md Quick Start (see next entry).
+- `LANGUAGE.md:411-414` — latch message format drifted (no filename on first
+  line; nonce now quoted; new `Authorized:` line). Cosmetic but agents
+  pattern-match it.
+- Stale test-file header comments that misdescribe what's covered:
+  `heredoc_compat_tests.rs:10-14` (claims unterminated-heredoc tolerance and
+  ignored $()-tests; both now wrong) and `heredoc_tests.rs:10-11` (claims CR/LF
+  normalization; tests assert `\r` preserved).
+Verified-accurate (no action): README builtin table matches all 86 registered
+builtins exactly; all Quick Tour examples run; syntax.md drift test passes and
+every spot-checked syntax.md claim verified; timeout/ignore/scatter help claims
+verified.
+
+### EMBEDDING.md predates the 0.8.0 split — 4 of 8 samples don't compile
+Last touched 2026-05-02 (fb49110). Verified against HEAD:
+- Quick Start (`:19`) and README both read private `result.out` → `text_out()`.
+- Custom Tools (`:144`) implements removed `Tool::execute(&mut ExecContext)`;
+  trait is now `execute(&mut dyn ToolCtx)` (`kaish-tool-api/src/tool.rs:27`)
+  with the downcast pattern every builtin uses.
+- KaijutsuBackend example (`:75`) calls `LocalBackend::new()` with no args;
+  signature requires `Arc<VfsRouter>` (`backend/local.rs:31`).
+- Programmatic VFS read (`:473`) passes `&str` where `&Path` is required and
+  never imports the `Filesystem` trait.
+- Promotes `Kernel::execute_with_vars`, now `#[deprecated]` (`kernel.rs:1080`).
+- Silent on everything an embedder now needs: **capability features** (default
+  is `localfs` only; every GitVfs example needs non-default `git`, external
+  commands need `subprocess` — no mention anywhere), **ExecuteOptions**
+  (timeout incl. ZERO dry-run, cancel_token, cwd, W3C trace context — the
+  canonical per-call surface, undocumented), `with_backend` hermeticity from
+  037aa63 (spill forced in-memory, job files off — embedders relying on disk
+  spill or `/v/jobs` persistence must know), `owns_output` from cd23012, and
+  the kaish-client `KernelClient`/`EmbeddedClient` surface.
+- `JobFs` status documented as `"completed:0"`; actual is `"done:0"`
+  (`job.rs:180-186`) — string-matching embedders never match.
+- Resonance panel (Gemini): GitVfs/kaijutsu material is ~60% of the doc and
+  reads as an app tutorial, not a library guide — move to its own doc when
+  rewriting. Panel also wants a stability/semver/MSRV statement and the
+  panic-safety line contextualized. See [resonance-2026-06.md](resonance-2026-06.md).
+Repo CLAUDE.md/GEMINI.md (byte-identical) share the staleness: crate tree lists
+8 of 12 crates — missing exactly kaish-tool-api, kaish-vfs, kaish-tools-git,
+kaish-tools-host, the ones an agent needs to find Tool/GitVfs. Also the
+"Avoid mod.rs" style rule is contradicted by 7 mod.rs files in kaish-kernel —
+scope it ("new modules") or drop it.
+
+### Resonance follow-ups — MCP contract docs (2026-06-09)
+Both panel models independently ranked the same gaps top-3; full report in
+[resonance-2026-06.md](resonance-2026-06.md). The doc work, in leverage order:
+1. README MCP section rewrite: the JSON-either-way vs clean-text-by-default
+   contradiction, plus an explicit `execute` **return contract** (envelope
+   shape, exit-code table 0/1/2/3, where `.data` lives, truncation recovery).
+2. Per-call **lifecycle table**: what resets each `execute()` (vars, functions,
+   cwd, aliases) vs what persists (nonce store, trash, init script) — "the
+   contract the agent codes against."
+3. Surface the existing security model: `allow_external_commands`, capability
+   features, with_backend hermeticity are invisible in user-facing docs; Gemini
+   read the external-command path as an undisclosed sandbox escape.
+4. Agent "Do Not" callouts: inline env vars (`FOO=bar cmd` → `$1`), one
+   concrete quote-to-join error example, latch exit-2 → parse nonce recipe.
 
 ### `rg` parallel walking
 The 2026-04-29 rg builtin uses `ignore::WalkBuilder::build()`, which
@@ -61,20 +187,142 @@ Remaining open work:
 
 ## P2 — Focused refactors & real bugs
 
-### Composable help/instructions library (`kaish-help` crate) — Phases 4–5 remaining
+### `[[ ! A || B ]]` — `!` binds loosest, backwards from doc and the parser's own comment
+Found 2026-06-09, adversarially verified. `parser.rs:1718-1719` has
+`just(Token::Bang).ignore_then(compound.clone())` where `compound` is the full
+or-level recursive parser — so `!` negates the **entire rest** of the
+expression. The grammar comment directly above (`parser.rs:1711-1713`,
+`unary_expr = "!" unary_expr | primary_test; Precedence: ! (highest)`) and
+`LANGUAGE.md:202-203` both specify the opposite. Empirical:
+`[[ ! -f /nonexistent || -d /etc ]]` evaluates **false** (should be true —
+`(!false) || true`). `&&`-over-`||` precedence is correct; only `!` is wrong.
+Fix: make the bang arm recurse at the unary level only; regression test
+`[[ ! -f missing || -d /etc ]]` == true. Doc is correct as written.
+
+### `break 2` silently discards output accumulated before the break
+Verified 2026-06-09: a nested loop printing before `break 2` prints **nothing**
+(exit 0); single-level `break` keeps its output. `ControlFlow::break_n`
+(`control_flow.rs:41-46`) carries a fresh empty `ExecResult`; when the Break
+propagates past the inner loop the accumulated output is replaced rather than
+merged. Bash prints the pre-break output. `LANGUAGE.md:240` documents `break 2`
+with no caveat. Fix: merge the loop's accumulated output into the propagating
+Break result; kernel-routed test asserting pre-break output survives.
+
+### `${NAME:-"default"}` keeps the quote characters literally
+`LANGUAGE.md:32`'s own example yields `"default"` **with literal quotes** in
+the value; `${NAME:-default}` works. In POSIX the quotes in a default word are
+syntax, not data; multi-word defaults are currently inexpressible cleanly.
+Fix in `parse_var_expr` (strip quoting in the default-word, bash-compatible) or
+change the doc and document the literal behavior. Prefer the code fix —
+agents will copy bash idioms here.
+
+### `--` does not protect dash-words with internal hyphens; snapshot blesses the bug
+`echo -- -not-a-flag` prints `-not -a -flag` (three args; external argv gets
+four: `[--][-not][-a][-flag]`). Mechanism: `ShortFlag` regex
+(`lexer.rs:438`, `-[a-zA-Z][a-zA-Z0-9]*`) disallows internal hyphens so the
+word lexes as three flag tokens, and the post-`--` arm of `args_list_parser`
+(`parser.rs:1440-1448`) maps each to its own positional with no rejoin.
+**Scope (verified):** only short-dash words with internal hyphens split —
+`git checkout -- -file` and `-- --weird-name` survive as one arg each; quoting
+is a clean workaround. The snapshot test `parser_double_dash_ends_flags`
+(`parser_tests.rs:694-699` + its .snap) pins the *broken* behavior — fixing the
+lexer will fail the test rather than the bug failing it. Same tokenization-gap
+family as the bare-`,`/digit-range P4 entry. Fix: rejoin dash-bearing words
+after DoubleDash (or document the divergence), update the snapshot, and add an
+end-to-end `echo -- -not-a-flag` assertion so the contract is explicit.
+
+### `;` sequences bypass the newline output separator — doc's own example is false
+`LANGUAGE.md:170` claims kaish separates statement outputs by newlines, with
+example `printf "a"; printf "b"` → `a\nb`. Observed: `ab` via the CLI — exactly
+the bash behavior the doc disclaims. `&&` chains DO separate (`a\nb`).
+Subtlety from verification: `accumulate_result` (`kernel.rs:~4216`) *does*
+insert newline separators — the `;`-sequence path evidently bypasses it.
+Decide intent (make `;` match `&&`, or scope the doc claim and fix
+`limits.md:64`'s matching row). Related undocumented limit found by the same
+probe: `$(printf a; printf b)` is a parse error — `;` is not accepted inside
+`$()` at all; multi-line `$( )` and `#` comments inside `$()` are also parse
+errors with no test pinning either behavior (`skip_command_substitution`,
+`lexer.rs:1096`, skips quotes but not comments — same family as the
+comment-arithmetic preprocessor gotcha).
+
+### `wait %1` / `kill %N` — documented jobspec syntax is a lexer error
+`LANGUAGE.md:481` (`wait %1 %2`) and `:635` (`kill %N`), plus generated
+`syntax.md:233`, document syntax that cannot be typed: `%` has no token, so
+both are "lexer error: unexpected character". Inconsistent workarounds:
+`wait 1` works, `wait "%1"` fails (wait doesn't strip `%`), `kill "%1"` parses
+(kill.rs strips `%`) but the `-c` probe couldn't find the job. Fix: lex `%N`
+as a jobspec token (preferred — it's what agents' bash priors write) or align
+wait/kill on quoted-`%` handling and rewrite the three doc sites to verified
+recipes.
+
+### scatter does not fan out plain-text stdin — the docs' canonical examples run one worker
+`cat items.txt | scatter --as ITEM ...` (`LANGUAGE.md:607`, `:611-613`) binds
+the **entire** stdin to one item — one worker, exit 0, silent. Structured input
+fans out correctly (`split ... | scatter` works as documented). The behavior is
+deliberate (`extract_items`, `scatter.rs:327-328`: "Raw text without structured
+data — one item (no implicit split)") but it contradicts the for-loop
+newline-split philosophy adopted later, and the doc's canonical examples
+silently degrade. Decide: newline-split plain text in scatter (consistent with
+`for`), or fix the examples to `... | split --lines | scatter` and state the
+structured-data requirement loudly.
+
+### Destructive-op safety rails have zero kernel-routed test coverage
+The latch and trash systems are only tested below the arg-binding layer that
+c463f42/ffe0f44 just reworked — verified 2026-06-09 (the flows *work* at HEAD;
+this is a missing regression net, not a bug):
+- `tests/common/mod.rs:28-32` builds every harness kernel with
+  `.with_latch(false).with_trash(false)`; no test anywhere drives
+  `set -o latch` → `rm` exit 2 → `rm --confirm=<nonce>` through
+  `kernel.execute`. All inline latch tests (`rm.rs:443-589`,
+  `kaish_trash.rs:281-307`) inject `confirm` directly into `ToolArgs.named`,
+  bypassing lex → parse → clap binding entirely.
+- The `RmAction::Trash` **execution** arm (`rm.rs:212-227`) is never run by any
+  test: no TrashBackend mock exists, and the real-backend tests are
+  `#[ignore]`d as CI-flaky. The "trash failure = error, never fall through to
+  permanent delete" invariant is honored by the code but pinned by nothing.
+Fix: `tests/latch_trash_tests.rs` with latch-on kernel (exit-2 → parse nonce →
+confirm → deleted; bogus nonce → exit 1, file survives), plus a test-only
+TrashBackend mock (recording + always-failing variants) covering the
+trash-success, trash-failure, and backend-absent paths.
+
+### `realworld_builtin_tests.rs` (43 tests) bypasses the kernel it's named for
+The file hand-builds `ToolArgs` and calls `tool.execute()` directly
+(`realworld_builtin_tests.rs:56-66`, e.g. `:464`) — the documented anti-pattern
+from the kernel-routed-tests convention. It carries the bulk of grep's flag
+coverage plus cat/head/tail/wc/ls/jq, none of it exercising lex → parse →
+validate → glob pre-expansion → `build_args_async` — the exact layer changed by
+ffe0f44/cd23012/c463f42. The intended commands are already in comments above
+each test; porting to the `common::kernel_at`/`run` harness is mechanical and
+converts 43 vacuous-at-the-binding-layer tests into real ones. Highest-risk
+sibling: `rg` — the largest flag surface in the registry (27 params), 15
+inline-only tests, zero kernel-routed coverage, post-canonicalization.
+Also port-priority: `read` (pipeline/scope semantics are pure kernel
+interaction), `env`/`exec` (hermetic-env overlay, two-spawn-site sync).
 Phases 1–3 done 2026-06-06: the `kaish-help` crate (concept fragments + `compose`/
 recipes + byte-stable `get_help`) is the single source for help content; `syntax.md`
 is generated + drift-tested; and MCP `instructions:`, the REPL welcome, the `execute`
 tool description, and the MCP prompt set all compose from it (no hand-rolled prose
 left in the MCP frontend). Remaining:
-- **Phase 4:** publish; kaijutsu/kaibo adopt `kaish-help`.
+- **Phase 4:** publish half **done 2026-06-08** (`kaish-help` 0.8.0 on
+  crates.io); remaining: kaijutsu/kaibo adoption (tracked in those repos).
 - **Phase 5:** i18n scaffolding + first `ja` fragments.
 
 Full design + resolved decisions: [composable-help.md](composable-help.md).
 
 ### Minimal build (`--no-default-features`) — integration test binaries don't compile
-Lib unit tests pass minimally as of 2026-06-07 (`cargo test -p kaish-kernel --lib
---no-default-features`, 1320 tests). Still open: the *integration* test binaries
+**REGRESSED 2026-06-09:** lib unit tests no longer compile minimally either —
+`test_touch_existing_readonly_rejects` (`touch.rs:199-214`) does
+`use crate::vfs::LocalFs;` at `touch.rs:200` with no `localfs` gate (E0432).
+The documented gate `cargo check -p kaish-kernel --no-default-features` still
+passes because check doesn't build `#[cfg(test)]` code — add
+`cargo test -p kaish-kernel --lib --no-default-features --no-run` to the gate
+list so this can't slip again. Consequence flagged by the safety-test audit:
+`sandbox_no_native_builtins` (`sandbox_mode_tests.rs:217-229`) only compiles in
+the exact configuration that doesn't build, so it is dead code, and the
+sandbox configuration is certified by check/clippy only (and there is no CI).
+Pre-regression state: lib tests passed minimally as of 2026-06-07
+(`cargo test -p kaish-kernel --lib --no-default-features`, 1320 tests).
+Still open: the *integration* test binaries
 (`tests/*.rs`) don't compile minimally. 8 of 23 files use `KernelConfig::repl()` /
 the `kernel_at` harness, both `#[cfg(feature = "localfs")]` (real-FS) — so `cargo
 test -p kaish-kernel --no-default-features` (which builds the integration binaries
@@ -87,7 +335,8 @@ as the pattern to follow. Surfaced 2026-06-03; partially resolved 2026-06-07. Fo
 naturally into the planned `native`→capability-feature split.
 
 ### Split `kernel.rs::execute_stmt_flow`
-~L1007–L1443 is an 18-arm async match. Each arm reaches into `scope`,
+`kernel.rs:1463`–~1913 (kernel.rs is now 6,838 lines) is a 16-arm async match.
+Each arm reaches into `scope`,
 `exec_ctx`, and `user_tools` RwLocks; `For`/`While`/`Case` are 100+
 lines apiece. Natural refactor: `mod kernel/exec/{assignment, command,
 pipeline, control, …}` with `execute_stmt_flow` reduced to a dispatch
@@ -95,17 +344,8 @@ arm-per-module.
 
 ### Extract `dispatch_command` ctx-sync helper
 The six-field `ExecContext` ↔ kernel-state sync appears near every
-call site that fields a fork (`kernel.rs:3224-3271` and duplicates).
-One helper, one truth.
-
-### grep `-E` is pure no-op
-`crates/kaish-kernel/src/tools/builtin/grep.rs:74-78`. Rust's regex
-crate is always extended, so `-E` semantically aliases to default.
-Currently declared as `_extended: bool` accept-and-ignore. Options:
-(a) keep the no-op for POSIX/muscle-memory compatibility (current);
-(b) remove the field, let clap reject `-E` so users learn it's
-unnecessary; (c) note in the help text. (a) is lowest churn — leave
-unless someone reports surprise.
+call site that fields a fork (`kernel.rs:~4100-4140` and duplicates;
+citation refreshed 2026-06-09). One helper, one truth.
 
 ### No unquoted token-pasting — adjacent bare lexemes are not one word
 kaish's lexer/parser does **no token pasting**: a run of adjacent *unquoted*
@@ -173,7 +413,8 @@ Acceptable today since kaish runs predominantly on Linux.
 The async `build_args_async` (kernel.rs) fails loud when an undeclared flag under
 a `map_positionals` schema would silently divorce a space-form value (fixed
 2026-06-08, see Resolved). The sync twin `build_tool_args`
-(`scheduler/pipeline.rs:545`) shares the same `unwrap_or(true)` default-to-bool
+(`scheduler/pipeline.rs:705`, `unwrap_or(true)` at `:822`; citation refreshed
+2026-06-09) shares the same `unwrap_or(true)` default-to-bool
 and has **no** equivalent guard. It can't trigger the production bug today — its
 only production callers are scatter/gather option parsing (builtin schemas,
 `map_positionals=false`); the backend-tool caller is the `#[cfg(test)]`
@@ -217,6 +458,62 @@ themselves. If we add another builtin that wants to propagate a token
 swap *outward* through dispatch_command, it would need either explicit
 restoration or a reverse sync added.
 
+### Test-effectiveness residuals (2026-06-09 fleet review)
+Smaller verified gaps from the systemic review, grouped; the headline test
+items got their own P2 entries (destructive rails, realworld port). Each
+bullet is independently actionable:
+- **`--json` is kernel-route-tested for ~4 of 89 commands** despite being the
+  headline MCP feature (`shell_compat_tests.rs:27` explicitly skips it; only
+  ps + three kaish-* tools assert shape through the full stack). One
+  rstest-parameterized sweep file — run `<cmd> --json`, assert it parses and
+  the top-level shape — would cover the registry.
+- **`builtin_kernel_tests.rs` is 100% happy-path:** 38 tests, zero nonzero-exit
+  assertions. Add 1–2 negative cases per builtin (missing file, bad flag)
+  asserting the specific code + err substring — agents branch on exit codes.
+- **External-command argv never tested with a space-containing `$VAR`**
+  (`external_command_tests.rs` uses only literals/builtin echo). The no-split
+  guarantee on the *external* path (`build_args_flat`) is unpinned, and the
+  hermetic-env memory note already warns the two spawn sites must stay in sync.
+  One Linux-gated `printf "[%s]\n" $X` test closes it.
+- **`background_job_snapshot_isolation` doesn't exercise its race**
+  (`concurrency_tests.rs:203`): `sleep 0.2; echo $VAR &` backgrounds only the
+  echo, so the sleep is foreground and the test passes even under a
+  shared-scope regression. Fix: move the delay inside the backgrounded unit
+  (`snap() { sleep 0.2; echo $VAR; }; snap &` then mutate immediately).
+- **Tautological assertions:** `sandbox_external_commands_blocked`
+  (`sandbox_mode_tests.rs:187`, second assert always true — pin exit 127 +
+  message so policy-block is distinguishable from accidental failure) and
+  `validation_quoted_glob_in_mv` (`validation_tests.rs:468`,
+  `is_ok() || is_err()`). The bare-glob validation tests at `:321-391` are
+  environment-dependent (transient-kernel cwd) — backstopped by the
+  deterministic inline `test_bare_glob_no_matches_errors` (`kernel.rs:6135`),
+  but that test only covers the builtin-argv site; the `execute_stmt_flow` and
+  `build_args_flat` "no matches" sites lack their own, and the inline module
+  is feature-gated such that `cargo test -p kaish-kernel --lib` alone skips it.
+- **Lexer negative tests assert only `is_err`** (`lexer_tests.rs:160`
+  `run_lexer_error_test`): the float/ambiguous-boolean/unterminated suites
+  would still pass if the curated diagnostics regressed to a generic error.
+  Thread an expected variant/substring through the rstest cases (the inline
+  `backtick_in_source_is_rejected` shows the pattern).
+- **7 of 20 `IssueCode` variants are never emitted** (E006 sed, E007 jq, E010,
+  E011 diff, W003, W004, W005 — `kaish-tool-api/src/issue.rs`): the advertised
+  validations don't exist, so deleting them fails zero tests. Only grep and
+  seq implement `Tool::validate`. Either implement + test per code, or remove
+  the dead variants (fail-loud over silent aspiration).
+- **kill/bg/fg coverage is PTY-only** (unix-gated, timing-sensitive,
+  `pty_job_control.rs`) and **`wait` never appears as a command in any
+  integration test** (6 inline tests only). `kill %1` + `wait` exit-code
+  propagation are doable in `background_execution_tests.rs` without a PTY.
+- **Timing margins:** `background_job_does_not_block_foreground`
+  (`concurrency_tests.rs:159`, 300ms headroom — the file's only hard
+  wall-clock bound) and bare 5-10ms registration sleeps in `job.rs` unit
+  tests (`:719/:738/:759`) — poll instead.
+- **Bash-compat leg never runs automatically:** with `KAISH_BASH_COMPAT=1`,
+  71+27 bash-side tests pass (verified) — but nothing sets it and there is no
+  CI workflow at all, so the divergence detector depends on someone
+  remembering. (CI is deliberately deferred per project memory; recorded here
+  so the deferral stays a decision, not a drift.)
+
 ### Test gaps around kill discipline
 - No test for `kill_grace = Duration::ZERO` (immediate SIGKILL).
 - No test that a user-defined tool (`tool name { ... }`) inside a
@@ -247,7 +544,7 @@ Uses `std::hint::spin_loop()` to guarantee immediate visibility. Works,
 wastes CPU on contention. Channel-based coordination would be cleaner.
 
 ### MCP per-request OS thread + 16MB stack
-`crates/kaish-mcp/src/server/execute.rs:154-157` documents it. Fine at
+`crates/kaish-mcp/src/server/execute.rs:192` documents it. Fine at
 agent-call rates, will be a problem in a hot loop. Replace with a pool
 of LocalSet workers + mpsc channel. Benchmark first to confirm the win.
 
@@ -352,11 +649,6 @@ O_RDONLY fd (works on dir fds; on Linux futimens needs only ownership/write
 perm, not a write-mode handle) instead of opening for write — deferred to keep
 the cross-platform `File::set_modified` contract unchanged for now.
 
-### `touch .hidden.txt` fails — dot-prefixed filenames mis-tokenized
-The lexer splits `.hidden.txt` into `Dot` + `Ident("hidden.txt")`
-rather than a single filename token. `DotSlashPath` (`./foo`) works;
-bare dot-prefixed names don't. Workaround: quote the name.
-
 ### Bare `,` / numeric ranges parse oddly — `cut -d,`, `tr -d 0-9` need quoting
 Surfaced 2026-05-28 by the kernel-routed builtin tests. Two related
 tokenization gaps in the same family as the dot-prefixed-filename entry
@@ -388,9 +680,13 @@ of the heredoc span-tracking work under P1.
 Handles `$VAR`, `${VAR}`, `$(…)` with nested paren tracking. Could
 split into smaller helpers for maintainability.
 
-### chumsky from git → crates.io
-`LANGUAGE.md` Build/Development note is honest but should resolve
-before 1.0. Either wait for chumsky 1.0 or pin a specific git commit.
+### chumsky alpha → 1.0 before kaish 1.0
+Updated 2026-06-09: chumsky moved to crates.io `1.0.0-alpha.8` in `229f363`
+(release prep) — the old "pin a git commit" option is moot. Residual: upgrade
+to a stable chumsky 1.0 when it ships, before kaish 1.0. `LANGUAGE.md:720`
+still claims the parser "is sourced from git rather than crates.io" — now
+factually wrong; fix with the doc sweep (the resonance panel cited that exact
+line as adoption risk the project has already paid down).
 
 ### REPL polish
 Syntax highlighting (chumsky already produces structured tokens),
@@ -432,6 +728,20 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`touch .hidden.txt` / dot-prefixed filenames — fixed (validated 2026-06-09).**
+  The old P4 entry is closed: dot-prefixed names now lex as a single
+  `DottedIdent` bareword (`lexer.rs:378-384`, the argv-barewords work,
+  `074ad98`). Verified at HEAD: `touch .hidden.txt && ls .hidden.txt &&
+  echo .parent` all behave; POSIX `. file` source alias still works (pinned by
+  the bare-`.` Resolved entry below). Quoting is no longer needed.
+
+- **grep `-E` no-op — closed as decided 2026-06-09.**
+  The old P2 entry's preferred end state (option a + c: keep the accept-and-
+  ignore for muscle-memory compatibility, note it in help text) is implemented:
+  `grep.rs:74-76` doc comment ("No-op: Rust's regex crate is always extended …
+  accepted for POSIX/muscle-memory compatibility") surfaces in `help grep` via
+  the clap-derived schema. Nothing left to do unless someone reports surprise.
 
 - **`with_backend` kernels now refuse host side channels — output spill + job-output leaks closed 2026-06-08.**
   Two paths reached the real host filesystem via `std::fs`, bypassing the VFS (and
