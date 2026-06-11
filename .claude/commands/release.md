@@ -68,25 +68,35 @@ Before releasing, get a second opinion on changes since the last release tag.
 
 ## Phase 4: Version Bump
 
-The workspace has a specific versioning structure. ALL of these must be updated to `$ARGUMENTS`:
+All crates use `version.workspace = true`, so the crate versions come from one
+place — but every `path + version` inter-crate dependency pin must be bumped
+to match. ALL of these must be updated to `$ARGUMENTS`:
 
 ### Workspace version (root Cargo.toml)
 ```
 Cargo.toml → version = "$ARGUMENTS"
 ```
 
-### Standalone crate versions (not using workspace version)
+### Inter-crate dependency version pins
+These use `path + version` for both local dev and crates.io publishing.
+Find them all with:
 ```
-crates/kaish-glob/Cargo.toml   → version = "$ARGUMENTS"
+grep -n 'kaish-.*version = "' crates/*/Cargo.toml
 ```
-
-### Inter-crate dependency versions
-These use `path + version` for both local dev and crates.io publishing:
+As of 0.8.x that is:
 ```
-crates/kaish-kernel/Cargo.toml → kaish-glob version, kaish-types version
-crates/kaish-client/Cargo.toml → kaish-kernel version
-crates/kaish-mcp/Cargo.toml    → kaish-kernel version
-crates/kaish-repl/Cargo.toml   → kaish-kernel version, kaish-client version
+crates/kaish-tool-api/Cargo.toml   → kaish-types
+crates/kaish-glob/Cargo.toml       → (no kaish deps)
+crates/kaish-vfs/Cargo.toml        → kaish-types
+crates/kaish-help/Cargo.toml       → kaish-types
+crates/kaish-tools-git/Cargo.toml  → kaish-types, kaish-tool-api, kaish-vfs
+crates/kaish-tools-host/Cargo.toml → kaish-types, kaish-tool-api
+crates/kaish-kernel/Cargo.toml     → kaish-glob, kaish-types, kaish-help,
+                                     kaish-tool-api, kaish-vfs,
+                                     kaish-tools-git, kaish-tools-host (optional deps — still pinned)
+crates/kaish-client/Cargo.toml     → kaish-kernel
+crates/kaish-mcp/Cargo.toml        → kaish-kernel
+crates/kaish-repl/Cargo.toml       → kaish-kernel, kaish-client
 ```
 
 After editing, run `cargo check --all` to verify the versions resolve correctly.
@@ -107,12 +117,19 @@ After editing, run `cargo check --all` to verify the versions resolve correctly.
 
 Publish in dependency order. Each crate must be available on crates.io before
 its dependents can be published. Wait 15 seconds between publishes.
+`kaish-wasi` is NOT published (wasm binary target, no library consumers).
 
 ```
-cargo publish -p kaish-glob
-# wait 15s
 cargo publish -p kaish-types
-# wait 15s
+# wait 15s — tier 2 depends only on kaish-types (kaish-glob on nothing)
+cargo publish -p kaish-glob
+cargo publish -p kaish-tool-api
+cargo publish -p kaish-vfs
+cargo publish -p kaish-help
+# wait 15s — tool bundles need types/tool-api/vfs
+cargo publish -p kaish-tools-git
+cargo publish -p kaish-tools-host
+# wait 15s — the kernel needs everything above (incl. its optional deps)
 cargo publish -p kaish-kernel
 # wait 15s
 cargo publish -p kaish-client
