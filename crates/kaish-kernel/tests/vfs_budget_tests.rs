@@ -268,3 +268,35 @@ fn repl_no_budget_by_default() {
 fn transient_no_budget_by_default() {
     assert_eq!(KernelConfig::transient().vfs_budget_bytes, None);
 }
+
+// ---------------------------------------------------------------------------
+// Embedder surface: ByteBudget is nameable through kaish-kernel alone
+// ---------------------------------------------------------------------------
+
+/// A `with_backend` embedder (kaibo's shape: it builds its own `MemoryFs` and
+/// mounts it via `Kernel::with_backend`) must be able to attach a labeled
+/// budget without a direct kaish-vfs dependency — `ByteBudget` is re-exported
+/// through `kaish_kernel::vfs`.
+#[tokio::test]
+async fn byte_budget_reexport_serves_with_backend_embedders() {
+    use std::sync::Arc;
+    use kaish_kernel::vfs::{ByteBudget, MemoryFs, VfsRouter};
+    use kaish_kernel::{KernelBackend, LocalBackend};
+
+    let budget = Arc::new(ByteBudget::labeled(64, "scratch"));
+    let mut vfs = VfsRouter::new();
+    vfs.mount("/", MemoryFs::with_budget(budget.clone()));
+    let backend: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(vfs)));
+    let kernel = kaish_kernel::Kernel::with_backend(
+        backend,
+        KernelConfig::isolated(),
+        |_| {},
+        |_| {},
+    )
+    .expect("with_backend kernel");
+
+    let (_, code) = run(&kernel, r#"write /big.txt "0123456789012345678901234567890123456789012345678901234567890123456789""#).await;
+    assert_ne!(code, 0, "write past the embedder's budget must fail loudly");
+    let result = kernel.execute("echo probe").await.expect("execute");
+    assert_eq!(result.code, 0, "kernel still healthy after budget rejection");
+}

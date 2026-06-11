@@ -36,6 +36,8 @@ pub use router::{MountInfo, VfsRouter};
 // worktree) and overlay consumers can implement/compose the trait without
 // depending on the kernel. Re-exported here so existing
 // `crate::vfs::{Filesystem, DirEntry, LocalFs, MemoryFs}` paths keep working.
-pub use kaish_vfs::{DirEntry, DirEntryKind, Filesystem, MemoryFs};
+// `ByteBudget` rides along so a `with_backend` embedder can name the type it
+// hands to `MemoryFs::with_budget` without a direct kaish-vfs dependency.
+pub use kaish_vfs::{ByteBudget, DirEntry, DirEntryKind, Filesystem, MemoryFs};
 #[cfg(feature = "localfs")]
 pub use kaish_vfs::LocalFs;
