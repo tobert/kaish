@@ -626,3 +626,9 @@ shell_compat! {
     script: "for i in 1 2 3; do printf \"$i\"; done",
     eq: "123",
 }
+
+shell_compat! {
+    name: unset_is_silent,
+    script: "X=1; unset X; echo done",
+    eq: "done",
+}

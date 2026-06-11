@@ -189,30 +189,31 @@ impl Tool for Grep {
         let recursive = args.has_flag("recursive") || args.has_flag("r") || args.has_flag("R");
         let fixed_strings = args.has_flag("F") || args.has_flag("fixed-strings");
 
-        // Get context values
-        let context = args.get("context", usize::MAX).and_then(|v| match v {
-            Value::Int(i) => Some(*i as usize),
-            Value::String(s) => s.parse().ok(),
-            _ => None,
-        });
-
-        let after_context = args
-            .get("after_context", usize::MAX)
-            .and_then(|v| match v {
-                Value::Int(i) => Some(*i as usize),
-                Value::String(s) => s.parse().ok(),
-                _ => None,
-            })
-            .or(context);
-
-        let before_context = args
-            .get("before_context", usize::MAX)
-            .and_then(|v| match v {
-                Value::Int(i) => Some(*i as usize),
-                Value::String(s) => s.parse().ok(),
-                _ => None,
-            })
-            .or(context);
+        // Context values come from the clap layer: the kernel binds `-A 5` /
+        // `--after-context=5` under the kebab long-flag name, so re-reading
+        // the raw named map by snake_case id silently dropped them (bug the
+        // kernel-routed realworld port exposed 2026-06-11). A non-numeric
+        // value is a loud error, not a silently ignored flag.
+        fn parse_context(name: &str, value: &Option<String>) -> Result<Option<usize>, String> {
+            match value {
+                None => Ok(None),
+                Some(s) => s.parse::<usize>().map(Some).map_err(|_| {
+                    format!("grep: invalid {name} value {s:?} (expected a non-negative number)")
+                }),
+            }
+        }
+        let context = match parse_context("--context", &parsed.context) {
+            Ok(c) => c,
+            Err(e) => return ExecResult::failure(2, e),
+        };
+        let after_context = match parse_context("--after-context", &parsed.after_context) {
+            Ok(c) => c.or(context),
+            Err(e) => return ExecResult::failure(2, e),
+        };
+        let before_context = match parse_context("--before-context", &parsed.before_context) {
+            Ok(c) => c.or(context),
+            Err(e) => return ExecResult::failure(2, e),
+        };
 
         let multiline = args.has_flag("multiline") || args.has_flag("U");
         let encoding = args.get_string("encoding", usize::MAX);

@@ -115,8 +115,9 @@ impl Tool for Checksum {
             let input = ctx.read_stdin_to_string().await.unwrap_or_default();
             let hash = compute_hash(input.as_bytes(), &algo);
             let text = format!("{}  -", hash);
-            let node = OutputNode::new(&text)
-                .with_cells(vec![hash, "-".to_string(), algo]);
+            // Table convention (OutputData::to_json): first header binds to
+            // node.name, remaining headers to cells — so HASH is the name.
+            let node = OutputNode::new(&hash).with_cells(vec!["-".to_string(), algo]);
             return ExecResult::with_output_and_text(
                 OutputData::table(
                     vec!["HASH".to_string(), "FILE".to_string(), "ALGO".to_string()],
@@ -135,9 +136,13 @@ impl Tool for Checksum {
                 Ok(data) => {
                     let hash = compute_hash(&data, &algo);
                     let line = format!("{}  {}", hash, path);
+                    // First header (HASH) binds to node.name; FILE/ALGO are
+                    // cells. The old code put the rendered line in the name,
+                    // which scrambled `--json` (HASH=line, FILE=hash,
+                    // ALGO=path, algo dropped).
                     nodes.push(
-                        OutputNode::new(&line)
-                            .with_cells(vec![hash, path.clone(), algo.clone()]),
+                        OutputNode::new(&hash)
+                            .with_cells(vec![path.clone(), algo.clone()]),
                     );
                     text_lines.push(line);
                 }

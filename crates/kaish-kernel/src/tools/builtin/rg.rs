@@ -185,7 +185,7 @@ impl Tool for Rg {
             None => return ExecResult::failure(2, "rg: missing pattern"),
         };
 
-        let opts = match RgOptions::from_args(&args) {
+        let opts = match RgOptions::from_parsed(&parsed) {
             Ok(o) => o,
             Err(e) => return ExecResult::failure(2, format!("rg: {e}")),
         };
@@ -419,20 +419,29 @@ struct RgOptions {
 }
 
 impl RgOptions {
-    fn from_args(args: &ToolArgs) -> Result<Self, String> {
-        let context = int_arg(args, "context");
-        let after = int_arg(args, "after_context").or(context);
-        let before = int_arg(args, "before_context").or(context);
+    /// Build options from the clap-parsed layer. Value-bearing flags MUST be
+    /// read from `parsed`, not the raw `ToolArgs` named map: the kernel binds
+    /// `-A 5` / `--after-context=5` under the kebab long-flag name, so a
+    /// snake_case `args.get("after_context")` silently dropped the value
+    /// (same bug as grep's context flags, found 2026-06-11). A non-numeric
+    /// value is a loud error, not a silently ignored flag.
+    fn from_parsed(parsed: &RgArgs) -> Result<Self, String> {
+        fn int_value(name: &str, value: &Option<String>) -> Result<Option<usize>, String> {
+            match value {
+                None => Ok(None),
+                Some(s) => s.parse::<usize>().map(Some).map_err(|_| {
+                    format!("invalid {name} value {s:?} (expected a non-negative number)")
+                }),
+            }
+        }
+        let context = int_value("--context", &parsed.context)?;
+        let after = int_value("--after-context", &parsed.after_context)?.or(context);
+        let before = int_value("--before-context", &parsed.before_context)?.or(context);
 
-        let line_number = args.has_flag("line-number") || args.has_flag("n");
-        let no_line_number = args.has_flag("no-line-number") || args.has_flag("N");
         // -N wins over default-on -n.
-        let show_line_numbers = line_number && !no_line_number;
+        let show_line_numbers = parsed.line_number && !parsed.no_line_number;
 
-        let binary_mode = args
-            .get_string("binary", usize::MAX)
-            .unwrap_or_else(|| "quit".into());
-        let binary_detection = match binary_mode.as_str() {
+        let binary_detection = match parsed.binary.as_deref().unwrap_or("quit") {
             "none" | "text" => BinaryDetection::none(),
             "without-match" => BinaryDetection::convert(b'\x00'),
             "quit" => BinaryDetection::quit(b'\x00'),
@@ -440,30 +449,30 @@ impl RgOptions {
         };
 
         Ok(Self {
-            ignore_case: args.has_flag("ignore-case") || args.has_flag("i"),
-            word: args.has_flag("word") || args.has_flag("w"),
-            fixed_strings: args.has_flag("fixed-strings") || args.has_flag("F"),
-            invert: args.has_flag("invert") || args.has_flag("v"),
+            ignore_case: parsed.ignore_case,
+            word: parsed.word,
+            fixed_strings: parsed.fixed_strings,
+            invert: parsed.invert,
             show_line_numbers,
-            only_matching: args.has_flag("only-matching") || args.has_flag("o"),
-            files_with_matches: args.has_flag("files-with-matches") || args.has_flag("l"),
-            count: args.has_flag("count") || args.has_flag("c"),
+            only_matching: parsed.only_matching,
+            files_with_matches: parsed.files_with_matches,
+            count: parsed.count,
             after_context: after,
             before_context: before,
-            max_count: int_arg(args, "max_count").map(|n| n as u64),
-            max_depth: int_arg(args, "max_depth"),
-            max_filesize: int_arg(args, "max_filesize").map(|n| n as u64),
-            multiline: args.has_flag("multiline") || args.has_flag("U"),
-            type_select: args.get_string("type", usize::MAX),
-            type_negate: args.get_string("type_not", usize::MAX),
-            hidden: args.has_flag("hidden"),
-            no_ignore: args.has_flag("no-ignore"),
-            include: args.get_string("include", usize::MAX),
-            exclude: args.get_string("exclude", usize::MAX),
-            encoding: args.get_string("encoding", usize::MAX),
+            max_count: int_value("--max-count", &parsed.max_count)?.map(|n| n as u64),
+            max_depth: int_value("--max-depth", &parsed.max_depth)?,
+            max_filesize: int_value("--max-filesize", &parsed.max_filesize)?.map(|n| n as u64),
+            multiline: parsed.multiline,
+            type_select: parsed.type_.clone(),
+            type_negate: parsed.type_not.clone(),
+            hidden: parsed.hidden,
+            no_ignore: parsed.no_ignore,
+            include: parsed.include.clone(),
+            exclude: parsed.exclude.clone(),
+            encoding: parsed.encoding.clone(),
             binary_detection,
-            list_files: args.has_flag("files"),
-            pcre2: args.has_flag("pcre2") || args.has_flag("P"),
+            list_files: parsed.files,
+            pcre2: parsed.pcre2,
         })
     }
 }
@@ -489,14 +498,6 @@ fn build_pcre2_matcher(
     let mut b = Pcre2Builder::new();
     b.caseless(opts.ignore_case).multi_line(opts.multiline);
     b.build(&final_pattern).map_err(|e| e.to_string())
-}
-
-fn int_arg(args: &ToolArgs, name: &str) -> Option<usize> {
-    args.get(name, usize::MAX).and_then(|v| match v {
-        Value::Int(i) if *i >= 0 => Some(*i as usize),
-        Value::String(s) => s.parse().ok(),
-        _ => None,
-    })
 }
 
 fn build_matcher(pattern: &str, opts: &RgOptions) -> Result<RegexMatcher, String> {

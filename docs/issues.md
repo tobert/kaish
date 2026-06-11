@@ -132,19 +132,15 @@ silently degrade. Decide: newline-split plain text in scatter (consistent with
 `for`), or fix the examples to `... | split --lines | scatter` and state the
 structured-data requirement loudly.
 
-### `realworld_builtin_tests.rs` (43 tests) bypasses the kernel it's named for
-The file hand-builds `ToolArgs` and calls `tool.execute()` directly
-(`realworld_builtin_tests.rs:56-66`, e.g. `:464`) — the documented anti-pattern
-from the kernel-routed-tests convention. It carries the bulk of grep's flag
-coverage plus cat/head/tail/wc/ls/jq, none of it exercising lex → parse →
-validate → glob pre-expansion → `build_args_async` — the exact layer changed by
-ffe0f44/cd23012/c463f42. The intended commands are already in comments above
-each test; porting to the `common::kernel_at`/`run` harness is mechanical and
-converts 43 vacuous-at-the-binding-layer tests into real ones. Highest-risk
-sibling: `rg` — the largest flag surface in the registry (27 params), 15
-inline-only tests, zero kernel-routed coverage, post-canonicalization.
-Also port-priority: `read` (pipeline/scope semantics are pure kernel
-interaction), `env`/`exec` (hermetic-env overlay, two-spawn-site sync).
+### Kernel-routed port residuals: `read`, `env`, `exec` deep coverage
+The realworld port is **done 2026-06-11** (see Resolved) — 48 tests through
+`kernel.execute`, plus a new rg section; the port immediately caught the
+grep/rg value-flag binding bug. Still worth dedicated kernel-routed suites:
+`read` (pipeline/scope semantics are pure kernel interaction) and `env`/`exec`
+(hermetic-env overlay, two-spawn-site sync) — each has a single smoke case in
+the `--json` sweep now, but no flag-surface depth.
+
+### Composable help — remaining phases
 Phases 1–3 done 2026-06-06: the `kaish-help` crate (concept fragments + `compose`/
 recipes + byte-stable `get_help`) is the single source for help content; `syntax.md`
 is generated + drift-tested; and MCP `instructions:`, the REPL welcome, the `execute`
@@ -301,15 +297,10 @@ restoration or a reverse sync added.
 
 ### Test-effectiveness residuals (2026-06-09 fleet review)
 Smaller verified gaps from the systemic review, grouped; the headline test
-items got their own P2 entries (destructive rails — closed 2026-06-11, see
-Resolved; realworld port). Five bullets fixed 2026-06-11 (snapshot-isolation
-race, both tautological asserts, external argv no-split, kill/wait e2e — see
-Resolved); each remaining bullet is independently actionable:
-- **`--json` is kernel-route-tested for ~4 of 89 commands** despite being the
-  headline MCP feature (`shell_compat_tests.rs:27` explicitly skips it; only
-  ps + three kaish-* tools assert shape through the full stack). One
-  rstest-parameterized sweep file — run `<cmd> --json`, assert it parses and
-  the top-level shape — would cover the registry.
+items (destructive rails, realworld port, `--json` sweep) are all closed as
+of 2026-06-11 — see Resolved. Five smaller bullets also fixed 2026-06-11
+(snapshot-isolation race, both tautological asserts, external argv no-split,
+kill/wait e2e). Each remaining bullet is independently actionable:
 - **`builtin_kernel_tests.rs` is 100% happy-path:** 38 tests, zero nonzero-exit
   assertions. Add 1–2 negative cases per builtin (missing file, bad flag)
   asserting the specific code + err substring — agents branch on exit codes.
@@ -478,6 +469,33 @@ O_RDONLY fd (works on dir fds; on Linux futimens needs only ownership/write
 perm, not a write-mode handle) instead of opening for write — deferred to keep
 the cross-platform `File::set_modified` contract unchanged for now.
 
+### `--json` is not stripped before `test` parses its operands
+`test -n hello --json` errors with `test: unknown binary operator: -json`
+(exit 2) — the global-flag extraction that strips `--json` for every other
+builtin doesn't fire for `test`'s raw-operand evaluation. The error does
+honor the JSON envelope contract, and the sweep pins that behavior
+(`json_sweep_tests.rs`, the `test` case). `--json` on an output-less builtin
+is near-meaningless, so this is polish: either strip it there too or document
+the exception. Surfaced by the `--json` sweep 2026-06-11.
+
+### `jq --json` double-encodes already-JSON stdout
+`echo '{"a":1}' | jq '.a' --json` emits the JSON *string* `"1\n"` rather than
+the number `1` — jq's stdout is already JSON text, and the text→string rule
+wraps it again. The real value rides `.data` (which MCP's
+`structured_content` uses), so consumers have a correct path; this is about
+the `--json` text surface specifically. Decide: have `apply_output_format`
+prefer `.data` when present, or document that `--json` is redundant after
+`jq`. Sweep pins current behavior. Surfaced 2026-06-11.
+
+### `spawn --command true` — bool-shaped values vanish from named args
+`true`/`false` as a named-arg value lex as `Value::Bool`, and
+`flagify_bool_named` converts `Bool(true)` into bare flag presence — so
+`spawn --command true` errors with "a value is required for '--command'".
+Quoting works (`--command 'true'`). Documented flagify behavior colliding
+with a literal command named `true`; a did-you-mean hint (or exempting
+declared value-taking params from flagify) would smooth it. Surfaced by the
+`--json` sweep probes 2026-06-11.
+
 ### Bare `,` / numeric ranges parse oddly — `cut -d,`, `tr -d 0-9` need quoting
 Surfaced 2026-05-28 by the kernel-routed builtin tests. Two related
 tokenization gaps in the same family as the dot-prefixed-filename entry
@@ -551,6 +569,57 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **grep/rg value-bearing flags were silently dropped on the kernel path — fixed 2026-06-11.**
+  The realworld-port's first kernel-routed run caught it: `grep -A 5` (and the
+  `--after-context=5` equals form) matched but emitted **no context lines**;
+  `rg -A`, `rg --max-count`, `--max-depth`, `--max-filesize`, `--type-not`
+  were all likewise dropped. Cause: both builtins clap-parse into a struct,
+  then **ignore it** and re-read the raw `ToolArgs` named map by snake_case
+  id (`args.get("after_context")`) — but kernel binding stores the value
+  under the kebab long-flag name (`after-context`), so the lookup missed and
+  the option silently defaulted. The inline unit tests passed because they
+  inject snake_case keys directly. Fix: grep's context values and the whole
+  of `RgOptions` now come from the clap-parsed struct (`from_parsed`), the
+  one source both paths share; a non-numeric value (`rg -A bogus`) is now a
+  loud exit-2 error naming the flag instead of a silently ignored option.
+  `awk` already did this right (clap-first with legacy fallback); audit found
+  no other value-flag offenders (`ln`'s snake read is a positional fallback).
+  Pinned by `realworld_builtin_tests.rs::rg_realworld` (context, max-count,
+  type filter, bad-value error) and the grep `-A` realworld case.
+
+- **`realworld_builtin_tests.rs` ported to the kernel route — done 2026-06-11.**
+  All 43 mined-pattern tests now drive their real command strings through
+  `kernel.execute()` over a tempdir (`common::kernel_at`/`run`); the pipeline
+  patterns that were previously simulated by manually shuttling stdout into
+  `ctx.set_stdin` are now actual `|` pipelines. Added a 5-test `rg_realworld`
+  section (rg had zero kernel-routed coverage and the largest flag surface) —
+  48 tests total. The port found the grep/rg value-flag bug above on its
+  first run. File is `#![cfg(feature = "localfs")]`-gated so the minimal
+  build skips it cleanly (the integration-binary minimal-compile item).
+
+- **`--json` sweep across the whole registry — done 2026-06-11.**
+  New `tests/json_sweep_tests.rs`: one representative invocation per
+  registered builtin run with `--json` through `kernel.execute()`, asserting
+  exit code + top-level JSON shape (array/object/string/empty/error
+  envelope). A drift guard fails the suite when a builtin is registered
+  without a sweep case or an explicit documented skip (5 skips: `[`
+  unreachable, bg/fg need a PTY, exec replaces the process, kaish-trash
+  reads the user's real trash). Found and fixed two real bugs:
+  - **`checksum --json` columns were scrambled** — the full text line sat in
+    `node.name`, which the table→JSON convention maps to the *first* header,
+    shifting every column (HASH=whole line, FILE=hash, ALGO=path, algorithm
+    dropped). Both table sites now follow the name-is-first-column rule.
+  - **`unset` printed the removed-count** (`X=1; unset X` emitted `1` where
+    bash is silent) — polluting `$()` captures and `--json` output with a
+    stray number. Now silent on success per POSIX; pinned by the
+    bash-cross-checked `unset_is_silent` compat case.
+  Three warts recorded as new P4 entries rather than fixed: `test` doesn't
+  get `--json` stripped, `jq --json` double-encodes, `spawn --command true`
+  bool-flagify collision. Harness note: the sweep builds its kernels via
+  `into_arc()` because redispatching builtins (`timeout`) need the kernel's
+  `self_weak` dispatcher — a plain `Kernel` returns "no dispatcher
+  available".
 
 - **Destructive-op safety rails now have kernel-routed coverage — fixed 2026-06-11.**
   New `tests/latch_trash_tests.rs` (9 tests, all through `kernel.execute`):

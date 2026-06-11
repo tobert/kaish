@@ -23,12 +23,18 @@
 //! ## Anonymization
 //!
 //! Raw patterns contain real file paths (e.g., `/home/atobey/src/project/...`).
-//! Tests use **synthetic paths** (`/src/main.rs`, `/tmp/app.log`) that capture
+//! Tests use **synthetic fixtures** (`src/main.rs`, `tmp/app.log`) that capture
 //! the **command structure** without exposing actual project files.
 //!
-//! Example transformation:
-//! - Real: `grep -A10 "pub fn encode" ~/.cargo/registry/src/.../diamond-types/...`
-//! - Test: `grep -A10 "pub fn new" /src/api.rs`
+//! ## Kernel-routed (ported 2026-06-11)
+//!
+//! Originally these hand-built `ToolArgs` and called `tool.execute()` directly
+//! — bypassing lex → parse → validate → glob pre-expansion → `build_args_async`,
+//! the exact layers the clap migration reworked. Now every test runs its
+//! real-world command string through `kernel.execute()` over a tempdir root
+//! (the `common::kernel_at`/`run` harness), so the mined patterns exercise the
+//! same path an agent's keystrokes do. Pipeline patterns that were previously
+//! simulated by manually shuttling stdout → stdin are now actual `|` pipelines.
 //!
 //! ## Bugs Found
 //!
@@ -42,155 +48,111 @@
 //!
 //! Source: ~/.claude/projects/*/*.jsonl (31,000+ bash commands analyzed)
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+// KernelConfig::repl() mounts the real filesystem.
+#![cfg(feature = "localfs")]
 
-use kaish_kernel::ast::Value;
-use kaish_kernel::tools::{register_builtins, ExecContext, ToolArgs, ToolRegistry};
-use kaish_kernel::vfs::{Filesystem, MemoryFs, VfsRouter};
+mod common;
 
-// ============================================================================
-// Test Helpers
-// ============================================================================
+use std::fs;
 
-async fn make_registry() -> ToolRegistry {
-    let mut registry = ToolRegistry::new();
-    register_builtins(&mut registry);
-    registry
+use common::{kernel_at, run};
+use kaish_kernel::Kernel;
+use tempfile::TempDir;
+
+fn touch(dir: &std::path::Path, name: &str, contents: &str) {
+    let path = dir.join(name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create parent dirs");
+    }
+    fs::write(path, contents).expect("write file");
 }
 
-async fn make_ctx() -> ExecContext {
-    let mut vfs = VfsRouter::new();
-    vfs.mount("/", MemoryFs::new());
-    ExecContext::new(Arc::new(vfs))
-}
-
-async fn ctx_with_files() -> ExecContext {
-    let mut vfs = VfsRouter::new();
-    let mem = MemoryFs::new();
-
-    // Create directory structure mimicking real project
-    mem.mkdir(Path::new("src")).await.unwrap();
-    mem.mkdir(Path::new("src/lib")).await.unwrap();
-    mem.mkdir(Path::new("docs")).await.unwrap();
-    mem.mkdir(Path::new("tmp")).await.unwrap();
+/// Build the synthetic project tree the mined commands run against.
+fn fixture() -> (TempDir, Kernel) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
 
     // Rust source files
-    mem.write(
-        Path::new("src/main.rs"),
-        b"fn main() {\n    println!(\"Hello, world!\");\n    // TODO: add features\n}\n",
-    )
-    .await
-    .unwrap();
-
-    mem.write(
-        Path::new("src/lib.rs"),
-        b"//! Library crate\npub mod utils;\npub mod api;\n\n/// Main entry point\npub fn init() {\n    // TODO: implement\n}\n",
-    )
-    .await
-    .unwrap();
-
-    mem.write(
-        Path::new("src/lib/utils.rs"),
-        b"pub fn helper() -> String {\n    \"helper\".to_string()\n}\n\npub fn format_output(s: &str) -> String {\n    format!(\"[{}]\", s)\n}\n",
-    )
-    .await
-    .unwrap();
+    touch(
+        root,
+        "src/main.rs",
+        "fn main() {\n    println!(\"Hello, world!\");\n    // TODO: add features\n}\n",
+    );
+    touch(
+        root,
+        "src/lib.rs",
+        "//! Library crate\npub mod utils;\npub mod api;\n\n/// Main entry point\npub fn init() {\n    // TODO: implement\n}\n",
+    );
+    touch(
+        root,
+        "src/lib/utils.rs",
+        "pub fn helper() -> String {\n    \"helper\".to_string()\n}\n\npub fn format_output(s: &str) -> String {\n    format!(\"[{}]\", s)\n}\n",
+    );
+    touch(
+        root,
+        "src/api.rs",
+        "use std::sync::Arc;\n\npub struct Api {\n    pub name: String,\n}\n\nimpl Api {\n    pub fn new(name: &str) -> Self {\n        Self { name: name.to_string() }\n    }\n\n    pub async fn execute(&self) -> Result<(), Error> {\n        // TODO: implement\n        Ok(())\n    }\n}\n",
+    );
 
     // Documentation
-    mem.write(
-        Path::new("README.md"),
-        b"# Project\n\nA sample project for testing.\n\n## Features\n\n- Feature one\n- Feature two\n\n## TODO\n\n- Add more features\n",
-    )
-    .await
-    .unwrap();
-
-    mem.write(
-        Path::new("docs/API.md"),
-        b"# API Documentation\n\n## Functions\n\n### init()\n\nInitializes the system.\n\n### helper()\n\nReturns a helper string.\n",
-    )
-    .await
-    .unwrap();
-
-    mem.write(
-        Path::new("CLAUDE.md"),
-        b"# Claude Instructions\n\nThis project uses kaish shell.\n\n## Build\n\ncargo build\ncargo test\n",
-    )
-    .await
-    .unwrap();
+    touch(
+        root,
+        "README.md",
+        "# Project\n\nA sample project for testing.\n\n## Features\n\n- Feature one\n- Feature two\n\n## TODO\n\n- Add more features\n",
+    );
+    touch(
+        root,
+        "docs/API.md",
+        "# API Documentation\n\n## Functions\n\n### init()\n\nInitializes the system.\n\n### helper()\n\nReturns a helper string.\n",
+    );
+    touch(
+        root,
+        "CLAUDE.md",
+        "# Claude Instructions\n\nThis project uses kaish shell.\n\n## Build\n\ncargo build\ncargo test\n",
+    );
 
     // Config/data files
-    mem.write(
-        Path::new("Cargo.toml"),
-        b"[package]\nname = \"example\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ntokio = \"1.0\"\n",
-    )
-    .await
-    .unwrap();
+    touch(
+        root,
+        "Cargo.toml",
+        "[package]\nname = \"example\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ntokio = \"1.0\"\n",
+    );
 
     // JSON files (for jq tests and cat tests)
-    mem.write(
-        Path::new("tmp/data.json"),
-        br#"{"name": "Alice", "age": 30, "active": true}"#,
-    )
-    .await
-    .unwrap();
-
-    mem.write(
-        Path::new("tmp/array.json"),
-        br#"[{"id": 1, "name": "one"}, {"id": 2, "name": "two"}, {"id": 3, "name": "three"}]"#,
-    )
-    .await
-    .unwrap();
-
-    mem.write(
-        Path::new("tmp/settings.json"),
-        br#"{"mcpServers": {"holler": {"url": "http://localhost:8080"}, "sshwarma": {"url": "http://localhost:3000"}}}"#,
-    )
-    .await
-    .unwrap();
+    touch(
+        root,
+        "tmp/data.json",
+        r#"{"name": "Alice", "age": 30, "active": true}"#,
+    );
+    touch(
+        root,
+        "tmp/array.json",
+        r#"[{"id": 1, "name": "one"}, {"id": 2, "name": "two"}, {"id": 3, "name": "three"}]"#,
+    );
+    touch(
+        root,
+        "tmp/settings.json",
+        r#"{"mcpServers": {"holler": {"url": "http://localhost:8080"}, "sshwarma": {"url": "http://localhost:3000"}}}"#,
+    );
 
     // Log file (for tail/head tests)
-    mem.write(
-        Path::new("tmp/app.log"),
-        b"2026-01-25T10:00:00 INFO Starting application\n\
-          2026-01-25T10:00:01 DEBUG Loading config\n\
-          2026-01-25T10:00:02 INFO Config loaded successfully\n\
-          2026-01-25T10:00:03 WARN Deprecated feature used\n\
-          2026-01-25T10:00:04 ERROR Connection failed\n\
-          2026-01-25T10:00:05 INFO Retrying connection\n\
-          2026-01-25T10:00:06 INFO Connected\n\
-          2026-01-25T10:00:07 DEBUG Processing request\n\
-          2026-01-25T10:00:08 INFO Request completed\n\
-          2026-01-25T10:00:09 INFO Shutting down\n",
-    )
-    .await
-    .unwrap();
+    touch(
+        root,
+        "tmp/app.log",
+        "2026-01-25T10:00:00 INFO Starting application\n\
+         2026-01-25T10:00:01 DEBUG Loading config\n\
+         2026-01-25T10:00:02 INFO Config loaded successfully\n\
+         2026-01-25T10:00:03 WARN Deprecated feature used\n\
+         2026-01-25T10:00:04 ERROR Connection failed\n\
+         2026-01-25T10:00:05 INFO Retrying connection\n\
+         2026-01-25T10:00:06 INFO Connected\n\
+         2026-01-25T10:00:07 DEBUG Processing request\n\
+         2026-01-25T10:00:08 INFO Request completed\n\
+         2026-01-25T10:00:09 INFO Shutting down\n",
+    );
 
-    // Multi-line source for context tests
-    mem.write(
-        Path::new("src/api.rs"),
-        b"use std::sync::Arc;\n\
-          \n\
-          pub struct Api {\n\
-              pub name: String,\n\
-          }\n\
-          \n\
-          impl Api {\n\
-              pub fn new(name: &str) -> Self {\n\
-                  Self { name: name.to_string() }\n\
-              }\n\
-              \n\
-              pub async fn execute(&self) -> Result<(), Error> {\n\
-                  // TODO: implement\n\
-                  Ok(())\n\
-              }\n\
-          }\n",
-    )
-    .await
-    .unwrap();
-
-    vfs.mount("/", mem);
-    ExecContext::new(Arc::new(vfs))
+    let kernel = kernel_at(root);
+    (dir, kernel)
 }
 
 // ============================================================================
@@ -204,77 +166,48 @@ mod grep_realworld {
     // Source: Frequently used to find function definitions with context
     #[tokio::test]
     async fn test_grep_after_context_function_definition() {
-        let registry = make_registry().await;
-        let grep = registry.get("grep").expect("grep not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("pub fn new".into()));
-        args.positional.push(Value::String("/src/api.rs".into()));
-        args.named.insert("after_context".to_string(), Value::Int(5));
-
-        let result = grep.execute(args, &mut ctx).await;
-        assert!(result.ok(), "grep -A failed: {}", result.err);
-        assert!(result.text_out().contains("pub fn new"));
-        assert!(result.text_out().contains("name.to_string()")); // Context line
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, r#"grep -A 5 "pub fn new" src/api.rs"#).await;
+        assert_eq!(code, 0, "grep -A failed: {out:?}");
+        assert!(out.contains("pub fn new"));
+        assert!(out.contains("name.to_string()")); // Context line
     }
 
-    // Pattern: grep -E "pattern\|pattern2" file
+    // Pattern: grep -E "pattern|pattern2" file
     // Source: Common for finding multiple related patterns
     #[tokio::test]
     async fn test_grep_alternation_pattern() {
-        let registry = make_registry().await;
-        let grep = registry.get("grep").expect("grep not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("TODO|FIXME".into()));
-        args.positional.push(Value::String("/src/main.rs".into()));
-        args.flags.insert("E".to_string()); // Extended regex
-
-        let result = grep.execute(args, &mut ctx).await;
-        assert!(result.ok(), "grep -E alternation failed: {}", result.err);
-        assert!(result.text_out().contains("TODO"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, r#"grep -E "TODO|FIXME" src/main.rs"#).await;
+        assert_eq!(code, 0, "grep -E alternation failed: {out:?}");
+        assert!(out.contains("TODO"));
     }
 
     // Pattern: grep -r "pattern" directory/
     // Source: Used extensively for codebase searches
     #[tokio::test]
     async fn test_grep_recursive_in_src() {
-        let registry = make_registry().await;
-        let grep = registry.get("grep").expect("grep not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("TODO".into()));
-        args.positional.push(Value::String("/src".into()));
-        args.flags.insert("r".to_string());
-
-        let result = grep.execute(args, &mut ctx).await;
-        assert!(result.ok(), "grep -r failed: {}", result.err);
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "grep -r TODO src").await;
+        assert_eq!(code, 0, "grep -r failed: {out:?}");
         // Should find TODO in multiple files
-        assert!(result.text_out().contains("main.rs") || result.text_out().contains("lib.rs") || result.text_out().contains("api.rs"));
+        assert!(
+            out.contains("main.rs") || out.contains("lib.rs") || out.contains("api.rs"),
+            "expected a source filename in: {out:?}"
+        );
     }
 
-    // Pattern: grep -l "pattern" *.rs
+    // Pattern: grep -rl "pattern" dir
     // Source: Finding which files contain a pattern
     #[tokio::test]
     async fn test_grep_files_with_matches() {
-        let registry = make_registry().await;
-        let grep = registry.get("grep").expect("grep not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("TODO".into()));
-        args.positional.push(Value::String("/src".into()));
-        args.flags.insert("r".to_string());
-        args.flags.insert("l".to_string());
-
-        let result = grep.execute(args, &mut ctx).await;
-        assert!(result.ok(), "grep -rl failed: {}", result.err);
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "grep -rl TODO src").await;
+        assert_eq!(code, 0, "grep -rl failed: {out:?}");
+        assert!(!out.is_empty(), "expected at least one matching file");
         // Output should be filenames only
-        for line in result.text_out().lines() {
-            assert!(line.ends_with(".rs"), "Expected filename, got: {}", line);
+        for line in out.lines() {
+            assert!(line.ends_with(".rs"), "Expected filename, got: {line}");
         }
     }
 
@@ -282,96 +215,132 @@ mod grep_realworld {
     // Source: Finding line numbers for navigation
     #[tokio::test]
     async fn test_grep_with_line_numbers() {
-        let registry = make_registry().await;
-        let grep = registry.get("grep").expect("grep not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("impl".into()));
-        args.positional.push(Value::String("/src/api.rs".into()));
-        args.flags.insert("n".to_string());
-
-        let result = grep.execute(args, &mut ctx).await;
-        assert!(result.ok(), "grep -n failed: {}", result.err);
-        // Should have line number prefix
-        assert!(result.text_out().contains(":"));
-        // Line should contain the pattern
-        assert!(result.text_out().contains("impl"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "grep -n impl src/api.rs").await;
+        assert_eq!(code, 0, "grep -n failed: {out:?}");
+        // Should have line number prefix and the pattern
+        assert!(out.contains(':'), "missing line-number prefix: {out:?}");
+        assert!(out.contains("impl"));
     }
 
     // Pattern: grep -i "error" logfile
     // Source: Case-insensitive log searching
     #[tokio::test]
     async fn test_grep_case_insensitive_log_search() {
-        let registry = make_registry().await;
-        let grep = registry.get("grep").expect("grep not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("error".into()));
-        args.positional.push(Value::String("/tmp/app.log".into()));
-        args.flags.insert("i".to_string());
-
-        let result = grep.execute(args, &mut ctx).await;
-        assert!(result.ok(), "grep -i failed: {}", result.err);
-        assert!(result.text_out().contains("ERROR")); // Finds ERROR even with lowercase pattern
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "grep -i error tmp/app.log").await;
+        assert_eq!(code, 0, "grep -i failed: {out:?}");
+        assert!(out.contains("ERROR")); // Finds ERROR even with lowercase pattern
     }
 
     // Pattern: grep -c "pattern" file
     // Source: Counting occurrences
     #[tokio::test]
     async fn test_grep_count_matches() {
-        let registry = make_registry().await;
-        let grep = registry.get("grep").expect("grep not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("INFO".into()));
-        args.positional.push(Value::String("/tmp/app.log".into()));
-        args.flags.insert("c".to_string());
-
-        let result = grep.execute(args, &mut ctx).await;
-        assert!(result.ok(), "grep -c failed: {}", result.err);
-        let count: i32 = result.text_out().trim().parse().unwrap_or(-1);
-        assert!(count > 0, "Expected positive count, got: {}", result.text_out());
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "grep -c INFO tmp/app.log").await;
+        assert_eq!(code, 0, "grep -c failed: {out:?}");
+        let count: i32 = out.trim().parse().unwrap_or(-1);
+        assert!(count > 0, "Expected positive count, got: {out:?}");
     }
 
     // Pattern: grep -v "pattern" file
     // Source: Filtering out lines (inverse match)
     #[tokio::test]
     async fn test_grep_invert_match() {
-        let registry = make_registry().await;
-        let grep = registry.get("grep").expect("grep not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("DEBUG".into()));
-        args.positional.push(Value::String("/tmp/app.log".into()));
-        args.flags.insert("v".to_string());
-
-        let result = grep.execute(args, &mut ctx).await;
-        assert!(result.ok(), "grep -v failed: {}", result.err);
-        // Should NOT contain DEBUG lines
-        assert!(!result.text_out().contains("DEBUG"));
-        // But should contain other lines
-        assert!(result.text_out().contains("INFO") || result.text_out().contains("ERROR"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "grep -v DEBUG tmp/app.log").await;
+        assert_eq!(code, 0, "grep -v failed: {out:?}");
+        // Should NOT contain DEBUG lines, but should contain others
+        assert!(!out.contains("DEBUG"));
+        assert!(out.contains("INFO") || out.contains("ERROR"));
     }
 
-    // Pattern: grep "pattern" file | head -10
-    // Simulated: grep from stdin (piped data)
+    // Pattern: cmd | grep "pattern"
+    // Source: grep over piped data
     #[tokio::test]
     async fn test_grep_from_stdin() {
-        let registry = make_registry().await;
-        let grep = registry.get("grep").expect("grep not found");
-        let mut ctx = ctx_with_files().await;
-        ctx.set_stdin("line one\nline two\nline three\nfour\nfive\n".to_string());
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(
+            &kernel,
+            r#"printf 'line one\nline two\nline three\nfour\nfive\n' | grep line"#,
+        )
+        .await;
+        assert_eq!(code, 0, "grep stdin failed: {out:?}");
+        assert_eq!(out.lines().count(), 3); // three lines contain "line"
+    }
+}
 
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("line".into()));
+// ============================================================================
+// RG Tests - value-bearing flags through kernel binding
+//
+// rg has the largest flag surface in the registry; until 2026-06-11 its
+// value flags (-A/-B/-C, --max-count, --max-depth, …) were silently dropped
+// on the kernel path because RgOptions re-read the raw named map by
+// snake_case id instead of using the clap-parsed values. These pin the fix.
+// ============================================================================
 
-        let result = grep.execute(args, &mut ctx).await;
-        assert!(result.ok(), "grep stdin failed: {}", result.err);
-        assert_eq!(result.text_out().lines().count(), 3); // three lines contain "line"
+mod rg_realworld {
+    use super::*;
+
+    // Pattern: rg "pattern" dir
+    #[tokio::test]
+    async fn test_rg_recursive_search() {
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, r#"rg "pub fn" src"#).await;
+        assert_eq!(code, 0, "rg failed: {out:?}");
+        assert!(out.contains("api.rs"), "expected filename prefix: {out:?}");
+    }
+
+    // Pattern: rg -A 2 "pattern" file — after-context must survive binding
+    #[tokio::test]
+    async fn test_rg_after_context() {
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, r#"rg -A 2 "pub fn new" src/api.rs"#).await;
+        assert_eq!(code, 0, "rg -A failed: {out:?}");
+        assert!(out.contains("pub fn new"));
+        assert!(
+            out.contains("name.to_string()"),
+            "after-context line missing — -A value dropped: {out:?}"
+        );
+    }
+
+    // Pattern: rg --max-count 1 pattern file — stop after one match
+    #[tokio::test]
+    async fn test_rg_max_count() {
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "rg --max-count 1 pub src/api.rs").await;
+        assert_eq!(code, 0, "rg --max-count failed: {out:?}");
+        assert_eq!(
+            out.lines().count(),
+            1,
+            "--max-count 1 must yield one line — value dropped: {out:?}"
+        );
+    }
+
+    // Pattern: rg -t rust "pattern" dir — type filter
+    #[tokio::test]
+    async fn test_rg_type_filter() {
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, r#"rg -t rust "pub fn" src"#).await;
+        assert_eq!(code, 0, "rg -t rust failed: {out:?}");
+        assert!(out.contains("api.rs"));
+    }
+
+    // A non-numeric context value errors loudly instead of being ignored.
+    #[tokio::test]
+    async fn test_rg_bad_context_value_fails_loud() {
+        let (_dir, kernel) = fixture();
+        let result = kernel
+            .execute("rg -A bogus pub src/api.rs")
+            .await
+            .expect("kernel execute");
+        assert_eq!(result.code, 2, "bad -A value must error: {}", result.err);
+        assert!(
+            result.err.contains("after-context"),
+            "error should name the flag: {}",
+            result.err
+        );
     }
 }
 
@@ -386,85 +355,63 @@ mod cat_realworld {
     // Source: Reading JSON config files
     #[tokio::test]
     async fn test_cat_json_file() {
-        let registry = make_registry().await;
-        let cat = registry.get("cat").expect("cat not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/tmp/settings.json".into()));
-
-        let result = cat.execute(args, &mut ctx).await;
-        assert!(result.ok(), "cat json failed: {}", result.err);
-        assert!(result.text_out().contains("mcpServers"));
-        assert!(result.text_out().contains("holler"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "cat tmp/settings.json").await;
+        assert_eq!(code, 0, "cat json failed: {out:?}");
+        assert!(out.contains("mcpServers"));
+        assert!(out.contains("holler"));
     }
 
     // Pattern: cat ~/.config/file.toml
     // Source: Reading TOML config
     #[tokio::test]
     async fn test_cat_toml_file() {
-        let registry = make_registry().await;
-        let cat = registry.get("cat").expect("cat not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/Cargo.toml".into()));
-
-        let result = cat.execute(args, &mut ctx).await;
-        assert!(result.ok(), "cat toml failed: {}", result.err);
-        assert!(result.text_out().contains("[package]"));
-        assert!(result.text_out().contains("[dependencies]"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "cat Cargo.toml").await;
+        assert_eq!(code, 0, "cat toml failed: {out:?}");
+        assert!(out.contains("[package]"));
+        assert!(out.contains("[dependencies]"));
     }
 
     // Pattern: cat file1 file2 file3
     // Source: Concatenating multiple files
     #[tokio::test]
     async fn test_cat_multiple_files() {
-        let registry = make_registry().await;
-        let cat = registry.get("cat").expect("cat not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/src/main.rs".into()));
-        args.positional.push(Value::String("/src/lib.rs".into()));
-
-        let result = cat.execute(args, &mut ctx).await;
-        assert!(result.ok(), "cat multiple failed: {}", result.err);
-        assert!(result.text_out().contains("fn main")); // from main.rs
-        assert!(result.text_out().contains("pub mod utils")); // from lib.rs
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "cat src/main.rs src/lib.rs").await;
+        assert_eq!(code, 0, "cat multiple failed: {out:?}");
+        assert!(out.contains("fn main")); // from main.rs
+        assert!(out.contains("pub mod utils")); // from lib.rs
     }
 
     // Pattern: cat -n file.rs
     // Source: Viewing with line numbers for reference
     #[tokio::test]
     async fn test_cat_with_line_numbers() {
-        let registry = make_registry().await;
-        let cat = registry.get("cat").expect("cat not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/src/main.rs".into()));
-        args.flags.insert("n".to_string());
-
-        let result = cat.execute(args, &mut ctx).await;
-        assert!(result.ok(), "cat -n failed: {}", result.err);
-        // Should have line number prefix
-        assert!(result.text_out().contains("1") || result.text_out().contains("2"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "cat -n src/main.rs").await;
+        assert_eq!(code, 0, "cat -n failed: {out:?}");
+        // First content line is numbered
+        let first = out.lines().next().expect("at least one line");
+        assert!(first.contains('1'), "expected a line number: {first:?}");
+        assert!(first.contains("fn main"), "expected content: {first:?}");
     }
 
     // Pattern: cat nonexistent 2>/dev/null || echo "Not found"
     // Test: cat on nonexistent file should fail
     #[tokio::test]
     async fn test_cat_nonexistent_file() {
-        let registry = make_registry().await;
-        let cat = registry.get("cat").expect("cat not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/nonexistent/file.txt".into()));
-
-        let result = cat.execute(args, &mut ctx).await;
-        assert!(!result.ok());
+        let (_dir, kernel) = fixture();
+        let result = kernel
+            .execute("cat nonexistent/file.txt")
+            .await
+            .expect("kernel execute");
+        assert!(!result.ok(), "cat of a missing file must fail");
+        assert!(
+            result.err.contains("file.txt") || result.err.contains("nonexistent"),
+            "error should name the path: {}",
+            result.err
+        );
     }
 }
 
@@ -475,74 +422,45 @@ mod cat_realworld {
 mod head_realworld {
     use super::*;
 
-    // Pattern: head -100 file.log
+    // Pattern: head --lines 5 file.log (long form)
     // Source: Looking at start of log files
     #[tokio::test]
     async fn test_head_log_file() {
-        let registry = make_registry().await;
-        let head = registry.get("head").expect("head not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/tmp/app.log".into()));
-        args.named.insert("lines".to_string(), Value::Int(5));
-
-        let result = head.execute(args, &mut ctx).await;
-        assert!(result.ok(), "head failed: {}", result.err);
-        assert_eq!(result.text_out().lines().count(), 5);
-        assert!(result.text_out().contains("Starting application")); // First line
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "head --lines 5 tmp/app.log").await;
+        assert_eq!(code, 0, "head failed: {out:?}");
+        assert_eq!(out.lines().count(), 5);
+        assert!(out.contains("Starting application")); // First line
     }
 
-    // Pattern: head -20 src/file.rs
+    // Pattern: head -n 3 src/file.rs
     // Source: Quick file preview
     #[tokio::test]
     async fn test_head_source_file() {
-        let registry = make_registry().await;
-        let head = registry.get("head").expect("head not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/src/api.rs".into()));
-        args.named.insert("lines".to_string(), Value::Int(3));
-
-        let result = head.execute(args, &mut ctx).await;
-        assert!(result.ok(), "head src failed: {}", result.err);
-        assert_eq!(result.text_out().lines().count(), 3);
-        assert!(result.text_out().contains("use std::sync::Arc"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "head -n 3 src/api.rs").await;
+        assert_eq!(code, 0, "head src failed: {out:?}");
+        assert_eq!(out.lines().count(), 3);
+        assert!(out.contains("use std::sync::Arc"));
     }
 
-    // Pattern: head -n 10 file (using -n flag)
+    // Pattern: head -n 3 file (short flag with value)
     #[tokio::test]
     async fn test_head_with_n_flag() {
-        let registry = make_registry().await;
-        let head = registry.get("head").expect("head not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/tmp/app.log".into()));
-        args.flags.insert("n".to_string());
-        // The number should be parsed from positional or named
-        args.named.insert("n".to_string(), Value::Int(3));
-
-        let result = head.execute(args, &mut ctx).await;
-        assert!(result.ok(), "head -n failed: {}", result.err);
-        assert!(result.text_out().lines().count() <= 3);
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "head -n 3 tmp/app.log").await;
+        assert_eq!(code, 0, "head -n failed: {out:?}");
+        assert!(out.lines().count() <= 3);
     }
 
     // Default: head file (should show 10 lines)
     #[tokio::test]
     async fn test_head_default_lines() {
-        let registry = make_registry().await;
-        let head = registry.get("head").expect("head not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/tmp/app.log".into()));
-
-        let result = head.execute(args, &mut ctx).await;
-        assert!(result.ok(), "head default failed: {}", result.err);
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "head tmp/app.log").await;
+        assert_eq!(code, 0, "head default failed: {out:?}");
         // Log has 10 lines, default should show all or 10
-        assert!(result.text_out().lines().count() <= 10);
+        assert!(out.lines().count() <= 10);
     }
 }
 
@@ -553,54 +471,34 @@ mod head_realworld {
 mod tail_realworld {
     use super::*;
 
-    // Pattern: tail -100 file.log
+    // Pattern: tail -n 5 file.log
     // Source: Looking at recent log entries
     #[tokio::test]
     async fn test_tail_log_file() {
-        let registry = make_registry().await;
-        let tail = registry.get("tail").expect("tail not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/tmp/app.log".into()));
-        args.named.insert("lines".to_string(), Value::Int(5));
-
-        let result = tail.execute(args, &mut ctx).await;
-        assert!(result.ok(), "tail failed: {}", result.err);
-        assert_eq!(result.text_out().lines().count(), 5);
-        assert!(result.text_out().contains("Shutting down")); // Last line
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "tail -n 5 tmp/app.log").await;
+        assert_eq!(code, 0, "tail failed: {out:?}");
+        assert_eq!(out.lines().count(), 5);
+        assert!(out.contains("Shutting down")); // Last line
     }
 
-    // Pattern: tail -15 typescript
-    // Source: Checking terminal recording output
+    // Pattern: tail -n 3 file
+    // Source: Checking the end of a source file
     #[tokio::test]
     async fn test_tail_source_file() {
-        let registry = make_registry().await;
-        let tail = registry.get("tail").expect("tail not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/src/api.rs".into()));
-        args.named.insert("lines".to_string(), Value::Int(3));
-
-        let result = tail.execute(args, &mut ctx).await;
-        assert!(result.ok(), "tail src failed: {}", result.err);
-        assert_eq!(result.text_out().lines().count(), 3);
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "tail -n 3 src/api.rs").await;
+        assert_eq!(code, 0, "tail src failed: {out:?}");
+        assert_eq!(out.lines().count(), 3);
     }
 
     // Default: tail file (should show 10 lines)
     #[tokio::test]
     async fn test_tail_default_lines() {
-        let registry = make_registry().await;
-        let tail = registry.get("tail").expect("tail not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/tmp/app.log".into()));
-
-        let result = tail.execute(args, &mut ctx).await;
-        assert!(result.ok(), "tail default failed: {}", result.err);
-        assert!(result.text_out().lines().count() <= 10);
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "tail tmp/app.log").await;
+        assert_eq!(code, 0, "tail default failed: {out:?}");
+        assert!(out.lines().count() <= 10);
     }
 }
 
@@ -615,81 +513,51 @@ mod wc_realworld {
     // Source: Checking file sizes
     #[tokio::test]
     async fn test_wc_lines_single_file() {
-        let registry = make_registry().await;
-        let wc = registry.get("wc").expect("wc not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/src/api.rs".into()));
-        args.flags.insert("l".to_string());
-
-        let result = wc.execute(args, &mut ctx).await;
-        assert!(result.ok(), "wc -l failed: {}", result.err);
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "wc -l src/api.rs").await;
+        assert_eq!(code, 0, "wc -l failed: {out:?}");
         // Output is TSV format: filename\tcount - get count from last column
-        let count: i32 = result.text_out()
+        let count: i32 = out
             .split('\t')
-            .last()
+            .next_back()
             .unwrap_or("0")
             .trim()
             .parse()
             .unwrap_or(-1);
-        assert!(count > 0, "Expected positive line count, got: {}", result.text_out());
+        assert!(count > 0, "Expected positive line count, got: {out:?}");
     }
 
     // Pattern: wc -l file1 file2 file3
     // Source: Comparing file sizes
     #[tokio::test]
     async fn test_wc_lines_multiple_files() {
-        let registry = make_registry().await;
-        let wc = registry.get("wc").expect("wc not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/src/main.rs".into()));
-        args.positional.push(Value::String("/src/lib.rs".into()));
-        args.flags.insert("l".to_string());
-
-        let result = wc.execute(args, &mut ctx).await;
-        assert!(result.ok(), "wc -l multiple failed: {}", result.err);
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "wc -l src/main.rs src/lib.rs").await;
+        assert_eq!(code, 0, "wc -l multiple failed: {out:?}");
         // Should have output for each file
-        let text = result.text_out();
-        let lines: Vec<&str> = text.lines().collect();
-        assert!(lines.len() >= 2, "Expected output for multiple files");
+        assert!(out.lines().count() >= 2, "Expected output for multiple files: {out:?}");
     }
 
     // Pattern: wc -l docs/*.md README.md CLAUDE.md
-    // This tests glob expansion which may not be handled by wc directly
+    // Glob + explicit operands mixed — the kernel pre-expands the glob
     #[tokio::test]
     async fn test_wc_markdown_files() {
-        let registry = make_registry().await;
-        let wc = registry.get("wc").expect("wc not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/README.md".into()));
-        args.positional.push(Value::String("/CLAUDE.md".into()));
-        args.flags.insert("l".to_string());
-
-        let result = wc.execute(args, &mut ctx).await;
-        assert!(result.ok(), "wc -l markdown failed: {}", result.err);
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "wc -l docs/*.md README.md CLAUDE.md").await;
+        assert_eq!(code, 0, "wc -l markdown failed: {out:?}");
+        assert!(out.contains("API.md"), "glob operand missing: {out:?}");
+        assert!(out.contains("README.md"), "explicit operand missing: {out:?}");
     }
 
-    // Pattern: wc (no flags) - should show lines, words, bytes
+    // Pattern: wc file (no flags) - should show lines, words, bytes
     #[tokio::test]
     async fn test_wc_default_output() {
-        let registry = make_registry().await;
-        let wc = registry.get("wc").expect("wc not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/README.md".into()));
-
-        let result = wc.execute(args, &mut ctx).await;
-        assert!(result.ok(), "wc default failed: {}", result.err);
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "wc README.md").await;
+        assert_eq!(code, 0, "wc default failed: {out:?}");
         // Default output should have multiple numbers
-        let text = result.text_out();
-        let parts: Vec<&str> = text.split_whitespace().collect();
-        assert!(parts.len() >= 3, "Expected lines, words, bytes");
+        let parts: Vec<&str> = out.split_whitespace().collect();
+        assert!(parts.len() >= 3, "Expected lines, words, bytes: {out:?}");
     }
 }
 
@@ -704,66 +572,39 @@ mod ls_realworld {
     // Source: Exploring directory structure
     #[tokio::test]
     async fn test_ls_directory() {
-        let registry = make_registry().await;
-        let ls = registry.get("ls").expect("ls not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/src".into()));
-
-        let result = ls.execute(args, &mut ctx).await;
-        assert!(result.ok(), "ls failed: {}", result.err);
-        assert!(result.text_out().contains("main.rs"));
-        assert!(result.text_out().contains("lib.rs"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "ls src").await;
+        assert_eq!(code, 0, "ls failed: {out:?}");
+        assert!(out.contains("main.rs"));
+        assert!(out.contains("lib.rs"));
     }
 
     // Pattern: ls -la directory/
     // Source: Detailed file listing
     #[tokio::test]
     async fn test_ls_long_all() {
-        let registry = make_registry().await;
-        let ls = registry.get("ls").expect("ls not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/src".into()));
-        args.flags.insert("l".to_string());
-        args.flags.insert("a".to_string());
-
-        let result = ls.execute(args, &mut ctx).await;
-        assert!(result.ok(), "ls -la failed: {}", result.err);
-        // Long format should have more detail
-        assert!(result.text_out().contains("main.rs"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "ls -la src").await;
+        assert_eq!(code, 0, "ls -la failed: {out:?}");
+        assert!(out.contains("main.rs"));
     }
 
-    // Pattern: ls *.rs (would need glob expansion)
-    // For now test explicit file
+    // Pattern: ls file (single file shows its name, not "not a directory")
     #[tokio::test]
     async fn test_ls_single_file() {
-        let registry = make_registry().await;
-        let ls = registry.get("ls").expect("ls not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/README.md".into()));
-
-        let result = ls.execute(args, &mut ctx).await;
-        assert!(result.ok(), "ls file failed: {}", result.err);
-        assert!(result.text_out().contains("README.md"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "ls README.md").await;
+        assert_eq!(code, 0, "ls file failed: {out:?}");
+        assert!(out.contains("README.md"));
     }
 
-    // Pattern: ls (current directory)
+    // Pattern: cd dir && ls (current directory)
     #[tokio::test]
     async fn test_ls_cwd() {
-        let registry = make_registry().await;
-        let ls = registry.get("ls").expect("ls not found");
-        let mut ctx = ctx_with_files().await;
-        ctx.set_cwd(PathBuf::from("/src"));
-        let args = ToolArgs::new();
-
-        let result = ls.execute(args, &mut ctx).await;
-        assert!(result.ok(), "ls cwd failed: {}", result.err);
-        assert!(result.text_out().contains("main.rs") || result.text_out().contains("lib.rs"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "cd src && ls").await;
+        assert_eq!(code, 0, "ls cwd failed: {out:?}");
+        assert!(out.contains("main.rs") || out.contains("lib.rs"));
     }
 }
 
@@ -777,78 +618,51 @@ mod echo_realworld {
     // Pattern: echo "message"
     #[tokio::test]
     async fn test_echo_simple_string() {
-        let registry = make_registry().await;
-        let echo = registry.get("echo").expect("echo not found");
-        let mut ctx = make_ctx().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("Hello, world!".into()));
-
-        let result = echo.execute(args, &mut ctx).await;
-        assert!(result.ok(), "echo failed: {}", result.err);
-        assert_eq!(result.text_out().trim(), "Hello, world!");
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, r#"echo "Hello, world!""#).await;
+        assert_eq!(code, 0, "echo failed: {out:?}");
+        assert_eq!(out, "Hello, world!");
     }
 
     // Pattern: echo "---"
     // Source: Common separator in output
     #[tokio::test]
     async fn test_echo_separator() {
-        let registry = make_registry().await;
-        let echo = registry.get("echo").expect("echo not found");
-        let mut ctx = make_ctx().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("---".into()));
-
-        let result = echo.execute(args, &mut ctx).await;
-        assert!(result.ok(), "echo separator failed: {}", result.err);
-        assert_eq!(result.text_out().trim(), "---");
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, r#"echo "---""#).await;
+        assert_eq!(code, 0, "echo separator failed: {out:?}");
+        assert_eq!(out, "---");
     }
 
     // Pattern: echo "" (empty string)
     #[tokio::test]
     async fn test_echo_empty() {
-        let registry = make_registry().await;
-        let echo = registry.get("echo").expect("echo not found");
-        let mut ctx = make_ctx().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("".into()));
-
-        let result = echo.execute(args, &mut ctx).await;
-        assert!(result.ok(), "echo empty failed: {}", result.err);
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, r#"echo """#).await;
+        assert_eq!(code, 0, "echo empty failed: {out:?}");
+        assert_eq!(out, "");
     }
 
     // Pattern: echo "multiple" "arguments"
     #[tokio::test]
     async fn test_echo_multiple_args() {
-        let registry = make_registry().await;
-        let echo = registry.get("echo").expect("echo not found");
-        let mut ctx = make_ctx().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("Hello".into()));
-        args.positional.push(Value::String("World".into()));
-
-        let result = echo.execute(args, &mut ctx).await;
-        assert!(result.ok(), "echo multiple failed: {}", result.err);
-        assert!(result.text_out().contains("Hello"));
-        assert!(result.text_out().contains("World"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, r#"echo "Hello" "World""#).await;
+        assert_eq!(code, 0, "echo multiple failed: {out:?}");
+        assert_eq!(out, "Hello World");
     }
 
     // Pattern: echo -n "no newline"
     #[tokio::test]
     async fn test_echo_no_newline() {
-        let registry = make_registry().await;
-        let echo = registry.get("echo").expect("echo not found");
-        let mut ctx = make_ctx().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("no newline".into()));
-        args.flags.insert("n".to_string());
-
-        let result = echo.execute(args, &mut ctx).await;
+        let (_dir, kernel) = fixture();
+        // run() trims, so inspect the raw result for the trailing-newline check.
+        let result = kernel
+            .execute(r#"echo -n "no newline""#)
+            .await
+            .expect("kernel execute");
         assert!(result.ok(), "echo -n failed: {}", result.err);
+        assert_eq!(result.text_out(), "no newline");
         assert!(!result.text_out().ends_with('\n'));
     }
 }
@@ -863,104 +677,65 @@ mod jq_realworld {
     // Pattern: jq '.field' file.json (positional file - the bug we fixed!)
     #[tokio::test]
     async fn test_jq_positional_file_basic() {
-        let registry = make_registry().await;
-        let jq = registry.get("jq").expect("jq not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String(".name".into()));
-        args.positional.push(Value::String("/tmp/data.json".into()));
-
-        let result = jq.execute(args, &mut ctx).await;
-        assert!(result.ok(), "jq positional failed: {}", result.err);
-        assert!(result.text_out().contains("Alice"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "jq '.name' tmp/data.json").await;
+        assert_eq!(code, 0, "jq positional failed: {out:?}");
+        assert!(out.contains("Alice"));
     }
 
     // Pattern: jq '.[] | select(.id == 2)' file.json
     #[tokio::test]
     async fn test_jq_select_from_array() {
-        let registry = make_registry().await;
-        let jq = registry.get("jq").expect("jq not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String(".[] | select(.id == 2)".into()));
-        args.positional.push(Value::String("/tmp/array.json".into()));
-
-        let result = jq.execute(args, &mut ctx).await;
-        assert!(result.ok(), "jq select failed: {}", result.err);
-        assert!(result.text_out().contains("two"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "jq '.[] | select(.id == 2)' tmp/array.json").await;
+        assert_eq!(code, 0, "jq select failed: {out:?}");
+        assert!(out.contains("two"));
     }
 
     // Pattern: jq -r '.field' file.json
     #[tokio::test]
     async fn test_jq_raw_output_positional_file() {
-        let registry = make_registry().await;
-        let jq = registry.get("jq").expect("jq not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String(".name".into()));
-        args.positional.push(Value::String("/tmp/data.json".into()));
-        args.flags.insert("r".to_string());
-
-        let result = jq.execute(args, &mut ctx).await;
-        assert!(result.ok(), "jq -r failed: {}", result.err);
-        assert_eq!(result.text_out().trim(), "Alice"); // No quotes with -r
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "jq -r '.name' tmp/data.json").await;
+        assert_eq!(code, 0, "jq -r failed: {out:?}");
+        assert_eq!(out, "Alice"); // No quotes with -r
     }
 
     // Pattern: jq 'length' file.json
     #[tokio::test]
     async fn test_jq_length_function() {
-        let registry = make_registry().await;
-        let jq = registry.get("jq").expect("jq not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("length".into()));
-        args.positional.push(Value::String("/tmp/array.json".into()));
-
-        let result = jq.execute(args, &mut ctx).await;
-        assert!(result.ok(), "jq length failed: {}", result.err);
-        assert_eq!(result.text_out().trim(), "3");
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "jq 'length' tmp/array.json").await;
+        assert_eq!(code, 0, "jq length failed: {out:?}");
+        assert_eq!(out, "3");
     }
 
     // Pattern: jq '.mcpServers | keys' settings.json
     #[tokio::test]
     async fn test_jq_keys_function() {
-        let registry = make_registry().await;
-        let jq = registry.get("jq").expect("jq not found");
-        let mut ctx = ctx_with_files().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String(".mcpServers | keys".into()));
-        args.positional.push(Value::String("/tmp/settings.json".into()));
-
-        let result = jq.execute(args, &mut ctx).await;
-        assert!(result.ok(), "jq keys failed: {}", result.err);
-        assert!(result.text_out().contains("holler"));
-        assert!(result.text_out().contains("sshwarma"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "jq '.mcpServers | keys' tmp/settings.json").await;
+        assert_eq!(code, 0, "jq keys failed: {out:?}");
+        assert!(out.contains("holler"));
+        assert!(out.contains("sshwarma"));
     }
 
-    // Pattern: cat file.json | jq '.field' (stdin)
+    // Pattern: echo '{...}' | jq '.field' (stdin)
     #[tokio::test]
     async fn test_jq_from_stdin() {
-        let registry = make_registry().await;
-        let jq = registry.get("jq").expect("jq not found");
-        let mut ctx = make_ctx().await;
-        ctx.set_stdin(r#"{"name": "Bob", "value": 42}"#.to_string());
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String(".value".into()));
-
-        let result = jq.execute(args, &mut ctx).await;
-        assert!(result.ok(), "jq stdin failed: {}", result.err);
-        assert_eq!(result.text_out().trim(), "42");
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(
+            &kernel,
+            r#"echo '{"name": "Bob", "value": 42}' | jq '.value'"#,
+        )
+        .await;
+        assert_eq!(code, 0, "jq stdin failed: {out:?}");
+        assert_eq!(out, "42");
     }
 }
 
 // ============================================================================
-// Pipeline Pattern Tests (simulated as sequential operations)
+// Pipeline Pattern Tests — real `|` pipelines through the kernel
 // ============================================================================
 
 mod pipeline_patterns {
@@ -969,79 +744,28 @@ mod pipeline_patterns {
     // Pattern: grep "pattern" file | wc -l
     #[tokio::test]
     async fn test_grep_pipe_wc() {
-        let registry = make_registry().await;
-        let grep = registry.get("grep").expect("grep not found");
-        let wc = registry.get("wc").expect("wc not found");
-        let mut ctx = ctx_with_files().await;
-
-        // First: grep INFO from log
-        let mut grep_args = ToolArgs::new();
-        grep_args.positional.push(Value::String("INFO".into()));
-        grep_args.positional.push(Value::String("/tmp/app.log".into()));
-
-        let grep_result = grep.execute(grep_args, &mut ctx).await;
-        assert!(grep_result.ok());
-
-        // Second: pipe output to wc -l
-        ctx.set_stdin(grep_result.text_out().into_owned());
-        let mut wc_args = ToolArgs::new();
-        wc_args.flags.insert("l".to_string());
-
-        let wc_result = wc.execute(wc_args, &mut ctx).await;
-        assert!(wc_result.ok(), "wc failed: {}", wc_result.err);
-
-        let count: i32 = wc_result.text_out().trim().parse().unwrap_or(0);
-        assert!(count > 0, "Expected INFO lines");
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "grep INFO tmp/app.log | wc -l").await;
+        assert_eq!(code, 0, "grep | wc failed: {out:?}");
+        let count: i32 = out.trim().parse().unwrap_or(0);
+        assert!(count > 0, "Expected INFO lines, got: {out:?}");
     }
 
     // Pattern: cat file | grep "pattern"
     #[tokio::test]
     async fn test_cat_pipe_grep() {
-        let registry = make_registry().await;
-        let cat = registry.get("cat").expect("cat not found");
-        let grep = registry.get("grep").expect("grep not found");
-        let mut ctx = ctx_with_files().await;
-
-        // First: cat the file
-        let mut cat_args = ToolArgs::new();
-        cat_args.positional.push(Value::String("/tmp/app.log".into()));
-
-        let cat_result = cat.execute(cat_args, &mut ctx).await;
-        assert!(cat_result.ok());
-
-        // Second: grep for ERROR
-        ctx.set_stdin(cat_result.text_out().into_owned());
-        let mut grep_args = ToolArgs::new();
-        grep_args.positional.push(Value::String("ERROR".into()));
-
-        let grep_result = grep.execute(grep_args, &mut ctx).await;
-        assert!(grep_result.ok(), "grep failed: {}", grep_result.err);
-        assert!(grep_result.text_out().contains("Connection failed"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "cat tmp/app.log | grep ERROR").await;
+        assert_eq!(code, 0, "cat | grep failed: {out:?}");
+        assert!(out.contains("Connection failed"));
     }
 
     // Pattern: head -50 file | grep "pattern"
     #[tokio::test]
     async fn test_head_pipe_grep() {
-        let registry = make_registry().await;
-        let head = registry.get("head").expect("head not found");
-        let grep = registry.get("grep").expect("grep not found");
-        let mut ctx = ctx_with_files().await;
-
-        // First: head
-        let mut head_args = ToolArgs::new();
-        head_args.positional.push(Value::String("/tmp/app.log".into()));
-        head_args.named.insert("lines".to_string(), Value::Int(5));
-
-        let head_result = head.execute(head_args, &mut ctx).await;
-        assert!(head_result.ok());
-
-        // Second: grep for DEBUG
-        ctx.set_stdin(head_result.text_out().into_owned());
-        let mut grep_args = ToolArgs::new();
-        grep_args.positional.push(Value::String("DEBUG".into()));
-
-        let grep_result = grep.execute(grep_args, &mut ctx).await;
-        assert!(grep_result.ok(), "grep failed: {}", grep_result.err);
-        assert!(grep_result.text_out().contains("Loading config"));
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "head -n 5 tmp/app.log | grep DEBUG").await;
+        assert_eq!(code, 0, "head | grep failed: {out:?}");
+        assert!(out.contains("Loading config"));
     }
 }

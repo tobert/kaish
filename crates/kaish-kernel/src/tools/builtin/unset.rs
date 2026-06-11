@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
-use crate::interpreter::{ExecResult, OutputData};
+use crate::interpreter::ExecResult;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Unset tool: removes variables from the current scope.
@@ -55,19 +55,20 @@ impl Tool for Unset {
             return ExecResult::failure(1, "unset: missing variable name");
         }
 
-        let mut unset_count = 0;
         for arg in &args.positional {
             let name = match arg {
                 Value::String(s) => s.clone(),
                 other => value_to_string(other),
             };
 
-            if ctx.scope.remove(&name).is_some() {
-                unset_count += 1;
-            }
+            // POSIX: unsetting a nonexistent variable is not an error.
+            ctx.scope.remove(&name);
         }
 
-        ExecResult::with_output(OutputData::text(format!("{}", unset_count)))
+        // POSIX unset is silent — emitting the removed-count polluted
+        // `$()` captures and `--json` output with a stray number
+        // (found by the --json sweep 2026-06-11).
+        ExecResult::success("")
     }
 }
 
@@ -106,7 +107,7 @@ mod tests {
 
         let result = Unset.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(),"1");
+        assert_eq!(&*result.text_out(), "", "POSIX unset is silent");
         assert!(ctx.scope.get("X").is_none());
     }
 
@@ -118,8 +119,8 @@ mod tests {
         args.positional.push(Value::String("MISSING".into()));
 
         let result = Unset.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        assert_eq!(&*result.text_out(),"0");
+        assert!(result.ok(), "unsetting a missing variable is not an error");
+        assert_eq!(&*result.text_out(), "", "POSIX unset is silent");
     }
 
     #[tokio::test]
@@ -136,7 +137,7 @@ mod tests {
 
         let result = Unset.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(),"2");
+        assert_eq!(&*result.text_out(), "", "POSIX unset is silent");
         assert!(ctx.scope.get("A").is_none());
         assert!(ctx.scope.get("B").is_none());
         assert!(ctx.scope.get("C").is_some());
