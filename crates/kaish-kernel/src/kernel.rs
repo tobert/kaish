@@ -1307,6 +1307,17 @@ impl Kernel {
         }
     }
 
+    /// Replace or remove the trash backend used by `rm` and `kaish-trash`.
+    ///
+    /// The kernel installs the OS trash (`SystemTrash`) automatically when
+    /// built with the `os-integration` feature. Embedders and tests can swap
+    /// in a custom [`crate::trash::TrashBackend`], or pass `None` to remove
+    /// it — with trash enabled but no backend present, `rm` fails loud
+    /// rather than falling through to permanent delete.
+    pub fn set_trash_backend(&mut self, backend: Option<Arc<dyn crate::trash::TrashBackend>>) {
+        self.exec_ctx.get_mut().trash_backend = backend;
+    }
+
     /// Cancel the current execution.
     ///
     /// This cancels the current cancellation token, causing any execution

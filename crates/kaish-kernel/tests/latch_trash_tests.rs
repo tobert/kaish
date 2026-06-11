@@ -1,0 +1,319 @@
+//! Kernel-routed tests for the destructive-op safety rails: the confirmation
+//! latch (`set -o latch`) and trash-on-delete (`set -o trash`).
+//!
+//! Everything here drives real command strings through `kernel.execute()` so
+//! the full pipeline runs — lex → parse → validate → clap binding → builtin.
+//! The inline tests in `rm.rs`/`kaish_trash.rs` inject `confirm` directly
+//! into `ToolArgs.named`, below the arg-binding layer; these tests are the
+//! regression net for the layer above it.
+//!
+//! Trash tests root their tempdir in `CARGO_TARGET_TMPDIR` (under `target/`),
+//! NOT the system temp dir: `decide_rm_action` deliberately skips trash for
+//! real paths under `/tmp` and `/v`, so a `/tmp`-rooted tempdir would never
+//! reach the trash arm.
+
+// KernelConfig::repl() mounts the real filesystem.
+#![cfg(feature = "localfs")]
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use kaish_kernel::ast::Value;
+use kaish_kernel::interpreter::ExecResult;
+use kaish_kernel::trash::{TrashBackend, TrashEntry, TrashError};
+use kaish_kernel::{Kernel, KernelConfig};
+
+fn tempdir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("latch-trash-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .expect("tempdir under CARGO_TARGET_TMPDIR")
+}
+
+/// Kernel with latch/trash forced OFF regardless of the developer's
+/// KAISH_LATCH / KAISH_TRASH env (which `repl()` reads). Each test opts in
+/// via `set -o latch` / `set -o trash` so the enable path itself is
+/// kernel-routed too.
+fn kernel_at(dir: &Path) -> Kernel {
+    let config = KernelConfig::repl()
+        .with_cwd(dir.to_path_buf())
+        .with_latch(false)
+        .with_trash(false);
+    Kernel::new(config).expect("kernel")
+}
+
+async fn run(kernel: &Kernel, script: &str) -> ExecResult {
+    kernel.execute(script).await.expect("kernel execute")
+}
+
+/// Pull a string field out of a latch result's structured `.data`.
+fn latch_data_str(result: &ExecResult, key: &str) -> String {
+    let data = result
+        .data
+        .as_ref()
+        .expect("latch exit-2 result carries structured data");
+    match data {
+        Value::Json(json) => json[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("latch data {key:?} should be a string: {json}"))
+            .to_string(),
+        other => panic!("expected Value::Json latch data, got {other:?}"),
+    }
+}
+
+// ============================================================================
+// Confirmation latch — set -o latch → rm exit 2 → rm --confirm=<nonce>
+// ============================================================================
+
+#[tokio::test]
+async fn latch_gates_rm_then_confirm_hint_deletes() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("precious.txt"), "data").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    let enable = run(&kernel, "set -o latch").await;
+    assert_eq!(enable.code, 0, "set -o latch failed: {}", enable.err);
+
+    // First rm: gated. Exit 2, file untouched, nonce + hint in .data.
+    let gated = run(&kernel, "rm precious.txt").await;
+    assert_eq!(gated.code, 2, "expected latch exit 2, err: {}", gated.err);
+    assert!(
+        gated.err.contains("confirmation required"),
+        "latch message missing: {}",
+        gated.err
+    );
+    assert!(
+        dir.path().join("precious.txt").exists(),
+        "file must survive the latch gate"
+    );
+
+    // The hint is the exact re-run command (`rm --confirm="<nonce>" precious.txt`).
+    // Run it verbatim — pins that the advertised recovery command actually
+    // parses and binds through the kernel.
+    let hint = latch_data_str(&gated, "hint");
+    let confirmed = run(&kernel, &hint).await;
+    assert_eq!(
+        confirmed.code, 0,
+        "confirm hint {hint:?} failed: {}",
+        confirmed.err
+    );
+    assert!(
+        !dir.path().join("precious.txt").exists(),
+        "file should be deleted after confirmation"
+    );
+}
+
+#[tokio::test]
+async fn latch_bogus_nonce_fails_and_file_survives() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("precious.txt"), "data").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    run(&kernel, "set -o latch").await;
+    let r = run(&kernel, "rm --confirm=\"deadbeef\" precious.txt").await;
+    assert_eq!(r.code, 1, "bogus nonce must fail, out: {}", r.text_out());
+    assert!(
+        r.err.contains("rm:"),
+        "expected an rm error naming the bad nonce, got: {}",
+        r.err
+    );
+    assert!(
+        dir.path().join("precious.txt").exists(),
+        "file must survive a rejected nonce"
+    );
+}
+
+#[tokio::test]
+async fn latch_batches_multiple_paths_under_one_nonce() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("a.txt"), "a").expect("write");
+    std::fs::write(dir.path().join("b.txt"), "b").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    run(&kernel, "set -o latch").await;
+    let gated = run(&kernel, "rm a.txt b.txt").await;
+    assert_eq!(gated.code, 2, "err: {}", gated.err);
+    assert!(
+        gated.err.contains("a.txt") && gated.err.contains("b.txt"),
+        "latch message should authorize both paths: {}",
+        gated.err
+    );
+
+    let hint = latch_data_str(&gated, "hint");
+    let confirmed = run(&kernel, &hint).await;
+    assert_eq!(confirmed.code, 0, "err: {}", confirmed.err);
+    assert!(!dir.path().join("a.txt").exists(), "a.txt should be gone");
+    assert!(!dir.path().join("b.txt").exists(), "b.txt should be gone");
+}
+
+#[tokio::test]
+async fn latch_off_by_default_rm_deletes_directly() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("plain.txt"), "x").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    let r = run(&kernel, "rm plain.txt").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+    assert!(!dir.path().join("plain.txt").exists());
+}
+
+// ============================================================================
+// Trash-on-delete — mock TrashBackend covering the RmAction::Trash arm
+// ============================================================================
+
+/// Recording/failing mock. `trash()` only records (it does NOT move the
+/// file) — so after a successful trash the file still existing on disk
+/// proves rm *delegated* the removal and didn't also permanently delete.
+#[derive(Default)]
+struct MockTrash {
+    trashed: Mutex<Vec<PathBuf>>,
+    fail: bool,
+}
+
+impl MockTrash {
+    fn failing() -> Self {
+        Self { fail: true, ..Self::default() }
+    }
+
+    fn trashed_paths(&self) -> Vec<PathBuf> {
+        self.trashed.lock().expect("mock lock").clone()
+    }
+}
+
+#[async_trait]
+impl TrashBackend for MockTrash {
+    async fn trash(&self, path: &Path) -> Result<(), TrashError> {
+        if self.fail {
+            return Err(TrashError::Backend("mock trash refused".into()));
+        }
+        self.trashed
+            .lock()
+            .expect("mock lock")
+            .push(path.to_path_buf());
+        Ok(())
+    }
+
+    async fn list(&self, _filter: Option<&str>) -> Result<Vec<TrashEntry>, TrashError> {
+        Ok(Vec::new())
+    }
+
+    async fn find_by_name(&self, _name: &str) -> Result<Vec<TrashEntry>, TrashError> {
+        Ok(Vec::new())
+    }
+
+    async fn restore(&self, _entries: Vec<TrashEntry>) -> Result<(), TrashError> {
+        Ok(())
+    }
+
+    async fn purge_all(&self) -> Result<usize, TrashError> {
+        Ok(0)
+    }
+}
+
+fn kernel_with_trash(dir: &Path, mock: &Arc<MockTrash>) -> Kernel {
+    let mut kernel = kernel_at(dir);
+    kernel.set_trash_backend(Some(Arc::clone(mock) as Arc<dyn TrashBackend>));
+    kernel
+}
+
+#[tokio::test]
+async fn trash_small_file_delegates_to_backend() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("keep.txt"), "data").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o trash").await;
+    let r = run(&kernel, "rm keep.txt").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+
+    let trashed = mock.trashed_paths();
+    assert_eq!(trashed.len(), 1, "exactly one trash call: {trashed:?}");
+    assert!(
+        trashed[0].ends_with("keep.txt"),
+        "trash received the real path: {trashed:?}"
+    );
+    // The recording mock didn't move the file; if rm ALSO deleted it the
+    // delegation contract is broken (double delete = trash can't restore).
+    assert!(
+        dir.path().join("keep.txt").exists(),
+        "rm must delegate removal to the trash backend, not delete as well"
+    );
+}
+
+#[tokio::test]
+async fn trash_directory_always_trashes_without_recursive_flag() {
+    let dir = tempdir();
+    std::fs::create_dir(dir.path().join("sub")).expect("mkdir");
+    std::fs::write(dir.path().join("sub/inner.txt"), "x").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o trash").await;
+    // Directories always trash (no -r needed; trash moves them atomically).
+    let r = run(&kernel, "rm sub").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+    let trashed = mock.trashed_paths();
+    assert_eq!(trashed.len(), 1, "one trash call for the dir: {trashed:?}");
+    assert!(trashed[0].ends_with("sub"));
+}
+
+#[tokio::test]
+async fn trash_catches_small_file_even_with_latch_enabled() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("small.txt"), "tiny").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o latch").await;
+    run(&kernel, "set -o trash").await;
+    // Priority: trash catches small files before the latch gates them —
+    // no exit 2, no nonce, straight to the backend.
+    let r = run(&kernel, "rm small.txt").await;
+    assert_eq!(r.code, 0, "trash should win over latch, err: {}", r.err);
+    assert_eq!(mock.trashed_paths().len(), 1);
+}
+
+#[tokio::test]
+async fn trash_failure_is_loud_and_never_falls_through_to_delete() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("guarded.txt"), "data").expect("write");
+    let mock = Arc::new(MockTrash::failing());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o trash").await;
+    let r = run(&kernel, "rm guarded.txt").await;
+    assert_eq!(r.code, 1, "trash failure must be an error, not silent");
+    assert!(
+        r.err.contains("trash failed"),
+        "error should name the trash failure: {}",
+        r.err
+    );
+    // THE invariant: a trash failure never falls through to permanent delete.
+    assert!(
+        dir.path().join("guarded.txt").exists(),
+        "trash failure fell through to permanent delete"
+    );
+}
+
+#[tokio::test]
+async fn trash_backend_absent_fails_loud() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("orphan.txt"), "data").expect("write");
+    let mut kernel = kernel_at(dir.path());
+    kernel.set_trash_backend(None);
+
+    run(&kernel, "set -o trash").await;
+    let r = run(&kernel, "rm orphan.txt").await;
+    assert_eq!(r.code, 1, "missing backend must be an error");
+    assert!(
+        r.err.contains("trash backend not available"),
+        "error should name the missing backend: {}",
+        r.err
+    );
+    assert!(
+        dir.path().join("orphan.txt").exists(),
+        "missing trash backend must not fall through to delete"
+    );
+}

@@ -363,6 +363,48 @@ async fn wait_jobspec_percent_form_end_to_end() {
     );
 }
 
+/// `wait %N` propagates a background job's failure: exit 1 + "Failed" in the
+/// status line. Pins the exit-code contract (any waited job failed → 1)
+/// through the full kernel, not just the inline unit tests.
+#[tokio::test]
+async fn wait_propagates_background_job_failure() {
+    let kernel = setup().await;
+    let result = kernel
+        .execute("bgfail() { sleep 0.01; return 7; }; bgfail & wait %1")
+        .await
+        .expect("execute");
+    assert_eq!(
+        result.code, 1,
+        "wait on a failed job must exit 1: out={} err={}",
+        result.text_out(),
+        result.err
+    );
+    assert!(
+        result.text_out().contains("[1] Failed"),
+        "expected failed status line, got: {}",
+        result.text_out()
+    );
+}
+
+/// `kill %N` removes the job from the table, so a subsequent `wait %N` reports
+/// it gone (exit 1, "not found") rather than hanging or succeeding silently.
+/// (`kill` is gated on the `subprocess` feature.)
+#[cfg(feature = "subprocess")]
+#[tokio::test]
+async fn wait_after_kill_reports_job_gone() {
+    let kernel = setup().await;
+    let killed = kernel.execute("sleep 30 & kill %1").await.expect("execute");
+    assert_eq!(killed.code, 0, "kill %1 should succeed: {}", killed.err);
+
+    let waited = kernel.execute("wait %1").await.expect("execute");
+    assert!(!waited.ok(), "wait on a killed job must fail");
+    assert!(
+        waited.err.contains("not found"),
+        "expected job-not-found, got: {}",
+        waited.err
+    );
+}
+
 /// Phase 1: `kill %N` stops a pure-builtin background job (no OS process
 /// group) via its cancellation token, and removes it from the table.
 /// (`kill` is gated on the `subprocess` feature.)

@@ -319,6 +319,34 @@ async fn interactive_piped_stdin_still_works() {
 }
 
 // ============================================================================
+// Argv No-Split Guarantee
+// ============================================================================
+
+/// The no-word-splitting guarantee on the EXTERNAL argv path
+/// (`build_args_flat` → `try_execute_external`): a `$VAR` holding spaces must
+/// arrive as ONE argv element in the spawned process, even unquoted. printf
+/// cycles its format over operands, so a split would render `[a][b][c]`
+/// instead of one bracket group. The builtin path is covered elsewhere; this
+/// pins the external spawn site, which the hermetic-env discipline requires
+/// to stay in sync with its test-only twin.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn external_argv_does_not_split_space_containing_var() {
+    let kernel = repl_kernel();
+    kernel.execute(r#"X="a b  c""#).await.unwrap();
+    let result = kernel
+        .execute(r#"/usr/bin/printf "[%s]" $X"#)
+        .await
+        .unwrap();
+    assert!(result.ok(), "printf should succeed: {:?}", result);
+    assert_eq!(
+        result.text_out(),
+        "[a b  c]",
+        "external argv split a space-containing $VAR"
+    );
+}
+
+// ============================================================================
 // Minus Alone (stdin indicator) Tests
 // ============================================================================
 

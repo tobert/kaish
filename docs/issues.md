@@ -132,25 +132,6 @@ silently degrade. Decide: newline-split plain text in scatter (consistent with
 `for`), or fix the examples to `... | split --lines | scatter` and state the
 structured-data requirement loudly.
 
-### Destructive-op safety rails have zero kernel-routed test coverage
-The latch and trash systems are only tested below the arg-binding layer that
-c463f42/ffe0f44 just reworked — verified 2026-06-09 (the flows *work* at HEAD;
-this is a missing regression net, not a bug):
-- `tests/common/mod.rs:28-32` builds every harness kernel with
-  `.with_latch(false).with_trash(false)`; no test anywhere drives
-  `set -o latch` → `rm` exit 2 → `rm --confirm=<nonce>` through
-  `kernel.execute`. All inline latch tests (`rm.rs:443-589`,
-  `kaish_trash.rs:281-307`) inject `confirm` directly into `ToolArgs.named`,
-  bypassing lex → parse → clap binding entirely.
-- The `RmAction::Trash` **execution** arm (`rm.rs:212-227`) is never run by any
-  test: no TrashBackend mock exists, and the real-backend tests are
-  `#[ignore]`d as CI-flaky. The "trash failure = error, never fall through to
-  permanent delete" invariant is honored by the code but pinned by nothing.
-Fix: `tests/latch_trash_tests.rs` with latch-on kernel (exit-2 → parse nonce →
-confirm → deleted; bogus nonce → exit 1, file survives), plus a test-only
-TrashBackend mock (recording + always-failing variants) covering the
-trash-success, trash-failure, and backend-absent paths.
-
 ### `realworld_builtin_tests.rs` (43 tests) bypasses the kernel it's named for
 The file hand-builds `ToolArgs` and calls `tool.execute()` directly
 (`realworld_builtin_tests.rs:56-66`, e.g. `:464`) — the documented anti-pattern
@@ -320,8 +301,10 @@ restoration or a reverse sync added.
 
 ### Test-effectiveness residuals (2026-06-09 fleet review)
 Smaller verified gaps from the systemic review, grouped; the headline test
-items got their own P2 entries (destructive rails, realworld port). Each
-bullet is independently actionable:
+items got their own P2 entries (destructive rails — closed 2026-06-11, see
+Resolved; realworld port). Five bullets fixed 2026-06-11 (snapshot-isolation
+race, both tautological asserts, external argv no-split, kill/wait e2e — see
+Resolved); each remaining bullet is independently actionable:
 - **`--json` is kernel-route-tested for ~4 of 89 commands** despite being the
   headline MCP feature (`shell_compat_tests.rs:27` explicitly skips it; only
   ps + three kaish-* tools assert shape through the full stack). One
@@ -330,26 +313,13 @@ bullet is independently actionable:
 - **`builtin_kernel_tests.rs` is 100% happy-path:** 38 tests, zero nonzero-exit
   assertions. Add 1–2 negative cases per builtin (missing file, bad flag)
   asserting the specific code + err substring — agents branch on exit codes.
-- **External-command argv never tested with a space-containing `$VAR`**
-  (`external_command_tests.rs` uses only literals/builtin echo). The no-split
-  guarantee on the *external* path (`build_args_flat`) is unpinned, and the
-  hermetic-env memory note already warns the two spawn sites must stay in sync.
-  One Linux-gated `printf "[%s]\n" $X` test closes it.
-- **`background_job_snapshot_isolation` doesn't exercise its race**
-  (`concurrency_tests.rs:203`): `sleep 0.2; echo $VAR &` backgrounds only the
-  echo, so the sleep is foreground and the test passes even under a
-  shared-scope regression. Fix: move the delay inside the backgrounded unit
-  (`snap() { sleep 0.2; echo $VAR; }; snap &` then mutate immediately).
-- **Tautological assertions:** `sandbox_external_commands_blocked`
-  (`sandbox_mode_tests.rs:187`, second assert always true — pin exit 127 +
-  message so policy-block is distinguishable from accidental failure) and
-  `validation_quoted_glob_in_mv` (`validation_tests.rs:468`,
-  `is_ok() || is_err()`). The bare-glob validation tests at `:321-391` are
-  environment-dependent (transient-kernel cwd) — backstopped by the
-  deterministic inline `test_bare_glob_no_matches_errors` (`kernel.rs:6135`),
-  but that test only covers the builtin-argv site; the `execute_stmt_flow` and
-  `build_args_flat` "no matches" sites lack their own, and the inline module
-  is feature-gated such that `cargo test -p kaish-kernel --lib` alone skips it.
+- **Bare-glob validation backstop is single-site:** the bare-glob validation
+  tests at `validation_tests.rs:321-391` are environment-dependent
+  (transient-kernel cwd) — backstopped by the deterministic inline
+  `test_bare_glob_no_matches_errors` (`kernel.rs:6135`), but that test only
+  covers the builtin-argv site; the `execute_stmt_flow` and `build_args_flat`
+  "no matches" sites lack their own, and the inline module is feature-gated
+  such that `cargo test -p kaish-kernel --lib` alone skips it.
 - **Lexer negative tests assert only `is_err`** (`lexer_tests.rs:160`
   `run_lexer_error_test`): the float/ambiguous-boolean/unterminated suites
   would still pass if the curated diagnostics regressed to a generic error.
@@ -360,10 +330,9 @@ bullet is independently actionable:
   validations don't exist, so deleting them fails zero tests. Only grep and
   seq implement `Tool::validate`. Either implement + test per code, or remove
   the dead variants (fail-loud over silent aspiration).
-- **kill/bg/fg coverage is PTY-only** (unix-gated, timing-sensitive,
-  `pty_job_control.rs`) and **`wait` never appears as a command in any
-  integration test** (6 inline tests only). `kill %1` + `wait` exit-code
-  propagation are doable in `background_execution_tests.rs` without a PTY.
+- **bg/fg coverage is PTY-only** (unix-gated, timing-sensitive,
+  `pty_job_control.rs`). The `wait`/`kill %1` half of this bullet closed
+  2026-06-11 (see Resolved); bg/fg still have no non-PTY coverage.
 - **Timing margins:** `background_job_does_not_block_foreground`
   (`concurrency_tests.rs:159`, 300ms headroom — the file's only hard
   wall-clock bound) and bare 5-10ms registration sleeps in `job.rs` unit
@@ -582,6 +551,38 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **Destructive-op safety rails now have kernel-routed coverage — fixed 2026-06-11.**
+  New `tests/latch_trash_tests.rs` (9 tests, all through `kernel.execute`):
+  latch flow (`set -o latch` → `rm` exit 2 → re-run the `.data` hint verbatim →
+  deleted; bogus nonce → exit 1, file survives; multi-path batch under one
+  nonce; latch-off default deletes) and the previously-never-executed
+  `RmAction::Trash` arm via a mock backend (small file delegates to backend
+  without double-delete; directories trash without `-r`; trash beats latch for
+  small files; **trash failure = exit 1, never falls through to permanent
+  delete**; backend-absent fails loud). Enabling API: new public
+  `Kernel::set_trash_backend(Option<Arc<dyn TrashBackend>>)` — also useful to
+  embedders that want a custom trash. Trash tests root their tempdir in
+  `CARGO_TARGET_TMPDIR` (not `/tmp` — `decide_rm_action` skips trash there).
+  Bonus find by the new `validation_quoted_glob_in_mv` assertion: `mv`'s
+  per-source error dropped the operand name (`mv: not found: …`); now
+  `mv: <src>: <err>` matching `rm`'s format.
+
+- **Five test-effectiveness residual bullets — fixed 2026-06-11.**
+  (1) `background_job_snapshot_isolation` now backgrounds the *delay* too
+  (`snap() { sleep 0.2; echo $VAR; }; snap &`), so it fails under a
+  shared-scope regression instead of sequencing the mutation after a
+  foreground sleep. (2) `sandbox_external_commands_blocked` pins exit 127 +
+  "command not found" — a sandbox escape where curl actually runs and fails
+  no longer passes. (3) `validation_quoted_glob_in_mv` replaced
+  `is_ok() || is_err()` with: validates OK, fails at runtime, error names the
+  literal `*.old` (proof the quoted glob wasn't expanded). (4) New Linux-gated
+  `external_argv_does_not_split_space_containing_var` pins the no-split
+  guarantee on the external spawn path (`/usr/bin/printf "[%s]" $X` → one
+  bracket group). (5) `wait`/`kill %1` now appear as commands in integration
+  tests: `wait_propagates_background_job_failure` (failed job → exit 1 +
+  `[1] Failed`) and `wait_after_kill_reports_job_gone` in
+  `background_execution_tests.rs` — no PTY needed.
 
 - **kaibo P1 pair for 0.8.1 — done 2026-06-11.** (1) `ByteBudget` re-exported
   through `kaish_kernel::vfs` so a `with_backend` embedder names the type it

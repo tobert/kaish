@@ -88,7 +88,7 @@ impl Tool for Mv {
             let source = crate::interpreter::value_to_string(src_value);
             let src_path = ctx.resolve_path(&source);
             if let Err(e) = move_path(&*ctx.backend, &src_path, &dst_path, no_clobber).await {
-                last_err = Some(format!("mv: {}", e));
+                last_err = Some(format!("mv: {}: {}", source, e));
             }
         }
         match last_err {

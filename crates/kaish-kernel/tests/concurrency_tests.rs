@@ -205,11 +205,15 @@ async fn background_job_snapshot_isolation() {
     let kernel = setup().await;
     kernel.execute("VAR=before").await.expect("set");
     // Start a background job that pauses briefly then echoes VAR — the
-    // pause lets the parent mutate VAR before the job reads it.
+    // pause lets the parent mutate VAR before the job reads it. The delay
+    // must live INSIDE the backgrounded unit: a bare `sleep 0.2; echo $VAR &`
+    // runs the sleep in the foreground and backgrounds only the echo, so the
+    // test would pass even under a shared-scope regression.
     kernel
-        .execute("sleep 0.2; echo $VAR &")
+        .execute("snap() { sleep 0.2; echo $VAR; }")
         .await
-        .expect("spawn");
+        .expect("define");
+    kernel.execute("snap &").await.expect("spawn");
     kernel.execute("VAR=after").await.expect("mutate");
     wait_for_job(&kernel, 1, Duration::from_secs(2)).await;
     let r = kernel

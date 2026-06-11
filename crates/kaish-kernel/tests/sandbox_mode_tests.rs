@@ -186,13 +186,21 @@ async fn sandbox_test_builtin_cannot_probe_host() {
 #[tokio::test]
 async fn sandbox_external_commands_blocked() {
     let k = sandbox_kernel().await;
-    // Use a command name that is definitely not a builtin
+    // Use a command name that is definitely not a builtin.
     let r = k.execute("/usr/bin/curl https://example.com").await.expect("execute failed");
-    assert!(!r.ok());
-    // Isolated mode blocks external commands — either "not found" or path resolution fails
+    // Pin the policy block exactly: exit 127 + "command not found". A looser
+    // !ok() would also pass if curl actually RAN and failed (network error,
+    // exit 6) — i.e., a sandbox escape would go unnoticed.
+    assert_eq!(
+        r.code, 127,
+        "external command should be policy-blocked (127), not merely fail: out={:?} err={:?}",
+        r.text_out(),
+        r.err
+    );
     assert!(
-        r.code == 127 || !r.ok(),
-        "external command should fail in sandbox: code={} out={:?} err={:?}", r.code, r.text_out(), r.err
+        r.err.contains("command not found"),
+        "policy block should surface as command-not-found: err={:?}",
+        r.err
     );
 }
 

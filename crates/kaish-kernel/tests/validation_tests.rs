@@ -464,8 +464,17 @@ async fn validation_quoted_glob_in_mv() {
     let kernel = make_kernel().await;
     // Quoted glob stays as a literal string — no expansion
     let result = kernel.execute("mv \"*.old\" backup/").await;
-    // mv may fail for other reasons (missing files), but it should parse ok
-    assert!(result.is_ok() || result.is_err(), "should parse without error");
+    assert!(result.is_ok(), "quoted glob should parse and validate: {result:?}");
+    // At runtime the literal filename `*.old` doesn't exist; the error must
+    // name it verbatim — proof the quoted glob was NOT expanded (an unquoted
+    // bare glob with zero matches errors before mv ever runs).
+    let r = result.expect("checked above");
+    assert!(!r.ok(), "mv of a nonexistent literal should fail");
+    assert!(
+        r.err.contains("*.old"),
+        "error should name the literal *.old: err={:?}",
+        r.err
+    );
 }
 
 #[tokio::test]
