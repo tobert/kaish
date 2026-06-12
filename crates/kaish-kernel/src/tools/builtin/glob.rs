@@ -102,16 +102,26 @@ impl Tool for Glob {
             Err(e) => return ExecResult::failure(1, format!("glob: invalid pattern: {}", e)),
         };
 
-        // Determine the root directory for walking:
-        // If pattern is anchored (/foo/bar), start from /
-        // Otherwise, start from current directory
-        //
-        // Note: We could optimize by using static_prefix, but that requires
-        // stripping the prefix from the pattern too. For now, keep it simple.
-        let root = if glob.is_anchored() {
+        // Names are reported relative to the conventional root — `/` for an
+        // anchored pattern, the cwd otherwise — regardless of where the walk
+        // actually starts.
+        let report_root = if glob.is_anchored() {
             ctx.resolve_path("/")
         } else {
             ctx.resolve_path(".")
+        };
+
+        // Walk from the pattern's deepest static directory, not from `/`.
+        // Walking from `/` is O(filesystem) and — fatally — the walker skips
+        // hidden intermediate directories, so an anchored pattern routed
+        // through a hidden dir (e.g. tempfile's `/tmp/.tmpXXXX/*.txt`) matched
+        // nothing. `split_static_dir` peels the literal leading components into
+        // the walk root and leaves the remainder as the match pattern.
+        let (static_dir, glob) = glob.split_static_dir();
+        let root = if static_dir.as_os_str().is_empty() {
+            report_root.clone()
+        } else {
+            report_root.join(&static_dir)
         };
 
         // Parse options
@@ -201,7 +211,7 @@ impl Tool for Glob {
         let nodes: Vec<OutputNode> = paths
             .iter()
             .map(|p| {
-                let rel = p.strip_prefix(&root).unwrap_or(p);
+                let rel = p.strip_prefix(&report_root).unwrap_or(p);
                 let name = rel.to_string_lossy().to_string();
                 let entry_type = if p.extension().is_none() && name.ends_with('/') {
                     EntryType::Directory
@@ -374,6 +384,60 @@ mod tests {
         let result = Glob.execute(args, &mut ctx).await;
         assert!(!result.ok());
         assert!(result.err.contains("missing pattern"));
+    }
+
+    #[tokio::test]
+    async fn test_glob_anchored_through_hidden_dir() {
+        // Regression: an absolute pattern routed through a HIDDEN intermediate
+        // directory matched nothing. The walk started at `/` and the walker
+        // skips hidden entries, so the `.work` component was never descended —
+        // which is exactly how `tempfile`'s `/tmp/.tmpXXXX/*.txt` resolved to
+        // zero matches. The fix walks from the pattern's static directory
+        // (`/.work/data`) instead of `/`. See docs/issues.md.
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.mkdir(Path::new(".work")).await.unwrap();
+        mem.mkdir(Path::new(".work/data")).await.unwrap();
+        mem.mkdir(Path::new(".work/data/sub")).await.unwrap();
+        mem.write(Path::new(".work/data/a.txt"), b"a").await.unwrap();
+        mem.write(Path::new(".work/data/b.txt"), b"b").await.unwrap();
+        // A deeper file must NOT be caught by a fixed-depth `*.txt`.
+        mem.write(Path::new(".work/data/sub/c.txt"), b"c").await.unwrap();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/.work/data/*.txt".into()));
+        let result = Glob.execute(args, &mut ctx).await;
+        assert!(result.ok(), "glob failed: {}", result.err);
+
+        let out = result.text_out();
+        assert!(out.contains("a.txt"), "should match a.txt through hidden dir: {out:?}");
+        assert!(out.contains("b.txt"), "should match b.txt through hidden dir: {out:?}");
+        assert!(!out.contains("c.txt"), "*.txt must not match nested sub/c.txt: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn test_glob_anchored_exact_literal_file() {
+        // All-literal anchored pattern: `split_static_dir` must keep the final
+        // component as the match target (walk `/proj`, match `only.txt`) rather
+        // than trying to descend into the file itself.
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.mkdir(Path::new("proj")).await.unwrap();
+        mem.write(Path::new("proj/only.txt"), b"x").await.unwrap();
+        mem.write(Path::new("proj/other.txt"), b"y").await.unwrap();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/proj/only.txt".into()));
+        let result = Glob.execute(args, &mut ctx).await;
+        assert!(result.ok(), "glob failed: {}", result.err);
+
+        let out = result.text_out();
+        assert!(out.contains("only.txt"), "should match the exact file: {out:?}");
+        assert!(!out.contains("other.txt"), "must not match siblings: {out:?}");
     }
 
     async fn make_ctx_with_artifacts() -> ExecContext {

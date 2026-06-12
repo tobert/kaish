@@ -132,6 +132,59 @@ impl GlobPath {
         }
     }
 
+    /// Split the pattern into its deepest static directory prefix and the
+    /// remaining pattern to match beneath it.
+    ///
+    /// Used to start a walk from the literal leading directories instead of
+    /// the filesystem root: walking from `/` is O(filesystem) and skips
+    /// hidden intermediate directories, so `/tmp/.tmpXXXX/*.txt` would match
+    /// nothing. At least one segment is always kept in the remaining pattern,
+    /// so an all-literal pattern (`/a/b/c.txt`) walks `/a/b` and matches
+    /// `c.txt` rather than trying to descend into the file itself. The
+    /// returned pattern is unanchored (the anchor is consumed by the caller's
+    /// walk root).
+    ///
+    /// # Examples
+    /// ```
+    /// use kaish_glob::GlobPath;
+    /// use std::path::{Path, PathBuf};
+    ///
+    /// let (dir, rest) = GlobPath::new("/a/b/*.txt").unwrap().split_static_dir();
+    /// assert_eq!(dir, PathBuf::from("a/b"));
+    /// assert!(rest.matches(Path::new("c.txt")));
+    ///
+    /// // All-literal: the final component stays in the match pattern.
+    /// let (dir, rest) = GlobPath::new("/a/b/c.txt").unwrap().split_static_dir();
+    /// assert_eq!(dir, PathBuf::from("a/b"));
+    /// assert!(rest.matches(Path::new("c.txt")));
+    ///
+    /// // No static prefix (leading wildcard / globstar): empty dir, full pattern.
+    /// let (dir, _rest) = GlobPath::new("**/*.rs").unwrap().split_static_dir();
+    /// assert_eq!(dir, PathBuf::new());
+    /// ```
+    pub fn split_static_dir(&self) -> (std::path::PathBuf, GlobPath) {
+        let leading_literals = self
+            .segments
+            .iter()
+            .take_while(|s| matches!(s, PathSegment::Literal(_)))
+            .count();
+        // Never consume the final segment — leave something to match.
+        let prefix_len = leading_literals.min(self.segments.len().saturating_sub(1));
+
+        let mut prefix = std::path::PathBuf::new();
+        for segment in &self.segments[..prefix_len] {
+            if let PathSegment::Literal(s) = segment {
+                prefix.push(s);
+            }
+        }
+
+        let remaining = GlobPath {
+            segments: self.segments[prefix_len..].to_vec(),
+            anchored: false,
+        };
+        (prefix, remaining)
+    }
+
     /// Check if the pattern only matches directories.
     pub fn is_dir_only(&self) -> bool {
         matches!(self.segments.last(), Some(PathSegment::Globstar))

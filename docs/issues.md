@@ -540,6 +540,34 @@ priority; decide whether multi-arg should accumulate per-path errors.
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
 
+- **`glob` with an absolute pattern matched nothing through a hidden dir — fixed 2026-06-11.**
+  Surfaced by `cargo test --all` (the `subprocess`-gated test module isn't
+  compiled by a plain `cargo test`, so it slipped past commit `3a30afe`, the
+  one that rewrote these tests to use absolute tempdir paths).
+  `kernel::tests::test_for_loop_glob_iterates` —
+  `for F in $(glob "/abs/dir/*.txt")` — iterated 0 times. **Actual root cause**
+  (my first localization in the now-removed P1 was wrong: `GlobPath::matches`
+  is purely segment-based and ignores `anchored`, so matching was never the
+  problem): for an anchored pattern the builtin walked from
+  `ctx.resolve_path("/")` with the full pattern (the `static_prefix`
+  optimization was explicitly punted in a code comment), and the walker
+  **skips hidden entries** (`entry_name.starts_with('.')`, `walker.rs:263`).
+  `tempfile::tempdir()` creates `/tmp/.tmpXXXX` — a *hidden* dir — so the walk
+  never descended into it. (Walking from `/` was also O(filesystem).) MemoryFs
+  only *appeared* to work because its non-hidden roots happened to be
+  traversable. **Fix:** new `GlobPath::split_static_dir()` peels the literal
+  leading components into the walk root, so glob walks from `/.work/data`
+  (or `/tmp/.tmpXXXX`) directly — the hidden ancestor is the root, not a
+  skipped entry — and matches the remainder (`*.txt`) beneath it; it always
+  leaves ≥1 segment so an all-literal `/a/b/c.txt` walks `/a/b` and matches
+  `c.txt`. Names are still reported relative to the conventional root
+  (`report_root`), so output shape is unchanged. Tests: a `split_static_dir`
+  doctest + two MemoryFs regression tests reproducing the bug class without a
+  real FS (`test_glob_anchored_through_hidden_dir` — absolute pattern through a
+  hidden `.work/`, plus a depth assertion that nested `sub/c.txt` is *not*
+  caught by `*.txt`; `test_glob_anchored_exact_literal_file`), and the original
+  `test_for_loop_glob_iterates` now passes.
+
 - **0.8.2 swipe: four agent-facing language fixes — done 2026-06-11.** One
   session, TDD throughout (failing test first), kaish+bash compat sides both
   green, clippy clean on default / `--no-default-features` / `subprocess`.
