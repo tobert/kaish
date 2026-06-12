@@ -12,8 +12,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-kaish-types = { path = "../kaish-types", version = "0.8.1", features = [] }
-kaish-tool-api = { path = "../kaish-tool-api", version = "0.8.1" }
+kaish-types = { path = "../kaish-types", version = "0.8.2", features = [] }
+kaish-tool-api = { path = "../kaish-tool-api", version = "0.8.2" }
 
 async-trait = { workspace = true }
 clap = { workspace = true }
