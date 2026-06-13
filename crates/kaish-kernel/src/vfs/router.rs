@@ -171,6 +171,20 @@ impl Filesystem for VfsRouter {
         fs.read(&relative).await
     }
 
+    #[tracing::instrument(level = "trace", skip(self), fields(path = %path.display()))]
+    async fn read_range(
+        &self,
+        path: &Path,
+        range: Option<kaish_vfs::ReadRange>,
+    ) -> io::Result<Vec<u8>> {
+        // Forward the range to the mount so range-aware backends (e.g. DevFs's
+        // /dev/zero) see the requested byte count. Falling through to the trait
+        // default would call our own `read` (whole file) and slice afterwards,
+        // which would hang or error on an infinite device.
+        let (fs, relative) = self.find_mount(path)?;
+        fs.read_range(&relative, range).await
+    }
+
     #[tracing::instrument(level = "trace", skip(self, data), fields(path = %path.display(), size = data.len()))]
     async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
         let (fs, relative) = self.find_mount(path)?;

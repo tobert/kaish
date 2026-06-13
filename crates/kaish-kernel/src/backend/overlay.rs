@@ -91,11 +91,7 @@ impl KernelBackend for VirtualOverlayBackend {
 
     async fn read(&self, path: &Path, range: Option<ReadRange>) -> BackendResult<Vec<u8>> {
         if Self::is_virtual_path(path) {
-            let content = self.vfs.read(path).await?;
-            match range {
-                Some(r) => Ok(LocalBackend::apply_read_range(&content, &r)),
-                None => Ok(content),
-            }
+            Ok(self.vfs.read_range(path, range).await?)
         } else {
             self.inner.read(path, range).await
         }

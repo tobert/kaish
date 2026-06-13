@@ -47,6 +47,25 @@ kaish-vfs builtin status/diff/commit/reset). Residuals:
   commit_into doesn't propagate mtimes. `VirtualOverlayBackend`
   (backend/overlay.rs) is unrelated prefix routing, not CoW.
 
+### Binary-data path — blocks `/dev/urandom` and raw byte streaming
+Surfaced 2026-06-13 while adding the synthetic `/dev` (DevFs: `/dev/null`,
+`/dev/zero` shipped; mounted in Sandboxed + NoLocal modes). `/dev/urandom`
+was deliberately **deferred**: kaish's pipes and `OutputData` are UTF-8 text
+end to end, so raw random bytes can't flow through intact — `head` does
+`String::from_utf8` (head.rs), and a lossy decode would corrupt the bytes
+irreversibly. The bounded whole-file read model also can't replicate the
+`cat /dev/urandom | tr -dc ... | head -c N` streaming idioms (no infinite
+streams; an unbounded device read is a loud error by design).
+
+The fix is a first-class binary path: a byte-typed `OutputData` variant (or
+a bytes-carrying channel) so builtins can produce/consume non-UTF-8 data, and
+a pipeline that preserves it. Once that lands, `/dev/urandom`/`/dev/random`
+(software via `getrandom`, already a dep) drop in by adding the device names
+to `DevFs` and honouring the byte count in `read_range`. A `random --bytes N
+--hex/--base64` builtin is the encoded, pipe-safe alternative worth landing
+regardless. Until then, agents needing entropy have no in-shell primitive.
+DevFs: `crates/kaish-vfs/src/dev.rs`; range plumbing: `Filesystem::read_range`.
+
 ### `rg` parallel walking
 The 2026-04-29 rg builtin uses `ignore::WalkBuilder::build()`, which
 yields a sequential iterator. `WalkParallel::run()` is a few lines'

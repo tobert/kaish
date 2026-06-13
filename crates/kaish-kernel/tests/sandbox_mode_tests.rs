@@ -287,3 +287,60 @@ async fn sandbox_checksum() {
     // SHA-256 of "hello"
     assert!(r.text_out().trim().starts_with("2cf24dba"));
 }
+
+// ── Synthetic /dev (DevFs) ──────────────────────────────────────────────────
+// In NoLocal mode the host's real /dev is unreachable, so /dev/null and
+// /dev/zero are software-backed. See crates/kaish-vfs/src/dev.rs.
+
+#[tokio::test]
+async fn sandbox_dev_null_is_a_sink() {
+    let k = sandbox_kernel().await;
+    // Writing succeeds and discards; reading back is empty — proving it is a
+    // real sink, not the in-memory file the old "/" MemoryFs would have made.
+    let r = k.execute("echo hello > /dev/null; cat /dev/null").await.expect("execute failed");
+    assert!(r.ok(), "stderr: {}", r.err);
+    assert_eq!(r.text_out().trim(), "");
+}
+
+#[tokio::test]
+async fn sandbox_dev_zero_counted_read() {
+    let k = sandbox_kernel().await;
+    // head -c N pushes the byte count down to DevFs, which yields exactly N
+    // zero bytes. Counting via wc -c keeps NULs out of the assertion.
+    let r = k.execute("head -c 8 /dev/zero | wc -c").await.expect("execute failed");
+    assert!(r.ok(), "stderr: {}", r.err);
+    assert_eq!(r.text_out().trim(), "8");
+}
+
+#[tokio::test]
+async fn sandbox_dev_zero_whole_read_is_loud_error() {
+    let k = sandbox_kernel().await;
+    // Reading the whole endless device is unbounded — it must fail loudly,
+    // not hang or silently truncate.
+    let r = k.execute("cat /dev/zero").await.expect("execute failed");
+    assert!(!r.ok(), "expected cat /dev/zero to fail; out={:?}", r.text_out());
+    assert!(
+        r.err.contains("head -c") || r.err.contains("endless"),
+        "error should name the fix: {}",
+        r.err
+    );
+}
+
+#[tokio::test]
+async fn sandbox_dev_lists_devices() {
+    let k = sandbox_kernel().await;
+    let r = k.execute("ls /dev").await.expect("execute failed");
+    assert!(r.ok(), "stderr: {}", r.err);
+    let out = r.text_out().into_owned();
+    let entries: Vec<&str> = out.trim().lines().collect();
+    assert!(entries.contains(&"null"), "expected null in ls /dev: {:?}", entries);
+    assert!(entries.contains(&"zero"), "expected zero in ls /dev: {:?}", entries);
+}
+
+#[tokio::test]
+async fn sandbox_dev_unknown_device_not_found() {
+    let k = sandbox_kernel().await;
+    // urandom is deliberately absent until kaish has a binary-data path.
+    let r = k.execute("cat /dev/urandom").await.expect("execute failed");
+    assert!(!r.ok(), "expected /dev/urandom to be absent");
+}

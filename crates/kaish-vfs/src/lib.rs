@@ -10,10 +10,12 @@
 //! down in `kaish-types` and are re-exported here for convenience.
 
 mod budget;
+mod dev;
 mod traits;
 
 pub use budget::ByteBudget;
-pub use traits::{DirEntry, DirEntryKind, Filesystem};
+pub use dev::DevFs;
+pub use traits::{DirEntry, DirEntryKind, Filesystem, ReadRange};
 
 // `LocalFs` pulls in `tokio/fs`; gated so the in-memory/wasm sandbox build
 // (which doesn't enable `localfs`) stays free of a real-filesystem dependency.

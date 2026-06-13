@@ -175,6 +175,43 @@ impl ReadRange {
             ..Default::default()
         }
     }
+
+    /// Apply this range to already-read file content.
+    ///
+    /// Byte ranges win over line ranges when both are set. A line range on
+    /// non-UTF-8 content returns the content untouched (there are no lines to
+    /// slice). This is the single source of truth for range slicing, shared by
+    /// the `Filesystem::read_range` default and the kernel backends.
+    pub fn apply(&self, content: &[u8]) -> Vec<u8> {
+        // Byte-based range
+        if self.offset.is_some() || self.limit.is_some() {
+            let offset = self.offset.unwrap_or(0) as usize;
+            let limit = self.limit.map(|l| l as usize).unwrap_or(content.len());
+            let end = offset.saturating_add(limit).min(content.len());
+            return content.get(offset..end).unwrap_or(&[]).to_vec();
+        }
+
+        // Line-based range
+        if self.start_line.is_some() || self.end_line.is_some() {
+            let content_str = match std::str::from_utf8(content) {
+                Ok(s) => s,
+                Err(_) => return content.to_vec(),
+            };
+            let lines: Vec<&str> = content_str.lines().collect();
+            let start = self.start_line.unwrap_or(1).saturating_sub(1);
+            let end = self.end_line.unwrap_or(lines.len()).min(lines.len());
+            let selected: Vec<&str> = lines.get(start..end).unwrap_or(&[]).to_vec();
+            let mut result = selected.join("\n");
+            // Preserve a trailing newline only when reading to the implicit end
+            // and the original content had one.
+            if self.end_line.is_none() && content_str.ends_with('\n') && !result.is_empty() {
+                result.push('\n');
+            }
+            return result.into_bytes();
+        }
+
+        content.to_vec()
+    }
 }
 
 /// Write mode for file operations.

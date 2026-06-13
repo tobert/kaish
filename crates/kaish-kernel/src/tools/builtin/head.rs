@@ -5,6 +5,7 @@ use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::ast::Value;
+use crate::backend::ReadRange;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -132,6 +133,30 @@ impl Tool for Head {
             }
         }
 
+        // Byte count (-c) is resolved up front so a single-file read can ask
+        // the backend for exactly that many bytes. That keeps `head -c N` from
+        // pulling whole files into memory and, crucially, lets it read endless
+        // devices like /dev/zero — a whole-file read of those is a hard error.
+        let bytes = args.get("bytes", usize::MAX).and_then(|v| match v {
+            Value::Int(i) => Some(*i as usize),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        });
+
+        // Single-file byte mode: request exactly N bytes via the read range.
+        if let (Some(byte_count), Some(path)) = (bytes, paths.first()) {
+            let resolved = ctx.resolve_path(path);
+            let range = Some(ReadRange::bytes(0, byte_count as u64));
+            return match ctx.backend.read(Path::new(&resolved), range).await {
+                // -c counts bytes and may split a UTF-8 boundary, so decode
+                // lossily rather than rejecting a valid partial read.
+                Ok(data) => ExecResult::with_output(OutputData::text(
+                    String::from_utf8_lossy(&data).into_owned(),
+                )),
+                Err(e) => ExecResult::failure(1, format!("head: {}: {}", path, e)),
+            };
+        }
+
         // Get input: from single file or stdin
         let input = match paths.first() {
             Some(path) => {
@@ -152,13 +177,7 @@ impl Tool for Head {
             None => ctx.read_stdin_to_string().await.unwrap_or_default(),
         };
 
-        // Check for byte mode (-c)
-        let bytes = args.get("bytes", usize::MAX).and_then(|v| match v {
-            Value::Int(i) => Some(*i as usize),
-            Value::String(s) => s.parse().ok(),
-            _ => None,
-        });
-
+        // Stdin byte mode (the single-file case returned above).
         if let Some(byte_count) = bytes {
             // Byte mode: output first N bytes (POSIX head -c counts bytes, not chars)
             let limit = byte_count.min(input.len());

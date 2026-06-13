@@ -62,7 +62,7 @@ use crate::tools::resolve_in_path;
 use crate::validator::{Severity, Validator};
 #[cfg(feature = "localfs")]
 use crate::vfs::LocalFs;
-use crate::vfs::{BuiltinFs, JobFs, MemoryFs, VfsRouter};
+use crate::vfs::{BuiltinFs, DevFs, JobFs, MemoryFs, VfsRouter};
 use kaish_vfs::ByteBudget;
 #[cfg(all(feature = "localfs", feature = "overlay"))]
 use kaish_vfs::OverlayFs;
@@ -99,6 +99,7 @@ pub enum VfsMountMode {
     /// - `/` → MemoryFs (catches paths outside sandbox)
     /// - `{root}` → LocalFs(root)  (e.g., `/home/user` → LocalFs)
     /// - `/tmp` → LocalFs("/tmp")
+    /// - `/dev` → DevFs (synthetic /dev/null, /dev/zero)
     /// - `/v` → MemoryFs (blob storage)
     #[cfg(feature = "localfs")]
     Sandboxed {
@@ -121,6 +122,7 @@ pub enum VfsMountMode {
     /// - `/` → MemoryFs
     /// - `/tmp` → MemoryFs
     /// - `/v` → MemoryFs
+    /// - `/dev` → DevFs (synthetic /dev/null, /dev/zero)
     NoLocal,
 }
 
@@ -852,6 +854,10 @@ impl Kernel {
                 vfs.mount("/", mem(&budget));
                 vfs.mount("/v", mem(&budget));
 
+                // Synthetic /dev: the host's real /dev isn't reachable here, so
+                // /dev/null and /dev/zero are software-backed (see DevFs).
+                vfs.mount("/dev", DevFs::new());
+
                 // Real /tmp for interop with other processes
                 vfs.mount("/tmp", LocalFs::new(PathBuf::from("/tmp")));
 
@@ -918,6 +924,8 @@ impl Kernel {
                 vfs.mount("/", mem(&budget));
                 vfs.mount("/tmp", mem(&budget));
                 vfs.mount("/v", mem(&budget));
+                // Synthetic /dev so /dev/null and /dev/zero work hermetically.
+                vfs.mount("/dev", DevFs::new());
             }
         }
 

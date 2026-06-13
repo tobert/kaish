@@ -38,6 +38,6 @@ pub use router::{MountInfo, VfsRouter};
 // `crate::vfs::{Filesystem, DirEntry, LocalFs, MemoryFs}` paths keep working.
 // `ByteBudget` rides along so a `with_backend` embedder can name the type it
 // hands to `MemoryFs::with_budget` without a direct kaish-vfs dependency.
-pub use kaish_vfs::{ByteBudget, DirEntry, DirEntryKind, Filesystem, MemoryFs};
+pub use kaish_vfs::{ByteBudget, DevFs, DirEntry, DirEntryKind, Filesystem, MemoryFs};
 #[cfg(feature = "localfs")]
 pub use kaish_vfs::LocalFs;

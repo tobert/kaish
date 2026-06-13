@@ -203,39 +203,6 @@ impl LocalBackend {
         Ok(())
     }
 
-    /// Apply range filter to file content.
-    ///
-    /// This is public for use by VirtualOverlayBackend.
-    pub fn apply_read_range(content: &[u8], range: &ReadRange) -> Vec<u8> {
-        // Handle byte-based range
-        if range.offset.is_some() || range.limit.is_some() {
-            let offset = range.offset.unwrap_or(0) as usize;
-            let limit = range.limit.map(|l| l as usize).unwrap_or(content.len());
-            let end = (offset + limit).min(content.len());
-            return content.get(offset..end).unwrap_or(&[]).to_vec();
-        }
-
-        // Handle line-based range
-        if range.start_line.is_some() || range.end_line.is_some() {
-            let content_str = match std::str::from_utf8(content) {
-                Ok(s) => s,
-                Err(_) => return content.to_vec(), // Return full content if not valid UTF-8
-            };
-            let lines: Vec<&str> = content_str.lines().collect();
-            let start = range.start_line.unwrap_or(1).saturating_sub(1);
-            let end = range.end_line.unwrap_or(lines.len()).min(lines.len());
-            let selected: Vec<&str> = lines.get(start..end).unwrap_or(&[]).to_vec();
-            let mut result = selected.join("\n");
-            // Preserve trailing newline only when reading to implicit end (no end_line specified)
-            // and the original content had a trailing newline
-            if range.end_line.is_none() && content_str.ends_with('\n') && !result.is_empty() {
-                result.push('\n');
-            }
-            return result.into_bytes();
-        }
-
-        content.to_vec()
-    }
 }
 
 #[async_trait]
@@ -245,11 +212,9 @@ impl KernelBackend for LocalBackend {
     // ═══════════════════════════════════════════════════════════════════════════
 
     async fn read(&self, path: &Path, range: Option<ReadRange>) -> BackendResult<Vec<u8>> {
-        let content = self.vfs.read(path).await?;
-        match range {
-            Some(r) => Ok(Self::apply_read_range(&content, &r)),
-            None => Ok(content),
-        }
+        // Range handling lives in the VFS layer (`Filesystem::read_range`) so
+        // range-aware backends like DevFs's /dev/zero see the byte count.
+        Ok(self.vfs.read_range(path, range).await?)
     }
 
     async fn write(&self, path: &Path, content: &[u8], mode: WriteMode) -> BackendResult<()> {

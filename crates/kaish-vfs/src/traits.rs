@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 // DirEntry and DirEntryKind live in kaish-types.
-pub use kaish_types::{DirEntry, DirEntryKind};
+pub use kaish_types::{DirEntry, DirEntryKind, ReadRange};
 
 /// Abstract filesystem interface.
 ///
@@ -17,6 +17,21 @@ pub use kaish_types::{DirEntry, DirEntryKind};
 pub trait Filesystem: Send + Sync {
     /// Read the entire contents of a file.
     async fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
+
+    /// Read a (possibly partial) slice of a file.
+    ///
+    /// The default reads the whole file and slices in memory, which is correct
+    /// for any finite backend. Backends that cannot answer a whole-file read —
+    /// notably synthetic infinite devices like `/dev/zero`, where reading
+    /// "everything" is unbounded — override this to honour the requested byte
+    /// count directly and to reject a `None` range loudly rather than hang.
+    async fn read_range(&self, path: &Path, range: Option<ReadRange>) -> io::Result<Vec<u8>> {
+        let content = self.read(path).await?;
+        Ok(match range {
+            Some(r) => r.apply(&content),
+            None => content,
+        })
+    }
 
     /// Write data to a file, creating it if it doesn't exist.
     ///
