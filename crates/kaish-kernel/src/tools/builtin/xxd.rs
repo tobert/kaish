@@ -101,29 +101,32 @@ impl Tool for Xxd {
             Err(e) => return ExecResult::failure(1, format!("xxd: {}", e)),
         };
 
-        let input = match paths.first() {
+        // Read raw bytes — a hex dump of binary must see the real bytes, never
+        // a lossy-decoded approximation.
+        let data: Vec<u8> = match paths.first() {
             Some(path) => {
                 let resolved = ctx.resolve_path(path);
                 match ctx.backend.read(Path::new(&resolved), None).await {
-                    Ok(data) => String::from_utf8_lossy(&data).into_owned(),
+                    Ok(d) => d,
                     Err(e) => return ExecResult::failure(1, format!("xxd: {}: {}", path, e)),
                 }
             }
-            None => ctx.read_stdin_to_string().await.unwrap_or_default(),
+            None => ctx.read_stdin_to_bytes().await.unwrap_or_default(),
         };
 
         if reverse {
-            return reverse_hex(&input, plain);
+            // Hex input is ASCII; a lossy view is lossless here. Output is bytes.
+            return reverse_hex(&String::from_utf8_lossy(&data), plain);
         }
 
-        // Forward: produce hex dump
-        let bytes = input.as_bytes();
+        // Forward: produce hex dump from the raw bytes.
+        let bytes = &data[..];
 
         // Apply seek
         let bytes = if seek < bytes.len() {
             &bytes[seek..]
         } else {
-            &[]
+            &[][..]
         };
 
         // Apply length limit
@@ -251,8 +254,8 @@ fn reverse_hex(input: &str, plain: bool) -> ExecResult {
         i += 2;
     }
 
-    let text = String::from_utf8_lossy(&bytes);
-    ExecResult::with_output(OutputData::text(text.into_owned()))
+    // Reversed bytes: text if valid UTF-8, otherwise a binary result.
+    ExecResult::success_text_or_bytes(bytes)
 }
 
 #[cfg(test)]
@@ -354,6 +357,37 @@ mod tests {
         let result = Xxd.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert_eq!(result.text_out().as_ref(), "616263"); // "abc" in hex
+    }
+
+    #[tokio::test]
+    async fn test_xxd_dumps_binary_file_exactly() {
+        use crate::vfs::Filesystem;
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(Path::new("blob.bin"), &[0xffu8, 0x00, 0x10]).await.unwrap();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/blob.bin".into()));
+        args.named.insert("plain".to_string(), Value::Bool(true));
+        let result = Xxd.execute(args, &mut ctx).await;
+        assert!(result.ok(), "stderr: {}", result.err);
+        // Exact hex of the real bytes — not a lossy approximation.
+        assert_eq!(result.text_out().as_ref(), "ff0010");
+    }
+
+    #[tokio::test]
+    async fn test_xxd_reverse_to_binary_yields_bytes() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("ff00".to_string());
+        let mut args = ToolArgs::new();
+        args.named.insert("reverse".to_string(), Value::Bool(true));
+        args.named.insert("plain".to_string(), Value::Bool(true));
+        let result = Xxd.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.is_bytes(), "reverse to binary must yield Bytes");
+        assert_eq!(result.out_bytes(), Some(&[0xffu8, 0x00][..]));
     }
 
     #[tokio::test]

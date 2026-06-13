@@ -115,10 +115,7 @@ impl Tool for Cat {
         if paths.len() == 1 && !number_lines {
             let resolved = ctx.resolve_path(&paths[0]);
             return match ctx.backend.read(Path::new(&resolved), None).await {
-                Ok(data) => match String::from_utf8(data) {
-                    Ok(text) => ExecResult::with_output(OutputData::text(text)),
-                    Err(e) => ExecResult::success_bytes(e.into_bytes()),
-                },
+                Ok(data) => ExecResult::success_text_or_bytes(data),
                 Err(e) => ExecResult::failure(1, format!("cat: {}: {}", paths[0], e)),
             };
         }

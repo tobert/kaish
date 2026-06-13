@@ -148,13 +148,20 @@ impl Tool for Head {
             let resolved = ctx.resolve_path(path);
             let range = Some(ReadRange::bytes(0, byte_count as u64));
             return match ctx.backend.read(Path::new(&resolved), range).await {
-                // -c counts bytes and may split a UTF-8 boundary, so decode
-                // lossily rather than rejecting a valid partial read.
-                Ok(data) => ExecResult::with_output(OutputData::text(
-                    String::from_utf8_lossy(&data).into_owned(),
-                )),
+                // -c counts bytes and may slice a multibyte boundary. Valid
+                // UTF-8 stays text; otherwise it's a Bytes result (hex dump /
+                // base64 envelope / raw through a pipe) rather than a lossy mangle.
+                Ok(data) => ExecResult::success_text_or_bytes(data),
                 Err(e) => ExecResult::failure(1, format!("head: {}: {}", path, e)),
             };
+        }
+
+        // Stdin byte mode: read raw bytes so piped binary survives intact (the
+        // single-file case returned above; here paths is empty).
+        if let Some(byte_count) = bytes {
+            let mut data = ctx.read_stdin_to_bytes().await.unwrap_or_default();
+            data.truncate(byte_count);
+            return ExecResult::success_text_or_bytes(data);
         }
 
         // Get input: from single file or stdin
@@ -176,14 +183,6 @@ impl Tool for Head {
             }
             None => ctx.read_stdin_to_string().await.unwrap_or_default(),
         };
-
-        // Stdin byte mode (the single-file case returned above).
-        if let Some(byte_count) = bytes {
-            // Byte mode: output first N bytes (POSIX head -c counts bytes, not chars)
-            let limit = byte_count.min(input.len());
-            let output = String::from_utf8_lossy(&input.as_bytes()[..limit]).into_owned();
-            return ExecResult::with_output(OutputData::text(output));
-        }
 
         // Line mode: output first N lines
         let lines = args

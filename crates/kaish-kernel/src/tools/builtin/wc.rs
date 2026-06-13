@@ -85,7 +85,7 @@ impl Tool for Wc {
 
         // If no files, read from stdin
         if paths.is_empty() {
-            let input = ctx.read_stdin_to_string().await.unwrap_or_default();
+            let input = ctx.read_stdin_to_bytes().await.unwrap_or_default();
             let (lc, wc, cc, bc) = count_content(&input);
             let cells = build_cells(lc, wc, cc, bc, lines_only, words_only, chars_only, bytes_only, show_all);
             let node = OutputNode::new("").with_cells(cells);
@@ -104,23 +104,19 @@ impl Tool for Wc {
         for path in &paths {
             let resolved = ctx.resolve_path(path);
             match ctx.backend.read(Path::new(&resolved), None).await {
-                Ok(data) => match String::from_utf8(data) {
-                    Ok(input) => {
-                        let (lc, wc, cc, bc) = count_content(&input);
+                Ok(data) => {
+                    // Counts come from raw bytes — `wc -c` is exact on binary,
+                    // and there is no UTF-8 gate to reject a binary file.
+                    let (lc, wc, cc, bc) = count_content(&data);
 
-                        total_lines += lc;
-                        total_words += wc;
-                        total_chars += cc;
-                        total_bytes += bc;
+                    total_lines += lc;
+                    total_words += wc;
+                    total_chars += cc;
+                    total_bytes += bc;
 
-                        let cells = build_cells(lc, wc, cc, bc, lines_only, words_only, chars_only, bytes_only, show_all);
-                        nodes.push(OutputNode::new(path.as_str()).with_cells(cells));
-                    }
-                    Err(_) => {
-                        error_messages.push(format!("wc: {}: invalid UTF-8", path));
-                        had_error = true;
-                    }
-                },
+                    let cells = build_cells(lc, wc, cc, bc, lines_only, words_only, chars_only, bytes_only, show_all);
+                    nodes.push(OutputNode::new(path.as_str()).with_cells(cells));
+                }
                 Err(e) => {
                     error_messages.push(format!("wc: {}: {}", path, e));
                     had_error = true;
@@ -152,11 +148,15 @@ impl Tool for Wc {
 }
 
 /// Count lines, words, chars, and bytes in content.
-fn count_content(input: &str) -> (usize, usize, usize, usize) {
-    let lines = input.lines().count();
-    let words = input.split_whitespace().count();
-    let chars = input.chars().count();
+fn count_content(input: &[u8]) -> (usize, usize, usize, usize) {
+    // Byte count is the raw length — exact for binary too. Lines/words/chars
+    // use a lossy text view: identical to before for valid UTF-8 (borrowed, no
+    // copy), best-effort for binary. This keeps `wc -c` honest on binary input.
     let bytes = input.len();
+    let text = String::from_utf8_lossy(input);
+    let lines = text.lines().count();
+    let words = text.split_whitespace().count();
+    let chars = text.chars().count();
     (lines, words, chars, bytes)
 }
 

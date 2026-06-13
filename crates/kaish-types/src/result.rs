@@ -169,6 +169,18 @@ impl ExecResult {
         r
     }
 
+    /// Create a successful result from bytes, applying the coercion rule at the
+    /// producer: valid UTF-8 becomes a text result, anything else a binary
+    /// `Bytes` result. This is the single place pass-through/decoder builtins
+    /// (`cat`, `head -c`, `base64 -d`, `xxd -r`, `tee`, …) decide text-vs-binary,
+    /// so text workflows stay text and only real binary flows as bytes.
+    pub fn success_text_or_bytes(bytes: Vec<u8>) -> Self {
+        match String::from_utf8(bytes) {
+            Ok(text) => Self::success(text),
+            Err(e) => Self::success_bytes(e.into_bytes()),
+        }
+    }
+
     /// Create a successful result with structured data.
     pub fn success_data(data: Value) -> Self {
         let out = value_to_json(&data).to_string();

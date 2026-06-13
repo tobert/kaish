@@ -1,7 +1,22 @@
 # Binary Data — Design Doc
 
-Status: **Phases 1 & 3 landed** (value + carrier + boundary; `dd` + `/dev/urandom`,
-north-star green). Phase 2 partial (cat producer); pipe-byte consumption remains.
+Status: **Phases 1–3 landed** (value + carrier + boundary; `dd` + `/dev/urandom`;
+binary plumbed through the movers). Binary now survives pipes & redirects:
+`dd if=/dev/urandom | base64 | base64 -d | wc -c` == 16, `… > file && cmp …`.
+Remaining: the text-processor lossy-decode sweep (issues.md) and `encode`/`decode` builtins.
+
+### Producer coercion is content-sniffing — an accepted tradeoff
+
+`success_text_or_bytes` (used by `cat`/`head -c`/`base64 -d`/`xxd -r`/`tee`) returns
+**Text when the bytes are valid UTF-8, Bytes otherwise**. This is content-driven
+typing: the *same* command yields a text result on text input and a `Bytes` result
+on binary, so a tool's `--json` shape varies with content (`"out":"hi"` vs
+`{"_type":"bytes",…}`). We accept this (flagged in DeepSeek review): the alternative
+— always-`Bytes` — forces every `cat`/`head` through the binary envelope and breaks
+the common text path. It differs from the banned JSON *value* sniffing: content is
+never mutated, only its text-vs-binary tag is detected losslessly. Known minor
+edges: `cat` multi-file / `-n` still rejects binary with `invalid UTF-8` (single-file
+is byte-aware); `wc -m` on binary over-counts via `U+FFFD` expansion (use `-c`).
 Author: design notes from a 2026-06-13 session (out of the synthetic-`/dev` work)
 Related: [LANGUAGE.md](LANGUAGE.md), [issues.md](issues.md), `docs/help/vfs.md`,
 `project_dev_fs.md` (auto-memory), `arch_no_json_sniffing.md` (auto-memory)

@@ -392,6 +392,70 @@ async fn sandbox_dd_entropy_differs() {
 }
 
 #[tokio::test]
+async fn sandbox_binary_survives_pipe_roundtrip() {
+    let k = sandbox_kernel().await;
+    // 16 random bytes → base64 (text) → base64 -d (binary through the pipe) →
+    // wc -c. If the pipe mangled the bytes, the count wouldn't be 16.
+    let r = k
+        .execute("dd if=/dev/urandom bs=16 count=1 | base64 | base64 -d | wc -c")
+        .await
+        .expect("execute failed");
+    assert!(r.ok(), "stderr: {}", r.err);
+    assert_eq!(r.text_out().trim(), "16");
+}
+
+#[tokio::test]
+async fn sandbox_head_c_on_piped_binary() {
+    let k = sandbox_kernel().await;
+    // `head -c 4` on a piped binary stream must keep exactly 4 raw bytes — not
+    // lossy-decode them (which would inflate the count via U+FFFD).
+    let r = k
+        .execute("dd if=/dev/urandom bs=16 count=1 | head -c 4 | wc -c")
+        .await
+        .expect("execute failed");
+    assert!(r.ok(), "stderr: {}", r.err);
+    assert_eq!(r.text_out().trim(), "4");
+}
+
+#[tokio::test]
+async fn sandbox_binary_merge_stdout_to_stderr_is_loud_error() {
+    let k = sandbox_kernel().await;
+    // Folding binary stdout into text stderr (1>&2) must fail loud, not mangle.
+    let r = k
+        .execute("dd if=/dev/urandom bs=16 count=1 1>&2")
+        .await
+        .expect("execute failed");
+    assert!(!r.ok(), "expected a loud error for binary 1>&2");
+}
+
+#[tokio::test]
+async fn sandbox_binary_pipe_to_xxd() {
+    let k = sandbox_kernel().await;
+    // 4 zero bytes through the pipe into xxd -p → eight hex zeros.
+    let r = k
+        .execute("dd if=/dev/zero bs=4 count=1 | xxd -p")
+        .await
+        .expect("execute failed");
+    assert!(r.ok(), "stderr: {}", r.err);
+    assert_eq!(r.text_out().trim(), "00000000");
+}
+
+#[tokio::test]
+async fn sandbox_binary_redirect_then_cmp() {
+    let k = sandbox_kernel().await;
+    // Redirect a binary result to a file (raw bytes, no lossy decode), then
+    // cmp it against itself — identical, exit 0.
+    let r = k
+        .execute("dd if=/dev/urandom bs=16 count=1 > /tmp/r.bin && cmp /tmp/r.bin /tmp/r.bin")
+        .await
+        .expect("execute failed");
+    assert!(r.ok(), "stderr: {}", r.err);
+    // And the file is exactly 16 bytes (binary-safe size check via dd).
+    let size = k.execute("dd if=/tmp/r.bin of=/dev/null").await.expect("execute failed");
+    assert!(size.err.contains("16 bytes copied"), "size: {}", size.err);
+}
+
+#[tokio::test]
 async fn sandbox_dd_zero_counted() {
     let k = sandbox_kernel().await;
     let r = k

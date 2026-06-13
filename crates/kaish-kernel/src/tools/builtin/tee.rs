@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::backend::WriteMode;
-use crate::interpreter::{ExecResult, OutputData};
+use crate::interpreter::ExecResult;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Tee tool: duplicate stdin to stdout and files.
@@ -61,8 +61,9 @@ impl Tool for Tee {
         }
 
         let append = args.has_flag("append") || args.has_flag("a");
-        let input = ctx.read_stdin_to_string().await.unwrap_or_default();
-        let input_bytes = input.as_bytes();
+        // Read raw bytes so binary passes through tee intact (to files and to
+        // the next stage).
+        let input = ctx.read_stdin_to_bytes().await.unwrap_or_default();
 
         // POSIX: tee writes stdin to every file AND to stdout. Continue past
         // per-file errors (matches POSIX `tee` semantics) and report the last
@@ -78,13 +79,13 @@ impl Tool for Tee {
                 match ctx.backend.read(path, None).await {
                     Ok(existing) => {
                         let mut combined = existing;
-                        combined.extend_from_slice(input_bytes);
+                        combined.extend_from_slice(&input);
                         combined
                     }
-                    Err(_) => input_bytes.to_vec(),
+                    Err(_) => input.clone(),
                 }
             } else {
-                input_bytes.to_vec()
+                input.clone()
             };
 
             if let Err(e) = ctx
@@ -96,7 +97,9 @@ impl Tool for Tee {
             }
         }
 
-        let mut result = ExecResult::with_output(OutputData::text(input));
+        // Pass the input through unchanged: text for text input, binary for
+        // binary input.
+        let mut result = ExecResult::success_text_or_bytes(input);
         if let Some(msg) = last_err {
             result.err = msg;
             result = result.with_code(1);

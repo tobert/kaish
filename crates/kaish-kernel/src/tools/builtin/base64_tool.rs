@@ -89,45 +89,35 @@ impl Tool for Base64Tool {
             Err(e) => return ExecResult::failure(1, format!("base64: {}", e)),
         };
 
-        let input = match paths.first() {
+        // Read input as raw bytes — base64 is fundamentally a binary codec, so
+        // never decode the input as UTF-8 (that would reject/mangle binary files).
+        let data: Vec<u8> = match paths.first() {
             Some(path) => {
                 let resolved = ctx.resolve_path(path);
                 match ctx.backend.read(Path::new(&resolved), None).await {
-                    Ok(data) => match String::from_utf8(data) {
-                        Ok(s) => s,
-                        Err(_) => {
-                            return ExecResult::failure(
-                                1,
-                                format!("base64: {}: invalid UTF-8", path),
-                            )
-                        }
-                    },
+                    Ok(d) => d,
                     Err(e) => return ExecResult::failure(1, format!("base64: {}: {}", path, e)),
                 }
             }
-            None => ctx.read_stdin_to_string().await.unwrap_or_default(),
+            None => ctx.read_stdin_to_bytes().await.unwrap_or_default(),
         };
 
         if decode {
-            // Strip whitespace before decoding (base64 input often has newlines)
-            let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
+            // Strip whitespace before decoding (base64 input often has newlines).
+            let cleaned: Vec<u8> = data.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
             match STANDARD.decode(&cleaned) {
-                Ok(bytes) => {
-                    let text = String::from_utf8_lossy(&bytes);
-                    ExecResult::with_output(OutputData::text(text.into_owned()))
-                }
+                // Decoded bytes: text if valid UTF-8, otherwise a binary result.
+                Ok(bytes) => ExecResult::success_text_or_bytes(bytes),
                 Err(e) => ExecResult::failure(1, format!("base64: invalid input: {}", e)),
             }
         } else {
-            // Encode: input bytes → base64 string
-            let encoded = STANDARD.encode(input.as_bytes());
-
+            // Encode: raw input bytes → base64 text.
+            let encoded = STANDARD.encode(&data);
             let output = if wrap_col > 0 {
                 wrap_lines(&encoded, wrap_col)
             } else {
                 encoded
             };
-
             ExecResult::with_output(OutputData::text(output))
         }
     }
@@ -284,6 +274,35 @@ mod tests {
         let result = Base64Tool.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert_eq!(result.text_out().as_ref(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_decode_to_binary_yields_bytes() {
+        // "/wA=" decodes to [0xFF, 0x00] — not valid UTF-8. The result must be
+        // a Bytes payload, not a lossy-mangled string.
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("/wA=".to_string());
+        let mut args = ToolArgs::new();
+        args.named.insert("decode".to_string(), Value::Bool(true));
+        let result = Base64Tool.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.is_bytes(), "binary decode must yield a Bytes result");
+        assert_eq!(result.out_bytes(), Some(&[0xffu8, 0x00][..]));
+    }
+
+    #[tokio::test]
+    async fn test_encode_binary_file() {
+        // Encoding must read the file as raw bytes, not reject non-UTF-8.
+        let mut ctx = make_ctx().await;
+        ctx.backend
+            .write(Path::new("/blob.bin"), &[0u8, 0xff, 0x10], crate::backend::WriteMode::Overwrite)
+            .await
+            .unwrap();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/blob.bin".into()));
+        let result = Base64Tool.execute(args, &mut ctx).await;
+        assert!(result.ok(), "stderr: {}", result.err);
+        assert_eq!(result.text_out().as_ref(), STANDARD.encode([0u8, 0xff, 0x10]));
     }
 
     #[tokio::test]

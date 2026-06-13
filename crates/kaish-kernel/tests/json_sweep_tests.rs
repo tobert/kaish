@@ -84,6 +84,8 @@ const CASES: &[Case] = &[
     Case { name: "cat", setup: &[], cmd: "cat tmp/nope.json --json", expect: Expect::FailsEnvelope(1) },
     Case { name: "cd", setup: &[], cmd: "cd src --json", expect: Expect::Empty },
     Case { name: "checksum", setup: &[], cmd: "checksum tmp/data.json --json", expect: Expect::Array },
+    // Identical files → exit 0, no output (clean success untouched by --json).
+    Case { name: "cmp", setup: &[], cmd: "cmp tmp/data.json tmp/data.json --json", expect: Expect::Empty },
     Case { name: "cp", setup: &[], cmd: "cp tmp/data.json tmp/copy.json --json", expect: Expect::Empty },
     // cut populates `.data` with a per-line array (the same structure that
     // drives `for v in $(cut …)`), so `--json` surfaces that array, not the

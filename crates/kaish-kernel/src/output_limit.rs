@@ -174,6 +174,51 @@ pub async fn spill_if_needed(
 ) -> Option<SpillResult> {
     let max = config.max_bytes?;
 
+    // Binary payloads are measured and spilled by RAW bytes. text_out() would
+    // lossy-decode a Bytes result — corrupting the spill file and mis-measuring
+    // the size (U+FFFD is 3 bytes per invalid byte). Handle them up front.
+    if let Some(total) = result.out_bytes().map(|b| b.len()) {
+        if total <= max {
+            return None;
+        }
+        #[cfg(feature = "localfs")]
+        if config.spill_mode == SpillMode::Disk {
+            let bytes = result.out_bytes().unwrap_or_default().to_vec();
+            return match write_spill_file(&bytes).await {
+                Ok((path, written)) => {
+                    result.set_out(format!(
+                        "[binary output: {total} bytes spilled to {} — read it with `cat {}`]",
+                        path.display(),
+                        path.display()
+                    ));
+                    result.did_spill = true;
+                    Some(SpillResult { path, total_bytes: written })
+                }
+                Err(e) => {
+                    tracing::error!("binary output spill failed: {}", e);
+                    *result = ExecResult::failure(
+                        1,
+                        format!(
+                            "binary output exceeded {max} byte limit ({total} bytes) and spill \
+                             to disk failed: {e}"
+                        ),
+                    );
+                    None
+                }
+            };
+        }
+        // Memory mode (or no localfs): bounded head+tail of the raw bytes. The
+        // result stays binary, just truncated.
+        let bytes = result.out_bytes().unwrap_or_default().to_vec();
+        let head_n = config.head_bytes.min(bytes.len());
+        let tail_n = config.tail_bytes.min(bytes.len().saturating_sub(head_n));
+        let mut truncated = bytes[..head_n].to_vec();
+        truncated.extend_from_slice(&bytes[bytes.len() - tail_n..]);
+        result.set_out_bytes(truncated);
+        result.did_spill = true;
+        return None;
+    }
+
     // Disk spill requires `localfs` AND the caller selecting it. Memory mode
     // (or a build without `localfs`) falls through to in-memory truncation.
     #[cfg(feature = "localfs")]

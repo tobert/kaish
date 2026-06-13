@@ -12,6 +12,7 @@ mod bg;
 mod cat;
 mod cd;
 mod checksum;
+mod cmp;
 mod cp;
 mod cut;
 mod date;
@@ -113,6 +114,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(cat::Cat);
     registry.register(cd::Cd);
     registry.register(checksum::Checksum);
+    registry.register(cmp::Cmp);
     registry.register(cp::Cp);
     registry.register(cut::Cut);
     registry.register(date::Date);

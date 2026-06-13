@@ -47,7 +47,16 @@ async fn apply_redirects(
                 }
             }
             RedirectKind::MergeStdout => {
-                // 1>&2 or >&2 - append stdout to stderr
+                // 1>&2 or >&2 - append stdout to stderr (a text stream).
+                // Binary stdout can't be folded into text stderr without
+                // corruption — fail loud instead.
+                if result.is_bytes() {
+                    return ExecResult::failure(
+                        1,
+                        "redirect: cannot merge binary stdout into stderr (1>&2) — \
+                         redirect it to a file or pipe through base64/xxd",
+                    );
+                }
                 result.materialize();
                 if !result.text_out().is_empty() {
                     let out = result.text_out().into_owned();
@@ -60,8 +69,13 @@ async fn apply_redirects(
                     Ok(p) => p,
                     Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
                 };
-                // Stream OutputData directly to file if available
-                if let Some(output) = result.take_output_for_stream() {
+                // A binary result writes its raw bytes (no lossy decode).
+                if let Some(bytes) = result.out_bytes() {
+                    if let Err(e) = redirect_write(ctx, &path, bytes).await {
+                        return ExecResult::failure(1, format!("redirect: {e}"));
+                    }
+                } else if let Some(output) = result.take_output_for_stream() {
+                    // Stream OutputData directly to file if available
                     let mut buf = Vec::new();
                     if let Err(e) = output.write_canonical(&mut buf, None) {
                         return ExecResult::failure(1, format!("redirect: {e}"));
@@ -69,10 +83,8 @@ async fn apply_redirects(
                     if let Err(e) = redirect_write(ctx, &path, &buf).await {
                         return ExecResult::failure(1, format!("redirect: {e}"));
                     }
-                } else {
-                    if let Err(e) = redirect_write(ctx, &path, result.text_out().as_bytes()).await {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
+                } else if let Err(e) = redirect_write(ctx, &path, result.text_out().as_bytes()).await {
+                    return ExecResult::failure(1, format!("redirect: {e}"));
                 }
                 result.clear_out();
                 result.set_output(None);
@@ -82,8 +94,13 @@ async fn apply_redirects(
                     Ok(p) => p,
                     Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
                 };
-                // Stream OutputData directly if available
-                if let Some(output) = result.take_output_for_stream() {
+                // A binary result appends its raw bytes (no lossy decode).
+                if let Some(bytes) = result.out_bytes() {
+                    if let Err(e) = redirect_append(ctx, &path, bytes).await {
+                        return ExecResult::failure(1, format!("redirect: {e}"));
+                    }
+                } else if let Some(output) = result.take_output_for_stream() {
+                    // Stream OutputData directly if available
                     let mut buf = Vec::new();
                     if let Err(e) = output.write_canonical(&mut buf, None) {
                         return ExecResult::failure(1, format!("redirect: {e}"));
@@ -91,10 +108,8 @@ async fn apply_redirects(
                     if let Err(e) = redirect_append(ctx, &path, &buf).await {
                         return ExecResult::failure(1, format!("redirect: {e}"));
                     }
-                } else {
-                    if let Err(e) = redirect_append(ctx, &path, result.text_out().as_bytes()).await {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
+                } else if let Err(e) = redirect_append(ctx, &path, result.text_out().as_bytes()).await {
+                    return ExecResult::failure(1, format!("redirect: {e}"));
                 }
                 result.clear_out();
                 result.set_output(None);
@@ -114,8 +129,14 @@ async fn apply_redirects(
                     Ok(p) => p,
                     Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
                 };
-                let combined = format!("{}{}", result.text_out(), result.err);
-                if let Err(e) = redirect_write(ctx, &path, combined.as_bytes()).await {
+                // Build the combined bytes: raw binary stdout (no lossy decode)
+                // or text stdout, followed by stderr.
+                let mut combined: Vec<u8> = match result.out_bytes() {
+                    Some(b) => b.to_vec(),
+                    None => result.text_out().into_owned().into_bytes(),
+                };
+                combined.extend_from_slice(result.err.as_bytes());
+                if let Err(e) = redirect_write(ctx, &path, &combined).await {
                     return ExecResult::failure(1, format!("redirect: {e}"));
                 }
                 result.clear_out();
@@ -506,10 +527,16 @@ impl PipelineRunner {
                 // Write output to pipe for next stage (if not last).
                 // Consumer is now unblocked and can drain concurrently.
                 if let Some(mut pipe_out) = stage_ctx.pipe_stdout.take() {
-                    let text = result.text_out();
-                    if !text.is_empty() {
+                    // A binary result flows through the pipe as raw bytes; text
+                    // results as their UTF-8 bytes. Either way the next stage
+                    // gets exactly what was produced — no lossy round-trip.
+                    let bytes: Vec<u8> = match result.out_bytes() {
+                        Some(b) => b.to_vec(),
+                        None => result.text_out().into_owned().into_bytes(),
+                    };
+                    if !bytes.is_empty() {
                         // Write result to pipe; ignore broken pipe (reader dropped early)
-                        let _ = pipe_out.write_all(text.as_bytes()).await;
+                        let _ = pipe_out.write_all(&bytes).await;
                         let _ = pipe_out.shutdown().await;
                     }
                     // Drop pipe_out signals EOF to next stage's reader

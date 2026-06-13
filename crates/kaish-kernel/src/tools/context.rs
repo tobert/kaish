@@ -464,6 +464,24 @@ impl ExecContext {
         }
     }
 
+    /// Read all of stdin as raw bytes, preserving binary intact.
+    ///
+    /// The byte-clean counterpart to [`Self::read_stdin_to_string`], for
+    /// binary-aware builtins (`base64`, `xxd`, `checksum`, `wc -c`, `cmp`, …).
+    /// Returns `None` when there is no stdin at all (no pipe and no buffer);
+    /// an empty pipe yields `Some(vec![])`. A buffered text stdin is returned
+    /// as its UTF-8 bytes. See `docs/binary-data.md`.
+    pub async fn read_stdin_to_bytes(&mut self) -> Option<Vec<u8>> {
+        if let Some(mut reader) = self.pipe_stdin.take() {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            reader.read_to_end(&mut buf).await.ok()?;
+            Some(buf)
+        } else {
+            self.stdin.take().map(String::into_bytes)
+        }
+    }
+
     /// Create a child context for a pipeline stage.
     ///
     /// Shares backend, tools, job_manager, aliases, cwd, and scope

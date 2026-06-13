@@ -47,6 +47,23 @@ kaish-vfs builtin status/diff/commit/reset). Residuals:
   commit_into doesn't propagate mtimes. `VirtualOverlayBackend`
   (backend/overlay.rs) is unrelated prefix routing, not CoW.
 
+### Silent lossy UTF-8 decodes in text builtins — corruption risk
+Surfaced 2026-06-13 plumbing binary. ~18 text-processing builtins read stdin via
+`read_stdin_to_string` (which does `from_utf8_lossy`) or `from_utf8_lossy` on file
+content: `grep`, `rg`, `sed`, `awk`, `sort`, `uniq`, `cut`, `tr`, `jq`, `tac`,
+`split`, `scatter`, `gather`, `read`, `diff`, `patch`, `env`, `tokens`. Handed
+binary, they **silently replace invalid bytes with `U+FFFD`** — corruption that
+looks like success (e.g. `grep x < blob`, `sed … < image.png`). The binary movers
+(`cat`/`dd`/`base64`/`xxd`/`checksum`/`wc`/`tee`/`head -c`/`cmp`) were made
+byte-aware 2026-06-13; these text tools were deliberately left for a dedicated
+sweep. **Fix:** per the coercion rule (`docs/binary-data.md`), a text tool handed
+non-UTF-8 input should **loud-error** ("input is binary, not text — pipe through
+`base64`/`xxd`"), not lossy-decode. Likely a strict `read_stdin_to_text()` that
+errors on invalid UTF-8 (vs the lossy `…_to_string`), plus auditing the
+`from_utf8_lossy` file-read sites. Net new helper exists: `read_stdin_to_bytes`.
+Worth doing — silent corruption violates "crashing is preferred over data
+corruption."
+
 ### Binary-data path — typed `Bytes`, `dd`, and `/dev/urandom`
 Surfaced 2026-06-13 while adding the synthetic `/dev` (DevFs: `/dev/null`,
 `/dev/zero` shipped). kaish is UTF-8 text end to end (`ExecResult.out: String`,

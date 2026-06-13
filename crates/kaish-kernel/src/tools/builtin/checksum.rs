@@ -111,9 +111,10 @@ impl Tool for Checksum {
         };
 
         if paths.is_empty() {
-            // Hash stdin
-            let input = ctx.read_stdin_to_string().await.unwrap_or_default();
-            let hash = compute_hash(input.as_bytes(), &algo);
+            // Hash stdin as raw bytes — a lossy decode would hash the wrong
+            // bytes for binary input (e.g. `dd if=/dev/urandom | checksum`).
+            let input = ctx.read_stdin_to_bytes().await.unwrap_or_default();
+            let hash = compute_hash(&input, &algo);
             let text = format!("{}  -", hash);
             // Table convention (OutputData::to_json): first header binds to
             // node.name, remaining headers to cells — so HASH is the name.
