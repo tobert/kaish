@@ -1459,6 +1459,7 @@ name = "kaish-vfs"
 version = "0.8.2"
 dependencies = [
  "async-trait",
+ "getrandom 0.3.4",
  "kaish-types",
  "tempfile",
  "tokio",

@@ -340,7 +340,64 @@ async fn sandbox_dev_lists_devices() {
 #[tokio::test]
 async fn sandbox_dev_unknown_device_not_found() {
     let k = sandbox_kernel().await;
-    // urandom is deliberately absent until kaish has a binary-data path.
-    let r = k.execute("cat /dev/urandom").await.expect("execute failed");
-    assert!(!r.ok(), "expected /dev/urandom to be absent");
+    // A genuinely unknown device is not found.
+    let r = k.execute("cat /dev/sda").await.expect("execute failed");
+    assert!(!r.ok(), "expected /dev/sda to be absent");
+}
+
+// ── dd + /dev/urandom — the binary-data north-star ──────────────────────────
+
+#[tokio::test]
+async fn sandbox_dd_urandom_to_dev_null() {
+    let k = sandbox_kernel().await;
+    // Counted read of an endless device terminates at exactly bs*count.
+    let r = k
+        .execute("dd if=/dev/urandom of=/dev/null bs=1024 count=10")
+        .await
+        .expect("execute failed");
+    assert!(r.ok(), "stderr: {}", r.err);
+    assert!(r.err.contains("10240 bytes copied"), "status: {}", r.err);
+}
+
+#[tokio::test]
+async fn sandbox_dd_roundtrip_file_size_exact() {
+    let k = sandbox_kernel().await;
+    // Random → file (binary survives the write); read it back with dd (no
+    // count) → exact byte count, no UTF-8 mangling anywhere.
+    let r = k
+        .execute(
+            "dd if=/dev/urandom of=/tmp/rand.bin bs=1024 count=10; \
+             dd if=/tmp/rand.bin of=/dev/null",
+        )
+        .await
+        .expect("execute failed");
+    assert!(r.ok(), "stderr: {}", r.err);
+    assert!(r.err.contains("10240 bytes copied"), "readback size: {}", r.err);
+}
+
+#[tokio::test]
+async fn sandbox_dd_entropy_differs() {
+    let k = sandbox_kernel().await;
+    // Two independent draws must differ — the source is actually random.
+    let r = k
+        .execute(
+            "dd if=/dev/urandom of=/tmp/a bs=32 count=1 && \
+             dd if=/dev/urandom of=/tmp/b bs=32 count=1 && \
+             [[ \"$(checksum --sha256 /tmp/a | cut -d ' ' -f 1)\" != \
+                \"$(checksum --sha256 /tmp/b | cut -d ' ' -f 1)\" ]]",
+        )
+        .await
+        .expect("execute failed");
+    assert!(r.ok(), "two random draws should differ; stderr: {}", r.err);
+}
+
+#[tokio::test]
+async fn sandbox_dd_zero_counted() {
+    let k = sandbox_kernel().await;
+    let r = k
+        .execute("dd if=/dev/zero of=/dev/null bs=512 count=2")
+        .await
+        .expect("execute failed");
+    assert!(r.ok(), "stderr: {}", r.err);
+    assert!(r.err.contains("1024 bytes copied"), "status: {}", r.err);
 }

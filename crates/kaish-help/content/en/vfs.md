@@ -17,6 +17,7 @@ In sandboxed mode, paths look native but access outside `$HOME` fails (except `/
 /tmp/          real /tmp (always accessible, tmpfs on Linux)
 /dev/null      sink: discards writes, reads empty
 /dev/zero      endless zero bytes (counted reads only — see below)
+/dev/urandom   endless cryptographic random bytes (also /dev/random)
 /v/blobs/      memory storage for blobs
 /v/bin/        read-only listing of builtins (can invoke: /v/bin/echo hello)
 /v/jobs/{id}/  live background job state (see below)
@@ -57,18 +58,20 @@ In sandboxed and memory-only modes the host's `/dev` is unreachable, so kaish
 provides software-backed devices:
 
 ```bash
-cmd > /dev/null            # discard output (writes are dropped)
-cat /dev/null              # empty
-head -c 32 /dev/zero       # exactly 32 zero bytes
+cmd > /dev/null                          # discard output (writes are dropped)
+cat /dev/null                            # empty
+head -c 32 /dev/zero                     # exactly 32 zero bytes
+dd if=/dev/urandom of=key.bin bs=16 count=1   # 16 random bytes to a file
+dd if=/dev/urandom bs=8 count=1          # 8 random bytes as a Bytes result
 ```
 
-`/dev/zero` is an *endless* stream, but kaish reads whole files into memory — it
-has no infinite streams. So you must read a fixed count: `head -c N /dev/zero`
-works, while `cat /dev/zero` is a loud error rather than a hang. In passthrough
-(REPL) mode `/dev` is the real host `/dev` instead.
-
-`/dev/urandom` is not yet provided — kaish's pipes are UTF-8 text and can't
-carry raw random bytes intact. Use a host command (passthrough mode) for now.
+`/dev/zero`, `/dev/urandom`, and `/dev/random` are *endless* streams, but kaish
+reads whole files into memory — it has no infinite streams. So you must read a
+fixed count: `head -c N` and `dd … count=N` work, while `cat /dev/urandom` is a
+loud error rather than a hang. Raw random bytes are binary, so move them with
+`dd` (binary-aware) rather than a text pipe; `dd` with no `of=` yields a binary
+result that renders as a hex dump (REPL) or a base64 envelope (`--json`). In
+passthrough (REPL) mode `/dev` is the real host `/dev` instead.
 
 ## Sandbox Limitations
 

@@ -15,6 +15,7 @@ mod checksum;
 mod cp;
 mod cut;
 mod date;
+mod dd;
 mod diff;
 mod dirname;
 mod patch;
@@ -115,6 +116,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(cp::Cp);
     registry.register(cut::Cut);
     registry.register(date::Date);
+    registry.register(dd::Dd);
     registry.register(diff::Diff);
     registry.register(dirname::Dirname);
     registry.register(echo::Echo);

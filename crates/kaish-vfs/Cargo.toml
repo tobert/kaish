@@ -14,6 +14,9 @@ categories.workspace = true
 [dependencies]
 kaish-types = { path = "../kaish-types", version = "0.8.2", features = [] }
 async-trait = { workspace = true }
+# DevFs's /dev/urandom pulls from the OS CSPRNG. Pure (no tokio); works on
+# Unix/macOS/WASI.
+getrandom = { workspace = true }
 
 # Only the backends need tokio; the trait itself is runtime-free. Gated so
 # the bare trait-only build never pulls it. `LocalFs` needs `tokio/fs`;

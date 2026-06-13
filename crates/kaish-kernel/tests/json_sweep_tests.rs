@@ -90,6 +90,10 @@ const CASES: &[Case] = &[
     // text-flattened scalar.
     Case { name: "cut", setup: &[], cmd: r#"printf 'a,b\n' | cut -d ',' -f 1 --json"#, expect: Expect::Array },
     Case { name: "date", setup: &[], cmd: "date --json", expect: Expect::String },
+    // dd with no of= emits a Bytes result; --json renders the base64 envelope
+    // (an object). Reads a finite fixture — never a real /dev device, which
+    // would hang here in passthrough mode.
+    Case { name: "dd", setup: &[], cmd: "dd if=tmp/data.json bs=4 count=1 --json", expect: Expect::Object },
     Case { name: "diff", setup: &[], cmd: "diff tmp/data.json tmp/data.json --json", expect: Expect::Empty },
     Case { name: "dirname", setup: &[], cmd: "dirname /a/b.txt --json", expect: Expect::String },
     Case { name: "echo", setup: &[], cmd: "echo hi --json", expect: Expect::String },

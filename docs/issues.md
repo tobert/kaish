@@ -67,17 +67,17 @@ Phases (each independently shippable):
 2. Transit: the pipe ring buffer is already `VecDeque<u8>` — the work is at
    *consumption*: a `read_stdin_to_bytes` sibling (26 `…_to_string` callers), a
    `bytes_out()` pipe-write path, and killing `from_utf8` in `head`/`cat`/`<`.
-3. Tools + devices: `encode`/`decode`, realign `base64`, add `random` and a
-   small `dd` (`if=`/`of=`/`bs=`/`count=`/`skip=`, reads via the shipped
-   `read_range`; needs its own total-bytes cap), and drop `/dev/urandom` +
-   `/dev/random` into `DevFs` (`getrandom` already a dep).
+3. **dd + urandom DONE** — `dd` builtin (`if=`/`of=`/`bs=`/`count=`/`skip=`,
+   256 MiB cap, reads via `read_range`) + `/dev/urandom`/`/dev/random` in `DevFs`
+   (`getrandom`). Parser `if=` blocker fixed. North-star green. Remaining:
+   `encode`/`decode`, realign `base64`, a `random` builtin.
 4. As demand appears: `gzip`/`gunzip`, blob helpers.
 
-**BLOCKER (gates Phase 3):** `dd if=…` misparses — `if` is `Token::If` and is
-absent from `keyword_as_bareword` (`parser.rs:1940-1954`), so `dd if=x` starts
-an if-statement. Fix in the parser (context-sensitive keyword-as-bareword in
-argument position) or fall back to `--if=`. Reviewed by DeepSeek 2026-06-13;
-details + the `OutputPayload`/`Blob`/coercion notes in binary-data.md.
+**North-star test PASSES** (`sandbox_mode_tests`): `dd if=/dev/urandom
+of=/dev/null bs=1024 count=10` copies exactly 10240 B; file round-trip readback
+is exact; two draws' checksums differ. Remaining Phase-2 transit work (byte-clean
+pipe consumption: `cat blob | xxd`) is still open. DeepSeek review notes
+(`OutputPayload`/`Blob`/coercion) in binary-data.md.
 
 **Definition of done (north-star test):** `dd if=/dev/urandom of=/dev/null
 bs=1024 count=10` exits 0 having copied exactly 10240 bytes; the same into a
@@ -179,6 +179,20 @@ arm-per-module.
 The six-field `ExecContext` ↔ kernel-state sync appears near every
 call site that fields a fork (`kernel.rs:~4100-4140` and duplicates;
 citation refreshed 2026-06-09). One helper, one truth.
+
+### Glued short-flag values rejected on clap-based coreutils (`cut -f1`, `head -c5`)
+Surfaced 2026-06-13 wiring the `dd`/binary tests: `cut -d ' ' -f1` errors with
+`unexpected argument '-1'` — the clap-derived arg layer doesn't accept a value
+glued onto a single-char short flag (`-f1`, `-c5`, `-n3`). The separated form
+(`-f 1`, `-c 5`) works. This breaks deep coreutils muscle memory — `cut -f1`,
+`head -c5`, `tail -c20`, `cut -d, -f1,3` are all idiomatic POSIX and what both
+agents *and* humans reflexively type. Likely a clap config gap (short flags need
+`num_args`/`require_equals` tuning, or a pre-parse split of `-fVALUE` →
+`-f VALUE` in the argv layer). Audit the clap-migrated builtins (`cut`, `head`,
+`tail`, `grep -A/-B/-C`, `base64 -w`, …) and either configure clap to accept
+glued values or normalize in `to_argv`/`build_args`. Pairs with the existing
+`gotcha_clap_parsed_vs_raw_args` lessons. Worth doing — the glued form is the
+common idiom, and silently erroring on it is a sharp edge.
 
 ### No unquoted token-pasting — adjacent bare lexemes are not one word
 kaish's lexer/parser does **no token pasting**: a run of adjacent *unquoted*

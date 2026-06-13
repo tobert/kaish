@@ -1,6 +1,7 @@
 # Binary Data — Design Doc
 
-Status: **Phase 1 landed** (value + carrier + boundary); Phases 2–4 proposed
+Status: **Phases 1 & 3 landed** (value + carrier + boundary; `dd` + `/dev/urandom`,
+north-star green). Phase 2 partial (cat producer); pipe-byte consumption remains.
 Author: design notes from a 2026-06-13 session (out of the synthetic-`/dev` work)
 Related: [LANGUAGE.md](LANGUAGE.md), [issues.md](issues.md), `docs/help/vfs.md`,
 `project_dev_fs.md` (auto-memory), `arch_no_json_sniffing.md` (auto-memory)
@@ -268,9 +269,13 @@ Supported operands (80% subset):
   bytes intact), `head`/`<`-redirect producers, and `OutputData::Bytes`. Note:
   there's no way to *write* a non-UTF-8 file through kaish until Phase 3's `dd`,
   so end-to-end binary tests through `kernel.execute` wait on a writer.
-- **Phase 3 — tools + devices.** `encode`/`decode`, realign `base64`, add the
-  `random` builtin and `dd`, and drop **`/dev/urandom` + `/dev/random`** into
-  `DevFs` (byte-count plumbing already exists; `getrandom` is already a dep).
+- **Phase 3 — tools + devices. ✅ dd + urandom DONE.** `dd` builtin
+  (`if=`/`of=`/`bs=`/`count=`/`skip=`, k/M/G suffixes, 256 MiB transfer cap, status
+  to stderr; reads via `read_range`, writes via the backend, or emits a `Bytes`
+  result with no `of=`). `/dev/urandom` + `/dev/random` added to `DevFs` (OS
+  CSPRNG via `getrandom`). The `if=` parser blocker is fixed (keyword tokens as
+  `key=` keys). North-star test green in `sandbox_mode_tests`. Still to do:
+  `encode`/`decode` builtins, realign `base64`, a `random` builtin.
 - **Phase 4 — as demand appears.** `gzip`/`gunzip`, image/blob helpers, etc.
 
 ## North-star acceptance test
