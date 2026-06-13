@@ -62,6 +62,40 @@ fn leading_dot_is_still_source(#[case] input: &str, #[case] expected_file: &str)
     );
 }
 
+/// Keyword tokens are accepted as the *key* of a `key=value` argv assignment,
+/// so `dd if=…` parses (`if` is `Token::If`). The classic `dd` idiom and the
+/// other operands must come through as one command.
+#[rstest]
+#[case("dd if=/dev/urandom of=/dev/null bs=1024 count=10")]
+#[case("dd if=/dev/zero of=/tmp/z.bin bs=512 count=2")]
+#[case("tool in=a do=b for=c")]
+fn keyword_key_argv_assignment_parses(#[case] input: &str) {
+    let program = parse(input).expect("should parse");
+    assert_eq!(
+        program.statements.len(),
+        1,
+        "`{input}` must be a single command: {}",
+        format_program(&program),
+    );
+}
+
+/// The `if=` key fix must NOT shadow a real `if` conditional — a leading `if`
+/// with a space still starts an if-statement.
+#[test]
+fn leading_if_conditional_still_parses() {
+    let program = parse("if true; then echo hi; fi").expect("should parse");
+    assert_eq!(program.statements.len(), 1);
+    let sexpr = format_program(&program);
+    assert!(sexpr.contains("(if"), "should be an if-statement: {sexpr}");
+}
+
+/// A spaced `if = x` is still the "no spaces around =" error — only the
+/// span-adjacent `if=x` is the assignment form.
+#[test]
+fn spaced_keyword_assignment_still_errors() {
+    expect_parse_error("dd if = x");
+}
+
 // =============================================================================
 // ASSIGNMENTS
 // =============================================================================

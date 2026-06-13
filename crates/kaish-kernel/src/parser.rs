@@ -1557,6 +1557,43 @@ where
         })
 }
 
+/// A statement keyword used as a plain word — its source spelling.
+///
+/// Lets keywords serve as the *key* of a `key=value` argv assignment, so
+/// `dd if=/dev/urandom` works (`if` is `Token::If`, not an `Ident`). Safe
+/// because: statement-level `if`/`for`/… are decided before arg parsing (their
+/// productions precede `pipeline_parser`), `command_name` never accepts these
+/// tokens, and the `key=value` rule requires the key span-adjacent to `=` — a
+/// real `if <cond>` has a space and never matches. See docs/binary-data.md.
+fn keyword_word<'tokens, I>(
+) -> impl Parser<'tokens, I, String, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    select! {
+        Token::Set => "set",
+        Token::Local => "local",
+        Token::If => "if",
+        Token::Then => "then",
+        Token::Else => "else",
+        Token::Elif => "elif",
+        Token::Fi => "fi",
+        Token::For => "for",
+        Token::While => "while",
+        Token::In => "in",
+        Token::Do => "do",
+        Token::Done => "done",
+        Token::Case => "case",
+        Token::Esac => "esac",
+        Token::Function => "function",
+        Token::Break => "break",
+        Token::Continue => "continue",
+        Token::Return => "return",
+        Token::Exit => "exit",
+    }
+    .map(|s| s.to_string())
+}
+
 /// Argument parser for arguments before `--` (normal flag handling).
 fn arg_before_double_dash_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Arg, extra::Err<Rich<'tokens, Token, Span>>> + Clone
@@ -1586,9 +1623,10 @@ where
     // only for shell-assignment-accepting builtins (export, alias). For every
     // other command it materialises as a `"name=value"` positional, matching
     // bash semantics (`cat foo=bar` opens a file named `foo=bar`).
-    let named = select! {
-        Token::Ident(s) => s,
-    }
+    let named = choice((
+        select! { Token::Ident(s) => s },
+        keyword_word(),
+    ))
     .map_with(|s, e| -> (String, Span) { (s, e.span()) })
     .then(just(Token::Eq).map_with(|_, e| -> Span { e.span() }))
     .then(primary_expr_parser().map_with(|expr, e| -> (Expr, Span) { (expr, e.span()) }))
@@ -2060,7 +2098,8 @@ where
     };
 
     // Shell assignment in argv position: name=value (see arg_before_double_dash_parser).
-    let named = ident_parser()
+    // Keyword keys (`if=`, `in=`, …) are accepted so `$(dd if=x)` parses.
+    let named = choice((ident_parser(), keyword_word()))
         .then_ignore(just(Token::Eq))
         .then(expr.clone())
         .map(|(key, value)| Arg::WordAssign { key, value });
