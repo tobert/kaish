@@ -107,6 +107,22 @@ impl Tool for Cat {
             return ExecResult::failure(1, "cat: missing path argument");
         }
 
+        // Binary-capable fast path: a single file with no line numbering. Valid
+        // UTF-8 is text as before; anything else becomes a Bytes result (a hex
+        // dump in the REPL, a base64 envelope under --json) instead of the old
+        // "invalid UTF-8" error. Multi-file / -n stay text-only below — you
+        // can't line-number or text-concat binary. See docs/binary-data.md.
+        if paths.len() == 1 && !number_lines {
+            let resolved = ctx.resolve_path(&paths[0]);
+            return match ctx.backend.read(Path::new(&resolved), None).await {
+                Ok(data) => match String::from_utf8(data) {
+                    Ok(text) => ExecResult::with_output(OutputData::text(text)),
+                    Err(e) => ExecResult::success_bytes(e.into_bytes()),
+                },
+                Err(e) => ExecResult::failure(1, format!("cat: {}: {}", paths[0], e)),
+            };
+        }
+
         let mut all_content = String::new();
         let mut line_num = 1;
 
@@ -154,6 +170,8 @@ mod tests {
         mem.write(Path::new("dir/nested.txt"), b"nested content").await.unwrap();
         mem.write(Path::new("lines.txt"), b"line1\nline2\nline3").await.unwrap();
         mem.write(Path::new("other.txt"), b"other content").await.unwrap();
+        // Non-UTF-8 bytes (0xFF 0xFE … is invalid UTF-8).
+        mem.write(Path::new("blob.bin"), &[0u8, 0xff, 0xfe, 0x41, 0x80]).await.unwrap();
         vfs.mount("/", mem);
         ExecContext::new(Arc::new(vfs))
     }
@@ -178,6 +196,34 @@ mod tests {
         let result = Cat.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert_eq!(&*result.text_out(), "nested content");
+    }
+
+    #[tokio::test]
+    async fn test_cat_binary_file_yields_bytes() {
+        // A single non-UTF-8 file becomes a Bytes result, not an error.
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/blob.bin".into()));
+
+        let result = Cat.execute(args, &mut ctx).await;
+        assert!(result.ok(), "stderr: {}", result.err);
+        assert!(result.is_bytes(), "binary file should produce a Bytes result");
+        assert_eq!(result.out_bytes(), Some(&[0u8, 0xff, 0xfe, 0x41, 0x80][..]));
+    }
+
+    #[tokio::test]
+    async fn test_cat_binary_file_json_envelope() {
+        // Under --json, a binary result serializes as the base64 envelope.
+        use crate::interpreter::{apply_output_format, OutputFormat};
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/blob.bin".into()));
+
+        let result = Cat.execute(args, &mut ctx).await;
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json: serde_json::Value = serde_json::from_str(&formatted.text_out()).unwrap();
+        assert_eq!(json["_type"], "bytes");
+        assert_eq!(json["len"], 5);
     }
 
     #[tokio::test]

@@ -520,6 +520,21 @@ pub enum OutputFormat {
 /// and `grep` (exit 1 = no matches) use non-zero exits for semantic meaning,
 /// not errors. The `--json` contract must hold for all exit codes.
 pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> ExecResult {
+    // Binary results serialize as the self-describing base64 envelope, never a
+    // lossy-decoded JSON string. See docs/binary-data.md.
+    if result.is_bytes() {
+        let envelope = crate::bytes::bytes_to_envelope(result.out_bytes().unwrap_or(&[]));
+        match format {
+            OutputFormat::Json => {
+                result.set_out(
+                    serde_json::to_string(&envelope).unwrap_or_else(|_| "null".to_string()),
+                );
+                result.data = Some(crate::result::json_to_value(envelope));
+                result.set_output(None);
+            }
+        }
+        return result;
+    }
     if !result.has_output() && result.text_out().is_empty() {
         // No stdout to format. A failure that carries a diagnostic message must
         // still honor --json — otherwise the message leaks out as plain text

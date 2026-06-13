@@ -260,8 +260,14 @@ Supported operands (80% subset):
   to Phase 2, where the pipe/consumption rework makes its text-shaped methods
   meaningful — until then a binary result is produced via `ExecResult::success_bytes`.
   No builtin produces bytes yet, so nothing changes for users.
-- **Phase 2 — transit.** Byte-clean pipe ends; kill the file-read chokepoints so
-  `head`/`cat`/`<` carry bytes and only decode on demand.
+- **Phase 2 — transit. (in progress)** First producer landed: `cat` of a single
+  non-UTF-8 file yields a `Bytes` result (terminal hex dump + `--json` base64
+  envelope, via `apply_output_format`'s bytes branch) instead of erroring —
+  multi-file/`-n` stay text. Remaining: byte-clean pipe *consumption*
+  (`read_stdin_to_bytes`, a `bytes_out()` write path so `cat blob | xxd` carries
+  bytes intact), `head`/`<`-redirect producers, and `OutputData::Bytes`. Note:
+  there's no way to *write* a non-UTF-8 file through kaish until Phase 3's `dd`,
+  so end-to-end binary tests through `kernel.execute` wait on a writer.
 - **Phase 3 — tools + devices.** `encode`/`decode`, realign `base64`, add the
   `random` builtin and `dd`, and drop **`/dev/urandom` + `/dev/random`** into
   `DevFs` (byte-count plumbing already exists; `getrandom` is already a dep).
