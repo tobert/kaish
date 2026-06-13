@@ -8,6 +8,72 @@ use std::collections::BTreeMap;
 use crate::output::OutputData;
 use crate::value::Value;
 
+/// A command's stdout payload: text, or raw bytes.
+///
+/// `Text` xor `Bytes` — the enum makes the invalid both-set state
+/// unrepresentable (an earlier draft used two sibling fields; see
+/// `docs/binary-data.md`). Serializes wire-compatibly: `Text` is a bare JSON
+/// string (unchanged from when `out` was a `String`), `Bytes` is the base64
+/// envelope from [`crate::bytes`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum OutputPayload {
+    /// UTF-8 text — the common case, canonical for pipes.
+    Text(String),
+    /// Raw bytes — binary output (set by binary-aware builtins). Until the
+    /// Phase-2 pipe/consumption rework, no builtin produces this in practice.
+    Bytes(Vec<u8>),
+}
+
+impl Default for OutputPayload {
+    fn default() -> Self {
+        OutputPayload::Text(String::new())
+    }
+}
+
+impl serde::Serialize for OutputPayload {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            // Bare string keeps the historical `"out":"…"` wire shape.
+            OutputPayload::Text(t) => serializer.serialize_str(t),
+            OutputPayload::Bytes(b) => crate::bytes::bytes_to_envelope(b).serialize(serializer),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for OutputPayload {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(deserializer)?;
+        match v {
+            serde_json::Value::String(s) => Ok(OutputPayload::Text(s)),
+            other => match crate::bytes::envelope_to_bytes(&other) {
+                Some(b) => Ok(OutputPayload::Bytes(b)),
+                None => Err(serde::de::Error::custom(
+                    "ExecResult.out: expected a string or a base64 bytes envelope",
+                )),
+            },
+        }
+    }
+}
+
+/// Returned when a binary result is asked to behave as text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryNotText {
+    /// Number of binary bytes that could not be coerced.
+    pub len: usize,
+}
+
+impl std::fmt::Display for BinaryNotText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "output is binary ({} bytes), not text — pipe through base64/xxd or redirect to a file",
+            self.len
+        )
+    }
+}
+
+impl std::error::Error for BinaryNotText {}
+
 /// The result of executing a command or pipeline.
 ///
 /// `$?` in script syntax is the POSIX exit code (an integer). To read the
@@ -27,8 +93,8 @@ use crate::value::Value;
 pub struct ExecResult {
     /// Exit code. 0 means success.
     pub code: i64,
-    /// Raw standard output as a string (canonical for pipes).
-    out: String,
+    /// Standard output payload — text (canonical for pipes) or raw bytes.
+    out: OutputPayload,
     /// Raw standard error as a string.
     pub err: String,
     /// Structured data — only populated when a builtin/tool sets it explicitly.
@@ -62,7 +128,7 @@ impl ExecResult {
     pub fn success(out: impl Into<String>) -> Self {
         Self {
             code: 0,
-            out: out.into(),
+            out: OutputPayload::Text(out.into()),
             err: String::new(),
             data: None,
             output: None,
@@ -84,7 +150,7 @@ impl ExecResult {
             Ok(text) => Self::success(text),
             Err(output) => Self {
                 code: 0,
-                out: String::new(),
+                out: OutputPayload::Text(String::new()),
                 err: String::new(),
                 data: None,
                 output: Some(output),
@@ -96,12 +162,19 @@ impl ExecResult {
         }
     }
 
+    /// Create a successful result whose stdout is raw bytes (binary payload).
+    pub fn success_bytes(bytes: Vec<u8>) -> Self {
+        let mut r = Self::success("");
+        r.out = OutputPayload::Bytes(bytes);
+        r
+    }
+
     /// Create a successful result with structured data.
     pub fn success_data(data: Value) -> Self {
         let out = value_to_json(&data).to_string();
         Self {
             code: 0,
-            out,
+            out: OutputPayload::Text(out),
             err: String::new(),
             data: Some(data),
             output: None,
@@ -123,7 +196,7 @@ impl ExecResult {
     pub fn success_with_data(out: impl Into<String>, data: Value) -> Self {
         Self {
             code: 0,
-            out: out.into(),
+            out: OutputPayload::Text(out.into()),
             err: String::new(),
             data: Some(data),
             output: None,
@@ -138,7 +211,7 @@ impl ExecResult {
     pub fn failure(code: i64, err: impl Into<String>) -> Self {
         Self {
             code,
-            out: String::new(),
+            out: OutputPayload::Text(String::new()),
             err: err.into(),
             data: None,
             output: None,
@@ -157,7 +230,7 @@ impl ExecResult {
     pub fn from_output(code: i64, stdout: impl Into<String>, stderr: impl Into<String>) -> Self {
         Self {
             code,
-            out: stdout.into(),
+            out: OutputPayload::Text(stdout.into()),
             err: stderr.into(),
             data: None,
             output: None,
@@ -175,7 +248,7 @@ impl ExecResult {
     pub fn with_output_and_text(output: OutputData, text: impl Into<String>) -> Self {
         Self {
             code: 0,
-            out: text.into(),
+            out: OutputPayload::Text(text.into()),
             err: String::new(),
             data: None,
             output: Some(output),
@@ -195,7 +268,7 @@ impl ExecResult {
     ) -> Self {
         Self {
             code,
-            out,
+            out: OutputPayload::Text(out),
             err,
             data,
             output: None,
@@ -216,17 +289,54 @@ impl ExecResult {
 
     /// Get text output, materializing from OutputData on demand.
     ///
-    /// Returns `self.out` if non-empty, otherwise falls back to
+    /// Returns the text payload if non-empty, otherwise falls back to
     /// `OutputData::to_canonical_string()`. This is the canonical way to
     /// get text for pipes, command substitution, and file redirects.
+    ///
+    /// **Binary payloads** decode lossily here (`U+FFFD` for invalid UTF-8). No
+    /// builtin produces a `Bytes` payload yet (Phase 1), so this lossy path is
+    /// unreachable in practice; the loud-error guard for binary lives in
+    /// [`Self::try_text_out`], which the Phase-2 text sinks adopt. See
+    /// `docs/binary-data.md`.
     pub fn text_out(&self) -> Cow<'_, str> {
-        if !self.out.is_empty() {
-            Cow::Borrowed(&self.out)
-        } else if let Some(ref output) = self.output {
-            Cow::Owned(output.to_canonical_string())
-        } else {
-            Cow::Borrowed("")
+        match &self.out {
+            OutputPayload::Text(s) if !s.is_empty() => Cow::Borrowed(s),
+            OutputPayload::Bytes(b) => match std::str::from_utf8(b) {
+                Ok(s) => Cow::Borrowed(s),
+                Err(_) => Cow::Owned(String::from_utf8_lossy(b).into_owned()),
+            },
+            // Empty text → fall back to structured output's canonical string.
+            _ => match self.output {
+                Some(ref output) => Cow::Owned(output.to_canonical_string()),
+                None => Cow::Borrowed(""),
+            },
         }
+    }
+
+    /// Get text output, or a [`BinaryNotText`] error if the payload is binary
+    /// and not valid UTF-8. This is the boundary guard for text sinks (`echo`,
+    /// interpolation, `$()` capture) — adopted as those paths grow byte
+    /// awareness (Phase 2). Valid-UTF-8 bytes coerce; everything else is loud.
+    pub fn try_text_out(&self) -> Result<Cow<'_, str>, BinaryNotText> {
+        match &self.out {
+            OutputPayload::Bytes(b) => std::str::from_utf8(b)
+                .map(Cow::Borrowed)
+                .map_err(|_| BinaryNotText { len: b.len() }),
+            _ => Ok(self.text_out()),
+        }
+    }
+
+    /// Raw bytes if this result carries a binary payload, else `None`.
+    pub fn out_bytes(&self) -> Option<&[u8]> {
+        match &self.out {
+            OutputPayload::Bytes(b) => Some(b),
+            OutputPayload::Text(_) => None,
+        }
+    }
+
+    /// True if the stdout payload is raw bytes rather than text.
+    pub fn is_bytes(&self) -> bool {
+        matches!(self.out, OutputPayload::Bytes(_))
     }
 
     /// Get a reference to structured output data.
@@ -241,19 +351,27 @@ impl ExecResult {
 
     // ── Mutation accessors ──
 
-    /// Replace `.out` with a new string.
+    /// Replace `.out` with text.
     pub fn set_out(&mut self, s: String) {
-        self.out = s;
+        self.out = OutputPayload::Text(s);
     }
 
-    /// Append to `.out`.
+    /// Replace `.out` with raw bytes (binary payload).
+    pub fn set_out_bytes(&mut self, b: Vec<u8>) {
+        self.out = OutputPayload::Bytes(b);
+    }
+
+    /// Append text to `.out`. A binary payload is appended to as raw UTF-8 bytes.
     pub fn push_out(&mut self, s: &str) {
-        self.out.push_str(s);
+        match &mut self.out {
+            OutputPayload::Text(t) => t.push_str(s),
+            OutputPayload::Bytes(b) => b.extend_from_slice(s.as_bytes()),
+        }
     }
 
-    /// Clear `.out`.
+    /// Clear `.out` back to empty text.
     pub fn clear_out(&mut self) {
-        self.out.clear();
+        self.out = OutputPayload::Text(String::new());
     }
 
     /// Replace `.output`.
@@ -269,9 +387,9 @@ impl ExecResult {
     /// Materialize: if `.out` is empty and `.output` is present,
     /// populate `.out` from canonical string and clear `.output`.
     pub fn materialize(&mut self) {
-        if self.out.is_empty() {
+        if matches!(&self.out, OutputPayload::Text(s) if s.is_empty()) {
             if let Some(ref output) = self.output {
-                self.out = output.to_canonical_string();
+                self.out = OutputPayload::Text(output.to_canonical_string());
             }
         }
         self.output = None;
@@ -280,7 +398,7 @@ impl ExecResult {
     /// Take `.output` only if `.out` is empty (no custom text),
     /// so caller can stream directly without materializing.
     pub fn take_output_for_stream(&mut self) -> Option<OutputData> {
-        if self.out.is_empty() {
+        if matches!(&self.out, OutputPayload::Text(s) if s.is_empty()) {
             self.output.take()
         } else {
             None
@@ -318,8 +436,13 @@ pub fn json_to_value(json: serde_json::Value) -> Value {
             }
         }
         serde_json::Value::String(s) => Value::String(s),
-        // Arrays and objects are preserved as Json values
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => Value::Json(json),
+        // A base64 byte envelope round-trips back to inline Bytes; any other
+        // object/array stays structured Json.
+        serde_json::Value::Object(_) => match crate::bytes::envelope_to_bytes(&json) {
+            Some(bytes) => Value::Bytes(bytes),
+            None => Value::Json(json),
+        },
+        serde_json::Value::Array(_) => Value::Json(json),
     }
 }
 
@@ -339,18 +462,7 @@ pub fn value_to_json(value: &Value) -> serde_json::Value {
         }
         Value::String(s) => serde_json::Value::String(s.clone()),
         Value::Json(json) => json.clone(),
-        Value::Blob(blob) => {
-            let mut map = serde_json::Map::new();
-            map.insert("_type".to_string(), serde_json::Value::String("blob".to_string()));
-            map.insert("id".to_string(), serde_json::Value::String(blob.id.clone()));
-            map.insert("size".to_string(), serde_json::Value::Number(blob.size.into()));
-            map.insert("contentType".to_string(), serde_json::Value::String(blob.content_type.clone()));
-            if let Some(hash) = &blob.hash {
-                let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
-                map.insert("hash".to_string(), serde_json::Value::String(hash_hex));
-            }
-            serde_json::Value::Object(map)
-        }
+        Value::Bytes(data) => crate::bytes::bytes_to_envelope(data),
     }
 }
 
@@ -363,7 +475,7 @@ mod tests {
         let result = ExecResult::success("hello world");
         assert!(result.ok());
         assert_eq!(result.code, 0);
-        assert_eq!(result.out, "hello world");
+        assert_eq!(&*result.text_out(),"hello world");
         assert!(result.err.is_empty());
     }
 
@@ -399,14 +511,14 @@ mod tests {
         // structured data must call success_with_data() / success_data().
         let result = ExecResult::success(r#"{"count": 42, "items": ["a", "b"]}"#);
         assert!(result.data.is_none());
-        assert_eq!(result.out, r#"{"count": 42, "items": ["a", "b"]}"#);
+        assert_eq!(&*result.text_out(),r#"{"count": 42, "items": ["a", "b"]}"#);
     }
 
     #[test]
     fn from_output_does_not_sniff_json_stdout() {
         let result = ExecResult::from_output(0, r#"[1, 2, 3]"#, "");
         assert!(result.data.is_none());
-        assert_eq!(result.out, "[1, 2, 3]");
+        assert_eq!(&*result.text_out(),"[1, 2, 3]");
     }
 
     #[test]
@@ -457,7 +569,7 @@ mod tests {
     fn default_is_empty_success() {
         let result = ExecResult::default();
         assert!(result.ok());
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
         assert!(result.data.is_none());
         assert!(result.content_type.is_none());
         assert!(result.baggage.is_empty());
@@ -467,7 +579,7 @@ mod tests {
     fn from_parts_creates_result() {
         let result = ExecResult::from_parts(42, "out".into(), "err".into(), None);
         assert_eq!(result.code, 42);
-        assert_eq!(result.out, "out");
+        assert_eq!(&*result.text_out(),"out");
         assert_eq!(result.err, "err");
         assert!(result.data.is_none());
         assert!(result.output.is_none());
@@ -477,7 +589,7 @@ mod tests {
     fn with_code_sets_code() {
         let result = ExecResult::success("hi").with_code(42);
         assert_eq!(result.code, 42);
-        assert_eq!(result.out, "hi");
+        assert_eq!(&*result.text_out(),"hi");
     }
 
     #[test]
@@ -503,11 +615,11 @@ mod tests {
     fn set_out_and_push_out_and_clear_out() {
         let mut result = ExecResult::success("");
         result.set_out("hello".into());
-        assert_eq!(result.out, "hello");
+        assert_eq!(&*result.text_out(),"hello");
         result.push_out(" world");
-        assert_eq!(result.out, "hello world");
+        assert_eq!(&*result.text_out(),"hello world");
         result.clear_out();
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 
     #[test]
@@ -530,11 +642,63 @@ mod tests {
         // Use structured output to test materialization
         let nodes = OutputData::nodes(vec![OutputNode::new("a"), OutputNode::new("b")]);
         let mut result = ExecResult::with_output(nodes);
-        assert!(result.out.is_empty());
+        // Raw text payload is empty before materialize (text_out() would
+        // already fall back to the OutputData canonical string).
+        assert!(matches!(&result.out, OutputPayload::Text(s) if s.is_empty()));
         assert!(result.has_output());
         result.materialize();
-        assert_eq!(result.out, "a\nb");
+        assert_eq!(&*result.text_out(),"a\nb");
         assert!(result.output.is_none());
+    }
+
+    #[test]
+    fn value_bytes_round_trips_through_envelope() {
+        let v = Value::Bytes(vec![0u8, 1, 2, 255, 128]);
+        let json = value_to_json(&v);
+        assert_eq!(json["_type"], "bytes");
+        assert_eq!(json["len"], 5);
+        // json_to_value recognizes the envelope and reconstructs Bytes.
+        assert_eq!(json_to_value(json), v);
+        // A plain object is NOT mistaken for bytes.
+        let obj = serde_json::json!({"name": "amy"});
+        assert!(matches!(json_to_value(obj), Value::Json(_)));
+    }
+
+    #[test]
+    fn output_payload_text_serializes_as_bare_string() {
+        // Wire compatibility: a text result's `out` stays a plain JSON string,
+        // exactly as when `out` was a `String`.
+        let r = ExecResult::success("hello");
+        let json: serde_json::Value = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(json["out"], "hello");
+        // Round-trips back to a Text payload.
+        let back: ExecResult = serde_json::from_value(json).unwrap();
+        assert_eq!(&*back.text_out(), "hello");
+        assert!(!back.is_bytes());
+    }
+
+    #[test]
+    fn success_bytes_carries_binary_and_round_trips() {
+        let r = ExecResult::success_bytes(vec![0u8, 159, 146, 150]); // invalid UTF-8
+        assert!(r.is_bytes());
+        assert_eq!(r.out_bytes(), Some(&[0u8, 159, 146, 150][..]));
+        // try_text_out is the loud guard: invalid UTF-8 → error, not mangling.
+        assert!(r.try_text_out().is_err());
+        // text_out (infallible) decodes lossily — Phase-1 fallback.
+        assert!(r.text_out().contains('\u{fffd}'));
+        // Serializes as a base64 envelope and round-trips back to bytes.
+        let json: serde_json::Value = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["out"]["_type"], "bytes");
+        let back: ExecResult = serde_json::from_value(json).unwrap();
+        assert_eq!(back.out_bytes(), Some(&[0u8, 159, 146, 150][..]));
+    }
+
+    #[test]
+    fn valid_utf8_bytes_coerce_to_text() {
+        let r = ExecResult::success_bytes(b"plain text".to_vec());
+        assert!(r.is_bytes());
+        assert_eq!(r.try_text_out().unwrap(), "plain text");
+        assert_eq!(&*r.text_out(), "plain text");
     }
 
     #[test]
@@ -542,7 +706,7 @@ mod tests {
         use crate::output::OutputData;
         let mut result = ExecResult::with_output_and_text(OutputData::text("ignored"), "custom");
         result.materialize();
-        assert_eq!(result.out, "custom");
+        assert_eq!(&*result.text_out(),"custom");
     }
 
     #[test]

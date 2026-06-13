@@ -347,7 +347,7 @@ impl<'a> ArithParser<'a> {
             Some(Value::Bool(b)) => Ok(if *b { 1 } else { 0 }),
             Some(Value::Null) => Ok(0), // Unset variables default to 0 in arithmetic
             Some(Value::Json(_)) => anyhow::bail!("variable '{}' is JSON, not a number", name),
-            Some(Value::Blob(_)) => anyhow::bail!("variable '{}' is a blob, not a number", name),
+            Some(Value::Bytes(_)) => anyhow::bail!("variable '{}' is binary data, not a number", name),
             None => Ok(0), // Unset variables default to 0 in arithmetic
         }
     }

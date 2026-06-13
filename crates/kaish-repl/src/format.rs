@@ -19,6 +19,12 @@ use kaish_kernel::tools::OutputContext;
 /// This is the main entry point for formatting command output. It uses
 /// structured OutputData if present, otherwise uses raw output.
 pub fn format_output(result: &ExecResult, context: OutputContext) -> String {
+    // Binary payload: a human can't read raw bytes — show a hex dump rather
+    // than letting text_out() decode it lossily. See docs/binary-data.md.
+    if let Some(bytes) = result.out_bytes() {
+        return kaish_kernel::interpreter::hex_dump(bytes);
+    }
+
     // Use OutputData if present
     if let Some(output) = result.output() {
         return format_output_data(output, context);
@@ -289,6 +295,15 @@ mod tests {
         let result = ExecResult::success("hello world");
         let output = format_output(&result, OutputContext::Interactive);
         assert_eq!(output, "hello world");
+    }
+
+    #[test]
+    fn test_binary_result_renders_hex_dump() {
+        // A binary payload is shown as a hex dump, not decoded lossily.
+        let result = ExecResult::success_bytes(vec![0u8, 1, 2, 255, b'A']);
+        let formatted = format_output(&result, OutputContext::Interactive);
+        assert!(formatted.starts_with("00000000  00 01 02 ff 41"), "hex dump: {formatted}");
+        assert!(formatted.ends_with("|....A|"), "ascii gutter: {formatted}");
     }
 
     #[test]

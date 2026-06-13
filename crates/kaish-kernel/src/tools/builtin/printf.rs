@@ -31,7 +31,7 @@ impl FormatArg for Value {
             Value::Bool(b) => b.to_string(),
             Value::Null => String::new(),
             Value::Json(json) => json.to_string(),
-            Value::Blob(blob) => format!("[blob: {} {}]", blob.formatted_size(), blob.content_type),
+            Value::Bytes(b) => format!("[binary: {} bytes]", b.len()),
         }
     }
 

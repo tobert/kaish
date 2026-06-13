@@ -84,7 +84,7 @@ fn is_truthy(value: &Value) -> bool {
             serde_json::Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
             serde_json::Value::String(s) => !s.is_empty() && s != "false" && s != "0",
         },
-        Value::Blob(_) => true, // Blob references are always truthy
+        Value::Bytes(b) => !b.is_empty(), // empty bytes are falsy, like ""
     }
 }
 

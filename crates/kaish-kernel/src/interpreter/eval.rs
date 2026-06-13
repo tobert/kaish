@@ -504,7 +504,7 @@ pub fn value_to_exit_code(value: &Value) -> anyhow::Result<i64> {
                 anyhow::anyhow!("numeric argument required: {:?}", s)
             })
         }
-        Value::Null | Value::Json(_) | Value::Blob(_) => {
+        Value::Null | Value::Json(_) | Value::Bytes(_) => {
             anyhow::bail!("numeric argument required (got {:?})", value)
         }
     }
@@ -518,7 +518,9 @@ pub fn value_to_string(value: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::String(s) => s.clone(),
         Value::Json(json) => json.to_string(),
-        Value::Blob(blob) => format!("[blob: {} {}]", blob.formatted_size(), blob.content_type),
+        // Binary in a text context: visible placeholder, not raw bytes. The
+        // loud-error guard lands with the Phase-2 arg/sink rework.
+        Value::Bytes(b) => format!("[binary: {} bytes]", b.len()),
     }
 }
 
@@ -530,7 +532,7 @@ pub fn value_to_string(value: &Value) -> String {
 /// - `Null` → `false`
 /// - `Float(0.0)` → `false`, other floats → `true`
 /// - `Json(null)` → `false`, `Json([])` → `false`, `Json({})` → `false`, others → `true`
-/// - `Blob(_)` → `true` (blobs always exist if referenced)
+/// - `Bytes(b)` → `b` non-empty (empty bytes are falsy, like `""`)
 pub fn value_to_bool(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -546,7 +548,7 @@ pub fn value_to_bool(value: &Value) -> bool {
             serde_json::Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
             serde_json::Value::String(s) => !s.is_empty(),
         },
-        Value::Blob(_) => true, // Blob references are always truthy
+        Value::Bytes(b) => !b.is_empty(), // empty bytes are falsy, like ""
     }
 }
 
@@ -690,7 +692,7 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         }
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Json(a), Value::Json(b)) => a == b,
-        (Value::Blob(a), Value::Blob(b)) => a.id == b.id,
+        (Value::Bytes(a), Value::Bytes(b)) => a == b,
         // Mixed types (most commonly String vs Int/Float from a quoted variable
         // against a numeric literal): fall back to string equality.
         _ => value_to_string(left) == value_to_string(right),
@@ -779,7 +781,7 @@ fn type_name(value: &Value) -> &'static str {
         Value::Float(_) => "float",
         Value::String(_) => "string",
         Value::Json(_) => "json",
-        Value::Blob(_) => "blob",
+        Value::Bytes(_) => "bytes",
     }
 }
 

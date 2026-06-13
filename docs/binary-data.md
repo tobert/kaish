@@ -1,6 +1,6 @@
 # Binary Data — Design Doc
 
-Status: **proposal / design exploration** (not yet implemented)
+Status: **Phase 1 landed** (value + carrier + boundary); Phases 2–4 proposed
 Author: design notes from a 2026-06-13 session (out of the synthetic-`/dev` work)
 Related: [LANGUAGE.md](LANGUAGE.md), [issues.md](issues.md), `docs/help/vfs.md`,
 `project_dev_fs.md` (auto-memory), `arch_no_json_sniffing.md` (auto-memory)
@@ -140,20 +140,22 @@ fn text_out(&self) -> io::Result<Cow<str>> {
   accumulation time. This is the bulk of Phase 1's blast radius; scope it
   honestly.
 
-### Relationship to the existing `Value::Blob`
+### One binary value — `Value::Blob` was deleted
 
-`Value::Blob(BlobRef)` **already exists** (`value.rs:20`) — an out-of-line
-handle (`id`, `size`, `content_type`, optional `hash`) into VFS blob storage,
-serialized as `{_type:"blob",…}`. `Value::Bytes` overlaps it and the two must
-not blur. Proposed split:
+An earlier draft proposed keeping the pre-existing `Value::Blob(BlobRef)` (an
+out-of-line handle into `/v/blobs`) alongside the new inline `Value::Bytes`,
+split by size. Investigation killed that: **`Value::Blob` was never constructed
+anywhere** — a vestigial variant defended in ~20 match arms with zero producers,
+and `BlobRef` was never used as a type (one stale doc comment aside). Per
+"[[no legacy dual-representations]] — delete old code immediately," Phase 1
+**removed `Value::Blob` and `BlobRef`** and made `Value::Bytes` the single binary
+value type.
 
-- **`Bytes`** = small, *inline* payload carried in the value/pipe (keys, a file
-  header, a 32-byte random draw).
-- **`Blob`** = large/stored payload referenced by handle; lives in `/v/blobs`.
-
-A `Bytes` that exceeds a threshold (tie to the output-limit default) spills to a
-`Blob`, mirroring `SpillMode::Memory`. This boundary needs nailing down before
-Phase 1 lands `Value::Bytes`, or the two representations will drift.
+Persisting large binary stays a *separate VFS concern*: plain files under
+`/v/blobs`, written/read via the client's `write_blob`/`read_blob` (which already
+work on `String` ids and raw bytes, never `BlobRef`). If a future spill-to-store
+path is wanted, it spills `Value::Bytes` → a `/v/blobs` file + path, not a second
+`Value` variant.
 
 ## Boundary rendering — display, don't coerce
 
@@ -249,9 +251,15 @@ Supported operands (80% subset):
 
 ## Phased plan (each phase independently shippable)
 
-- **Phase 1 — value + boundary.** `Value::Bytes` / `OutputData::Bytes`, the
-  `ExecResult` carrier, the coercion rule, and boundary rendering (REPL hex
-  dump, `--json`/MCP structured base64). No tool behavior changes yet.
+- **Phase 1 — value + boundary. ✅ DONE.** `Value::Bytes` (single binary type;
+  `Value::Blob`/`BlobRef` deleted), the `ExecResult.out` `OutputPayload::{Text,
+  Bytes}` enum (wire-compatible serde), `text_out()` infallible + `try_text_out()`
+  loud guard + `out_bytes()`/`is_bytes()`/`success_bytes()`, base64 envelope +
+  `hex_dump` helpers, and boundary rendering (REPL hex dump via `format_output`,
+  `--json`/MCP base64 envelope via `value_to_json`). `OutputData::Bytes` deferred
+  to Phase 2, where the pipe/consumption rework makes its text-shaped methods
+  meaningful — until then a binary result is produced via `ExecResult::success_bytes`.
+  No builtin produces bytes yet, so nothing changes for users.
 - **Phase 2 — transit.** Byte-clean pipe ends; kill the file-read chokepoints so
   `head`/`cat`/`<` carry bytes and only decode on demand.
 - **Phase 3 — tools + devices.** `encode`/`decode`, realign `base64`, add the

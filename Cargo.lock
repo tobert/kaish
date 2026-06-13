@@ -1446,6 +1446,7 @@ dependencies = [
 name = "kaish-types"
 version = "0.8.2"
 dependencies = [
+ "base64",
  "schemars",
  "serde",
  "serde_json",

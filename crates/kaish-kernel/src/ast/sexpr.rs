@@ -403,7 +403,7 @@ pub fn format_value(value: &Value) -> String {
         Value::Float(f) => format!("(float {})", f),
         Value::String(s) => format!("(string \"{}\")", escape_for_display(s)),
         Value::Json(json) => format!("(json {})", json),
-        Value::Blob(blob) => format!("(blob id={} size={} type={})", blob.id, blob.size, blob.content_type),
+        Value::Bytes(b) => format!("(bytes len={})", b.len()),
     }
 }
 

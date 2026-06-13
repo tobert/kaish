@@ -483,7 +483,10 @@ fn value_to_argv_token(value: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::String(s) => s.clone(),
         Value::Json(j) => j.to_string(),
-        Value::Blob(b) => format!("[blob: {} {}]", b.formatted_size(), b.content_type),
+        // Splatting binary into argv is a text context; a real loud-error guard
+        // lands with the arg-building rework (Phase 2). For now mark it visibly
+        // rather than emitting raw bytes. See docs/binary-data.md.
+        Value::Bytes(data) => format!("[binary: {} bytes]", data.len()),
     }
 }
 

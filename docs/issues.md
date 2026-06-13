@@ -58,10 +58,12 @@ that flows through pipes, **coerces to text iff valid UTF-8 (else loud error)**,
 and renders at the boundary (REPL hex dump, `--json`/MCP structured base64).
 
 Phases (each independently shippable):
-1. Value + boundary: `Value::Bytes` + `OutputData::Bytes`, `ExecResult.out` as
-   an `OutputPayload::{Text,Bytes}` **enum** (not sibling fields), coercion
-   rule, boundary rendering. Define the `Value::Bytes` ↔ existing `Value::Blob`
-   split (inline vs stored) first.
+1. **DONE** — Value + boundary: `Value::Bytes` (single binary type; the dead
+   `Value::Blob`/`BlobRef` were deleted), `ExecResult.out` as an
+   `OutputPayload::{Text,Bytes}` enum (wire-compatible serde), coercion rule
+   (`text_out` infallible + lossy / `try_text_out` loud guard), base64 +
+   `hex_dump` helpers, boundary rendering (REPL hex dump, `--json` envelope).
+   `OutputData::Bytes` deferred to Phase 2.
 2. Transit: the pipe ring buffer is already `VecDeque<u8>` — the work is at
    *consumption*: a `read_stdin_to_bytes` sibling (26 `…_to_string` callers), a
    `bytes_out()` pipe-write path, and killing `from_utf8` in `head`/`cat`/`<`.

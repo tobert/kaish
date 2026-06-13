@@ -380,8 +380,8 @@ pub enum TestCmpOp {
     NumLtEq,
 }
 
-// Value and BlobRef live in kaish-types.
-pub use kaish_types::{BlobRef, Value};
+// Value lives in kaish-types.
+pub use kaish_types::Value;
 
 /// Variable reference path: `${VAR}` or `${VAR.field}`.
 ///

@@ -87,7 +87,7 @@ fn format_value(value: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::String(s) => format!("\"{}\"", s.replace('\"', "\\\"")),
         Value::Json(json) => json.to_string(),
-        Value::Blob(blob) => format!("[blob: {} {}]", blob.formatted_size(), blob.content_type),
+        Value::Bytes(b) => format!("[binary: {} bytes]", b.len()),
     }
 }
 
@@ -100,7 +100,7 @@ fn value_type_name(value: &Value) -> &'static str {
         Value::Float(_) => "float",
         Value::String(_) => "string",
         Value::Json(_) => "json",
-        Value::Blob(_) => "blob",
+        Value::Bytes(_) => "bytes",
     }
 }
 

@@ -118,7 +118,7 @@ pub trait KernelClient {
 
     /// Write a blob and return its ID.
     ///
-    /// The blob is stored in `/v/blobs/{id}` and can be referenced via BlobRef.
+    /// The blob is stored in `/v/blobs/{id}` and can be read back via `read_blob`.
     async fn write_blob(&self, content_type: &str, data: &[u8]) -> ClientResult<String>;
 
     /// Delete a blob by ID.

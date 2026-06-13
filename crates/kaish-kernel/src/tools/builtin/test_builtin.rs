@@ -136,7 +136,7 @@ async fn evaluate_test(args: ToolArgs, ctx: &mut ExecContext, bracket_mode: bool
             Value::Bool(b) => tokens.push(if *b { "true" } else { "false" }.to_string()),
             Value::Null => {}
             Value::Json(json) => tokens.push(json.to_string()),
-            Value::Blob(blob) => tokens.push(format!("[blob: {} {}]", blob.formatted_size(), blob.content_type)),
+            Value::Bytes(b) => tokens.push(format!("[binary: {} bytes]", b.len())),
         }
     }
 

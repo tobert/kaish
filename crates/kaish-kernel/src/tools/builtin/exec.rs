@@ -144,7 +144,7 @@ fn value_to_string(value: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::String(s) => s.clone(),
         Value::Json(json) => json.to_string(),
-        Value::Blob(blob) => format!("[blob: {} {}]", blob.formatted_size(), blob.content_type),
+        Value::Bytes(b) => format!("[binary: {} bytes]", b.len()),
     }
 }
 
