@@ -47,24 +47,33 @@ kaish-vfs builtin status/diff/commit/reset). Residuals:
   commit_into doesn't propagate mtimes. `VirtualOverlayBackend`
   (backend/overlay.rs) is unrelated prefix routing, not CoW.
 
-### Binary-data path — blocks `/dev/urandom` and raw byte streaming
+### Binary-data path — typed `Bytes`, `dd`, and `/dev/urandom`
 Surfaced 2026-06-13 while adding the synthetic `/dev` (DevFs: `/dev/null`,
-`/dev/zero` shipped; mounted in Sandboxed + NoLocal modes). `/dev/urandom`
-was deliberately **deferred**: kaish's pipes and `OutputData` are UTF-8 text
-end to end, so raw random bytes can't flow through intact — `head` does
-`String::from_utf8` (head.rs), and a lossy decode would corrupt the bytes
-irreversibly. The bounded whole-file read model also can't replicate the
-`cat /dev/urandom | tr -dc ... | head -c N` streaming idioms (no infinite
-streams; an unbounded device read is a loud error by design).
+`/dev/zero` shipped). kaish is UTF-8 text end to end (`ExecResult.out: String`,
+`OutputData` string-shaped, pipe consumed as text), so raw bytes can't transit
+intact and `/dev/urandom` can't exist. **Design committed: typed `Bytes`
+through pipes, nushell-style** — full plan in
+[binary-data.md](binary-data.md). Spine: a `Value::Bytes`/`OutputData::Bytes`
+that flows through pipes, **coerces to text iff valid UTF-8 (else loud error)**,
+and renders at the boundary (REPL hex dump, `--json`/MCP structured base64).
 
-The fix is a first-class binary path: a byte-typed `OutputData` variant (or
-a bytes-carrying channel) so builtins can produce/consume non-UTF-8 data, and
-a pipeline that preserves it. Once that lands, `/dev/urandom`/`/dev/random`
-(software via `getrandom`, already a dep) drop in by adding the device names
-to `DevFs` and honouring the byte count in `read_range`. A `random --bytes N
---hex/--base64` builtin is the encoded, pipe-safe alternative worth landing
-regardless. Until then, agents needing entropy have no in-shell primitive.
-DevFs: `crates/kaish-vfs/src/dev.rs`; range plumbing: `Filesystem::read_range`.
+Phases (each independently shippable):
+1. Value + boundary: `Value::Bytes`/`OutputData::Bytes`, `ExecResult` byte
+   carrier, coercion rule, boundary rendering.
+2. Transit: byte-clean pipe ends; kill `from_utf8` chokepoints in
+   `head`/`cat`/`<`-redirect/heredoc (backend already returns `Vec<u8>`).
+3. Tools + devices: `encode`/`decode` builtins, realign `base64`, add `random`
+   and a small `dd` (`if=`/`of=`/`bs=`/`count=`/`skip=` — reads via the
+   `read_range` byte-count plumbing already shipped), and drop `/dev/urandom` +
+   `/dev/random` into `DevFs` (`getrandom` already a dep).
+4. As demand appears: `gzip`/`gunzip`, blob helpers.
+
+**Definition of done (north-star test):** `dd if=/dev/urandom of=/dev/null
+bs=1024 count=10` exits 0 having copied exactly 10240 bytes; the same into a
+`/tmp` file verifies an exact `wc -c`; two 16-byte draws have differing
+checksums (entropy is real). Home: a NoLocal kernel-routed test beside the
+DevFs tests in `tests/sandbox_mode_tests.rs`. DevFs:
+`crates/kaish-vfs/src/dev.rs`; range plumbing: `Filesystem::read_range`.
 
 ### `rg` parallel walking
 The 2026-04-29 rg builtin uses `ignore::WalkBuilder::build()`, which
