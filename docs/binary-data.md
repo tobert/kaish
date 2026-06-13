@@ -4,6 +4,10 @@ Status: **proposal / design exploration** (not yet implemented)
 Author: design notes from a 2026-06-13 session (out of the synthetic-`/dev` work)
 Related: [LANGUAGE.md](LANGUAGE.md), [issues.md](issues.md), `docs/help/vfs.md`,
 `project_dev_fs.md` (auto-memory), `arch_no_json_sniffing.md` (auto-memory)
+Review: DeepSeek V4-Pro adversarial pass 2026-06-13 — folded in the `if=`
+keyword conflict (blocker), `OutputPayload` enum, `Value::Blob` overlap, the
+auto-coerce hazards/scope, the expanded test suite, and the `dd` caps. Its BOM
+claim was checked and rejected (a BOM is valid UTF-8 and coerces).
 
 ## Motivation
 
@@ -67,24 +71,89 @@ This is what keeps the change small rather than sprawling:
 The stricter alternative — *always* require an explicit `decode utf-8` — is
 purer but breaks every existing text pipeline and taxes the 99% case. Rejected.
 
+### Hazards of auto-coerce, and where it's scoped
+
+The rule is right for *file/device reads producing a value*, but it has sharp
+edges that must be documented and that argue for **localizing coercion to the
+consumer that wants text, not the carrier**:
+
+- **Multibyte split (real behavior change).** `head -c 1` / `dd bs=1 count=1`
+  over a UTF-8 file can slice mid-codepoint → invalid UTF-8 → loud error, where
+  today `from_utf8_lossy` yields `U+FFFD`. POSIX `head -c` counts *bytes* and
+  doesn't care about encoding; under the rule, a correct byte slice that isn't
+  text becomes an error. That's defensible (it *is* binary now) but it is a
+  change, and the error message must say so.
+- **Binary that happens to be valid UTF-8.** A `.wasm`/key file that decodes by
+  chance flows through as text and gets newline-split or substring-matched —
+  content preserved, *type* wrong. This differs from the banned JSON sniffing
+  (which mutates output) but still burns a consumer that ignores `content_type`.
+- **BOM is NOT a problem.** (Corrected from review: `String::from_utf8(EF BB
+  BF)` returns `Ok("\u{feff}")` — a BOM is valid UTF-8 and coerces cleanly. The
+  resulting string carries a leading `U+FEFF`, exactly as text tools see today.)
+- **Migration blast radius.** 10 `from_utf8_lossy` sites in builtins (+ `context.rs`)
+  and **26 callers of `read_stdin_to_string`** encode the text assumption. Each
+  needs a decision — accept-and-coerce vs. require-bytes — and a `read_stdin_to_bytes`
+  sibling. `base64 -d`/`xxd -r`/`checksum` want raw bytes; `jq`/`grep` want text.
+  This is per-tool work Phase 2 must enumerate, not a blanket switch.
+
+So the operative rule is two-tier: **reads yield `Bytes`; coercion happens at the
+point a tool declares it needs text** (and fails loud there), rather than
+silently at the carrier.
+
 ## Value model
 
 ```
 kaish-types:
-  Value::Bytes(Vec<u8>)             // a binary value (vars, $() capture, args)
+  Value::Bytes(Vec<u8>)                 // a binary value (vars, $() capture, args)
   OutputData::Bytes { data: Vec<u8> }   // a builtin's binary output
 
 ExecResult:
-  out: String                       // text result (unchanged)
-  out_bytes: Option<Vec<u8>>        // binary result; a result is text XOR bytes
+  enum OutputPayload { Text(String), Bytes(Vec<u8>) }
+  out: OutputPayload                    // text XOR bytes, enforced by the type
+```
+
+**Use an enum, not sibling fields.** An earlier draft proposed `out: String` +
+`out_bytes: Option<Vec<u8>>` as "text XOR bytes" — but two fields admit the
+invalid both-set state, and every builder (`set_out`/`push_out`/`clear_out`,
+`success`/`failure`/`from_parts`/`with_output`/…) would have to defend the
+invariant by hand. `OutputPayload::{Text,Bytes}` makes the invalid state
+unrepresentable and puts the coercion in exactly one place:
+
+```rust
+fn text_out(&self) -> io::Result<Cow<str>> {
+    match &self.out {
+        OutputPayload::Text(s) => Ok(Cow::Borrowed(s)),
+        OutputPayload::Bytes(b) => match std::str::from_utf8(b) {
+            Ok(s) => Ok(Cow::Borrowed(s)),
+            Err(_) => Err(/* "binary data — pipe through base64/xxd …" */),
+        },
+    }
+}
 ```
 
 - `$(cmd)` and assignment **preserve the type**: `key=$(random --bytes 32)`
   holds `Value::Bytes`, not text. `echo $key` is a loud error; `encode base64
   $key` (or `"$(encode base64 $key)"`) is how you get a string.
-- `text_out()` on a bytes result applies the coercion rule (UTF-8 → `Cow::Owned`,
-  else error). All current `text_out()` callers route through it, so they get
-  the guard for free.
+- `text_out()` becomes fallible. ~200 call sites and the
+  `accumulate_result`/sequence-join path must handle the error rather than
+  unwrap — joining a bytes stage onto a text stage is itself a loud error, at
+  accumulation time. This is the bulk of Phase 1's blast radius; scope it
+  honestly.
+
+### Relationship to the existing `Value::Blob`
+
+`Value::Blob(BlobRef)` **already exists** (`value.rs:20`) — an out-of-line
+handle (`id`, `size`, `content_type`, optional `hash`) into VFS blob storage,
+serialized as `{_type:"blob",…}`. `Value::Bytes` overlaps it and the two must
+not blur. Proposed split:
+
+- **`Bytes`** = small, *inline* payload carried in the value/pipe (keys, a file
+  header, a 32-byte random draw).
+- **`Blob`** = large/stored payload referenced by handle; lives in `/v/blobs`.
+
+A `Bytes` that exceeds a threshold (tie to the output-limit default) spills to a
+`Blob`, mirroring `SpillMode::Memory`. This boundary needs nailing down before
+Phase 1 lands `Value::Bytes`, or the two representations will drift.
 
 ## Boundary rendering — display, don't coerce
 
@@ -109,9 +178,24 @@ A *top-level* bytes result is displayed (not coerced):
 ## `dd` — the binary mover
 
 A small, classic `dd` is the natural binary-aware copy tool and the north-star
-integration target (below). Operands use the traditional `key=value` form —
-which already lexes as bareword args (precedent: `awk prog var=value file`,
-`awk.rs:128`); a spot-check is owed for slashed values like `if=/dev/urandom`.
+integration target (below). Operands use the traditional `key=value` form.
+
+> **BLOCKER — `if=` collides with the `if` keyword.** My earlier "lexes as
+> barewords (awk precedent)" claim was **wrong**: `awk.rs:128` splits an
+> *already-parsed positional string* at runtime; the lexer never sees a keyword.
+> But `if` is `Token::If`, and `keyword_as_bareword` (`parser.rs:1940-1954`)
+> lists only the *closing* keywords (`done`/`fi`/`then`/`else`/`elif`/`in`/`do`/
+> `esac`/`set`) — **not `If`**. So `dd if=x` parses `dd` as the command and then
+> tries to start an `if`-statement on `if=x`. (`of=`/`bs=`/`count=`/`skip=` are
+> plain idents and are fine; the `/` in `if=/dev/urandom` is also fine — the key
+> alone is the problem.) This must be fixed in the parser before `dd` ships:
+> - **(preferred)** make `keyword_as_bareword` *context-sensitive* — in argument
+>   position (after a command name) accept statement-openers (`If`/`For`/`While`/
+>   `Case`) as barewords too; or
+> - emit a dedicated `WordAssign{key,value}` token for `key=value` whose key may
+>   be a keyword; or
+> - **(fallback)** use `--if=FILE` flags and drop the classic idiom.
+> Gates Phase 3.
 
 Supported operands (80% subset):
 
@@ -123,23 +207,45 @@ Supported operands (80% subset):
 | `count=N`  | number of blocks to copy | until EOF |
 | `skip=N`   | skip N input blocks before copying | 0 |
 
-- Total bytes = `bs * count`. `dd` reads exactly that many via the
-  `Filesystem::read_range` byte-count plumbing already added for `/dev/zero`
-  (`ReadRange::bytes(skip*bs, count*bs)`), so it composes with endless devices
-  without hanging.
+- Total bytes = `bs * count`. `dd` reads via the `Filesystem::read_range`
+  byte-count plumbing added for `/dev/zero` (`ReadRange::bytes(skip*bs,
+  count*bs)`), so it composes with endless devices without hanging.
 - `dd` is inherently binary: it carries `Bytes`, never coerces, and writes via
   the backend (`of=`) or emits a `Bytes` result (no `of=`).
 - A short status line (`N bytes copied`) goes to stderr, matching `dd`.
+- **Total-bytes cap, independent of the device cap.** DevFs caps a *device*
+  read at 64 MiB (`dev.rs`), but `dd if=/tmp/huge bs=1M count=1000000` reads a
+  *real* file and would allocate the whole request. `dd` needs its own cap on
+  `bs*count` (loud error above it) so a fat `count` can't OOM the kernel —
+  whether or not the source is a device. Also: `bs=1M count=128` (128 MiB)
+  trips the 64 MiB *device* cap; either raise/justify that cap or have `dd`
+  chunk its reads to stay under it.
+- **Streaming vs. buffering.** The all-at-once `read_range(bs*count)` buffers
+  the whole transfer in RAM. Faithful `dd` reads a block, writes a block,
+  repeats — bounded memory regardless of `count`. Decide: stream block-at-a-time
+  (preferred for large transfers; also the natural cap mechanism) or buffer.
+- **`skip=` on a non-seekable device consumes entropy.** For `/dev/urandom`,
+  `skip=N` means generating and discarding `N*bs` bytes (there's no seek). Note
+  it; it's correct but not free.
 
 ## Chokepoints to remove (the actual work)
 
 1. File read path: stop `from_utf8` in `head` / `cat` / `<`-redirect /
    heredoc; carry `Vec<u8>`, decode only when text is required.
-2. `ExecResult` / `OutputData`: add the bytes carrier + the coercion rule.
-3. Pipe ends: byte-clean rather than `String`-clean (the channel can hold
-   `Vec<u8>`; line tools split on `\n` over bytes).
+2. `ExecResult` / `OutputData`: `OutputPayload` enum + the coercion rule.
+3. Pipe *consumption*, not transport. The pipe ring buffer is **already
+   `VecDeque<u8>`** (`pipe_stream.rs:37`) — byte-clean today. The text
+   assumption lives only at the ends: `pipeline.rs` calls `text_out()` then
+   `.as_bytes()` to fill the pipe, and `read_stdin_to_string` (26 callers)
+   pulls it back as a `String`. The work is a `bytes_out()` write path + a
+   `read_stdin_to_bytes` sibling + per-tool opt-in — not a transport rewrite.
 4. `encode`/`decode` builtins + realigned `base64` + the loud-error guard at
    text sinks (`echo`, interpolation, MCP/REPL text).
+5. **`for x in $(cmd)` over a `Bytes` value.** The `$()` capture (`kernel.rs`)
+   returns `Value::String` today via `text_out()`; preserving the type means it
+   can return `Value::Bytes`. Iterating bytes as lines is meaningless — define
+   it as a **loud error** ("binary value is not iterable; `decode`/`encode`
+   first"), not a silent byte-by-byte loop.
 
 ## Phased plan (each phase independently shippable)
 
@@ -173,17 +279,37 @@ dd if=/dev/urandom of=/tmp/b.bin bs=16 count=1
 Asserts, in order: counted reads of an endless device terminate at exactly
 `bs*count`; binary survives `dd` → file write intact; the byte count is exact
 (no UTF-8 mangling); and the source is actually random (two draws diverge).
-A NoLocal-mode kernel-routed test (`KernelConfig::isolated()`) is the home for
-it, alongside today's DevFs tests in `tests/sandbox_mode_tests.rs`.
+
+A compact happy-path test is a false economy — it wouldn't catch the failure
+modes the design is *for*. Expand to a suite that also bites:
+
+```sh
+dd if=/dev/urandom bs=1024 count=10 | dd of=/dev/null        # bytes survive a PIPE stage
+dd if=/dev/urandom bs=16 count=1 | grep x                    # MUST fail loud (not search garbage)
+x=$(dd if=/dev/urandom bs=1 count=1); echo $x                # MUST error (bytes can't echo)
+dd if=/dev/zero bs=8 count=1                                 # result is Bytes([0;8]) — check via --json/kaish-last
+dd if=/dev/urandom of=/tmp/x bs=1 count=1; cat /tmp/x | encode hex   # binary→hex exact, lossless
+dd if=/dev/urandom of=/dev/null bs=1024 count=10 2>&1 | grep "10240" # stderr status line present
+```
+
+Home: a NoLocal kernel-routed test (`KernelConfig::isolated()`) beside today's
+DevFs tests in `tests/sandbox_mode_tests.rs`.
 
 ## Open questions
 
-- **Hex-dump cap.** Default bytes-before-truncation for the REPL dump and the
-  base64 envelope (tie to the existing output-limit default?).
-- **`dd` operand lexing.** Confirm `if=/dev/urandom` (with `/`) stays a single
-  bareword arg; if not, a small lexer tweak rather than `--if=` flags, to keep
-  the recognizable idiom.
-- **`Bytes` in arithmetic / `[[ ]]`.** Almost certainly an error (no implicit
-  numeric/string coercion); confirm the message names the fix.
+- **Hex-dump cap & encoded-output truncation.** Default bytes-before-truncation
+  for the REPL dump and the base64 envelope (tie to the output-limit default?).
+  base64 expands ~33%, so a 64 MiB payload → ~85 MiB of JSON and likely blows
+  past MCP message limits. Decide: truncate the **raw bytes before encoding**
+  (and report `len` so it's never silent), not the encoded string. Spilling a
+  large `Bytes` to a `Blob` (see value model) is the cleaner answer for MCP.
+- **`--json` is a breaking change for consumers.** A top-level `{"type":"bytes",
+  "encoding":"base64","data":…}` envelope is a new shape any existing `--json`
+  parser must learn. Call it out in release notes.
+- **`Bytes` in arithmetic / `[[ ]]`.** An error (no implicit numeric/string
+  coercion); confirm the message names the fix (`decode`/`encode`).
 - **`random` surface.** `random --bytes N [--hex|--base64]` returns text;
   `random --bytes N` alone returns `Bytes`. Bikeshed `--int`/range later.
+- **`getrandom` platform behavior.** Linux `getrandom(2)` blocks until the pool
+  is seeded (fine); WASI/older-macOS quality and the existing entropy-failure
+  message gap (`issues.md` mktemp note) should be documented for `/dev/urandom`.

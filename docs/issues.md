@@ -58,15 +58,24 @@ that flows through pipes, **coerces to text iff valid UTF-8 (else loud error)**,
 and renders at the boundary (REPL hex dump, `--json`/MCP structured base64).
 
 Phases (each independently shippable):
-1. Value + boundary: `Value::Bytes`/`OutputData::Bytes`, `ExecResult` byte
-   carrier, coercion rule, boundary rendering.
-2. Transit: byte-clean pipe ends; kill `from_utf8` chokepoints in
-   `head`/`cat`/`<`-redirect/heredoc (backend already returns `Vec<u8>`).
-3. Tools + devices: `encode`/`decode` builtins, realign `base64`, add `random`
-   and a small `dd` (`if=`/`of=`/`bs=`/`count=`/`skip=` — reads via the
-   `read_range` byte-count plumbing already shipped), and drop `/dev/urandom` +
+1. Value + boundary: `Value::Bytes` + `OutputData::Bytes`, `ExecResult.out` as
+   an `OutputPayload::{Text,Bytes}` **enum** (not sibling fields), coercion
+   rule, boundary rendering. Define the `Value::Bytes` ↔ existing `Value::Blob`
+   split (inline vs stored) first.
+2. Transit: the pipe ring buffer is already `VecDeque<u8>` — the work is at
+   *consumption*: a `read_stdin_to_bytes` sibling (26 `…_to_string` callers), a
+   `bytes_out()` pipe-write path, and killing `from_utf8` in `head`/`cat`/`<`.
+3. Tools + devices: `encode`/`decode`, realign `base64`, add `random` and a
+   small `dd` (`if=`/`of=`/`bs=`/`count=`/`skip=`, reads via the shipped
+   `read_range`; needs its own total-bytes cap), and drop `/dev/urandom` +
    `/dev/random` into `DevFs` (`getrandom` already a dep).
 4. As demand appears: `gzip`/`gunzip`, blob helpers.
+
+**BLOCKER (gates Phase 3):** `dd if=…` misparses — `if` is `Token::If` and is
+absent from `keyword_as_bareword` (`parser.rs:1940-1954`), so `dd if=x` starts
+an if-statement. Fix in the parser (context-sensitive keyword-as-bareword in
+argument position) or fall back to `--if=`. Reviewed by DeepSeek 2026-06-13;
+details + the `OutputPayload`/`Blob`/coercion notes in binary-data.md.
 
 **Definition of done (north-star test):** `dd if=/dev/urandom of=/dev/null
 bs=1024 count=10` exits 0 having copied exactly 10240 bytes; the same into a
