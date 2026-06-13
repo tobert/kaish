@@ -266,8 +266,9 @@ async fn execute_with_env(
         cmd.env(name, value);
     }
 
-    // Handle stdin
-    if let Some(stdin_data) = ctx.read_stdin_to_string().await {
+    // Handle stdin. Forward raw bytes so binary piped into the child
+    // (`… | env FOO=bar gzip`) isn't lossy-decoded.
+    if let Some(stdin_data) = ctx.read_stdin_to_bytes().await {
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
@@ -279,18 +280,13 @@ async fn execute_with_env(
 
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            if let Err(e) = stdin.write_all(stdin_data.as_bytes()).await {
+            if let Err(e) = stdin.write_all(&stdin_data).await {
                 return ExecResult::failure(1, format!("env: failed to write stdin: {}", e));
             }
         }
 
         match child.wait_with_output().await {
-            Ok(output) => {
-                let code = output.status.code().unwrap_or(-1) as i64;
-                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                ExecResult::from_output(code, stdout, stderr)
-            }
+            Ok(output) => capture_to_result(output.status.code(), output.stdout, output.stderr),
             Err(e) => ExecResult::failure(1, format!("env: failed to wait: {}", e)),
         }
     } else {
@@ -298,15 +294,19 @@ async fn execute_with_env(
         cmd.stderr(std::process::Stdio::piped());
 
         match cmd.output().await {
-            Ok(output) => {
-                let code = output.status.code().unwrap_or(-1) as i64;
-                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                ExecResult::from_output(code, stdout, stderr)
-            }
+            Ok(output) => capture_to_result(output.status.code(), output.stdout, output.stderr),
             Err(e) => ExecResult::failure(127, format!("env: {}: {}", command, e)),
         }
     }
+}
+
+/// Build a result from a child's captured stdout/stderr: stdout keeps binary
+/// intact (text if valid UTF-8, else a Bytes result); stderr stays text.
+#[cfg(feature = "subprocess")]
+fn capture_to_result(code: Option<i32>, stdout: Vec<u8>, stderr: Vec<u8>) -> ExecResult {
+    let mut result = ExecResult::success_text_or_bytes(stdout).with_code(code.unwrap_or(-1) as i64);
+    result.err = String::from_utf8_lossy(&stderr).into_owned();
+    result
 }
 
 /// Convert a Value to a string.

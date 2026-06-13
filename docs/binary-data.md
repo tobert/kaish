@@ -1,9 +1,12 @@
 # Binary Data — Design Doc
 
-Status: **Phases 1–3 landed** (value + carrier + boundary; `dd` + `/dev/urandom`;
-binary plumbed through the movers). Binary now survives pipes & redirects:
-`dd if=/dev/urandom | base64 | base64 -d | wc -c` == 16, `… > file && cmp …`.
-Remaining: the text-processor lossy-decode sweep (issues.md) and `encode`/`decode` builtins.
+Status: **Phases 1–3 landed + binary plumbed end to end.** value/carrier/boundary;
+`dd` + `/dev/urandom`; the data movers; text tools loud-error on binary (no lossy
+decode); external commands keep binary intact (capture → Bytes, stdin forwarded
+raw). Binary survives pipes, redirects, and external I/O:
+`dd if=/dev/urandom | base64 | base64 -d | wc -c` == 16; `curl url > file.bin`;
+`printf … | base64`. Remaining: `encode`/`decode` builtins; buffered-String stdin
+(`take_stdin`) for the rare binary-heredoc case.
 
 ### Producer coercion is content-sniffing — an accepted tradeoff
 

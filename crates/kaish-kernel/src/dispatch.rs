@@ -377,7 +377,10 @@ impl BackendDispatcher {
             ).await;
             if let Some(task) = stdin_task { task.abort(); }
             let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
-            let mut result = ExecResult::from_output(code, stdout, stderr);
+            // stdout came back as raw bytes: text if valid UTF-8, else a Bytes
+            // result (so `curl url`, `curl url > file.bin`, etc. keep binary intact).
+            let mut result = ExecResult::success_text_or_bytes(stdout).with_code(code);
+            result.err = stderr;
             result.did_spill = did_spill;
             Some(result)
         }

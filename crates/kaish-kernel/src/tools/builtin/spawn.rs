@@ -178,8 +178,8 @@ impl Tool for Spawn {
             cmd.env(key, value);
         }
 
-        // Handle stdin
-        let stdin_data = ctx.read_stdin_to_string().await;
+        // Handle stdin — forward raw bytes so binary survives into the child.
+        let stdin_data = ctx.read_stdin_to_bytes().await;
         cmd.stdin(if stdin_data.is_some() {
             std::process::Stdio::piped()
         } else {
@@ -198,7 +198,7 @@ impl Tool for Spawn {
         if let Some(data) = stdin_data
             && let Some(mut stdin) = child.stdin.take() {
                 use tokio::io::AsyncWriteExt;
-                if let Err(e) = stdin.write_all(data.as_bytes()).await {
+                if let Err(e) = stdin.write_all(&data).await {
                     return ExecResult::failure(1, format!("spawn: failed to write stdin: {}", e));
                 }
             }
@@ -207,12 +207,7 @@ impl Tool for Spawn {
         if let Some(ms) = timeout_ms {
             let timeout = Duration::from_millis(ms);
             match tokio::time::timeout(timeout, child.wait_with_output()).await {
-                Ok(Ok(output)) => {
-                    let code = output.status.code().unwrap_or(-1) as i64;
-                    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                    ExecResult::from_output(code, stdout, stderr)
-                }
+                Ok(Ok(output)) => capture_to_result(output.status.code(), output.stdout, output.stderr),
                 Ok(Err(e)) => ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
                 Err(_) => {
                     // Timeout - process is still running but we can't kill it
@@ -222,16 +217,19 @@ impl Tool for Spawn {
             }
         } else {
             match child.wait_with_output().await {
-                Ok(output) => {
-                    let code = output.status.code().unwrap_or(-1) as i64;
-                    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                    ExecResult::from_output(code, stdout, stderr)
-                }
+                Ok(output) => capture_to_result(output.status.code(), output.stdout, output.stderr),
                 Err(e) => ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
             }
         }
     }
+}
+
+/// Build a result from a child's captured stdout/stderr: stdout keeps binary
+/// intact (text if valid UTF-8, else a Bytes result); stderr stays text.
+fn capture_to_result(code: Option<i32>, stdout: Vec<u8>, stderr: Vec<u8>) -> ExecResult {
+    let mut result = ExecResult::success_text_or_bytes(stdout).with_code(code.unwrap_or(-1) as i64);
+    result.err = String::from_utf8_lossy(&stderr).into_owned();
+    result
 }
 
 /// Resolve a command name in PATH.

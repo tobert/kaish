@@ -415,3 +415,49 @@ async fn kill_signals_external_background_job_process_group() {
     let again = kernel.execute("kill %1").await.expect("execute");
     assert!(again.err.contains("not found"), "job should be gone: {}", again.err);
 }
+
+// ── External-command binary I/O (binary-data Phase C) ───────────────────────
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn external_binary_output_is_captured_as_bytes() {
+    // A standalone external command producing non-UTF-8 bytes is captured as a
+    // Bytes result, not lossy-decoded. 0xFF 0xFE 0xFD is invalid UTF-8.
+    let kernel = repl_kernel();
+    let r = kernel
+        .execute(r#"sh -c 'printf "\377\376\375"'"#)
+        .await
+        .unwrap();
+    assert!(r.is_bytes(), "binary external output should be a Bytes result");
+    assert_eq!(r.out_bytes(), Some(&[0xffu8, 0xfe, 0xfd][..]));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn external_binary_output_redirects_raw() {
+    // `cmd > file` writes the raw bytes (the capture is byte-clean, so the
+    // redirect isn't fed a lossy string). Verify the round-trip size via dd.
+    let kernel = repl_kernel();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("b.bin");
+    let p = path.to_string_lossy();
+    let r = kernel
+        .execute(&format!(r#"sh -c 'printf "\377\376\375\374"' > {p}; dd if={p} of=/dev/null"#))
+        .await
+        .unwrap();
+    assert!(r.err.contains("4 bytes copied"), "raw redirect size: {}", r.err);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn spawn_forwards_and_captures_binary() {
+    // Binary into an external command's stdin (forwarded raw) and back out
+    // (captured as bytes): xxd -r -p makes the 0xFF byte, cat echoes it.
+    let kernel = repl_kernel();
+    let r = kernel
+        .execute("echo ff | xxd -r -p | spawn --command cat")
+        .await
+        .unwrap();
+    assert!(r.is_bytes(), "binary round-trip through cat should be Bytes");
+    assert_eq!(r.out_bytes(), Some(&[0xffu8][..]));
+}

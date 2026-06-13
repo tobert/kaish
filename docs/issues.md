@@ -58,12 +58,23 @@ byte-aware movers. Text tools now loud-error on binary; byte-aware tools
 (`cat`/`dd`/`base64`/`xxd`/`checksum`/`wc`/`tee`/`head -c`/`tail -c`/`cmp`) consume
 it. Regression tests in `sandbox_mode_tests`.
 
-**Remaining (separate concern — external-command binary I/O):** `env` and `spawn`
-still `from_utf8_lossy` when *forwarding stdin to* and *capturing stdout/stderr
-from* an external process. Fixing that means piping raw bytes to/from the child
-(and deciding whether captured binary output becomes a `Bytes` result) — a
-distinct design question from the in-process text tools. `grep_engine`'s internal
-`from_utf8_lossy` is now safe because `grep` validates UTF-8 upstream.
+**External-command binary I/O — FIXED 2026-06-13.** External commands now keep
+binary intact in both directions: stdin is forwarded raw (`env`/`spawn` read
+`read_stdin_to_bytes`; the pipeline path already streamed raw), and captured
+stdout becomes a `Bytes` result (text if valid UTF-8) at all three capture sites
+— `kernel.rs::try_execute_external` (`BoundedStream::read()` not `read_string`),
+`dispatch.rs` (`spill_aware_collect` returns `Vec<u8>`), and `env`/`spawn`. So
+`curl url`, `curl url > file.bin`, `… | gzip`, `printf … | base64` all round-trip.
+stderr stays text. The output limiter's binary spill/truncate (already
+byte-aware) composes. `grep_engine`'s `from_utf8_lossy` is safe (grep validates
+upstream). Residual: buffered-`String` stdin (`take_stdin`, heredoc/here-string)
+is still text — binary there would need `ctx.stdin` to become bytes, rare.
+
+**Bug found + fixed in the same pass:** `accumulate_result` (kernel.rs) folded
+every top-level statement's result via `push_out(text_out())` — lossy-decoding
+*any* `Bytes` final result (so even `cat blob.bin` or `echo ff | xxd -r -p`
+standalone came back mangled, independent of external commands). Now concatenates
+raw bytes when binary is involved.
 
 ### Binary-data path — typed `Bytes`, `dd`, and `/dev/urandom`
 Surfaced 2026-06-13 while adding the synthetic `/dev` (DevFs: `/dev/null`,

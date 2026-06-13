@@ -422,7 +422,7 @@ pub async fn spill_aware_collect(
     mut stderr_reader: tokio::process::ChildStderr,
     stderr_stream: Option<crate::scheduler::StderrStream>,
     config: &OutputLimitConfig,
-) -> (String, String, bool) {
+) -> (Vec<u8>, String, bool) {
     let max = config.max_bytes.unwrap_or(usize::MAX);
 
     // Spawn stderr collection
@@ -430,6 +430,10 @@ pub async fn spill_aware_collect(
         collect_stderr(&mut stderr_reader, stderr_stream.as_ref()).await
     });
 
+    // stdout is returned as RAW bytes — the caller applies `success_text_or_bytes`
+    // so a binary-producing external command (curl, openssl, gzip) isn't lossy
+    // decoded. The over-limit spill/truncation *notice* is valid UTF-8 text, so
+    // it round-trips through the same path as a plain text result.
     let (stdout_result, did_spill) = collect_stdout_with_spill(&mut stdout, max, config).await;
 
     let stderr = stderr_task.await.unwrap_or_default();
@@ -477,7 +481,7 @@ async fn collect_stdout_with_spill<R: tokio::io::AsyncRead + Unpin>(
     stdout: &mut R,
     max_bytes: usize,
     config: &OutputLimitConfig,
-) -> (String, bool) {
+) -> (Vec<u8>, bool) {
     use tokio::io::AsyncReadExt;
     use tokio::time::{sleep, Duration};
 
@@ -495,7 +499,7 @@ async fn collect_stdout_with_spill<R: tokio::io::AsyncRead + Unpin>(
                     Ok(0) => {
                         // EOF — command finished within detection window.
                         // Post-hoc spill check happens in the caller.
-                        return (String::from_utf8_lossy(&buffer).into_owned(), false);
+                        return (buffer, false);
                     }
                     Ok(n) => {
                         buffer.extend_from_slice(&chunk[..n]);
@@ -505,7 +509,7 @@ async fn collect_stdout_with_spill<R: tokio::io::AsyncRead + Unpin>(
                         }
                     }
                     Err(_) => {
-                        return (String::from_utf8_lossy(&buffer).into_owned(), false);
+                        return (buffer, false);
                     }
                 }
             }
@@ -519,7 +523,8 @@ async fn collect_stdout_with_spill<R: tokio::io::AsyncRead + Unpin>(
     // Phase 2: Check if we should switch to spill mode
     if buffer.len() > max_bytes {
         // Already over limit — hand off to the disk-spill or in-memory-drain path
-        return handle_overflow(&buffer, stdout, config, max_bytes).await;
+        let (msg, spilled) = handle_overflow(&buffer, stdout, config, max_bytes).await;
+        return (msg.into_bytes(), spilled);
     }
 
     // Continue collecting (under limit so far)
@@ -531,14 +536,15 @@ async fn collect_stdout_with_spill<R: tokio::io::AsyncRead + Unpin>(
                 buffer.extend_from_slice(&chunk[..n]);
                 // Check if we've exceeded limit mid-stream
                 if buffer.len() > max_bytes {
-                    return handle_overflow(&buffer, stdout, config, max_bytes).await;
+                    let (msg, spilled) = handle_overflow(&buffer, stdout, config, max_bytes).await;
+        return (msg.into_bytes(), spilled);
                 }
             }
             Err(_) => break,
         }
     }
 
-    (String::from_utf8_lossy(&buffer).into_owned(), false)
+    (buffer, false)
 }
 
 /// Decide how to handle stdout that has overflowed the limit: spill the rest to
@@ -1192,6 +1198,7 @@ mod tests {
 
         let mut reader = reader;
         let (result, did_spill) = collect_stdout_with_spill(&mut reader, 1024, &config).await;
+        let result = String::from_utf8(result).expect("test output is valid UTF-8");
         assert_eq!(result, "hello world");
         assert!(!did_spill);
     }
@@ -1215,6 +1222,7 @@ mod tests {
 
         let mut reader = reader;
         let (result, did_spill) = collect_stdout_with_spill(&mut reader, 100, &config).await;
+        let result = String::from_utf8(result).expect("test output is valid UTF-8");
         assert!(did_spill, "should have spilled");
         assert!(result.contains("[output truncated:"));
         assert!(result.contains("full output at"));
@@ -1239,6 +1247,7 @@ mod tests {
 
         let mut reader = reader;
         let (result, did_spill) = collect_stdout_with_spill(&mut reader, 100, &config).await;
+        let result = String::from_utf8(result).expect("test output is valid UTF-8");
         // Exactly at limit — should not spill (<=)
         assert!(!did_spill, "exact boundary should not spill");
         assert_eq!(result.len(), 100);
@@ -1263,6 +1272,7 @@ mod tests {
 
         let mut reader = reader;
         let (result, did_spill) = collect_stdout_with_spill(&mut reader, 1024, &config).await;
+        let result = String::from_utf8(result).expect("test output is valid UTF-8");
         assert_eq!(result, "partial data");
         assert!(!did_spill);
     }
@@ -1410,6 +1420,7 @@ mod tests {
 
         let mut reader = reader;
         let (result, did_spill) = collect_stdout_with_spill(&mut reader, 100, &config).await;
+        let result = String::from_utf8(result).expect("test output is valid UTF-8");
         assert!(did_spill, "drain flags truncation for the exit-3 remap");
         assert!(result.contains("truncated in memory"), "got: {}", result);
         assert!(!result.contains("full output at"), "no disk file in memory mode");

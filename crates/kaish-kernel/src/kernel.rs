@@ -4442,10 +4442,14 @@ impl Kernel {
                 }
             }) as i64;
 
-            let stdout = stdout_stream.read_string().await;
+            // Read stdout as RAW bytes: text if valid UTF-8, else a Bytes
+            // result, so `curl url`, `curl url > file.bin`, etc. keep binary
+            // intact. stderr stays text. See docs/binary-data.md.
+            let stdout = stdout_stream.read().await;
             let stderr = stderr_stream.read_string().await;
-
-            Ok(Some(ExecResult::from_output(code, stdout, stderr)))
+            let mut result = ExecResult::success_text_or_bytes(stdout).with_code(code);
+            result.err = stderr;
+            Ok(Some(result))
         }
     }
 
@@ -4729,7 +4733,20 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     // Without this, the first command's output stays in .output while
     // the second's text gets appended to .out, losing the first.
     accumulated.materialize();
-    accumulated.push_out(&new.text_out());
+    match new.out_bytes() {
+        // A binary result must not be lossy-decoded by text_out(): concatenate
+        // raw bytes so the combined output stays binary (this is the path every
+        // top-level statement's result flows through). See docs/binary-data.md.
+        Some(new_bytes) => {
+            let mut combined: Vec<u8> = match accumulated.out_bytes() {
+                Some(b) => b.to_vec(),
+                None => accumulated.text_out().into_owned().into_bytes(),
+            };
+            combined.extend_from_slice(new_bytes);
+            accumulated.set_out_bytes(combined);
+        }
+        None => accumulated.push_out(&new.text_out()),
+    }
     accumulated.err.push_str(&new.err);
     accumulated.code = new.code;
     accumulated.data = new.data.clone();
