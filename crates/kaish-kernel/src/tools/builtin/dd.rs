@@ -117,7 +117,10 @@ impl Tool for Dd {
                             ),
                         )
                     }
-                    Some(t) => Some(ReadRange::bytes(skip.saturating_mul(bs), t)),
+                    Some(t) => match skip.checked_mul(bs) {
+                        Some(offset) => Some(ReadRange::bytes(offset, t)),
+                        None => return ExecResult::failure(2, "dd: skip*bs overflow"),
+                    },
                     None => return ExecResult::failure(2, "dd: count*bs overflow"),
                 }
             }

@@ -434,6 +434,70 @@ async fn sandbox_binary_aware_tools_accept_binary_stdin() {
 }
 
 #[tokio::test]
+async fn sandbox_cat_last_stage_keeps_binary() {
+    let k = sandbox_kernel().await;
+    // `cat` as the last pipeline stage must not lossy-decode piped binary.
+    let r = k
+        .execute("echo ff | xxd -r -p | cat | wc -c")
+        .await
+        .expect("execute failed");
+    assert!(r.ok(), "stderr: {}", r.err);
+    assert_eq!(r.text_out().trim(), "1");
+}
+
+#[tokio::test]
+async fn sandbox_kaish_last_keeps_binary() {
+    let k = sandbox_kernel().await;
+    // kaish-last must preserve a binary previous result, not lossy-decode it.
+    // base64 of the raw 0xFF byte is "/w=="; a lossy U+FFFD would be "77+9".
+    let r = k
+        .execute("echo ff | xxd -r -p; kaish-last | base64")
+        .await
+        .expect("execute failed");
+    assert!(r.ok(), "stderr: {}", r.err);
+    assert!(r.text_out().contains("/w=="), "kaish-last kept the byte: {:?}", r.text_out());
+    assert!(!r.text_out().contains("77+9"), "must not be lossy-decoded: {:?}", r.text_out());
+}
+
+#[tokio::test]
+async fn sandbox_subst_capture_preserves_binary_byte_count() {
+    let k = sandbox_kernel().await;
+    // $() of a binary command yields a Bytes value (1 byte), not a 3-byte
+    // U+FFFD mangle. base64 it back out to observe exactly one byte.
+    let r = k
+        .execute("x=$(echo ff | xxd -r -p); kaish-vars --json")
+        .await
+        .expect("execute failed");
+    assert!(r.ok(), "stderr: {}", r.err);
+    // The var renders via the bytes placeholder, proving it stayed binary.
+    assert!(r.text_out().contains("binary"), "x should be binary: {}", r.text_out());
+}
+
+#[tokio::test]
+async fn sandbox_for_over_binary_is_loud_error() {
+    let k = sandbox_kernel().await;
+    // A loud error surfaces as an Err from execute (or a non-zero result).
+    let r = k
+        .execute("for x in $(echo ff | xxd -r -p); do echo $x; done")
+        .await;
+    assert!(
+        r.is_err() || !r.unwrap().ok(),
+        "iterating binary should fail loud"
+    );
+}
+
+#[tokio::test]
+async fn sandbox_binary_in_string_interpolation_is_loud_error() {
+    let k = sandbox_kernel().await;
+    // Command substitution producing binary directly inside a string must error.
+    let r = k.execute("echo \"val=$(echo ff | xxd -r -p)\"").await;
+    assert!(
+        r.is_err() || !r.unwrap().ok(),
+        "binary in a string should fail loud, not splice U+FFFD"
+    );
+}
+
+#[tokio::test]
 async fn sandbox_head_c_on_piped_binary() {
     let k = sandbox_kernel().await;
     // `head -c 4` on a piped binary stream must keep exactly 4 raw bytes — not

@@ -86,6 +86,11 @@ impl Tool for KaishLast {
             return ExecResult::with_output(OutputData::text(format!("{}\n", json)));
         }
 
+        // Preserve a binary previous result as bytes — don't lossy-decode it.
+        if let Some(bytes) = prev.out_bytes() {
+            return ExecResult::success_bytes(bytes.to_vec());
+        }
+
         let out = prev.text_out();
         if !out.is_empty() {
             return ExecResult::with_output(OutputData::text(out.into_owned()));

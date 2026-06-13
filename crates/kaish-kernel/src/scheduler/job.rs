@@ -254,9 +254,16 @@ impl Job {
 
     /// Write job output to a temp file.
     fn write_output_file(&self, result: &ExecResult) -> Option<PathBuf> {
-        // Only write if there's output to capture
-        let text = result.text_out();
-        if text.is_empty() && result.err.is_empty() {
+        // This is a human-readable text log; a binary stdout is noted, not
+        // dumped (lossy-decoding it would corrupt; raw bytes would garble the
+        // log). Only its size is recorded.
+        let is_bytes = result.is_bytes();
+        let text = if is_bytes {
+            std::borrow::Cow::Borrowed("")
+        } else {
+            result.text_out()
+        };
+        if !is_bytes && text.is_empty() && result.err.is_empty() {
             return None;
         }
 
@@ -286,7 +293,12 @@ impl Job {
         content.push_str(&format!("# Job {}: {}\n", self.id, self.command));
         content.push_str(&format!("# Status: {}\n\n", if result.ok() { "Done" } else { "Failed" }));
 
-        if !text.is_empty() {
+        if is_bytes {
+            let n = result.out_bytes().map(|b| b.len()).unwrap_or(0);
+            content.push_str(&format!(
+                "## STDOUT\n[binary output: {n} bytes — omitted from this text log]\n"
+            ));
+        } else if !text.is_empty() {
             content.push_str("## STDOUT\n");
             content.push_str(&text);
             if !text.ends_with('\n') {

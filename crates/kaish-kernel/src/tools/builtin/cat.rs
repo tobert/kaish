@@ -84,9 +84,18 @@ impl Tool for Cat {
                 }
             }
 
-            // Buffered path: read all stdin (empty stdin is valid — POSIX cat exits 0)
-            let stdin = ctx.read_stdin_to_string().await.unwrap_or_default();
-            if number_lines && !stdin.is_empty() {
+            // Buffered path (e.g. `cat` as a pipeline's last stage). With `-n`
+            // we need text for line numbering, so binary is a loud error;
+            // without it, stay byte-clean so piped binary survives intact
+            // (`dd if=/dev/urandom … | cat` → a Bytes result, not a lossy mangle).
+            if number_lines {
+                let stdin = match ctx.read_stdin_to_text().await {
+                    Ok(s) => s.unwrap_or_default(),
+                    Err(e) => return ExecResult::failure(2, format!("cat: {e}")),
+                };
+                if stdin.is_empty() {
+                    return ExecResult::with_output(OutputData::text(stdin));
+                }
                 let numbered = stdin
                     .lines()
                     .enumerate()
@@ -95,7 +104,8 @@ impl Tool for Cat {
                     .join("\n");
                 return ExecResult::with_output(OutputData::text(numbered));
             }
-            return ExecResult::with_output(OutputData::text(stdin));
+            let stdin = ctx.read_stdin_to_bytes().await.unwrap_or_default();
+            return ExecResult::success_text_or_bytes(stdin);
         }
         // Collect paths, expanding any glob patterns
         let paths = match ctx.expand_paths(&args.positional).await {

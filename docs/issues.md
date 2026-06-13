@@ -76,6 +76,32 @@ every top-level statement's result via `push_out(text_out())` — lossy-decoding
 standalone came back mangled, independent of external commands). Now concatenates
 raw bytes when binary is involved.
 
+**Round-2 DeepSeek + Gemini review (2026-06-13)** caught more silent-corruption
+sites, all FIXED: `cat` as a pipeline's last stage (read_stdin_to_string),
+`$()`/block/function-body capture (`execute_block_capturing` +
+`execute_user_tool` now accumulate raw bytes → `$()` yields `Value::Bytes`),
+command-subst inside a string (loud error), `kaish-last` (preserves bytes),
+background-job output file (notes binary, doesn't dump lossy), `for` over a
+`Bytes` value (loud error), `dd skip*bs` (checked_mul). Regression tests in
+`sandbox_mode_tests`.
+
+**Residuals (NOT silent corruption — visible/loud, deferred):**
+- **Buffered-`String` stdin** (`ExecContext::stdin: Option<String>`): `< binfile`
+  and binary here-strings/heredocs error (`from_utf8`) or stringify a
+  `Value::Bytes` to the `[binary: N bytes]` placeholder. Making `ctx.stdin` hold
+  bytes is the real fix; rare in practice.
+- **Var interpolation** `"$x"` where `x` is `Value::Bytes` → `[binary: N bytes]`
+  placeholder (visible marker, not lossy). Command-subst-in-string already
+  errors; var-in-string could too if `value_to_string` grew a fallible path.
+- **Output-limit spill preview**: the head/tail *preview text* in the spill
+  notice still `from_utf8_lossy`s (U+FFFD); the spilled file itself is correct
+  raw bytes. Cosmetic — switch the preview to a hex dump.
+- **`cmp`/`cat`/… whole-file reads** OOM on huge inputs (general kaish model, not
+  binary-specific); add a size cap if it bites.
+- **`wc -l`** counts `str::lines()` not `\n` — overcounts by 1 with no trailing
+  newline (pre-existing, unrelated to binary). **`wc -m`** on binary over-counts
+  via U+FFFD (documented).
+
 ### Binary-data path — typed `Bytes`, `dd`, `/dev/urandom` — LANDED (residuals only)
 Surfaced 2026-06-13 while adding the synthetic `/dev` (DevFs: `/dev/null`,
 `/dev/zero` shipped). kaish is UTF-8 text end to end (`ExecResult.out: String`,

@@ -1979,6 +1979,14 @@ impl Kernel {
                                 items.push(Value::String(trimmed.to_string()));
                             }
                         }
+                        // Binary isn't iterable — fail loud rather than loop
+                        // once over an opaque byte blob.
+                        Value::Bytes(_) => {
+                            anyhow::bail!(
+                                "for: cannot iterate over binary data — decode it \
+                                 (base64/xxd) first"
+                            );
+                        }
                         // Strings not from $(cmd) stay as one value.
                         other => items.push(other),
                     }
@@ -3309,8 +3317,12 @@ impl Kernel {
                 // Now propagate the error
                 let result = run_result?;
 
+                // A binary result is preserved as bytes — never lossy-decoded to
+                // a string. No trailing-newline trim (every byte is significant).
+                if let Some(bytes) = result.out_bytes() {
+                    Ok(Value::Bytes(bytes.to_vec()))
                 // Prefer structured data (enables `for i in $(cmd)` iteration)
-                if let Some(data) = &result.data {
+                } else if let Some(data) = &result.data {
                     Ok(data.clone())
                 } else if let Some(output) = result.output() {
                     // Flat non-text node lists (glob, ls, tree) → iterable array
@@ -3554,7 +3566,15 @@ impl Kernel {
                 // Now propagate the error
                 let result = run_result?;
 
-                Ok(result.text_out().trim_end_matches('\n').to_string())
+                // Embedding binary into a string is a text context: fail loud
+                // rather than splice in U+FFFD garbage.
+                match result.try_text_out() {
+                    Ok(s) => Ok(s.trim_end_matches('\n').to_string()),
+                    Err(e) => anyhow::bail!(
+                        "command substitution in a string produced binary data ({e}) — \
+                         pipe through base64/xxd"
+                    ),
+                }
             }
             StringPart::LastExitCode => {
                 let scope = self.scope.read().await;
@@ -3624,10 +3644,19 @@ impl Kernel {
 
         // 3. Execute body statements with control flow handling
         // Accumulate output across statements (like sh)
-        let mut accumulated_out = String::new();
+        // Accumulate stdout as raw bytes so a binary-producing statement in a
+        // function body survives instead of being lossy-decoded here.
+        let mut accumulated_out: Vec<u8> = Vec::new();
         let mut accumulated_err = String::new();
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
+
+        fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
+            match r.out_bytes() {
+                Some(b) => buf.extend_from_slice(b),
+                None => buf.extend_from_slice(r.text_out().as_bytes()),
+            }
+        }
 
         // Track execution error for propagation after cleanup
         let mut exec_error: Option<anyhow::Error> = None;
@@ -3647,13 +3676,13 @@ impl Kernel {
 
                     match flow {
                         ControlFlow::Normal(r) => {
-                            accumulated_out.push_str(&r.text_out());
+                            push_out(&mut accumulated_out, &r);
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
                             last_data = r.data;
                         }
                         ControlFlow::Return { value } => {
-                            accumulated_out.push_str(&value.text_out());
+                            push_out(&mut accumulated_out, &value);
                             accumulated_err.push_str(&value.err);
                             last_code = value.code;
                             last_data = value.data;
@@ -3664,7 +3693,7 @@ impl Kernel {
                             break;
                         }
                         ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
-                            accumulated_out.push_str(&r.text_out());
+                            push_out(&mut accumulated_out, &r);
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
                             last_data = r.data;
@@ -3689,11 +3718,11 @@ impl Kernel {
         if let Some(e) = exec_error {
             return Err(e);
         }
-        if let Some(code) = exit_code {
-            return Ok(ExecResult::from_parts(code, accumulated_out, accumulated_err, last_data));
-        }
-
-        Ok(ExecResult::from_parts(last_code, accumulated_out, accumulated_err, last_data))
+        let code = exit_code.unwrap_or(last_code);
+        let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
+        result.err = accumulated_err;
+        result.data = last_data;
+        Ok(result)
     }
 
     /// Execute a command-substitution body — a block of statements — and return
@@ -3704,10 +3733,21 @@ impl Kernel {
     /// captures `ab`. Scope/cwd snapshotting (so `$(cd / && pwd)` cannot leak the
     /// cwd) is the caller's responsibility.
     async fn execute_block_capturing(&self, stmts: &[Stmt]) -> Result<ExecResult> {
-        let mut accumulated_out = String::new();
+        // Accumulate stdout as raw bytes so a binary-producing statement
+        // (`$(dd …)`, `$(base64 -d …)`) isn't lossy-decoded here before the
+        // caller can preserve it. The final result is text iff valid UTF-8.
+        let mut accumulated_out: Vec<u8> = Vec::new();
         let mut accumulated_err = String::new();
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
+
+        // Append a statement's stdout as raw bytes (binary) or its UTF-8 bytes.
+        fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
+            match r.out_bytes() {
+                Some(b) => buf.extend_from_slice(b),
+                None => buf.extend_from_slice(r.text_out().as_bytes()),
+            }
+        }
 
         for stmt in stmts {
             let flow = self.execute_stmt_flow(stmt).await?;
@@ -3726,13 +3766,13 @@ impl Kernel {
                 ControlFlow::Normal(r)
                 | ControlFlow::Break { result: r, .. }
                 | ControlFlow::Continue { result: r, .. } => {
-                    accumulated_out.push_str(&r.text_out());
+                    push_out(&mut accumulated_out, &r);
                     accumulated_err.push_str(&r.err);
                     last_code = r.code;
                     last_data = r.data;
                 }
                 ControlFlow::Return { value } => {
-                    accumulated_out.push_str(&value.text_out());
+                    push_out(&mut accumulated_out, &value);
                     accumulated_err.push_str(&value.err);
                     last_code = value.code;
                     last_data = value.data;
@@ -3745,12 +3785,10 @@ impl Kernel {
             }
         }
 
-        Ok(ExecResult::from_parts(
-            last_code,
-            accumulated_out,
-            accumulated_err,
-            last_data,
-        ))
+        let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(last_code);
+        result.err = accumulated_err;
+        result.data = last_data;
+        Ok(result)
     }
 
     /// Execute the `source` / `.` command to include and run a script.
