@@ -139,7 +139,8 @@ impl Tool for Checksum {
             let mut hasher = StreamHasher::new(&algo);
             match ctx
                 .read_file_chunked(&resolved, ExecContext::STREAM_CHUNK_SIZE, |chunk| {
-                    hasher.update(chunk)
+                    hasher.update(chunk);
+                    std::ops::ControlFlow::Continue(())
                 })
                 .await
             {
@@ -220,7 +221,8 @@ impl Checksum {
             let mut hasher = StreamHasher::new(algo);
             match ctx
                 .read_file_chunked(&file_resolved, ExecContext::STREAM_CHUNK_SIZE, |chunk| {
-                    hasher.update(chunk)
+                    hasher.update(chunk);
+                    std::ops::ControlFlow::Continue(())
                 })
                 .await
             {

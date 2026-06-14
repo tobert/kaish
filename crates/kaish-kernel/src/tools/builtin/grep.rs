@@ -389,7 +389,17 @@ impl Tool for Grep {
                 .read_file_chunked(
                     Path::new(&resolved),
                     ExecContext::STREAM_CHUNK_SIZE,
-                    |chunk| scanner.push(chunk),
+                    |chunk| {
+                        scanner.push(chunk);
+                        // Once the scanner has decided the file is binary (bad
+                        // UTF-8) or hit the quit byte, the rest of the file is
+                        // irrelevant — stop reading it.
+                        if scanner.saw_invalid_utf8 || scanner.stopped_early {
+                            std::ops::ControlFlow::Break(())
+                        } else {
+                            std::ops::ControlFlow::Continue(())
+                        }
+                    },
                 )
                 .await;
 
@@ -400,7 +410,7 @@ impl Tool for Grep {
 
             // Flush the remaining carry.  `saw_invalid_utf8` is set if any
             // chunk (including the final carry) contained a genuinely bad byte.
-            // `stopped_early` means a quit_byte was seen — not an error.
+            // `stopped_early` means a quit_byte (NUL) was seen.
             scanner.finish();
             if scanner.saw_invalid_utf8 {
                 return ExecResult::failure(
@@ -409,20 +419,29 @@ impl Tool for Grep {
                 );
             }
 
-            let render = scanner.into_render_result();
-
-            return if render.match_count == 0 {
-                ExecResult::from_output(1, render.text, "")
-            } else {
-                let headers = if line_number {
-                    vec!["MATCH".to_string(), "LINE".to_string()]
+            // A NUL byte (valid UTF-8, so not the loud error above) triggers
+            // grep-searcher's `BinaryDetection::quit`, whose exact emit/suppress
+            // semantics are subtle and engine-specific. Rather than reproduce
+            // them in the line scanner, fall through to the whole-buffer path
+            // below — it runs the real searcher and is the parity reference.
+            // NUL-bearing files are the rare binary case, so the extra read is
+            // acceptable.
+            if !scanner.stopped_early {
+                let render = scanner.into_render_result();
+                return if render.match_count == 0 {
+                    ExecResult::from_output(1, render.text, "")
                 } else {
-                    vec!["MATCH".to_string()]
+                    let headers = if line_number {
+                        vec!["MATCH".to_string(), "LINE".to_string()]
+                    } else {
+                        vec!["MATCH".to_string()]
+                    };
+                    let output = OutputData::table(headers, render.nodes)
+                        .with_rich_json(serde_json::Value::Array(render.rich));
+                    ExecResult::with_output_and_text(output, render.text)
                 };
-                let output = OutputData::table(headers, render.nodes)
-                    .with_rich_json(serde_json::Value::Array(render.rich));
-                ExecResult::with_output_and_text(output, render.text)
-            };
+            }
+            // else: NUL seen — fall through to the whole-buffer path below.
         }
 
         // Fallback: whole-buffer path for stdin OR complex flags (-c/-q/-l/-o/-A/-B/-C).
@@ -852,7 +871,11 @@ impl<'r> GrepLineScanner<'r> {
         // Rich JSON: must be byte-identical to `match_record_to_json` for the
         // same line — path (the filename arg), the real line number (the
         // searcher numbers unconditionally), the line's absolute byte offset,
-        // and submatches from the same regex.
+        // and submatches. Submatches come from `regex::Regex` here vs the
+        // whole-buffer path's `grep_regex::RegexMatcher`; both compile the same
+        // `final_pattern` with the same flags (same underlying engine), so spans
+        // agree for the patterns we support — verified by the rich-JSON parity
+        // test against `grep_lines_structured`.
         let submatches: Vec<serde_json::Value> = self
             .regex
             .find_iter(line)
@@ -1773,6 +1796,11 @@ mod tests {
             // Empty file.
             (b"", "pattern"),
         ];
+        // NOTE: NUL-bearing inputs are intentionally absent here. The line
+        // scanner does NOT replicate grep-searcher's `BinaryDetection::quit`;
+        // instead the execute() path falls back to the whole-buffer searcher on
+        // a NUL. That end-to-end parity is covered by
+        // `grep_nul_file_matches_whole_buffer_path` below.
 
         for (input, pattern) in cases {
             for line_numbers in [false, true] {
@@ -1875,6 +1903,24 @@ mod tests {
         );
     }
 
+    /// A NUL byte (valid UTF-8) is not the loud binary error; it triggers
+    /// grep-searcher's `BinaryDetection::quit`. The streaming line scanner would
+    /// emit pre-NUL matches, but the searcher suppresses them — so execute()
+    /// falls back to the whole-buffer path on a NUL. This asserts the command's
+    /// output matches the whole-buffer reference exactly (it did NOT before the
+    /// fallback: the scanner emitted "foo" while the searcher emitted nothing).
+    #[tokio::test]
+    async fn grep_nul_file_matches_whole_buffer_path() {
+        let content: &[u8] = b"foo\nbar\x00baz\nfoo again\n";
+        for (pattern, ln) in [("foo", false), ("bar", false), ("foo", true)] {
+            let reference = reference_render(content, pattern, ln, Some("/f.txt"));
+            let (text, code) = stream_grep_via_exec(content, pattern, ln).await;
+            assert_eq!(text, reference.text, "pattern={pattern} ln={ln}: text");
+            let expected_code = if reference.match_count == 0 { 1 } else { 0 };
+            assert_eq!(code, expected_code, "pattern={pattern} ln={ln}: exit code");
+        }
+    }
+
     // ---- Streaming: bounded-memory proof ----
 
     /// A `Filesystem` that records every `read_range` it is asked for, so a test
@@ -1947,9 +1993,12 @@ mod tests {
         let regex = regex::Regex::new("line").unwrap();
         let mut scanner =
             GrepLineScanner::new(&regex, false, false, Some(b'\x00'), Some("/big.txt".to_string()));
-        ctx.read_file_chunked(Path::new("/big.txt"), 256, |c| scanner.push(c))
-            .await
-            .unwrap();
+        ctx.read_file_chunked(Path::new("/big.txt"), 256, |c| {
+            scanner.push(c);
+            std::ops::ControlFlow::Continue(())
+        })
+        .await
+        .unwrap();
         scanner.finish();
 
         let recs = ranges.lock().unwrap();

@@ -671,12 +671,15 @@ impl ExecContext {
     /// Stream a file's bytes forward in `chunk_size` slices, handing each
     /// non-empty chunk to `f`.
     ///
-    /// Reads are issued as positional `read_range` requests, so backends that
-    /// honour byte ranges (LocalFs) never materialise the whole file; in-memory
-    /// backends slice cheaply. The loop terminates on the first empty chunk,
-    /// which every backend returns once the offset reaches EOF. This is the
-    /// shared engine for scan-oriented builtins (`wc`, and next `grep`) that
-    /// only walk a file front-to-back and must not hold it all in memory.
+    /// Reads are issued as positional `read_range` requests, so backends slice
+    /// without materialising the whole file (LocalFs seeks; MemoryFs/OverlayFs
+    /// slice their stored bytes). The loop terminates on the first empty chunk,
+    /// which every backend returns once the offset reaches EOF. `f` returns a
+    /// [`ControlFlow`](std::ops::ControlFlow): `Break` stops the loop early
+    /// (e.g. a consumer that has detected binary content and will discard the
+    /// rest), so we don't keep reading a file the caller is done with. This is
+    /// the shared engine for scan-oriented builtins (`wc`, `checksum`, `grep`)
+    /// that walk a file front-to-back and must not hold it all in memory.
     pub async fn read_file_chunked<F>(
         &self,
         path: &std::path::Path,
@@ -684,7 +687,7 @@ impl ExecContext {
         mut f: F,
     ) -> kaish_types::backend::BackendResult<()>
     where
-        F: FnMut(&[u8]),
+        F: FnMut(&[u8]) -> std::ops::ControlFlow<()>,
     {
         use kaish_types::ReadRange;
         let mut offset = 0u64;
@@ -697,7 +700,9 @@ impl ExecContext {
                 break;
             }
             offset += chunk.len() as u64;
-            f(&chunk);
+            if f(&chunk).is_break() {
+                break;
+            }
         }
         Ok(())
     }

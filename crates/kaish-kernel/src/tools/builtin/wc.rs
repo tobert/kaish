@@ -108,7 +108,8 @@ impl Tool for Wc {
             let mut counter = WcCounter::default();
             match ctx
                 .read_file_chunked(&resolved, ExecContext::STREAM_CHUNK_SIZE, |chunk| {
-                    counter.push(chunk)
+                    counter.push(chunk);
+                    std::ops::ControlFlow::Continue(())
                 })
                 .await
             {
@@ -610,9 +611,12 @@ mod tests {
         let ctx = ExecContext::new(Arc::new(vfs));
 
         let mut counter = WcCounter::default();
-        ctx.read_file_chunked(Path::new("/big.txt"), 256, |c| counter.push(c))
-            .await
-            .unwrap();
+        ctx.read_file_chunked(Path::new("/big.txt"), 256, |c| {
+            counter.push(c);
+            std::ops::ControlFlow::Continue(())
+        })
+        .await
+        .unwrap();
 
         let recs = ranges.lock().unwrap();
         // 1000 bytes / 256 → 4 data chunks + 1 terminating empty read.

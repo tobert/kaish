@@ -210,7 +210,12 @@ async fn stream_file_to_pipe(
             .await
         {
             Ok(c) => c,
-            Err(e) => return ExecResult::failure(1, format!("cat: {display_path}: {e}")),
+            Err(e) => {
+                // Shut the pipe down before bailing so the reader sees EOF
+                // promptly rather than waiting on `Drop`.
+                let _ = pipe_out.shutdown().await;
+                return ExecResult::failure(1, format!("cat: {display_path}: {e}"));
+            }
         };
         if chunk.is_empty() {
             break; // EOF
