@@ -399,6 +399,12 @@ only production callers are scatter/gather option parsing (builtin schemas,
 `map_positionals` backend tool in production, add the same guard (lift a shared
 helper) to keep the two builders in sync.
 
+The two builders have since drifted further: the glued short-flag value handling
+(`cut -f1`, `head -c5`) added 2026-06-14 lives only in `build_args_async`, so a
+glued short flag on a sync-path builtin (e.g. a hypothetical `scatter -n5`) would
+not bind. Same low-impact-today reasoning (sync callers are scatter/gather option
+parsing), same fix: lift a shared helper, or fold into the twin-elimination below.
+
 ### Eliminate the sync `build_tool_args` twin entirely
 Bigger than the guard above: retire the sync arg builder so there's one path to
 reason about. Real commands already bind through the async `build_args_async`
