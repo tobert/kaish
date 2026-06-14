@@ -116,6 +116,9 @@ fn list_aliases(ctx: &ExecContext) -> ExecResult {
     let headers = vec!["NAME".to_string(), "VALUE".to_string()];
 
     let mut entries: Vec<_> = ctx.aliases.iter().collect();
+    // sort_by_key would force cloning the borrowed &String key; the comparator
+    // form sorts by reference with no allocation.
+    #[allow(clippy::unnecessary_sort_by)]
     entries.sort_by(|(a, _), (b, _)| a.cmp(b));
 
     let nodes: Vec<OutputNode> = entries

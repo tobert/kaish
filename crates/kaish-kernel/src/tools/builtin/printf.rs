@@ -40,7 +40,7 @@ impl FormatArg for Value {
             Value::Int(i) => *i,
             Value::Float(f) => *f as i64,
             Value::String(s) => s.parse().unwrap_or(0),
-            Value::Bool(b) => if *b { 1 } else { 0 },
+            Value::Bool(b) => i64::from(*b),
             _ => 0,
         }
     }
