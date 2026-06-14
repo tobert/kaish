@@ -6,7 +6,9 @@ use std::path::Path;
 
 #[cfg(test)]
 use crate::ast::Value;
+use crate::backend::ReadRange;
 use crate::interpreter::{ExecResult, OutputData};
+use crate::scheduler::PipeWriter;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Cat tool: read and output file contents.
@@ -124,6 +126,21 @@ impl Tool for Cat {
         // can't line-number or text-concat binary. See docs/binary-data.md.
         if paths.len() == 1 && !number_lines {
             let resolved = ctx.resolve_path(&paths[0]);
+            // Streaming path: when cat feeds a downstream stage, stream the file
+            // in bounded chunks rather than reading it whole. This bounds memory
+            // and lets downstream consumers (e.g. `head`) early-exit cheaply.
+            if let Some(pipe_out) = ctx.pipe_stdout.take() {
+                return stream_file_to_pipe(
+                    ctx,
+                    Path::new(&resolved),
+                    &paths[0],
+                    pipe_out,
+                    ExecContext::STREAM_CHUNK_SIZE,
+                )
+                .await;
+            }
+            // Terminal stage (pipe_stdout is None): must materialise the whole
+            // file to return it as an ExecResult. Streaming saves nothing here.
             return match ctx.backend.read(Path::new(&resolved), None).await {
                 Ok(data) => ExecResult::success_text_or_bytes(data),
                 Err(e) => ExecResult::failure(1, format!("cat: {}: {}", paths[0], e)),
@@ -162,6 +179,49 @@ impl Tool for Cat {
 
         ExecResult::with_output(OutputData::text(all_content))
     }
+}
+
+/// Stream a single file to a pipe in bounded `chunk_size` chunks.
+///
+/// Exposed as a standalone async function (not a method) so tests can call it
+/// directly with an injected `PipeWriter` and a custom chunk size that forces
+/// multiple reads on a small file — mirroring the cmp/wc approach.
+///
+/// Binary integrity: every chunk is written as raw bytes (`write_all(&chunk)`),
+/// no UTF-8 decode involved. A non-UTF-8 file arrives byte-for-byte identical
+/// at the pipe reader.
+///
+/// Early exit: if `write_all` returns `Err` (the downstream reader was dropped,
+/// e.g. `cat big | head -1`), the loop breaks immediately and returns success —
+/// the downstream command already has what it needed.
+async fn stream_file_to_pipe(
+    ctx: &ExecContext,
+    path: &Path,
+    display_path: &str,
+    mut pipe_out: PipeWriter,
+    chunk_size: u64,
+) -> ExecResult {
+    use tokio::io::AsyncWriteExt;
+    let mut offset = 0u64;
+    loop {
+        let chunk = match ctx
+            .backend
+            .read(path, Some(ReadRange::bytes(offset, chunk_size)))
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => return ExecResult::failure(1, format!("cat: {display_path}: {e}")),
+        };
+        if chunk.is_empty() {
+            break; // EOF
+        }
+        offset += chunk.len() as u64;
+        if pipe_out.write_all(&chunk).await.is_err() {
+            break; // downstream dropped (e.g. head -1 satisfied) — stop reading
+        }
+    }
+    let _ = pipe_out.shutdown().await;
+    ExecResult::success("")
 }
 
 #[cfg(test)]
@@ -355,5 +415,190 @@ mod tests {
         let result = Cat.execute(args, &mut ctx).await;
         // No matches → missing path
         assert!(!result.ok());
+    }
+
+    // ---- Streaming / pipe tests ----
+    //
+    // RecordingFs wraps a MemoryFs and records every read_range call.
+    // (None, None) in the log signals a whole-file read, which the streaming
+    // path must never issue.
+
+    struct RecordingFs {
+        inner: MemoryFs,
+        ranges: Arc<std::sync::Mutex<Vec<(Option<u64>, Option<u64>)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Filesystem for RecordingFs {
+        async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            // A whole-file read defeats the test; record it as (None, None).
+            self.ranges.lock().unwrap().push((None, None));
+            self.inner.read(path).await
+        }
+        async fn read_range(
+            &self,
+            path: &Path,
+            range: Option<kaish_vfs::ReadRange>,
+        ) -> std::io::Result<Vec<u8>> {
+            let key = (
+                range.as_ref().and_then(|r| r.offset),
+                range.as_ref().and_then(|r| r.limit),
+            );
+            self.ranges.lock().unwrap().push(key);
+            self.inner.read_range(path, range).await
+        }
+        async fn write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+            self.inner.write(path, data).await
+        }
+        async fn list(&self, path: &Path) -> std::io::Result<Vec<crate::vfs::DirEntry>> {
+            self.inner.list(path).await
+        }
+        async fn stat(&self, path: &Path) -> std::io::Result<crate::vfs::DirEntry> {
+            self.inner.stat(path).await
+        }
+        async fn mkdir(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.mkdir(path).await
+        }
+        async fn remove(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.remove(path).await
+        }
+        fn read_only(&self) -> bool {
+            self.inner.read_only()
+        }
+    }
+
+    /// Build an ExecContext backed by a RecordingFs, returning the ctx and the
+    /// shared range log.  The file at `path` is pre-populated with `data`.
+    async fn make_recording_ctx(
+        path: &str,
+        data: &[u8],
+    ) -> (ExecContext, Arc<std::sync::Mutex<Vec<(Option<u64>, Option<u64>)>>>) {
+        let ranges = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rec = RecordingFs {
+            inner: MemoryFs::new(),
+            ranges: ranges.clone(),
+        };
+        rec.inner.write(Path::new(path), data).await.unwrap();
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", rec);
+        (ExecContext::new(Arc::new(vfs)), ranges)
+    }
+
+    /// Test (a): bytes arriving on the pipe equal the file contents exactly.
+    /// Test (b): reads are issued as bounded ranges (never a whole-file None read).
+    ///
+    /// We use a 256-byte chunk size (much smaller than STREAM_CHUNK_SIZE) to
+    /// force multiple reads on a modestly-sized test file, without needing a
+    /// file larger than a few hundred KiB.
+    #[tokio::test]
+    async fn cat_streams_file_in_bounded_chunks() {
+        // Build a file large enough to need multiple 256-byte reads.
+        let payload: Vec<u8> = (0u8..=255u8).cycle().take(1000).collect();
+        let (ctx, ranges) = make_recording_ctx("big.bin", &payload).await;
+
+        // Set up a pipe pair and call the helper directly with chunk_size=256.
+        let (pipe_out, mut pipe_in) = crate::scheduler::pipe_stream(4096);
+
+        // Drain the pipe concurrently while stream_file_to_pipe writes.
+        let drain = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut collected = Vec::new();
+            let mut buf = [0u8; 512];
+            loop {
+                match pipe_in.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => collected.extend_from_slice(&buf[..n]),
+                }
+            }
+            collected
+        });
+
+        let result = stream_file_to_pipe(&ctx, Path::new("/big.bin"), "/big.bin", pipe_out, 256).await;
+        assert!(result.ok(), "stream_file_to_pipe failed: {}", result.err);
+
+        let collected = drain.await.expect("drain task panicked");
+
+        // (a) Byte-exact round-trip.
+        assert_eq!(
+            collected, payload,
+            "piped bytes must equal the original file contents exactly"
+        );
+
+        // (b) No whole-file reads; all reads carry a limit (bounded).
+        let recs = ranges.lock().unwrap();
+        assert!(
+            recs.len() >= 4,
+            "expected multiple bounded reads, got {} reads: {recs:?}",
+            recs.len()
+        );
+        assert!(
+            recs.iter().all(|&(_, limit)| limit == Some(256)),
+            "every read must be bounded to chunk size 256; recorded {recs:?}"
+        );
+    }
+
+    /// Binary integrity: a file containing non-UTF-8 bytes streams through
+    /// the pipe path byte-for-byte identical — no UTF-8 decode anywhere.
+    #[tokio::test]
+    async fn cat_streams_binary_file_intact() {
+        // Bytes that are not valid UTF-8.
+        let payload: Vec<u8> = vec![0x00, 0xff, 0xfe, 0x80, 0x81, 0x82, 0x41, 0x00, 0xff];
+        let (ctx, _ranges) = make_recording_ctx("binary.bin", &payload).await;
+
+        let (pipe_out, mut pipe_in) = crate::scheduler::pipe_stream(4096);
+
+        let drain = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut collected = Vec::new();
+            let mut buf = [0u8; 512];
+            loop {
+                match pipe_in.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => collected.extend_from_slice(&buf[..n]),
+                }
+            }
+            collected
+        });
+
+        // Use a small chunk size to exercise the loop even on a small file.
+        let result =
+            stream_file_to_pipe(&ctx, Path::new("/binary.bin"), "/binary.bin", pipe_out, 4).await;
+        assert!(result.ok(), "stream_file_to_pipe failed: {}", result.err);
+
+        let collected = drain.await.expect("drain task panicked");
+        assert_eq!(
+            collected, payload,
+            "non-UTF-8 bytes must arrive at the pipe reader byte-identical"
+        );
+    }
+
+    /// Early-exit: drop the pipe reader before draining, confirm the loop
+    /// returns success without reading the entire file.
+    ///
+    /// With chunk_size=256 and a 1000-byte file, an intact reader would trigger
+    /// ceil(1000/256)+1 = 5 reads (4 data + 1 EOF probe).  After the reader is
+    /// dropped the first write_all fails and the loop breaks, so the read count
+    /// stays at 1 (the first chunk read before the write attempt).
+    #[tokio::test]
+    async fn cat_streaming_early_exit_on_broken_pipe() {
+        let payload: Vec<u8> = vec![b'x'; 1000];
+        let (ctx, ranges) = make_recording_ctx("big.bin", &payload).await;
+
+        let (pipe_out, pipe_reader) = crate::scheduler::pipe_stream(4096);
+        // Drop the reader immediately — the first write_all will fail.
+        drop(pipe_reader);
+
+        let result = stream_file_to_pipe(&ctx, Path::new("/big.bin"), "/big.bin", pipe_out, 256).await;
+        // Early exit must still return success (not an error).
+        assert!(result.ok(), "early-exit path should return success, got: {}", result.err);
+
+        // The loop must have stopped early: we expect very few reads (1 chunk
+        // read + the early-exit write failure), not all 5 that a full drain
+        // would require.
+        let read_count = ranges.lock().unwrap().len();
+        assert!(
+            read_count < 5,
+            "expected early exit to stop reads; got {read_count} reads (expected < 5)"
+        );
     }
 }
