@@ -182,6 +182,36 @@ Remaining open work:
 
 ## P2 — Focused refactors & real bugs
 
+### Streaming file reads — `wc` landed 2026-06-14; spread to the other scanners
+First slice shipped: scan-oriented builtins no longer read whole files into
+memory. Mechanism (chosen to respect kaish-vfs's runtime-free trait — no
+`AsyncRead`/tokio in the `Filesystem` trait, so WASI stays clean):
+- `LocalFs::read_range` now does a true positional `seek + take` for byte ranges
+  instead of read-whole-then-slice. Bonus: this also fixed `head -c bigfile`,
+  which previously slurped the whole file before slicing.
+- `ExecContext::read_file_chunked(path, chunk_size, f)` pulls a file forward in
+  `STREAM_CHUNK_SIZE` (256 KiB) windows via `read_range(bytes)` and feeds each
+  chunk to a closure; bounded memory, EOF on first empty chunk.
+- `wc` converted to an incremental line-buffered `WcCounter` (exact parity with
+  `str::lines`/`split_whitespace`/`chars`/`len`, proven by a split-at-every-byte
+  test incl. multibyte). A `RecordingFs` test proves the reads are chunk-bounded
+  and never a whole-file read.
+
+Remaining:
+- **Convert the other forward scanners**: `grep` (file path; `stream_grep`
+  already does the stdin→stdout case), `cat` (single-file path), `checksum`,
+  `base64`. Each can reuse `read_file_chunked` + a per-line/per-chunk fold.
+- **Deliberately NOT streamed** (need all input or random access — leave whole-
+  buffer): `sort`, `uniq` (global dedup), `diff`, `cmp`, `jq`, anything emitting
+  structured `.data`. The `.data`/`OutputData` channel is whole-value by design
+  (it powers `--json` and `for x in $(cmd)`); streaming only ever applies to the
+  raw-byte path.
+- **`read_file_chunked` re-opens the file per chunk** on LocalFs (open+seek per
+  256 KiB). Cheap relative to the read, but a stateful streaming handle would cut
+  the syscalls. Deferred — would mean an `AsyncRead`-returning method, which
+  reintroduces the tokio-in-trait problem the chunk approach avoided. Revisit
+  only if a profile shows the re-opens matter.
+
 ### Kernel-routed port residuals: `read`, `env`, `exec` deep coverage
 The realworld port is **done 2026-06-11** (see Resolved) — 48 tests through
 `kernel.execute`, plus a new rg section; the port immediately caught the

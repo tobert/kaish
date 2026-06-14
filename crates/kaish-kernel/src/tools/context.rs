@@ -663,6 +663,44 @@ impl ExecContext {
         }
         Ok(paths)
     }
+
+    /// Default chunk size for forward file scans. Bounds the memory a
+    /// scan-oriented builtin holds at once, independent of file size.
+    pub const STREAM_CHUNK_SIZE: u64 = 256 * 1024;
+
+    /// Stream a file's bytes forward in `chunk_size` slices, handing each
+    /// non-empty chunk to `f`.
+    ///
+    /// Reads are issued as positional `read_range` requests, so backends that
+    /// honour byte ranges (LocalFs) never materialise the whole file; in-memory
+    /// backends slice cheaply. The loop terminates on the first empty chunk,
+    /// which every backend returns once the offset reaches EOF. This is the
+    /// shared engine for scan-oriented builtins (`wc`, and next `grep`) that
+    /// only walk a file front-to-back and must not hold it all in memory.
+    pub async fn read_file_chunked<F>(
+        &self,
+        path: &std::path::Path,
+        chunk_size: u64,
+        mut f: F,
+    ) -> kaish_types::backend::BackendResult<()>
+    where
+        F: FnMut(&[u8]),
+    {
+        use kaish_types::ReadRange;
+        let mut offset = 0u64;
+        loop {
+            let chunk = self
+                .backend
+                .read(path, Some(ReadRange::bytes(offset, chunk_size)))
+                .await?;
+            if chunk.is_empty() {
+                break;
+            }
+            offset += chunk.len() as u64;
+            f(&chunk);
+        }
+        Ok(())
+    }
 }
 
 /// The kernel's full execution context satisfies the trimmed portable

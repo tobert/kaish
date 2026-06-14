@@ -2,7 +2,7 @@
 //!
 //! Provides access to real filesystem paths, with optional read-only mode.
 
-use crate::traits::{DirEntry, DirEntryKind, Filesystem};
+use crate::traits::{DirEntry, DirEntryKind, Filesystem, ReadRange};
 use async_trait::async_trait;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -168,6 +168,46 @@ impl Filesystem for LocalFs {
     async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         let full_path = self.resolve(path)?;
         fs::read(&full_path).await
+    }
+
+    async fn read_range(&self, path: &Path, range: Option<ReadRange>) -> io::Result<Vec<u8>> {
+        // A byte range gets a true positional read — seek to the offset and read
+        // at most `limit` bytes — so chunked/streaming scans and `head -c` never
+        // pull the whole file into memory. Line ranges (and a bare `None`) fall
+        // back to the default whole-file read + slice: line slicing needs the
+        // full text anyway, and `None` means "everything".
+        let Some(r) = range else {
+            return self.read(path).await;
+        };
+        if r.offset.is_none() && r.limit.is_none() {
+            let content = self.read(path).await?;
+            return Ok(r.apply(&content));
+        }
+        let full_path = self.resolve(path)?;
+        let offset = r.offset.unwrap_or(0);
+        let limit = r.limit;
+        // Blocking std file I/O on the blocking pool, mirroring `set_mtime`.
+        tokio::task::spawn_blocking(move || -> io::Result<Vec<u8>> {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut file = std::fs::File::open(&full_path)?;
+            if offset > 0 {
+                // Seeking past EOF is allowed; the following read yields 0 bytes,
+                // which matches the empty slice an out-of-range request returns.
+                file.seek(SeekFrom::Start(offset))?;
+            }
+            let mut buf = Vec::new();
+            match limit {
+                Some(limit) => {
+                    file.take(limit).read_to_end(&mut buf)?;
+                }
+                None => {
+                    file.read_to_end(&mut buf)?;
+                }
+            }
+            Ok(buf)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
@@ -413,6 +453,69 @@ mod tests {
         fs.write(Path::new("test.txt"), b"hello").await.unwrap();
         let data = fs.read(Path::new("test.txt")).await.unwrap();
         assert_eq!(data, b"hello");
+
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_read_range_bytes_positional() {
+        let (fs, dir) = setup().await;
+        fs.write(Path::new("data.bin"), b"0123456789abcdef")
+            .await
+            .unwrap();
+
+        // Mid-file slice.
+        let mid = fs
+            .read_range(Path::new("data.bin"), Some(ReadRange::bytes(4, 5)))
+            .await
+            .unwrap();
+        assert_eq!(mid, b"45678");
+
+        // Offset to end, with a limit that runs past EOF.
+        let tail = fs
+            .read_range(Path::new("data.bin"), Some(ReadRange::bytes(10, 999)))
+            .await
+            .unwrap();
+        assert_eq!(tail, b"abcdef");
+
+        // Offset past EOF yields an empty read (no error) — the streaming
+        // loop relies on this to detect EOF.
+        let past = fs
+            .read_range(Path::new("data.bin"), Some(ReadRange::bytes(100, 8)))
+            .await
+            .unwrap();
+        assert!(past.is_empty());
+
+        // `None` is still the whole file.
+        let whole = fs
+            .read_range(Path::new("data.bin"), None)
+            .await
+            .unwrap();
+        assert_eq!(whole, b"0123456789abcdef");
+
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_read_range_reconstructs_file_in_chunks() {
+        let (fs, dir) = setup().await;
+        let payload: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        fs.write(Path::new("big.bin"), &payload).await.unwrap();
+
+        let mut rebuilt = Vec::new();
+        let mut offset = 0u64;
+        loop {
+            let chunk = fs
+                .read_range(Path::new("big.bin"), Some(ReadRange::bytes(offset, 256)))
+                .await
+                .unwrap();
+            if chunk.is_empty() {
+                break;
+            }
+            offset += chunk.len() as u64;
+            rebuilt.extend_from_slice(&chunk);
+        }
+        assert_eq!(rebuilt, payload);
 
         cleanup(&dir).await;
     }

@@ -2,7 +2,6 @@
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
-use std::path::Path;
 
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
@@ -103,11 +102,18 @@ impl Tool for Wc {
 
         for path in &paths {
             let resolved = ctx.resolve_path(path);
-            match ctx.backend.read(Path::new(&resolved), None).await {
-                Ok(data) => {
-                    // Counts come from raw bytes — `wc -c` is exact on binary,
-                    // and there is no UTF-8 gate to reject a binary file.
-                    let (lc, wc, cc, bc) = count_content(&data);
+            // Stream the file through a bounded chunk window rather than reading
+            // it whole. Counts come from raw bytes — `wc -c` is exact on binary,
+            // and there is no UTF-8 gate to reject a binary file.
+            let mut counter = WcCounter::default();
+            match ctx
+                .read_file_chunked(&resolved, ExecContext::STREAM_CHUNK_SIZE, |chunk| {
+                    counter.push(chunk)
+                })
+                .await
+            {
+                Ok(()) => {
+                    let (lc, wc, cc, bc) = counter.finish();
 
                     total_lines += lc;
                     total_words += wc;
@@ -144,6 +150,68 @@ impl Tool for Wc {
         } else {
             ExecResult::with_output(output)
         }
+    }
+}
+
+/// Incremental, line-buffered counter for streaming `wc`.
+///
+/// Fed arbitrary byte chunks via [`push`](WcCounter::push), it produces the
+/// same `(lines, words, chars, bytes)` tuple as [`count_content`] over the
+/// concatenation — without ever holding the whole input. The trick is to carry
+/// the trailing partial line (the bytes after the last `\n`) between chunks, so
+/// complete lines are only counted once their bytes are all present. Because
+/// `\n` is a word/line separator and never part of a multibyte UTF-8 sequence,
+/// splitting on it lets each line decode cleanly and keeps words, chars, and
+/// UTF-8 boundaries from ever straddling a chunk edge.
+#[derive(Default)]
+struct WcCounter {
+    /// Bytes seen since the last newline — the in-progress line.
+    carry: Vec<u8>,
+    newlines: usize,
+    words: usize,
+    /// Char count of completed lines only (excludes the `\n` separators, which
+    /// are added back in `finish`).
+    chars: usize,
+    bytes: usize,
+}
+
+impl WcCounter {
+    fn push(&mut self, chunk: &[u8]) {
+        self.bytes += chunk.len();
+        self.carry.extend_from_slice(chunk);
+
+        // Count every complete line now (terminated by `\n`); keep the trailing
+        // partial line in `carry` for the next chunk.
+        let mut start = 0;
+        while let Some(pos) = self.carry[start..].iter().position(|&b| b == b'\n') {
+            let line_end = start + pos;
+            self.count_line(start, line_end);
+            self.newlines += 1;
+            start = line_end + 1;
+        }
+        if start > 0 {
+            self.carry.drain(..start);
+        }
+    }
+
+    fn count_line(&mut self, lo: usize, hi: usize) {
+        let line = String::from_utf8_lossy(&self.carry[lo..hi]);
+        self.words += line.split_whitespace().count();
+        self.chars += line.chars().count();
+    }
+
+    fn finish(mut self) -> (usize, usize, usize, usize) {
+        // A non-empty remainder is the final line with no trailing newline. It
+        // counts as a line, matching `str::lines()` (which yields a final
+        // unterminated segment).
+        let has_trailing = !self.carry.is_empty();
+        if has_trailing {
+            self.count_line(0, self.carry.len());
+        }
+        let lines = self.newlines + usize::from(has_trailing);
+        // Every consumed `\n` is one character that line-splitting removed.
+        let chars = self.chars + self.newlines;
+        (lines, self.words, chars, self.bytes)
     }
 }
 
@@ -222,6 +290,7 @@ mod tests {
     use super::*;
     use crate::ast::Value;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
+    use std::path::Path;
     use std::sync::Arc;
 
     async fn make_ctx() -> ExecContext {
@@ -437,6 +506,127 @@ mod tests {
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.text_out().contains("10001")); // 10000 + newline
+    }
+
+    // --- Streaming: chunk-seam correctness ---
+
+    #[test]
+    fn wc_counter_matches_whole_buffer_across_every_split() {
+        // Each input is counted by the incremental WcCounter fed as two chunks
+        // split at *every* byte boundary, and compared to the whole-buffer
+        // reference. The multibyte and mid-word splits are the seam this guards:
+        // a 2-byte kanji or a word straddling the chunk edge must still count
+        // exactly once.
+        let inputs: &[&[u8]] = &[
+            b"hello world\nfoo bar baz\n",
+            b"word",
+            b"",
+            "h\u{e9}llo w\u{f6}rld\n\u{65e5}\u{672c}\u{8a9e} \u{30c6}\u{30b9}\u{30c8}\n".as_bytes(),
+            b"a\n\nb",
+            b"   \n\t\t\n   ",
+            b"trailing no newline",
+        ];
+        for input in inputs {
+            let want = count_content(input);
+            for split in 0..=input.len() {
+                let mut c = WcCounter::default();
+                c.push(&input[..split]);
+                c.push(&input[split..]);
+                assert_eq!(
+                    c.finish(),
+                    want,
+                    "input={:?} split={}",
+                    String::from_utf8_lossy(input),
+                    split
+                );
+            }
+        }
+    }
+
+    // --- Streaming: bounded-memory proof ---
+
+    /// A `Filesystem` that records every `read_range` it is asked for, so a test
+    /// can prove a builtin pulls a file in bounded chunks rather than slurping
+    /// it whole. Delegates all real work to an inner `MemoryFs`.
+    struct RecordingFs {
+        inner: MemoryFs,
+        ranges: Arc<std::sync::Mutex<Vec<(Option<u64>, Option<u64>)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Filesystem for RecordingFs {
+        async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            // A whole-file read here would defeat the test's purpose; record it
+            // as `(None, None)` so the assertion below can catch it.
+            self.ranges.lock().unwrap().push((None, None));
+            self.inner.read(path).await
+        }
+        async fn read_range(
+            &self,
+            path: &Path,
+            range: Option<kaish_vfs::ReadRange>,
+        ) -> std::io::Result<Vec<u8>> {
+            let key = (
+                range.as_ref().and_then(|r| r.offset),
+                range.as_ref().and_then(|r| r.limit),
+            );
+            self.ranges.lock().unwrap().push(key);
+            self.inner.read_range(path, range).await
+        }
+        async fn write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+            self.inner.write(path, data).await
+        }
+        async fn list(&self, path: &Path) -> std::io::Result<Vec<crate::vfs::DirEntry>> {
+            self.inner.list(path).await
+        }
+        async fn stat(&self, path: &Path) -> std::io::Result<crate::vfs::DirEntry> {
+            self.inner.stat(path).await
+        }
+        async fn mkdir(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.mkdir(path).await
+        }
+        async fn remove(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.remove(path).await
+        }
+        fn read_only(&self) -> bool {
+            self.inner.read_only()
+        }
+    }
+
+    #[tokio::test]
+    async fn wc_streams_file_in_bounded_chunks() {
+        let ranges = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rec = RecordingFs {
+            inner: MemoryFs::new(),
+            ranges: ranges.clone(),
+        };
+        // 1000 bytes, no newline → one long word; we only assert the byte total
+        // and the read pattern.
+        let payload = vec![b'x'; 1000];
+        rec.inner.write(Path::new("big.txt"), &payload).await.unwrap();
+
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", rec);
+        let ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut counter = WcCounter::default();
+        ctx.read_file_chunked(Path::new("/big.txt"), 256, |c| counter.push(c))
+            .await
+            .unwrap();
+
+        let recs = ranges.lock().unwrap();
+        // 1000 bytes / 256 → 4 data chunks + 1 terminating empty read.
+        assert!(
+            recs.len() >= 4,
+            "expected the file to be read in several chunks, got {} reads",
+            recs.len()
+        );
+        // Never a whole-file read, and every chunk bounded to the window.
+        assert!(
+            recs.iter().all(|&(_, limit)| limit == Some(256)),
+            "every read must be bounded to the chunk size; recorded {recs:?}"
+        );
+        assert_eq!(counter.finish().3, payload.len(), "byte count is exact");
     }
 
     #[tokio::test]
