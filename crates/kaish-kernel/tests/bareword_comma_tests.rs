@@ -8,6 +8,8 @@
 //! (a digit range) are loud parse errors with a "quote the whole word" hint,
 //! never the silent no-op the range form used to produce.
 
+#![cfg(feature = "localfs")]
+
 mod common;
 
 use common::{kernel_at, run};

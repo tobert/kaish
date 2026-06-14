@@ -16,7 +16,7 @@ use kaish_kernel::{Kernel, KernelConfig, OutputLimitConfig};
 /// A kernel that starts with no limit but truncates in memory once one is set
 /// (no disk spill, so the test leaves nothing on the host filesystem).
 fn mem_kernel() -> Kernel {
-    let config = KernelConfig::repl().with_output_limit(OutputLimitConfig::none().in_memory());
+    let config = KernelConfig::isolated().with_output_limit(OutputLimitConfig::none().in_memory());
     Kernel::new(config).expect("failed to create kernel")
 }
 

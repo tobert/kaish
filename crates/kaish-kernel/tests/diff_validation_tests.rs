@@ -6,6 +6,8 @@
 //! leaving dynamic operand counts (`diff *.txt`, `diff $a $b`) alone — their
 //! runtime expansion is unknowable statically.
 
+#![cfg(feature = "localfs")]
+
 mod common;
 
 use common::kernel_at;

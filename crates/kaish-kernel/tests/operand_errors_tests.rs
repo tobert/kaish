@@ -5,6 +5,8 @@
 //! the bad operand on stderr and exit nonzero, while the readable operands
 //! still produce their normal output.
 
+#![cfg(feature = "localfs")]
+
 mod common;
 
 use common::kernel_at;

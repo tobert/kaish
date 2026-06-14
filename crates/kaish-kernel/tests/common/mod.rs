@@ -11,10 +11,13 @@
 //! are allowed module-wide.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(feature = "localfs")]
 use std::path::Path;
 use std::process::Command;
 
-use kaish_kernel::{Kernel, KernelConfig};
+use kaish_kernel::Kernel;
+#[cfg(feature = "localfs")]
+use kaish_kernel::KernelConfig;
 
 /// Build a kernel rooted at `dir` with passthrough (real-FS) access.
 ///
@@ -26,6 +29,7 @@ use kaish_kernel::{Kernel, KernelConfig};
 ///
 /// Pair with `tempfile::tempdir()` so each test owns an isolated real-FS
 /// root (per the project's no-hardcoded-system-paths rule).
+#[cfg(feature = "localfs")]
 #[allow(dead_code)] // not every test binary that includes `common` uses this
 pub fn kernel_at(dir: &Path) -> Kernel {
     // Force latch/trash off so `rm`-style tests are deterministic regardless of

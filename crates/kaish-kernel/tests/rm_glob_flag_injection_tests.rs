@@ -8,6 +8,8 @@
 //! the files as operands but refuses `sub/` (no `-r` was injected), so the
 //! subtree survives.
 
+#![cfg(feature = "localfs")]
+
 mod common;
 
 use common::kernel_at;

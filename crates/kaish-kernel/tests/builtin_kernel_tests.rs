@@ -9,6 +9,7 @@
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#![cfg(feature = "localfs")]
 
 mod common;
 

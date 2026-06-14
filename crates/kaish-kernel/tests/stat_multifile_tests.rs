@@ -3,6 +3,8 @@
 //! Regression guard against a relapse to the old single-positional behavior
 //! (which joined the list into one path and errored "not found").
 
+#![cfg(feature = "localfs")]
+
 mod common;
 
 use common::{kernel_at, run};

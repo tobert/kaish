@@ -8,6 +8,8 @@
 //! the token as its value, while a run of bare bool flags (`ls -la`) still
 //! splits into individual flags.
 
+#![cfg(feature = "localfs")]
+
 mod common;
 
 use common::{kernel_at, run};
