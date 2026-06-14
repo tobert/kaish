@@ -12,6 +12,7 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 - **`diff` operand-count validation**: `diff` requires exactly two file operands — a wrong count among literal arguments is caught at pre-execution validation (error code `E011`) instead of only at runtime, and a glob/variable expansion to three or more files now errors loudly rather than silently dropping the extra operands.
+- **`jq`/`sed` pre-execution validation**: a malformed `jq` filter (`E007`) or `sed` expression (`E006`) is now reported at validation time — before any pipeline runs — instead of only failing mid-execution. Filters/expressions built from variables or command substitution (`<dynamic>`) are skipped, as is a `jq` filter using `--arg`/`--argjson` bindings.
 
 ## [0.8.3] - 2026-06-14
 

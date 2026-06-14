@@ -25,7 +25,8 @@ use jaq_json::Val;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::validator::{IssueCode, ValidationIssue};
 
 /// Native jq tool using jaq (pure Rust jq implementation).
 pub struct JqNative;
@@ -343,6 +344,44 @@ impl Tool for JqNative {
         schema
     }
 
+    fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
+        let mut issues = validate_against_schema(args, &self.schema());
+
+        // Get the filter positional (index 0). If it is the `<dynamic>` marker
+        // (variable, `$(cmd)`, or glob), we cannot inspect it statically — skip.
+        let filter_str = match args.get_string("filter", 0) {
+            Some(f) => f,
+            None => return issues,
+        };
+        if filter_str == "<dynamic>" {
+            return issues;
+        }
+
+        // If any `--arg` / `--argjson` binding is present we cannot know the full
+        // set of `$var` names that will be in scope at runtime, so skip the
+        // compile-step check to avoid false "undefined variable" errors on valid
+        // filters like `.foo + $x` used with `--arg x 1`.
+        //
+        // At validation time `--arg` appears as `Arg::LongFlag("arg")` → stored in
+        // `args.flags`; the execute-time Array-of-pairs form (`consumes=2` result
+        // in `args.named`) is not available until the kernel's runtime pre-parser runs.
+        if args.flags.contains("arg") || args.flags.contains("argjson") {
+            return issues;
+        }
+
+        if let Err(msg) = validate_filter(&filter_str, &[]) {
+            issues.push(
+                ValidationIssue::error(
+                    IssueCode::InvalidJqFilter,
+                    format!("jq: {msg}"),
+                )
+                .with_suggestion("check jq filter syntax: https://jqlang.org/manual/"),
+            );
+        }
+
+        issues
+    }
+
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
@@ -536,10 +575,14 @@ fn build_exec_result(run: JqRun) -> ExecResult {
 }
 
 /// Validate a jq filter expression without executing it.
+///
+/// Compiles the filter with the supplied `var_names` so that filters using
+/// `--arg`/`--argjson` bindings (e.g. `.foo + $x` compiled with `["$x"]`)
+/// are not falsely rejected. Pass an empty slice when no bindings are known.
+///
 /// Returns Ok(()) if valid, Err(message) if invalid.
-#[cfg(test)]
-fn validate_filter(filter: &str) -> Result<(), String> {
-    compile_filter(filter, &[])?;
+fn validate_filter(filter: &str, var_names: &[String]) -> Result<(), String> {
+    compile_filter(filter, var_names)?;
     Ok(())
 }
 
@@ -558,16 +601,16 @@ mod tests {
 
     #[test]
     fn test_validate_filter_valid() {
-        assert!(validate_filter(".name").is_ok());
-        assert!(validate_filter(".items[]").is_ok());
-        assert!(validate_filter(".[] | select(.active)").is_ok());
-        assert!(validate_filter("map(.x + 1)").is_ok());
+        assert!(validate_filter(".name", &[]).is_ok());
+        assert!(validate_filter(".items[]", &[]).is_ok());
+        assert!(validate_filter(".[] | select(.active)", &[]).is_ok());
+        assert!(validate_filter("map(.x + 1)", &[]).is_ok());
     }
 
     #[test]
     fn test_validate_filter_invalid() {
-        assert!(validate_filter(".[[[invalid").is_err());
-        assert!(validate_filter(".foo | | bar").is_err());
+        assert!(validate_filter(".[[[invalid", &[]).is_err());
+        assert!(validate_filter(".foo | | bar", &[]).is_err());
     }
 
     #[tokio::test]

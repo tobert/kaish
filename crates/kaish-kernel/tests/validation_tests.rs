@@ -7,9 +7,12 @@
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(feature = "localfs")]
 use std::path::PathBuf;
 
-use kaish_kernel::{Kernel, KernelConfig};
+use kaish_kernel::Kernel;
+#[cfg(feature = "localfs")]
+use kaish_kernel::KernelConfig;
 
 /// Helper to create a transient kernel for testing.
 async fn make_kernel() -> std::sync::Arc<Kernel> {
@@ -17,6 +20,7 @@ async fn make_kernel() -> std::sync::Arc<Kernel> {
 }
 
 /// Helper to create a kernel with CWD in the repo (for tests that run external commands).
+#[cfg(feature = "localfs")]
 fn make_repo_kernel() -> std::sync::Arc<Kernel> {
     let config = KernelConfig::repl()
         .with_cwd(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
@@ -414,6 +418,7 @@ async fn validation_allows_grep_pattern() {
     assert!(exec.ok(), "grep should execute successfully");
 }
 
+#[cfg(feature = "localfs")]
 #[tokio::test]
 async fn validation_allows_find_pattern() {
     // Use repo-scoped kernel so `find .` walks the crate dir, not $HOME
@@ -510,8 +515,11 @@ async fn validation_allows_glob_character_class_in_cat() {
 #[tokio::test]
 async fn validation_allows_sed_pattern() {
     let kernel = make_kernel().await;
-    // sed patterns look like globs but are regex
-    let result = kernel.execute("echo 'test' | sed 's/*.txt/replaced/'").await;
+    // sed patterns are ERE regex, not globs. `.*\.txt` is a valid ERE that
+    // resembles a glob pattern (*.txt) but uses proper regex quantifier syntax.
+    // The original `s/*.txt/replaced/` used a bare `*` which is invalid ERE
+    // and was correctly rejected once E006 validation landed.
+    let result = kernel.execute(r"echo 'test' | sed 's/.*\.txt/replaced/'").await;
 
     assert!(result.is_ok(), "sed pattern should pass validation");
 }

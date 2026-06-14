@@ -50,17 +50,19 @@ pub enum IssueCode {
     LastResultFieldAccess,
     /// diff was given other than two file operands.
     DiffNeedsTwoFiles,
+    /// sed expression is syntactically invalid.
+    InvalidSedExpr,
+    /// jq filter expression is syntactically invalid.
+    InvalidJqFilter,
 }
 
 impl IssueCode {
     /// Returns a short code string for the issue.
     ///
-    /// Code numbers are stable identifiers, not contiguous. E006/E007/E010 and
-    /// W003/W004/W005 remain retired — advertised but never emitted, and their
-    /// runtime paths already fail loudly (`sed`/`jq` report bad expressions at
-    /// runtime). E011 was revived 2026-06-14 with a real emitter (`diff` arity).
-    /// A future pre-execution validator for the others should add the variant
-    /// and its implementation together.
+    /// Code numbers are stable identifiers, not contiguous. E010 and
+    /// W003/W004/W005 remain retired. E006 (InvalidSedExpr), E007
+    /// (InvalidJqFilter), and E011 (DiffNeedsTwoFiles) were wired up with
+    /// real emitters in 2026-06-14.
     pub fn code(&self) -> &'static str {
         match self {
             IssueCode::UndefinedCommand => "E001",
@@ -69,11 +71,14 @@ impl IssueCode {
             IssueCode::InvalidArgType => "E003",
             IssueCode::SeqZeroIncrement => "E004",
             IssueCode::InvalidRegex => "E005",
+            IssueCode::InvalidSedExpr => "E006",
+            IssueCode::InvalidJqFilter => "E007",
             IssueCode::BreakOutsideLoop => "E008",
             IssueCode::ReturnOutsideFunction => "E009",
+            // E010 retired — never emitted
             IssueCode::PossiblyUndefinedVariable => "W002",
-            IssueCode::ForLoopScalarVar => "E012",
             IssueCode::DiffNeedsTwoFiles => "E011",
+            IssueCode::ForLoopScalarVar => "E012",
             IssueCode::ScatterWithoutGather => "E014",
             IssueCode::LastResultFieldAccess => "E015",
         }
@@ -85,6 +90,8 @@ impl IssueCode {
             // These are hard errors that will definitely fail at runtime
             IssueCode::SeqZeroIncrement
             | IssueCode::InvalidRegex
+            | IssueCode::InvalidSedExpr
+            | IssueCode::InvalidJqFilter
             | IssueCode::DiffNeedsTwoFiles
             | IssueCode::BreakOutsideLoop
             | IssueCode::ReturnOutsideFunction

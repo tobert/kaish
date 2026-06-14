@@ -10,7 +10,8 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::validator::{IssueCode, ValidationIssue};
 
 /// Sed tool: stream editor for text transformations.
 pub struct Sed;
@@ -60,6 +61,37 @@ impl Tool for Sed {
                 ("Capture groups", "sed 's/(\\w+) (\\w+)/\\2 \\1/' file.txt"),
             ],
         )
+    }
+
+    fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
+        let mut issues = validate_against_schema(args, &self.schema());
+
+        // Collect expressions the same way execute() does: from -e flags or the
+        // first positional. Any `<dynamic>` marker means a variable/substitution
+        // whose value is unknown at parse time — skip the whole expression so we
+        // don't false-error on `F='s/a/b/'; sed $F`.
+        let exprs = collect_expressions(args);
+        for expr in &exprs {
+            if expr.contains("<dynamic>") {
+                return issues;
+            }
+        }
+
+        // Nothing to validate if expressions are absent (execute() will also
+        // reject this case at runtime with "missing expression").
+        for expr in &exprs {
+            if let Err(msg) = parse_expression(expr) {
+                issues.push(
+                    ValidationIssue::error(
+                        IssueCode::InvalidSedExpr,
+                        format!("sed: {msg}"),
+                    )
+                    .with_suggestion("supported commands: s/pat/rep/[flags], d, p, q; addresses: N, /pat/, $"),
+                );
+            }
+        }
+
+        issues
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
