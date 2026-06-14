@@ -658,11 +658,12 @@ table-with-children (so the metadata-bearing serializer applies) or extend the
 tree-JSON branch to carry a metadata slot per node. Surfaced 2026-06-14 while
 probing fs-rip ergonomics. (P3)
 
-### `stat --json` accepts only one file
-`stat` is single-positional: `stat --json a b c` treats the joined list as one
-path and errors `not found`. A multi-file `stat` would make a one-shot metadata
-rip (`stat --json $(find DIR -type f)`) possible without the per-file loop.
-Surfaced 2026-06-14. (P3)
+### `stat --json` accepts only one file — already FIXED (verified 2026-06-14)
+Stale. `stat a b c` and `stat --json a b c` already stat every operand (the
+2026-05-28 multi-positional sweep), so the one-shot metadata rip
+`stat --json $(find DIR -type f)` works, and a missing operand is reported
+loudly (stderr names it, exit 1) while the readable ones still stat. Probed live
+and pinned by `stat_multifile_tests.rs`.
 
 ### `spawn --command true` — bool-shaped values vanish from named args — FIXED 2026-06-14
 `flagify_bool_named` is now schema-aware: it skips keys the schema declares as
@@ -748,6 +749,14 @@ expansion keep their benign skip-on-race tolerance. Pinned by
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`stat` multi-file — verified already working 2026-06-14.** `stat a b c` and
+  `stat --json a b c` stat every operand (an array of one object per file under
+  `--json`), and a missing operand among several is loud (stderr names it, exit 1,
+  readable ones still stat). The single-positional limitation was fixed in the
+  2026-05-28 multi-positional sweep; this adds the missing regression guard
+  (`stat_multifile_tests.rs`, DeepSeek-reviewed for non-vacuity — exact exit 1 +
+  array-length + readable-operand assertions).
 
 - **`rm` glob flag-injection — verified not reproducible 2026-06-14.** The
   classic `rm *` with a `-rf.txt` file in the directory does *not* inject `-r -f`
