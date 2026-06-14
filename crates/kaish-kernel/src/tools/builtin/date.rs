@@ -2,7 +2,7 @@
 //!
 //! Re-specced against the **empirical** `date` — what language models actually
 //! type when they reach for it — rather than an imagined one. See
-//! `docs/date-upgrades.md` for the fleet survey that drove this. The headline
+//! `docs/date-design.md` for the fleet survey that drove this. The headline
 //! behaviors:
 //!
 //! - **GNU dialect, deliberately.** 9/9 surveyed models were GNU-shaped, so we

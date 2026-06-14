@@ -714,7 +714,7 @@ Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
 
 - **`date` builtin rewritten against the empirical spec — done 2026-06-14.**
-  Full disposable-rewrite of `builtin/date.rs` per [date-upgrades.md](date-upgrades.md)
+  Full disposable-rewrite of `builtin/date.rs` per [date-design.md](date-design.md)
   (GNU dialect, the forms a 9-model fleet actually types). All three footguns
   closed: **(1)** the format path translates GNU `%N`/`%3N`/`%6N`/`%9N` →
   chrono `%9f`/… so `date +%s%N` *works*, and validates against `Item::Error`
