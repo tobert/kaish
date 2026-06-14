@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::path::Path;
 
+use crate::backend::ReadRange;
 use crate::interpreter::ExecResult;
 use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
 
@@ -71,6 +72,28 @@ impl Tool for Cmp {
             return ExecResult::failure(2, "cmp: only one operand may be '-' (stdin)");
         }
 
+        // Fast-path: lockstep streaming when both operands are real file paths.
+        // A pipe can't be seeked, so if either operand is `-` we fall back to
+        // the whole-buffer path below — stdin is already buffered and small.
+        // This split is legitimate (streaming fast-path + general fallback), not
+        // a dual-representation smell: the two paths must stay semantically
+        // identical, which the parity tests in `#[cfg(test)]` enforce.
+        if name1 != "-" && name2 != "-" {
+            let path1 = ctx.resolve_path(&name1);
+            let path2 = ctx.resolve_path(&name2);
+            return cmp_lockstep(
+                ctx,
+                Path::new(&path1),
+                Path::new(&path2),
+                &name1,
+                &name2,
+                silent,
+                ExecContext::STREAM_CHUNK_SIZE,
+            )
+            .await;
+        }
+
+        // Fallback: whole-buffer path for stdin (`-`) operands.
         let a = match read_operand(ctx, &name1).await {
             Ok(d) => d,
             Err(e) => return ExecResult::failure(2, format!("cmp: {name1}: {e}")),
@@ -80,34 +103,126 @@ impl Tool for Cmp {
             Err(e) => return ExecResult::failure(2, format!("cmp: {name2}: {e}")),
         };
 
-        // First differing byte (1-based), with its line number (newlines before it + 1).
-        let common = a.len().min(b.len());
-        if let Some(offset) = (0..common).find(|&i| a[i] != b[i]) {
+        cmp_whole_buffer(&a, &b, &name1, &name2, silent)
+    }
+}
+
+/// Lockstep streaming comparison for two real file paths.
+///
+/// Reads both files in parallel `chunk_size` windows, advancing a shared offset.
+/// Stops at the first differing byte (EARLY EXIT — does not read the rest of
+/// either file). The `chunk_size` parameter is exposed so tests can force tiny
+/// chunks (1, 2, 3 bytes) to exercise chunk-boundary seams while production
+/// always passes `ExecContext::STREAM_CHUNK_SIZE`.
+async fn cmp_lockstep(
+    ctx: &ExecContext,
+    path_a: &Path,
+    path_b: &Path,
+    name1: &str,
+    name2: &str,
+    silent: bool,
+    chunk_size: u64,
+) -> ExecResult {
+    let mut offset = 0u64;
+    // Running newline count in file A, used to compute the "line N" in the
+    // differing-byte message. Tracks only the bytes *before* the first difference.
+    let mut newlines_a: u64 = 0;
+
+    loop {
+        let chunk_a = match ctx
+            .backend
+            .read(path_a, Some(ReadRange::bytes(offset, chunk_size)))
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => return ExecResult::failure(2, format!("cmp: {name1}: {e}")),
+        };
+        let chunk_b = match ctx
+            .backend
+            .read(path_b, Some(ReadRange::bytes(offset, chunk_size)))
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => return ExecResult::failure(2, format!("cmp: {name2}: {e}")),
+        };
+
+        // Both chunks empty ⇒ EOF reached simultaneously ⇒ files are identical.
+        if chunk_a.is_empty() && chunk_b.is_empty() {
+            return ExecResult::success("");
+        }
+
+        // Compare the common prefix of the two chunks.
+        let common = chunk_a.len().min(chunk_b.len());
+        if let Some(diff_pos) = (0..common).find(|&i| chunk_a[i] != chunk_b[i]) {
+            // Early exit: stop here, do not read any further.
             if silent {
                 return ExecResult::failure(1, "");
             }
-            let line = a[..offset].iter().filter(|&&c| c == b'\n').count() + 1;
-            let msg = format!("{name1} {name2} differ: byte {}, line {}", offset + 1, line);
+            // Count newlines in A up to (not including) the differing byte.
+            newlines_a += chunk_a[..diff_pos].iter().filter(|&&c| c == b'\n').count() as u64;
+            let byte_number = offset + diff_pos as u64 + 1; // 1-based
+            let line_number = newlines_a + 1;
+            let msg = format!(
+                "{name1} {name2} differ: byte {byte_number}, line {line_number}"
+            );
             return ExecResult::success(msg).with_code(1);
         }
 
-        // Common prefix matches; a length difference is EOF on the shorter file.
-        if a.len() != b.len() {
+        // Common region matched. If the chunk lengths differ, the shorter file
+        // hit EOF while the longer file still had bytes — report EOF on shorter.
+        if chunk_a.len() != chunk_b.len() {
             if silent {
                 return ExecResult::failure(1, "");
             }
-            let (shorter, at) = if a.len() < b.len() {
-                (&name1, a.len())
+            let (shorter, at) = if chunk_a.len() < chunk_b.len() {
+                (name1, offset + chunk_a.len() as u64)
             } else {
-                (&name2, b.len())
+                (name2, offset + chunk_b.len() as u64)
             };
             let msg = format!("cmp: EOF on {shorter} after byte {at}");
             return ExecResult::success(msg).with_code(1);
         }
 
-        // Identical → exit 0, no output.
-        ExecResult::success("")
+        // Both chunks are the same length and identical — advance to the next window.
+        // Count newlines in A's chunk for the running line tracker.
+        newlines_a += chunk_a.iter().filter(|&&c| c == b'\n').count() as u64;
+        offset += chunk_a.len() as u64;
     }
+}
+
+/// Whole-buffer comparison. Used only when one operand is `-` (stdin).
+///
+/// Preserved verbatim from the original implementation so the fallback path
+/// continues to pass the existing tests. The parity tests compare this against
+/// `cmp_lockstep` for every file-pair case to ensure they stay in sync.
+fn cmp_whole_buffer(a: &[u8], b: &[u8], name1: &str, name2: &str, silent: bool) -> ExecResult {
+    // First differing byte (1-based), with its line number (newlines before it + 1).
+    let common = a.len().min(b.len());
+    if let Some(offset) = (0..common).find(|&i| a[i] != b[i]) {
+        if silent {
+            return ExecResult::failure(1, "");
+        }
+        let line = a[..offset].iter().filter(|&&c| c == b'\n').count() + 1;
+        let msg = format!("{name1} {name2} differ: byte {}, line {}", offset + 1, line);
+        return ExecResult::success(msg).with_code(1);
+    }
+
+    // Common prefix matches; a length difference is EOF on the shorter file.
+    if a.len() != b.len() {
+        if silent {
+            return ExecResult::failure(1, "");
+        }
+        let (shorter, at) = if a.len() < b.len() {
+            (name1, a.len())
+        } else {
+            (name2, b.len())
+        };
+        let msg = format!("cmp: EOF on {shorter} after byte {at}");
+        return ExecResult::success(msg).with_code(1);
+    }
+
+    // Identical → exit 0, no output.
+    ExecResult::success("")
 }
 
 /// Read an operand as raw bytes — a path through the VFS, or stdin for `-`.
@@ -150,6 +265,8 @@ mod tests {
         }
         a
     }
+
+    // ---- Existing tests (must all still pass) ----
 
     #[tokio::test]
     async fn identical_files_exit_zero() {
@@ -208,5 +325,323 @@ mod tests {
         let mut ctx = make_ctx().await;
         let r = Cmp.execute(args(&["/a.bin", "/nope.bin"]), &mut ctx).await;
         assert_eq!(r.code, 2);
+    }
+
+    // ---- Parity tests: streaming result == whole-buffer reference ----
+    //
+    // For each file pair we drive `cmp_lockstep` at several tiny chunk sizes
+    // (including 1, 2, 3 bytes) to exercise every possible chunk-boundary
+    // alignment, and compare its (code, message) against `cmp_whole_buffer`.
+    // An earlier draft that only compared the streamer against itself masked
+    // a divergence; comparing against the whole-buffer reference ensures both
+    // paths stay in lock-step.
+
+    struct PairResult {
+        code: i64,
+        text: String,
+    }
+
+    fn whole_buffer_result(a: &[u8], b: &[u8], name1: &str, name2: &str) -> PairResult {
+        let r = cmp_whole_buffer(a, b, name1, name2, false);
+        PairResult {
+            code: r.code,
+            text: r.text_out().to_string(),
+        }
+    }
+
+    async fn lockstep_result(
+        a: &[u8],
+        b: &[u8],
+        name1: &str,
+        name2: &str,
+        chunk_size: u64,
+    ) -> PairResult {
+        // Build a fresh MemoryFs for each call so paths don't collide.
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(Path::new("a"), a).await.unwrap();
+        mem.write(Path::new("b"), b).await.unwrap();
+        vfs.mount("/", mem);
+        let ctx = ExecContext::new(Arc::new(vfs));
+
+        let r = cmp_lockstep(
+            &ctx,
+            Path::new("/a"),
+            Path::new("/b"),
+            name1,
+            name2,
+            false,
+            chunk_size,
+        )
+        .await;
+        PairResult {
+            code: r.code, // i64
+            text: r.text_out().to_string(),
+        }
+    }
+
+    // File pairs used across the parity and chunk-seam tests.
+    fn file_pairs() -> Vec<(&'static str, Vec<u8>, Vec<u8>)> {
+        vec![
+            // identical
+            ("identical", b"hello world".to_vec(), b"hello world".to_vec()),
+            // differ at byte 1 (very first byte)
+            ("differ_first", b"xhello".to_vec(), b"yhello".to_vec()),
+            // differ at byte 4 (early but not first)
+            ("differ_early", b"abcX".to_vec(), b"abcY".to_vec()),
+            // differ in a later chunk (byte > chunk_size when chunk=3)
+            ("differ_later", b"aabbccDDee".to_vec(), b"aabbccEEee".to_vec()),
+            // file B is a prefix of file A (EOF on b)
+            ("prefix_b_shorter", b"abcdef".to_vec(), b"abc".to_vec()),
+            // file A is a prefix of file B (EOF on a)
+            ("prefix_a_shorter", b"abc".to_vec(), b"abcdef".to_vec()),
+            // files with newlines — line number tracking
+            ("newlines_same_line", b"ab\ncdXef".to_vec(), b"ab\ncdYef".to_vec()),
+            // difference falls exactly on a chunk boundary (byte 3, chunks of 3)
+            (
+                "diff_on_boundary",
+                b"abcXefg".to_vec(),
+                b"abcYefg".to_vec(),
+            ),
+            // empty files (identical)
+            ("both_empty", b"".to_vec(), b"".to_vec()),
+            // one empty, one not
+            ("one_empty", b"".to_vec(), b"x".to_vec()),
+            // binary content (not valid UTF-8)
+            ("binary", vec![0u8, 1, 2, 3, 4], vec![0u8, 1, 2, 255, 4]),
+        ]
+    }
+
+    #[tokio::test]
+    async fn streaming_parity_with_whole_buffer() {
+        for (label, a, b) in file_pairs() {
+            let want = whole_buffer_result(&a, &b, "/a", "/b");
+            for &chunk_size in &[1u64, 2, 3, 7, 13] {
+                let got = lockstep_result(&a, &b, "/a", "/b", chunk_size).await;
+                assert_eq!(
+                    got.code, want.code,
+                    "{label} chunk={chunk_size}: exit code mismatch (got {}, want {})",
+                    got.code,
+                    want.code
+                );
+                assert_eq!(
+                    got.text, want.text,
+                    "{label} chunk={chunk_size}: message mismatch\n  got:  {:?}\n  want: {:?}",
+                    got.text, want.text
+                );
+            }
+        }
+    }
+
+    // ---- Line-number tracking across chunk seams ----
+    //
+    // Verify that the running newline counter survives chunk boundaries correctly.
+    // A difference on line 3 must report "line 3" regardless of where the chunk
+    // edges fall.
+
+    #[tokio::test]
+    async fn line_number_survives_chunk_seams() {
+        // "aaa\nbbb\ncXd" vs "aaa\nbbb\ncYd" — difference at byte 10, line 3.
+        let a = b"aaa\nbbb\ncXd".to_vec();
+        let b = b"aaa\nbbb\ncYd".to_vec();
+        let want = whole_buffer_result(&a, &b, "/f1", "/f2");
+        assert!(want.text.contains("line 3"), "reference said: {}", want.text);
+
+        for &chunk_size in &[1u64, 2, 3, 4, 5] {
+            let got = lockstep_result(&a, &b, "/f1", "/f2", chunk_size).await;
+            assert_eq!(
+                got.code, want.code,
+                "chunk={chunk_size}: exit code mismatch"
+            );
+            assert_eq!(
+                got.text, want.text,
+                "chunk={chunk_size}: message mismatch\n  got:  {:?}\n  want: {:?}",
+                got.text, want.text
+            );
+        }
+    }
+
+    // ---- RecordingFs: prove bounded reads and early exit ----
+    //
+    // The RecordingFs wraps a MemoryFs and records every `read_range` call.
+    // We assert:
+    //   (a) The streaming path never issues a whole-file `read(None)`.
+    //   (b) All reads are bounded to the chunk size.
+    //   (c) On an early difference (byte 1 differs), we stop after ONE chunk
+    //       per file — not after reading every chunk.
+
+    struct RecordingFs {
+        inner: MemoryFs,
+        /// (offset, limit) pairs for each `read_range` call.
+        /// `(None, None)` signals a whole-file `read(None)`.
+        ranges: Arc<std::sync::Mutex<Vec<(Option<u64>, Option<u64>)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Filesystem for RecordingFs {
+        async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            // A whole-file read here would defeat the test; record it as
+            // (None, None) so the assertion below can catch it.
+            self.ranges.lock().unwrap().push((None, None));
+            self.inner.read(path).await
+        }
+        async fn read_range(
+            &self,
+            path: &Path,
+            range: Option<kaish_vfs::ReadRange>,
+        ) -> std::io::Result<Vec<u8>> {
+            let key = (
+                range.as_ref().and_then(|r| r.offset),
+                range.as_ref().and_then(|r| r.limit),
+            );
+            self.ranges.lock().unwrap().push(key);
+            self.inner.read_range(path, range).await
+        }
+        async fn write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+            self.inner.write(path, data).await
+        }
+        async fn list(&self, path: &Path) -> std::io::Result<Vec<crate::vfs::DirEntry>> {
+            self.inner.list(path).await
+        }
+        async fn stat(&self, path: &Path) -> std::io::Result<crate::vfs::DirEntry> {
+            self.inner.stat(path).await
+        }
+        async fn mkdir(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.mkdir(path).await
+        }
+        async fn remove(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.remove(path).await
+        }
+        fn read_only(&self) -> bool {
+            self.inner.read_only()
+        }
+    }
+
+    /// Build an ExecContext backed by a RecordingFs and return the shared range log.
+    async fn make_recording_ctx(
+        file_a: &[u8],
+        file_b: &[u8],
+    ) -> (ExecContext, Arc<std::sync::Mutex<Vec<(Option<u64>, Option<u64>)>>>) {
+        let ranges = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rec = RecordingFs {
+            inner: MemoryFs::new(),
+            ranges: ranges.clone(),
+        };
+        rec.inner.write(Path::new("a"), file_a).await.unwrap();
+        rec.inner.write(Path::new("b"), file_b).await.unwrap();
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", rec);
+        (ExecContext::new(Arc::new(vfs)), ranges)
+    }
+
+    #[tokio::test]
+    async fn cmp_streams_in_bounded_chunks() {
+        // Two 1000-byte identical files: the loop must issue multiple chunk reads
+        // and must never issue a whole-file read.
+        let payload = vec![b'x'; 1000];
+        let (ctx, ranges) = make_recording_ctx(&payload, &payload).await;
+
+        let result = cmp_lockstep(
+            &ctx,
+            Path::new("/a"),
+            Path::new("/b"),
+            "/a",
+            "/b",
+            false,
+            256,
+        )
+        .await;
+        assert_eq!(result.code, 0, "files are identical");
+
+        let recs = ranges.lock().unwrap();
+        // 1000 bytes / 256 → 4 data reads + 1 terminating empty read = 5 per file → 10 total.
+        assert!(
+            recs.len() >= 8,
+            "expected multiple bounded reads, got {} reads: {recs:?}",
+            recs.len()
+        );
+        // Never a whole-file read (None, None) — all reads must carry a limit.
+        // All reads bounded to the chunk size.
+        assert!(
+            recs.iter().all(|&(_, limit)| limit == Some(256)),
+            "every read must be bounded to chunk size 256; recorded {recs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmp_early_exit_on_first_byte_difference() {
+        // Two 1000-byte files where the FIRST byte differs. The streaming path
+        // must stop after reading exactly one chunk from each file (plus the
+        // termination probe reads at offset 0 and offset chunk_size would not be
+        // reached). In total we expect exactly 2 reads: one for file A at offset 0
+        // and one for file B at offset 0 — then the loop exits immediately.
+        let mut file_a = vec![b'x'; 1000];
+        let file_b = vec![b'y'; 1000];
+        file_a[0] = b'X'; // differs at byte 0
+
+        let (ctx, ranges) = make_recording_ctx(&file_a, &file_b).await;
+
+        let result = cmp_lockstep(
+            &ctx,
+            Path::new("/a"),
+            Path::new("/b"),
+            "/a",
+            "/b",
+            false,
+            256, // chunk_size — 1000 bytes would take 4+ chunks if not stopped
+        )
+        .await;
+        assert_eq!(result.code, 1, "files differ");
+        assert!(
+            result.text_out().contains("byte 1"),
+            "expected byte 1 report, got: {}",
+            result.text_out()
+        );
+
+        let recs = ranges.lock().unwrap();
+        // Exactly 2 reads: one chunk from each file at offset 0.
+        // The loop must NOT have read any further.
+        assert_eq!(
+            recs.len(),
+            2,
+            "early exit must stop after 2 reads (1 per file); got {} reads: {recs:?}",
+            recs.len()
+        );
+        // Both reads are at offset 0.
+        assert!(
+            recs.iter().all(|&(offset, _)| offset == Some(0)),
+            "both reads must be at offset 0; recorded {recs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmp_no_whole_file_reads() {
+        // Ensure that even for two identical files, the streaming path never
+        // issues a `read(None)` whole-file request — all reads must be ranged.
+        let payload = b"hello world, no whole-file reads here".to_vec();
+        let (ctx, ranges) = make_recording_ctx(&payload, &payload).await;
+
+        cmp_lockstep(
+            &ctx,
+            Path::new("/a"),
+            Path::new("/b"),
+            "/a",
+            "/b",
+            false,
+            ExecContext::STREAM_CHUNK_SIZE,
+        )
+        .await;
+
+        let recs = ranges.lock().unwrap();
+        // (None, None) would indicate a whole-file read — there must be none.
+        assert!(
+            !recs.iter().any(|&r| r == (None, None)),
+            "whole-file read(None) detected; recorded {recs:?}"
+        );
+        // All reads must carry a limit (bounded).
+        assert!(
+            recs.iter().all(|&(_, limit)| limit.is_some()),
+            "every read must be bounded; recorded {recs:?}"
+        );
     }
 }
