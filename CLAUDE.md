@@ -127,4 +127,64 @@ The builtin list in `help builtins` is generated dynamically from tool schemas.
 edit the fragments, then `cargo run -p kaish-help --example regen_syntax` (a drift test
 fails if it's stale). `limits.md` and the deeper `docs/LANGUAGE.md` still need manual updates.
 
+## Changelog
+
+`CHANGELOG.md` follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/)
+and [Semantic Versioning](https://semver.org). While pre-1.0, minor (`0.X.0`)
+releases may carry breaking changes.
+
+- **Every user/agent/embedder-facing change adds a bullet** under the top
+  `## [Unreleased]` section, in the right group: `Added`, `Changed`,
+  `Deprecated`, `Removed`, `Fixed`, `Security`. Omit empty groups. Skip pure
+  internal churn (refactors with no observable effect, version bumps).
+- **Mark breaking changes** by starting the bullet with `**BREAKING:**`. Anything
+  that changes default features, the embedder API, language grammar, exit-code
+  contracts, or `--json` shapes is breaking.
+- Bullets are concise and scannable — one line each, written for someone reading
+  the shell/embedding surface, not the diff.
+- **At release** (the `/release` skill owns this): rename `## [Unreleased]` to
+  `## [X.Y.Z] - YYYY-MM-DD`, add a fresh empty `## [Unreleased]` above it, and add
+  the `[X.Y.Z]` compare link at the bottom of the file.
+- **Every version bump gets a git tag** `vX.Y.Z` at the bump commit. One tag per
+  released version, no gaps — the changelog and `git tag -l` must agree.
+
+## Contributor conventions & gotchas
+
+Hard-won rules that aren't obvious from the code. Violating these silently breaks things.
+
+- **No legacy dual-representations.** Delete old code the moment it's superseded —
+  no compatibility shims, no parallel old/new types. Fix call sites immediately.
+- **Defer out-of-scope work to `docs/issues.md`** under a P1–P4 heading, not as
+  inline `TODO`s in code or scratch notes.
+- **Test builtins through `kernel.execute(...)`, not a builtin's direct
+  `.execute()`.** Direct calls skip the dispatch chain (arg binding, `--json`,
+  output limits) and pass while the real path is broken.
+- **Read clap value flags from the parsed struct, never the raw `ToolArgs` map.**
+  The kernel binds kebab-case keys (`-A`/`--after-context`); a snake_case raw-map
+  read silently misses them (this was the `grep`/`rg` context-flag bug class).
+- **`--json` is a kernel-level concern**, not per-tool: `extract_output_format()`
+  strips it before tools run; `apply_output_format()` transforms the `ExecResult`
+  after. Builtins emit typed `ExecResult::with_output(OutputData::...)` and never
+  format JSON themselves (unless they opt out via `ToolSchema.owns_output`).
+- **No real system paths in tests.** Use `tempfile::tempdir()` for real FS and VFS
+  paths (`/v/...`) for in-memory; never hardcode `/tmp`, `/home`, `/bin`. Gate
+  Linux-only tests (`/proc`, absolute `/bin/`) with `#[cfg(target_os = "linux")]`.
+  Trash-related tempdirs must use `CARGO_TARGET_TMPDIR`.
+- **Backends that don't override `read_range` are O(n²)** under the streaming
+  readers (`wc`/`cat`/`grep`/`cmp`/`checksum` scan in 256 KiB windows). Override it
+  on any new `Filesystem`/`KernelBackend` that supports byte ranges.
+- **Hermetic env has two spawn sites that must stay in sync:**
+  `kernel.rs::try_execute_external` (production) and
+  `dispatch.rs::BackendDispatcher::try_external` (test-only). The kernel never reads
+  OS env — frontends populate `KernelConfig::initial_vars`.
+- **clap builtin gotchas:** `with_output` drops the `rich_json` payload — use
+  `with_output_and_text` when a builtin needs a custom pipe representation;
+  `to_argv()` injects a `--` separator, so don't unit-test clap builtins via raw
+  `positional` (route through an `execute_argv`-style entrypoint).
+- **Capability features are opt-in axes** (`localfs`, `subprocess`, `host`, `git`,
+  `os-integration`, `tokens`); default is `["localfs"]`. A localfs-only build does
+  not spawn subprocesses. `full`/`native` are aliases for all six. New OS-touching
+  code must sit behind the right axis and compile out cleanly without it (the
+  `--no-default-features` gates in Build Commands enforce this).
+
 
