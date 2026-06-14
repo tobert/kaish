@@ -9,6 +9,9 @@
 //! - External commands are correctly blocked
 //! - Help system lists only available (ungated) builtins
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::sync::Arc;
 
 use kaish_kernel::{Kernel, KernelConfig};

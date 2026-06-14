@@ -5,6 +5,9 @@
 //!
 //! See docs/issues.md "Kernel reads host HOME unconditionally".
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::collections::HashMap;
 
 use kaish_kernel::ast::Value;

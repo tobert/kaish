@@ -614,7 +614,7 @@ mod tests {
             params.clone(),
             30_000,
             None,
-            &[init_path.clone()],
+            std::slice::from_ref(&init_path),
             McpTraceContext::default(),
             false,
         )

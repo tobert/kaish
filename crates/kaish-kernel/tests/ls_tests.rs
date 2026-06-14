@@ -12,6 +12,9 @@
 //! `tempfile::tempdir()` root, so they exercise the same path a REPL/MCP user
 //! hits. See `common::kernel_at` / `common::run`.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod common;
 
 use std::fs;

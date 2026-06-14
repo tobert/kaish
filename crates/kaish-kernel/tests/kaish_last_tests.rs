@@ -4,6 +4,9 @@
 //! its `.data` (as JSON) or its captured `.out` (raw stdout). It replaces
 //! the removed `${?.data}` field access on `$?`.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::sync::Arc;
 
 use kaish_kernel::{Kernel, KernelConfig};

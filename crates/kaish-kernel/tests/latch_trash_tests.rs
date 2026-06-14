@@ -12,6 +12,9 @@
 //! real paths under `/tmp` and `/v`, so a `/tmp`-rooted tempdir would never
 //! reach the trash arm.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 // KernelConfig::repl() mounts the real filesystem.
 #![cfg(feature = "localfs")]
 

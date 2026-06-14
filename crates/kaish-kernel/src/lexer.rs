@@ -2114,6 +2114,7 @@ pub fn parse_float(source: &str) -> Result<f64, LexerError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 

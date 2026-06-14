@@ -6,6 +6,8 @@
 //! `tokio::time::pause` is intentionally avoided because `nix::kill` and OS
 //! signal delivery do not honor the tokio test clock.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(all(unix, feature = "subprocess"))]
 
 use std::path::Path;

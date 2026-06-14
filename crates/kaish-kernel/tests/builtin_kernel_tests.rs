@@ -7,6 +7,9 @@
 //! kernel-routed test locking them in. These do: real command strings through
 //! `kernel.execute()` over a `tempfile::tempdir()` root.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod common;
 
 use std::fs;

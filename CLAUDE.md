@@ -42,10 +42,21 @@ cargo build -p kaish-kernel              # Build specific crate
 cargo test --all                         # Run all tests
 cargo test -p kaish-kernel --test lexer_tests   # Lexer tests only
 cargo test -p kaish-kernel --test parser_tests  # Parser tests only
+cargo clippy --all --all-targets         # Lint everything incl. tests (must be clean)
 cargo insta test                         # Run snapshot tests
 cargo insta test --check                 # CI mode (fails on pending snapshots)
 cargo insta review                       # Interactive review of pending snapshots
 ```
+
+The workspace denies `clippy::unwrap_used` and warns `clippy::expect_used` (see
+`[workspace.lints]` in the root `Cargo.toml`) to keep production code propagating
+errors. `clippy.toml` sets `allow-{unwrap,expect}-in-tests = true` so those
+restriction lints don't fire on code inside `#[test]` bodies — but clippy does
+**not** treat non-`#[test]` test *helper* functions, integration-test crates, or
+`#[cfg(all(test, …))]` modules as test context, so add a file- or module-scoped
+`#![allow(clippy::unwrap_used, clippy::expect_used)]` there (a panic on a known-good
+fixture IS the test failing). `cargo clippy --all` alone skips test targets — use
+`--all-targets` to catch test code too.
 
 ## Development Guidelines
 
@@ -68,7 +79,11 @@ cargo insta review                       # Interactive review of pending snapsho
 ### Version Control
 
 - **Always add files by name**
-- Run `cargo test` before committing
+- Before committing, both must be clean:
+  - `cargo test --all`
+  - `cargo clippy --all --all-targets` — zero errors **and** zero warnings
+    (`--all-targets` so test code is linted too; see Build Commands for the
+    test-code allow convention)
 
 ## Architecture
 

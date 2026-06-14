@@ -8,6 +8,9 @@
 //! strings through `kernel.execute()` so the whole lex → parse → dispatch →
 //! builtin pipeline runs, not just the builtin's arg struct.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use kaish_kernel::{Kernel, KernelConfig, OutputLimitConfig};
 
 /// A kernel that starts with no limit but truncates in memory once one is set

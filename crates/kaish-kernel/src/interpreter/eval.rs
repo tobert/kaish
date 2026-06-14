@@ -841,6 +841,7 @@ pub fn eval_expr(expr: &Expr, scope: &mut Scope) -> EvalResult<Value> {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use crate::ast::VarSegment;

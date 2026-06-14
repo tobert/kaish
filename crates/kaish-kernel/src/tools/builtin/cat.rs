@@ -428,9 +428,12 @@ mod tests {
     // (None, None) in the log signals a whole-file read, which the streaming
     // path must never issue.
 
+    /// Recorded (offset, limit) pairs from each `read_range` call.
+    type RecordedRanges = Arc<std::sync::Mutex<Vec<(Option<u64>, Option<u64>)>>>;
+
     struct RecordingFs {
         inner: MemoryFs,
-        ranges: Arc<std::sync::Mutex<Vec<(Option<u64>, Option<u64>)>>>,
+        ranges: RecordedRanges,
     }
 
     #[async_trait::async_trait]
@@ -477,7 +480,7 @@ mod tests {
     async fn make_recording_ctx(
         path: &str,
         data: &[u8],
-    ) -> (ExecContext, Arc<std::sync::Mutex<Vec<(Option<u64>, Option<u64>)>>>) {
+    ) -> (ExecContext, RecordedRanges) {
         let ranges = Arc::new(std::sync::Mutex::new(Vec::new()));
         let rec = RecordingFs {
             inner: MemoryFs::new(),

@@ -889,7 +889,7 @@ mod tests {
         match result.output() {
             Some(output) => {
                 // Find a node that has 'l' as the type in cells
-                let has_symlink_type = output.root.iter().any(|n| n.cells.get(0) == Some(&"l".to_string()));
+                let has_symlink_type = output.root.iter().any(|n| n.cells.first() == Some(&"l".to_string()));
                 assert!(has_symlink_type, "Expected 'l' type character for symlinks");
             }
             None => panic!("Expected OutputData for long format"),

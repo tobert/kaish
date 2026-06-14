@@ -290,7 +290,7 @@ mod tests {
         let mut args = ToolArgs::new();
         // Create a longer text to test
         let text = "The quick brown fox jumps over the lazy dog. ".repeat(10);
-        args.positional.push(Value::String(text.into()));
+        args.positional.push(Value::String(text));
 
         let result = Tokens.execute(args, &mut ctx).await;
         assert!(result.ok());

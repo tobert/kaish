@@ -19,6 +19,9 @@
 //!
 //! All tests use a multi-threaded tokio runtime so contention is real.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::sync::Arc;
 use std::time::Duration;
 

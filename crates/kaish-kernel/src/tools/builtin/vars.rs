@@ -105,6 +105,7 @@ fn value_type_name(value: &Value) -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use crate::interpreter::apply_output_format;

@@ -297,7 +297,7 @@ mod tests {
 
         // Simulate global --json (handled by kernel)
         let result = apply_output_format(result, OutputFormat::Json);
-        let data: Vec<serde_json::Value> = serde_json::from_str(&*result.text_out()).expect("valid JSON");
+        let data: Vec<serde_json::Value> = serde_json::from_str(&result.text_out()).expect("valid JSON");
         assert_eq!(data.len(), 2);
         assert!(data[0].get("NAME").is_some());
     }
@@ -354,7 +354,7 @@ mod tests {
         // (and optionally a "budget" key when a budget is set — not present here).
         let result = apply_output_format(result, OutputFormat::Json);
         let top: serde_json::Value =
-            serde_json::from_str(&*result.text_out()).expect("valid JSON");
+            serde_json::from_str(&result.text_out()).expect("valid JSON");
 
         let data = top.get("mounts").expect("must have 'mounts' key");
         assert!(data.is_array(), "'mounts' must be an array");

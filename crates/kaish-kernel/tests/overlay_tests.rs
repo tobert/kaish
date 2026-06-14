@@ -4,6 +4,9 @@
 //! `#[cfg(feature = "localfs")]` (matching the project pattern from touch.rs
 //! regression gate and the CLAUDE.md gate list).
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 #[cfg(all(feature = "localfs", feature = "overlay"))]
 mod overlay_tests {
     use kaish_kernel::{Kernel, KernelConfig};

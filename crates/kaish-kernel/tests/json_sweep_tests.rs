@@ -16,6 +16,8 @@
 //! scrambled columns (full text line in node.name shifted every column by
 //! one and dropped the algorithm).
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 // KernelConfig::repl() mounts the real filesystem.
 #![cfg(feature = "localfs")]
 

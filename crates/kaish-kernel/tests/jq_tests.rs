@@ -12,6 +12,9 @@
 //! single iteration with a multi-line value would print the prefix once
 //! followed by embedded newlines, not once per element.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::sync::Arc;
 
 use kaish_kernel::{Kernel, KernelConfig};

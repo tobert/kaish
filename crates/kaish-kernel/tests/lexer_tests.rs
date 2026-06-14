@@ -2,6 +2,9 @@
 //!
 //! These tests replace the custom tokens.txt test file format with native Rust tests.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use kaish_kernel::lexer::{tokenize, LexerError, Token};
 use rstest::rstest;
 

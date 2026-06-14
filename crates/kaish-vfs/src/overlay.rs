@@ -1114,6 +1114,7 @@ impl Filesystem for OverlayFs {
 }
 
 #[cfg(all(test, feature = "memory"))]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::memory::MemoryFs;

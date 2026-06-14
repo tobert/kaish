@@ -411,7 +411,7 @@ mod tests {
             let (writer, mut reader) = pipe_stream(64);
 
             let write_task = tokio::spawn(async move {
-                let chunk = vec![0xABu8; 37]; // odd size to stress partial writes
+                let chunk = [0xABu8; 37]; // odd size to stress partial writes
                 for _ in 0..5000 {
                     let mut pos = 0;
                     while pos < chunk.len() {

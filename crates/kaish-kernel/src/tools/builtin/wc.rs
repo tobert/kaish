@@ -546,12 +546,15 @@ mod tests {
 
     // --- Streaming: bounded-memory proof ---
 
+    /// Recorded (offset, limit) pairs from each `read_range` call.
+    type RecordedRanges = Arc<std::sync::Mutex<Vec<(Option<u64>, Option<u64>)>>>;
+
     /// A `Filesystem` that records every `read_range` it is asked for, so a test
     /// can prove a builtin pulls a file in bounded chunks rather than slurping
     /// it whole. Delegates all real work to an inner `MemoryFs`.
     struct RecordingFs {
         inner: MemoryFs,
-        ranges: Arc<std::sync::Mutex<Vec<(Option<u64>, Option<u64>)>>>,
+        ranges: RecordedRanges,
     }
 
     #[async_trait::async_trait]

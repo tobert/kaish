@@ -10,6 +10,9 @@
 //! - Capture stdout/stderr via BoundedStream
 //! - Allow polling status via /v/jobs/{id}/status
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::time::Duration;
 
 use std::sync::Arc;

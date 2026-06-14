@@ -4,6 +4,9 @@
 //! for scripts with Error-level issues, while allowing scripts with
 //! only Warning-level issues to execute.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::path::PathBuf;
 
 use kaish_kernel::{Kernel, KernelConfig};

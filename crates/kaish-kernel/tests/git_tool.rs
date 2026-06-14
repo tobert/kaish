@@ -6,6 +6,8 @@
 //! exactly the path that matters now that the tool is out-of-tree. Requires the
 //! `git` capability.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(feature = "git")]
 
 use kaish_kernel::{Kernel, KernelConfig};

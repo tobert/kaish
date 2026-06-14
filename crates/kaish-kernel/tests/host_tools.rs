@@ -5,6 +5,8 @@
 //! so these are Linux + `host` only. Driving through `kernel.execute` validates
 //! registration and the full dispatch path.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(all(target_os = "linux", feature = "host"))]
 
 use kaish_kernel::{Kernel, KernelConfig};

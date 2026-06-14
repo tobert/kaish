@@ -5,6 +5,9 @@
 //! `.`. So `*` skips dotfiles, while `.*`, `.github`, and `.github/*` reach
 //! them. `glob -a` / a hidden-inclusive walk acts like `dotglob`.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod common;
 
 use common::{kernel_at, run};

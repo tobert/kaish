@@ -3,6 +3,9 @@
 //! All tests use NoLocal/isolated kernels (or tiny budgets) — no real system
 //! paths, no /tmp writes. VFS paths only.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use kaish_kernel::{Kernel, KernelConfig};
 
 /// Build a NoLocal kernel with a specific budget (in bytes).

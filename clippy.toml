@@ -1,0 +1,8 @@
+# The workspace denies `unwrap_used` and warns on `expect_used` to keep
+# production code propagating errors (see CLAUDE.md error-handling rules).
+# Those restriction lints fire on test code too, where `unwrap()`/`expect()`
+# on known-good fixtures is the idiom — a panic there IS the test failing.
+# Exempt test contexts so `cargo clippy --all --all-targets` stays meaningful
+# (real production unwraps still fail the gate).
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

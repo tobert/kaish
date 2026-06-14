@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn spill_dir_is_under_runtime() {
         let spill = spill_dir();
-        assert!(spill.starts_with(&runtime_dir()));
+        assert!(spill.starts_with(runtime_dir()));
         assert!(spill.ends_with("spill"));
     }
 

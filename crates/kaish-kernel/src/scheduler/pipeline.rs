@@ -2121,7 +2121,7 @@ mod tests {
                 Value::String("world".to_string()),
             ]
         );
-        assert!(tool_args.named.get("args").is_none());
+        assert!(!tool_args.named.contains_key("args"));
     }
 
     #[test]

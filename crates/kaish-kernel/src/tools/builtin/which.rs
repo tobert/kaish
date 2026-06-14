@@ -250,7 +250,7 @@ mod tests {
         if result.ok() {
             let text = result.text_out();
             let lines: Vec<&str> = text.lines().collect();
-            assert!(lines.len() >= 1);
+            assert!(!lines.is_empty());
         }
     }
 

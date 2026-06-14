@@ -4,6 +4,8 @@
 //! when no builtin tool matches a command name. They spawn real processes, so
 //! the whole suite requires the `subprocess` capability.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(feature = "subprocess")]
 
 use kaish_kernel::{Kernel, KernelConfig};

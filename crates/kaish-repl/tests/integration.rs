@@ -1,6 +1,9 @@
 //! Integration tests for kaish REPL.
 //!
 //! These tests run scripts through the REPL and verify behavior.
+//!
+//! Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kaish_repl::{ProcessResult, Repl};
 

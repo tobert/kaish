@@ -347,6 +347,23 @@ targets.
 
 ## P3 — Scheduler and infra
 
+### Code formatting (rustfmt) — considered and declined 2026-06-14
+**Decision (Amy): not adopting rustfmt.** The audience for this code is Claude and
+other agents, not human reviewers, so rustfmt's payoff (consistent visual style,
+stable git blame, smaller PR diffs) is mostly cosmetic here; the compiler enforces
+correctness and `cargo clippy --all --all-targets` now enforces the lints that
+actually affect clarity. Against that thin benefit, a first `cargo fmt --all`
+rewrites **~202 files / ~2127 hunks** (rustfmt 1.8.0-stable, edition 2024) and no
+small config shrinks it meaningfully — measured: `use_small_heuristics` Off/Max
+both make it *worse* (2261/2214), `max_width=80` far worse (3247), `max_width=120`
+only ~8% better (1966) at the cost of wider lines everywhere; the knobs that would
+preserve the hand-style (`chain_width`, `imports_granularity`, `group_imports`)
+are nightly-only and can't back a stable gate. So **no `rustfmt.toml`** is added
+(a dormant one would make an ad-hoc `cargo fmt --check` fail confusingly). If this
+is ever revisited, it must be its OWN commit (never bundled with a feature) and
+pin `edition = "2024"` (bare `rustfmt` defaults to 2015; `cargo fmt` already reads
+2024 from Cargo.toml).
+
 ### `GlobPath::walk_match` globstar recursion has no work bound
 `walk_match` (and the older `match_segments` it parallels) backtrack on globstar
 with no `MAX_MATCH_CALLS` guard — unlike the single-component `match_bounded` in

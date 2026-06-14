@@ -470,11 +470,14 @@ mod tests {
     //   (c) On an early difference (byte 1 differs), we stop after ONE chunk
     //       per file — not after reading every chunk.
 
+    /// Recorded (offset, limit) pairs from each `read_range` call.
+    type RecordedRanges = Arc<std::sync::Mutex<Vec<(Option<u64>, Option<u64>)>>>;
+
     struct RecordingFs {
         inner: MemoryFs,
         /// (offset, limit) pairs for each `read_range` call.
         /// `(None, None)` signals a whole-file `read(None)`.
-        ranges: Arc<std::sync::Mutex<Vec<(Option<u64>, Option<u64>)>>>,
+        ranges: RecordedRanges,
     }
 
     #[async_trait::async_trait]
@@ -521,7 +524,7 @@ mod tests {
     async fn make_recording_ctx(
         file_a: &[u8],
         file_b: &[u8],
-    ) -> (ExecContext, Arc<std::sync::Mutex<Vec<(Option<u64>, Option<u64>)>>>) {
+    ) -> (ExecContext, RecordedRanges) {
         let ranges = Arc::new(std::sync::Mutex::new(Vec::new()));
         let rec = RecordingFs {
             inner: MemoryFs::new(),
@@ -635,7 +638,7 @@ mod tests {
         let recs = ranges.lock().unwrap();
         // (None, None) would indicate a whole-file read — there must be none.
         assert!(
-            !recs.iter().any(|&r| r == (None, None)),
+            !recs.contains(&(None, None)),
             "whole-file read(None) detected; recorded {recs:?}"
         );
         // All reads must carry a limit (bounded).

@@ -258,7 +258,7 @@ mod tests {
         // Verify file was created
         let stat = ctx.backend.stat(Path::new(&*result.text_out())).await;
         assert!(stat.is_ok());
-        assert_eq!(stat.unwrap().is_file(), true);
+        assert!(stat.unwrap().is_file());
     }
 
     #[tokio::test]
@@ -274,7 +274,7 @@ mod tests {
         // Verify directory was created
         let stat = ctx.backend.stat(Path::new(&*result.text_out())).await;
         assert!(stat.is_ok());
-        assert_eq!(stat.unwrap().is_dir(), true);
+        assert!(stat.unwrap().is_dir());
     }
 
     #[tokio::test]

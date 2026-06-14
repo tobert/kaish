@@ -7,6 +7,8 @@
 
 #![cfg(unix)]
 #![allow(unsafe_code)]
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
@@ -90,7 +92,7 @@ impl PtySession {
 
     /// Send a line of input (appends newline).
     fn send_line(&mut self, line: &str) {
-        write!(self.master, "{}\n", line).expect("write to pty failed");
+        writeln!(self.master, "{}", line).expect("write to pty failed");
     }
 
     /// Send raw bytes (for control characters).
@@ -159,7 +161,7 @@ impl PtySession {
 impl Drop for PtySession {
     fn drop(&mut self) {
         // Try graceful exit first
-        let _ = write!(self.master, "exit\n");
+        let _ = writeln!(self.master, "exit");
         std::thread::sleep(Duration::from_millis(100));
 
         // Force kill if still running

@@ -18,6 +18,9 @@
 //! - Command-substitution cwd isolation, which depends on the host process's
 //!   starting cwd (hard to make deterministic across two runners).
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use kaish_kernel::Kernel;
 
 // ============================================================================

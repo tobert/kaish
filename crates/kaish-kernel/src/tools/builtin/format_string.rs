@@ -301,6 +301,7 @@ fn apply_string_padding(spec: &FormatSpec, val: &str, output: &mut String) {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 

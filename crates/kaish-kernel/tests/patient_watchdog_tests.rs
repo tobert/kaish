@@ -6,6 +6,9 @@
 //! script clock resumes with the remaining time it had at acquire. Cancellation
 //! stays live throughout — only the timer pauses, never the cancel surface.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::sync::Arc;
 use std::time::Duration;
 

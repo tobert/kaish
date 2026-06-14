@@ -17,6 +17,9 @@
 //!   heredoc bodies (these were `#[ignore]`d until async redirect-target
 //!   evaluation landed).
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::sync::Arc;
 
 use kaish_kernel::{Kernel, KernelConfig};

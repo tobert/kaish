@@ -4926,6 +4926,7 @@ pub(crate) async fn kill_with_grace(
 }
 
 #[cfg(all(test, feature = "subprocess"))]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

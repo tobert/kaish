@@ -5,6 +5,11 @@
 //! The `common/mod.rs` form is the documented escape hatch for shared
 //! test code, and is the only place in the workspace where we use a
 //! `mod.rs` (the project otherwise prefers `module_name.rs`).
+//!
+//! This is test-fixture code: `unwrap()`/`expect()` on known-good setup is the
+//! idiom (a panic here IS the test failing), so the workspace restriction lints
+//! are allowed module-wide.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::Path;
 use std::process::Command;
@@ -54,9 +59,7 @@ pub struct BashOutput {
 /// `bash` is missing or errored — they explicitly asked us to compare.
 #[allow(dead_code)] // only the compat-test binaries call this
 pub fn run_bash_if_enabled(script: &str) -> Option<BashOutput> {
-    if std::env::var_os("KAISH_BASH_COMPAT").is_none() {
-        return None;
-    }
+    std::env::var_os("KAISH_BASH_COMPAT")?;
     let output = Command::new("bash")
         .arg("-c")
         .arg(script)
@@ -75,9 +78,9 @@ pub fn run_bash_if_enabled(script: &str) -> Option<BashOutput> {
 ///
 /// - `eq: "..."`        — stdout (after `.trim()`) equals the literal
 /// - `eq_exact: "..."`  — stdout equals the literal *byte-for-byte*, no trim
-///                        (use for heredoc tests where trailing `\n` matters)
+///   (use for heredoc tests where trailing `\n` matters)
 /// - `kaish_eq: "..."`  — trimmed kaish-only (paired with `bash_eq:` for
-///                        known divergences)
+///   known divergences)
 /// - `bash_eq: "..."`   — ignored on the kaish side
 /// - `contains: "..."`  — stdout contains the substring
 /// - `absent: "..."`    — stdout does not contain the substring
