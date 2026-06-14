@@ -594,6 +594,26 @@ the `--json` text surface specifically. Decide: have `apply_output_format`
 prefer `.data` when present, or document that `--json` is redundant after
 `jq`. Sweep pins current behavior. Surfaced 2026-06-11.
 
+### Recursive/tree `--json` carries structure but no size/type metadata
+`tree --json DIR` and `ls -R --json DIR` (without `-l`) serialize the
+directory *shape* but every leaf value is `null` — there is nowhere in the
+tree JSON shape (`OutputData::to_json`'s nested-object branch, `name → children`)
+to hang per-node metadata, and `tree` never collects sizes in the first place.
+So neither can produce a recursive "rip of the filesystem + sizes" on its own.
+`ls -lR --json` *does* now carry sizes (the table-with-children path, fixed
+2026-06-14 — see Resolved), but the bare-tree shapes don't. Working alternative
+today: `for f in $(find DIR -type f); do stat -c '%s %n' "$f"; done`. Proper
+fix is a shape decision — either teach `tree`/recursive-`ls` to emit a
+table-with-children (so the metadata-bearing serializer applies) or extend the
+tree-JSON branch to carry a metadata slot per node. Surfaced 2026-06-14 while
+probing fs-rip ergonomics. (P3)
+
+### `stat --json` accepts only one file
+`stat` is single-positional: `stat --json a b c` treats the joined list as one
+path and errors `not found`. A multi-file `stat` would make a one-shot metadata
+rip (`stat --json $(find DIR -type f)`) possible without the per-file loop.
+Surfaced 2026-06-14. (P3)
+
 ### `spawn --command true` — bool-shaped values vanish from named args
 `true`/`false` as a named-arg value lex as `Value::Bool`, and
 `flagify_bool_named` converts `Bool(true)` into bare flag presence — so
@@ -676,6 +696,21 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`ls -lR --json` silently dropped every file and size — fixed 2026-06-14.**
+  Recursive long listing builds an `OutputData::table` whose root nodes are
+  directory *groups* and whose actual entries (carrying the type/size cells)
+  live in `children`. But `OutputData::to_json`'s table branch only emitted
+  each root node's `name` + `cells` and never recursed into `children` — and
+  the directory group nodes have no cells, so each collapsed to `{"NAME":"a/b"}`.
+  Result: `code:0, ok:true`, but every file and every size gone — silent
+  corruption, exactly the class crash-over-corruption forbids. The defect was
+  in the serializer, not `ls`: *any* table-shaped output with child nodes lost
+  them. **Fix:** `row_to_json` now recurses, nesting child rows under a
+  `"children"` key (`crates/kaish-types/src/output.rs`); flat tables (ps, vars,
+  single-dir `ls -l`) are unchanged since they have no children. Regression
+  guard: `output::tests::to_json_table_with_children`. Surfaced 2026-06-14
+  probing fs-rip ergonomics; bare-tree metadata gap filed P3 above.
 
 - **`glob` with an absolute pattern matched nothing through a hidden dir — fixed 2026-06-11.**
   Surfaced by `cargo test --all` (the `subprocess`-gated test module isn't

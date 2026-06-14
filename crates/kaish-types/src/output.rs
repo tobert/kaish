@@ -451,9 +451,12 @@ impl OutputData {
             return serde_json::Value::String(text.to_string());
         }
 
-        // Table -> array of objects keyed by headers
+        // Table -> array of objects keyed by headers. Nodes with children
+        // (e.g. `ls -lR`, where root nodes are directory groups holding the
+        // actual entries) nest those entries under a "children" key — dropping
+        // them would silently lose every file and size.
         if let Some(ref headers) = self.headers {
-            let rows: Vec<serde_json::Value> = self.root.iter().map(|node| {
+            fn row_to_json(node: &OutputNode, headers: &[String]) -> serde_json::Value {
                 let mut map = serde_json::Map::new();
                 // First header maps to node.name
                 if let Some(first) = headers.first() {
@@ -463,8 +466,21 @@ impl OutputData {
                 for (header, cell) in headers.iter().skip(1).zip(node.cells.iter()) {
                     map.insert(header.clone(), serde_json::Value::String(cell.clone()));
                 }
+                if !node.children.is_empty() {
+                    let children: Vec<serde_json::Value> = node
+                        .children
+                        .iter()
+                        .map(|child| row_to_json(child, headers))
+                        .collect();
+                    map.insert("children".to_string(), serde_json::Value::Array(children));
+                }
                 serde_json::Value::Object(map)
-            }).collect();
+            }
+            let rows: Vec<serde_json::Value> = self
+                .root
+                .iter()
+                .map(|node| row_to_json(node, headers))
+                .collect();
             return serde_json::Value::Array(rows);
         }
 
@@ -627,6 +643,39 @@ mod tests {
         assert_eq!(output.to_json(), serde_json::json!([
             {"NAME": "foo.rs", "SIZE": "1024", "TYPE": "file"},
             {"NAME": "bar/", "SIZE": "4096", "TYPE": "dir"},
+        ]));
+    }
+
+    #[test]
+    fn to_json_table_with_children() {
+        // `ls -lR --json` builds a table whose root nodes are directory
+        // groups and whose actual entries (with size/type cells) live in
+        // `children`. The table serializer must recurse into them or every
+        // file and size is silently dropped — corruption, not an error.
+        let output = OutputData::table(
+            vec!["NAME".into(), "TYPE".into(), "SIZE".into()],
+            vec![
+                OutputNode::new(".")
+                    .with_entry_type(EntryType::Directory)
+                    .with_children(vec![
+                        OutputNode::new("top.txt").with_cells(vec!["-".into(), "6".into()]),
+                        OutputNode::new("a").with_cells(vec!["d".into(), "60".into()]),
+                    ]),
+                OutputNode::new("a")
+                    .with_entry_type(EntryType::Directory)
+                    .with_children(vec![
+                        OutputNode::new("mid.txt").with_cells(vec!["-".into(), "3".into()]),
+                    ]),
+            ],
+        );
+        assert_eq!(output.to_json(), serde_json::json!([
+            {"NAME": ".", "children": [
+                {"NAME": "top.txt", "TYPE": "-", "SIZE": "6"},
+                {"NAME": "a", "TYPE": "d", "SIZE": "60"},
+            ]},
+            {"NAME": "a", "children": [
+                {"NAME": "mid.txt", "TYPE": "-", "SIZE": "3"},
+            ]},
         ]));
     }
 
