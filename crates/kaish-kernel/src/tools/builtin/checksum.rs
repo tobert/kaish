@@ -133,9 +133,18 @@ impl Tool for Checksum {
         let mut text_lines = Vec::new();
         for path in &paths {
             let resolved = ctx.resolve_path(path);
-            match ctx.backend.read(Path::new(&resolved), None).await {
-                Ok(data) => {
-                    let hash = compute_hash(&data, &algo);
+            // Stream the file into the hasher rather than reading it whole — a
+            // digest reduces any size of input to a fixed string, so this is a
+            // pure win: bounded memory even on multi-GB files.
+            let mut hasher = StreamHasher::new(&algo);
+            match ctx
+                .read_file_chunked(&resolved, ExecContext::STREAM_CHUNK_SIZE, |chunk| {
+                    hasher.update(chunk)
+                })
+                .await
+            {
+                Ok(()) => {
+                    let hash = hasher.finalize_hex();
                     let line = format!("{}  {}", hash, path);
                     // First header (HASH) binds to node.name; FILE/ALGO are
                     // cells. The old code put the rendered line in the name,
@@ -208,9 +217,15 @@ impl Checksum {
             let filename = rest.trim_start_matches([' ', '*']);
 
             let file_resolved = ctx.resolve_path(filename);
-            match ctx.backend.read(Path::new(&file_resolved), None).await {
-                Ok(file_data) => {
-                    let actual_hash = compute_hash(&file_data, algo);
+            let mut hasher = StreamHasher::new(algo);
+            match ctx
+                .read_file_chunked(&file_resolved, ExecContext::STREAM_CHUNK_SIZE, |chunk| {
+                    hasher.update(chunk)
+                })
+                .await
+            {
+                Ok(()) => {
+                    let actual_hash = hasher.finalize_hex();
                     if actual_hash == expected_hash {
                         output.push_str(&format!("{}: OK\n", filename));
                     } else {
@@ -234,6 +249,45 @@ impl Checksum {
             ExecResult::from_output(1, output, format!("checksum: {} computed checksum(s) did NOT match", failures))
         } else {
             ExecResult::with_output(OutputData::text(output))
+        }
+    }
+}
+
+/// Incremental hasher for streaming file digests.
+///
+/// One variant per supported algorithm — `digest::Digest` gives each a uniform
+/// `update`/`finalize`, but the concrete types come from three crates, so the
+/// enum dispatches. `new` panics on an unvalidated algorithm; callers validate
+/// the name before constructing one (same contract as [`compute_hash`]).
+enum StreamHasher {
+    Sha256(sha2::Sha256),
+    Sha1(sha1::Sha1),
+    Md5(md5::Md5),
+}
+
+impl StreamHasher {
+    fn new(algo: &str) -> Self {
+        match algo {
+            "sha256" => StreamHasher::Sha256(sha2::Sha256::new()),
+            "sha1" => StreamHasher::Sha1(sha1::Sha1::new()),
+            "md5" => StreamHasher::Md5(md5::Md5::new()),
+            _ => unreachable!("algorithm validated before constructing StreamHasher"),
+        }
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        match self {
+            StreamHasher::Sha256(h) => h.update(data),
+            StreamHasher::Sha1(h) => h.update(data),
+            StreamHasher::Md5(h) => h.update(data),
+        }
+    }
+
+    fn finalize_hex(self) -> String {
+        match self {
+            StreamHasher::Sha256(h) => hex_encode(h.finalize().as_slice()),
+            StreamHasher::Sha1(h) => hex_encode(h.finalize().as_slice()),
+            StreamHasher::Md5(h) => hex_encode(h.finalize().as_slice()),
         }
     }
 }
@@ -407,6 +461,22 @@ mod tests {
         let result = Checksum.execute(args, &mut ctx).await;
         assert!(!result.ok());
         assert!(result.err.contains("unknown algorithm"));
+    }
+
+    #[test]
+    fn stream_hasher_matches_one_shot_across_every_split() {
+        // Feeding the incremental hasher in two chunks split at every byte
+        // boundary must yield the same digest as the one-shot `compute_hash`.
+        let data = b"the quick brown fox\n\x00\xff binary too";
+        for algo in ["sha256", "sha1", "md5"] {
+            let want = compute_hash(data, algo);
+            for split in 0..=data.len() {
+                let mut h = StreamHasher::new(algo);
+                h.update(&data[..split]);
+                h.update(&data[split..]);
+                assert_eq!(h.finalize_hex(), want, "algo={algo} split={split}");
+            }
+        }
     }
 
     #[tokio::test]
