@@ -280,19 +280,6 @@ The six-field `ExecContext` ↔ kernel-state sync appears near every
 call site that fields a fork (`kernel.rs:~4100-4140` and duplicates;
 citation refreshed 2026-06-09). One helper, one truth.
 
-### Glued short-flag values rejected on clap-based coreutils (`cut -f1`, `head -c5`)
-Surfaced 2026-06-13 wiring the `dd`/binary tests: `cut -d ' ' -f1` errors with
-`unexpected argument '-1'` — the clap-derived arg layer doesn't accept a value
-glued onto a single-char short flag (`-f1`, `-c5`, `-n3`). The separated form
-(`-f 1`, `-c 5`) works. This breaks deep coreutils muscle memory — `cut -f1`,
-`head -c5`, `tail -c20`, `cut -d, -f1,3` are all idiomatic POSIX and what both
-agents *and* humans reflexively type. Likely a clap config gap (short flags need
-`num_args`/`require_equals` tuning, or a pre-parse split of `-fVALUE` →
-`-f VALUE` in the argv layer). Audit the clap-migrated builtins (`cut`, `head`,
-`tail`, `grep -A/-B/-C`, `base64 -w`, …) and either configure clap to accept
-glued values or normalize in `to_argv`/`build_args`. Pairs with the existing
-`gotcha_clap_parsed_vs_raw_args` lessons. Worth doing — the glued form is the
-common idiom, and silently erroring on it is a sharp edge.
 
 ### No unquoted token-pasting — adjacent bare lexemes are not one word
 kaish's lexer/parser does **no token pasting**: a run of adjacent *unquoted*
@@ -425,9 +412,11 @@ items (destructive rails, realworld port, `--json` sweep) are all closed as
 of 2026-06-11 — see Resolved. Five smaller bullets also fixed 2026-06-11
 (snapshot-isolation race, both tautological asserts, external argv no-split,
 kill/wait e2e). Each remaining bullet is independently actionable:
-- **`builtin_kernel_tests.rs` is 100% happy-path:** 38 tests, zero nonzero-exit
-  assertions. Add 1–2 negative cases per builtin (missing file, bad flag)
-  asserting the specific code + err substring — agents branch on exit codes.
+- **`builtin_kernel_tests.rs` happy-path gap — PARTIALLY FIXED 2026-06-14:** added
+  6 negative cases (cat/wc/sort missing file → exit 1 + named file, cut missing
+  -f/-c → exit 1, head unknown flag → clap exit 2, grep no-match → exit 1), each
+  pinning the specific code + err substring. More per-builtin negatives still
+  welcome, but the "zero nonzero-exit assertions" state is gone.
 - **Bare-glob validation backstop is single-site:** the bare-glob validation
   tests at `validation_tests.rs:321-391` are environment-dependent
   (transient-kernel cwd) — backstopped by the deterministic inline
@@ -435,16 +424,24 @@ kill/wait e2e). Each remaining bullet is independently actionable:
   covers the builtin-argv site; the `execute_stmt_flow` and `build_args_flat`
   "no matches" sites lack their own, and the inline module is feature-gated
   such that `cargo test -p kaish-kernel --lib` alone skips it.
-- **Lexer negative tests assert only `is_err`** (`lexer_tests.rs:160`
-  `run_lexer_error_test`): the float/ambiguous-boolean/unterminated suites
-  would still pass if the curated diagnostics regressed to a generic error.
-  Thread an expected variant/substring through the rstest cases (the inline
-  `backtick_in_source_is_rejected` shows the pattern).
-- **7 of 20 `IssueCode` variants are never emitted** (E006 sed, E007 jq, E010,
-  E011 diff, W003, W004, W005 — `kaish-tool-api/src/issue.rs`): the advertised
-  validations don't exist, so deleting them fails zero tests. Only grep and
-  seq implement `Tool::validate`. Either implement + test per code, or remove
-  the dead variants (fail-loud over silent aspiration).
+- **Lexer negative tests assert only `is_err` — FIXED 2026-06-14:** float and
+  unterminated-string cases now assert the exact `LexerError` variant via
+  `run_lexer_error_variant`; the ambiguous-boolean cases match the
+  `AmbiguousBoolean(_)`/`AmbiguousBooleanLike(_)` family via
+  `run_lexer_error_matching`. Tightening surfaced a real **diagnostic gap**: an
+  unterminated double-quoted string (`"unterminated`) never matches the logos
+  `String` regex, so it emits the generic `UnexpectedCharacter`, not the curated
+  `UnterminatedString` (which only the complete/interpolated-string helper
+  reaches). The test pins the *actual* variant with a comment; improving it to
+  `UnterminatedString` needs a logos fallback rule on the string token (P4).
+- **7 never-emitted `IssueCode` variants — REMOVED 2026-06-14:** E006 sed, E007
+  jq, E010, E011 diff, W003, W004, W005 deleted from `kaish-tool-api/src/issue.rs`
+  (enum + `code()` + `default_severity()`). They advertised validations that
+  didn't exist while every runtime path already fails loudly (`diff` exit 2,
+  `sed`/`jq` report bad expressions at runtime) — silent aspiration, so removed
+  rather than half-built. Code numbers stay stable identifiers (gaps documented
+  in `code()`); a future pre-execution validator for those builtins should add
+  the variant and its implementation together.
 - **bg/fg coverage is PTY-only** (unix-gated, timing-sensitive,
   `pty_job_control.rs`). The `wait`/`kill %1` half of this bullet closed
   2026-06-11 (see Resolved); bg/fg still have no non-PTY coverage.
@@ -604,23 +601,13 @@ O_RDONLY fd (works on dir fds; on Linux futimens needs only ownership/write
 perm, not a write-mode handle) instead of opening for write — deferred to keep
 the cross-platform `File::set_modified` contract unchanged for now.
 
-### `--json` is not stripped before `test` parses its operands
-`test -n hello --json` errors with `test: unknown binary operator: -json`
-(exit 2) — the global-flag extraction that strips `--json` for every other
-builtin doesn't fire for `test`'s raw-operand evaluation. The error does
-honor the JSON envelope contract, and the sweep pins that behavior
-(`json_sweep_tests.rs`, the `test` case). `--json` on an output-less builtin
-is near-meaningless, so this is polish: either strip it there too or document
-the exception. Surfaced by the `--json` sweep 2026-06-11.
-
-### `jq --json` double-encodes already-JSON stdout
-`echo '{"a":1}' | jq '.a' --json` emits the JSON *string* `"1\n"` rather than
-the number `1` — jq's stdout is already JSON text, and the text→string rule
-wraps it again. The real value rides `.data` (which MCP's
-`structured_content` uses), so consumers have a correct path; this is about
-the `--json` text surface specifically. Decide: have `apply_output_format`
-prefer `.data` when present, or document that `--json` is redundant after
-`jq`. Sweep pins current behavior. Surfaced 2026-06-11.
+### `--json` on `test` and `jq` double-encode — verified FIXED 2026-06-14
+Both stale. `test -n hello --json` no longer leaks `-json` into operand
+parsing (the `test` builtin skips the global flag); `echo '{"a":1}' | jq '.a'
+--json` emits the number `1`, not the string `"1\n"`, because
+`apply_output_format` prefers `.data` when present. `json_sweep_tests.rs`
+already pins both (test→Empty, jq→Number). Probed live 2026-06-14 while
+sweeping the P4 `--json` warts; left in place as covered.
 
 ### Recursive/tree `--json` carries structure but no size/type metadata
 `tree --json DIR` and `ls -R --json DIR` (without `-l`) serialize the
@@ -651,20 +638,14 @@ with a literal command named `true`; a did-you-mean hint (or exempting
 declared value-taking params from flagify) would smooth it. Surfaced by the
 `--json` sweep probes 2026-06-11.
 
-### Bare `,` / numeric ranges parse oddly — `cut -d,`, `tr -d 0-9` need quoting
-Surfaced 2026-05-28 by the kernel-routed builtin tests. Two related
-tokenization gaps in the same family as the dot-prefixed-filename entry
-above:
-- A standalone comma isn't a bareword, so `cut -d, -f2` and `cut -d , -f2`
-  both raise a parse error; only `cut -d ',' -f2` works.
-- A numeric range like `0-9` lexes as `Int(0)` + `Int(-9)` (the `-` starts
-  a negative int), so `tr -d 0-9` is a silent no-op — only `tr -d '0-9'`
-  works. Letter ranges (`tr a-z A-Z`) work because `-` is inside the Ident
-  char class. (The `tr` help example was fixed 2026-05-28 to quote `'0-9'`.)
-Low priority — quoting is a clean workaround and kaish is a POSIX *subset* —
-but a "did-you-mean: quote it" diagnostic would smooth bash porting. Decide
-whether lone punctuation / digit-ranges that agents reach for as set/delim
-arguments should tokenize as barewords.
+### Bare `,` / numeric ranges parse oddly — `cut -d,`, `tr -d 0-9` — FIXED 2026-06-14
+Both resolved (see Resolved). A standalone comma now parses as the literal
+`","` in argument position, so `cut -d, -f2` / `cut -d , -f2` / `tr -d ,` work
+without quoting; the no-token-pasting guard still catches comma-touching runs
+(`echo 1,2,3`). The `tr -d 0-9` silent no-op was already closed by the 0.8.2
+adjacent-span guard — it is a loud "quote the whole word" parse error pointing
+at `tr -d '0-9'`, now pinned by a regression test. Letter ranges (`tr a-z A-Z`)
+were always fine.
 
 ### Flag injection via glob expansion in `rm`
 `rm *` in a directory containing `-rf.txt` expands to `rm -rf.txt …`
@@ -703,20 +684,13 @@ remains is "soft" guidance for less-common ports; a shellcheck-style
 actionable warning without rejection would steer without frustrating.
 Optional but moderate leverage now that the loud cases are handled.
 
-### Multi-file `grep` silently skips unreadable explicit operands
-`grep_multiple_files` does `Err(_) => continue` per file — right for the
-recursive walk it was written for, but for explicit operands
-(`grep p real.txt typo.txt`) a missing/unreadable file should report
-`grep: typo.txt: …` and affect the exit code, like POSIX grep. Same
-silent-skip shape as the multi-arg `ls` entry below. Low priority.
-
-### Multi-argument `ls` silently skips inaccessible paths
-`Ls::render_names` (`ls.rs`) skips any path that fails to `stat` — correct
-for the glob race it was written for (a match removed between walk and
-stat), but for an explicit multi-arg call like `ls real.txt gone.txt` it
-drops `gone.txt` with no error, where bash prints `ls: cannot access`.
-Single-arg `ls gone.txt` still fails loudly (separate code path). Low
-priority; decide whether multi-arg should accumulate per-path errors.
+### Multi-file `grep` / multi-argument `ls` silently skipped bad operands — FIXED 2026-06-14
+Both fail loud now (see Resolved). `grep_multiple_files` and `Ls::render_names`
+take a `report_missing` flag: explicit operands (`grep p real.txt typo.txt`,
+`ls real.txt gone.txt`) report `grep: typo.txt: …` / `ls: cannot access
+'gone.txt': …` on stderr and exit nonzero, while the recursive walk / glob
+expansion keep their benign skip-on-race tolerance. Pinned by
+`operand_errors_tests.rs`.
 
 ---
 
@@ -724,6 +698,44 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **Argv ergonomics: glued short-flag values + bare comma — done 2026-06-14.**
+  Two coreutils idioms agents reflexively type now work.
+  - **Glued short-flag values** (`cut -f1`, `head -c5`, `tail -c20`, `cut -f1-3`,
+    `grep -A1`): `build_args_async`'s `ShortFlag` arm (`kernel.rs`) gained a
+    middle branch — when a multi-char short-flag token's *first* char is a
+    declared value-taking flag, the rest of the token binds as its value (under
+    the canonical schema name, so `to_argv` renders `--fields=1` and clap
+    accepts it). A run of bare bool flags (`ls -la`) still splits per char; the
+    fix is generic at the binder, so every clap builtin benefits. The
+    `cut -d ' ' -f1` → "unexpected argument '-1'" failure is gone. Pinned by
+    `glued_short_flag_tests.rs` (6 cases incl. the `ls -la` non-regression).
+  - **Bare comma** (`cut -d, -f2`, `cut -d , -f2`, `tr -d ,`): a standalone
+    comma parses as the literal `","` in argument position (`primary_expr_parser`
+    `select!` arm), mirroring `.`/`..`/`~`. Brace-expansion separators are
+    consumed inside `{…}` before reaching it, and the no-token-pasting guard
+    still rejects comma-touching runs (`echo 1,2,3` → "quote the whole word").
+    The `tr -d 0-9` digit-range silent no-op was already a loud parse error via
+    the 0.8.2 adjacent-span guard; now regression-pinned. Tests in
+    `bareword_comma_tests.rs` (6 cases).
+
+- **grep / ls fail loud on bad explicit operands — done 2026-06-14.**
+  `grep_multiple_files` and `Ls::render_names` gained a `report_missing` flag.
+  Explicit operands (`grep p real.txt typo.txt`, `ls real.txt gone.txt`) now
+  report `grep: typo.txt: …` / `ls: cannot access 'gone.txt': …` on stderr and
+  exit nonzero (grep 2, ls 1) — the readable operands still produce their normal
+  output. The recursive walk (`grep -r`) and glob expansion (`ls *.rs`) pass
+  `false` and keep their benign skip-on-race tolerance. Both were silent drops
+  that hid typos (crash-over-corruption violations). Pinned by
+  `operand_errors_tests.rs` (4 cases, incl. the recursive/glob non-regressions).
+
+- **Test hardening: lexer-variant asserts, dead IssueCodes, builtin negatives — done 2026-06-14.**
+  Three test-effectiveness residuals from the 2026-06-09 review (see the P3
+  bullets above for detail): lexer negative suites now assert the specific
+  `LexerError` variant (surfacing the unterminated-string diagnostic gap, filed
+  P4); the 7 never-emitted `IssueCode` variants were deleted from
+  `kaish-tool-api`; and `builtin_kernel_tests.rs` gained 6 negative cases
+  (specific exit code + err substring), ending its 100%-happy-path state.
 
 - **`date` builtin rewritten against the empirical spec — done 2026-06-14.**
   Full disposable-rewrite of `builtin/date.rs` per [date-design.md](date-design.md)
