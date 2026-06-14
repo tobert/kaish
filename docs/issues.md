@@ -695,12 +695,14 @@ adjacent-span guard — it is a loud "quote the whole word" parse error pointing
 at `tr -d '0-9'`, now pinned by a regression test. Letter ranges (`tr a-z A-Z`)
 were always fine.
 
-### Flag injection via glob expansion in `rm`
-`rm *` in a directory containing `-rf.txt` expands to `rm -rf.txt …`
-and kaish's structured flag parsing then flips `rm` behaviour.
-Mitigations already in place: `set -o latch`, `set -o trash`, `rm --
-*`. Future fix: the kernel knows which args are `GlobPattern`-sourced
-— `rm` could reject flag-shaped positional args from that path.
+### Flag injection via glob expansion in `rm` — NOT REPRODUCIBLE 2026-06-14
+Verified safe (see Resolved). Unlike bash, kaish expands a glob into *positional*
+`Value::String`s that `to_argv()` emits after `--`, so a flag-shaped match
+(`-rf.txt`) is data, never re-parsed as `-r -f`. Probed live and pinned by
+`rm_glob_flag_injection_tests.rs`: `rm *` over a dir with `-rf.txt` and a
+non-empty `sub/` deletes the files as operands but refuses `sub/` (no `-r`
+injected), so the subtree survives. The `set -o latch`/`set -o trash`/`rm -- *`
+mitigations remain as defense in depth.
 
 ### Extract `skip_quoted_content()` shared by arithmetic/heredoc preprocessing
 `preprocess_arithmetic()` (~150 lines) and `preprocess_heredocs()`
@@ -746,6 +748,15 @@ expansion keep their benign skip-on-race tolerance. Pinned by
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`rm` glob flag-injection — verified not reproducible 2026-06-14.** The
+  classic `rm *` with a `-rf.txt` file in the directory does *not* inject `-r -f`
+  in kaish: glob expansion produces positional `Value::String`s that `to_argv()`
+  emits after `--`, so flag-shaped matches are operands, never flags. Confirmed
+  live (`rm *` over `{-rf.txt, a.txt, sub/inside.txt}` deleted the files, refused
+  `sub/` for lack of `-r`, left the subtree intact) and pinned by
+  `rm_glob_flag_injection_tests.rs`. Filed as a fix candidate, found already safe;
+  the entry stays in P4 as documentation of the guarantee.
 
 - **`spawn --command true` — bool value no longer swallowed — done 2026-06-14.**
   `ToolArgs::flagify_bool_named` became schema-aware: it builds the set of
