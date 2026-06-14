@@ -573,3 +573,75 @@ async fn date_json_emits_fields_through_kernel() {
     assert_eq!(parsed["weekday"], "Tuesday", "{out:?}");
     assert_eq!(parsed["offset_seconds"], 0, "{out:?}");
 }
+
+// --- Negative cases: agents branch on exit codes, so a builtin must fail with
+// the right code AND a message naming the cause. These pin the specific code +
+// an error substring; a regression to a happy-path swallow would break them.
+// (See docs/issues.md: builtin_kernel_tests was 100% happy-path.)
+
+/// Run a script and return (trimmed stdout, stderr, exit code).
+async fn run_err(kernel: &kaish_kernel::Kernel, script: &str) -> (String, String, i64) {
+    let result = kernel.execute(script).await.expect("kernel execute");
+    (
+        result.text_out().trim().to_string(),
+        result.err.clone(),
+        result.code,
+    )
+}
+
+#[tokio::test]
+async fn cat_missing_file_errors_with_name() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (_out, err, code) = run_err(&kernel, "cat nope.txt").await;
+    assert_eq!(code, 1, "missing file → exit 1; err={err:?}");
+    assert!(err.contains("nope.txt"), "err should name the file: {err:?}");
+}
+
+#[tokio::test]
+async fn wc_missing_file_errors_with_name() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (_out, err, code) = run_err(&kernel, "wc nope.txt").await;
+    assert_eq!(code, 1, "missing file → exit 1; err={err:?}");
+    assert!(err.contains("nope.txt"), "err should name the file: {err:?}");
+}
+
+#[tokio::test]
+async fn sort_missing_file_errors_with_name() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (_out, err, code) = run_err(&kernel, "sort nope.txt").await;
+    assert_eq!(code, 1, "missing file → exit 1; err={err:?}");
+    assert!(err.contains("nope.txt"), "err should name the file: {err:?}");
+}
+
+#[tokio::test]
+async fn cut_without_field_or_char_spec_errors() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "data.txt", "a b c\n");
+    let kernel = kernel_at(dir.path());
+    let (_out, err, code) = run_err(&kernel, "cut data.txt").await;
+    assert_eq!(code, 1, "no -f/-c → exit 1; err={err:?}");
+    assert!(err.contains("-f or -c"), "err should explain the missing spec: {err:?}");
+}
+
+#[tokio::test]
+async fn head_unknown_flag_is_clap_usage_error() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "data.txt", "x\n");
+    let kernel = kernel_at(dir.path());
+    let (_out, err, code) = run_err(&kernel, "head --bogus data.txt").await;
+    assert_eq!(code, 2, "unknown flag → clap usage error exit 2; err={err:?}");
+    assert!(err.contains("bogus"), "err should name the bad flag: {err:?}");
+}
+
+#[tokio::test]
+async fn grep_missing_pattern_only_no_match_is_exit_1() {
+    // A readable file with no match is the canonical exit-1 (not an error code).
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "data.txt", "hello\n");
+    let kernel = kernel_at(dir.path());
+    let (_out, _err, code) = run_err(&kernel, "grep zzz data.txt").await;
+    assert_eq!(code, 1, "no match → exit 1");
+}

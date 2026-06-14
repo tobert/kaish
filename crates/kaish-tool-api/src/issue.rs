@@ -35,26 +35,12 @@ pub enum IssueCode {
     SeqZeroIncrement,
     /// Regex pattern is invalid.
     InvalidRegex,
-    /// sed expression is invalid.
-    InvalidSedExpr,
-    /// jq filter is invalid.
-    InvalidJqFilter,
     /// break/continue outside of a loop.
     BreakOutsideLoop,
     /// return outside of a function.
     ReturnOutsideFunction,
     /// Variable may be undefined.
     PossiblyUndefinedVariable,
-    /// Multiple conflicting flags.
-    ConflictingFlags,
-    /// count/lines value is zero or negative.
-    InvalidCount,
-    /// diff needs two files.
-    DiffNeedsTwoFiles,
-    /// Recursive operation without -r flag.
-    RecursiveWithoutFlag,
-    /// Extra positional arguments beyond what tool accepts.
-    ExtraPositionalArgs,
     /// Bare scalar variable in for loop (no word splitting in kaish).
     ForLoopScalarVar,
     /// scatter without gather — parallel results would be lost.
@@ -66,6 +52,12 @@ pub enum IssueCode {
 
 impl IssueCode {
     /// Returns a short code string for the issue.
+    ///
+    /// Code numbers are stable identifiers, not contiguous. E006/E007/E010/E011
+    /// and W003/W004/W005 were retired — they were advertised but never emitted,
+    /// and their runtime paths already fail loudly (`diff` exit 2, `sed`/`jq`
+    /// report bad expressions at runtime). A future pre-execution validator for
+    /// those builtins should add the variant and its implementation together.
     pub fn code(&self) -> &'static str {
         match self {
             IssueCode::UndefinedCommand => "E001",
@@ -74,16 +66,9 @@ impl IssueCode {
             IssueCode::InvalidArgType => "E003",
             IssueCode::SeqZeroIncrement => "E004",
             IssueCode::InvalidRegex => "E005",
-            IssueCode::InvalidSedExpr => "E006",
-            IssueCode::InvalidJqFilter => "E007",
             IssueCode::BreakOutsideLoop => "E008",
             IssueCode::ReturnOutsideFunction => "E009",
             IssueCode::PossiblyUndefinedVariable => "W002",
-            IssueCode::ConflictingFlags => "W003",
-            IssueCode::InvalidCount => "E010",
-            IssueCode::DiffNeedsTwoFiles => "E011",
-            IssueCode::RecursiveWithoutFlag => "W004",
-            IssueCode::ExtraPositionalArgs => "W005",
             IssueCode::ForLoopScalarVar => "E012",
             IssueCode::ScatterWithoutGather => "E014",
             IssueCode::LastResultFieldAccess => "E015",
@@ -96,12 +81,8 @@ impl IssueCode {
             // These are hard errors that will definitely fail at runtime
             IssueCode::SeqZeroIncrement
             | IssueCode::InvalidRegex
-            | IssueCode::InvalidSedExpr
-            | IssueCode::InvalidJqFilter
             | IssueCode::BreakOutsideLoop
             | IssueCode::ReturnOutsideFunction
-            | IssueCode::InvalidCount
-            | IssueCode::DiffNeedsTwoFiles
             | IssueCode::ForLoopScalarVar
             | IssueCode::ScatterWithoutGather
             | IssueCode::LastResultFieldAccess => Severity::Error,
@@ -114,10 +95,7 @@ impl IssueCode {
             | IssueCode::InvalidArgType
             | IssueCode::UndefinedCommand
             | IssueCode::UnknownFlag
-            | IssueCode::PossiblyUndefinedVariable
-            | IssueCode::ConflictingFlags
-            | IssueCode::RecursiveWithoutFlag
-            | IssueCode::ExtraPositionalArgs => Severity::Warning,
+            | IssueCode::PossiblyUndefinedVariable => Severity::Warning,
         }
     }
 }

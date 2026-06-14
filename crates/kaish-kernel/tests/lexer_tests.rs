@@ -2,7 +2,7 @@
 //!
 //! These tests replace the custom tokens.txt test file format with native Rust tests.
 
-use kaish_kernel::lexer::{tokenize, Token};
+use kaish_kernel::lexer::{tokenize, LexerError, Token};
 use rstest::rstest;
 
 /// Format a Token into the test format string.
@@ -163,6 +163,29 @@ fn run_lexer_error_test(input: &str) {
     assert!(result.is_err(), "expected error for input: {:?}", input);
 }
 
+/// Run a lexer test that expects a *specific* error variant. Asserting only
+/// `is_err()` would still pass if a curated diagnostic regressed to the generic
+/// `UnexpectedCharacter`, so the negative suites pin the variant they document.
+fn run_lexer_error_variant(input: &str, expected: LexerError) {
+    let errors = tokenize(input).expect_err(&format!("expected error for input: {input:?}"));
+    assert!(
+        errors.iter().any(|e| e.token == expected),
+        "input {input:?}: expected {expected:?}, got {:?}",
+        errors.iter().map(|e| &e.token).collect::<Vec<_>>(),
+    );
+}
+
+/// Like [`run_lexer_error_variant`] but matches against a predicate, for error
+/// variants that carry a payload (e.g. the ambiguous-boolean spellings).
+fn run_lexer_error_matching(input: &str, pred: impl Fn(&LexerError) -> bool, what: &str) {
+    let errors = tokenize(input).expect_err(&format!("expected error for input: {input:?}"));
+    assert!(
+        errors.iter().any(|e| pred(&e.token)),
+        "input {input:?}: expected {what}, got {:?}",
+        errors.iter().map(|e| &e.token).collect::<Vec<_>>(),
+    );
+}
+
 // =============================================================================
 // Keywords
 // =============================================================================
@@ -256,10 +279,10 @@ fn lexer_floats(#[case] input: &str, #[case] expected: &[&str]) {
 }
 
 #[rstest]
-#[case::float_no_leading(".5")]
-#[case::float_no_trailing("5.")]
-fn lexer_float_errors(#[case] input: &str) {
-    run_lexer_error_test(input);
+#[case::float_no_leading(".5", LexerError::InvalidFloatNoLeading)]
+#[case::float_no_trailing("5.", LexerError::InvalidFloatNoTrailing)]
+fn lexer_float_errors(#[case] input: &str, #[case] expected: LexerError) {
+    run_lexer_error_variant(input, expected);
 }
 
 // =============================================================================
@@ -282,7 +305,16 @@ fn lexer_booleans(#[case] input: &str, #[case] expected: &[&str]) {
 #[case::bool_like_yes_upper("YES")]
 #[case::bool_like_no_upper("NO")]
 fn lexer_ambiguous_boolean_errors(#[case] input: &str) {
-    run_lexer_error_test(input);
+    run_lexer_error_matching(
+        input,
+        |e| {
+            matches!(
+                e,
+                LexerError::AmbiguousBoolean(_) | LexerError::AmbiguousBooleanLike(_)
+            )
+        },
+        "an ambiguous-boolean error",
+    );
 }
 
 // =============================================================================
@@ -305,7 +337,13 @@ fn lexer_double_quoted_strings(#[case] input: &str, #[case] expected: &[&str]) {
 #[rstest]
 #[case::string_unterminated(r#""unterminated"#)]
 fn lexer_string_errors(#[case] input: &str) {
-    run_lexer_error_test(input);
+    // KNOWN GAP (docs/issues.md): an unterminated double-quoted string never
+    // matches the logos `String` token regex, so it surfaces the generic
+    // `UnexpectedCharacter` rather than the curated `UnterminatedString` (which
+    // only the interpolated/complete-string helper emits). Pinning the *actual*
+    // variant keeps the test honest and flags any change for review — improving
+    // the diagnostic to `UnterminatedString` should update this assertion.
+    run_lexer_error_variant(input, LexerError::UnexpectedCharacter);
 }
 
 // =============================================================================
