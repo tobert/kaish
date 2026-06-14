@@ -182,6 +182,34 @@ Remaining open work:
 
 ## P2 — Focused refactors & real bugs
 
+### Pre-execution validation for `jq`, `sed`, and `diff`
+Add per-builtin `Tool::validate` so a malformed `jq` filter, a malformed `sed`
+expression, and a `diff` with the wrong number of file operands are caught at
+*validation* time — before any pipeline runs — instead of only failing loud at
+runtime. The validator already does this for `grep` (E005 InvalidRegex) and
+`seq` (E004 SeqZeroIncrement); those are the pattern to follow (compile the
+pattern in `validate()`, push a `ValidationIssue::error` with a `.with_suggestion`
+hint). The payoff is agent DX: the whole script's bad filters/expressions
+surface at once with E-codes + suggestions, rather than one runtime failure
+mid-pipeline.
+
+The matching `IssueCode` variants (E006 `InvalidSedExpr`, E007 `InvalidJqFilter`,
+E011 `DiffNeedsTwoFiles`) were **removed 2026-06-14** as dead aspiration — they
+advertised validations that didn't exist. **Re-add each variant and its
+implementation + test together** (the removal lesson: no variant without an
+emitter). Implementation notes:
+- **`diff`** is the cheapest — pure positional-arity check (needs two file
+  operands; `diff a.txt` already errors `missing second file` at runtime).
+  Start here.
+- **`jq`** — reuse the `jq_native` filter parser to compile the filter string in
+  `validate()`; a parse error becomes E007. Skip when the filter contains a
+  `<dynamic>` interpolation marker (grep's `validate` shows the guard).
+- **`sed`** — parse the sed expression (the same path `sed` runs) in `validate()`;
+  an unknown command (`sed 'zzz'`) becomes E006.
+Each must have a test per code asserting the E-code fires for a bad input and
+does *not* fire for a valid one. Surfaced 2026-06-14 while clearing the
+never-emitted-IssueCode residual.
+
 ### Streaming file reads — wc/checksum/grep/cmp/cat landed 2026-06-14; residuals
 Scan-oriented builtins no longer read whole files into memory. Mechanism
 (chosen to respect kaish-vfs's runtime-free trait — no `AsyncRead`/tokio in the
@@ -440,8 +468,9 @@ kill/wait e2e). Each remaining bullet is independently actionable:
   didn't exist while every runtime path already fails loudly (`diff` exit 2,
   `sed`/`jq` report bad expressions at runtime) — silent aspiration, so removed
   rather than half-built. Code numbers stay stable identifiers (gaps documented
-  in `code()`); a future pre-execution validator for those builtins should add
-  the variant and its implementation together.
+  in `code()`). Re-adding the validations (variant + impl + test together) is now
+  filed as a dedicated P2 item ("Pre-execution validation for `jq`, `sed`, and
+  `diff`").
 - **bg/fg coverage is PTY-only** (unix-gated, timing-sensitive,
   `pty_job_control.rs`). The `wait`/`kill %1` half of this bullet closed
   2026-06-11 (see Resolved); bg/fg still have no non-PTY coverage.
