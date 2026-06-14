@@ -3050,6 +3050,20 @@ impl Kernel {
                             )
                             .await?;
                         }
+                    } else if let Some(&(canonical, _, _)) = param_lookup
+                        .get(&name[..1])
+                        .filter(|(_, typ, _)| !is_bool_type(typ))
+                    {
+                        // Glued short-flag value: `cut -f1`, `head -c5`, `cut -f1-3`,
+                        // `grep -A1`. The first char is a declared value-taking short
+                        // flag, so the rest of the token is its value — the coreutils
+                        // idiom. The lexer's flag char class is `[a-zA-Z][a-zA-Z0-9-]*`,
+                        // so the first byte is always ASCII (safe to slice) and the tail
+                        // is a plain literal. Single value only; no builtin short flag
+                        // declares consumes>1.
+                        tool_args
+                            .named
+                            .insert(canonical.to_string(), Value::String(name[1..].to_string()));
                     } else {
                         // Multi-char combined flags like -la: always boolean
                         for c in name.chars() {

@@ -2030,6 +2030,13 @@ where
                 // so only a `.` that follows a command reaches here.
                 Token::Dot => Expr::Literal(Value::String(".".into())),
                 Token::DotDot => Expr::Literal(Value::String("..".into())),
+                // Bare comma in argument position is the literal "," — the
+                // `cut -d, -f2` / `tr -d ,` delimiter idiom. Brace expansion
+                // consumes its separator commas inside `{…}` before reaching
+                // here, and a run of comma-touching positionals (`echo 1,2,3`)
+                // is still caught by the no-token-pasting guard in
+                // `args_list_parser`. See docs/issues.md.
+                Token::Comma => Expr::Literal(Value::String(",".into())),
                 Token::Tilde => Expr::Literal(Value::String("~".into())),
                 Token::TildePath(s) => Expr::Literal(Value::String(s)),
                 Token::RelativePath(s) => Expr::Literal(Value::String(s)),
