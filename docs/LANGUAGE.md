@@ -15,6 +15,7 @@ PI=3.14159                      # float (extension)
 ENABLED=true                    # boolean (extension)
 ITEMS="one two three"           # string (space-separated for iteration)
 DATA='{"key": "value"}'         # JSON stored as string
+KEY=$(dd if=/dev/urandom bs=16 count=1)   # binary bytes (see Binary Data)
 
 # Both $VAR and ${VAR} work
 echo $NAME
@@ -692,10 +693,52 @@ VFS mounts provide unified resource access:
 /v/bin/            → read-only builtin listing (invocable: /v/bin/echo hi)
 /v/blobs/          → in-memory blob storage
 /v/jobs/<id>/      → live background job state (stdout, stderr, status, command)
+/dev/              → synthetic devices: /dev/null, /dev/zero, /dev/urandom, /dev/random
 ```
+
+In Sandboxed and isolated (NoLocal) modes the host's real `/dev` isn't reachable,
+so `/dev` is software-backed by DevFs: `/dev/null` sinks writes and reads empty,
+`/dev/zero` and `/dev/urandom`/`/dev/random` are endless. The endless devices have
+no whole-device read (kaish reads whole files into memory), so `cat /dev/urandom`
+is a loud error — use a counted read like `head -c 32 /dev/urandom` or `dd`. In
+Passthrough/REPL mode the host's real `/dev` is used.
 
 Embedders can mount additional prefixes (e.g. `/mnt/<name>/`) via `Kernel::with_backend`.
 Git operations are provided by the `git` *builtin*, not a VFS mount.
+
+## Binary Data
+
+kaish carries binary as a first-class typed value (`Value::Bytes`) that flows
+through pipes intact. A bytes value **coerces to text only if it is valid UTF-8**;
+otherwise an operation that requires text fails loudly rather than corrupting data.
+
+```bash
+# Produce bytes and copy them with explicit block sizing
+dd if=/dev/urandom of=key.bin bs=16 count=1     # 16 random bytes to a file
+dd if=/dev/zero of=/dev/null bs=1k count=10     # discard a measured stream
+
+# Bridge text <-> bytes (no generic encode/decode — base64 and xxd cover it)
+echo -n hello | base64                          # text -> base64
+echo 'aGVsbG8=' | base64 -d                      # base64 -> bytes (quote padding '=')
+printf '%s' hi | xxd                             # hex dump
+xxd -r -p <<< 6869                               # hex -> bytes
+
+# Inspect and measure
+checksum key.bin                                 # hash arbitrary bytes
+wc -c key.bin                                    # exact byte count
+cmp a.bin b.bin                                  # byte-compare, early-exits on first diff
+```
+
+**Rendering at the boundary.** Bytes that aren't valid UTF-8 render as a hex dump
+in the REPL and as a base64 envelope under `--json` / MCP structured output, so
+binary never garbles a terminal or a JSON channel.
+
+**Text builtins refuse binary.** `grep`, `sed`, `awk`, `sort`, `cut`, `tr`, `jq`,
+and the other text tools **error** on non-UTF-8 input instead of silently
+replacing bytes with `U+FFFD`. The byte-aware movers (`cat`, `dd`, `base64`,
+`xxd`, `checksum`, `wc`, `tee`, `head -c`, `tail -c`, `cmp`) consume binary
+directly. External commands keep binary intact in both directions, so
+`curl url > out.bin` and `... | gzip` round-trip.
 
 ## What's Intentionally Missing
 

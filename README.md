@@ -118,7 +118,7 @@ everywhere, a `jq` that always uses the same filter syntax, an `awk` that never 
 | Category | Tools |
 |----------|-------|
 | **Text** | awk, base64, cut, diff, grep, head, rg, sed, sort, split, tac, tail, tr, uniq, wc, xxd |
-| **Files** | basename, cat, cd, checksum, cp, dirname, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, readlink, realpath, rm, stat, tee, touch, tree, write |
+| **Files** | basename, cat, cd, checksum, cmp, cp, dd, dirname, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, readlink, realpath, rm, stat, tee, touch, tree, write |
 | **JSON** | jq |
 | **Git** | git (init, clone, status, add, commit, log, diff, branch, checkout, worktree) |
 | **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, printf, ps, read, seq, set, sleep, spawn, test/\[\[, timeout, tokens, uname, unalias, unset, wait, which |
