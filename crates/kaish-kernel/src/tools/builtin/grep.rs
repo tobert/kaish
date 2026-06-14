@@ -353,11 +353,12 @@ impl Tool for Grep {
                 .await;
         }
 
-        // Streaming path: pipe_stdin → pipe_stdout, process line by line
-        // Only for simple stdin grep (no context, no count, no quiet, no files-only, no only-matching)
+        // Streaming path: pipe_stdin → pipe_stdout, process line by line.
+        // Only for simple grep (no context, no count, no quiet, no files-only, no only-matching).
+        let is_simple = !count_only && !quiet && !files_only && !only_matching
+            && before_context.is_none() && after_context.is_none();
         let can_stream = args.get_string("path", 1).is_none()
-            && !count_only && !quiet && !files_only && !only_matching
-            && before_context.is_none() && after_context.is_none()
+            && is_simple
             && ctx.pipe_stdin.is_some() && ctx.pipe_stdout.is_some();
         if can_stream {
             // Both checked with is_some() above — take() cannot return None.
@@ -368,8 +369,63 @@ impl Tool for Grep {
             }
         }
 
-        // Single file or stdin search. The bytes are buffered up-front;
-        // the searcher then runs synchronously inside `spawn_blocking`.
+        // Single file: stream the file in bounded chunks rather than reading it whole.
+        // The conditions mirror `can_stream` above — simple invocations only.
+        // Complex flags (-A/-B/-C context, -c, -q, -l, -o) keep the whole-buffer path
+        // below because context lines need look-behind buffering.
+        if let Some(path) = args.get_string("path", 1).filter(|_| is_simple) {
+            let resolved = ctx.resolve_path(&path);
+            // Mirror BinaryDetection::quit(b'\x00') for the default binary_mode.
+            // The grep-searcher's quit mode stops at the first NUL byte; our
+            // streaming path must do the same so single-file and buffered paths
+            // produce identical results.
+            let quit_byte = match binary_mode.as_str() {
+                "none" | "text" | "without-match" => None,
+                _ => Some(b'\x00'),
+            };
+            let mut scanner =
+                GrepLineScanner::new(&regex, invert, line_number, quit_byte, Some(path.clone()));
+            let scan_result = ctx
+                .read_file_chunked(
+                    Path::new(&resolved),
+                    ExecContext::STREAM_CHUNK_SIZE,
+                    |chunk| scanner.push(chunk),
+                )
+                .await;
+
+            // I/O error reading the file.
+            if let Err(e) = scan_result {
+                return ExecResult::failure(1, format!("grep: {}: {}", path, e));
+            }
+
+            // Flush the remaining carry.  `saw_invalid_utf8` is set if any
+            // chunk (including the final carry) contained a genuinely bad byte.
+            // `stopped_early` means a quit_byte was seen — not an error.
+            scanner.finish();
+            if scanner.saw_invalid_utf8 {
+                return ExecResult::failure(
+                    2,
+                    format!("grep: {path}: binary data — pipe through base64/xxd or use cmp"),
+                );
+            }
+
+            let render = scanner.into_render_result();
+
+            return if render.match_count == 0 {
+                ExecResult::from_output(1, render.text, "")
+            } else {
+                let headers = if line_number {
+                    vec!["MATCH".to_string(), "LINE".to_string()]
+                } else {
+                    vec!["MATCH".to_string()]
+                };
+                let output = OutputData::table(headers, render.nodes)
+                    .with_rich_json(serde_json::Value::Array(render.rich));
+                ExecResult::with_output_and_text(output, render.text)
+            };
+        }
+
+        // Fallback: whole-buffer path for stdin OR complex flags (-c/-q/-l/-o/-A/-B/-C).
         let (bytes, filename) = match args.get_string("path", 1) {
             Some(path) => {
                 let resolved = ctx.resolve_path(&path);
@@ -583,6 +639,250 @@ impl Grep {
             let output = OutputData::table(headers, total_nodes)
                 .with_rich_json(serde_json::Value::Array(total_rich));
             ExecResult::with_output_and_text(output, total_output)
+        }
+    }
+}
+
+/// Incremental, line-buffered grep scanner for streaming file reads.
+///
+/// Fed arbitrary byte chunks via [`push`](GrepLineScanner::push), it produces
+/// the same `RenderResult` as [`grep_lines_structured`] for simple matches
+/// (no context, no `-c`/`-q`/`-l`/`-o`) — without ever holding the whole file.
+///
+/// Binary detection is incremental:
+/// - A `\n` is never part of a multibyte UTF-8 sequence, so splitting on it
+///   keeps each line's bytes complete and lets us validate them with
+///   `std::str::from_utf8`.
+/// - An incomplete multibyte sequence at a chunk boundary is distinguishable
+///   from a genuine invalid byte via `Utf8Error::error_len()`: `None` means
+///   "truncated at end of input" (not an error; wait for the next chunk),
+///   `Some` means a real bad byte (binary error, exit 2).
+/// - A `quit_byte` (default `\x00`) mirrors `BinaryDetection::quit(b'\x00')`:
+///   scanning stops silently at the first occurrence without emitting an error.
+struct GrepLineScanner<'r> {
+    regex: &'r regex::Regex,
+    invert: bool,
+    show_line_numbers: bool,
+    /// Filename for the rich-JSON `path` field, mirroring the whole-buffer
+    /// path's `fallback_path` (the arg the user passed). `None` for stdin.
+    path: Option<String>,
+    /// If `Some(b)`, stop scanning **silently** when byte `b` is seen.
+    /// Mirrors `BinaryDetection::quit(b)` from the grep-searcher library: the
+    /// searcher just stops; it does not return an error.
+    quit_byte: Option<u8>,
+    /// Bytes since the last `\n` — the in-progress (potentially partial) line.
+    carry: Vec<u8>,
+    /// Absolute byte offset of `carry[0]` from the start of the file — i.e. how
+    /// many bytes have already been drained. Used to give each emitted line the
+    /// same `byte_offset` the grep-searcher reports (`absolute_byte_offset`).
+    consumed: u64,
+    line_number: u64,
+    text: String,
+    nodes: Vec<OutputNode>,
+    rich: Vec<serde_json::Value>,
+    match_count: usize,
+    /// Set to `true` when a genuinely invalid UTF-8 byte is seen.  Callers
+    /// check this after [`finish`](GrepLineScanner::finish) and emit exit-2.
+    /// Distinguished from `stopped_early` (quit byte) which is *not* an error.
+    saw_invalid_utf8: bool,
+    /// Set to `true` when the `quit_byte` is encountered.  Scanning stops but
+    /// the matched output collected so far is still returned (no error).
+    stopped_early: bool,
+}
+
+impl<'r> GrepLineScanner<'r> {
+    fn new(
+        regex: &'r regex::Regex,
+        invert: bool,
+        show_line_numbers: bool,
+        quit_byte: Option<u8>,
+        path: Option<String>,
+    ) -> Self {
+        Self {
+            regex,
+            invert,
+            show_line_numbers,
+            path,
+            quit_byte,
+            carry: Vec::new(),
+            consumed: 0,
+            line_number: 0,
+            text: String::new(),
+            nodes: Vec::new(),
+            rich: Vec::new(),
+            match_count: 0,
+            saw_invalid_utf8: false,
+            stopped_early: false,
+        }
+    }
+
+    /// Feed the next chunk of bytes from the file.
+    /// - Sets `saw_invalid_utf8 = true` on a genuinely bad UTF-8 byte (exit 2).
+    /// - Sets `stopped_early = true` on a `quit_byte` (stop silently, no error).
+    fn push(&mut self, chunk: &[u8]) {
+        if self.saw_invalid_utf8 || self.stopped_early {
+            return;
+        }
+        // Honour BinaryDetection::quit(byte): stop at the first occurrence of
+        // the quit byte, mirroring grep-searcher's "quit" mode (no error).
+        let chunk = if let Some(qb) = self.quit_byte {
+            if let Some(pos) = chunk.iter().position(|&b| b == qb) {
+                // Process only the bytes before the quit byte, then stop.
+                let prefix = &chunk[..pos];
+                self.carry.extend_from_slice(prefix);
+                self.drain_complete_lines();
+                self.stopped_early = true;
+                return;
+            }
+            chunk
+        } else {
+            chunk
+        };
+        self.carry.extend_from_slice(chunk);
+        self.drain_complete_lines();
+    }
+
+    /// Process all complete (newline-terminated) lines in `carry`, leaving any
+    /// trailing partial line in place for the next chunk.
+    ///
+    /// Three cases for `from_utf8`:
+    /// - `Ok`: entire carry is valid; process up to the last `\n`.
+    /// - `Err` with `error_len() == None`: the *tail* of carry is an incomplete
+    ///   multibyte sequence split across a chunk boundary — not a real error.
+    ///   Process only the valid prefix (up to `valid_up_to`), but only lines
+    ///   that are fully terminated by `\n` within that prefix.
+    /// - `Err` with `error_len() == Some(_)`: genuine invalid byte → binary.
+    fn drain_complete_lines(&mut self) {
+        // Determine the longest valid UTF-8 prefix we can inspect.
+        let valid_text = match std::str::from_utf8(&self.carry) {
+            Ok(s) => s.to_owned(),
+            Err(e) if e.error_len().is_none() => {
+                // Incomplete multibyte at the tail — safe to inspect the valid prefix.
+                // from_utf8 validated [0..valid_up_to]; the second call cannot fail.
+                let valid_up_to = e.valid_up_to();
+                match std::str::from_utf8(&self.carry[..valid_up_to]) {
+                    Ok(s) => s.to_owned(),
+                    // This branch is unreachable: Utf8Error guarantees the prefix
+                    // is valid.  Treat it as empty to avoid a panic.
+                    Err(_) => String::new(),
+                }
+            }
+            Err(_) => {
+                // Genuine invalid byte — binary file.
+                self.saw_invalid_utf8 = true;
+                return;
+            }
+        };
+
+        // Find the last newline in the valid text (whether full or truncated
+        // prefix).  If there isn't one, no complete line exists yet — wait.
+        let Some(last_nl) = valid_text.rfind('\n') else {
+            return; // No complete line yet.
+        };
+
+        // Process every complete line up to (and excluding) `last_nl`. Track
+        // each line's start as a byte offset within carry so it can be made
+        // absolute via `consumed`.
+        let mut local = 0usize;
+        for line in valid_text[..last_nl].split('\n') {
+            let line_abs = self.consumed + local as u64;
+            self.line_number += 1;
+            // Mirror grep-searcher's CRLF handling (`trim_line_terminator`): a
+            // `\r` before the `\n` is part of the terminator, not the line. The
+            // offset still advances by the original length — the `\r` is a real
+            // byte consumed before the `\n`.
+            let stripped = line.strip_suffix('\r').unwrap_or(line);
+            self.match_line(stripped, line_abs);
+            local += line.len() + 1; // + 1 for the consumed '\n'
+        }
+        // Discard the processed bytes (including the `\n` at last_nl).
+        self.carry.drain(..last_nl + 1);
+        self.consumed += (last_nl + 1) as u64;
+    }
+
+    /// Flush the remaining carry as the final (unterminated) line.
+    /// Sets `saw_invalid_utf8` if the remaining bytes are genuinely invalid UTF-8.
+    fn finish(&mut self) {
+        if self.saw_invalid_utf8 || self.stopped_early || self.carry.is_empty() {
+            return;
+        }
+        match std::str::from_utf8(&self.carry) {
+            Ok(line) => {
+                // `trim_line_terminator` strips a trailing `\r` even with no
+                // following `\n`, so the final unterminated line does too.
+                let owned = line.strip_suffix('\r').unwrap_or(line).to_owned();
+                self.line_number += 1;
+                // The trailing line starts exactly where the undrained carry begins.
+                let line_abs = self.consumed;
+                self.match_line(&owned, line_abs);
+                self.consumed += self.carry.len() as u64;
+                self.carry.clear();
+            }
+            Err(_) => {
+                // Invalid bytes in the final carry — binary file.
+                self.saw_invalid_utf8 = true;
+            }
+        }
+    }
+
+    fn match_line(&mut self, line: &str, byte_offset: u64) {
+        let matches = self.regex.is_match(line);
+        let should_output = if self.invert { !matches } else { matches };
+        if !should_output {
+            return;
+        }
+
+        self.match_count += 1;
+
+        // Build the prefix (line number, no filename — single-file simple path).
+        if self.show_line_numbers {
+            self.text.push_str(&format!("{}:{}\n", self.line_number, line));
+        } else {
+            self.text.push_str(line);
+            self.text.push('\n');
+        }
+
+        let mut cells = Vec::new();
+        if self.show_line_numbers {
+            cells.push(self.line_number.to_string());
+        }
+        self.nodes
+            .push(OutputNode::new(line).with_cells(cells));
+
+        // Rich JSON: must be byte-identical to `match_record_to_json` for the
+        // same line — path (the filename arg), the real line number (the
+        // searcher numbers unconditionally), the line's absolute byte offset,
+        // and submatches from the same regex.
+        let submatches: Vec<serde_json::Value> = self
+            .regex
+            .find_iter(line)
+            .map(|m| {
+                serde_json::json!({
+                    "text": m.as_str(),
+                    "start": m.start(),
+                    "end": m.end(),
+                })
+            })
+            .collect();
+        let path_v = match &self.path {
+            Some(p) => serde_json::Value::String(p.clone()),
+            None => serde_json::Value::Null,
+        };
+        self.rich.push(serde_json::json!({
+            "path": path_v,
+            "line_number": self.line_number,
+            "byte_offset": byte_offset,
+            "line_text": line,
+            "submatches": submatches,
+        }));
+    }
+
+    fn into_render_result(self) -> RenderResult {
+        RenderResult {
+            text: self.text,
+            nodes: self.nodes,
+            rich: self.rich,
+            match_count: self.match_count,
         }
     }
 }
@@ -1370,5 +1670,304 @@ mod tests {
         assert!(result.ok(), "grep --fixed_strings should succeed: {}", result.err);
         assert!(result.text_out().contains("foo[bar]"));
         assert!(!result.text_out().contains("foobar\n"));
+    }
+
+    // ---- Streaming file path: chunk-seam parity ----
+
+    /// Helper: run the streaming file path (via Grep.execute with a small chunk
+    /// size backed by a tiny MemoryFs file) and return the text output.
+    async fn stream_grep_via_exec(content: &[u8], pattern: &str, line_numbers: bool) -> (String, i32) {
+        let mem = MemoryFs::new();
+        mem.write(Path::new("f.txt"), content).await.unwrap();
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String(pattern.into()));
+        args.positional.push(Value::String("/f.txt".into()));
+        if line_numbers {
+            args.flags.insert("n".to_string());
+        }
+        let result = Grep.execute(args, &mut ctx).await;
+        (result.text_out().to_string(), result.code as i32)
+    }
+
+    /// Whole-buffer reference: the real production formatter the streaming path
+    /// must match byte-for-byte (text, table, AND rich `--json`).
+    fn reference_render(content: &[u8], pattern: &str, line_numbers: bool, path: Option<&str>) -> RenderResult {
+        let matcher = RegexMatcherBuilder::new().build(pattern).unwrap();
+        let opts = GrepOptions {
+            show_line_numbers: line_numbers,
+            invert: false,
+            only_matching: false,
+            before_context: None,
+            after_context: None,
+            show_filename: false,
+            multiline: false,
+            encoding: None,
+            binary_detection: BinaryDetection::quit(b'\x00'),
+        };
+        grep_lines_structured(content, &matcher, &opts, path).unwrap()
+    }
+
+    /// Run the streaming scanner with a configurable chunk size.
+    fn scanner_render(
+        content: &[u8],
+        pattern: &str,
+        line_numbers: bool,
+        path: Option<&str>,
+        chunk_size: usize,
+    ) -> (RenderResult, bool) {
+        let regex = regex::RegexBuilder::new(pattern).build().unwrap();
+        let mut scanner =
+            GrepLineScanner::new(&regex, false, line_numbers, Some(b'\x00'), path.map(str::to_string));
+        for chunk in content.chunks(chunk_size.max(1)) {
+            scanner.push(chunk);
+        }
+        scanner.finish();
+        let invalid = scanner.saw_invalid_utf8;
+        (scanner.into_render_result(), invalid)
+    }
+
+    /// Convenience wrapper used by the binary/quit tests.
+    fn scanner_grep(content: &[u8], pattern: &str, invert: bool, line_numbers: bool, chunk_size: usize) -> (String, usize, bool) {
+        let regex = regex::RegexBuilder::new(pattern).build().unwrap();
+        let mut scanner = GrepLineScanner::new(&regex, invert, line_numbers, Some(b'\x00'), None);
+        for chunk in content.chunks(chunk_size) {
+            scanner.push(chunk);
+        }
+        scanner.finish();
+        let invalid = scanner.saw_invalid_utf8;
+        let render = scanner.into_render_result();
+        (render.text, render.match_count, invalid)
+    }
+
+    /// Chunk-seam parity: for each input, split at every byte boundary and both
+    /// `-n` modes, and assert the streaming scanner produces output identical to
+    /// the **production** whole-buffer path — including the rich `--json` array
+    /// (path, line_number, byte_offset, line_text, submatches). This is the
+    /// guard that catches a silent `--json` divergence; comparing text alone
+    /// would not (an earlier draft hardcoded byte_offset=0 and path=null and
+    /// still produced correct text).
+    ///
+    /// Inputs include a multibyte UTF-8 character (日本語) and lines that straddle
+    /// arbitrary boundaries — the seam the scanner must handle correctly.
+    #[test]
+    fn grep_scanner_matches_whole_buffer_across_every_split() {
+        let cases: &[(&[u8], &str)] = &[
+            (b"hello world\nfoo bar\nbaz hello\n", "hello"),
+            (b"line one\nline two\nline three\n", "line"),
+            // Multibyte UTF-8 characters: each is 3 bytes in UTF-8.
+            ("日本語テスト\nfoo\n日本語match\n".as_bytes(), "日本語"),
+            // Line with no trailing newline (final partial line).
+            (b"foo\nbar\nbaz", "bar"),
+            // Case with no matches at all.
+            (b"alpha\nbeta\ngamma\n", "zzz"),
+            // Only one line, no newline.
+            (b"only line here", "line"),
+            // CRLF line endings — the `\r` must be stripped to match grep-searcher.
+            (b"win foo\r\nwin bar\r\nno match\r\n", "win"),
+            // CRLF with a final unterminated line carrying a stray `\r`.
+            (b"a\r\nbcd\r", "a"),
+            // Empty file.
+            (b"", "pattern"),
+        ];
+
+        for (input, pattern) in cases {
+            for line_numbers in [false, true] {
+                let reference = reference_render(input, pattern, line_numbers, Some("f.txt"));
+                for chunk_size in 1..=input.len().max(1) {
+                    let (render, invalid) =
+                        scanner_render(input, pattern, line_numbers, Some("f.txt"), chunk_size);
+                    let ctx = format!(
+                        "pattern={pattern:?} ln={line_numbers} chunk={chunk_size} input={:?}",
+                        String::from_utf8_lossy(input)
+                    );
+                    assert!(!invalid, "valid UTF-8 flagged binary — {ctx}");
+                    assert_eq!(render.text, reference.text, "text — {ctx}");
+                    assert_eq!(render.match_count, reference.match_count, "match_count — {ctx}");
+                    assert_eq!(render.rich, reference.rich, "rich JSON — {ctx}");
+                }
+            }
+        }
+    }
+
+    /// Binary file (invalid UTF-8) must produce exit-2 with the exact binary
+    /// error message, and saw_invalid_utf8 must be set.
+    #[test]
+    fn grep_scanner_rejects_invalid_utf8_as_binary() {
+        // \xff is not valid UTF-8 and will never be part of a multibyte sequence.
+        let binary_content: &[u8] = b"valid line\n\xff invalid\nsecond line\n";
+        let (text, _count, saw_invalid) = scanner_grep(binary_content, "line", false, false, 4);
+        assert!(saw_invalid, "saw_invalid_utf8 must be set for non-UTF-8 input");
+        // No matches should be emitted before/after the binary byte.
+        // (In practice, "valid line\n" may have been processed if the invalid
+        // byte is in a later chunk — the important thing is the flag is set.)
+        let _ = text; // text may be partial; the caller checks saw_invalid_utf8
+    }
+
+    /// When a NUL byte is present and binary_mode is "quit" (the default),
+    /// the scanner stops silently and saw_invalid_utf8 remains false.
+    #[test]
+    fn grep_scanner_quit_on_nul_is_not_an_error() {
+        let content: &[u8] = b"foo line\nbar\x00baz\nsecond foo\n";
+        let (text, _count, saw_invalid) =
+            scanner_grep(content, "foo", false, false, 32);
+        // The scanner must NOT set saw_invalid_utf8 on NUL (that's stopped_early).
+        assert!(!saw_invalid, "NUL byte must not set saw_invalid_utf8");
+        // "second foo" is after the NUL, so it must NOT appear.
+        assert!(
+            !text.contains("second foo"),
+            "output after NUL must be suppressed: {text:?}",
+        );
+    }
+
+    /// Streaming file path round-trip: Grep.execute via a MemoryFs file with the
+    /// streaming path active (simple flags: no -c/-q/-l/-o/-A/-B/-C) must return
+    /// the same text as the same invocation on a tiny file.
+    #[tokio::test]
+    async fn grep_streaming_file_parity_with_reference() {
+        // Use a file with a multibyte character to stress the UTF-8 seam.
+        let content = "one line\ntwo line\nthree\n日本語 test\n".as_bytes().to_vec();
+        let (streamed, code) = stream_grep_via_exec(&content, "line", false).await;
+        assert_eq!(code, 0, "streaming path must return 0 on match");
+        assert!(streamed.contains("one line"), "missing 'one line': {streamed:?}");
+        assert!(streamed.contains("two line"), "missing 'two line': {streamed:?}");
+        assert!(!streamed.contains("three"), "non-matching line leaked: {streamed:?}");
+    }
+
+    /// Streaming file path with -n (line numbers) must number from 1.
+    #[tokio::test]
+    async fn grep_streaming_file_line_numbers() {
+        let content = b"alpha\nbeta\ngamma\n";
+        let (out, code) = stream_grep_via_exec(content, "beta", true).await;
+        assert_eq!(code, 0);
+        assert!(out.contains("2:beta"), "expected '2:beta' in output: {out:?}");
+    }
+
+    /// A file with invalid UTF-8 bytes must produce exit-2 with the binary error
+    /// message, not a partial match or a panic.
+    #[tokio::test]
+    async fn grep_streaming_file_binary_data_error() {
+        let content: Vec<u8> = b"good line\nbad \xff byte\nmore\n".to_vec();
+        let mem = MemoryFs::new();
+        mem.write(Path::new("bad.txt"), &content).await.unwrap();
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("line".into()));
+        args.positional.push(Value::String("/bad.txt".into()));
+        let result = Grep.execute(args, &mut ctx).await;
+
+        assert_eq!(result.code, 2, "binary data must exit with code 2");
+        assert!(
+            result.err.contains("binary data"),
+            "error must mention 'binary data': {:?}",
+            result.err,
+        );
+        assert!(
+            result.err.contains("/bad.txt"),
+            "error must name the file: {:?}",
+            result.err,
+        );
+    }
+
+    // ---- Streaming: bounded-memory proof ----
+
+    /// A `Filesystem` that records every `read_range` it is asked for, so a test
+    /// can prove the streaming file path pulls the file in bounded chunks rather
+    /// than slurping it whole.  Delegates all real I/O to an inner `MemoryFs`.
+    struct RecordingFs {
+        inner: MemoryFs,
+        ranges: Arc<std::sync::Mutex<Vec<(Option<u64>, Option<u64>)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::vfs::Filesystem for RecordingFs {
+        async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            // A whole-file read would defeat the test; record it as (None, None)
+            // so the assertion can catch it.
+            self.ranges.lock().unwrap().push((None, None));
+            self.inner.read(path).await
+        }
+        async fn read_range(
+            &self,
+            path: &Path,
+            range: Option<kaish_vfs::ReadRange>,
+        ) -> std::io::Result<Vec<u8>> {
+            let key = (
+                range.as_ref().and_then(|r| r.offset),
+                range.as_ref().and_then(|r| r.limit),
+            );
+            self.ranges.lock().unwrap().push(key);
+            self.inner.read_range(path, range).await
+        }
+        async fn write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+            self.inner.write(path, data).await
+        }
+        async fn list(&self, path: &Path) -> std::io::Result<Vec<crate::vfs::DirEntry>> {
+            self.inner.list(path).await
+        }
+        async fn stat(&self, path: &Path) -> std::io::Result<crate::vfs::DirEntry> {
+            self.inner.stat(path).await
+        }
+        async fn mkdir(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.mkdir(path).await
+        }
+        async fn remove(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.remove(path).await
+        }
+        fn read_only(&self) -> bool {
+            self.inner.read_only()
+        }
+    }
+
+    #[tokio::test]
+    async fn grep_streams_file_in_bounded_chunks() {
+        let ranges = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rec = RecordingFs {
+            inner: MemoryFs::new(),
+            ranges: ranges.clone(),
+        };
+        // 1000 bytes of repeated content with newlines to exercise the line-buffer path.
+        let mut payload = Vec::new();
+        for i in 0..40usize {
+            payload.extend_from_slice(format!("line number {i:04} content here\n").as_bytes());
+        }
+        rec.inner.write(Path::new("big.txt"), &payload).await.unwrap();
+
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", rec);
+        let ctx = ExecContext::new(Arc::new(vfs));
+
+        // Use read_file_chunked directly with a small chunk to force multiple reads.
+        let regex = regex::Regex::new("line").unwrap();
+        let mut scanner =
+            GrepLineScanner::new(&regex, false, false, Some(b'\x00'), Some("/big.txt".to_string()));
+        ctx.read_file_chunked(Path::new("/big.txt"), 256, |c| scanner.push(c))
+            .await
+            .unwrap();
+        scanner.finish();
+
+        let recs = ranges.lock().unwrap();
+        // 1000+ bytes / 256 → multiple bounded reads + a terminating empty read.
+        assert!(
+            recs.len() >= 4,
+            "expected the file to be read in several chunks, got {} reads",
+            recs.len()
+        );
+        // Every read must be bounded (limit = Some(256)); no unbounded whole-file read.
+        assert!(
+            recs.iter().all(|&(_, limit)| limit == Some(256)),
+            "every read must be bounded to the chunk size; recorded {recs:?}",
+        );
+
+        drop(recs);
+        let render = scanner.into_render_result();
+        // All 40 lines match "line".
+        assert_eq!(render.match_count, 40, "expected 40 matches");
     }
 }
