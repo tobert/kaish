@@ -182,38 +182,6 @@ Remaining open work:
 
 ## P2 — Focused refactors & real bugs
 
-### Pre-execution validation for `jq` and `sed` (diff done 2026-06-14)
-Add per-builtin `Tool::validate` so a malformed `jq` filter and a malformed `sed`
-expression are caught at *validation* time — before any pipeline runs — instead
-of only failing loud at runtime. The validator already does this for `grep` (E005
-InvalidRegex), `seq` (E004 SeqZeroIncrement), and now `diff` (E011
-DiffNeedsTwoFiles); those are the pattern to follow (compile the pattern in
-`validate()`, push a `ValidationIssue::error` with a `.with_suggestion` hint). The
-payoff is agent DX: the whole script's bad filters/expressions surface at once
-with E-codes + suggestions, rather than one runtime failure mid-pipeline.
-
-**`diff` — DONE 2026-06-14.** E011 `DiffNeedsTwoFiles` re-added to
-`kaish-tool-api/src/issue.rs` (Error severity) *with* its emitter, per the
-no-variant-without-an-emitter rule. `Diff::validate` (diff.rs) requires exactly
-two file operands; it skips the check when any operand is the `<dynamic>` marker
-(variable/`$(cmd)`/bare glob — unknown runtime count, mirrors grep's guard) and
-discounts one positional when a bare `-C`/`--context` value-flag parks its value
-in `positional` at validation time. A runtime backstop in `execute` also rejects
-3+ operands the validator waved through (`diff *.txt` expanding to 3 files), since
-the old code silently dropped the surplus. Pinned by `diff_validation_tests.rs`
-(8 cases: 0/1/3 literal operands → E011; two-files/`-C 3`/glob/vars pass; glob→3
-errors at runtime). The remaining two:
-- **`jq`** — reuse the `jq_native` filter parser to compile the filter string in
-  `validate()`; a parse error becomes E007 (re-add the variant + impl + test
-  together). Skip when the filter contains a `<dynamic>` interpolation marker
-  (grep's `validate` shows the guard). E007 `InvalidJqFilter` is still retired.
-- **`sed`** — parse the sed expression (the same path `sed` runs) in `validate()`;
-  an unknown command (`sed 'zzz'`) becomes E006 (re-add variant + impl + test).
-  E006 `InvalidSedExpr` is still retired.
-Each must have a test per code asserting the E-code fires for a bad input and
-does *not* fire for a valid one. Surfaced 2026-06-14 while clearing the
-never-emitted-IssueCode residual.
-
 ### Streaming file reads — wc/checksum/grep/cmp/cat landed 2026-06-14; residuals
 Scan-oriented builtins no longer read whole files into memory. Mechanism
 (chosen to respect kaish-vfs's runtime-free trait — no `AsyncRead`/tokio in the
@@ -279,25 +247,6 @@ left in the MCP frontend). Remaining:
 - **Phase 5:** i18n scaffolding + first `ja` fragments.
 
 Full design + resolved decisions: [composable-help.md](composable-help.md).
-
-### Minimal build (`--no-default-features`) — integration test binaries don't compile
-(The lib-unit-test regression in this entry is **fixed 2026-06-10** — see
-git history; the `--lib --no-default-features --no-run` gate is now in the build-
-command list. Consequence still standing: `sandbox_no_native_builtins`
-(`sandbox_mode_tests.rs:217-229`) only compiles in the minimal config, so it's
-exercised only when someone runs the minimal gate, and the sandbox config has no
-CI.)
-Still open: the *integration* test binaries
-(`tests/*.rs`) don't compile minimally. 8 of 23 files use `KernelConfig::repl()` /
-the `kernel_at` harness, both `#[cfg(feature = "localfs")]` (real-FS) — so `cargo
-test -p kaish-kernel --no-default-features` (which builds the integration binaries
-too) fails to compile those. Options: (a) file-level `#![cfg(feature = "localfs")]`
-on the inherently real-FS binaries so they're skipped minimally; (b) convert the
-ones that don't actually need real FS (e.g. `validation_tests`) to
-`KernelConfig::isolated()` (memory VFS) so they *run* minimally — strictly better
-coverage. `hermetic_home_tests.rs` already uses `isolated()` and runs in both modes
-as the pattern to follow. Surfaced 2026-06-03; partially resolved 2026-06-07. Folds
-naturally into the planned `native`→capability-feature split.
 
 ### Split `kernel.rs::execute_stmt_flow`
 `kernel.rs:1463`–~1913 (kernel.rs is now 6,838 lines) is a 16-arm async match.
@@ -489,15 +438,13 @@ kill/wait e2e). Each remaining bullet is independently actionable:
   `UnterminatedString` (which only the complete/interpolated-string helper
   reaches). The test pins the *actual* variant with a comment; improving it to
   `UnterminatedString` needs a logos fallback rule on the string token (P4).
-- **7 never-emitted `IssueCode` variants — REMOVED 2026-06-14:** E006 sed, E007
-  jq, E010, E011 diff, W003, W004, W005 deleted from `kaish-tool-api/src/issue.rs`
-  (enum + `code()` + `default_severity()`). They advertised validations that
-  didn't exist while every runtime path already fails loudly (`diff` exit 2,
-  `sed`/`jq` report bad expressions at runtime) — silent aspiration, so removed
-  rather than half-built. Code numbers stay stable identifiers (gaps documented
-  in `code()`). Re-adding the validations (variant + impl + test together) is now
-  filed as a dedicated P2 item ("Pre-execution validation for `jq`, `sed`, and
-  `diff`").
+- **7 never-emitted `IssueCode` variants — REMOVED 2026-06-14, then 3 re-added
+  with emitters:** E006 sed, E007 jq, E010, E011 diff, W003, W004, W005 were
+  deleted from `kaish-tool-api/src/issue.rs` as silent aspiration (advertised
+  validations that didn't exist). E011 (diff), E006 (sed), and E007 (jq) have
+  since been re-added *with* real `Tool::validate` emitters + tests, honoring the
+  no-variant-without-an-emitter rule; E010/W003/W004/W005 stay retired (gaps
+  documented in `code()`).
 - **bg/fg coverage is PTY-only** (unix-gated, timing-sensitive,
   `pty_job_control.rs`). The `wait`/`kill %1` half of this bullet closed
   2026-06-11 (see git history); bg/fg still have no non-PTY coverage.
@@ -530,12 +477,6 @@ builtin that holds a long time/IO future without yielding through `ctx.cancel`:
 audit and apply the same `tokio::select!` pattern where one is found (none
 currently known besides the now-fixed `sleep`).
 
-### Job output files in `/tmp/kaish/jobs/` persist indefinitely
-`JobManager` only cleans up on explicit `cleanup()` / `remove()`. No
-automatic GC of stale files from crashed sessions or old jobs.
-Long-running embedders accumulate. Prune on kernel start and on a
-configurable interval.
-
 ### `JobManager::spawn` busy-waits
 Uses `std::hint::spin_loop()` to guarantee immediate visibility. Works,
 wastes CPU on contention. Channel-based coordination would be cleaner.
@@ -544,10 +485,6 @@ wastes CPU on contention. Channel-based coordination would be cleaner.
 `crates/kaish-mcp/src/server/execute.rs:192` documents it. Fine at
 agent-call rates, will be a problem in a hot loop. Replace with a pool
 of LocalSet workers + mpsc channel. Benchmark first to confirm the win.
-
-### MCP resource list always re-traversed
-`notify_resource_list_changed` fires unconditionally. Cheap fix;
-diff against previous snapshot before notifying.
 
 ### MCP resource watcher channel fixed at 256
 `subscriptions.rs:33` bounds the file-watch channel; high-churn
@@ -565,17 +502,6 @@ external authors. Surfaced by the dpal review 2026-06-03. Options: (a) ship a
 `backend()` return `Option<&Arc<dyn KernelBackend>>` (kernel always `Some`,
 pure-compute/test contexts `None`). (a) is less invasive and keeps the common
 path honest. Revisit when the first external tool bundle wants unit tests.
-
-### `ToolCtx::as_any`/`as_any_mut` are a public downcast hatch
-`crates/kaish-tool-api/src/ctx.rs`. The escape hatch that lets in-tree builtins
-recover the concrete `ExecContext` is exposed on the public trait, so an
-out-of-tree tool could in principle downcast to a kernel type — though only if
-it deliberately takes a dependency on `kaish-kernel` to name `ExecContext`
-(impossible from the leaf API alone), so the practical risk is low. Cheap
-hardening flagged by dpal 2026-06-03: mark both methods `#[doc(hidden)]` so they
-don't advertise themselves as part of the supported surface. A heavier option (a
-kernel-internal extension trait carrying the downcast, keeping `ToolCtx` itself
-hatch-free) is more churn than the current need justifies.
 
 ---
 
