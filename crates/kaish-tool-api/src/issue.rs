@@ -48,16 +48,19 @@ pub enum IssueCode {
     /// Field access on `$?` (e.g. `${?.data}`, `${?.ok}`) was removed.
     /// `$?` is the POSIX exit code; use `kaish-last` for structured data.
     LastResultFieldAccess,
+    /// diff was given other than two file operands.
+    DiffNeedsTwoFiles,
 }
 
 impl IssueCode {
     /// Returns a short code string for the issue.
     ///
-    /// Code numbers are stable identifiers, not contiguous. E006/E007/E010/E011
-    /// and W003/W004/W005 were retired — they were advertised but never emitted,
-    /// and their runtime paths already fail loudly (`diff` exit 2, `sed`/`jq`
-    /// report bad expressions at runtime). A future pre-execution validator for
-    /// those builtins should add the variant and its implementation together.
+    /// Code numbers are stable identifiers, not contiguous. E006/E007/E010 and
+    /// W003/W004/W005 remain retired — advertised but never emitted, and their
+    /// runtime paths already fail loudly (`sed`/`jq` report bad expressions at
+    /// runtime). E011 was revived 2026-06-14 with a real emitter (`diff` arity).
+    /// A future pre-execution validator for the others should add the variant
+    /// and its implementation together.
     pub fn code(&self) -> &'static str {
         match self {
             IssueCode::UndefinedCommand => "E001",
@@ -70,6 +73,7 @@ impl IssueCode {
             IssueCode::ReturnOutsideFunction => "E009",
             IssueCode::PossiblyUndefinedVariable => "W002",
             IssueCode::ForLoopScalarVar => "E012",
+            IssueCode::DiffNeedsTwoFiles => "E011",
             IssueCode::ScatterWithoutGather => "E014",
             IssueCode::LastResultFieldAccess => "E015",
         }
@@ -81,6 +85,7 @@ impl IssueCode {
             // These are hard errors that will definitely fail at runtime
             IssueCode::SeqZeroIncrement
             | IssueCode::InvalidRegex
+            | IssueCode::DiffNeedsTwoFiles
             | IssueCode::BreakOutsideLoop
             | IssueCode::ReturnOutsideFunction
             | IssueCode::ForLoopScalarVar

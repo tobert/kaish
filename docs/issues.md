@@ -182,30 +182,34 @@ Remaining open work:
 
 ## P2 — Focused refactors & real bugs
 
-### Pre-execution validation for `jq`, `sed`, and `diff`
-Add per-builtin `Tool::validate` so a malformed `jq` filter, a malformed `sed`
-expression, and a `diff` with the wrong number of file operands are caught at
-*validation* time — before any pipeline runs — instead of only failing loud at
-runtime. The validator already does this for `grep` (E005 InvalidRegex) and
-`seq` (E004 SeqZeroIncrement); those are the pattern to follow (compile the
-pattern in `validate()`, push a `ValidationIssue::error` with a `.with_suggestion`
-hint). The payoff is agent DX: the whole script's bad filters/expressions
-surface at once with E-codes + suggestions, rather than one runtime failure
-mid-pipeline.
+### Pre-execution validation for `jq` and `sed` (diff done 2026-06-14)
+Add per-builtin `Tool::validate` so a malformed `jq` filter and a malformed `sed`
+expression are caught at *validation* time — before any pipeline runs — instead
+of only failing loud at runtime. The validator already does this for `grep` (E005
+InvalidRegex), `seq` (E004 SeqZeroIncrement), and now `diff` (E011
+DiffNeedsTwoFiles); those are the pattern to follow (compile the pattern in
+`validate()`, push a `ValidationIssue::error` with a `.with_suggestion` hint). The
+payoff is agent DX: the whole script's bad filters/expressions surface at once
+with E-codes + suggestions, rather than one runtime failure mid-pipeline.
 
-The matching `IssueCode` variants (E006 `InvalidSedExpr`, E007 `InvalidJqFilter`,
-E011 `DiffNeedsTwoFiles`) were **removed 2026-06-14** as dead aspiration — they
-advertised validations that didn't exist. **Re-add each variant and its
-implementation + test together** (the removal lesson: no variant without an
-emitter). Implementation notes:
-- **`diff`** is the cheapest — pure positional-arity check (needs two file
-  operands; `diff a.txt` already errors `missing second file` at runtime).
-  Start here.
+**`diff` — DONE 2026-06-14.** E011 `DiffNeedsTwoFiles` re-added to
+`kaish-tool-api/src/issue.rs` (Error severity) *with* its emitter, per the
+no-variant-without-an-emitter rule. `Diff::validate` (diff.rs) requires exactly
+two file operands; it skips the check when any operand is the `<dynamic>` marker
+(variable/`$(cmd)`/bare glob — unknown runtime count, mirrors grep's guard) and
+discounts one positional when a bare `-C`/`--context` value-flag parks its value
+in `positional` at validation time. A runtime backstop in `execute` also rejects
+3+ operands the validator waved through (`diff *.txt` expanding to 3 files), since
+the old code silently dropped the surplus. Pinned by `diff_validation_tests.rs`
+(8 cases: 0/1/3 literal operands → E011; two-files/`-C 3`/glob/vars pass; glob→3
+errors at runtime). The remaining two:
 - **`jq`** — reuse the `jq_native` filter parser to compile the filter string in
-  `validate()`; a parse error becomes E007. Skip when the filter contains a
-  `<dynamic>` interpolation marker (grep's `validate` shows the guard).
+  `validate()`; a parse error becomes E007 (re-add the variant + impl + test
+  together). Skip when the filter contains a `<dynamic>` interpolation marker
+  (grep's `validate` shows the guard). E007 `InvalidJqFilter` is still retired.
 - **`sed`** — parse the sed expression (the same path `sed` runs) in `validate()`;
-  an unknown command (`sed 'zzz'`) becomes E006.
+  an unknown command (`sed 'zzz'`) becomes E006 (re-add variant + impl + test).
+  E006 `InvalidSedExpr` is still retired.
 Each must have a test per code asserting the E-code fires for a bad input and
 does *not* fire for a valid one. Surfaced 2026-06-14 while clearing the
 never-emitted-IssueCode residual.

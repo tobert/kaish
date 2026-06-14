@@ -16,7 +16,8 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::validator::{IssueCode, ValidationIssue};
 
 /// Diff tool: compares two files line by line.
 pub struct Diff;
@@ -66,6 +67,50 @@ impl Tool for Diff {
         )
     }
 
+    fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
+        let mut issues = validate_against_schema(args, &self.schema());
+
+        // diff compares exactly two files (no stdin path), so the operand count
+        // is knowable up front for all-literal argv — catch both the too-few
+        // (`diff a`) and the silently-dropped too-many (`diff a b c`) cases
+        // before any pipeline runs.
+        //
+        // Two static-analysis caveats, both handled conservatively:
+        //  - A `<dynamic>` operand (variable, `$(cmd)`, or a bare glob) has an
+        //    unknown runtime count, so skip the check entirely — `diff *.txt`
+        //    may legitimately expand to two files. Mirrors grep's guard.
+        //  - The only value-taking flag, `-C`/`--context`, binds its value at
+        //    execute time; in space form (`-C 3`) the value still sits in
+        //    `positional` here, so discount one slot when a bare context flag
+        //    is present.
+        let has_dynamic = args
+            .positional
+            .iter()
+            .any(|v| matches!(v, Value::String(s) if s == "<dynamic>"));
+        if has_dynamic {
+            return issues;
+        }
+
+        let context_steals_positional =
+            args.flags.contains("C") || args.flags.contains("context");
+        let operand_count = args
+            .positional
+            .len()
+            .saturating_sub(if context_steals_positional { 1 } else { 0 });
+
+        if operand_count != 2 {
+            issues.push(
+                ValidationIssue::error(
+                    IssueCode::DiffNeedsTwoFiles,
+                    format!("diff: needs exactly two file operands (got {operand_count})"),
+                )
+                .with_suggestion("usage: diff OLD NEW"),
+            );
+        }
+
+        issues
+    }
+
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
@@ -77,6 +122,21 @@ impl Tool for Diff {
             Err(e) => return ExecResult::failure(2, format!("diff: {e}")),
         };
         parsed.global.apply(ctx);
+
+        // Runtime backstop for the too-many case the validator can't see: a glob
+        // or variables expanding to 3+ files (`diff *.txt`, `diff $a $b $c`) reach
+        // here as `<dynamic>` and skip the static arity check. `parsed.files` is
+        // clap's clean operand list (the `-C 3` value already pulled out), so a
+        // surplus operand is a loud error instead of a silent drop.
+        if parsed.files.len() > 2 {
+            return ExecResult::failure(
+                2,
+                format!(
+                    "diff: needs exactly two file operands (got {})",
+                    parsed.files.len()
+                ),
+            );
+        }
 
         // Get file paths
         let file1 = match args.get_string("file1", 0) {
