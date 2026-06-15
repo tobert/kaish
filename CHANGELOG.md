@@ -10,8 +10,15 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`sed` ergonomics pass** (gaps chosen from a cross-model usability panel — see `docs/sed-design.md`): `;` now chains multiple commands in one expression (`sed 's/a/b/; s/c/d/'`); `s///N` / `s///Ng` act on the Nth match; `a TEXT`/`i TEXT`/`c TEXT` append/insert/change lines (all of `a\TEXT`, `a TEXT`, `aTEXT`); `y/abc/xyz/` transliterates; and `-E`/`-r` are accepted as no-ops (kaish sed is always ERE).
+
+### Changed
+- **`sed` rejects BRE capture groups loudly**: `s/\(…\)/\1/`-style patterns (BRE, sed's default dialect elsewhere) previously *silently* failed to match because kaish sed is ERE. They now error with a hint to use `(…)`. Use unescaped `(…)` groups (ERE).
+
 ### Fixed
 - **`sed -e EXPR -e EXPR` applies every expression**: repeated `-e` flags are now accumulated and applied in order instead of silently keeping only the last one (a "never silently corrupt" violation). `sed -e 's/a/b/' -e 's/c/d/'` chains both substitutions. The same fix corrects `sed -e EXPR file` reading the file (it previously misrouted to stdin). Repeatable value flags are now a first-class, opt-in schema property (`Vec<_>` value flags reflect as repeatable), so the kernel accumulates rather than overwrites — the mechanism generalizes to any future repeatable flag.
+- **`sed 's/x/Y/2'` no longer silently ignores the occurrence count**, and `sed 's/a/b/;…'` no longer silently drops everything after the first `;` — both previously produced wrong output with no error.
 
 ## [0.8.4] - 2026-06-14
 

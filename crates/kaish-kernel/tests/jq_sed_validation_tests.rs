@@ -225,6 +225,90 @@ async fn sed_three_e_flags_all_apply() {
     assert_eq!(result.text_out().trim(), "123", "got: {}", result.text_out());
 }
 
+// ============================================================================
+// sed — ergonomics pass (LLM-panel-driven gap closures, 2026-06-15)
+// Scenarios are the exact forms Gemini-flash and Claude-haiku reached for.
+// ============================================================================
+
+/// `;` chains commands (both models used it for multi-pattern delete). Pre-fix
+/// kaish silently dropped everything after the first `;`.
+#[tokio::test]
+async fn sed_semicolon_chains_commands() {
+    let kernel = kernel_at(tempfile::tempdir().unwrap().path());
+    let result = kernel
+        .execute(r#"echo 'abc' | sed 's/a/X/; s/c/Z/'"#)
+        .await
+        .expect("; chain should run");
+    assert!(result.ok(), "{:?}", result.err);
+    assert_eq!(result.text_out().trim(), "XbZ");
+}
+
+/// `s///N` replaces the Nth match (both models used `s/x/Y/2`). Pre-fix kaish
+/// silently replaced the first.
+#[tokio::test]
+async fn sed_nth_occurrence_substitute() {
+    let kernel = kernel_at(tempfile::tempdir().unwrap().path());
+    let result = kernel
+        .execute(r#"echo 'aaa' | sed 's/a/X/2'"#)
+        .await
+        .expect("s///2 should run");
+    assert_eq!(result.text_out().trim(), "aXa", "{:?}", result.err);
+}
+
+/// `a`/`i` append/insert lines (both models used them).
+#[tokio::test]
+async fn sed_append_and_insert_lines() {
+    let kernel = kernel_at(tempfile::tempdir().unwrap().path());
+    let appended = kernel
+        .execute(r#"printf 'x\nERROR\n' | sed '/ERROR/a ---'"#)
+        .await
+        .expect("a should run");
+    assert_eq!(appended.text_out(), "x\nERROR\n---\n", "{:?}", appended.err);
+
+    let inserted = kernel
+        .execute(r#"printf 'body\n' | sed '1i #!/bin/sh'"#)
+        .await
+        .expect("i should run");
+    assert_eq!(inserted.text_out(), "#!/bin/sh\nbody\n", "{:?}", inserted.err);
+}
+
+/// `y///` transliterates (both models used it).
+#[tokio::test]
+async fn sed_transliterate() {
+    let kernel = kernel_at(tempfile::tempdir().unwrap().path());
+    let result = kernel
+        .execute(r#"echo 'abc' | sed 'y/abc/xyz/'"#)
+        .await
+        .expect("y should run");
+    assert_eq!(result.text_out().trim(), "xyz", "{:?}", result.err);
+}
+
+/// `-E`/`-r` are accepted no-ops (Gemini reached for `-E`). The engine is
+/// already ERE, so the capture-group swap just works.
+#[tokio::test]
+async fn sed_dash_e_flag_is_accepted() {
+    let kernel = kernel_at(tempfile::tempdir().unwrap().path());
+    let result = kernel
+        .execute(r#"echo 'John Smith' | sed -E 's/(\w+) (\w+)/\2 \1/'"#)
+        .await
+        .expect("-E should be accepted");
+    assert_eq!(result.text_out().trim(), "Smith John", "{:?}", result.err);
+}
+
+/// The BRE capture-group idiom (Claude-haiku reached for `\(…\)`) is rejected
+/// loudly with an ERE hint, instead of silently not matching.
+#[tokio::test]
+async fn sed_bre_capture_groups_rejected_with_hint() {
+    let kernel = kernel_at(tempfile::tempdir().unwrap().path());
+    let err = kernel
+        .execute(r#"echo 'John Smith' | sed 's/\(\w*\) \(\w*\)/\2 \1/'"#)
+        .await
+        .expect_err("BRE groups should be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("E006"), "should name the code: {msg}");
+    assert!(msg.contains("ERE"), "should hint ERE: {msg}");
+}
+
 /// `-e EXPR file` (flag form) reads the file, not stdin. This exercises the
 /// `file_pos` fix: when `-e` supplies the expression, the first positional is
 /// the file. (Pre-fix, the flags-based `file_pos` check misrouted this to

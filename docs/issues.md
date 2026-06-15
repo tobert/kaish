@@ -182,6 +182,19 @@ Remaining open work:
 
 ## P2 — Focused refactors & real bugs
 
+### `sed -i` (in-place edit) — deferred pending a write-model design
+Both lite models in the 2026-06-15 sed usability panel (see `docs/sed-design.md`)
+reached for `sed -i 's/…/…/' file`, making it the strongest remaining ergonomic
+gap after the `;`/`s///N`/`a`-`i`-`c`/`y` pass landed. It's deferred because
+in-place editing is a file-mutating side effect that must route through kaish's
+write machinery — VFS resolution, overlay transactions, and the latch/trash
+confirmation rails — so that sandbox, `--overlay`, and confirmation modes all
+hold. That's a design (where does the write go under overlay? does `-i` need a
+latch nonce like `rm`? `-i.bak` backup suffix?), not a parser tweak. Today `sed`
+loud-errors on `-i` rather than pretending. Revisit when an embedder (kaibo/kj)
+actually needs agent-driven in-place edits; until then `s/…/…/ … > file` via a
+real external `sed`, or the overlay, covers it.
+
 ### Streaming file reads — wc/checksum/grep/cmp/cat landed 2026-06-14; residuals
 Scan-oriented builtins no longer read whole files into memory. Mechanism
 (chosen to respect kaish-vfs's runtime-free trait — no `AsyncRead`/tokio in the

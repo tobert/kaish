@@ -831,7 +831,13 @@ These are documented limitations of the current implementation:
 - **`ps` is Linux-only** — The process listing builtin reads from `/proc` and only works on Linux systems.
 - **`git` requires real filesystem** — The git builtin operates on the actual filesystem, not the VFS. It won't work with memory-backed or remote VFS mounts.
 - **`head`/`tail -c` counts bytes** — POSIX semantics, deliberately. A byte count can split a multi-byte UTF-8 sequence; use line-based forms (`-n`) for text.
-- **`sed` is a "muscle-memory" subset, not full sed** — kaish's `sed` deliberately implements the slice of GNU/BSD (AT&T) `sed` that humans and agents actually reach for by reflex — closest in spirit to **busybox** `sed`, which is a strong influence. It covers substitution `s/pat/rep/[gip]` (ERE, like `egrep` — not BRE) with capture groups (`\1`–`\9`, `&`), the `d`/`p`/`q` commands, and addresses (line number `N`, last line `$`, `/regex/`, ranges `N,M` and `/start/,/end/`). Multiple expressions chain with repeated `-e` (applied in order) or via the first positional. The advanced sed program (hold space, `y///`, labels/branching `b`/`t`, `a`/`i`/`c`, `w`/`r`, `;`-separated multi-command scripts, in-place `-i`) is **out of scope** — kaish errors loudly on an unsupported command rather than half-running it. Reach for a real `sed` (external command) when you need the full language.
+- **`sed` is a "muscle-memory" subset, not full sed** — kaish's `sed` deliberately implements the slice of GNU/BSD (AT&T) `sed` that humans and agents actually reach for by reflex — closest in spirit to **busybox** `sed`, which is a strong influence (the supported set was [chosen from a cross-model usability panel](sed-design.md)). It covers:
+  - **Substitution** `s/pat/rep/[flags]` with capture groups (`\1`–`\9`, `&`) and flags `g` (global), `i`/`I` (case-insensitive), `p` (print), `m`/`M` (multiline anchors), and a numeric `N` for the Nth match (`s/x/Y/2`; combine as `Ng` for "Nth onward").
+  - **Commands** `d` (delete), `p` (print), `q` (quit), `a TEXT`/`i TEXT`/`c TEXT` (append/insert/change line — the `a\TEXT`, `a TEXT`, and `aTEXT` forms all work), and `y/abc/xyz/` (transliterate).
+  - **Addresses** line number `N`, last line `$`, `/regex/`, and ranges `N,M` / `/start/,/end/`.
+  - **Chaining** multiple commands with `;` *or* repeated `-e` (applied in order); both forms compose into one program.
+  - **Regex is ERE** (extended, like `egrep`) — *always*. `-E`/`-r` are accepted no-ops; **BRE capture groups `\(…\)` are rejected with a hint** to use `(…)` rather than silently not matching.
+  - **Out of scope** (errors loudly, never half-runs): hold space (`h`/`H`/`g`/`G`/`x`), labels/branching (`b`/`t`/`:`), `w`/`r` file I/O, in-place `-i`, and GNU address extensions (`1~2`, `0,/re/`, `/re/,+N`). Reach for a real `sed` (external command) when you need those.
 
 ### Execution
 

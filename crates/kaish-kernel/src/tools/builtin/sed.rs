@@ -32,6 +32,13 @@ struct SedArgs {
     #[arg(short = 'e', long = "expression")]
     expression: Vec<String>,
 
+    /// Use extended regex (-E/-r). kaish sed is ALWAYS ERE, so this is a
+    /// compatibility no-op — accepted so muscle-memory `sed -E '(…)'` /
+    /// `sed -r` invocations don't error. (`\(…\)`-style BRE groups are
+    /// rejected with a hint; see the regex notes in `help sed`.)
+    #[arg(short = 'E', short_alias = 'r', long = "regexp-extended")]
+    extended: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -53,13 +60,19 @@ impl Tool for Sed {
             [
                 ("Basic substitution", "sed 's/old/new/' file.txt"),
                 ("Global substitution", "sed 's/old/new/g' file.txt"),
+                ("Replace the 2nd match only", "sed 's/x/Y/2' file.txt"),
                 ("Case-insensitive", "sed 's/hello/hi/gi' file.txt"),
                 ("Delete lines matching pattern", "sed '/error/d' log.txt"),
                 ("Print only matching lines", "sed -n '/pattern/p' file.txt"),
-                ("Multiple expressions", "sed -e 's/a/b/' -e 's/c/d/' file.txt"),
+                ("Multiple commands (;)", "sed 's/a/b/; s/c/d/' file.txt"),
+                ("Multiple expressions (-e)", "sed -e 's/a/b/' -e 's/c/d/' file.txt"),
+                ("Append a line after matches", "sed '/ERROR/a ---' log.txt"),
+                ("Insert a line at the top", "sed '1i #!/bin/sh' script.sh"),
+                ("Change matching lines", "sed '/old/c replaced' file.txt"),
+                ("Transliterate characters", "sed 'y/abc/xyz/' file.txt"),
                 ("Line range", "sed '2,5d' file.txt"),
                 ("Alternative delimiter", "sed 's|/usr|/opt|g' file.txt"),
-                ("Capture groups", "sed 's/(\\w+) (\\w+)/\\2 \\1/' file.txt"),
+                ("Capture groups (ERE)", "sed 's/(\\w+) (\\w+)/\\2 \\1/' file.txt"),
             ],
         )
     }
@@ -81,13 +94,16 @@ impl Tool for Sed {
         // Nothing to validate if expressions are absent (execute() will also
         // reject this case at runtime with "missing expression").
         for expr in &exprs {
-            if let Err(msg) = parse_expression(expr) {
+            if let Err(msg) = parse_program(expr) {
                 issues.push(
                     ValidationIssue::error(
                         IssueCode::InvalidSedExpr,
                         format!("sed: {msg}"),
                     )
-                    .with_suggestion("supported commands: s/pat/rep/[flags], d, p, q; addresses: N, /pat/, $"),
+                    .with_suggestion(
+                        "commands: s/pat/rep/[gipN], y/abc/xyz/, d, p, q, a/i/c TEXT; \
+                         chain with ; or -e; addresses: N, $, /re/, N,M; regex is ERE (egrep-style)",
+                    ),
                 );
             }
         }
@@ -119,16 +135,16 @@ impl Tool for Sed {
             return ExecResult::failure(1, "sed: missing expression");
         }
 
-        // Parse all expressions upfront (fail early)
-        let parsed: Result<Vec<SedExpression>, String> = expressions
-            .iter()
-            .map(|expr| parse_expression(expr))
-            .collect();
-
-        let parsed = match parsed {
-            Ok(p) => p,
-            Err(e) => return ExecResult::failure(1, format!("sed: {}", e)),
-        };
+        // Parse all expressions upfront (fail early). Each expression string may
+        // itself hold several `;`-separated commands, so flatten into one
+        // ordered program (matching `-e A -e B` and `'A; B'` semantics).
+        let mut parsed: Vec<SedExpression> = Vec::new();
+        for expr in &expressions {
+            match parse_program(expr) {
+                Ok(cmds) => parsed.extend(cmds),
+                Err(e) => return ExecResult::failure(1, format!("sed: {}", e)),
+            }
+        }
 
         // Get input: file or stdin. When `-e` supplied the expression(s), every
         // positional is a file (file at position 0); otherwise the first
@@ -230,7 +246,12 @@ enum Command {
     Substitute {
         pattern: Regex,
         replacement: String,
+        /// Replace every match at/after `occurrence` (the `g` flag).
         global: bool,
+        /// 1-indexed first match to act on (the `s///N` flag). `0` means
+        /// "unspecified" and behaves as `1` (replace the first match).
+        occurrence: usize,
+        /// Print the pattern space after a successful substitution (`p` flag).
         print: bool,
     },
     /// Delete the pattern space.
@@ -239,6 +260,14 @@ enum Command {
     Print,
     /// Quit processing.
     Quit,
+    /// Append text after the current line (`a`).
+    Append(String),
+    /// Insert text before the current line (`i`).
+    Insert(String),
+    /// Change: replace the matched line(s) with text (`c`).
+    Change(String),
+    /// Transliterate `from` chars to `to` chars, 1:1 (`y/from/to/`).
+    Transliterate { from: Vec<char>, to: Vec<char> },
 }
 
 /// A complete sed expression: address + command.
@@ -252,17 +281,42 @@ struct SedExpression {
 // Parser
 // ============================================================================
 
-/// Parse a complete sed expression (address + command).
-fn parse_expression(expr: &str) -> Result<SedExpression, String> {
-    let expr = expr.trim();
-    if expr.is_empty() {
-        return Err("empty expression".to_string());
+/// Parse a sed program: one or more `;`/newline-separated commands, each an
+/// optional address + command. `-e EXPR` strings and `'A; B'` both arrive here,
+/// so multi-command programs collapse to one ordered `Vec` either way.
+///
+/// `;` is only a separator at the top level. Inside `s///`, `y///`, or a
+/// `/regex/` address it's an ordinary character (those parsers consume their own
+/// delimiters), and `a`/`i`/`c` swallow the rest of the program as literal text
+/// — matching GNU sed's one-line `a TEXT` behavior.
+fn parse_program(expr: &str) -> Result<Vec<SedExpression>, String> {
+    let mut out = Vec::new();
+    let mut rest = expr.to_string();
+
+    loop {
+        let next = {
+            let trimmed = rest.trim_start_matches([';', '\n', ' ', '\t']);
+            if trimmed.is_empty() {
+                break;
+            }
+            let (expr, remaining) = parse_one(trimmed)?;
+            out.push(expr);
+            remaining
+        };
+        rest = next;
     }
 
-    let (address, rest) = parse_address(expr)?;
-    let command = parse_command(rest.trim())?;
+    if out.is_empty() {
+        return Err("empty expression".to_string());
+    }
+    Ok(out)
+}
 
-    Ok(SedExpression { address, command })
+/// Parse a single address+command, returning it and the unconsumed remainder.
+fn parse_one(expr: &str) -> Result<(SedExpression, String), String> {
+    let (address, rest) = parse_address(expr)?;
+    let (command, rest) = parse_command(rest.trim_start())?;
+    Ok((SedExpression { address, command }, rest))
 }
 
 /// Parse an optional address prefix, returning (Address, remaining).
@@ -363,59 +417,144 @@ fn parse_pattern_address(expr: &str) -> Result<(Regex, &str), String> {
     Ok((regex, &expr[consumed..]))
 }
 
-/// Parse a sed command (s, d, p, q).
-fn parse_command(cmd: &str) -> Result<Command, String> {
-    if cmd.is_empty() {
-        return Err("missing command".to_string());
-    }
-
-    // Safe: we checked `cmd.is_empty()` above, so `.next()` always succeeds.
+/// Parse a sed command and return it plus the unconsumed remainder of the
+/// program (everything after this command's text/flags, including a leading
+/// `;`/newline separator if present).
+fn parse_command(cmd: &str) -> Result<(Command, String), String> {
+    // Safe: `parse_one` trims then checks non-empty before calling us, but guard
+    // anyway so a bare `;;` can't panic.
     let Some(first) = cmd.chars().next() else {
         return Err("missing command".to_string());
     };
+    let after_first = &cmd[first.len_utf8()..];
 
     match first {
-        's' => parse_substitute(&cmd[1..]),
-        'd' => Ok(Command::Delete),
-        'p' => Ok(Command::Print),
-        'q' => Ok(Command::Quit),
+        's' => parse_substitute(after_first),
+        'y' => parse_transliterate(after_first),
+        'd' => Ok((Command::Delete, after_first.to_string())),
+        'p' => Ok((Command::Print, after_first.to_string())),
+        'q' => Ok((Command::Quit, after_first.to_string())),
+        // a/i/c take the rest of the program as literal text (GNU one-line form).
+        'a' => Ok((Command::Append(parse_text_arg(after_first)), String::new())),
+        'i' => Ok((Command::Insert(parse_text_arg(after_first)), String::new())),
+        'c' => Ok((Command::Change(parse_text_arg(after_first)), String::new())),
         _ => Err(format!("unknown command: {}", first)),
     }
 }
 
-/// Parse a substitution command: /pattern/replacement/flags
-fn parse_substitute(expr: &str) -> Result<Command, String> {
-    if expr.is_empty() {
+/// Strip the optional leading `\` and one optional space from the text of an
+/// `a`/`i`/`c` command. Accepts every form models reach for: `a\text`,
+/// `a text`, and `atext` (GNU one-liner).
+fn parse_text_arg(s: &str) -> String {
+    let s = s.strip_prefix('\\').unwrap_or(s);
+    s.strip_prefix(' ').unwrap_or(s).to_string()
+}
+
+/// Parse a substitution command `s/pattern/replacement/flags`, returning the
+/// command and the unconsumed remainder. Supported flags: `g` (global),
+/// `i`/`I` (case-insensitive), `p` (print), `m`/`M` (multiline anchors), and a
+/// numeric `N` (act on the Nth match; combine with `g` for "Nth onward").
+fn parse_substitute(expr: &str) -> Result<(Command, String), String> {
+    let chars: Vec<char> = expr.chars().collect();
+    if chars.is_empty() {
         return Err("s command requires delimiter".to_string());
     }
-
-    let chars: Vec<char> = expr.chars().collect();
     let delimiter = chars[0];
 
-    // Parse pattern
     let (pattern_str, after_pattern) = parse_delimited(&chars[1..], delimiter)?;
-
-    // Parse replacement
     let (replacement, after_replacement) = parse_delimited(after_pattern, delimiter)?;
 
-    // Parse flags
-    let flags: String = after_replacement.iter().collect();
-    let global = flags.contains('g');
-    let case_insensitive = flags.contains('i');
-    let print = flags.contains('p');
+    let mut global = false;
+    let mut case_insensitive = false;
+    let mut multiline = false;
+    let mut print = false;
+    let mut digits = String::new();
+    let mut idx = 0;
+    while idx < after_replacement.len() {
+        match after_replacement[idx] {
+            'g' => global = true,
+            'i' | 'I' => case_insensitive = true,
+            'm' | 'M' => multiline = true,
+            'p' => print = true,
+            c if c.is_ascii_digit() => digits.push(c),
+            // A separator (or whitespace) ends this command's flags.
+            ';' | '\n' | ' ' | '\t' => break,
+            other => return Err(format!("unknown s flag: {}", other)),
+        }
+        idx += 1;
+    }
+    let occurrence = if digits.is_empty() {
+        0
+    } else {
+        digits.parse().map_err(|_| "invalid s/// occurrence number")?
+    };
 
-    // Build regex
+    detect_bre_idiom(&pattern_str, &replacement)?;
+
     let regex = RegexBuilder::new(&pattern_str)
         .case_insensitive(case_insensitive)
+        .multi_line(multiline)
         .build()
         .map_err(|e| format!("invalid pattern: {}", e))?;
 
-    Ok(Command::Substitute {
-        pattern: regex,
-        replacement,
-        global,
-        print,
-    })
+    let rest: String = after_replacement[idx..].iter().collect();
+    Ok((
+        Command::Substitute {
+            pattern: regex,
+            replacement,
+            global,
+            occurrence,
+            print,
+        },
+        rest,
+    ))
+}
+
+/// Parse a transliterate command `y/from/to/`, returning the command and the
+/// unconsumed remainder. `from` and `to` must be equal length (real sed errors
+/// otherwise).
+fn parse_transliterate(expr: &str) -> Result<(Command, String), String> {
+    let chars: Vec<char> = expr.chars().collect();
+    if chars.is_empty() {
+        return Err("y command requires delimiter".to_string());
+    }
+    let delimiter = chars[0];
+
+    let (from, after_from) = parse_delimited(&chars[1..], delimiter)?;
+    let (to, after_to) = parse_delimited(after_from, delimiter)?;
+
+    let from: Vec<char> = from.chars().collect();
+    let to: Vec<char> = to.chars().collect();
+    if from.len() != to.len() {
+        return Err("y command: 'from' and 'to' must have the same length".to_string());
+    }
+
+    let rest: String = after_to.iter().collect();
+    Ok((Command::Transliterate { from, to }, rest))
+}
+
+/// Reject the BRE capture-group idiom with an ERE hint instead of silently not
+/// matching. kaish sed is ERE (egrep-style): `\(` / `\)` are *literal* parens,
+/// so `s/\(a\)/[\1]/` would match the literal text `(a)` and `\1` would refer to
+/// a group that doesn't exist — a silent no-op on muscle-memory BRE. A pattern
+/// with `\(`…`\)` *and* a numeric backreference in the replacement is
+/// unambiguously BRE intent (no ERE user escapes the group then backrefs it), so
+/// we can flag it with near-zero false positives.
+fn detect_bre_idiom(pattern: &str, replacement: &str) -> Result<(), String> {
+    let escaped_group = pattern.contains("\\(") || pattern.contains("\\)");
+    let bytes = replacement.as_bytes();
+    let has_backref = bytes
+        .iter()
+        .enumerate()
+        .any(|(i, &b)| b == b'\\' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit));
+    if escaped_group && has_backref {
+        return Err(
+            "pattern uses BRE capture groups \\(...\\); kaish sed is ERE \
+             (egrep-style) — write (...) and backreference \\1, not \\(...\\)"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Parse a delimited section, handling escapes.
@@ -466,9 +605,12 @@ fn execute_sed(input: &str, expressions: &[SedExpression], quiet: bool) -> Strin
         let mut deleted = false;
         let mut printed_by_p = false;
         let mut quit = false;
+        // `a` text is emitted *after* the line's auto-print; collect it here so
+        // multiple `a` commands queue in order.
+        let mut appends: Vec<&str> = Vec::new();
 
         for (expr_idx, expr) in expressions.iter().enumerate() {
-            // Check if address matches
+            let was_active = range_active[expr_idx];
             let matches = address_matches(
                 &expr.address,
                 one_indexed,
@@ -481,19 +623,16 @@ fn execute_sed(input: &str, expressions: &[SedExpression], quiet: bool) -> Strin
                 continue;
             }
 
-            // Execute command
             match &expr.command {
                 Command::Substitute {
                     pattern,
                     replacement,
                     global,
+                    occurrence,
                     print,
                 } => {
-                    let new_text = if *global {
-                        substitute_all(pattern, &pattern_space, replacement)
-                    } else {
-                        substitute_first(pattern, &pattern_space, replacement)
-                    };
+                    let new_text =
+                        substitute(pattern, &pattern_space, replacement, *global, *occurrence);
 
                     let changed = new_text != pattern_space;
                     pattern_space = new_text;
@@ -517,12 +656,40 @@ fn execute_sed(input: &str, expressions: &[SedExpression], quiet: bool) -> Strin
                     quit = true;
                     break;
                 }
+                // `a`/`i`/`c` text is emitted regardless of `-n` (real sed prints
+                // it unconditionally).
+                Command::Append(text) => {
+                    appends.push(text);
+                }
+                Command::Insert(text) => {
+                    output.push_str(text);
+                    output.push('\n');
+                }
+                Command::Change(text) => {
+                    // The line is suppressed. For a range, the text replaces the
+                    // *whole* range and is emitted once when the range closes;
+                    // for a single line/pattern, once per matching line.
+                    deleted = true;
+                    let is_range = matches!(expr.address, Address::Range(..));
+                    let range_closed = is_range && was_active && !range_active[expr_idx];
+                    if !is_range || range_closed {
+                        output.push_str(text);
+                        output.push('\n');
+                    }
+                }
+                Command::Transliterate { from, to } => {
+                    pattern_space = transliterate(&pattern_space, from, to);
+                }
             }
         }
 
-        // Auto-print unless quiet or deleted
+        // Auto-print unless quiet or deleted, then flush any queued `a` text.
         if !deleted && !quiet && !printed_by_p {
             output.push_str(&pattern_space);
+            output.push('\n');
+        }
+        for text in appends {
+            output.push_str(text);
             output.push('\n');
         }
 
@@ -532,6 +699,19 @@ fn execute_sed(input: &str, expressions: &[SedExpression], quiet: bool) -> Strin
     }
 
     output
+}
+
+/// Transliterate each char of `text` that appears in `from` to the char at the
+/// same index in `to` (`y/from/to/`). Callers guarantee `from.len() == to.len()`.
+fn transliterate(text: &str, from: &[char], to: &[char]) -> String {
+    text.chars()
+        .map(|c| {
+            from.iter()
+                .position(|&f| f == c)
+                .and_then(|i| to.get(i).copied())
+                .unwrap_or(c)
+        })
+        .collect()
 }
 
 /// Check if an address matches the current line.
@@ -579,33 +759,42 @@ fn address_matches(
     }
 }
 
-/// Substitute first match, handling capture groups.
-fn substitute_first(pattern: &Regex, text: &str, replacement: &str) -> String {
-    if let Some(captures) = pattern.captures(text) {
-        // Capture group 0 (the full match) is always present when captures succeeds.
-        let Some(mat) = captures.get(0) else {
-            return text.to_string();
-        };
-        let expanded = expand_replacement(replacement, &captures);
-        format!("{}{}{}", &text[..mat.start()], expanded, &text[mat.end()..])
-    } else {
-        text.to_string()
-    }
-}
-
-/// Substitute all matches, handling capture groups.
-fn substitute_all(pattern: &Regex, text: &str, replacement: &str) -> String {
+/// Substitute matches, handling capture groups, the `g` (global) flag, and the
+/// `s///N` occurrence count.
+///
+/// - `occurrence` is the 1-indexed first match to act on (`0` behaves as `1`).
+/// - `global` then extends the action to every match at/after that point.
+///
+/// So `(occurrence=0|1, global=false)` replaces the first match; `g` replaces
+/// all; `N` replaces only the Nth; `Ng` replaces the Nth and everything after.
+fn substitute(
+    pattern: &Regex,
+    text: &str,
+    replacement: &str,
+    global: bool,
+    occurrence: usize,
+) -> String {
+    let skip = occurrence.saturating_sub(1);
     let mut result = String::new();
     let mut last_end = 0;
+    let mut seen = 0;
+    let mut replaced = false;
 
     for captures in pattern.captures_iter(text) {
         // Capture group 0 (the full match) is always present when captures succeeds.
         let Some(mat) = captures.get(0) else {
             continue;
         };
-        result.push_str(&text[last_end..mat.start()]);
-        result.push_str(&expand_replacement(replacement, &captures));
-        last_end = mat.end();
+        // Skip matches before the requested occurrence; once at/after it, replace
+        // either just the first (non-global) or all remaining (global).
+        let do_replace = seen >= skip && (global || !replaced);
+        seen += 1;
+        if do_replace {
+            result.push_str(&text[last_end..mat.start()]);
+            result.push_str(&expand_replacement(replacement, &captures));
+            last_end = mat.end();
+            replaced = true;
+        }
     }
 
     result.push_str(&text[last_end..]);
@@ -665,6 +854,17 @@ mod tests {
     use super::*;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
+
+    /// Test helper: parse a single-command expression. Most parser tests predate
+    /// `;`-separated programs and assert against one `SedExpression`; this keeps
+    /// them terse by unwrapping the one-element program `parse_program` returns.
+    fn parse_expression(expr: &str) -> Result<SedExpression, String> {
+        let mut cmds = parse_program(expr)?;
+        if cmds.len() != 1 {
+            return Err(format!("expected 1 command, got {}", cmds.len()));
+        }
+        Ok(cmds.remove(0))
+    }
 
     async fn make_ctx() -> ExecContext {
         let mut vfs = VfsRouter::new();
@@ -1006,6 +1206,136 @@ mod tests {
         let expr = parse_expression(r"s/ /\n/").unwrap();
         let output = execute_sed(input, &[expr], false);
         assert_eq!(output, "hello\nworld\n");
+    }
+
+    // === `;` command separation ===
+
+    #[test]
+    fn semicolon_splits_into_multiple_commands() {
+        let prog = parse_program("s/a/X/;s/b/Y/").unwrap();
+        assert_eq!(prog.len(), 2);
+        let output = execute_sed("abc", &prog, false);
+        assert_eq!(output, "XYc\n");
+    }
+
+    #[test]
+    fn semicolon_with_addresses_and_whitespace() {
+        // `/x/d ; /y/d` (spaces around `;`) — two addressed deletes.
+        let prog = parse_program("/b/d ; /d/d").unwrap();
+        assert_eq!(prog.len(), 2);
+        let output = execute_sed("a\nb\nc\nd\n", &prog, false);
+        assert_eq!(output, "a\nc\n");
+    }
+
+    #[test]
+    fn semicolon_inside_regex_is_literal_not_a_separator() {
+        // A `;` inside the pattern must not split the command.
+        let prog = parse_program("s/a;b/X/").unwrap();
+        assert_eq!(prog.len(), 1);
+        assert_eq!(execute_sed("a;b", &prog, false), "X\n");
+    }
+
+    #[test]
+    fn empty_segments_from_doubled_semicolons_are_skipped() {
+        let prog = parse_program(";;s/a/X/;;").unwrap();
+        assert_eq!(prog.len(), 1);
+    }
+
+    // === s///N occurrence count ===
+
+    #[test]
+    fn substitute_nth_occurrence_only() {
+        let expr = parse_expression("s/a/X/2").unwrap();
+        assert_eq!(execute_sed("aaa", &[expr], false), "aXa\n");
+    }
+
+    #[test]
+    fn substitute_nth_onward_with_g() {
+        let expr = parse_expression("s/a/X/2g").unwrap();
+        assert_eq!(execute_sed("aaaa", &[expr], false), "aXXX\n");
+    }
+
+    #[test]
+    fn substitute_default_is_first_match() {
+        let expr = parse_expression("s/a/X/").unwrap();
+        assert_eq!(execute_sed("aaa", &[expr], false), "Xaa\n");
+    }
+
+    // === a / i / c ===
+
+    #[test]
+    fn append_emits_text_after_the_line() {
+        let expr = parse_expression("/B/a ---").unwrap();
+        assert_eq!(execute_sed("A\nB\nC", &[expr], false), "A\nB\n---\nC\n");
+    }
+
+    #[test]
+    fn insert_emits_text_before_the_line() {
+        let expr = parse_expression("1i top").unwrap();
+        assert_eq!(execute_sed("A\nB", &[expr], false), "top\nA\nB\n");
+    }
+
+    #[test]
+    fn change_replaces_single_line() {
+        let expr = parse_expression("/B/c NEW").unwrap();
+        assert_eq!(execute_sed("A\nB\nC", &[expr], false), "A\nNEW\nC\n");
+    }
+
+    #[test]
+    fn change_replaces_whole_range_once() {
+        let expr = parse_expression("2,3c NEW").unwrap();
+        assert_eq!(execute_sed("A\nB\nC\nD", &[expr], false), "A\nNEW\nD\n");
+    }
+
+    #[test]
+    fn append_text_emits_even_under_quiet() {
+        // a/i/c print unconditionally, like real sed.
+        let expr = parse_expression("/B/a ---").unwrap();
+        assert_eq!(execute_sed("A\nB\nC", &[expr], true), "---\n");
+    }
+
+    #[test]
+    fn parse_text_arg_accepts_backslash_space_and_glued_forms() {
+        assert_eq!(parse_text_arg(r"\hello"), "hello");
+        assert_eq!(parse_text_arg(" hello"), "hello");
+        assert_eq!(parse_text_arg("hello"), "hello");
+        assert_eq!(parse_text_arg(r"\ hello"), "hello");
+    }
+
+    // === y/// transliterate ===
+
+    #[test]
+    fn transliterate_maps_chars() {
+        let expr = parse_expression("y/abc/xyz/").unwrap();
+        assert_eq!(execute_sed("cabbage", &[expr], false), "zxyyxge\n");
+    }
+
+    #[test]
+    fn transliterate_length_mismatch_errors() {
+        let err = parse_program("y/abc/xy/").unwrap_err();
+        assert!(err.contains("same length"), "got: {err}");
+    }
+
+    // === ERE dialect honesty ===
+
+    #[test]
+    fn bre_capture_group_idiom_is_rejected() {
+        let err = parse_program(r"s/\(a\)\(b\)/\2\1/").unwrap_err();
+        assert!(err.contains("ERE"), "should hint ERE: {err}");
+        assert!(err.contains("BRE"), "should name BRE: {err}");
+    }
+
+    #[test]
+    fn escaped_paren_without_backref_is_allowed() {
+        // `\(` as a literal paren in ERE (no backref) must NOT trip the detector.
+        let expr = parse_expression(r"s/\(x\)/Y/").unwrap();
+        assert_eq!(execute_sed("(x)", &[expr], false), "Y\n");
+    }
+
+    #[test]
+    fn ere_groups_with_backref_work_normally() {
+        let expr = parse_expression(r"s/(a)(b)/\2\1/").unwrap();
+        assert_eq!(execute_sed("ab", &[expr], false), "ba\n");
     }
 
     // === Integration Tests ===
