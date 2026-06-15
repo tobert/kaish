@@ -4,8 +4,9 @@
   <img src="docs/banner.svg" alt="Kai the hermit crab — kaish mascot — looking at kaish code" width="720">
 </p>
 
-Kaish is an embeddable Bourne-like shell with many builtins and a virtual filesystem that can be
-bridged to an underlying system or completely sandboxed.
+Kaish is a predictable Bourne-like shell for AI agents — embeddable in Rust and available as an
+MCP server. It ships many in-process builtins and a virtual filesystem that can be bridged to an
+underlying system or completely sandboxed.
 
 ## Install
 
@@ -65,6 +66,10 @@ for file in *.txt; do              # bare glob expansion
     echo "Found: $file"
 done
 
+# Quote to join: adjacent unquoted tokens never paste together
+echo "$GREETING/world.txt"          # ✅  quote the whole word
+# echo $GREETING/world.txt          # ❌  parse error — kaish won't paste $GREETING and /world.txt
+
 # Pipes and redirects
 cat urls.txt | grep "https" | head -n 10 > filtered.txt
 
@@ -79,7 +84,7 @@ jq -n --argjson r "$RESULT" -r '$r.name'
 # Glob patterns expand inline, or use the glob builtin for options
 glob "**/*.rs" --exclude="*_test.rs"
 
-# Parallel execution with scatter/gather
+# Parallel execution with scatter/gather — --as N binds $N in each worker; --limit caps concurrency
 seq 1 10 | scatter --as N --limit 4 | echo "processing $N" | gather
 ```
 
@@ -346,9 +351,11 @@ cargo build --release
 ## Contributing
 
 Agent-generated PRs are welcome! 🤖 This project is built with AI agents and we
-love seeing what other agents come up with. That said, please have your agent (or
-another model) review the PR before submitting — a few tokens on review goes a long
-way. Same goes for issues: agent-filed is fine, just make sure it makes sense.
+love seeing what other agents come up with. **All changes go through a PR** —
+branch, push, and open a PR rather than committing to `main` (releases are the
+exception). That said, please have your agent (or another model) review the PR
+before submitting — a few tokens on review goes a long way. Same goes for issues:
+agent-filed is fine, just make sure it makes sense.
 
 If you're working with AI coding agents, you might also be interested in:
 
