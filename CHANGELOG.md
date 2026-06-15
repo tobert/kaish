@@ -10,6 +10,8 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-06-14
+
 ### Added
 - **`diff` operand-count validation**: `diff` requires exactly two file operands — a wrong count among literal arguments is caught at pre-execution validation (error code `E011`) instead of only at runtime, and a glob/variable expansion to three or more files now errors loudly rather than silently dropping the extra operands.
 - **`jq`/`sed` pre-execution validation**: a malformed `jq` filter (`E007`) or `sed` expression (`E006`) is now reported at validation time — before any pipeline runs — instead of only failing mid-execution. Filters/expressions built from variables or command substitution (`<dynamic>`) are skipped, as is a `jq` filter using `--arg`/`--argjson` bindings.
@@ -391,7 +393,8 @@ Initial public release of **kaish** (会sh) — a predictable Bourne-like shell 
 - **REPL** (`kaish-repl`) with multi-line input, completion, and history; **MCP server** (`kaish-mcp`) exposing `kaish_execute` with help resources and structured + plain-text content blocks.
 - **`KernelClient` trait** + `EmbeddedClient` for in-process embedding; topic-based help system; `kaish-wasi` `wasm32-wasip1` target.
 
-[Unreleased]: https://github.com/tobert/kaish/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/tobert/kaish/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/tobert/kaish/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/tobert/kaish/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/tobert/kaish/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/tobert/kaish/compare/v0.8.0...v0.8.1
