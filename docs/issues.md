@@ -24,6 +24,15 @@ subprocess capture, arithmetic token leak) **all validate as fixed** on
 
 ## P1 — High-leverage features and diagnostics
 
+### `sed -e EXPR -e EXPR` silently keeps only the last expression
+(real bug, pre-existing — `SedArgs::expression` is `Option<String>` and
+`collect_expressions` does single-key `args.named` lookups, so the kernel's
+`consumes<=1` HashMap overwrite drops earlier `-e`s). The `help` example
+`sed -e 's/a/b/' -e 's/c/d/' file.txt` advertises a feature that doesn't fully
+work — a "never silently corrupt" violation. Fix: `expression: Vec<String>`
+with `ArgAction::Append`, plus kernel accumulation of repeated 1-value flags
+into a `Value::Json(Array)`. Same class likely affects other repeatable flags.
+
 ### OverlayFs — ALL HUNKS LANDED 2026-06-10; residuals only
 Hunk 1 `69c42e3`+`2a62a72` (MemoryFs lift, overlay core), accounting vfs half
 `dddc85d` (resident_bytes, ByteBudget), hunk 2 `6fe2225` (inspection API),
@@ -302,14 +311,6 @@ E007-ing — was investigated and rejected: the equals form is not a legal jq
 invocation, real jq exits 2 "Unknown option", so rejecting it before execution
 is correct. Pinned by `jq_equals_form_arg_is_rejected_not_silently_run`.)
 
-- **`sed -e EXPR -e EXPR` silently keeps only the last expression** (real bug,
-  pre-existing — `SedArgs::expression` is `Option<String>` and
-  `collect_expressions` does single-key `args.named` lookups, so the kernel's
-  `consumes<=1` HashMap overwrite drops earlier `-e`s). The `help` example
-  `sed -e 's/a/b/' -e 's/c/d/' file.txt` advertises a feature that doesn't fully
-  work — a "never silently corrupt" violation. Fix: `expression: Vec<String>`
-  with `ArgAction::Append`, plus kernel accumulation of repeated 1-value flags
-  into a `Value::Json(Array)`. Same class likely affects other repeatable flags.
 - **Combined short flags only bind a glued value when the value-flag is first**
   (feature gap, pre-existing — `cut -f1` works, but `grep -ivC 3` treats `C` as a
   bool because the leading `i`/`v` are bool flags, leaving `3` as a stray

@@ -78,6 +78,14 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
 
 ### Version Control
 
+- **Work on a branch, open a PR.** Don't commit changes directly to `main`.
+  Branch first (`git switch -c <type>/<short-desc>`), push, and open a PR with
+  `gh pr create` so changes are reviewable before they land. Releases (the
+  `/release` skill) are the deliberate exception — they tag and publish from
+  `main`.
+- **Have the PR reviewed before merging** — `/code-review` on the diff, or another
+  agent/model. A few tokens on review goes a long way (this is what we ask outside
+  contributors to do too; see README "Contributing").
 - **Always add files by name**
 - Before committing, both must be clean:
   - `cargo test --all`
