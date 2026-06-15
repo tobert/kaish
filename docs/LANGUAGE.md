@@ -831,6 +831,7 @@ These are documented limitations of the current implementation:
 - **`ps` is Linux-only** — The process listing builtin reads from `/proc` and only works on Linux systems.
 - **`git` requires real filesystem** — The git builtin operates on the actual filesystem, not the VFS. It won't work with memory-backed or remote VFS mounts.
 - **`head`/`tail -c` counts bytes** — POSIX semantics, deliberately. A byte count can split a multi-byte UTF-8 sequence; use line-based forms (`-n`) for text.
+- **`sed` is a "muscle-memory" subset, not full sed** — kaish's `sed` deliberately implements the slice of GNU/BSD (AT&T) `sed` that humans and agents actually reach for by reflex — closest in spirit to **busybox** `sed`, which is a strong influence. It covers substitution `s/pat/rep/[gip]` (ERE, like `egrep` — not BRE) with capture groups (`\1`–`\9`, `&`), the `d`/`p`/`q` commands, and addresses (line number `N`, last line `$`, `/regex/`, ranges `N,M` and `/start/,/end/`). Multiple expressions chain with repeated `-e` (applied in order) or via the first positional. The advanced sed program (hold space, `y///`, labels/branching `b`/`t`, `a`/`i`/`c`, `w`/`r`, `;`-separated multi-command scripts, in-place `-i`) is **out of scope** — kaish errors loudly on an unsupported command rather than half-running it. Reach for a real `sed` (external command) when you need the full language.
 
 ### Execution
 

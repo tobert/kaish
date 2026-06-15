@@ -27,9 +27,10 @@ struct SedArgs {
     #[arg(short = 'n', long = "quiet")]
     quiet: bool,
 
-    /// Sed expression to execute (-e). Repeatable.
+    /// Sed expression to execute (-e). Repeatable: each `-e` adds an
+    /// expression, applied in order (clap `Append` → schema `repeatable`).
     #[arg(short = 'e', long = "expression")]
-    expression: Option<String>,
+    expression: Vec<String>,
 
     #[command(flatten)]
     global: GlobalFlags,
@@ -108,7 +109,11 @@ impl Tool for Sed {
 
         let quiet = parsed.quiet || args.has_flag("quiet") || args.has_flag("n");
 
-        // Collect expressions: from -e flags or first positional
+        // Collect expressions from the *raw* args, not `parsed.expression`: the
+        // kernel accumulates repeated `-e` into a `Value::Json(Array)`, which
+        // `ToolArgs::to_argv()` renders as one JSON token (it can't tell a
+        // repeatable scalar array from a single array value). `parsed` above is
+        // only consulted for `-n`/global flags; expressions live here.
         let expressions = collect_expressions(&args);
         if expressions.is_empty() {
             return ExecResult::failure(1, "sed: missing expression");
@@ -125,13 +130,10 @@ impl Tool for Sed {
             Err(e) => return ExecResult::failure(1, format!("sed: {}", e)),
         };
 
-        // Get input: file or stdin
-        // Expression is at position 0, file at position 1 (unless using -e)
-        let file_pos = if args.flags.contains("e") || args.flags.contains("expression") {
-            0
-        } else {
-            1
-        };
+        // Get input: file or stdin. When `-e` supplied the expression(s), every
+        // positional is a file (file at position 0); otherwise the first
+        // positional is the expression and the file is at position 1.
+        let file_pos = if expression_from_flag(&args) { 0 } else { 1 };
 
         let input = match args.get_string("path", file_pos) {
             Some(path) => {
@@ -158,19 +160,43 @@ impl Tool for Sed {
     }
 }
 
-/// Collect all expressions from args (supports multiple -e flags).
+/// True when the expression(s) came from `-e`/`--expression` flags rather than
+/// the first positional. The kernel binds repeated `-e` under the canonical
+/// `expression` key (single `-e` may also land under the `e` alias on the sync
+/// path), so either key's presence means "flag form".
+fn expression_from_flag(args: &ToolArgs) -> bool {
+    args.named.contains_key("expression") || args.named.contains_key("e")
+}
+
+/// Collect all expressions from args (supports multiple `-e` flags).
+///
+/// Repeated `-e` flags are accumulated by the kernel into a
+/// `Value::Json(Array)` under the canonical `expression` key (see
+/// `consume_flag_positionals`); a single value may arrive as a bare
+/// `Value::String`. When no `-e` is used, the first positional is the
+/// expression. Order is preserved so `-e A -e B` applies A then B.
 fn collect_expressions(args: &ToolArgs) -> Vec<String> {
     let mut exprs = Vec::new();
 
-    // Check for -e/--expression flag with values
-    if let Some(Value::String(e)) = args.named.get("e") {
-        exprs.push(e.clone());
-    }
-    if let Some(Value::String(e)) = args.named.get("expression") {
-        exprs.push(e.clone());
+    // Both paths canonicalize `-e`/`--expression` to the long name `expression`,
+    // so `e` is never actually populated today; it's defensive insurance against
+    // a future change that binds under the short alias. Because only one key is
+    // ever present, iterating both can't double-count or reorder.
+    for key in ["expression", "e"] {
+        match args.named.get(key) {
+            Some(Value::Json(serde_json::Value::Array(items))) => {
+                for item in items {
+                    if let serde_json::Value::String(s) = item {
+                        exprs.push(s.clone());
+                    }
+                }
+            }
+            Some(Value::String(e)) => exprs.push(e.clone()),
+            _ => {}
+        }
     }
 
-    // First positional is expression if no -e flag was used
+    // First positional is the expression when no -e flag was used.
     if exprs.is_empty() && let Some(Value::String(e)) = args.positional.first() {
         exprs.push(e.clone());
     }
@@ -887,6 +913,43 @@ mod tests {
         let e2 = parse_expression("s/1/Y/").unwrap();
         let output = execute_sed(input, &[e1, e2], false);
         assert_eq!(output, "Xbc Y23\n");
+    }
+
+    #[test]
+    fn collect_expressions_reads_json_array_from_repeated_e() {
+        // The kernel accumulates repeated `-e` into a Json array under the
+        // canonical `expression` key. collect_expressions must read every
+        // element, in order — the heart of the repeated-`-e` fix.
+        let mut args = ToolArgs::new();
+        args.named.insert(
+            "expression".to_string(),
+            Value::Json(serde_json::json!(["s/a/b/", "s/c/d/"])),
+        );
+        assert_eq!(
+            collect_expressions(&args),
+            vec!["s/a/b/".to_string(), "s/c/d/".to_string()]
+        );
+        assert!(expression_from_flag(&args));
+    }
+
+    #[test]
+    fn collect_expressions_reads_single_string_e() {
+        // A single `-e` may arrive as a bare String (e.g. the sync arg path).
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("expression".to_string(), Value::String("s/a/b/".into()));
+        assert_eq!(collect_expressions(&args), vec!["s/a/b/".to_string()]);
+        assert!(expression_from_flag(&args));
+    }
+
+    #[test]
+    fn collect_expressions_falls_back_to_positional() {
+        // No `-e`: the first positional is the expression.
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("s/a/b/".into()));
+        args.positional.push(Value::String("file.txt".into()));
+        assert_eq!(collect_expressions(&args), vec!["s/a/b/".to_string()]);
+        assert!(!expression_from_flag(&args));
     }
 
     #[test]

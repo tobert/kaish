@@ -24,15 +24,6 @@ subprocess capture, arithmetic token leak) **all validate as fixed** on
 
 ## P1 — High-leverage features and diagnostics
 
-### `sed -e EXPR -e EXPR` silently keeps only the last expression
-(real bug, pre-existing — `SedArgs::expression` is `Option<String>` and
-`collect_expressions` does single-key `args.named` lookups, so the kernel's
-`consumes<=1` HashMap overwrite drops earlier `-e`s). The `help` example
-`sed -e 's/a/b/' -e 's/c/d/' file.txt` advertises a feature that doesn't fully
-work — a "never silently corrupt" violation. Fix: `expression: Vec<String>`
-with `ArgAction::Append`, plus kernel accumulation of repeated 1-value flags
-into a `Value::Json(Array)`. Same class likely affects other repeatable flags.
-
 ### OverlayFs — ALL HUNKS LANDED 2026-06-10; residuals only
 Hunk 1 `69c42e3`+`2a62a72` (MemoryFs lift, overlay core), accounting vfs half
 `dddc85d` (resident_bytes, ByteBudget), hunk 2 `6fe2225` (inspection API),
@@ -420,6 +411,25 @@ those test sites to async. Deferred 2026-06-08 while landing per-subcommand tool
 schemas — `select_leaf` lives only in the async builder, so the twin never sees a
 subcommand tool and routing isn't at risk; this is purely a "fewer paths to
 reason about" cleanup. Doing it would also subsume the guard-parity item above.
+**Also subsumes the repeatable/consumes>1 gap** (2026-06-15): the sync builder
+honors neither `consumes > 1` nor the new `repeatable` flag — it overwrites on a
+repeated occurrence where the async builder accumulates into a `Json(Array)`.
+Safe today because the only production sync caller (scatter/gather option parsing)
+exposes scalar flags only; would silently drop values the moment a repeatable or
+multi-consume flag routed through it. Noted at the insert site in `pipeline.rs`.
+
+### `to_argv()` flattens a repeatable scalar array to one JSON token
+`ParamSchema.repeatable` (added 2026-06-15 for `sed -e A -e B`) stores repeated
+single-value flags as `named[key] = Json(Array([scalar, ...]))`.
+`ToolArgs::to_argv()` / `render_named_value` only splits the *array-of-arrays*
+shape (`consumes > 1`); a flat scalar array falls through to one JSON-text token
+(`--expression=["s/a/b/","s/c/d/"]`). `sed` is unaffected because it reads the raw
+`ToolArgs` (not the clap-parsed `Vec`), and clap accepts the blob without error —
+but a *future* repeatable-flag builtin that trusts its clap-parsed struct after a
+`to_argv()` round-trip would see one mangled value instead of N. The fix needs
+schema context in `to_argv` (it currently has none) to know a flat array is
+repeatable vs. a single genuine `Json(Array)` value — the two are indistinguishable
+at that layer. Revisit when a second repeatable flag lands. (P3)
 
 ### Undeclared space-flag guard covers long flags only (`-t val` still divorces)
 The 2026-06-08 fix errors on undeclared `--type value` but not single-char

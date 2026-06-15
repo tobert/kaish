@@ -2826,7 +2826,13 @@ impl Kernel {
     /// Pull `consumes` positional args after a non-bool flag and stash them
     /// on `tool_args.named` under the canonical param name.
     ///
-    /// - `consumes == 1` keeps the historical contract: a single scalar value.
+    /// - `consumes == 1` (non-repeatable) keeps the historical contract: a
+    ///   single scalar value (last write wins on the rare duplicate).
+    /// - `consumes == 1` + `repeatable` accumulates each occurrence as a scalar
+    ///   inside `named[canonical] = Value::Json(Array(...))`, preserving
+    ///   invocation order. This is the shape sed's `-e EXPR -e EXPR` lands in —
+    ///   a repeated single-value flag must keep every value, not silently drop
+    ///   all but the last (a "no silent corruption" violation).
     /// - `consumes > 1` accumulates each occurrence as an inner
     ///   `serde_json::Value::Array` inside `named[canonical] =
     ///   Value::Json(Array(...))`, preserving invocation order. This is the
@@ -2842,6 +2848,7 @@ impl Kernel {
         flag_name: &str,
         canonical: &str,
         consumes: usize,
+        repeatable: bool,
         positional_indices: &[usize],
         consumed: &mut std::collections::HashSet<usize>,
         current_idx: usize,
@@ -2882,7 +2889,25 @@ impl Kernel {
 
         if consumes <= 1 {
             if let Some(v) = collected.pop() {
-                tool_args.named.insert(canonical.to_string(), v);
+                if repeatable {
+                    // Repeated single-value flag (sed `-e`): keep every
+                    // occurrence under named[canonical] as a flat Json array of
+                    // scalars, in invocation order. Never overwrite.
+                    let occ = crate::interpreter::value_to_json(&v);
+                    let entry = tool_args
+                        .named
+                        .entry(canonical.to_string())
+                        .or_insert_with(|| Value::Json(serde_json::Value::Array(Vec::new())));
+                    if let Value::Json(serde_json::Value::Array(items)) = entry {
+                        items.push(occ);
+                    } else {
+                        anyhow::bail!(
+                            "--{flag_name}: named[{canonical}] already holds a non-array value"
+                        );
+                    }
+                } else {
+                    tool_args.named.insert(canonical.to_string(), v);
+                }
             }
             return Ok(());
         }
@@ -3013,19 +3038,21 @@ impl Kernel {
                     } else if name.len() == 1 {
                         let flag_name = name.as_str();
                         let lookup = param_lookup.get(flag_name);
-                        let is_bool = lookup.map(|(_, typ, _)| is_bool_type(typ)).unwrap_or(true);
+                        let is_bool = lookup.map(|(_, typ, ..)| is_bool_type(typ)).unwrap_or(true);
 
                         if is_bool {
                             tool_args.flags.insert(flag_name.to_string());
                         } else {
                             // Non-bool: consume `consumes` positionals as value(s)
-                            let canonical = lookup.map(|(n, _, _)| *n).unwrap_or(flag_name);
-                            let consumes = lookup.map(|(_, _, c)| *c).unwrap_or(1);
+                            let canonical = lookup.map(|(n, ..)| *n).unwrap_or(flag_name);
+                            let consumes = lookup.map(|(_, _, c, _)| *c).unwrap_or(1);
+                            let repeatable = lookup.map(|(_, _, _, r)| *r).unwrap_or(false);
                             self.consume_flag_positionals(
                                 args,
                                 name,
                                 canonical,
                                 consumes,
+                                repeatable,
                                 &positional_indices,
                                 &mut consumed,
                                 i,
@@ -3033,7 +3060,7 @@ impl Kernel {
                             )
                             .await?;
                         }
-                    } else if let Some(&(canonical, typ, consumes)) = param_lookup.get(name.as_str()) {
+                    } else if let Some(&(canonical, typ, consumes, repeatable)) = param_lookup.get(name.as_str()) {
                         // Multi-char short flag matches a schema param (POSIX style: -name value)
                         if is_bool_type(typ) {
                             tool_args.flags.insert(canonical.to_string());
@@ -3043,6 +3070,7 @@ impl Kernel {
                                 name,
                                 canonical,
                                 consumes,
+                                repeatable,
                                 &positional_indices,
                                 &mut consumed,
                                 i,
@@ -3050,9 +3078,9 @@ impl Kernel {
                             )
                             .await?;
                         }
-                    } else if let Some(&(canonical, _, _)) = param_lookup
+                    } else if let Some(&(canonical, _, _, _)) = param_lookup
                         .get(&name[..1])
-                        .filter(|(_, typ, _)| !is_bool_type(typ))
+                        .filter(|(_, typ, ..)| !is_bool_type(typ))
                     {
                         // Glued short-flag value: `cut -f1`, `head -c5`, `cut -f1-3`,
                         // `grep -A1`. The first char is a declared value-taking short
@@ -3106,18 +3134,20 @@ impl Kernel {
                                  in its schema."
                             );
                         }
-                        let is_bool = lookup.map(|(_, typ, _)| is_bool_type(typ)).unwrap_or(true);
+                        let is_bool = lookup.map(|(_, typ, ..)| is_bool_type(typ)).unwrap_or(true);
 
                         if is_bool {
                             tool_args.flags.insert(name.clone());
                         } else {
-                            let canonical = lookup.map(|(n, _, _)| *n).unwrap_or(name.as_str());
-                            let consumes = lookup.map(|(_, _, c)| *c).unwrap_or(1);
+                            let canonical = lookup.map(|(n, ..)| *n).unwrap_or(name.as_str());
+                            let consumes = lookup.map(|(_, _, c, _)| *c).unwrap_or(1);
+                            let repeatable = lookup.map(|(_, _, _, r)| *r).unwrap_or(false);
                             self.consume_flag_positionals(
                                 args,
                                 name,
                                 canonical,
                                 consumes,
+                                repeatable,
                                 &positional_indices,
                                 &mut consumed,
                                 i,

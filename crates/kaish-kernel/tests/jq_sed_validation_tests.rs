@@ -170,3 +170,75 @@ async fn sed_valid_on_real_file_passes() {
         result.text_out()
     );
 }
+
+// ============================================================================
+// sed — repeated `-e` expressions (docs/issues.md P1 regression guard)
+// ============================================================================
+
+/// `sed -e A -e B` must apply BOTH expressions, in order. The pre-fix kernel
+/// overwrote the first `-e` in the `named` HashMap (a "never silently corrupt"
+/// violation), so only the last expression ran. This is the canonical
+/// regression test for the repeatable-flag accumulation fix.
+#[tokio::test]
+async fn sed_two_e_flags_apply_both_in_order() {
+    let kernel = kernel_at(tempfile::tempdir().unwrap().path());
+
+    let result = kernel
+        .execute(r#"echo 'abc' | sed -e 's/a/X/' -e 's/c/Z/'"#)
+        .await
+        .expect("two -e expressions should run");
+    assert!(result.ok(), "sed should succeed: {:?}", result.err);
+    assert_eq!(
+        result.text_out().trim(),
+        "XbZ",
+        "both expressions must apply: {}",
+        result.text_out()
+    );
+}
+
+/// Ordering matters: a later `-e` sees the earlier one's output. `s/a/b/` then
+/// `s/b/c/` over `a` yields `c`, proving sequential application (not just
+/// "both ran independently").
+#[tokio::test]
+async fn sed_two_e_flags_pipe_through_in_sequence() {
+    let kernel = kernel_at(tempfile::tempdir().unwrap().path());
+
+    let result = kernel
+        .execute(r#"echo 'a' | sed -e 's/a/b/' -e 's/b/c/'"#)
+        .await
+        .expect("chained -e expressions should run");
+    assert!(result.ok(), "sed should succeed: {:?}", result.err);
+    assert_eq!(result.text_out().trim(), "c", "got: {}", result.text_out());
+}
+
+/// Three `-e` flags all survive (not just two) — guards against an off-by-one
+/// in the accumulation.
+#[tokio::test]
+async fn sed_three_e_flags_all_apply() {
+    let kernel = kernel_at(tempfile::tempdir().unwrap().path());
+
+    let result = kernel
+        .execute(r#"echo 'abc' | sed -e 's/a/1/' -e 's/b/2/' -e 's/c/3/'"#)
+        .await
+        .expect("three -e expressions should run");
+    assert!(result.ok(), "sed should succeed: {:?}", result.err);
+    assert_eq!(result.text_out().trim(), "123", "got: {}", result.text_out());
+}
+
+/// `-e EXPR file` (flag form) reads the file, not stdin. This exercises the
+/// `file_pos` fix: when `-e` supplies the expression, the first positional is
+/// the file. (Pre-fix, the flags-based `file_pos` check misrouted this to
+/// stdin.)
+#[tokio::test]
+async fn sed_e_flag_then_file_reads_the_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("in.txt"), "one two\n").unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    let result = kernel
+        .execute("sed -e 's/one/1/' -e 's/two/2/' in.txt")
+        .await
+        .expect("sed -e ... file should run");
+    assert!(result.ok(), "sed should succeed: {:?}", result.err);
+    assert_eq!(result.text_out().trim(), "1 2", "got: {}", result.text_out());
+}

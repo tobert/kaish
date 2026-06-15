@@ -627,7 +627,7 @@ pub fn select_leaf<'a>(schema: &'a ToolSchema, args: &[Arg]) -> anyhow::Result<&
     // whose space-form value is a positional we must skip while routing.
     let root_lookup = schema_param_lookup(schema);
     let is_root_value_flag = |name: &str| -> bool {
-        root_lookup.get(name).is_some_and(|(_, typ, _)| !is_bool_type(typ))
+        root_lookup.get(name).is_some_and(|(_, typ, ..)| !is_bool_type(typ))
     };
 
     let mut node = schema;
@@ -705,13 +705,13 @@ fn classify_subcommand_positional(expr: &Expr) -> SubcommandWord<'_> {
     }
 }
 
-pub fn schema_param_lookup(schema: &ToolSchema) -> HashMap<String, (&str, &str, usize)> {
+pub fn schema_param_lookup(schema: &ToolSchema) -> HashMap<String, (&str, &str, usize, bool)> {
     let mut map = HashMap::new();
     for p in schema.params.iter().filter(|p| !p.positional) {
-        map.insert(p.name.clone(), (p.name.as_str(), p.param_type.as_str(), p.consumes));
+        map.insert(p.name.clone(), (p.name.as_str(), p.param_type.as_str(), p.consumes, p.repeatable));
         for alias in &p.aliases {
             let stripped = alias.trim_start_matches('-');
-            map.insert(stripped.to_string(), (p.name.as_str(), p.param_type.as_str(), p.consumes));
+            map.insert(stripped.to_string(), (p.name.as_str(), p.param_type.as_str(), p.consumes, p.repeatable));
         }
     }
     map
@@ -789,14 +789,14 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
                     let flag_name = name.as_str();
                     let lookup = param_lookup.get(flag_name);
                     let is_bool = lookup
-                        .map(|(_, typ, _)| is_bool_type(typ))
+                        .map(|(_, typ, ..)| is_bool_type(typ))
                         .unwrap_or(true);
 
                     if is_bool {
                         tool_args.flags.insert(flag_name.to_string());
                     } else {
                         // Non-bool: consume next positional as value, insert under canonical name
-                        let canonical = lookup.map(|(n, _, _)| *n).unwrap_or(flag_name);
+                        let canonical = lookup.map(|(n, ..)| *n).unwrap_or(flag_name);
                         let next_positional = positional_indices
                             .iter()
                             .find(|(idx, _)| *idx > i && !consumed_positionals.contains(idx));
@@ -812,7 +812,7 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
                             tool_args.flags.insert(flag_name.to_string());
                         }
                     }
-                } else if let Some(&(canonical, typ, _)) = param_lookup.get(name.as_str()) {
+                } else if let Some(&(canonical, typ, ..)) = param_lookup.get(name.as_str()) {
                     // Multi-char short flag matches a schema param (POSIX style: -name value)
                     if is_bool_type(typ) {
                         tool_args.flags.insert(canonical.to_string());
@@ -845,18 +845,21 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
                     // Look up type in schema (checks name and aliases)
                     let lookup = param_lookup.get(name.as_str());
                     let is_bool = lookup
-                        .map(|(_, typ, _)| is_bool_type(typ))
+                        .map(|(_, typ, ..)| is_bool_type(typ))
                         .unwrap_or(true); // Unknown params default to bool
 
                     if is_bool {
                         tool_args.flags.insert(name.clone());
                     } else {
                         // Non-bool: consume next positional as value, insert under canonical name
-                        // Note: the sync build_tool_args does NOT honor `consumes > 1`. The async
+                        // Note: the sync build_tool_args does NOT honor `consumes > 1` OR
+                        // `repeatable` (it overwrites on a repeated flag). The async
                         // build_args_async in kernel.rs is the only path that supports multi-consume
-                        // flags. Sync callers (scheduler pipelines for --json-marker plumbing) don't
-                        // yet need that; if they ever do, lift the logic via a shared helper.
-                        let canonical = lookup.map(|(n, _, _)| *n).unwrap_or(name.as_str());
+                        // and repeatable accumulation. Sync callers — scatter/gather option parsing
+                        // (scalar flags only) and the test-only BackendDispatcher — don't carry such
+                        // flags, so this is safe today; if they ever do, lift the logic via a shared
+                        // helper. Tracked in docs/issues.md.
+                        let canonical = lookup.map(|(n, ..)| *n).unwrap_or(name.as_str());
                         let next_positional = positional_indices
                             .iter()
                             .find(|(idx, _)| *idx > i && !consumed_positionals.contains(idx));
