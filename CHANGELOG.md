@@ -13,9 +13,15 @@ breaking entries are marked **BREAKING**.
 ### Added
 - **`diff` operand-count validation**: `diff` requires exactly two file operands — a wrong count among literal arguments is caught at pre-execution validation (error code `E011`) instead of only at runtime, and a glob/variable expansion to three or more files now errors loudly rather than silently dropping the extra operands.
 - **`jq`/`sed` pre-execution validation**: a malformed `jq` filter (`E007`) or `sed` expression (`E006`) is now reported at validation time — before any pipeline runs — instead of only failing mid-execution. Filters/expressions built from variables or command substitution (`<dynamic>`) are skipped, as is a `jq` filter using `--arg`/`--argjson` bindings.
+- **Glued short-flag values**: coreutils idioms like `cut -f1`, `head -c5`, `tail -c20`, `cut -f1-3`, and `grep -A1` now parse — the tail of a multi-char short-flag token binds as the flag's value when the leading char is a declared value-taking flag. A run of bare bool flags (`ls -la`) still splits per character. Generic at the arg binder, so every clap builtin benefits.
+- **Bare comma in argv**: a lone `,` is accepted as the literal `","` in argument position (`cut -d, -f2`, `cut -d , -f2`, `tr -d ,`), mirroring `.`/`..`/`~`. Comma-touching runs (`echo 1,2,3`) still hit the no-token-pasting guard.
 
 ### Fixed
 - **MCP suppresses no-op resource notifications**: `notifications/resources/list_changed` is now sent only when the VFS resource list actually changes between `execute` calls, instead of after every call.
+- **Explicit-dot glob patterns match dotfiles**: the file walker no longer skips every `.`-leading entry before applying the pattern, so `.*`, `.github/*`, and `**/.env` reach dotfiles (bash no-`dotglob` semantics) — a `.` is matched only by a pattern segment that explicitly begins with a literal `.`, while `*`/`**`/`?`/`[…]` skip dotfiles. Previously these patterns matched nothing and shell expansion hard-errored `no matches`.
+- **`grep`/`ls` report bad explicit operands**: a named operand that can't be read (`grep p real.txt typo.txt`, `ls real.txt gone.txt`) now writes `grep: typo.txt: …` / `ls: cannot access 'gone.txt': …` to stderr and exits nonzero (grep 2, ls 1), instead of silently dropping it. Recursive walks (`grep -r`) and glob expansions (`ls *.rs`) keep their benign skip-on-race tolerance.
+- **`spawn --command true` keeps its value**: a value-taking flag given a bool literal (`true`/`false`) no longer has that value moved into the flag set, which had left `--command` empty and triggered clap's "a value is required". Bool *flags* still flagify as before.
+- **Orphaned job files pruned on startup**: `JobManager` removes stale `kaish/jobs/` output files left by dead sessions (Linux liveness check via `/proc`), so background-job scratch files no longer accumulate. The scan runs once per process, off the job hot path.
 
 ## [0.8.3] - 2026-06-14
 
