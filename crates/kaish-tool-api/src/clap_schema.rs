@@ -194,12 +194,19 @@ fn arg_to_param(arg: &Arg) -> ParamSchema {
     // in `schema.params`, not by clap's internal index.
     let positional = arg.is_positional();
 
+    // A `Vec<_>` *value flag* (e.g. sed's `-e`) reflects as `ArgAction::Append`:
+    // each occurrence must be kept, not overwritten. Positional `Vec<_>` sinks
+    // (`echo words`, `unset names`) are also Append but never route through the
+    // kernel's flag-accumulation path, so exclude them to keep the bit precise.
+    let repeatable = matches!(action, ArgAction::Append) && !positional;
+
     ParamSchema::new(name, param_type.to_string())
         .with_required(required)
         .with_default(default)
         .with_description(description)
         .with_aliases(aliases)
         .consumes(consumes)
+        .with_repeatable(repeatable)
         .with_positional(positional)
 }
 
@@ -322,6 +329,42 @@ mod tests {
         let clean = params.iter().find(|p| p.name == "clean")
             .expect("name should be the long flag `clean`");
         assert_eq!(clean.aliases, vec!["c".to_string()]);
+    }
+
+    /// A `Vec<_>` *value flag* reflects as repeatable (clap `ArgAction::Append`),
+    /// so the kernel accumulates each occurrence instead of overwriting — the
+    /// sed `-e EXPR -e EXPR` fix. A scalar value flag is NOT repeatable, and a
+    /// positional `Vec<_>` sink (also Append) is excluded.
+    #[derive(Parser, Debug)]
+    #[command(name = "demo-rep")]
+    struct DemoRepeatableArgs {
+        /// Repeatable expression flag.
+        #[arg(short = 'e', long = "expression")]
+        expression: Vec<String>,
+
+        /// Scalar value flag.
+        #[arg(short = 's', long = "single")]
+        single: Option<String>,
+
+        /// Positional sink (Append, but positional).
+        paths: Vec<String>,
+    }
+
+    #[test]
+    fn vec_value_flag_is_repeatable() {
+        let cmd = DemoRepeatableArgs::command();
+        let params = params_from_clap(&cmd);
+
+        let expr = params.iter().find(|p| p.name == "expression").expect("expression param");
+        assert!(expr.repeatable, "Vec<String> value flag should be repeatable");
+        assert!(!expr.positional);
+
+        let single = params.iter().find(|p| p.name == "single").expect("single param");
+        assert!(!single.repeatable, "scalar value flag must not be repeatable");
+
+        let paths = params.iter().find(|p| p.name == "paths").expect("paths param");
+        assert!(!paths.repeatable, "positional Vec sink must not be marked repeatable");
+        assert!(paths.positional);
     }
 
     #[test]

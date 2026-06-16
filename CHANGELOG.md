@@ -10,6 +10,19 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`sed` ergonomics pass** (gaps chosen from a cross-model usability panel — see `docs/sed-design.md`): `;` now chains multiple commands in one expression (`sed 's/a/b/; s/c/d/'`); `s///N` / `s///Ng` act on the Nth match; `a TEXT`/`i TEXT`/`c TEXT` append/insert/change lines (all of `a\TEXT`, `a TEXT`, `aTEXT`); `y/abc/xyz/` transliterates; and `-E`/`-r` are accepted as no-ops (kaish sed is always ERE).
+
+### Changed
+- **`sed` rejects the BRE escapes that silently mis-behave under ERE**: kaish sed is *always* ERE, so BRE `\(…\)` capture groups, `\|` alternation, and `\{N,M\}` intervals used to match the wrong thing with no error. They now error with a hint to the ERE form (`(…)`, `a|b`, `a{2,5}`), and a pattern-side backreference (`\1` in the pattern) gets a sed-specific message instead of the raw engine error. `\+`/`\?` are left alone — they're valid ERE escapes for a literal `+`/`?`.
+
+### Fixed
+- **`sed -e EXPR -e EXPR` applies every expression**: repeated `-e` flags are now accumulated and applied in order instead of silently keeping only the last one (a "never silently corrupt" violation). `sed -e 's/a/b/' -e 's/c/d/'` chains both substitutions. The same fix corrects `sed -e EXPR file` reading the file (it previously misrouted to stdin). Repeatable value flags are now a first-class, opt-in schema property (`Vec<_>` value flags reflect as repeatable), so the kernel accumulates rather than overwrites — the mechanism generalizes to any future repeatable flag.
+- **`sed 's/x/Y/2'` no longer silently ignores the occurrence count**, and `sed 's/a/b/;…'` no longer silently drops everything after the first `;` — both previously produced wrong output with no error.
+- **`sed` `c` (change) on a range emits its text even when the range never closes**: `sed '2,/nomatch/c X'` (or a numeric end past EOF) previously deleted to end-of-input and emitted nothing — silent data loss. The replacement is now emitted once at EOF.
+- **`sed` single-line numeric ranges span exactly one line**: `sed '2,2d'` (or any `N,N`, and descending `N,M` with `M ≤ N`) no longer also affects the following line.
+- **`sed --expression=A --expression=B` applies both**: the `--flag=value` form now accumulates repeatable flags like the `-e` space form instead of silently keeping only the last (and mixing the two forms no longer clobbers or errors).
+
 ## [0.8.4] - 2026-06-14
 
 ### Added

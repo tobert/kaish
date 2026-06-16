@@ -24,15 +24,6 @@ subprocess capture, arithmetic token leak) **all validate as fixed** on
 
 ## P1 — High-leverage features and diagnostics
 
-### `sed -e EXPR -e EXPR` silently keeps only the last expression
-(real bug, pre-existing — `SedArgs::expression` is `Option<String>` and
-`collect_expressions` does single-key `args.named` lookups, so the kernel's
-`consumes<=1` HashMap overwrite drops earlier `-e`s). The `help` example
-`sed -e 's/a/b/' -e 's/c/d/' file.txt` advertises a feature that doesn't fully
-work — a "never silently corrupt" violation. Fix: `expression: Vec<String>`
-with `ArgAction::Append`, plus kernel accumulation of repeated 1-value flags
-into a `Value::Json(Array)`. Same class likely affects other repeatable flags.
-
 ### OverlayFs — ALL HUNKS LANDED 2026-06-10; residuals only
 Hunk 1 `69c42e3`+`2a62a72` (MemoryFs lift, overlay core), accounting vfs half
 `dddc85d` (resident_bytes, ByteBudget), hunk 2 `6fe2225` (inspection API),
@@ -190,6 +181,43 @@ Remaining open work:
 ---
 
 ## P2 — Focused refactors & real bugs
+
+### Repeatable flags: glued short-flag form still overwrites (`-es/a/b/`)
+DeepSeek review of the `sed-fixes` branch (2026-06-16) found that the `-e A -e B`
+space form and the `--expression=A --expression=B` `=` form now both accumulate
+correctly (fixed on the branch), but the *glued* short-flag value path in
+`kernel.rs` (the one that parses `cut -f1`, `head -c5`) still does an
+unconditional `named.insert` of a single `Value::String`. So `sed -es/a/b/`
+followed by `-e X` overwrites the accumulated array (or hard-errors with
+"already holds a non-array value"). Low severity — nobody glues `-e`'s value —
+but it's the same silent-drop class the branch otherwise closed. Fix: route the
+glued path through `push_repeatable_value` when the matched param is repeatable
+(the helper already exists). Lift it once and the three flag surfaces converge.
+
+### `sed` `detect_bre_idiom` false positives
+The BRE-rejection heuristic (`s/\(…\)/\1/` → loud ERE hint) fires on
+`pattern contains \( or \)` AND `replacement contains \<digit>`. Two false
+positives DeepSeek flagged: (a) a *literal* `\\1` in the replacement (escaped
+backslash + digit, not a backreference) trips the `\<digit>` check; (b) a pattern
+mixing a real ERE group `(a)` with a literal escaped paren `\(b\)` plus a
+legitimate `\1` backref is valid ERE but gets rejected. Both turn a valid command
+into a hard error. Tighten: only treat `\<digit>` as a backref when the preceding
+backslash isn't itself escaped, and consider requiring the absence of any
+unescaped `(` group before concluding "BRE intent." Low frequency, but a false
+error is worse than the silent-no-op it replaced for these exact inputs.
+
+### `sed -i` (in-place edit) — deferred pending a write-model design
+Both lite models in the 2026-06-15 sed usability panel (see `docs/sed-design.md`)
+reached for `sed -i 's/…/…/' file`, making it the strongest remaining ergonomic
+gap after the `;`/`s///N`/`a`-`i`-`c`/`y` pass landed. It's deferred because
+in-place editing is a file-mutating side effect that must route through kaish's
+write machinery — VFS resolution, overlay transactions, and the latch/trash
+confirmation rails — so that sandbox, `--overlay`, and confirmation modes all
+hold. That's a design (where does the write go under overlay? does `-i` need a
+latch nonce like `rm`? `-i.bak` backup suffix?), not a parser tweak. Today `sed`
+loud-errors on `-i` rather than pretending. Revisit when an embedder (kaibo/kj)
+actually needs agent-driven in-place edits; until then `s/…/…/ … > file` via a
+real external `sed`, or the overlay, covers it.
 
 ### Streaming file reads — wc/checksum/grep/cmp/cat landed 2026-06-14; residuals
 Scan-oriented builtins no longer read whole files into memory. Mechanism
@@ -420,6 +448,25 @@ those test sites to async. Deferred 2026-06-08 while landing per-subcommand tool
 schemas — `select_leaf` lives only in the async builder, so the twin never sees a
 subcommand tool and routing isn't at risk; this is purely a "fewer paths to
 reason about" cleanup. Doing it would also subsume the guard-parity item above.
+**Also subsumes the repeatable/consumes>1 gap** (2026-06-15): the sync builder
+honors neither `consumes > 1` nor the new `repeatable` flag — it overwrites on a
+repeated occurrence where the async builder accumulates into a `Json(Array)`.
+Safe today because the only production sync caller (scatter/gather option parsing)
+exposes scalar flags only; would silently drop values the moment a repeatable or
+multi-consume flag routed through it. Noted at the insert site in `pipeline.rs`.
+
+### `to_argv()` flattens a repeatable scalar array to one JSON token
+`ParamSchema.repeatable` (added 2026-06-15 for `sed -e A -e B`) stores repeated
+single-value flags as `named[key] = Json(Array([scalar, ...]))`.
+`ToolArgs::to_argv()` / `render_named_value` only splits the *array-of-arrays*
+shape (`consumes > 1`); a flat scalar array falls through to one JSON-text token
+(`--expression=["s/a/b/","s/c/d/"]`). `sed` is unaffected because it reads the raw
+`ToolArgs` (not the clap-parsed `Vec`), and clap accepts the blob without error —
+but a *future* repeatable-flag builtin that trusts its clap-parsed struct after a
+`to_argv()` round-trip would see one mangled value instead of N. The fix needs
+schema context in `to_argv` (it currently has none) to know a flat array is
+repeatable vs. a single genuine `Json(Array)` value — the two are indistinguishable
+at that layer. Revisit when a second repeatable flag lands. (P3)
 
 ### Undeclared space-flag guard covers long flags only (`-t val` still divorces)
 The 2026-06-08 fix errors on undeclared `--type value` but not single-char

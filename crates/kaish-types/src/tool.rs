@@ -33,6 +33,15 @@ pub struct ParamSchema {
     /// `Value::Json(Array(Array(...)))` listing every (N-tuple) occurrence.
     #[serde(default = "default_consumes")]
     pub consumes: usize,
+    /// True when this flag may appear more than once and each occurrence
+    /// should be kept (clap's `ArgAction::Append`, i.e. a `Vec<_>` value flag
+    /// like sed's `-e`). When set, the kernel accumulates every occurrence
+    /// under the same `named` key as a `Value::Json(Array(...))` instead of
+    /// letting the last write win — the "no silent drop" contract for repeated
+    /// flags. Orthogonal to `consumes`: `consumes` is values-per-occurrence,
+    /// `repeatable` is occurrences-per-invocation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub repeatable: bool,
     /// True for positional arguments (`cat foo.txt`), false for flags
     /// (`grep --ignore-case`). The validator matches positional params
     /// against `args.positional` by their order *among positionals only*,
@@ -55,6 +64,7 @@ impl ParamSchema {
             description: description.into(),
             aliases: Vec::new(),
             consumes: 1,
+            repeatable: false,
             positional: false,
         }
     }
@@ -69,6 +79,7 @@ impl ParamSchema {
             description: description.into(),
             aliases: Vec::new(),
             consumes: 1,
+            repeatable: false,
             positional: false,
         }
     }
@@ -88,6 +99,7 @@ impl ParamSchema {
             description: String::new(),
             aliases: Vec::new(),
             consumes: 1,
+            repeatable: false,
             positional: false,
         }
     }
@@ -140,6 +152,14 @@ impl ParamSchema {
     pub fn consumes(mut self, n: usize) -> Self {
         assert!(n >= 1, "ParamSchema::consumes requires n >= 1 (use a bool param for flags that take no value)");
         self.consumes = n;
+        self
+    }
+
+    /// Mark this flag as repeatable: each occurrence is accumulated rather than
+    /// overwritten (see [`repeatable`](Self::repeatable)). Set from a computed
+    /// boolean so clap reflection can pass `ArgAction::Append` directly.
+    pub fn with_repeatable(mut self, repeatable: bool) -> Self {
+        self.repeatable = repeatable;
         self
     }
 
