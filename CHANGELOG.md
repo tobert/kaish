@@ -11,6 +11,7 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`kaish -c '…'` (and `kaish script.kai`) now read piped stdin** when invoked non-interactively, so `printf 'data' | kaish -c 'sort'` feeds the top-level builtin instead of silently producing nothing. Stdin is consumed by the first command that reads it (shell draining semantics); a redirect (`< file`/heredoc) still takes precedence. Binary stdin is rejected loudly (`not valid UTF-8`) rather than corrupted — feed binary through files or the VFS. Mechanism: a new `ExecuteOptions::stdin` field (`with_stdin(...)`) that seeds the first command's stdin, available to all embedders.
 - **`sed` ergonomics pass** (gaps chosen from a cross-model usability panel — see `docs/sed-design.md`): `;` now chains multiple commands in one expression (`sed 's/a/b/; s/c/d/'`); `s///N` / `s///Ng` act on the Nth match; `a TEXT`/`i TEXT`/`c TEXT` append/insert/change lines (all of `a\TEXT`, `a TEXT`, `aTEXT`); `y/abc/xyz/` transliterates; and `-E`/`-r` are accepted as no-ops (kaish sed is always ERE).
 
 ### Changed

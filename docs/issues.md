@@ -567,6 +567,26 @@ of LocalSet workers + mpsc channel. Benchmark first to confirm the win.
 `subscriptions.rs:33` bounds the file-watch channel; high-churn
 environments drop events silently.
 
+### MCP `execute` has no `stdin` param (frontend stdin gap)
+`ExecuteOptions::stdin` + `with_stdin()` landed 2026-06-16 (the `kaish -c`
+piped-stdin fix), and `kaish-repl` wires its process stdin through it. The MCP
+server (`crates/kaish-mcp/src/server/execute.rs:264`) builds `ExecuteOptions`
+without it, and `ExecuteParams` has no `stdin` field — so an MCP client cannot
+feed a program's stdin (it must use a heredoc/here-string in the script, or
+files/VFS). Low-effort follow-up: add `stdin: Option<String>` to `ExecuteParams`
+(+ schema doc), then `if let Some(s) = params.stdin { opts = opts.with_stdin(s) }`.
+Deferred because kaibo/kaijutsu feed data via files/VFS, not process stdin, so
+nothing reaches for it today. Surfaced by the DeepSeek review of the stdin fix.
+
+### `PipelineRunner::run_single`'s `stdin` parameter is vestigial
+`crates/kaish-kernel/src/scheduler/pipeline.rs:362` — `run_single(cmd, ctx,
+stdin: Option<String>)` is always called with `stdin: None` from
+`run_sequential` (`pipeline.rs:304`); the real stdin travels through `ctx.stdin`
+set by the `execute_pipeline` snapshot. The override branch (line ~371, "Set
+stdin from pipeline overrides redirect stdin") is dead. Drop the parameter, or
+add a note that it's forward-looking. Pre-existing; surfaced by the DeepSeek
+review of the stdin fix.
+
 ### `ToolCtx::backend()` forces a full `KernelBackend` mock for out-of-tree tests
 `crates/kaish-tool-api/src/ctx.rs`. `backend()` returns a non-optional
 `&Arc<dyn KernelBackend>`, so a third-party tool author who wants to unit-test

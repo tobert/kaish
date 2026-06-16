@@ -1597,6 +1597,36 @@ impl Kernel {
             None
         };
 
+        // Per-call stdin: seed the persistent exec_ctx so the first top-level
+        // command that reads stdin consumes it (it's `take()`n at dispatch).
+        // Restore the prior value on Drop — normally `None`, so this also drops
+        // any residual seed an stdin-less program never consumed, keeping it
+        // from bleeding into the next call. Same RAII pattern as CwdGuard.
+        struct StdinGuard<'a> {
+            kernel: &'a Kernel,
+            saved: Option<String>,
+        }
+        impl Drop for StdinGuard<'_> {
+            fn drop(&mut self) {
+                let Ok(mut ec) = self.kernel.exec_ctx.try_write() else {
+                    tracing::error!(
+                        "stdin guard: exec_ctx lock unexpectedly busy; \
+                         skipping stdin restore — stale stdin may leak to next call"
+                    );
+                    return;
+                };
+                ec.stdin = self.saved.take();
+            }
+        }
+        let _stdin_guard: Option<StdinGuard<'_>> = if let Some(stdin) = opts.stdin {
+            let mut ec = self.exec_ctx.write().await;
+            let saved = ec.stdin.replace(stdin);
+            drop(ec);
+            Some(StdinGuard { kernel: self, saved })
+        } else {
+            None
+        };
+
         let _vars_guard: Option<VarsFrameGuard<'_>> = if !opts.vars.is_empty() {
             let mut scope = self.scope.write().await;
             scope.push_frame();
@@ -2370,8 +2400,12 @@ impl Kernel {
                 scope: scope.clone(),
                 cwd: ec.cwd.clone(),
                 prev_cwd: ec.prev_cwd.clone(),
-                stdin: None,
-                stdin_data: None,
+                // Seed the first stage's stdin from any frontend-supplied input
+                // (`ExecuteOptions::stdin`, e.g. `printf … | kaish -c sort`). The
+                // runner forwards `ctx.stdin` to stage 0 unless a redirect
+                // (`< file`/heredoc) already set it, so redirect precedence holds.
+                stdin: ec.stdin.clone(),
+                stdin_data: ec.stdin_data.clone(),
                 pipe_stdin: None,
                 pipe_stdout: None,
                 stderr: ec.stderr.clone(),
@@ -2401,6 +2435,15 @@ impl Kernel {
                 overlay_handle: self.overlay_handle.clone(),
             }
         }; // locks released
+
+        // Consume-once: drain the seeded stdin from the persistent exec_ctx now
+        // that this pipeline's ctx owns it, so a later statement in the same call
+        // (`cat ; cat`) does not re-receive it — matching shell stdin draining.
+        if ctx.stdin.is_some() || ctx.stdin_data.is_some() {
+            let mut ec = self.exec_ctx.write().await;
+            ec.stdin = None;
+            ec.stdin_data = None;
+        }
 
         let mut result = self.runner.run(&pipeline.commands, &mut ctx, self).await;
 

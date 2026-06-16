@@ -67,6 +67,15 @@ pub struct ExecuteOptions {
     /// span. Independent of `traceparent`: baggage with no trace context starts
     /// a fresh root that still carries the identifiers.
     pub baggage: BTreeMap<String, String>,
+    /// Standard input for this call, consumed by the first top-level command
+    /// that reads stdin (shell semantics — a later reader sees nothing).
+    ///
+    /// Lets a non-interactive frontend feed piped input, e.g.
+    /// `printf '…' | kaish -c 'sort'`. Without it a bare top-level builtin
+    /// reading stdin has no input source and silently produces nothing. It is
+    /// `String`-typed to match `ExecContext::set_stdin`; binary stdin is fed
+    /// through files/VFS, not this knob.
+    pub stdin: Option<String>,
 }
 
 impl ExecuteOptions {
@@ -125,6 +134,12 @@ impl ExecuteOptions {
     /// Add a single baggage identifier (extending; last write wins).
     pub fn with_baggage_entry(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.baggage.insert(key.into(), value.into());
+        self
+    }
+
+    /// Set the standard input fed to this call's first stdin-reading command.
+    pub fn with_stdin(mut self, stdin: impl Into<String>) -> Self {
+        self.stdin = Some(stdin.into());
         self
     }
 }

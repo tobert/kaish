@@ -29,6 +29,8 @@ kerr=$(mktemp)
 # Sentinel guard: bash $() strips trailing newlines, which would hide a
 # trailing-newline divergence (e.g. tr -cd dropping the final \n) as a false
 # MATCH. Append a sentinel, then strip exactly it, to capture bytes verbatim.
+# kaish `-c` reads piped stdin into the first top-level command (the REPL wires
+# process stdin → ExecuteOptions::stdin), so a plain pipe feeds the builtins.
 kout=$(printf '%s' "$stdin" | "$KAISH" -c "$kprog" 2>"$kerr"; printf X); krc=$?
 kout=${kout%X}
 

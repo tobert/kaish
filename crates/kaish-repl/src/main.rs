@@ -6,10 +6,34 @@
 //!   kaish script.kai           # Run a script
 
 use std::env;
+use std::io::{IsTerminal, Read};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+/// Read piped stdin for a non-interactive run so a top-level command (`sort`,
+/// `cut`, `wc`) can consume it — `printf '…' | kaish -c sort`.
+///
+/// Returns `None` when stdin is a TTY (interactive): we must not block reading
+/// from a keyboard the user isn't piping into. Binary stdin is rejected loudly
+/// rather than lossily decoded — kaish feeds binary through files/VFS, and
+/// silently corrupting it would violate the fail-loud contract.
+fn read_piped_stdin() -> Result<Option<String>> {
+    let mut handle = std::io::stdin();
+    if handle.is_terminal() {
+        return Ok(None);
+    }
+    let mut buf = Vec::new();
+    handle.read_to_end(&mut buf).context("reading stdin")?;
+    if buf.is_empty() {
+        return Ok(None);
+    }
+    match String::from_utf8(buf) {
+        Ok(s) => Ok(Some(s)),
+        Err(_) => bail!("stdin is not valid UTF-8; pipe binary data through a file or the VFS"),
+    }
+}
 
 fn main() -> ExitCode {
     // Initialize tracing (respects RUST_LOG env var)
@@ -133,7 +157,10 @@ fn run_script(path: &str, overlay: bool) -> Result<ExitCode> {
     rt.block_on(client.kernel().set_positional(path, vec![]));
     // Forward any upstream W3C trace context (TRACEPARENT/TRACESTATE/BAGGAGE)
     // so e.g. `otel-cli exec -- kaish script.kai` traces across the boundary.
-    let opts = kaish_repl::trace_options_from_env();
+    let mut opts = kaish_repl::trace_options_from_env();
+    if let Some(stdin) = read_piped_stdin()? {
+        opts = opts.with_stdin(stdin);
+    }
     let result = rt.block_on(client.execute_with_options_streaming(&source, opts, &mut |r| {
         let text = r.text_out();
         if !text.is_empty() {
@@ -169,7 +196,10 @@ fn run_command(cmd: &str, overlay: bool) -> Result<ExitCode> {
     let rt = tokio::runtime::Runtime::new()?;
     // Forward any upstream W3C trace context (TRACEPARENT/TRACESTATE/BAGGAGE)
     // so e.g. `otel-cli exec -- kaish -c '…'` traces across the boundary.
-    let opts = kaish_repl::trace_options_from_env();
+    let mut opts = kaish_repl::trace_options_from_env();
+    if let Some(stdin) = read_piped_stdin()? {
+        opts = opts.with_stdin(stdin);
+    }
     let result = rt.block_on(client.execute_with_options_streaming(cmd, opts, &mut |r| {
         let text = r.text_out();
         if !text.is_empty() {
