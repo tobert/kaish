@@ -150,9 +150,9 @@ commits; gates green each time. Resume via §Status across passes.
 ## Status (executor updates every pass)
 | Phase | State | Pass / notes |
 |-------|-------|--------------|
-| A pre-flight + harness | ☐ not started | |
-| B run all clusters | ☐ | |
-| C punch list | ☐ | |
+| A pre-flight + harness | ☑ done | Harness stdin-delivery was broken: `kaish -c` ignored process stdin → all cells empty/rc0. **Amy chose "fix the REPL"** not workaround. Fix shipped `c09ee26` (ExecuteOptions::stdin + REPL read_piped_stdin, DeepSeek-reviewed). Harness reverted to natural piping. Pilot: 13 MATCH + 8 real findings. |
+| B run all clusters | ☑ done | All 7 clusters run (rc-fixed harness `225e1c5`). Clean: grep/cmp/diff-id/printf/seq/sort-core/tr-core/tee. Findings catalogued in builtin-sweep-overhaul.md. |
+| C punch list | ☑ done | `docs/builtin-sweep-overhaul.md` written. Two Amy decisions: comma→message+docs (keep `,` reserved for brace-exp + arrays/hashes); trailing-newline→EMIT. |
 | D P1 | ☐ | |
 | D P2 | ☐ | |
 | D P3+P4 | ☐ | |
