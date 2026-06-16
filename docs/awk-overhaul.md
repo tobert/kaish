@@ -21,6 +21,18 @@ unanimous).
 - Tag fixes with the commit that closed them. `cargo test --all` +
   `cargo clippy --all --all-targets` clean before each commit.
 
+> **STATUS: COMPLETE (2026-06-16)** — all items below landed on branch
+> `feat/awk-overhaul`, each gawk-verified and DeepSeek-reviewed. Commits:
+> `ae0357b`+`5faae15` (-F:), `31d1c70` (split/sub/gsub), `6e0ba5b`
+> (match/length/int/sqrt/OFMT), `23759d6` (range patterns + loud boundaries),
+> `7d36647` (docs/schema). **One found-and-fixed bonus bug:** a regex pattern
+> starting a new rule after `}`/`;`/newline (`/a/{...} /b/{...}`) was mis-lexed
+> as division — fixed in `23759d6`. **Deferred minors (out of scope, noted):**
+> (1) `compare_values` treats `NaN` as equal (pre-existing; only reachable via
+> `sqrt(-1)`); (2) `"cmd" | getline` hits the awk lexer's lone-`|` error before
+> the getline hint; (3) `awk.md` topic-wiring waits for composable-help Phase 4
+> (rg.md/timeout.md are unwired too). Once a release ships, **delete this file.**
+
 Priorities: **P1** unanimous-80% breakage · **P2** fidelity bugs · **P3** coverage
 adds · **P4** teach/document boundaries.
 
@@ -37,7 +49,7 @@ loud with a hint and be documented in the help fragment. The pilot panel
 
 All three panel models reached for these unprompted; all three are broken.
 
-### [ ] 1. `-F:` rejected by the kaish lexer (NOT awk.rs)
+### [x] 1. `-F:` rejected by the kaish lexer (NOT awk.rs)
 - **Symptom:** `awk -F: '{print $1}' /etc/passwd` → kaish shell parse error
   `found ':' expected …`. The single most common awk invocation.
 - **Blast radius:** fails for `-F:`, `-F;`, `-F'\t'`, `-F|`; *works* for `-F,`,
@@ -56,7 +68,7 @@ All three panel models reached for these unprompted; all three are broken.
 - **Test:** differential `awk -F: '{print $1}'` over a passwd fixture == gawk; plus
   `-F;`, `-F'\t'`. Lexer unit test that `-F:` is one token.
 
-### [ ] 2. `split()` never populates the array
+### [x] 2. `split()` never populates the array
 - **Symptom:** `{n=split($0,a," "); print n, a[1], a[2]}` → kaish `3  ` (count right,
   array empty); gawk `3 alice 25`.
 - **Contributing factor:** `awk.rs` `call_function` `"split"` arm computes the parts
@@ -68,7 +80,7 @@ All three panel models reached for these unprompted; all three are broken.
 - **Test:** differential `split($0,a,","); print a[2]` and the whitespace/regex
   variants == gawk.
 
-### [ ] 3. `sub()` / `gsub()` never substitute
+### [x] 3. `sub()` / `gsub()` never substitute
 - **Symptom:** `{n=gsub(/o/,"0"); print n,$0}` → kaish `0 foo BAR baz` (no-op);
   gawk `2 f00 BAR baz`. `sub` likewise.
 - **Contributing factor:** `awk.rs:~2194` `"sub" | "gsub"` arm returns `0` with a
@@ -85,7 +97,7 @@ All three panel models reached for these unprompted; all three are broken.
 
 ## P2 — Fidelity bugs worth fixing
 
-### [ ] 4. `match()` doesn't set `RSTART` / `RLENGTH`
+### [x] 4. `match()` doesn't set `RSTART` / `RLENGTH`
 - **Symptom:** `if(match("foobar",/bar/)) print RSTART, RLENGTH` → kaish empty;
   gawk `4 3`.
 - **Why in-scope:** `match()` is *only* worth calling for the position — a plain
@@ -95,7 +107,7 @@ All three panel models reached for these unprompted; all three are broken.
   (match length, -1 on no match) in `self.vars`.
 - **Test:** differential match + RSTART/RLENGTH, incl. no-match (`0`, `-1`).
 
-### [ ] 5. `print $1 > "file"` silently parsed as comparison
+### [x] 5. `print $1 > "file"` silently parsed as comparison
 - **Symptom:** `{print $1 > "/dev/stderr"}` → kaish prints `1` per line (evaluates
   `$1 > "/dev/stderr"` as a boolean); gawk redirects.
 - **Decision:** output redirection is **unsupported forever** (see bottom). But
@@ -110,20 +122,20 @@ All three panel models reached for these unprompted; all three are broken.
 
 ## P3 — Coverage adds (cheap, idiomatic, panel/POSIX-justified)
 
-### [ ] 6. Range patterns `/a/,/b/`
+### [x] 6. Range patterns `/a/,/b/`
 - **Symptom:** `awk '/bob/,/carol/'` → `unexpected token: Comma`. POSIX core,
   parallels sed's address ranges (already supported).
 - **Fix:** parse `pattern , pattern` as a range pattern with per-rule active-state;
   fires inclusively from the line matching the first to the line matching the second.
 - **Test:** differential range over a fixture == gawk, incl. re-trigger.
 
-### [ ] 7. Bare `length` (no parens)
+### [x] 7. Bare `length` (no parens)
 - **Symptom:** `{print length}` → kaish empty (parsed as a variable); gawk =
   `length($0)`.
 - **Fix:** treat bare `length` as `length($0)`.
 - **Test:** differential `{print length}` == gawk.
 
-### [ ] 8. Numeric builtins `int` and `sqrt` (only)
+### [x] 8. Numeric builtins `int` and `sqrt` (only)
 - **Symptom:** `int(3.9)` → `not implemented (use dedicated tool)` (and the message
   is wrong — there is no dedicated tool). `int`/`sqrt` do show up in data work.
 - **Fix:** implement `int` (truncate toward zero) and `sqrt`. The rest of the math
@@ -136,7 +148,7 @@ All three panel models reached for these unprompted; all three are broken.
 
 ## P4 — Teach: loud boundaries + the docs
 
-### [ ] 9. Unsupported-forever constructs → loud, hinted errors
+### [x] 9. Unsupported-forever constructs → loud, hinted errors
 Every item in the **Unsupported forever** section below must fail with a clear
 awk-level error that names the construct and the kaish alternative — never a silent
 no-op, a mis-parse, or a misleading message. Audit each:
@@ -155,7 +167,7 @@ no-op, a mis-parse, or a misleading message. Audit each:
 - `ENVIRON`/`ARGV`/`ARGC`: currently a silently-empty array — document the hermetic
   reason; if a loud signal is feasible on access, prefer it.
 
-### [ ] 10. Write the awk help content (the biggest teaching lever)
+### [x] 10. Write the awk help content (the biggest teaching lever)
 awk has **zero** dedicated `kaish-help` content and one line in `docs/LANGUAGE.md`.
 Add an awk fragment to `crates/kaish-help/content/en/` (and the fragment registry if
 applicable) and an `docs/LANGUAGE.md` section covering:
