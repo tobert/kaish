@@ -626,22 +626,29 @@ fn lexer_flag_sequences(#[case] input: &str, #[case] expected: &[&str]) {
 // Flag-metachar merging (awk -F: idiom)
 // =============================================================================
 //
-// A metachar (`:`, `;`, `|`) glued directly onto a short flag with no space
-// must lex as a single ShortFlag token so the arg-binding layer can treat the
-// metachar as the flag's value rather than as a shell operator.
-// Guarded by span-adjacency: a *space*-separated flag and metachar must stay
-// as separate tokens so `;` as a statement terminator and `|` as a pipe are
-// never misinterpreted.
+// Only `:` (Colon) fuses onto a short flag when span-adjacent (no whitespace).
+// `;` (Semi) and `|` (Pipe) are shell operators and must NEVER fuse — even when
+// typed immediately after a flag with no space — because they are statement
+// terminators and pipe operators respectively.  bash also requires quoting for
+// those forms: `awk -F';'`, not `awk -F;`.
+// Guarded by span-adjacency: a *space*-separated flag and colon must stay
+// as separate tokens.
 
 #[rstest]
-// Colon glued onto short flag: `awk -F:` idiom
+// Colon glued onto short flag: `awk -F:` idiom — should fuse
 #[case::shortflag_colon("-F:", &["SHORTFLAG(F:)"])]
-// Semicolon glued onto short flag: `awk -F;` idiom
-#[case::shortflag_semi("-F;", &["SHORTFLAG(F;)"])]
-// Pipe glued onto short flag: `awk -F|` idiom
-#[case::shortflag_pipe("-F|", &["SHORTFLAG(F|)"])]
+// Double-colon run: `-F::` fuses completely into one token
+#[case::shortflag_double_colon("-F::", &["SHORTFLAG(F::)"])]
+// Semicolon glued onto short flag: must NOT fuse — `;` is a shell operator
+#[case::shortflag_semi("-F;", &["SHORTFLAG(F)", "SEMI"])]
+// Pipe glued onto short flag: must NOT fuse — `|` is a shell operator
+#[case::shortflag_pipe("-F|", &["SHORTFLAG(F)", "PIPE"])]
 // Colon in full command context: awk -F: is one token; the program is another
 #[case::awk_colon_full(r"awk -F: '{print $1}'", &["IDENT(awk)", "SHORTFLAG(F:)", "SINGLESTRING({print $1})"])]
+// Regression: `ls -l|cat` — the Pipe must survive as a real pipeline operator
+#[case::ls_pipe_cat("ls -l|cat", &["IDENT(ls)", "SHORTFLAG(l)", "PIPE", "IDENT(cat)"])]
+// Regression: `cmd -x;cmd2` — the Semi must survive as a real statement separator
+#[case::cmd_semi_cmd2("cmd -x;cmd2", &["IDENT(cmd)", "SHORTFLAG(x)", "SEMI", "IDENT(cmd2)"])]
 // Space-separated: flag and operator MUST stay separate (no merge)
 #[case::shortflag_space_colon("-F :", &["SHORTFLAG(F)", "COLON"])]
 #[case::shortflag_space_semi("-F ;", &["SHORTFLAG(F)", "SEMI"])]

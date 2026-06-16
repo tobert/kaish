@@ -1768,12 +1768,21 @@ fn glob_mergeable_text(token: &Token) -> Option<String> {
 /// This pass fuses them so `ShortFlag("F:")` reaches the arg-binding layer, which
 /// already handles the glued-value form (the same mechanism used for `cut -f1`).
 ///
-/// Metachars handled: `:` (Colon), `;` (Semi), `|` (Pipe).
-/// Tab (`\t`) is already consumed as whitespace by logos and cannot appear here.
+/// Metachars handled: `:` (Colon) only.
+///
+/// `;` (Semi) and `|` (Pipe) are shell operators and must NOT be fused even when
+/// span-adjacent — `cmd -p; cmd2` and `ls -l|cat` must produce real Semi/Pipe
+/// tokens so the shell grammar can treat them as statement separators and pipes.
+/// In bash, `-F;` and `-F|` require quoting (`-F';'`), so kaish matches that
+/// contract.
 ///
 /// **Safety**: the fuse is guarded by span adjacency (`last.span.end == token.span.start`),
 /// which is only true when there is no whitespace between the flag and the metachar.
 /// A space-separated `cmd -F :` leaves a gap and never reaches this merge.
+///
+/// **Colon-run fusion**: consecutive span-adjacent colons after the flag are all
+/// absorbed in one pass, so `-F::` becomes `ShortFlag("F::")` rather than
+/// `ShortFlag("F:") + Colon`.
 ///
 /// Only `ShortFlag` is handled here. `LongFlag` with a bare `=:` form (e.g.
 /// `--field-separator=:`) is handled by the parser's `long_flag_with_value` rule
@@ -1790,27 +1799,31 @@ fn merge_flag_metachar_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Toke
     while i < tokens.len() {
         let token = &tokens[i];
 
-        // Only short flags can be followed by a glued metachar.
+        // Only short flags can be followed by a glued colon.
         if let Token::ShortFlag(flag_name) = &token.token {
-            if let Some(next) = tokens.get(i + 1) {
-                // Span adjacency: the flag ends exactly where the next token starts.
-                let adjacent = token.span.end == next.span.start;
-                if adjacent {
-                    let metachar = match &next.token {
-                        Token::Colon => Some(":"),
-                        Token::Semi => Some(";"),
-                        Token::Pipe => Some("|"),
-                        _ => None,
-                    };
-                    if let Some(ch) = metachar {
-                        // Fuse: ShortFlag("F") + Colon → ShortFlag("F:")
-                        let fused = format!("{}{}", flag_name, ch);
-                        let span = token.span.start..next.span.end;
-                        result.push(Spanned::new(Token::ShortFlag(fused), span));
-                        i += 2;
+            // Absorb a run of span-adjacent colons into the flag name.
+            let mut fused = flag_name.clone();
+            let mut end_span = token.span.end;
+            let mut j = i + 1;
+
+            while let Some(next) = tokens.get(j) {
+                if next.span.start == end_span {
+                    if let Token::Colon = &next.token {
+                        fused.push(':');
+                        end_span = next.span.end;
+                        j += 1;
                         continue;
                     }
                 }
+                break;
+            }
+
+            if j > i + 1 {
+                // At least one colon was absorbed.
+                let span = token.span.start..end_span;
+                result.push(Spanned::new(Token::ShortFlag(fused), span));
+                i = j;
+                continue;
             }
         }
 

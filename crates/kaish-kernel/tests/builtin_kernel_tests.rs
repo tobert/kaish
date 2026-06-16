@@ -505,12 +505,16 @@ async fn awk_field_separator_colon_stdin() {
 
 #[tokio::test]
 async fn awk_field_separator_semicolon() {
+    // `-F;` requires the `;` to be a separate word (quoting it, or passing it as `-F ';'`).
+    // A bare `awk -F;` fused the `;` as a shell statement terminator before this fix;
+    // now `-F` and `;` stay separate tokens, so the field separator value must be
+    // passed as a distinct quoted argument: `awk -F ';'`.
     let dir = tempdir().unwrap();
     touch(dir.path(), "semi.txt", "a;b;c\n");
     let kernel = kernel_at(dir.path());
-    let (out, code) = run(&kernel, "awk -F; '{print $2}' semi.txt").await;
-    assert_eq!(code, 0, "awk -F; should succeed: {out:?}");
-    assert_eq!(out, "b", "awk -F; second field: {out:?}");
+    let (out, code) = run(&kernel, "awk -F ';' '{print $2}' semi.txt").await;
+    assert_eq!(code, 0, "awk -F ';' should succeed: {out:?}");
+    assert_eq!(out, "b", "awk -F ';' second field: {out:?}");
 }
 
 #[tokio::test]
