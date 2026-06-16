@@ -52,14 +52,15 @@ impl Tool for Awk {
             "awk",
             "Pattern scanning and text processing language",
             [
-                ("Print second field", "awk '{print $2}' file.txt"),
-                ("Sum first column", "awk '{sum += $1} END {print sum}' data.txt"),
-                ("Filter by pattern", "awk '/error/ {print $0}' log.txt"),
-                ("Custom separator", "awk -F: '{print $1}' /etc/passwd"),
-                ("Conditional", "awk '$3 > 100 {print $1, $3}' data.txt"),
-                ("BEGIN/END", "awk 'BEGIN {print \"Header\"} {print} END {print \"Footer\"}'"),
-                ("Field count", "awk '{print NF, $0}' file.txt"),
-                ("Line numbers", "awk '{print NR, $0}' file.txt"),
+                ("Print a field", "awk '{print $2}' file.txt"),
+                ("Field separator", "awk -F: '{print $1}' /etc/passwd"),
+                ("Filter on a numeric field", "awk '$3 > 100 {print $1, $3}' data.txt"),
+                ("Match a regex", "awk '/error/ {print}' log.txt"),
+                ("Sum, grouped by a key", "awk '{sum[$1] += $2} END {for (k in sum) print k, sum[k]}' data.txt"),
+                ("Substitute text", "awk '{gsub(/foo/, \"bar\"); print}' notes.txt"),
+                ("Split into an array", "awk '{n = split($0, a, \",\"); print a[1], n}' file.csv"),
+                ("BEGIN/END", "awk 'BEGIN {print \"head\"} {print} END {print NR}'"),
+                ("Range of lines", "awk '/start/,/stop/' file.txt"),
             ],
         )
     }
