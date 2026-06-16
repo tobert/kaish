@@ -610,8 +610,7 @@ fn execute_sed(input: &str, expressions: &[SedExpression], quiet: bool) -> Strin
         let mut appends: Vec<&str> = Vec::new();
 
         for (expr_idx, expr) in expressions.iter().enumerate() {
-            let was_active = range_active[expr_idx];
-            let matches = address_matches(
+            let addr = address_matches(
                 &expr.address,
                 one_indexed,
                 is_last,
@@ -619,7 +618,7 @@ fn execute_sed(input: &str, expressions: &[SedExpression], quiet: bool) -> Strin
                 &mut range_active[expr_idx],
             );
 
-            if !matches {
+            if !addr.matched {
                 continue;
             }
 
@@ -666,13 +665,13 @@ fn execute_sed(input: &str, expressions: &[SedExpression], quiet: bool) -> Strin
                     output.push('\n');
                 }
                 Command::Change(text) => {
-                    // The line is suppressed. For a range, the text replaces the
-                    // *whole* range and is emitted once when the range closes;
-                    // for a single line/pattern, once per matching line.
+                    // The matched line(s) are suppressed; the text is emitted once
+                    // at the *end* of the selection. For a range that's the closing
+                    // line (or EOF if it never closes); for a single line/pattern
+                    // every match is its own one-line selection. `range_end`
+                    // (computed in `address_matches`) collapses all those cases.
                     deleted = true;
-                    let is_range = matches!(expr.address, Address::Range(..));
-                    let range_closed = is_range && was_active && !range_active[expr_idx];
-                    if !is_range || range_closed {
+                    if addr.range_end {
                         output.push_str(text);
                         output.push('\n');
                     }
@@ -714,22 +713,39 @@ fn transliterate(text: &str, from: &[char], to: &[char]) -> String {
         .collect()
 }
 
-/// Check if an address matches the current line.
+/// Outcome of testing one address against the current line.
+struct AddressMatch {
+    /// The address selects this line — the command should run.
+    matched: bool,
+    /// This is the *final* line the address selects: a single line/pattern match,
+    /// or the line a range closes on — including a range that opens and closes on
+    /// the same line, and one still open when it reaches EOF. The `c` (Change)
+    /// command emits its text once keyed off this flag, so a whole range collapses
+    /// to a single replacement.
+    range_end: bool,
+}
+
+/// Check whether an address matches the current line, and whether this is the
+/// last line the address selects (see [`AddressMatch::range_end`]).
 fn address_matches(
     addr: &Address,
     line_num: usize,
     is_last: bool,
     pattern_space: &str,
     range_active: &mut bool,
-) -> bool {
+) -> AddressMatch {
+    // Single-line forms: every match is its own one-line selection.
+    let single = |m: bool| AddressMatch {
+        matched: m,
+        range_end: m,
+    };
     match addr {
-        Address::All => true,
-        Address::Line(n) => line_num == *n,
-        Address::LastLine => is_last,
-        Address::Pattern(regex) => regex.is_match(pattern_space),
+        Address::All => single(true),
+        Address::Line(n) => single(line_num == *n),
+        Address::LastLine => single(is_last),
+        Address::Pattern(regex) => single(regex.is_match(pattern_space)),
         Address::Range(start, end) => {
             if *range_active {
-                // Check if end matches
                 let end_matches = match end.as_ref() {
                     Address::Line(n) => line_num >= *n,
                     Address::LastLine => is_last,
@@ -738,21 +754,48 @@ fn address_matches(
                 };
                 if end_matches {
                     *range_active = false;
+                    AddressMatch {
+                        matched: true,
+                        range_end: true,
+                    }
+                } else {
+                    // Still inside the range — but if this is the last line the
+                    // range ends here (an unclosed range terminates at EOF).
+                    AddressMatch {
+                        matched: true,
+                        range_end: is_last,
+                    }
                 }
-                true
             } else {
-                // Check if start matches
                 let start_matches = match start.as_ref() {
                     Address::Line(n) => line_num == *n,
                     Address::LastLine => is_last,
                     Address::Pattern(regex) => regex.is_match(pattern_space),
                     _ => false,
                 };
-                if start_matches {
-                    *range_active = true;
-                    true
+                if !start_matches {
+                    return AddressMatch {
+                        matched: false,
+                        range_end: false,
+                    };
+                }
+                // GNU sed: a numeric end address at or before the start line
+                // collapses the range to a single line (it closes immediately).
+                // A regex/last-line end is only tested on *subsequent* lines, so
+                // the range stays open past the start line.
+                let close_same_line = matches!(end.as_ref(), Address::Line(n) if *n <= line_num);
+                if close_same_line {
+                    AddressMatch {
+                        matched: true,
+                        range_end: true,
+                    }
                 } else {
-                    false
+                    *range_active = true;
+                    // A range that opens on the final line also ends there.
+                    AddressMatch {
+                        matched: true,
+                        range_end: is_last,
+                    }
                 }
             }
         }
@@ -1285,6 +1328,44 @@ mod tests {
     fn change_replaces_whole_range_once() {
         let expr = parse_expression("2,3c NEW").unwrap();
         assert_eq!(execute_sed("A\nB\nC\nD", &[expr], false), "A\nNEW\nD\n");
+    }
+
+    #[test]
+    fn change_range_unclosed_at_eof_still_emits_once() {
+        // #1: a range whose end never matches must emit the change text once at
+        // EOF, not silently delete to end-of-input with nothing in its place.
+        let prog = parse_program("2,/NOPE/c NEW").unwrap();
+        assert_eq!(execute_sed("a\nb\nc\nd", &prog, false), "a\nNEW\n");
+    }
+
+    #[test]
+    fn change_numeric_range_past_eof_emits_once() {
+        // #1: numeric end beyond the input length also closes at EOF.
+        let prog = parse_program("2,99c NEW").unwrap();
+        assert_eq!(execute_sed("a\nb\nc", &prog, false), "a\nNEW\n");
+    }
+
+    #[test]
+    fn single_line_numeric_range_matches_one_line() {
+        // #2: `N,N` must span exactly one line, not two (the old `>=`-on-next-line
+        // close included the following line as well).
+        let prog = parse_program("2,2d").unwrap();
+        assert_eq!(execute_sed("a\nb\nc", &prog, false), "a\nc\n");
+    }
+
+    #[test]
+    fn change_single_line_numeric_range_emits_once() {
+        // #2 + #3: a single-line range opens and closes on the same line, so the
+        // change text is emitted once for that one line.
+        let prog = parse_program("2,2c NEW").unwrap();
+        assert_eq!(execute_sed("a\nb\nc", &prog, false), "a\nNEW\nc\n");
+    }
+
+    #[test]
+    fn descending_numeric_range_matches_only_start_line() {
+        // GNU sed: a numeric end <= the start line collapses to the one start line.
+        let prog = parse_program("3,1d").unwrap();
+        assert_eq!(execute_sed("a\nb\nc\nd", &prog, false), "a\nb\nd\n");
     }
 
     #[test]

@@ -2823,6 +2823,8 @@ impl Kernel {
         }
     }
 
+    // (see `push_repeatable_value` below for the repeatable-flag accumulation.)
+
     /// Pull `consumes` positional args after a non-bool flag and stash them
     /// on `tool_args.named` under the canonical param name.
     ///
@@ -2890,21 +2892,7 @@ impl Kernel {
         if consumes <= 1 {
             if let Some(v) = collected.pop() {
                 if repeatable {
-                    // Repeated single-value flag (sed `-e`): keep every
-                    // occurrence under named[canonical] as a flat Json array of
-                    // scalars, in invocation order. Never overwrite.
-                    let occ = crate::interpreter::value_to_json(&v);
-                    let entry = tool_args
-                        .named
-                        .entry(canonical.to_string())
-                        .or_insert_with(|| Value::Json(serde_json::Value::Array(Vec::new())));
-                    if let Value::Json(serde_json::Value::Array(items)) = entry {
-                        items.push(occ);
-                    } else {
-                        anyhow::bail!(
-                            "--{flag_name}: named[{canonical}] already holds a non-array value"
-                        );
-                    }
+                    push_repeatable_value(tool_args, flag_name, canonical, v)?;
                 } else {
                     tool_args.named.insert(canonical.to_string(), v);
                 }
@@ -3018,7 +3006,16 @@ impl Kernel {
                 Arg::Named { key, value } => {
                     let val = self.eval_expr_async(value).await?;
                     let val = apply_tilde_expansion(val, home.as_deref());
-                    tool_args.named.insert(key.clone(), val);
+                    // A repeatable flag in `--flag=value` form must accumulate too,
+                    // not overwrite — otherwise `--expression=A --expression=B`
+                    // would silently keep only B, and mixing with the `-e` space
+                    // form would clobber the array. Route it through the same
+                    // accumulator the space form uses.
+                    if let Some(&(canonical, _, _, true)) = param_lookup.get(key.as_str()) {
+                        push_repeatable_value(&mut tool_args, key, canonical, val)?;
+                    } else {
+                        tool_args.named.insert(key.clone(), val);
+                    }
                 }
                 Arg::WordAssign { key, value } => {
                     let val = self.eval_expr_async(value).await?;
@@ -4889,6 +4886,33 @@ fn apply_tilde_expansion(value: Value, home: Option<&str>) -> Value {
     match value {
         Value::String(s) if s.starts_with('~') => Value::String(expand_tilde(&s, home)),
         _ => value,
+    }
+}
+
+/// Accumulate one occurrence of a repeatable value flag (e.g. sed `-e`) under
+/// `named[canonical]` as a flat `Value::Json(Array(...))`, in invocation order.
+/// Never overwrites — that's the whole point of `repeatable`: a repeated flag
+/// must keep every value, not silently drop all but the last. Used by every flag
+/// surface that can carry the same flag twice — the space form
+/// (`consume_flag_positionals`) and the `--flag=value` form (`Arg::Named`) — so
+/// `-e A -e B`, `--expression=A --expression=B`, and any mix all converge on one
+/// ordered array.
+fn push_repeatable_value(
+    tool_args: &mut ToolArgs,
+    flag_name: &str,
+    canonical: &str,
+    v: Value,
+) -> anyhow::Result<()> {
+    let occ = crate::interpreter::value_to_json(&v);
+    let entry = tool_args
+        .named
+        .entry(canonical.to_string())
+        .or_insert_with(|| Value::Json(serde_json::Value::Array(Vec::new())));
+    if let Value::Json(serde_json::Value::Array(items)) = entry {
+        items.push(occ);
+        Ok(())
+    } else {
+        anyhow::bail!("--{flag_name}: named[{canonical}] already holds a non-array value")
     }
 }
 

@@ -225,6 +225,48 @@ async fn sed_three_e_flags_all_apply() {
     assert_eq!(result.text_out().trim(), "123", "got: {}", result.text_out());
 }
 
+/// The `--expression=VALUE` form must accumulate exactly like the `-e VALUE`
+/// space form. The pre-fix `Arg::Named` path did an unconditional HashMap
+/// insert, so `--expression=A --expression=B` silently kept only B — the same
+/// "never silently corrupt" violation the `-e` fix closed, leaking through a
+/// sibling door.
+#[tokio::test]
+async fn sed_two_long_expression_eq_flags_apply_both() {
+    let kernel = kernel_at(tempfile::tempdir().unwrap().path());
+
+    let result = kernel
+        .execute(r#"echo 'abc' | sed --expression='s/a/X/' --expression='s/c/Z/'"#)
+        .await
+        .expect("two --expression= flags should run");
+    assert!(result.ok(), "sed should succeed: {:?}", result.err);
+    assert_eq!(
+        result.text_out().trim(),
+        "XbZ",
+        "both --expression= values must apply: {}",
+        result.text_out()
+    );
+}
+
+/// Mixing the `=` form and the space form must converge on one ordered array,
+/// not clobber each other (the `=` form used to overwrite the `-e` array, or
+/// hard-error when `-e` came second and tried to push into a String).
+#[tokio::test]
+async fn sed_mixed_e_and_long_expression_eq_apply_in_order() {
+    let kernel = kernel_at(tempfile::tempdir().unwrap().path());
+
+    let result = kernel
+        .execute(r#"echo 'abc' | sed -e 's/a/X/' --expression='s/b/Y/'"#)
+        .await
+        .expect("mixed -e and --expression= should run");
+    assert!(result.ok(), "sed should succeed: {:?}", result.err);
+    assert_eq!(
+        result.text_out().trim(),
+        "XYc",
+        "both forms must apply in order: {}",
+        result.text_out()
+    );
+}
+
 // ============================================================================
 // sed — ergonomics pass (LLM-panel-driven gap closures, 2026-06-15)
 // Scenarios are the exact forms Gemini-flash and Claude-haiku reached for.

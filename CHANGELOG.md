@@ -19,6 +19,9 @@ breaking entries are marked **BREAKING**.
 ### Fixed
 - **`sed -e EXPR -e EXPR` applies every expression**: repeated `-e` flags are now accumulated and applied in order instead of silently keeping only the last one (a "never silently corrupt" violation). `sed -e 's/a/b/' -e 's/c/d/'` chains both substitutions. The same fix corrects `sed -e EXPR file` reading the file (it previously misrouted to stdin). Repeatable value flags are now a first-class, opt-in schema property (`Vec<_>` value flags reflect as repeatable), so the kernel accumulates rather than overwrites — the mechanism generalizes to any future repeatable flag.
 - **`sed 's/x/Y/2'` no longer silently ignores the occurrence count**, and `sed 's/a/b/;…'` no longer silently drops everything after the first `;` — both previously produced wrong output with no error.
+- **`sed` `c` (change) on a range emits its text even when the range never closes**: `sed '2,/nomatch/c X'` (or a numeric end past EOF) previously deleted to end-of-input and emitted nothing — silent data loss. The replacement is now emitted once at EOF.
+- **`sed` single-line numeric ranges span exactly one line**: `sed '2,2d'` (or any `N,N`, and descending `N,M` with `M ≤ N`) no longer also affects the following line.
+- **`sed --expression=A --expression=B` applies both**: the `--flag=value` form now accumulates repeatable flags like the `-e` space form instead of silently keeping only the last (and mixing the two forms no longer clobbers or errors).
 
 ## [0.8.4] - 2026-06-14
 

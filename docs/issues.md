@@ -182,6 +182,30 @@ Remaining open work:
 
 ## P2 — Focused refactors & real bugs
 
+### Repeatable flags: glued short-flag form still overwrites (`-es/a/b/`)
+DeepSeek review of the `sed-fixes` branch (2026-06-16) found that the `-e A -e B`
+space form and the `--expression=A --expression=B` `=` form now both accumulate
+correctly (fixed on the branch), but the *glued* short-flag value path in
+`kernel.rs` (the one that parses `cut -f1`, `head -c5`) still does an
+unconditional `named.insert` of a single `Value::String`. So `sed -es/a/b/`
+followed by `-e X` overwrites the accumulated array (or hard-errors with
+"already holds a non-array value"). Low severity — nobody glues `-e`'s value —
+but it's the same silent-drop class the branch otherwise closed. Fix: route the
+glued path through `push_repeatable_value` when the matched param is repeatable
+(the helper already exists). Lift it once and the three flag surfaces converge.
+
+### `sed` `detect_bre_idiom` false positives
+The BRE-rejection heuristic (`s/\(…\)/\1/` → loud ERE hint) fires on
+`pattern contains \( or \)` AND `replacement contains \<digit>`. Two false
+positives DeepSeek flagged: (a) a *literal* `\\1` in the replacement (escaped
+backslash + digit, not a backreference) trips the `\<digit>` check; (b) a pattern
+mixing a real ERE group `(a)` with a literal escaped paren `\(b\)` plus a
+legitimate `\1` backref is valid ERE but gets rejected. Both turn a valid command
+into a hard error. Tighten: only treat `\<digit>` as a backref when the preceding
+backslash isn't itself escaped, and consider requiring the absence of any
+unescaped `(` group before concluding "BRE intent." Low frequency, but a false
+error is worse than the silent-no-op it replaced for these exact inputs.
+
 ### `sed -i` (in-place edit) — deferred pending a write-model design
 Both lite models in the 2026-06-15 sed usability panel (see `docs/sed-design.md`)
 reached for `sed -i 's/…/…/' file`, making it the strongest remaining ergonomic
