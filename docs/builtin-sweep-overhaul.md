@@ -43,7 +43,7 @@ idiom breakage · **P3** coverage gaps · **P4** doc / format-pin / message qual
 
 ## P1 — Silent corruption / contract break
 
-### [ ] 1. `cat` corrupts byte concatenation (inserts newlines)
+### [x] 1. `cat` corrupts byte concatenation (inserts newlines) — FIXED `995a744`
 - **Symptom (CT3 + direct):** `cat A B` where A ends in `\n` emits a **blank line**
   between files; `cat C D` where C is `x` (no trailing `\n`) emits `x\ny\n` instead
   of `xy\n`. kaish `cat` is line-oriented and appends a newline per file/line; it
@@ -56,6 +56,34 @@ idiom breakage · **P3** coverage gaps · **P4** doc / format-pin / message qual
 - **Fix sketch:** stream bytes through unchanged; never synthesize a separator.
 - **Test:** `cat A B` (both `\n`-terminated) == raw concat; `cat C D` (C no trailing
   `\n`) == `xy\n`; single-file `cat` unchanged.
+
+### [ ] 0. ⚠ REGRESSION from the stdin fix: `kaish -c` eager-read hangs on open stdin
+- **Symptom:** `kaish -c 'echo hi'` **hangs** when stdin is an open, non-TTY pipe
+  that never sends EOF (e.g. spawned as a subprocess inheriting an idle pipe — the
+  Bash-tool case). bash prints `hi` immediately and never reads stdin; kaish's
+  frontend `read_piped_stdin()` (`crates/kaish-repl/src/main.rs`) eagerly
+  `read_to_end`s stdin *before* execution, so it blocks on input no command will
+  ever consume. Confirmed: `sleep 10 | kaish -c 'echo hi'` → no output, rc 124
+  (timeout); `sleep 10 | bash -c 'echo hi'` → prints `hi`.
+- **Blast radius:** the standalone `kaish -c`/script CLI only. Embedders
+  (kaijutsu/kaibo) feed stdin via the kernel API, unaffected. The sweep harness
+  pipes closed stdin (EOF), unaffected — so Phase D can proceed. But it must be
+  fixed before PR #7 lands.
+- **Introduced by:** `c09ee26` (the eager-String stdin approach). DeepSeek flagged
+  eager read-to-EOF as the one hazard; it's worse than "acceptable" because it
+  breaks the most common invocation (`kaish -c 'cmd'` with inherited stdin).
+- **Fix sketch (lazy, pipe-backed stdin):** don't pre-read in the frontend. Feed
+  process stdin to the kernel as a **lazy reader** that seeds `exec_ctx.pipe_stdin`
+  (a `PipeReader`), with a detached thread copying process-stdin → pipe writer. A
+  command that reads stdin drains the pipe (blocks until data/EOF, correct); a
+  command that doesn't (`echo`) never touches it and returns immediately — matching
+  shell laziness. Obstacle: `ExecuteOptions::stdin` is `Option<String>` in
+  kaish-types, which can't hold a kernel `PipeReader`; needs a new seam (e.g. a
+  `Kernel`/`EmbeddedClient` method that takes a boxed `AsyncRead` and builds the
+  pipe internally, or a kaish-types reader trait object). Keep the existing
+  `ExecuteOptions::stdin` String path for embedders that already have a buffer.
+- **Test:** `sleep N | kaish -c 'echo hi'` prints `hi` fast (no hang); `printf data
+  | kaish -c 'sort'` still works; binary stdin survives losslessly through the pipe.
 
 ### [ ] 2. `tee` / `patch` bypass the latch + trash machinery  (Decision #3 — design)
 - **Symptom:** file mutations via `tee`/`patch` go through the VFS (overlay-safe)
