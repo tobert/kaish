@@ -26,13 +26,20 @@ KAISH="${KAISH:-./target/debug/kaish}"
 label=$1 stdin=$2 kprog=$3 expected=$4 exp_rc=${5:-0}
 
 kerr=$(mktemp)
+krcf=$(mktemp)
 # Sentinel guard: bash $() strips trailing newlines, which would hide a
 # trailing-newline divergence (e.g. tr -cd dropping the final \n) as a false
 # MATCH. Append a sentinel, then strip exactly it, to capture bytes verbatim.
 # kaish `-c` reads piped stdin into the first top-level command (the REPL wires
 # process stdin → ExecuteOptions::stdin), so a plain pipe feeds the builtins.
-kout=$(printf '%s' "$stdin" | "$KAISH" -c "$kprog" 2>"$kerr"; printf X); krc=$?
+#
+# Exit code: the sentinel `printf X` would clobber `$?`, so kaish's real rc is
+# captured INSIDE the subshell to a tempfile (`$?` there is kaish's, taken
+# before the sentinel). Capturing krc=$? outside would only see printf X (=0)
+# and silently defeat every LOUD / WRONG-RC / expected-rc classification.
+kout=$(printf '%s' "$stdin" | { "$KAISH" -c "$kprog" 2>"$kerr"; printf '%s' "$?" >"$krcf"; printf X; })
 kout=${kout%X}
+krc=$(cat "$krcf"); rm -f "$krcf"
 
 if [ "$kout" = "$expected" ] && [ "$krc" -eq "$exp_rc" ]; then
   verdict=MATCH

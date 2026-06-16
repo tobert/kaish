@@ -22,10 +22,10 @@ run 'CT4 echo|cat'     '' 'echo hi | cat'    $'hi\n'
 #   expect: non-zero exit + error message; FAIL if it hangs (timeout) or streams NUL.
 
 # tee — stdout passthrough + file content
-run 'TE1 tee stdout' 'hi\n' "tee $FX/out.txt" $'hi\n'
+run 'TE1 tee stdout' $'hi\n' "tee $FX/out.txt" $'hi\n'
 run 'TE1b tee wrote file' '' "cat $FX/out.txt" $'hi\n'
 printf 'x\n' > "$FX/ap.txt"
-run 'TE2 tee -a stdout' 'a\n' "tee -a $FX/ap.txt" $'a\n'
+run 'TE2 tee -a stdout' $'a\n' "tee -a $FX/ap.txt" $'a\n'
 run 'TE2b tee -a appended' '' "cat $FX/ap.txt" $'x\na\n'
 
 echo "---"
