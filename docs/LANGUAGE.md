@@ -836,7 +836,7 @@ These are documented limitations of the current implementation:
   - **Commands** `d` (delete), `p` (print), `q` (quit), `a TEXT`/`i TEXT`/`c TEXT` (append/insert/change line — the `a\TEXT`, `a TEXT`, and `aTEXT` forms all work), and `y/abc/xyz/` (transliterate).
   - **Addresses** line number `N`, last line `$`, `/regex/`, and ranges `N,M` / `/start/,/end/`.
   - **Chaining** multiple commands with `;` *or* repeated `-e` (applied in order); both forms compose into one program.
-  - **Regex is ERE** (extended, like `egrep`) — *always*. `-E`/`-r` are accepted no-ops; **BRE capture groups `\(…\)` are rejected with a hint** to use `(…)` rather than silently not matching.
+  - **Regex is ERE** (extended, like `egrep`) — *always*. `-E`/`-r` are accepted no-ops. The BRE escapes that mean something different under ERE are **rejected with a hint** instead of silently matching the wrong thing: capture groups `\(…\)` (use `(…)`), alternation `\|` (use `a|b`), and intervals `\{N,M\}` (use `a{2,5}`). A pattern-side backreference (`\1` in the pattern) is also rejected — the linear-time engine has none, in any dialect. (`\+`/`\?` are left alone: they're valid ERE escapes for literal `+`/`?`, so the BRE-vs-literal intent is ambiguous.)
   - **Out of scope** (errors loudly, never half-runs): hold space (`h`/`H`/`g`/`G`/`x`), labels/branching (`b`/`t`/`:`), `w`/`r` file I/O, in-place `-i`, and GNU address extensions (`1~2`, `0,/re/`, `/re/,+N`). Reach for a real `sed` (external command) when you need those.
 
 ### Execution

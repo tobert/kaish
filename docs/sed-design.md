@@ -68,8 +68,13 @@ strongest possible signal: the default-pull lands squarely on the silent paths.
   same ordered program `-e A -e B` produces. `;` inside `s///`, `y///`, or a
   `/regex/` stays literal; `a`/`i`/`c` swallow the rest as text (GNU one-liner).
 - **Regex-dialect honesty** — accept `-E`/`-r` as no-ops (kaish is *always* ERE),
-  and **loud-error on the BRE capture-group idiom** (`\(…\)` + a `\N` backref is
-  unambiguous BRE intent) with a hint to use `(…)`. Silent-wrong → loud-with-fix.
+  and **loud-error on the BRE escapes that silently mis-behave under ERE**: capture
+  groups `\(…\)` (+ a `\N` backref, unambiguous BRE intent), alternation `\|`, and
+  intervals `\{N,M\}` — each with a hint to the ERE form. A pattern-side
+  backreference is rejected with a sed-specific message (the linear-time engine has
+  none, in any dialect). `\+`/`\?` are left alone — they're valid ERE escapes for a
+  literal `+`/`?`, so BRE-vs-literal intent is ambiguous and flagging would have
+  false positives. Silent-wrong → loud-with-fix.
 - **`s///N` / `s///Ng`** — the Nth-match and Nth-onward forms, properly.
 - **`a`/`i`/`c` + `y///`** — append/insert/change lines and transliterate, the
   remaining high-frequency commands both models emitted.
@@ -94,7 +99,8 @@ regex library, and most languages — and it's what kaish's other regex tools
 (`grep`, `awk`) use, so the dialect is consistent across the shell. The panel
 shows models *will* type BRE `\(…\)` by reflex, so the fix isn't to switch
 dialects — it's to **catch that reflex and correct it out loud**, which is what
-the BRE-idiom diagnostic does.
+the BRE-idiom diagnostics do (capture groups, alternation `\|`, intervals
+`\{N,M\}`, and pattern-side backreferences).
 
 ---
 

@@ -351,6 +351,27 @@ async fn sed_bre_capture_groups_rejected_with_hint() {
     assert!(msg.contains("ERE"), "should hint ERE: {msg}");
 }
 
+/// BRE alternation `\|` and intervals `\{N\}` mean literal `|`/`{` under ERE —
+/// they used to silently match the wrong thing. Now they're rejected with an ERE
+/// hint, through the full kernel path.
+#[tokio::test]
+async fn sed_bre_alternation_and_interval_rejected_with_hint() {
+    let kernel = kernel_at(tempfile::tempdir().unwrap().path());
+    let err = kernel
+        .execute(r#"echo 'cat' | sed 's/cat\|dog/X/'"#)
+        .await
+        .expect_err("BRE alternation should be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("E006"), "should name the code: {msg}");
+    assert!(msg.contains("ERE"), "should hint ERE: {msg}");
+
+    let err = kernel
+        .execute(r#"echo 'aa' | sed 's/a\{2\}/X/'"#)
+        .await
+        .expect_err("BRE interval should be rejected");
+    assert!(err.to_string().contains("ERE"), "interval should hint ERE: {err}");
+}
+
 /// `-e EXPR file` (flag form) reads the file, not stdin. This exercises the
 /// `file_pos` fix: when `-e` supplies the expression, the first positional is
 /// the file. (Pre-fix, the flags-based `file_pos` check misrouted this to
