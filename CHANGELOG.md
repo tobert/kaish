@@ -16,6 +16,14 @@ breaking entries are marked **BREAKING**.
 ### Changed
 - **`sed` rejects the BRE escapes that silently mis-behave under ERE**: kaish sed is *always* ERE, so BRE `\(…\)` capture groups, `\|` alternation, and `\{N,M\}` intervals used to match the wrong thing with no error. They now error with a hint to the ERE form (`(…)`, `a|b`, `a{2,5}`), and a pattern-side backreference (`\1` in the pattern) gets a sed-specific message instead of the raw engine error. `\+`/`\?` are left alone — they're valid ERE escapes for a literal `+`/`?`.
 
+### Added
+- **`awk` `match()` sets `RSTART` and `RLENGTH`** (1-based start / match length, `0` and `-1` on no match), so the `substr($0, RSTART, RLENGTH)` extraction idiom works.
+- **`awk` numeric builtins `int()` and `sqrt()`** are implemented. The rest of the math set (`sin`/`cos`/`atan2`/`exp`/`log`/`rand`/`srand`) errors with an honest "not supported" message — kaish awk is a text-processing subset.
+
+### Changed
+- **`awk` bare `length`** (no parentheses) now means `length($0)`, matching awk; it previously read as an unset variable (empty).
+- **`awk` numeric output matches awk's `OFMT`**: integral values print in full (`100000000000000000`), non-integral values use `%.6g` (6 significant figures, e.g. `sqrt(2)` → `1.41421`). Previously fractions printed with 6 decimal places and large integers were truncated.
+
 ### Fixed
 - **`awk` `split()` now populates the array** (it previously returned the field count but left the array empty — silent data loss). Fills 1-indexed keys, clears the target first, honors the whitespace/single-char/regex separator rules, and returns 0 on an empty input string (matching gawk).
 - **`awk` `sub()`/`gsub()` now actually substitute** (they were silent no-ops returning 0). First-match (`sub`) / all-matches (`gsub`), `&` expands to the matched text and `\&` is a literal `&`, the result is written back to the target (`$0` by default, or a field/variable/array element), and the replacement count is returned. Writing a field rebuilds `$0` and raises `NF` when the field index extends the record. `match()`-style empty patterns don't loop.

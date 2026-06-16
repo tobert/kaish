@@ -1405,6 +1405,55 @@ fn parse_program(input: &str) -> Result<AwkProgram, String> {
 // Runtime / Evaluator
 // ============================================================================
 
+/// Format a number for `print` / string coercion, matching gawk's default OFMT (%.6g).
+///
+/// Rules (matching gawk 5.x):
+/// - Zero (including -0.0): always `"0"`.
+/// - Integral values (`fract() == 0.0`): emit all digits with no decimal point using
+///   `format!("{:.0}", n)`.  This handles large magnitudes like 1e20 correctly without
+///   casting to i64 (which would overflow or saturate).
+/// - Non-integral values: implement C `%.6g` — 6 significant figures, scientific notation
+///   when the rounded exponent is < -4 or >= 6, otherwise fixed, trailing zeros stripped.
+fn format_awk_number(n: f64) -> String {
+    if n == 0.0 {
+        return "0".to_string();
+    }
+    if n.fract() == 0.0 {
+        // Integral: print all significant digits (no cast to i64 — would overflow at 1e20).
+        return format!("{:.0}", n);
+    }
+    format_awk_ofmt(n)
+}
+
+/// Implement C `%.6g` for non-integral awk values (OFMT default).
+///
+/// The trick: format with `%.5e` first to get the *rounded* exponent (5 decimal digits +
+/// implicit 1 = 6 significant figures).  Then choose fixed vs. scientific based on that
+/// exponent, following the C standard rule: scientific when e < -4 or e >= 6.
+fn format_awk_ofmt(n: f64) -> String {
+    const P: i32 = 6; // significant figures
+    // %.5e gives 6 sig figs in scientific form; read the exponent from the result.
+    let sci = format!("{:.5e}", n);
+    // Rust's {:e} always includes 'e'; split at the last one.
+    let e_pos = sci.rfind('e').unwrap_or(sci.len());
+    let exp: i32 = sci.get(e_pos + 1..).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    if !(-4..P).contains(&exp) {
+        // Scientific notation: strip trailing zeros from the mantissa.
+        let mantissa = sci[..e_pos].trim_end_matches('0').trim_end_matches('.');
+        if exp >= 0 {
+            format!("{}e+{:02}", mantissa, exp)
+        } else {
+            format!("{}e-{:02}", mantissa, -exp)
+        }
+    } else {
+        // Fixed notation: (P-1-exp) decimal places, then strip trailing zeros.
+        let dec = ((P - 1 - exp).max(0)) as usize;
+        let raw = format!("{:.prec$}", n, prec = dec);
+        raw.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
 /// AWK value with string/number coercion.
 #[derive(Debug, Clone, Default)]
 enum AwkValue {
@@ -1418,14 +1467,7 @@ impl std::fmt::Display for AwkValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AwkValue::String(s) => f.write_str(s),
-            AwkValue::Number(n) => {
-                if n.fract() == 0.0 && n.abs() < 1e15 {
-                    write!(f, "{}", *n as i64)
-                } else {
-                    let s = format!("{:.6}", n);
-                    f.write_str(s.trim_end_matches('0').trim_end_matches('.'))
-                }
-            }
+            AwkValue::Number(n) => f.write_str(&format_awk_number(*n)),
             AwkValue::Uninitialized => Ok(()),
         }
     }
@@ -1901,7 +1943,14 @@ impl AwkRuntime {
                 let matched = regex.is_match(&self.get_field(0).to_string());
                 Ok(AwkValue::Number(if matched { 1.0 } else { 0.0 }))
             }
-            Expr::Var(name) => Ok(self.get_var(name)),
+            Expr::Var(name) => {
+                // Bare `length` (no parens) is `length($0)` in awk.
+                if name == "length" {
+                    let s = self.get_field(0).to_string();
+                    return Ok(AwkValue::Number(s.chars().count() as f64));
+                }
+                Ok(self.get_var(name))
+            }
             Expr::Field(n_expr) => {
                 let n = self.eval_expr(n_expr)?.to_number() as i64;
                 Ok(self.get_field(n))
@@ -2206,12 +2255,23 @@ impl AwkRuntime {
                     return Err("match requires 2 arguments".to_string());
                 }
                 let s = self.eval_expr(&args[0])?.to_string();
-                let pattern = self.eval_expr(&args[1])?.to_string();
+                // Regex literal or string — mirror the sub/gsub handling.
+                let pattern = match &args[1] {
+                    Expr::Regex(re) => re.clone(),
+                    other => self.eval_expr(other)?.to_string(),
+                };
                 let regex = Regex::new(&pattern).map_err(|e| format!("invalid regex: {}", e))?;
-                let pos = regex.find(&s).map(|m| {
-                    s[..m.start()].chars().count() + 1
-                }).unwrap_or(0);
-                Ok(AwkValue::Number(pos as f64))
+                if let Some(m) = regex.find(&s) {
+                    let rstart = s[..m.start()].chars().count() as i64 + 1;
+                    let rlength = m.as_str().chars().count() as i64;
+                    self.set_var("RSTART", AwkValue::Number(rstart as f64));
+                    self.set_var("RLENGTH", AwkValue::Number(rlength as f64));
+                    Ok(AwkValue::Number(rstart as f64))
+                } else {
+                    self.set_var("RSTART", AwkValue::Number(0.0));
+                    self.set_var("RLENGTH", AwkValue::Number(-1.0));
+                    Ok(AwkValue::Number(0.0))
+                }
             }
             "sub" | "gsub" => {
                 if args.len() < 2 {
@@ -2358,9 +2418,27 @@ impl AwkRuntime {
 
                 Ok(AwkValue::Number(replacement_count as f64))
             }
-            "sin" | "cos" | "atan2" | "exp" | "log" | "sqrt" | "int" | "rand" | "srand" => {
-                // Numeric functions not in the 80%
-                Err(format!("function '{}' not implemented (use dedicated tool)", name))
+            "int" => {
+                if args.is_empty() {
+                    return Err("int requires 1 argument".to_string());
+                }
+                let x = self.eval_expr(&args[0])?.to_number();
+                Ok(AwkValue::Number(x.trunc()))
+            }
+            "sqrt" => {
+                if args.is_empty() {
+                    return Err("sqrt requires 1 argument".to_string());
+                }
+                let x = self.eval_expr(&args[0])?.to_number();
+                Ok(AwkValue::Number(x.sqrt()))
+            }
+            "sin" | "cos" | "atan2" | "exp" | "log" | "rand" | "srand" => {
+                // Math functions outside the 80/20 text-processing subset — declared
+                // unsupported forever (see docs/awk-overhaul.md). rand/srand also
+                // conflict with the hermetic/deterministic stance.
+                Err(format!(
+                    "{name}() is not supported (kaish awk is a text-processing subset; only int and sqrt are provided)"
+                ))
             }
             _ => Err(format!("unknown function: {}", name)),
         }
@@ -3182,5 +3260,328 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         let mut rt = AwkRuntime::new();
         let result = rt.execute(&prog, "").unwrap();
         assert_eq!(result, "f\\xo\n");
+    }
+
+    // =========================================================================
+    // P2 #4 — match() sets RSTART and RLENGTH
+    // =========================================================================
+
+    /// match on a hit: RSTART = 1-based start, RLENGTH = char length of match.
+    /// gawk: `BEGIN{match("foobar",/bar/); print RSTART, RLENGTH}` → `4 3`
+    #[test]
+    fn test_match_sets_rstart_rlength_on_hit() {
+        let prog =
+            parse_program(r#"BEGIN{match("foobar",/bar/); print RSTART, RLENGTH}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "4 3\n");
+    }
+
+    /// match on no hit: RSTART = 0, RLENGTH = -1 (gawk standard).
+    /// gawk: `BEGIN{match("foobar",/xyz/); print RSTART, RLENGTH}` → `0 -1`
+    #[test]
+    fn test_match_sets_rstart_rlength_on_miss() {
+        let prog =
+            parse_program(r#"BEGIN{match("foobar",/xyz/); print RSTART, RLENGTH}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "0 -1\n");
+    }
+
+    /// match return value is the 1-based start position (or 0 on no match).
+    /// gawk: `BEGIN{pos=match("foobar",/bar/); print pos}` → `4`
+    #[test]
+    fn test_match_return_value_is_rstart() {
+        let prog = parse_program(r#"BEGIN{pos=match("foobar",/bar/); print pos}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "4\n");
+    }
+
+    /// substr($0, RSTART, RLENGTH) extraction idiom works after match().
+    /// gawk: `BEGIN{s="hello world"; match(s,/wor/); print substr(s,RSTART,RLENGTH)}` → `wor`
+    #[test]
+    fn test_match_substr_extraction_idiom() {
+        let prog = parse_program(
+            r#"BEGIN{s="hello world"; match(s,/wor/); print substr(s,RSTART,RLENGTH)}"#,
+        )
+        .unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "wor\n");
+    }
+
+    /// match() via kernel.execute (not builtin .execute()) — verifies dispatch chain.
+    #[tokio::test]
+    async fn test_match_kernel_dispatch_rstart_rlength() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String(
+            r#"BEGIN{match("foobar",/bar/); print RSTART, RLENGTH}"#.into(),
+        ));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "awk failed: {}", result.err);
+        assert_eq!(&*result.text_out(), "4 3\n");
+    }
+
+    // =========================================================================
+    // P3 #7 — bare `length` (no parens) means length($0)
+    // =========================================================================
+
+    /// bare `length` (no parens) evaluates to the character length of $0.
+    /// gawk: `echo "hello" | gawk '{print length}'` → `5`
+    #[test]
+    fn test_bare_length_is_length_dollar_zero() {
+        let prog = parse_program("{print length}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "hello").unwrap();
+        assert_eq!(result, "5\n");
+    }
+
+    /// bare `length` counts Unicode characters, not bytes.
+    /// gawk: `echo "こんにちは" | gawk '{print length}'` → `5`
+    #[test]
+    fn test_bare_length_counts_unicode_chars() {
+        let prog = parse_program("{print length}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "こんにちは").unwrap();
+        assert_eq!(result, "5\n");
+    }
+
+    /// length($1) (explicit arg) still works — bare-length special-case must not break it.
+    /// gawk: `echo "hello world" | gawk '{print length($1)}'` → `5`
+    #[test]
+    fn test_length_explicit_arg_still_works() {
+        let prog = parse_program("{print length($1)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "hello world").unwrap();
+        assert_eq!(result, "5\n");
+    }
+
+    /// length() with empty parens defaults to $0, just like length($0).
+    /// gawk: `echo "hello" | gawk '{print length()}'` → `5`
+    #[test]
+    fn test_length_empty_parens_defaults_to_dollar_zero() {
+        let prog = parse_program("{print length()}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "hello").unwrap();
+        assert_eq!(result, "5\n");
+    }
+
+    /// bare `length` via kernel.execute.
+    #[tokio::test]
+    async fn test_bare_length_kernel_dispatch() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hello".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("{print length}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "awk failed: {}", result.err);
+        assert_eq!(&*result.text_out(), "5\n");
+    }
+
+    // =========================================================================
+    // P3 #8 — int() and sqrt() implemented; other math functions loud-error
+    // =========================================================================
+
+    /// int(3.9) truncates toward zero.
+    /// gawk: `BEGIN{print int(3.9)}` → `3`
+    #[test]
+    fn test_int_positive_truncates_toward_zero() {
+        let prog = parse_program("BEGIN{print int(3.9)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "3\n");
+    }
+
+    /// int(-3.9) truncates toward zero (not floor).
+    /// gawk: `BEGIN{print int(-3.9)}` → `-3`
+    #[test]
+    fn test_int_negative_truncates_toward_zero() {
+        let prog = parse_program("BEGIN{print int(-3.9)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "-3\n");
+    }
+
+    /// sqrt(2) matches gawk's output.
+    /// gawk: `BEGIN{print sqrt(2)}` → `1.41421`
+    #[test]
+    fn test_sqrt_two() {
+        let prog = parse_program("BEGIN{print sqrt(2)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "1.41421\n");
+    }
+
+    /// int() and sqrt() via kernel.execute.
+    #[tokio::test]
+    async fn test_int_sqrt_kernel_dispatch() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("BEGIN{print int(3.9), int(-3.9), sqrt(4)}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "awk failed: {}", result.err);
+        assert_eq!(&*result.text_out(), "3 -3 2\n");
+    }
+
+    /// sin() returns a loud, honest error (not "use dedicated tool").
+    #[tokio::test]
+    async fn test_sin_returns_loud_unsupported_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("BEGIN{print sin(1)}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure but got success");
+        assert!(
+            result.err.contains("not supported"),
+            "expected 'not supported' in error, got: {}",
+            result.err
+        );
+        assert!(
+            !result.err.contains("dedicated tool"),
+            "stale 'dedicated tool' message still present: {}",
+            result.err
+        );
+    }
+
+    /// cos() also loud-errors with the accurate subset message.
+    #[test]
+    fn test_cos_loud_error_message() {
+        let prog = parse_program("BEGIN{print cos(0)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let err = rt.execute(&prog, "").unwrap_err();
+        assert!(err.contains("not supported"), "got: {err}");
+        assert!(err.contains("int and sqrt"), "got: {err}");
+    }
+
+    // =========================================================================
+    // AwkValue Display — format_awk_number gawk-compatibility matrix
+    // =========================================================================
+
+    /// format_awk_number matches gawk's default OFMT (%.6g) for the full
+    /// matrix required by the task, plus representative edge cases.
+    #[test]
+    #[allow(clippy::approx_constant)] // 3.14159265 is deliberately not PI; it is the test input
+    fn test_format_awk_number_gawk_matrix() {
+        #[rustfmt::skip]
+        let cases: &[(f64, &str)] = &[
+            // gawk: `BEGIN{print 1/3}` → `0.333333`
+            (1.0 / 3.0,                  "0.333333"),
+            // gawk: `BEGIN{print 2^10}` → `1024`  (integral)
+            (1024.0,                     "1024"),
+            // gawk: `BEGIN{print 3.14159265}` → `3.14159`
+            (3.141_592_65,               "3.14159"),
+            // gawk: `BEGIN{print 0.1+0.2}` → `0.3`  (rounds nicely at 6 sig figs)
+            (0.1 + 0.2,                  "0.3"),
+            // gawk: `BEGIN{print 100000000000000000}` → `100000000000000000`  (large integral)
+            (100_000_000_000_000_000.0,  "100000000000000000"),
+            // gawk: `BEGIN{print 1e20}` → `100000000000000000000`
+            (1e20,                       "100000000000000000000"),
+            // gawk: `BEGIN{print sqrt(2)}` → `1.41421`
+            (2.0_f64.sqrt(),             "1.41421"),
+            // gawk: `BEGIN{print -1/3}` → `-0.333333`
+            (-1.0 / 3.0,                 "-0.333333"),
+            // gawk: `BEGIN{print 0.0000001}` → `1e-07`
+            (0.000_000_1,                "1e-07"),
+            // gawk: `BEGIN{print 123456.789}` → `123457`  (rounds to 6 sig figs in fixed form)
+            (123_456.789,                "123457"),
+            // gawk: `BEGIN{print 0}` → `0`
+            (0.0,                        "0"),
+            // gawk: `BEGIN{print 1000000}` → `1000000`  (integral, 7 digits, not scientific)
+            (1_000_000.0,                "1000000"),
+            // Additional boundary cases
+            // e=5, rounds up to e=6: scientific
+            (999_999.5,                  "1e+06"),
+            // e < -4: scientific
+            (0.000_01,                   "1e-05"),
+            (0.000_099,                  "9.9e-05"),
+            // large non-integral: scientific
+            (1_234_567.89,               "1.23457e+06"),
+            // negative zero → "0"
+            (-0.0_f64,                   "0"),
+            // negative scientific
+            (-0.000_000_1,               "-1e-07"),
+        ];
+
+        for &(n, expected) in cases {
+            let got = super::format_awk_number(n);
+            assert_eq!(got, expected, "format_awk_number({n}) = {got:?}, want {expected:?}");
+        }
+    }
+
+    /// Kernel-routed tests for the three classes: large integral, sub-1 fraction, sqrt(2).
+    /// These go through the full AwkRuntime.execute path so Display is exercised end-to-end.
+    #[tokio::test]
+    async fn test_numeric_display_kernel_large_integral_fraction_sqrt() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        // Large integral: must not truncate or switch to scientific
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("BEGIN{print 100000000000000000}".into()));
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "awk failed: {}", result.err);
+        assert_eq!(&*result.text_out(), "100000000000000000\n");
+
+        // Sub-1 fraction: must use scientific at e < -4
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("BEGIN{print 0.0000001}".into()));
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "awk failed: {}", result.err);
+        assert_eq!(&*result.text_out(), "1e-07\n");
+
+        // sqrt(2): 6 significant figures, fixed form
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("BEGIN{print sqrt(2)}".into()));
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "awk failed: {}", result.err);
+        assert_eq!(&*result.text_out(), "1.41421\n");
+    }
+
+    // =========================================================================
+    // Issue 2 — single `awk:` prefix on unsupported-math errors
+    // =========================================================================
+
+    /// The user-visible error for sin() must be `awk: sin() is not supported ...`
+    /// (single prefix), not `awk: awk: sin() is not supported ...`.
+    #[tokio::test]
+    async fn test_sin_error_has_single_awk_prefix() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("BEGIN{print sin(1)}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure");
+        // Must start with exactly "awk: sin()" — not "awk: awk: sin()"
+        assert!(
+            result.err.starts_with("awk: sin()"),
+            "expected single 'awk:' prefix, got: {:?}",
+            result.err
+        );
+        assert!(
+            !result.err.contains("awk: awk:"),
+            "doubled prefix detected: {:?}",
+            result.err
+        );
     }
 }
