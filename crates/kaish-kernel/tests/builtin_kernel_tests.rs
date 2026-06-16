@@ -473,6 +473,56 @@ async fn awk_prints_selected_field() {
     assert_eq!(out, "y", "awk field: {out:?}");
 }
 
+// --- awk -F: field separator (P1 #1 in docs/awk-overhaul.md) ----------------
+//
+// `awk -F: '{print $1}'` is the most common awk invocation. Before the fix,
+// kaish's lexer emitted `-F` as ShortFlag("F") and `:` as a separate Colon
+// token, causing a parse error. The fix fuses span-adjacent metachars onto
+// short flags so `-F:` → ShortFlag("F:"), which the existing glued-value
+// binding already handles (same path as `cut -f1`).
+//
+// Expected output matches gawk 5.x. No external binary required at test time.
+
+#[tokio::test]
+async fn awk_field_separator_colon_file() {
+    let dir = tempdir().unwrap();
+    // passwd-style fixture: two colon-separated records
+    touch(dir.path(), "pw.txt", "root:x:0:0\nuser:x:1000:1000\n");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "awk -F: '{print $1}' pw.txt").await;
+    assert_eq!(code, 0, "awk -F: should succeed: {out:?}");
+    assert_eq!(out, "root\nuser", "awk -F: first field: {out:?}");
+}
+
+#[tokio::test]
+async fn awk_field_separator_colon_stdin() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "printf 'root:x:0:0\\nuser:x:1000:1000\\n' | awk -F: '{print $1}'").await;
+    assert_eq!(code, 0, "awk -F: stdin should succeed: {out:?}");
+    assert_eq!(out, "root\nuser", "awk -F: stdin first field: {out:?}");
+}
+
+#[tokio::test]
+async fn awk_field_separator_semicolon() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "semi.txt", "a;b;c\n");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "awk -F; '{print $2}' semi.txt").await;
+    assert_eq!(code, 0, "awk -F; should succeed: {out:?}");
+    assert_eq!(out, "b", "awk -F; second field: {out:?}");
+}
+
+#[tokio::test]
+async fn awk_field_separator_long_flag() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "pw.txt", "root:x:0:0\nuser:x:1000:1000\n");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "awk --field-separator=: '{print $1}' pw.txt").await;
+    assert_eq!(code, 0, "awk --field-separator=: should succeed: {out:?}");
+    assert_eq!(out, "root\nuser", "awk --field-separator=: first field: {out:?}");
+}
+
 #[tokio::test]
 async fn realpath_resolves_multiple_operands() {
     let dir = tempdir().unwrap();

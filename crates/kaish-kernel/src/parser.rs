@@ -2037,6 +2037,13 @@ where
                 // is still caught by the no-token-pasting guard in
                 // `args_list_parser`. See docs/issues.md.
                 Token::Comma => Expr::Literal(Value::String(",".into())),
+                // Bare colon in argument position is the literal ":" — the
+                // `awk -F: '{print $1}'` / `--field-separator=:` idiom and
+                // the bash no-op `:` alias. In statement position the colon is
+                // the no-op command (handled by `command_parser`); here it is
+                // only reached after a command name has been parsed, so there
+                // is no ambiguity with the statement form.
+                Token::Colon => Expr::Literal(Value::String(":".into())),
                 Token::Tilde => Expr::Literal(Value::String("~".into())),
                 Token::TildePath(s) => Expr::Literal(Value::String(s)),
                 Token::RelativePath(s) => Expr::Literal(Value::String(s)),

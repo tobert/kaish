@@ -623,6 +623,34 @@ fn lexer_flag_sequences(#[case] input: &str, #[case] expected: &[&str]) {
 }
 
 // =============================================================================
+// Flag-metachar merging (awk -F: idiom)
+// =============================================================================
+//
+// A metachar (`:`, `;`, `|`) glued directly onto a short flag with no space
+// must lex as a single ShortFlag token so the arg-binding layer can treat the
+// metachar as the flag's value rather than as a shell operator.
+// Guarded by span-adjacency: a *space*-separated flag and metachar must stay
+// as separate tokens so `;` as a statement terminator and `|` as a pipe are
+// never misinterpreted.
+
+#[rstest]
+// Colon glued onto short flag: `awk -F:` idiom
+#[case::shortflag_colon("-F:", &["SHORTFLAG(F:)"])]
+// Semicolon glued onto short flag: `awk -F;` idiom
+#[case::shortflag_semi("-F;", &["SHORTFLAG(F;)"])]
+// Pipe glued onto short flag: `awk -F|` idiom
+#[case::shortflag_pipe("-F|", &["SHORTFLAG(F|)"])]
+// Colon in full command context: awk -F: is one token; the program is another
+#[case::awk_colon_full(r"awk -F: '{print $1}'", &["IDENT(awk)", "SHORTFLAG(F:)", "SINGLESTRING({print $1})"])]
+// Space-separated: flag and operator MUST stay separate (no merge)
+#[case::shortflag_space_colon("-F :", &["SHORTFLAG(F)", "COLON"])]
+#[case::shortflag_space_semi("-F ;", &["SHORTFLAG(F)", "SEMI"])]
+#[case::shortflag_space_pipe("-F |", &["SHORTFLAG(F)", "PIPE"])]
+fn lexer_flag_metachar_merge(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+// =============================================================================
 // Special Variables
 // =============================================================================
 
