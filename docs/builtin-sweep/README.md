@@ -30,13 +30,14 @@ deliberate pass.
 | pilot | cut tr sort | ✅ | ✅ | ✅ | ⏳ deferred |
 | line-slicers | head tail tac uniq wc | ✅ | ✅ | ✅ | ⏳ deferred |
 | search | grep ~~rg~~ | ✅ | ✅ | ✅ | ⏳ deferred |
-| generate/transform | printf format_string seq split jq | ⬜ | ⬜ | ⬜ | ⬜ |
-| encode/binary | xxd base64 checksum dd | ⬜ | ⬜ | ⬜ | ⬜ |
+| generate/transform | printf seq split jq | ✅ | ✅ | ✅ | ⏳ deferred |
+| encode/binary | base64 xxd checksum dd | ✅ | ✅ | ✅ | ⏳ deferred |
 | compare/patch | cmp diff patch | ⬜ | ⬜ | ⬜ | ⬜ |
 | passthrough/io | cat tee | ⬜ | ⬜ | ⬜ | ⬜ |
 
 (FS mutators cp/mv/rm/ln/mkdir/touch/write — separate behavioral pass, out of
-scope here per the scope decision.)
+scope here per the scope decision. `format_string` is the shared printf/awk
+sprintf parser, NOT a builtin — excluded from the sweep.)
 
 ## Accumulated findings (fill as Phase 2 runs)
 Cross-tool levers worth fixing/documenting regardless of any single cell:
@@ -59,7 +60,19 @@ Cross-tool levers worth fixing/documenting regardless of any single cell:
   removal-safety check, not a fidelity target; the no-match-rc and ERE-dialect
   findings still apply to `grep`.
 - **Trailing-newline under delete/complement (CODE).** `tr -cd` drops the final
-  `\n` (3/3). Harness is sentinel-guarded to catch a kaish that keeps it.
+  `\n` (3/3); base64 `-d` / `xxd -r` likewise. Producers add a newline, decoders/
+  transformers don't. Harness is sentinel-guarded to catch a kaish that keeps it.
+- **Namesake collision must be LOUD (CODE — wave-2 headline).** Where kaish reuses
+  a familiar name with a narrower contract, the GNU reflex must error, never
+  silently misbehave: `split -l 100` (string-splitter, no `-l`), `sha256sum` (it's
+  `checksum`), `printf | dd` (dd requires `if=`, no stdin), `dd … bogus`. All 3/3
+  unanimous they should be loud. Phase 2 asserts rc≠0 + a hint on each.
+- **jq env boundary (CODE, P1-class).** kaish jq (jaq subset) is hermetic; `env`
+  must fail loud, but real jq returns `null` silently — verify jaq doesn't inherit
+  the silent-null and quietly diverge from kaish's own contract.
+- **Format/layout decisions (DOC).** base64 wrap-76, `xxd` default-dump spacing,
+  `checksum` line shape (`hash  -` vs bare hex; must round-trip with `-c`). Decide,
+  pin a test, document — same class as the wc/uniq padding lever.
 
 ## Files
 `battery-<cluster>.md` cells+prompt · `expectations-<cluster>.md` banked
