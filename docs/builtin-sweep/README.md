@@ -32,8 +32,11 @@ deliberate pass.
 | search | grep ~~rg~~ | ✅ | ✅ | ✅ | ⏳ deferred |
 | generate/transform | printf seq split jq | ✅ | ✅ | ✅ | ⏳ deferred |
 | encode/binary | base64 xxd checksum dd | ✅ | ✅ | ✅ | ⏳ deferred |
-| compare/patch | cmp diff patch | ⬜ | ⬜ | ⬜ | ⬜ |
-| passthrough/io | cat tee | ⬜ | ⬜ | ⬜ | ⬜ |
+| compare/patch | cmp diff patch | ✅ | ✅ | ✅ | ⏳ deferred |
+| passthrough/io | cat tee | ✅ | ✅ | ✅ | ⏳ deferred |
+
+**All 7 clusters banked (Phase 1 complete).** Phase 2 (run kaish via `run-*.sh`)
+stays deferred until the tree is stable.
 
 (FS mutators cp/mv/rm/ln/mkdir/touch/write — separate behavioral pass, out of
 scope here per the scope decision. `format_string` is the shared printf/awk
@@ -71,8 +74,21 @@ Cross-tool levers worth fixing/documenting regardless of any single cell:
   must fail loud, but real jq returns `null` silently — verify jaq doesn't inherit
   the silent-null and quietly diverge from kaish's own contract.
 - **Format/layout decisions (DOC).** base64 wrap-76, `xxd` default-dump spacing,
-  `checksum` line shape (`hash  -` vs bare hex; must round-trip with `-c`). Decide,
-  pin a test, document — same class as the wc/uniq padding lever.
+  `checksum` line shape (`hash  -` vs bare hex; must round-trip with `-c`), `cat -n`
+  field-width, `diff -u` header form. Decide, pin a test, document — same class as
+  the wc/uniq padding lever.
+- **`diff` default format (CODE+DOC — wave-3 headline).** All 3 vendors expect
+  plain `diff a b` to emit ed-style **normal** format (`2c2 …`); kaish defaults to
+  **unified**. Not corruption (valid output) but a muscle-memory divergence — keep
+  unified (useful for agents/patch) and document, or reconsider the default.
+- **Writer write-model (CODE — from source).** `tee`/`patch` route through the VFS
+  (`ctx.backend.write`/`.patch`) so `--overlay` captures them ✅ — but **neither is
+  latch-gated**: destructive *overwrite* isn't gated like `rm`'s destructive
+  *delete*. Decide whether `tee`/`patch` over an existing file need `set -o latch`.
+  Same hazard class as sed's deferred `-i`.
+- **Intentional safety divergences (DOC the surprise).** `cat /dev/zero` is a loud
+  error in kaish (not a hang); `dd` requires `if=` (no stdin). kaish is *safer*
+  than muscle memory here — document so agents expect it.
 
 ## Files
 `battery-<cluster>.md` cells+prompt · `expectations-<cluster>.md` banked
