@@ -42,6 +42,40 @@ async fn cat_concatenates_multiple_files_in_order() {
 }
 
 #[tokio::test]
+async fn cat_concatenates_bytes_verbatim_no_inserted_newline() {
+    // cat must concatenate raw bytes — never synthesize a separator. A file
+    // that ends in a newline must not gain a blank line after it.
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "a.txt", "alpha\nbanana\n");
+    touch(dir.path(), "b.txt", "beta\n");
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute("cat a.txt b.txt").await.expect("execute");
+    assert_eq!(result.code, 0);
+    assert_eq!(
+        result.text_out(),
+        "alpha\nbanana\nbeta\n",
+        "cat inserted a spurious separator between newline-terminated files"
+    );
+}
+
+#[tokio::test]
+async fn cat_joins_file_without_trailing_newline() {
+    // GNU cat of `x` (no trailing newline) then `y\n` yields `xy\n`, not
+    // `x\ny\n`. Inserting a newline corrupts the byte stream.
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "c.txt", "x");
+    touch(dir.path(), "d.txt", "y\n");
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute("cat c.txt d.txt").await.expect("execute");
+    assert_eq!(result.code, 0);
+    assert_eq!(
+        result.text_out(),
+        "xy\n",
+        "cat inserted a newline after a file that lacked a trailing one"
+    );
+}
+
+#[tokio::test]
 async fn cat_glob_concatenates_all_matches() {
     let dir = tempdir().unwrap();
     touch(dir.path(), "one.log", "first\n");

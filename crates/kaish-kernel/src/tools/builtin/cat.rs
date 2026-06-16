@@ -150,7 +150,7 @@ impl Tool for Cat {
         let mut all_content = String::new();
         let mut line_num = 1;
 
-        for (i, path) in paths.iter().enumerate() {
+        for path in paths.iter() {
             let resolved = ctx.resolve_path(path);
 
             match ctx.backend.read(Path::new(&resolved), None).await {
@@ -165,9 +165,11 @@ impl Tool for Cat {
                                 line_num += 1;
                             }
                         } else {
-                            if i > 0 && !all_content.is_empty() {
-                                all_content.push('\n');
-                            }
+                            // Byte-verbatim concatenation: never synthesize a
+                            // separator. Inserting a newline between files (or
+                            // after a file that lacks a trailing one) corrupts
+                            // the stream — `cat x y` where x is `a` and y is
+                            // `b\n` must be `ab\n`, not `a\nb\n`.
                             all_content.push_str(&content);
                         }
                     }
