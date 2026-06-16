@@ -171,6 +171,10 @@ enum Pattern {
     Regex(String),
     /// Expression pattern: $1 > 100.
     Expr(Expr),
+    /// Range pattern: /start/,/end/ — fires from the record matching `start`
+    /// through the record matching `end`, inclusive (POSIX semantics).
+    /// Neither endpoint may be BEGIN or END.
+    Range(Box<Pattern>, Box<Pattern>),
 }
 
 /// A block of statements.
@@ -426,9 +430,11 @@ impl AwkLexer {
             None => return Ok(Token::Eof),
         };
 
-        // Newline is significant in AWK
+        // Newline is significant in AWK. It also begins a new rule/statement,
+        // a position where a leading `/` is a regex, not division.
         if c == '\n' {
             self.advance();
+            self.in_regex_context = true;
             return Ok(Token::Newline);
         }
 
@@ -570,7 +576,9 @@ impl AwkLexer {
             "return" => Token::Return,
             _ => Token::Ident(s),
         };
-        self.in_regex_context = matches!(tok, Token::Match | Token::NotMatch);
+        // An identifier/keyword is a value (or precedes one), so a following `/`
+        // is division, not a regex. (scan_ident never yields `~`/`!~`.)
+        self.in_regex_context = false;
         Ok(tok)
     }
 
@@ -686,7 +694,11 @@ impl AwkLexer {
             '?' => Token::Question,
             ':' => Token::Colon,
             ',' => Token::Comma,
-            ';' => Token::Semicolon,
+            ';' => {
+                // A `;` ends a statement/rule; a `/` after it is a regex.
+                self.in_regex_context = true;
+                Token::Semicolon
+            }
             '(' => {
                 self.in_regex_context = true;
                 Token::LParen
@@ -700,7 +712,9 @@ impl AwkLexer {
                 Token::LBrace
             }
             '}' => {
-                self.in_regex_context = false;
+                // A `}` ends an action block; the next rule's leading `/` is a
+                // regex pattern, not division.
+                self.in_regex_context = true;
                 Token::RBrace
             }
             '[' => {
@@ -768,11 +782,15 @@ impl AwkLexer {
 struct AwkParser {
     tokens: Vec<Token>,
     pos: usize,
+    /// When true, `parse_comparison` must not consume a top-level `>` or `>=`,
+    /// because inside `print`/`printf` those introduce output redirection (which
+    /// kaish rejects with a clear error rather than silently mis-parsing).
+    in_print: bool,
 }
 
 impl AwkParser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self { tokens, pos: 0, in_print: false }
     }
 
     fn peek(&self) -> &Token {
@@ -818,6 +836,14 @@ impl AwkParser {
         self.skip_newlines();
 
         while self.peek() != &Token::Eof {
+            // Catch top-level `function` declarations (they appear before a rule, not
+            // inside a block, so parse_statement wouldn't see them).
+            if self.peek() == &Token::Function {
+                return Err(
+                    "user-defined functions are not supported (kaish awk is a one-liner subset)"
+                        .to_string(),
+                );
+            }
             rules.push(self.parse_rule()?);
             self.skip_terminators();
         }
@@ -845,29 +871,65 @@ impl AwkParser {
         Ok(Rule { pattern, action })
     }
 
-    // pattern := BEGIN | END | /regex/ | expr | (empty)
+    // pattern := BEGIN | END | /regex/ | expr | pattern,pattern | (empty)
     fn parse_pattern(&mut self) -> Result<Pattern, String> {
-        match self.peek() {
+        let first = match self.peek() {
             Token::Begin => {
                 self.advance();
-                Ok(Pattern::Begin)
+                Pattern::Begin
             }
             Token::End => {
                 self.advance();
-                Ok(Pattern::End)
+                Pattern::End
             }
             Token::Regex(re) => {
                 let re = re.clone();
                 self.advance();
-                Ok(Pattern::Regex(re))
+                Pattern::Regex(re)
             }
-            Token::LBrace => Ok(Pattern::All),
-            Token::Eof | Token::Newline => Ok(Pattern::All),
+            Token::LBrace => return Ok(Pattern::All),
+            Token::Eof | Token::Newline => return Ok(Pattern::All),
             _ => {
                 let expr = self.parse_expr()?;
-                Ok(Pattern::Expr(expr))
+                Pattern::Expr(expr)
             }
+        };
+
+        // Check for range pattern: `pattern , pattern`.
+        // BEGIN/END may not serve as range endpoints.
+        if self.peek() == &Token::Comma {
+            match &first {
+                Pattern::Begin | Pattern::End => {
+                    return Err(
+                        "BEGIN and END may not be used as range pattern endpoints".to_string(),
+                    );
+                }
+                _ => {}
+            }
+            self.advance(); // consume ','
+            let second = match self.peek() {
+                Token::Begin | Token::End => {
+                    return Err(
+                        "BEGIN and END may not be used as range pattern endpoints".to_string(),
+                    );
+                }
+                Token::Regex(re) => {
+                    let re = re.clone();
+                    self.advance();
+                    Pattern::Regex(re)
+                }
+                Token::LBrace | Token::Eof | Token::Newline => {
+                    return Err("expected pattern after ',' in range pattern".to_string());
+                }
+                _ => {
+                    let expr = self.parse_expr()?;
+                    Pattern::Expr(expr)
+                }
+            };
+            return Ok(Pattern::Range(Box::new(first), Box::new(second)));
         }
+
+        Ok(first)
     }
 
     // action := '{' statement* '}'
@@ -920,6 +982,14 @@ impl AwkParser {
                 Ok(Stmt::Exit(code))
             }
             Token::Delete => self.parse_delete(),
+            Token::Function => {
+                Err("user-defined functions are not supported (kaish awk is a one-liner subset)"
+                    .to_string())
+            }
+            Token::Return => {
+                Err("user-defined functions are not supported (kaish awk is a one-liner subset)"
+                    .to_string())
+            }
             Token::LBrace => {
                 let block = self.parse_action()?;
                 Ok(Stmt::If(Expr::Number(1.0), block, None)) // Block as always-true if
@@ -1044,10 +1114,33 @@ impl AwkParser {
             self.peek(),
             Token::Newline | Token::Semicolon | Token::RBrace | Token::Eof
         ) {
-            args.push(self.parse_expr()?);
+            self.in_print = true;
+            let first = self.parse_expr();
+            self.in_print = false;
+            args.push(first?);
+            // After the first expr, a leftover bare `>` (Gt) that parse_comparison
+            // left unconsumed (because in_print was set) is output redirection.
+            // `>=` (Ge) is never left unconsumed — it is always a comparison.
+            if self.peek() == &Token::Gt {
+                return Err(
+                    "output redirection (> >> |) is not supported; \
+                     pipe kaish's output downstream instead"
+                        .to_string(),
+                );
+            }
             while self.peek() == &Token::Comma {
                 self.advance();
-                args.push(self.parse_expr()?);
+                self.in_print = true;
+                let arg = self.parse_expr();
+                self.in_print = false;
+                args.push(arg?);
+                if self.peek() == &Token::Gt {
+                    return Err(
+                        "output redirection (> >> |) is not supported; \
+                         pipe kaish's output downstream instead"
+                            .to_string(),
+                    );
+                }
             }
         }
 
@@ -1062,10 +1155,31 @@ impl AwkParser {
             self.peek(),
             Token::Newline | Token::Semicolon | Token::RBrace | Token::Eof
         ) {
-            args.push(self.parse_expr()?);
+            self.in_print = true;
+            let first = self.parse_expr();
+            self.in_print = false;
+            args.push(first?);
+            // Same rule as parse_print: only bare `>` (Gt) is redirection; `>=` is comparison.
+            if self.peek() == &Token::Gt {
+                return Err(
+                    "output redirection (> >> |) is not supported; \
+                     pipe kaish's output downstream instead"
+                        .to_string(),
+                );
+            }
             while self.peek() == &Token::Comma {
                 self.advance();
-                args.push(self.parse_expr()?);
+                self.in_print = true;
+                let arg = self.parse_expr();
+                self.in_print = false;
+                args.push(arg?);
+                if self.peek() == &Token::Gt {
+                    return Err(
+                        "output redirection (> >> |) is not supported; \
+                         pipe kaish's output downstream instead"
+                            .to_string(),
+                    );
+                }
             }
         }
 
@@ -1130,9 +1244,15 @@ impl AwkParser {
         let cond = self.parse_or()?;
         if self.peek() == &Token::Question {
             self.advance();
+            // Ternary branches are sub-expressions: a top-level `>` inside them
+            // is a comparison, not print redirection (only an unparenthesized
+            // `>` directly in print/printf is redirection).
+            let saved_in_print = self.in_print;
+            self.in_print = false;
             let then_expr = self.parse_expr()?;
             self.expect(&Token::Colon)?;
             let else_expr = self.parse_expr()?;
+            self.in_print = saved_in_print;
             Ok(Expr::Ternary(
                 Box::new(cond),
                 Box::new(then_expr),
@@ -1199,6 +1319,13 @@ impl AwkParser {
             Token::Ne => BinOp::Ne,
             Token::Lt => BinOp::Lt,
             Token::Le => BinOp::Le,
+            // When inside a print/printf arg list, a bare top-level `>` introduces
+            // output redirection, not a comparison. Leave the token unconsumed so
+            // parse_print / parse_printf can detect and reject it with a clear error.
+            // `>=` (Ge) is NOT redirection — it is a normal comparison operator and
+            // must be consumed here regardless of in_print.  Inside parentheses
+            // in_print is reset to false, so `print ($1>2)` still compares normally.
+            Token::Gt if self.in_print => return Ok(left),
             Token::Gt => BinOp::Gt,
             Token::Ge => BinOp::Ge,
             _ => return Ok(left),
@@ -1322,6 +1449,16 @@ impl AwkParser {
                     if let Expr::Var(name) = expr {
                         self.advance();
                         let key = self.parse_expr()?;
+                        // Multi-dimensional subscripts a[i,j] are not supported.
+                        // Detect the comma after the first subscript expression and
+                        // emit a clear, hinted error rather than "expected RBracket".
+                        if self.peek() == &Token::Comma {
+                            return Err(
+                                "multi-dimensional array subscripts (a[i,j]) are not supported; \
+                                 build a string key like a[i \",\" j]"
+                                    .to_string(),
+                            );
+                        }
                         self.expect(&Token::RBracket)?;
                         expr = Expr::ArrayAccess(name, Box::new(key));
                     } else {
@@ -1365,10 +1502,24 @@ impl AwkParser {
                 Ok(Expr::Field(Box::new(field)))
             }
             Token::Ident(name) => {
+                // `getline` is tokenized as Ident (not a keyword). Catch it here
+                // before treating it as a variable or function call.
+                if name == "getline" {
+                    return Err(
+                        "getline is not supported; pipe input into awk instead \
+                         (e.g. cat f | awk '...')"
+                            .to_string(),
+                    );
+                }
                 self.advance();
                 // Check for function call
                 if self.peek() == &Token::LParen {
                     self.advance();
+                    // Call arguments are sub-expressions: a top-level `>` inside
+                    // them is a comparison, not print redirection (mirrors the
+                    // LParen reset below so `print length(a>b)` works).
+                    let saved_in_print = self.in_print;
+                    self.in_print = false;
                     let mut args = Vec::new();
                     if self.peek() != &Token::RParen {
                         args.push(self.parse_expr()?);
@@ -1377,6 +1528,7 @@ impl AwkParser {
                             args.push(self.parse_expr()?);
                         }
                     }
+                    self.in_print = saved_in_print;
                     self.expect(&Token::RParen)?;
                     Ok(Expr::Call(name, args))
                 } else {
@@ -1385,9 +1537,14 @@ impl AwkParser {
             }
             Token::LParen => {
                 self.advance();
-                let expr = self.parse_expr()?;
+                // Parentheses reset the print context: `print ($1 > 2)` must
+                // parse the comparison, not treat `>` as redirection.
+                let saved_in_print = self.in_print;
+                self.in_print = false;
+                let expr = self.parse_expr();
+                self.in_print = saved_in_print;
                 self.expect(&Token::RParen)?;
-                Ok(expr)
+                Ok(expr?)
             }
             _ => Err(format!("unexpected token: {:?}", self.peek())),
         }
@@ -1415,6 +1572,16 @@ fn parse_program(input: &str) -> Result<AwkProgram, String> {
 /// - Non-integral values: implement C `%.6g` — 6 significant figures, scientific notation
 ///   when the rounded exponent is < -4 or >= 6, otherwise fixed, trailing zeros stripped.
 fn format_awk_number(n: f64) -> String {
+    // Non-finite values: replicate gawk 5.x exact spellings.
+    // gawk: `BEGIN{print sqrt(-1)}` → `-nan`
+    //       `BEGIN{print 2^1024}`   → `+inf`
+    //       `BEGIN{print -2^1024}`  → `-inf`
+    if n.is_nan() {
+        return "-nan".to_string();
+    }
+    if n.is_infinite() {
+        return if n.is_sign_positive() { "+inf" } else { "-inf" }.to_string();
+    }
     if n == 0.0 {
         return "0".to_string();
     }
@@ -1560,6 +1727,10 @@ struct AwkRuntime {
     output: String,
     nr: i64, // Current record number
     nf: i64, // Number of fields in current record
+    /// Per-rule active state for range patterns (`/start/,/end/`).
+    /// Indexed by the rule's position in `AwkProgram.rules`.
+    /// Non-range rules always read `false` here and never write it.
+    range_active: Vec<bool>,
 }
 
 impl AwkRuntime {
@@ -1581,6 +1752,7 @@ impl AwkRuntime {
             output: String::new(),
             nr: 0,
             nf: 0,
+            range_active: Vec::new(),
         }
     }
 
@@ -1652,6 +1824,9 @@ impl AwkRuntime {
     }
 
     fn execute(&mut self, program: &AwkProgram, input: &str) -> Result<String, String> {
+        // Size range_active to the number of rules; non-range rules never touch it.
+        self.range_active = vec![false; program.rules.len()];
+
         // Run BEGIN rules
         for rule in &program.rules {
             if matches!(rule.pattern, Pattern::Begin) && let ControlFlow::Exit(_) = self.execute_block(&rule.action)? {
@@ -1675,12 +1850,12 @@ impl AwkRuntime {
             self.set_var("NR", AwkValue::Number(self.nr as f64));
             self.split_record(record);
 
-            for rule in &program.rules {
+            for (rule_idx, rule) in program.rules.iter().enumerate() {
                 if matches!(rule.pattern, Pattern::Begin | Pattern::End) {
                     continue;
                 }
 
-                if self.pattern_matches(&rule.pattern)? {
+                if self.pattern_matches(rule_idx, &rule.pattern)? {
                     match self.execute_block(&rule.action)? {
                         ControlFlow::Next => continue 'records,
                         ControlFlow::Exit(_) => break 'records,
@@ -1703,7 +1878,7 @@ impl AwkRuntime {
         Ok(std::mem::take(&mut self.output))
     }
 
-    fn pattern_matches(&mut self, pattern: &Pattern) -> Result<bool, String> {
+    fn pattern_matches(&mut self, rule_idx: usize, pattern: &Pattern) -> Result<bool, String> {
         match pattern {
             Pattern::All => Ok(true),
             Pattern::Begin | Pattern::End => Ok(false),
@@ -1714,6 +1889,58 @@ impl AwkRuntime {
             Pattern::Expr(expr) => {
                 let val = self.eval_expr(expr)?;
                 Ok(val.to_bool())
+            }
+            Pattern::Range(start_pat, end_pat) => {
+                // POSIX range pattern semantics (matching gawk):
+                //
+                // When NOT active: test `start`. If it matches, mark active and
+                // fire this record. If `end` also matches the same record, mark
+                // inactive immediately (one-record range). Either way fire = true.
+                //
+                // When active: fire this record. Then test `end`; if it matches,
+                // mark inactive (end record is still included).
+                let active = self.range_active[rule_idx];
+                if !active {
+                    // Helper to evaluate a simple (non-Range) pattern inline.
+                    let start_matches = self.eval_simple_pattern(start_pat)?;
+                    if start_matches {
+                        // Check if end also matches this same record.
+                        let end_matches = self.eval_simple_pattern(end_pat)?;
+                        self.range_active[rule_idx] = !end_matches;
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                } else {
+                    // We are inside an active range: fire, then check end.
+                    let end_matches = self.eval_simple_pattern(end_pat)?;
+                    if end_matches {
+                        self.range_active[rule_idx] = false;
+                    }
+                    Ok(true)
+                }
+            }
+        }
+    }
+
+    /// Evaluate a non-Range pattern as a boolean (used for range endpoints).
+    fn eval_simple_pattern(&mut self, pattern: &Pattern) -> Result<bool, String> {
+        match pattern {
+            Pattern::Regex(re) => {
+                let regex = Regex::new(re).map_err(|e| format!("invalid regex: {}", e))?;
+                Ok(regex.is_match(&self.get_field(0).to_string()))
+            }
+            Pattern::Expr(expr) => {
+                let val = self.eval_expr(expr)?;
+                Ok(val.to_bool())
+            }
+            Pattern::All => Ok(true),
+            // BEGIN/END are rejected at parse time; this branch is unreachable.
+            Pattern::Begin | Pattern::End => {
+                Err("BEGIN/END may not be used as range pattern endpoints".to_string())
+            }
+            Pattern::Range(_, _) => {
+                Err("nested range patterns are not supported".to_string())
             }
         }
     }
@@ -3469,6 +3696,181 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     }
 
     // =========================================================================
+    // P3 #6 — range patterns `/start/,/end/`
+    // =========================================================================
+
+    /// Multi-record span: /bob/,/carol/ fires on bob, dave (between), and carol.
+    /// gawk: echo "alice\nbob\ndave\ncarol\neve" | gawk '/bob/,/carol/'
+    /// → bob\ndave\ncarol
+    #[test]
+    fn test_range_pattern_multi_record_span() {
+        let prog = parse_program("/bob/,/carol/").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "alice\nbob\ndave\ncarol\neve").unwrap();
+        assert_eq!(result, "bob\ndave\ncarol\n");
+    }
+
+    /// One-record range: start and end match the same record — only that record fires.
+    /// gawk: echo "alice\nbobcarol\neve" | gawk '/bob/,/carol/'
+    /// → bobcarol  (start and end matched same line → range closes immediately)
+    #[test]
+    fn test_range_pattern_one_record_range() {
+        let prog = parse_program("/bob/,/carol/").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "alice\nbobcarol\neve").unwrap();
+        assert_eq!(result, "bobcarol\n");
+    }
+
+    /// Range re-opens after closing: gawk fires on each span independently.
+    /// Input: start1 ... end1 ... start2 ... end2
+    /// gawk: echo "bob\ncarol\nbob\ncarol" | gawk '/bob/,/carol/'
+    /// → bob\ncarol\nbob\ncarol
+    #[test]
+    fn test_range_pattern_re_triggers_after_close() {
+        let prog = parse_program("/bob/,/carol/").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt
+            .execute(&prog, "alice\nbob\ncarol\neve\nbob\nfoo\ncarol\ndone")
+            .unwrap();
+        assert_eq!(result, "bob\ncarol\nbob\nfoo\ncarol\n");
+    }
+
+    /// Range with expression endpoints: NR==2,NR==4 fires on lines 2–4 inclusive.
+    /// gawk: printf "a\nb\nc\nd\ne\n" | gawk 'NR==2,NR==4'
+    /// → b\nc\nd
+    ///
+    /// Note: NR>=2,NR<=4 would re-open on line 5 (5>=2 fires again), matching gawk;
+    /// NR==2,NR==4 uses exact equality so the range closes cleanly after line 4.
+    #[test]
+    fn test_range_pattern_expr_endpoints() {
+        let prog = parse_program("NR==2,NR==4").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "a\nb\nc\nd\ne").unwrap();
+        assert_eq!(result, "b\nc\nd\n");
+    }
+
+    /// Range pattern with action block.
+    /// gawk: echo "alice\nbob\ndave\ncarol\neve" | gawk '/bob/,/carol/ {print ">" $0}'
+    /// → >bob\n>dave\n>carol
+    #[test]
+    fn test_range_pattern_with_action() {
+        let prog = parse_program("/bob/,/carol/ {print \">\" $0}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "alice\nbob\ndave\ncarol\neve").unwrap();
+        assert_eq!(result, ">bob\n>dave\n>carol\n");
+    }
+
+    /// BEGIN/END rejected as range endpoints with a clear error.
+    #[test]
+    fn test_range_pattern_begin_endpoint_rejected() {
+        let err = parse_program("BEGIN,/foo/").unwrap_err();
+        assert!(
+            err.contains("BEGIN") || err.contains("END"),
+            "expected clear error about BEGIN/END, got: {err}"
+        );
+    }
+
+    /// Range pattern via kernel.execute (dispatch chain).
+    #[tokio::test]
+    async fn test_range_pattern_kernel_dispatch() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("alice\nbob\ndave\ncarol\neve".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/bob/,/carol/".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "awk failed: {}", result.err);
+        assert_eq!(&*result.text_out(), "bob\ndave\ncarol\n");
+    }
+
+    // =========================================================================
+    // P2 #5 — print redirection is a loud error, not a silent comparison
+    // =========================================================================
+
+    /// `{print $1 > "f"}` must fail with the redirection hint — NOT print `1` per line.
+    #[tokio::test]
+    async fn test_print_redirect_gt_is_loud_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hello\nworld".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String(r#"{print $1 > "f"}"#.into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("redirection") || result.err.contains("not supported"),
+            "expected redirection error, got: {}",
+            result.err
+        );
+        // Must NOT have printed `1` per line (the old silent mis-parse behaviour).
+        assert!(
+            !result.text_out().contains("1\n"),
+            "old silent comparison behaviour still active: {}",
+            result.text_out()
+        );
+    }
+
+    /// `{print ($1 > 2)}` — parenthesised comparison inside print still works.
+    /// gawk: echo "5" | gawk '{print ($1 > 2)}' → `1`
+    #[test]
+    fn test_print_parenthesised_comparison_still_works() {
+        let prog = parse_program("{print ($1 > 2)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "5\n1").unwrap();
+        // 5 > 2 → 1; 1 > 2 → 0
+        assert_eq!(result, "1\n0\n");
+    }
+
+    /// `print $1, $2` (comma-separated) still works correctly.
+    #[test]
+    fn test_print_comma_sep_args_still_works() {
+        let prog = parse_program("{print $1, $2}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "hello world").unwrap();
+        assert_eq!(result, "hello world\n");
+    }
+
+    /// `print $1 $2` (concat, no comma) still works correctly.
+    #[test]
+    fn test_print_concat_no_comma_still_works() {
+        let prog = parse_program("{print $1 $2}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "hello world").unwrap();
+        assert_eq!(result, "helloworld\n");
+    }
+
+    /// Pattern comparison `$3 > 100 {print}` outside print is unaffected.
+    #[test]
+    fn test_pattern_comparison_gt_outside_print_unaffected() {
+        let prog = parse_program("$3 > 100 {print $1}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "alice bob 50\nbob carol 200").unwrap();
+        assert_eq!(result, "bob\n");
+    }
+
+    /// `{printf "%s\n", $1 > "f"}` also rejects redirection in printf.
+    #[tokio::test]
+    async fn test_printf_redirect_gt_is_loud_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hello".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String(r#"{printf "%s\n", $1 > "f"}"#.into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("redirection") || result.err.contains("not supported"),
+            "expected redirection error, got: {}",
+            result.err
+        );
+    }
+
+    // =========================================================================
     // AwkValue Display — format_awk_number gawk-compatibility matrix
     // =========================================================================
 
@@ -3583,5 +3985,313 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
             "doubled prefix detected: {:?}",
             result.err
         );
+    }
+
+    // =========================================================================
+    // P4 #9 — Grammar-boundary loud errors and the >= comparison fix
+    // =========================================================================
+
+    /// `print 1>=2` must evaluate to `0` (comparison), not error as redirection.
+    /// gawk: `echo x | gawk '{print 1>=2}'` → `0`
+    #[test]
+    fn test_print_ge_is_comparison_not_redirect() {
+        let prog = parse_program("{print 1>=2}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "x").unwrap();
+        assert_eq!(result, "0\n");
+    }
+
+    /// `print 1 >= 2` with spaces also compares, not redirects.
+    #[test]
+    fn test_print_ge_spaced_is_comparison() {
+        let prog = parse_program("{print 1 >= 2}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "x").unwrap();
+        assert_eq!(result, "0\n");
+    }
+
+    /// `print 2>=1` → `1` (true comparison).
+    #[test]
+    fn test_print_ge_true_comparison() {
+        let prog = parse_program("{print 2>=1}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "x").unwrap();
+        assert_eq!(result, "1\n");
+    }
+
+    /// `print 1>2` is output redirection and must error loud.
+    /// gawk redirects; kaish doesn't support redirection — must not silently compare.
+    #[tokio::test]
+    async fn test_print_bare_gt_is_loud_redirect_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("x".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String(r#"{print 1>2}"#.into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("redirection") || result.err.contains("not supported"),
+            "expected redirection error, got: {}",
+            result.err
+        );
+    }
+
+    /// `print x>>"f"` (append redirection) must also error loud.
+    #[tokio::test]
+    async fn test_print_append_redirect_is_loud_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("x".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String(r#"{print x>>"f"}"#.into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("redirection") || result.err.contains("not supported"),
+            "expected redirection error, got: {}",
+            result.err
+        );
+    }
+
+    /// `print ($1>2)` with parentheses still compares (in_print reset inside parens).
+    /// gawk: `echo "5" | gawk '{print ($1>2)}'` → `1`
+    #[test]
+    fn test_print_paren_gt_is_comparison() {
+        let prog = parse_program("{print ($1>2)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "5").unwrap();
+        assert_eq!(result, "1\n");
+    }
+
+    /// A `>` inside a function-call argument in print is a comparison, not
+    /// redirection — the print context must reset across call args.
+    /// gawk: `echo hello | gawk '{print substr($1,1,2>1)}'` → `h`
+    #[test]
+    fn test_print_call_arg_gt_is_comparison() {
+        let prog = parse_program("{print substr($1, 1, 2>1)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "hello").unwrap();
+        assert_eq!(result, "h\n");
+    }
+
+    /// A `>` inside a (parenthesized) ternary branch in print is a comparison.
+    #[test]
+    fn test_print_paren_ternary_gt_is_comparison() {
+        let prog = parse_program("{print (1 ? 3>2 : 0)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "x").unwrap();
+        assert_eq!(result, "1\n");
+    }
+
+    /// Two independent range patterns in one program keep separate active state.
+    /// gawk: `printf '1\n2\n3\n4\n5\n' | gawk '/1/,/2/{print} /3/,/4/{print}'` → 1 2 3 4
+    #[test]
+    fn test_two_independent_range_patterns() {
+        let prog = parse_program("/1/,/2/{print} /3/,/4/{print}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "1\n2\n3\n4\n5\n").unwrap();
+        assert_eq!(result, "1\n2\n3\n4\n");
+    }
+
+    /// A range whose end never matches stays open through EOF.
+    /// gawk: `printf '1\n2\n3\n4\n5\n' | gawk '/2/,/zzz/'` → 2 3 4 5
+    #[test]
+    fn test_range_end_never_matches_runs_to_eof() {
+        let prog = parse_program("/2/,/zzz/").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "1\n2\n3\n4\n5\n").unwrap();
+        assert_eq!(result, "2\n3\n4\n5\n");
+    }
+
+    /// A regex pattern starting a new rule after a `}` lexes as a regex, not
+    /// division. `/1/{print} /3/{print}` over 1..5 → `1`, `3`.
+    #[test]
+    fn test_multiple_regex_rules_lex_after_brace() {
+        let prog = parse_program("/1/{print} /3/{print}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "1\n2\n3\n4\n5\n").unwrap();
+        assert_eq!(result, "1\n3\n");
+    }
+
+    /// Division (`/` after a value) must still lex as division, not regex.
+    #[test]
+    fn test_division_still_lexes_after_value() {
+        let prog = parse_program("BEGIN{x=10; print x/2/1}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "5\n");
+    }
+
+    /// Division inside a for-header (after `;`) still lexes as division — the
+    /// `;`-enters-regex-context fix must not break `i < n/2`.
+    #[test]
+    fn test_division_in_for_header() {
+        let prog = parse_program("BEGIN{ for(i=0; i<10/2; i++) s=s i; print s }").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "01234\n");
+    }
+
+    /// A regex expression after `;` lexes as a regex (matches $0), not division.
+    #[test]
+    fn test_regex_after_semicolon() {
+        let prog = parse_program("{ x=1; if (/3/) print \"hit\" }").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "3\n4\n").unwrap();
+        assert_eq!(result, "hit\n");
+    }
+
+    /// A range whose start and end match the same record fires for one record.
+    /// gawk: `printf '1\n2\n3\n4\n5\n' | gawk '/3/,/3/'` → 3
+    #[test]
+    fn test_range_one_record_when_start_equals_end() {
+        let prog = parse_program("/3/,/3/").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "1\n2\n3\n4\n5\n").unwrap();
+        assert_eq!(result, "3\n");
+    }
+
+    /// bare `getline` → loud, hinted error.
+    #[tokio::test]
+    async fn test_getline_bare_is_loud_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("x".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("{getline}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("getline") && result.err.contains("not supported"),
+            "expected getline error, got: {}",
+            result.err
+        );
+    }
+
+    /// `getline x` (getline into a variable) → loud, hinted error.
+    #[tokio::test]
+    async fn test_getline_into_var_is_loud_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("x".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("{getline x}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("getline") && result.err.contains("not supported"),
+            "expected getline error, got: {}",
+            result.err
+        );
+    }
+
+    /// `function f(){return 1}` → loud error about user-defined functions.
+    #[tokio::test]
+    async fn test_user_function_is_loud_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("function f(){return 1}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("user-defined functions") || result.err.contains("not supported"),
+            "expected function error, got: {}",
+            result.err
+        );
+    }
+
+    /// `return` inside a block also errors about user-defined functions.
+    #[tokio::test]
+    async fn test_return_in_block_is_loud_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("x".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("{return 1}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("user-defined functions") || result.err.contains("not supported"),
+            "expected function error, got: {}",
+            result.err
+        );
+    }
+
+    /// `a[1,2]=3` (multi-dimensional subscript) → loud, hinted error.
+    #[tokio::test]
+    async fn test_multi_dim_subscript_is_loud_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("BEGIN{a[1,2]=3; print a[1,2]}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("multi-dimensional") || result.err.contains("a[i,j]"),
+            "expected multi-dim error, got: {}",
+            result.err
+        );
+    }
+
+    // =========================================================================
+    // Non-finite number formatting — matches gawk 5.4.0 exact spelling
+    // =========================================================================
+
+    /// sqrt(-1) formats as `-nan`, matching gawk 5.4.0.
+    /// gawk: `BEGIN{print sqrt(-1)}` (stderr warning suppressed) → `-nan`
+    #[test]
+    fn test_sqrt_negative_formats_as_nan() {
+        let got = super::format_awk_number(f64::NAN);
+        assert_eq!(got, "-nan", "NaN must format as '-nan', got: {got:?}");
+    }
+
+    /// Positive infinity formats as `+inf`, matching gawk 5.4.0.
+    /// gawk: `BEGIN{print 2^1024}` → `+inf`
+    #[test]
+    fn test_positive_infinity_formats_as_plus_inf() {
+        let got = super::format_awk_number(f64::INFINITY);
+        assert_eq!(got, "+inf", "pos inf must format as '+inf', got: {got:?}");
+    }
+
+    /// Negative infinity formats as `-inf`, matching gawk 5.4.0.
+    /// gawk: `BEGIN{print -2^1024}` → `-inf`
+    #[test]
+    fn test_negative_infinity_formats_as_minus_inf() {
+        let got = super::format_awk_number(f64::NEG_INFINITY);
+        assert_eq!(got, "-inf", "neg inf must format as '-inf', got: {got:?}");
+    }
+
+    /// sqrt(-1) via AwkRuntime end-to-end: the output string matches gawk.
+    #[test]
+    fn test_sqrt_negative_runtime_output() {
+        let prog = parse_program("BEGIN{print sqrt(-1)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "-nan\n", "sqrt(-1) runtime output must be '-nan\\n'");
+    }
+
+    /// 2^1024 via AwkRuntime end-to-end: prints `+inf` like gawk.
+    #[test]
+    fn test_pow_overflow_runtime_output() {
+        let prog = parse_program("BEGIN{print 2^1024}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "+inf\n", "2^1024 must print '+inf\\n'");
     }
 }
