@@ -1490,6 +1490,12 @@ fn stmt_has_ambiguous_stdin(stmt: &Stmt) -> bool {
     }
 }
 
+/// True when `arg` is the bare-comma literal positional (`Expr::Literal(",")`),
+/// produced by a lone `,` token in argument position.
+fn is_comma_literal_arg(arg: &Arg) -> bool {
+    matches!(arg, Arg::Positional(Expr::Literal(Value::String(s))) if s == ",")
+}
+
 /// Arguments list parser that handles `--` flag terminator.
 ///
 /// After `--`, all subsequent flags are converted to positional string arguments.
@@ -1516,12 +1522,20 @@ where
                     && matches!(next, Arg::Positional(_))
                     && prev_span.end == next_span.start
                 {
-                    return Err(Rich::custom(
-                        *next_span,
+                    // A bare `,` lexes as its own token, so a comma-bearing word
+                    // (`cut -f1,3`, `sort -k2,2n`, `echo a,b`) trips this guard.
+                    // It isn't token pasting — `,` is reserved (brace expansion,
+                    // lists) — so give a comma-specific hint that teaches quoting.
+                    let msg = if is_comma_literal_arg(prev) || is_comma_literal_arg(next) {
+                        "an unquoted comma splits this into separate words — kaish reserves \
+                         `,` (brace expansion, lists); quote a comma-bearing argument to keep \
+                         it one word, e.g. cut -f \"1,3\", sort -k \"2,2n\", or echo \"a,b\""
+                    } else {
                         "adjacent words with no space between them are not joined into one \
                          argument (kaish does no token pasting); quote the whole word, e.g. \
-                         \"/tmp/$(echo x).txt\" or \"$dir/out.txt\"",
-                    ));
+                         \"/tmp/$(echo x).txt\" or \"$dir/out.txt\""
+                    };
+                    return Err(Rich::custom(*next_span, msg));
                 }
             }
             Ok(args.into_iter().map(|(arg, _)| arg).collect::<Vec<Arg>>())

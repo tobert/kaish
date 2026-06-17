@@ -59,9 +59,9 @@ impl Tool for Diff {
         schema_from_clap(
             &DiffArgs::command(),
             "diff",
-            "Compare files line by line",
+            "Compare files line by line (unified diff by default)",
             [
-                ("Compare two files", "diff file1.txt file2.txt"),
+                ("Compare two files (unified)", "diff file1.txt file2.txt"),
                 ("Quiet mode", "diff -q old.txt new.txt"),
             ],
         )

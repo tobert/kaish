@@ -64,6 +64,8 @@ impl Tool for Sort {
                 ("Version sort (v1.2 < v1.10)", "sort -V tags.txt"),
                 ("Reverse sort", "sort -r file.txt"),
                 ("Sort by second field", "sort -k 2 data.txt"),
+                // A `from,to` key range must be quoted — an unquoted comma splits.
+                ("Sort by a key range", "sort -k \"2,2\" data.txt"),
                 ("Unique lines only", "sort -u file.txt"),
             ],
         )

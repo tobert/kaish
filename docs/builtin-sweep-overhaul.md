@@ -136,7 +136,7 @@ EMBEDDING.md, issues.md MCP follow-up updated.
 
 ## P2 — Fidelity & common-idiom breakage
 
-### [ ] ⛳ 1. Unquoted comma in argv splits the word (misleading parse error)
+### [x] ⛳ 1. Unquoted comma in argv splits the word (misleading parse error) — DONE 2026-06-17 (via P4.3)
 - **Symptom:** `cut -d: -f1,3`, `sort -k2,2n`, `cut … --output-delimiter='|'`, even
   `echo a,b` / `echo 1,3` → shell **parse error** "adjacent words with no space …
   kaish does no token pasting". The user wrote one word; the lexer splits at `,`
@@ -310,13 +310,20 @@ Guard test in `execute_pipe_stdin_tests.rs`.
   **drop the kaish-specific summary line** (hunk failures still go to stderr as
   patch(1) does).
 
-### [ ] 3. LOUD message quality
+### [x] 3. LOUD message quality — comma part DONE 2026-06-17
+**Fix:** unquoted comma-bearing argv that trips the no-pasting guard now gets a
+comma-specific message teaching quoting (`cut -f "1,3"`, `sort -k "2,2n"`) via
+`is_comma_literal_arg`; non-comma adjacency keeps the token-pasting hint. cut/sort
+schema examples use the quoted form (cut's old `-f 1,3` example was itself the
+broken unquoted form). Tests pin all three. (tr -c message moot — now supported.)
 - Comma-parse message (P2.1) says "token pasting" when it's a comma — misleading even
   if the fix is declined.
 - `tr -c` (P2.8) "unexpected argument '-c'" should hint complement support/scope.
 - General: every LOUD boundary must hint the fix (PLAN ground rule #2). Eyeball each.
 
-### [ ] 4. `diff` default = unified  (Decision #2 — doc only)
+### [x] 4. `diff` default = unified (Decision #2 — doc only) — DONE 2026-06-17
+**Confirmed** unified is the default (verified CLI: `--- +++ @@`); documented in
+the diff `about` string + examples. No code change.
 - Already implemented (`diff.rs`); the model-reflex "ed-style normal default" is a
   documented divergence, not a bug. **Confirm + document**; no code. Do not chase
   richer diff now.

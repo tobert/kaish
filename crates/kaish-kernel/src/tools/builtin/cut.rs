@@ -51,7 +51,9 @@ impl Tool for Cut {
             "Remove sections from each line",
             [
                 ("Extract first field (CSV)", "cut -d ',' -f 1 data.csv"),
-                ("Extract fields 1 and 3", "cut -d ':' -f 1,3 /etc/passwd"),
+                // A comma-separated field list must be quoted — an unquoted
+                // comma is reserved and splits the word.
+                ("Extract fields 1 and 3", "cut -d: -f \"1,3\" /etc/passwd"),
                 ("Extract characters 1-10", "cut -c 1-10 file.txt"),
             ],
         )

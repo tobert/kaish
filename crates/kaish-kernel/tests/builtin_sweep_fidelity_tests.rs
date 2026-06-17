@@ -116,6 +116,15 @@ async fn run_no_stdin(prog: &str) -> (String, i64) {
     (result.text_out().to_string(), result.code)
 }
 
+/// Run a program expected to fail to parse/validate; return the error text.
+async fn run_err(prog: &str) -> String {
+    let kernel = kernel();
+    match kernel.execute(prog).await {
+        Ok(r) => panic!("expected an error, got ok: {:?} (code {})", r.text_out(), r.code),
+        Err(e) => format!("{e:?}"),
+    }
+}
+
 #[tokio::test]
 async fn split_limit_caps_field_count() {
     // 2 fields: first split, remainder intact.
@@ -253,6 +262,42 @@ async fn tr_plain_delete_still_works() {
     let (out, code) = run("tr -d '0-9'", "a1b2c3\n").await;
     assert_eq!(code, 0, "out={out:?}");
     assert_eq!(out, "abc\n", "tr -d removes the set (newline preserved)");
+}
+
+// ────────────────── unquoted-comma message (P2.1 / P4.3) ─────────────────
+// An unquoted comma in argv is intentionally LOUD (kaish reserves `,`), but
+// the message must teach quoting — not say "token pasting" (nothing was
+// pasted). The quoted idiom must work.
+
+#[tokio::test]
+async fn unquoted_comma_message_teaches_quoting() {
+    let err = run_err("echo a,b").await;
+    assert!(
+        err.contains("comma") && err.to_lowercase().contains("quote"),
+        "comma error should mention the comma and quoting, got: {err}"
+    );
+    assert!(
+        !err.contains("token pasting"),
+        "comma error must not use the misleading 'token pasting' text: {err}"
+    );
+}
+
+#[tokio::test]
+async fn quoted_comma_field_list_works() {
+    // The fix is the message, not the grammar — quoting is how you pass a list.
+    let (out, code) = run("cut -d: -f \"1,3\"", "a:b:c\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "a:c\n");
+}
+
+#[tokio::test]
+async fn non_comma_pasting_keeps_generic_message() {
+    // The interpolation-splat case keeps its own hint (not the comma one).
+    let err = run_err("echo $(echo x)y").await;
+    assert!(
+        err.contains("token pasting"),
+        "non-comma adjacency keeps the token-pasting hint: {err}"
+    );
 }
 
 // ─────────────────────────── sort -V (P3) ────────────────────────────────
