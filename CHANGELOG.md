@@ -11,6 +11,7 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`sort -V` / `--version-sort`** orders version-like strings naturally — digit runs compare by value, so `v1.2` < `v1.9` < `v1.10` (was an `unexpected argument` error).
 - **`kaish -c '…'` (and `kaish script.kai`) now read piped stdin** when invoked non-interactively, so `printf 'data' | kaish -c 'sort'` feeds the top-level builtin instead of silently producing nothing. Stdin is fed **lazily**: a command that reads stdin drains it, but one that doesn't (`echo`) returns immediately even when stdin is an open pipe that never sends EOF — `sleep 10 | kaish -c 'echo hi'` prints `hi` and exits at once rather than hanging. Stdin is consumed by the first command that reads it (shell draining semantics); a redirect (`< file`/heredoc) still takes precedence; binary stdin survives losslessly. Two embedder seams: `ExecuteOptions::with_stdin(String)` for a ready buffer, and `Kernel::execute_with_pipe_stdin(_streaming)` taking a `PipeReader` for a lazy, byte-clean stream (the CLI uses the latter).
 - **`sed` ergonomics pass** (gaps chosen from a cross-model usability panel — see `docs/sed-design.md`): `;` now chains multiple commands in one expression (`sed 's/a/b/; s/c/d/'`); `s///N` / `s///Ng` act on the Nth match; `a TEXT`/`i TEXT`/`c TEXT` append/insert/change lines (all of `a\TEXT`, `a TEXT`, `aTEXT`); `y/abc/xyz/` transliterates; and `-E`/`-r` are accepted as no-ops (kaish sed is always ERE).
 

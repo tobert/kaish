@@ -263,7 +263,13 @@ when only set2.last() is emitted).
 
 ## P3 — Coverage gaps
 
-### [ ] 1. `sort -V` (version sort) unimplemented
+### [x] 1. `sort -V` (version sort) unimplemented — FIXED 2026-06-17
+**Fix:** `-V`/`--version-sort` via `compare_version` (digit runs by value,
+non-digit runs byte-wise; leading zeros ignored). Common-case subset (orders
+version tags; not full `filevercmp` tie-breaks). 6 tests incl. prefix/-u/no-digits.
+DeepSeek-reviewed: no blocking bugs. *Discovered (deferred):* `-k` reads the raw
+ToolArgs map not `parsed.key` (pre-existing, violates the read-from-parsed
+convention; affects `-V -k` but works via to_argv round-trip — separate cleanup).
 - **Symptom (A7):** `sort -V` over `v1.10,v1.2,v1.9` → "unexpected argument '-V'".
 - **Verdict:** LOUD, reasonable boundary but a reached-for form. **⛳ Decision (Amy,
   2026-06-17): implement version sort** (`-V`/`--version-sort`) — common for

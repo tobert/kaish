@@ -20,6 +20,10 @@ struct SortArgs {
     #[arg(short = 'n', long = "numeric")]
     numeric: bool,
 
+    /// Sort by version (natural numeric runs), e.g. v1.2 < v1.10 (-V)
+    #[arg(short = 'V', long = "version-sort")]
+    version: bool,
+
     /// Reverse the sort order (-r)
     #[arg(short = 'r', long = "reverse")]
     reverse: bool,
@@ -57,6 +61,7 @@ impl Tool for Sort {
             [
                 ("Alphabetical sort", "sort names.txt"),
                 ("Numeric sort", "sort -n numbers.txt"),
+                ("Version sort (v1.2 < v1.10)", "sort -V tags.txt"),
                 ("Reverse sort", "sort -r file.txt"),
                 ("Sort by second field", "sort -k 2 data.txt"),
                 ("Unique lines only", "sort -u file.txt"),
@@ -100,6 +105,7 @@ impl Tool for Sort {
         };
 
         let numeric = parsed.numeric;
+        let version = parsed.version;
         let reverse = parsed.reverse;
         let unique = parsed.unique;
 
@@ -117,7 +123,7 @@ impl Tool for Sort {
 
         // Sort with the appropriate comparator
         lines.sort_by(|a, b| {
-            let cmp = compare_lines(a, b, numeric, key_field, delimiter.as_deref());
+            let cmp = compare_lines(a, b, numeric, version, key_field, delimiter.as_deref());
             if reverse {
                 cmp.reverse()
             } else {
@@ -143,6 +149,7 @@ fn compare_lines(
     a: &str,
     b: &str,
     numeric: bool,
+    version: bool,
     key_field: Option<usize>,
     delimiter: Option<&str>,
 ) -> Ordering {
@@ -166,13 +173,65 @@ fn compare_lines(
         _ => (a, b),
     };
 
-    if numeric {
+    if version {
+        compare_version(val_a, val_b)
+    } else if numeric {
         let num_a = extract_leading_number(val_a);
         let num_b = extract_leading_number(val_b);
         num_a.partial_cmp(&num_b).unwrap_or(Ordering::Equal)
     } else {
         val_a.cmp(val_b)
     }
+}
+
+/// Compare two strings as versions (GNU `sort -V` family). The strings are
+/// walked in lock-step as alternating runs of digits and non-digits: digit runs
+/// are compared by numeric value (leading zeros ignored, then longer wins),
+/// non-digit runs byte-by-byte. This is the common-case subset that orders
+/// version tags correctly (`v1.2 < v1.9 < v1.10`); it does not implement every
+/// `filevercmp` tie-break rule.
+fn compare_version(a: &str, b: &str) -> Ordering {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        let (da, db) = (a[i].is_ascii_digit(), b[j].is_ascii_digit());
+        if da && db {
+            let ni = i + a[i..].iter().take_while(|c| c.is_ascii_digit()).count();
+            let nj = j + b[j..].iter().take_while(|c| c.is_ascii_digit()).count();
+            let cmp = compare_numeric_run(&a[i..ni], &b[j..nj]);
+            if cmp != Ordering::Equal {
+                return cmp;
+            }
+            i = ni;
+            j = nj;
+        } else if !da && !db {
+            let cmp = a[i].cmp(&b[j]);
+            if cmp != Ordering::Equal {
+                return cmp;
+            }
+            i += 1;
+            j += 1;
+        } else {
+            // One side is a digit, the other isn't: fall back to a byte compare.
+            return a[i].cmp(&b[j]);
+        }
+    }
+    // The longer string sorts after when one is a prefix of the other.
+    a.len().cmp(&b.len())
+}
+
+/// Compare two runs of ASCII digits by numeric value: ignore leading zeros,
+/// then the longer run is larger, then lexically (handles equal-length runs).
+fn compare_numeric_run(a: &[u8], b: &[u8]) -> Ordering {
+    let a = strip_leading_zeros(a);
+    let b = strip_leading_zeros(b);
+    a.len().cmp(&b.len()).then_with(|| a.cmp(b))
+}
+
+fn strip_leading_zeros(s: &[u8]) -> &[u8] {
+    let nz = s.iter().take_while(|&&c| c == b'0').count();
+    // Keep one digit if the run is all zeros.
+    &s[nz.min(s.len().saturating_sub(1))..]
 }
 
 /// Extract the leading numeric prefix from a string, like GNU sort -n.

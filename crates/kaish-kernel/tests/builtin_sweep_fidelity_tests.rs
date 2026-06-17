@@ -254,3 +254,49 @@ async fn tr_plain_delete_still_works() {
     assert_eq!(code, 0, "out={out:?}");
     assert_eq!(out, "abc\n", "tr -d removes the set (newline preserved)");
 }
+
+// ─────────────────────────── sort -V (P3) ────────────────────────────────
+// Version sort: numeric runs compare by value, so v1.2 < v1.9 < v1.10.
+
+#[tokio::test]
+async fn sort_version_orders_numeric_runs_by_value() {
+    let (out, code) = run("sort -V", "v1.10\nv1.2\nv1.9\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "v1.2\nv1.9\nv1.10\n");
+}
+
+#[tokio::test]
+async fn sort_version_multi_component() {
+    let (out, code) = run("sort -V", "1.0.10\n1.0.2\n1.0.1\n1.10.0\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "1.0.1\n1.0.2\n1.0.10\n1.10.0\n");
+}
+
+#[tokio::test]
+async fn sort_version_reverse() {
+    let (out, code) = run("sort -rV", "v1.10\nv1.2\nv1.9\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "v1.10\nv1.9\nv1.2\n");
+}
+
+#[tokio::test]
+async fn sort_version_prefix_sorts_first() {
+    // A string that is a prefix of another sorts before it (`v1` < `v1.0`).
+    let (out, code) = run("sort -V", "v1.0\nv1\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "v1\nv1.0\n");
+}
+
+#[tokio::test]
+async fn sort_version_unique_dedups() {
+    let (out, code) = run("sort -Vu", "1.10\n1.2\n1.2\n1.10\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "1.2\n1.10\n");
+}
+
+#[tokio::test]
+async fn sort_version_no_digits_is_lexical() {
+    let (out, code) = run("sort -V", "banana\napple\ncherry\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "apple\nbanana\ncherry\n");
+}
