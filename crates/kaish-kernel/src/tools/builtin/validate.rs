@@ -96,10 +96,13 @@ impl Tool for Validate {
                 },
                 Err(e) => return ExecResult::failure(1, format!("kaish-validate: {}: {}", path, e)),
             }
-        } else if let Some(stdin) = &ctx.stdin {
-            (stdin.clone(), "<stdin>".to_string())
         } else {
-            return ExecResult::failure(1, "kaish-validate: no input provided (use path or -e)");
+            // stdin (pipe or buffered — `read_stdin_to_text` prefers the pipe).
+            match ctx.read_stdin_to_text().await {
+                Ok(Some(s)) => (s, "<stdin>".to_string()),
+                Ok(None) => return ExecResult::failure(1, "kaish-validate: no input provided (use path or -e)"),
+                Err(e) => return ExecResult::failure(2, format!("kaish-validate: {e}")),
+            }
         };
 
         // Parse the script

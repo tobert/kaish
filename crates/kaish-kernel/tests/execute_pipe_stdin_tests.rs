@@ -142,6 +142,29 @@ async fn lazy_stdin_feeds_scatter_with_no_pre_scatter_command() {
 }
 
 #[tokio::test]
+async fn lazy_stdin_reaches_a_builtin_that_reads_the_stdin_field() {
+    // Regression: `patch`/`write`/`kaish-validate` read stdin and must see a
+    // seeded lazy pipe. They formerly read the `ctx.stdin` String field directly
+    // (bypassing `pipe_stdin`), so the lazy-stdin change silently starved them.
+    // `kaish-validate` reads stdin with no file setup — a clean probe.
+    let kernel = kernel();
+    let (writer, reader) = pipe_stream_default();
+    writer.write_bytes(b"echo hi | grep x\n").await.unwrap();
+    drop(writer);
+
+    let result = kernel
+        .execute_with_pipe_stdin("kaish-validate", ExecuteOptions::new(), reader)
+        .await
+        .expect("kernel execute");
+    assert!(result.ok(), "validate should see piped stdin: {}", result.err);
+    assert!(
+        result.text_out().contains("valid"),
+        "expected validation of piped script, got: {:?}",
+        result.text_out()
+    );
+}
+
+#[tokio::test]
 async fn lazy_stdin_does_not_leak_between_calls() {
     // The seeded reader is consume-once: a second call with no stdin sees none.
     let kernel = kernel();

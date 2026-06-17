@@ -89,8 +89,13 @@ impl Tool for Patch {
         };
         parsed.global.apply(ctx);
 
-        // Read patch content from stdin
-        let patch_content = ctx.stdin.take().unwrap_or_default();
+        // Read patch content from stdin (pipe or buffered — `read_stdin_to_text`
+        // prefers the streaming pipe, so a piped `cmd | patch` / `patch < file`
+        // is seen, not just a frontend-buffered String).
+        let patch_content = match ctx.read_stdin_to_text().await {
+            Ok(s) => s.unwrap_or_default(),
+            Err(e) => return ExecResult::failure(2, format!("patch: {e}")),
+        };
         if patch_content.is_empty() {
             return ExecResult::failure(1, "patch: no input provided (use stdin)");
         }
@@ -123,7 +128,6 @@ impl Tool for Patch {
         }
 
         let mut output = String::new();
-        let mut total_applied = 0;
 
         // Group hunks by target file
         for file_hunks in group_by_file(&hunks) {
@@ -184,13 +188,10 @@ impl Tool for Patch {
                         format!("patch: failed to apply to '{}': {}", target_path, e),
                     );
                 }
+                // Follow patch(1): emit only `patching file <name>` per file, no
+                // kaish-specific "N changes applied" summary line.
                 output.push_str(&format!("patching file {}\n", target_path));
-                total_applied += ops.len();
             }
-        }
-
-        if !dry_run && total_applied > 0 {
-            output.push_str(&format!("{} changes applied\n", total_applied));
         }
 
         ExecResult::with_output(OutputData::text(output.trim_end()))
@@ -536,6 +537,12 @@ mod tests {
 
         assert!(result.ok(), "patch failed: {}", result.err);
         assert!(result.text_out().contains("patching file"));
+        // Follow patch(1): no kaish-specific "N changes applied" summary line.
+        assert!(
+            !result.text_out().contains("changes applied"),
+            "unexpected summary line: {}",
+            result.text_out()
+        );
 
         // Verify the file was modified
         let content = ctx.backend.read(Path::new("/test.txt"), None).await.unwrap();

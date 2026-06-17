@@ -297,7 +297,12 @@ DeepSeek-reviewed clean.
   one-liners here).
 - **Test:** one kernel-routed assertion per builtin that output ends in `\n`.
 
-### [ ] 2. `patch` emits an extra "N changes applied" line on stdout
+### [x] 2. `patch` emits an extra "N changes applied" line on stdout — FIXED 2026-06-17
+**Fix:** dropped the summary line (follow `patch(1)`); stdout is now just
+`patching file <name>` per file. While here, found+fixed a P1.0 regression:
+`patch`/`write`/`kaish-validate` read the `ctx.stdin` String field directly and so
+missed the lazy `pipe_stdin` — converted all three to `read_stdin_to_text()`.
+Guard test in `execute_pipe_stdin_tests.rs`.
 - **Symptom (PT1):** `patch` stdout is `patching file …\nN changes applied` vs
   consensus `patching file …\n`. The summary line is kaish-specific.
 - **⛳ Decision (Amy, 2026-06-17): follow `patch(1)`** — 30 years stable. GNU

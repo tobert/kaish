@@ -66,19 +66,18 @@ impl Tool for Write {
             None => return ExecResult::failure(1, "write: missing path argument"),
         };
 
-        // Content can be positional[1] or named "content"
-        let content = match args.named.get("content") {
-            Some(v) => value_to_string(v),
-            None => match args.positional.get(1) {
-                Some(v) => value_to_string(v),
-                None => {
-                    // Check for stdin
-                    match &ctx.stdin {
-                        Some(s) => s.clone(),
-                        None => return ExecResult::failure(1, "write: missing content argument"),
-                    }
-                }
-            },
+        // Content can be positional[1], named "content", or stdin (pipe or
+        // buffered — `read_stdin_to_text` prefers the streaming pipe).
+        let content = if let Some(v) = args.named.get("content") {
+            value_to_string(v)
+        } else if let Some(v) = args.positional.get(1) {
+            value_to_string(v)
+        } else {
+            match ctx.read_stdin_to_text().await {
+                Ok(Some(s)) => s,
+                Ok(None) => return ExecResult::failure(1, "write: missing content argument"),
+                Err(e) => return ExecResult::failure(2, format!("write: {e}")),
+            }
         };
 
         let resolved = ctx.resolve_path(&path);
