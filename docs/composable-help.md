@@ -2,13 +2,21 @@
 
 **Status:** Phases 1–3 landed (2026-06-06) — `kaish-help` crate built, content moved,
 `kaish_kernel::help` is a shim, `syntax.md` generated + drift-tested, and every runtime
-surface (kernel `help`, REPL welcome, MCP `instructions:`, MCP `execute` tool
-description, MCP prompt set) composes from the corpus. All tests/clippy/WASI green.
-Phases 4–5 (publish + i18n) pending (§10).
-**Driver:** Embedders (kaijutsu, kaibo), the REPL, and the MCP server should all
-build the instructions they hand to humans and agents on top of *one* canonical
-kaish content library, so that a kaish release pushes updated guidance everywhere
-instead of each frontend hand-rolling its own prose that silently drifts.
+surface (kernel `help`, REPL welcome, and the agent-onboarding / tool-description /
+prompt surfaces an embedder exposes) composes from the corpus. All tests/clippy/WASI
+green. Phases 4–5 (publish + i18n) pending (§10).
+
+> **Note (post-MCP-drop):** this design was written when kaish shipped an in-tree MCP
+> server (`kaish-mcp`). That crate has since been removed — the MCP surface now lives
+> in *embedders* (kaibo, kaijutsu). The composition design below is **unchanged**: the
+> recipes that once fed the in-tree handler now feed the embedders' MCP handlers, which
+> drive kaish through `KernelClient`/`execute()`. Read "the MCP server" throughout as
+> "an embedder's MCP surface" — a consumer of `kaish-help`, not part of the kernel.
+
+**Driver:** Embedders (kaijutsu, kaibo) and the REPL should all build the instructions
+they hand to humans and agents on top of *one* canonical kaish content library, so that
+a kaish release pushes updated guidance everywhere instead of each frontend hand-rolling
+its own prose that silently drifts.
 
 ---
 
@@ -23,15 +31,19 @@ The **instructions** surface is not. The agent/human-facing "what kaish is, why,
 how to start" guidance is hand-written separately in at least three places, none
 of which call the help module:
 
-| Surface | Location | Sourced from help module? |
+(Locations below are as of the original write-up, when the in-tree `kaish-mcp` crate
+held these surfaces; they now live in embedders' MCP handlers — same drift problem,
+same fix.)
+
+| Surface | Location (then) | Sourced from help module? |
 |---|---|---|
-| MCP server `instructions:` field | `kaish-mcp/.../handler.rs:472` | ❌ bespoke prose |
-| MCP `execute` tool description | `kaish-mcp/.../handler.rs:243` | ❌ bespoke prose |
-| REPL startup welcome | `kaish-repl/src/lib.rs:727` | ❌ bespoke prose |
-| MCP prompt set (6 prompts) | `kaish-mcp/.../handler.rs:367` | ✅ via `get_help`, but the *list* is hand-maintained |
+| MCP `instructions:` field | embedder MCP handler (was `kaish-mcp/handler.rs`) | ❌ bespoke prose |
+| MCP `execute` tool description | embedder MCP handler (was `kaish-mcp/handler.rs`) | ❌ bespoke prose |
+| REPL startup welcome | `kaish-repl/src/lib.rs` | ❌ bespoke prose |
+| MCP prompt set | embedder MCP handler (was `kaish-mcp/handler.rs`) | ✅ via `get_help`, but the *list* is hand-maintained |
 
 An embedder building an agent system prompt today has nothing to call — they would
-hand-roll a fourth copy. That is exactly the drift this proposal kills.
+hand-roll yet another copy. That is exactly the drift this proposal kills.
 
 Two content problems compound it:
 
@@ -53,8 +65,9 @@ Two content problems compound it:
    it (rule / example / contrast-with-bash / rationale).
 4. **i18n-ready**: the data model is keyed so non-English translations can be added
    later without restructuring.
-5. The kernel `help` builtin, the REPL, the MCP server, **and external embedders
-   (kaijutsu, kaibo)** all consume this crate. A kaish release pushes updates to all.
+5. The kernel `help` builtin, the REPL, **and external embedders (kaijutsu, kaibo —
+   including their MCP surfaces)** all consume this crate. A kaish release pushes
+   updates to all.
 6. **LANGUAGE.md becomes composable** — broken into fragments; the monolithic file
    becomes *generated* build output rather than a hand-edited source.
 
@@ -71,9 +84,9 @@ kaish-help         (content fragments + composition; i18n; render)
    ▲           ▲
 kaish-kernel    │   (help builtin → kaish-help, injects live schemas)
    ▲           │
-kaish-mcp /     │   (instructions, tool desc, prompts → kaish-help recipes)
-kaish-repl      │
-                └── kaijutsu, kaibo (external) → depend on kaish-help directly
+kaish-repl      │   (REPL welcome → kaish-help recipes)
+                └── kaijutsu, kaibo (external embedders) → depend on kaish-help
+                    directly (instructions, MCP tool desc, prompts → recipes)
 ```
 
 `kaish_kernel::help` keeps its current public functions as a **thin re-export /
@@ -174,9 +187,9 @@ prose fragment keyed by tool name. Most tools render schema-only; `rg`/`timeout`
 
 ```rust
 impl Recipe {
-    fn agent_onboarding() -> Selector;  // MCP `instructions:` + embedder system prompt
+    fn agent_onboarding() -> Selector;  // embedder agent prompt / MCP `instructions:`
     fn repl_welcome() -> Selector;      // REPL startup
-    fn tool_description() -> Selector;  // MCP `execute` tool description
+    fn tool_description() -> Selector;  // embedder's `execute` tool description
     fn topic(name: &str) -> Selector;   // backs `help <topic>` builtin
     fn full_reference() -> Selector;    // regenerates LANGUAGE.md
 }
@@ -206,13 +219,14 @@ fall out of one fragment set.
 
 ## 7. Consumer migration (kills the drift)
 
-- MCP `instructions:` (`handler.rs:472`) → `compose(Recipe::agent_onboarding(), gen)`.
-- MCP `execute` tool description (`handler.rs:243`) → `Recipe::tool_description()`.
-- REPL welcome (`lib.rs:727`) → `compose(Recipe::repl_welcome(), gen)`.
-- MCP prompt set → generated by iterating the concept/recipe registry instead of the
-  hand-maintained list of 6.
+- An embedder's MCP `instructions:` → `compose(Recipe::agent_onboarding(), gen)`.
+- An embedder's `execute` tool description → `Recipe::tool_description()`.
+- REPL welcome (`kaish-repl/src/lib.rs`) → `compose(Recipe::repl_welcome(), gen)`.
+- An embedder's MCP prompt set → generated by iterating the concept/recipe registry
+  instead of a hand-maintained list.
 - kaijutsu / kaibo → depend on `kaish-help`, call `Recipe::agent_onboarding()` (or a
-  custom `Selector`) for the instructions they pass to their agents and humans.
+  custom `Selector`) for the instructions they pass to their agents and humans, and
+  drive kaish itself through `KernelClient`/`execute()`.
 
 ## 8. i18n
 
@@ -275,7 +289,10 @@ for a human reader. Visibility lives at build/introspection time instead:
    moved to fragments. `LANGUAGE.md` stays hand-authored; a test guards that it
    still covers the syntax surface. (Full decomposition of LANGUAGE.md itself was
    declined — preserve its prose flow.)
-3. ✅ **DONE (2026-06-06).** Wired every runtime surface to the corpus:
+3. ✅ **DONE (2026-06-06).** Wired every runtime surface to the corpus. *(The MCP
+   wiring described here lived in the since-removed in-tree `kaish-mcp` crate; the same
+   `compose(...)` calls now run in embedders' MCP handlers. Kept as the historical
+   record of how the surfaces were single-sourced.)*
    - MCP `instructions:` (`handler.rs` `get_info`) → `compose(Recipe::agent_onboarding,
      SchemaContent::new(&[]))` (empty schemas → skips the inline builtin dump; clients
      run `help builtins`) + the MCP-specific tail (tools / `--init` / `kaish://vfs`),
