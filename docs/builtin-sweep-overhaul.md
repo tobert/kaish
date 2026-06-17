@@ -111,6 +111,23 @@ EMBEDDING.md, issues.md MCP follow-up updated.
   where rm requires existence; **overlay semantics** — should latch/trash fire on
   ephemeral overlay writes that only materialize on `kaish-vfs commit`? `--confirm`
   flag name (tee/patch have none today); does `tee -a` (append) gate?
+- **⛳ Decisions (Amy, 2026-06-17):**
+  - **Latch + trash stay ON consistently, even in overlay mode.** The
+    protections are about *agent-operation* safety, not just real-FS data —
+    latch guards the user from a dangerous op even in virtual space, and trash
+    likewise. So a tee/patch overwrite gates regardless of `--overlay`. (Don't
+    bypass gating in overlay; the overlay being reversible is not a reason to
+    skip the confirm.)
+  - **Truncating overwrite gates (trash + latch); `tee -a` append does NOT gate
+    — for now.** Keep the first cut simpler: append is non-destructive, so leave
+    it ungated and **leave a note** (here + code comment) that we may add
+    latch/trash-on-append once a concrete use case appears. New file (no prior
+    content) → just write, no trash.
+  - Open impl detail deferred to coding: `decide_mutation_action` shape,
+    `--confirm` flag naming, and how trash physically captures prior content in
+    overlay mode (overlay preserves the original via `reset`, so trash there may
+    be a copy-within-overlay vs real-trash — resolve when building; check back
+    if thorny).
 - **Test:** `tee`/`patch` over an existing file under `set -o latch` → exit 2 + nonce
   on first call, applies on `--confirm`; trash captures prior content; `/tmp`,`/v`
   excluded; overlay-write behavior pinned per the decision.
@@ -203,9 +220,10 @@ EMBEDDING.md, issues.md MCP follow-up updated.
 
 ### [ ] 1. `sort -V` (version sort) unimplemented
 - **Symptom (A7):** `sort -V` over `v1.10,v1.2,v1.9` → "unexpected argument '-V'".
-- **Verdict:** LOUD, reasonable boundary but a reached-for form. **Decide:** implement
-  version sort, or keep loud with a clear "version sort not supported" hint. Pin via
-  80/20 — likely implement (common for tags/semver).
+- **Verdict:** LOUD, reasonable boundary but a reached-for form. **⛳ Decision (Amy,
+  2026-06-17): implement version sort** (`-V`/`--version-sort`) — common for
+  tags/semver, squarely in the 80%. Standard version comparison (numeric runs
+  compared numerically). Pin against banked consensus.
 - **Test:** `sort -V` over `v1.10\nv1.2\nv1.9` == `v1.2\nv1.9\nv1.10`.
 
 ---
@@ -227,7 +245,10 @@ EMBEDDING.md, issues.md MCP follow-up updated.
 ### [ ] 2. `patch` emits an extra "N changes applied" line on stdout
 - **Symptom (PT1):** `patch` stdout is `patching file …\nN changes applied` vs
   consensus `patching file …\n`. The summary line is kaish-specific.
-- **Fix/decide:** drop it, or route to stderr (progress, not data). Pin via panel.
+- **⛳ Decision (Amy, 2026-06-17): follow `patch(1)`** — 30 years stable. GNU
+  patch emits `patching file …` on stdout and no "N changes applied" line, so
+  **drop the kaish-specific summary line** (hunk failures still go to stderr as
+  patch(1) does).
 
 ### [ ] 3. LOUD message quality
 - Comma-parse message (P2.1) says "token pasting" when it's a comma — misleading even
