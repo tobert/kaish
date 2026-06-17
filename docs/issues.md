@@ -381,6 +381,29 @@ is correct. Pinned by `jq_equals_form_arg_is_rejected_not_silently_run`.)
 
 ## P3 — Scheduler and infra
 
+### Pre-0.9 punch-list residuals — low-frequency fidelity gaps (2026-06-17)
+Deferred from the pre-0.9 pass (`docs/next.md`); the P1/P2 items there landed
+(`fix/pre-0.9-punch-list`). These are low-frequency, record-then-defer:
+- **sed `p` / `s///p` in non-quiet mode** suppress the auto-print → a single print
+  where GNU/POSIX print twice. Invisible in tests (all `p` tests use `-n`). Add a
+  non-quiet test at minimum.
+- **sed `s///0`** is silently treated as first-match (GNU errors); **empty `//`**
+  compiles an always-match regex instead of reusing the last pattern. Pin with tests.
+- **awk `"1e"` → 0** (`parse_awk_number` accepts a partial exponent, then
+  `unwrap_or(0.0)`); **`FILENAME` always empty** (never set from the input path);
+  **`RS=""` paragraph mode** splits on exactly `"\n\n"` so runs of blank lines yield
+  stray records; **`OFMT` ignored** (format hardcoded `%.6g`).
+- **multi-file `head`/`tail` strip the trailing newline** while single-file emits
+  one — inconsistent (`head.rs`/`tail.rs` `*_files`).
+- **stdin bridge-thread leak / `block_on`-after-shutdown race**: the REPL detaches an
+  OS thread blocked in `read(2)` that can't observe `PipeReader::drop` while parked
+  (CLI: bounded, no hang; a long-lived embedder with a never-closing producer would
+  leak a thread permanently). Harden with `select!`/cancellation.
+- **`PipeStdinGuard::try_write` silent skip** (`kernel.rs`) and the **test-only
+  `BackendDispatcher::try_external` stdin-task leak** on unreachable error returns
+  (missing the `AbortStdinCopyOnDrop` guard the production path has). Both "shouldn't
+  fire" but are silent — add the guard / make it loud.
+
 ### Code formatting (rustfmt) — considered and declined 2026-06-14
 **Decision (Amy): not adopting rustfmt.** The audience for this code is Claude and
 other agents, not human reviewers, so rustfmt's payoff (consistent visual style,
