@@ -166,14 +166,31 @@ EMBEDDING.md, issues.md MCP follow-up updated.
 - **Test:** `cut -d: -f "1,3"` over `a:b:c` == `a:c` (quoted idiom works — pin it); the
   parse-error hint for an unquoted comma mentions quoting (asserted in P4.3).
 
-### [ ] 2. `tail -n +N` (from line N) misread as `tail -n N`
+### [x] 2. `tail -n +N` (from line N) misread as `tail -n N` — FIXED 2026-06-17
+**Fix:** `parse_line_spec` detects the `+`-prefixed String (the `+` survives
+lexing; a bare `parse()` dropped it) → from-line-N semantics (skip N-1, `+1` =
+whole input). Single-stream + multi-file. Tests in
+`builtin_sweep_fidelity_tests.rs`. DeepSeek-reviewed.
+**Discovered (DeepSeek, deferred):** the `-c` byte-count path on head/tail has
+the SAME unsigned-wrap class — `head -c -1` casts `*i as usize` → `usize::MAX`.
+Not in the consensus findings; natural next sweep item if we touch `-c`. Also
+`tail +3`/`head +3` POSIX shorthand (without `-n`) lexes `+3` as a String the
+shorthand handler skips (it only catches negative Int) — both pre-existing, out
+of this fix's scope.
+
 - **Symptom (TL2):** `tail -n +2` on 4 lines yields the **last 2** (`cherry,date`)
   instead of **from line 2** (`banana,cherry,date`). The `+N` "start at line N" form
   is silently treated as plain `N`.
 - **Verdict:** SILENT-WRONG. **Fix:** parse a leading `+` as start-offset semantics.
 - **Test:** `tail -n +2` and `tail -n +1` (== whole input).
 
-### [ ] 3. `head -n -N` (all but last N) unsupported → emits everything
+### [x] 3. `head -n -N` (all but last N) unsupported → emits everything — FIXED 2026-06-17
+**Fix:** consolidated head's 4 duplicated count-parsers into one
+`Head::line_spec → (count, all_but_last)` that treats a negative Int / `-`-prefixed
+String as all-but-last-N (was `*i as usize` wrap → giant `take`). Streaming
+fast-path falls back to buffered when all_but_last (can't early-terminate).
+Tests in `builtin_sweep_fidelity_tests.rs`. DeepSeek-reviewed.
+
 - **Symptom (H2):** `head -n -1` emits all 4 lines instead of the first 3.
 - **Verdict:** SILENT-WRONG (negative count ignored). **Fix:** support negative `-N`
   (all but last N), or fail loud if declared out of scope. Pin via panel if contested.

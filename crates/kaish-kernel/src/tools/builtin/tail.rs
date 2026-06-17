@@ -44,6 +44,7 @@ impl Tool for Tail {
             [
                 ("Last 10 lines (default)", "tail file.txt"),
                 ("Last 20 lines", "tail -n 20 log.txt"),
+                ("From line 2 to the end", "tail -n +2 log.txt"),
                 ("Last 1000 bytes", "tail -c 1000 file.txt"),
             ],
         )
@@ -129,19 +130,17 @@ impl Tool for Tail {
             },
         };
 
-        // Line mode: output last N lines
-        let lines = args
-            .get("lines", usize::MAX)
-            .and_then(|v| match v {
-                Value::Int(i) => Some(*i as usize),
-                Value::String(s) => s.parse().ok(),
-                _ => None,
-            })
-            .unwrap_or(10);
+        // Line mode: `-n N` = last N lines; `-n +N` = from line N (1-based).
+        let (count, from_start) = parse_line_spec(&args);
 
         let all_lines: Vec<&str> = input.lines().collect();
         let total = all_lines.len();
-        let skip_count = total.saturating_sub(lines);
+        let skip_count = if from_start {
+            // From line N: skip the first N-1 lines (`+1` = whole input).
+            count.saturating_sub(1).min(total)
+        } else {
+            total.saturating_sub(count)
+        };
         let output_lines: Vec<&str> = all_lines.into_iter().skip(skip_count).collect();
 
         if output_lines.is_empty() {
@@ -166,17 +165,24 @@ impl Tool for Tail {
     }
 }
 
+/// Resolve the `-n` line spec into `(count, from_start)`. `-n +N` (lexed as a
+/// String with a leading `+`) means "from line N" (1-based); plain `-n N` means
+/// "last N". A bare `parse()` would silently drop the `+` and conflate the two.
+fn parse_line_spec(args: &ToolArgs) -> (usize, bool) {
+    match args.get("lines", usize::MAX) {
+        Some(Value::String(s)) if s.starts_with('+') => {
+            (s[1..].parse().unwrap_or(1), true)
+        }
+        Some(Value::Int(i)) => (*i as usize, false),
+        Some(Value::String(s)) => (s.parse().unwrap_or(10), false),
+        _ => (10, false),
+    }
+}
+
 impl Tail {
     /// Tail for multiple files: show each with `==> filename <==` header.
     async fn tail_files(&self, ctx: &mut ExecContext, args: &ToolArgs, paths: &[String]) -> ExecResult {
-        let lines = args
-            .get("lines", usize::MAX)
-            .and_then(|v| match v {
-                Value::Int(i) => Some(*i as usize),
-                Value::String(s) => s.parse().ok(),
-                _ => None,
-            })
-            .unwrap_or(10);
+        let (count, from_start) = parse_line_spec(args);
 
         let mut output = String::new();
         let multi = paths.len() > 1;
@@ -192,7 +198,11 @@ impl Tail {
                             output.push_str(&format!("==> {} <==\n", path));
                         }
                         let all_lines: Vec<&str> = content.lines().collect();
-                        let skip = all_lines.len().saturating_sub(lines);
+                        let skip = if from_start {
+                            count.saturating_sub(1).min(all_lines.len())
+                        } else {
+                            all_lines.len().saturating_sub(count)
+                        };
                         let tail: Vec<&str> = all_lines.into_iter().skip(skip).collect();
                         output.push_str(&tail.join("\n"));
                         output.push('\n');

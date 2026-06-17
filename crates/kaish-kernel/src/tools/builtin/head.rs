@@ -45,6 +45,7 @@ impl Tool for Head {
             [
                 ("First 10 lines (default)", "head file.txt"),
                 ("First 5 lines", "head -n 5 file.txt"),
+                ("All but the last line", "head -n -1 file.txt"),
                 ("First 100 bytes", "head -c 100 file.txt"),
             ],
         )
@@ -104,32 +105,14 @@ impl Tool for Head {
                 Value::String(s) => s.parse().ok(),
                 _ => None,
             });
-            if bytes.is_some() {
-                // Put pipe back — bytes mode doesn't use streaming
+            let (count, all_but_last) = Self::line_spec(&args);
+            if bytes.is_some() || all_but_last {
+                // Bytes mode and `-n -N` (all but last N) both need the whole
+                // input — they can't early-terminate. Put the pipe back and fall
+                // through to the buffered path.
                 ctx.pipe_stdin = Some(pipe_in);
             } else {
-                let lines = args
-                    .get("lines", usize::MAX)
-                    .and_then(|v| match v {
-                        Value::Int(i) => Some(*i as usize),
-                        Value::String(s) => s.parse().ok(),
-                        _ => None,
-                    })
-                    .unwrap_or(10);
-
-                let lines = if args.has_flag("n") {
-                    args.get("n", usize::MAX)
-                        .and_then(|v| match v {
-                            Value::Int(i) => Some(*i as usize),
-                            Value::String(s) => s.parse().ok(),
-                            _ => None,
-                        })
-                        .unwrap_or(lines)
-                } else {
-                    lines
-                };
-
-                return self.stream_head_lines(ctx, pipe_in, lines).await;
+                return self.stream_head_lines(ctx, pipe_in, count).await;
             }
         }
 
@@ -184,30 +167,15 @@ impl Tool for Head {
             None => ctx.read_stdin_to_string().await.unwrap_or_default(),
         };
 
-        // Line mode: output first N lines
-        let lines = args
-            .get("lines", usize::MAX)
-            .and_then(|v| match v {
-                Value::Int(i) => Some(*i as usize),
-                Value::String(s) => s.parse().ok(),
-                _ => None,
-            })
-            .unwrap_or(10);
-
-        // Handle -n flag as alias
-        let lines = if args.has_flag("n") {
-            args.get("n", usize::MAX)
-                .and_then(|v| match v {
-                    Value::Int(i) => Some(*i as usize),
-                    Value::String(s) => s.parse().ok(),
-                    _ => None,
-                })
-                .unwrap_or(lines)
+        // Line mode: `-n N` = first N; `-n -N` = all but the last N.
+        let (count, all_but_last) = Self::line_spec(&args);
+        let all_lines: Vec<&str> = input.lines().collect();
+        let take_n = if all_but_last {
+            all_lines.len().saturating_sub(count)
         } else {
-            lines
+            count
         };
-
-        let output_lines: Vec<&str> = input.lines().take(lines).collect();
+        let output_lines: Vec<&str> = all_lines.into_iter().take(take_n).collect();
         if output_lines.is_empty() {
             ExecResult::with_output(OutputData::new())
         } else {
@@ -232,7 +200,7 @@ impl Tool for Head {
 impl Head {
     /// Head for multiple files: show each with `==> filename <==` header.
     async fn head_files(&self, ctx: &mut ExecContext, args: &ToolArgs, paths: &[String]) -> ExecResult {
-        let lines = Self::parse_line_count(args);
+        let (count, all_but_last) = Self::line_spec(args);
         let mut output = String::new();
         let multi = paths.len() > 1;
 
@@ -246,7 +214,13 @@ impl Head {
                             if i > 0 { output.push('\n'); }
                             output.push_str(&format!("==> {} <==\n", path));
                         }
-                        let head: Vec<&str> = content.lines().take(lines).collect();
+                        let file_lines: Vec<&str> = content.lines().collect();
+                        let take_n = if all_but_last {
+                            file_lines.len().saturating_sub(count)
+                        } else {
+                            count
+                        };
+                        let head: Vec<&str> = file_lines.into_iter().take(take_n).collect();
                         output.push_str(&head.join("\n"));
                         output.push('\n');
                     }
@@ -260,27 +234,27 @@ impl Head {
         ExecResult::with_output(OutputData::text(trimmed))
     }
 
-    /// Parse line count from args (shared by execute and head_glob).
-    fn parse_line_count(args: &ToolArgs) -> usize {
-        let lines = args
-            .get("lines", usize::MAX)
-            .and_then(|v| match v {
-                Value::Int(i) => Some(*i as usize),
-                Value::String(s) => s.parse().ok(),
+    /// Parse the `-n` line spec into `(count, all_but_last)`. A negative value
+    /// (`-n -N`, lexed as `Int(-N)` or a `-`-prefixed string) means "all lines
+    /// but the last N"; a bare `as usize` cast used to wrap it into a giant
+    /// count and emit everything. The POSIX shorthand `head -N` is normalized to
+    /// a positive `lines` before this runs, so a negative here is unambiguously
+    /// the `-n -N` form. Shared by every head path (stream / single / multi).
+    fn line_spec(args: &ToolArgs) -> (usize, bool) {
+        fn pick(v: &Value) -> Option<(usize, bool)> {
+            match v {
+                Value::Int(i) if *i < 0 => Some((i.unsigned_abs() as usize, true)),
+                Value::Int(i) => Some((*i as usize, false)),
+                Value::String(s) if s.starts_with('-') => Some((s[1..].parse().ok()?, true)),
+                Value::String(s) => Some((s.parse().ok()?, false)),
                 _ => None,
-            })
-            .unwrap_or(10);
-
+            }
+        }
+        let base = args.get("lines", usize::MAX).and_then(pick).unwrap_or((10, false));
         if args.has_flag("n") {
-            args.get("n", usize::MAX)
-                .and_then(|v| match v {
-                    Value::Int(i) => Some(*i as usize),
-                    Value::String(s) => s.parse().ok(),
-                    _ => None,
-                })
-                .unwrap_or(lines)
+            args.get("n", usize::MAX).and_then(pick).unwrap_or(base)
         } else {
-            lines
+            base
         }
     }
 
