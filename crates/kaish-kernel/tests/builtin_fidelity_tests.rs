@@ -1,9 +1,14 @@
-//! Kernel-routed fidelity fixes from the builtin sweep (docs/builtin-sweep-
-//! overhaul.md, P2/P3). Each asserts kaish output == the panel's banked
-//! consensus, driven through `kernel.execute_with_options(...)` so the full
-//! lex → parse → dispatch → builtin path runs (not a builtin's `.execute()`).
+//! Output-fidelity tests for the text builtins: each asserts that kaish emits
+//! the expected bytes for a given invocation. Covers `tail -n +N` / `head -n
+//! -N`, `cut` delimiter passthrough + `-s`, `split --limit`, `jq -c`, `wc`
+//! formatting + newline counting, `tr -c`, `sort -V`, the trailing-newline
+//! policy (tac/base64/xxd), and the unquoted-comma argv message.
 //!
-//! Oracle = model-consensus, NOT GNU (`[[model-memory-over-gnu-oracle]]`).
+//! Driven through `kernel.execute_with_options(...)` so the full lex → parse →
+//! dispatch → builtin path runs (not a builtin's `.execute()`). Expected
+//! outputs are a cross-model banked consensus, NOT GNU coreutils
+//! (`[[model-memory-over-gnu-oracle]]`). These pin behavior permanently; they
+//! originated in the 2026-06 builtin sweep (scaffolding since removed).
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]

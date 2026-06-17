@@ -219,6 +219,37 @@ loud-errors on `-i` rather than pretending. Revisit when an embedder (kaibo/kj)
 actually needs agent-driven in-place edits; until then `s/…/…/ … > file` via a
 real external `sed`, or the overlay, covers it.
 
+### `tee` / `patch` bypass the latch + trash machinery (write-model design)
+From the builtin sweep (was punch-list P1.2; deferred here 2026-06-17 to keep the
+release scoped). `tee` and `patch` mutate files through the VFS (overlay-safe)
+but do **not** honor `set -o latch` (confirmation nonce) or trash-on-overwrite the
+way `rm` does — same hazard class as the deferred `sed -i` above. An agent can
+silently overwrite a file via `tee` with no confirm and no recoverable prior copy.
+
+**NOT a reuse of `rm`'s path:** `decide_rm_action → {Trash,Delete,Latch}` means
+"trash IS the op." tee/patch need a *pre-write safety copy then overwrite* — a new
+`decide_mutation_action → {TrashFirst(path), Latch, Proceed}` (same priority chain
++ `/tmp`,`/v` excludes). tee can create a nonexistent file (no trash, just write)
+where rm requires existence.
+
+**Amy decisions (2026-06-17):**
+- **Latch + trash stay ON consistently, even in overlay mode** — the protections
+  are about agent-operation safety, not just real-FS data; latch guards a
+  dangerous op even in virtual space. So a tee/patch overwrite gates regardless of
+  `--overlay`. (Don't skip the confirm just because the overlay is reversible.)
+- **Truncating overwrite gates (trash + latch); `tee -a` append does NOT gate —
+  for now.** Append is non-destructive; keep the first cut simple and revisit
+  latch/trash-on-append when a concrete use case appears. New file (no prior
+  content) → just write, no trash.
+
+**Open impl detail (resolve when building):** the `decide_mutation_action` shape,
+the `--confirm` flag name (tee/patch have none today), and how trash physically
+captures prior content in overlay mode (overlay preserves the original via
+`reset`, so it may be a copy-within-overlay vs real-trash). Pairs naturally with
+the `sed -i` write-model work — do them together. Tests: tee/patch over an
+existing file under `set -o latch` → exit 2 + nonce, applies on `--confirm`; trash
+captures prior content; `/tmp`,`/v` excluded.
+
 ### Streaming file reads — wc/checksum/grep/cmp/cat landed 2026-06-14; residuals
 Scan-oriented builtins no longer read whole files into memory. Mechanism
 (chosen to respect kaish-vfs's runtime-free trait — no `AsyncRead`/tokio in the
