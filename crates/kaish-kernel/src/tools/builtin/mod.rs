@@ -37,7 +37,6 @@ pub(crate) mod format_string;
 mod gather;
 mod grep;
 mod grep_engine;
-mod rg;
 mod head;
 mod ignore;
 mod help;
@@ -136,7 +135,6 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     #[cfg(feature = "git")]
     registry.register(kaish_tools_git::Git);
     registry.register(grep::Grep);
-    registry.register(rg::Rg);
     registry.register(head::Head);
     registry.register(help::Help);
     registry.register(ignore::KaishIgnore);

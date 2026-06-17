@@ -328,7 +328,15 @@ the diff `about` string + examples. No code change.
   documented divergence, not a bug. **Confirm + document**; no code. Do not chase
   richer diff now.
 
-### [ ] 5. Remove `rg`  (Decision #1 — breaking)
+### [x] 5. Remove `rg` (Decision #1 — breaking) — DONE 2026-06-17
+**Removed:** rg.rs + rg.md deleted; deregistered; grep-pcre2 dep + pcre2 feature
+dropped (kaish-kernel + root workspace Cargo.toml); grep_engine `#![allow(dead_code)]`
+removed and the surfaced rg-only dead code pruned (ContextRecord.path/byte_offset,
+max_count/match_count machinery); rg tests removed (realworld module + json_sweep
+case); README lists; CHANGELOG **Removed** (BREAKING) bullet w/ accepted-lost
+features. DeepSeek-reviewed: removal complete, grep NOT regressed (grep counts
+post-hoc, never used the sink early-stop). Follow-up noted in issues.md (Amy):
+port `--type`/`--hidden` etc. into kaish-glob rather than a 2nd search builtin.
 - Delete `rg.rs`, deregister, drop from help/`LANGUAGE.md`/README builtin lists;
   remove orphaned `crates/kaish-help/content/en/rg.md`, the `grep_engine.rs`
   "used by both" comment + its `#![allow(dead_code)]` (so newly-dead code surfaces),

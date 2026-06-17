@@ -93,7 +93,7 @@ seq 1 10 | scatter --as N --limit 4 | echo "processing $N" | gather
 | Feature | Description |
 |---------|-------------|
 | **Familiar syntax** | Variables, pipes, control flow, functions — Bourne-inspired, modern semantics |
-| **Builtins** | grep, rg, jq, git, find, sed, awk, diff, patch, and more — all in-process |
+| **Builtins** | grep, jq, git, find, sed, awk, diff, patch, and more — all in-process |
 | **Structured data** | Commands return typed arrays — `for i in $(seq 1 5)` iterates 5 values, not word-split text |
 | **Strict validation** | Errors caught before execution with clear messages |
 | **Virtual filesystem** | Unified access: native `$HOME` paths (sandboxed), `/tmp`, and the in-memory `/v/` namespace (`/v/jobs` observability, scratch storage) |
@@ -122,7 +122,7 @@ everywhere, a `jq` that always uses the same filter syntax, an `awk` that never 
 
 | Category | Tools |
 |----------|-------|
-| **Text** | awk, base64, cut, diff, grep, head, rg, sed, sort, split, tac, tail, tr, uniq, wc, xxd |
+| **Text** | awk, base64, cut, diff, grep, head, sed, sort, split, tac, tail, tr, uniq, wc, xxd |
 | **Files** | basename, cat, cd, checksum, cmp, cp, dd, dirname, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, readlink, realpath, rm, stat, tee, touch, tree, write |
 | **JSON** | jq |
 | **Git** | git (init, clone, status, add, commit, log, diff, branch, checkout, worktree) |

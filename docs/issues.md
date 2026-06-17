@@ -140,22 +140,22 @@ checksums (entropy is real). Home: a NoLocal kernel-routed test beside the
 DevFs tests in `tests/sandbox_mode_tests.rs`. DevFs:
 `crates/kaish-vfs/src/dev.rs`; range plumbing: `Filesystem::read_range`.
 
-### `rg` parallel walking
-The 2026-04-29 rg builtin uses `ignore::WalkBuilder::build()`, which
-yields a sequential iterator. `WalkParallel::run()` is a few lines'
-diff plus careful synchronization (work-stealing crossbeam deques,
-results merged across workers). High value on large trees — rg's
-real-world advantage. Skipped this round to ship the feature; revisit
-when single-thread perf bites.
-
-### `rg` async stdin streaming
-`rg.rs::run_with_matcher` reads stdin via `ctx.read_stdin_to_string()`
-into a `String` and uses `Searcher::search_slice` on the bytes. Fine
-for small/medium pipes; blocks the runtime worker on large pipes.
-A `SyncPipeReader` adapter (sync `std::io::Read` over async
-`PipeReader` via `Handle::block_on`) plus `Searcher::search_reader`
-would stream chunks. Expected modest payoff; defer until a real
-workload pushes against the buffer.
+### Port useful `rg`-only features into `kaish-glob` / `grep` (Amy, 2026-06-17)
+The `rg` builtin was removed 2026-06-17 (builtin-sweep Decision #1; 80%-rule:
+one search builtin). Some of its dropped flags are genuinely useful and could
+be re-homed in `kaish-glob` (which already depends on `ignore` and wraps
+`ignore::types::Types`/`TypesBuilder`) and surfaced through `grep`/`glob`/`find`
+rather than a second search builtin:
+- **`--type`/`-t`/`-T`** (file-type filters, e.g. `-t rust`) — the strongest
+  candidate; `kaish-glob` already has the `Types` machinery, so this is mostly
+  surface wiring on the existing walkers.
+- **`--hidden`** — kaish-glob already has dotglob-style hidden handling
+  (`[[project_dotfile_glob_fix]]`); a `grep --hidden` could thread it through.
+- **`--no-ignore`** (bypass gitignore), **`--max-count`** (early-stop; the
+  `grep_engine` sink had the hook, removed with rg — re-add on demand).
+Design first: decide whether these live on `grep` flags or on the file-walking
+layer (`find`/`glob`) so search and listing share one type/hidden/ignore model.
+Not urgent; pick up when an agent reaches for `-t`.
 
 ### Output disk-spill — runtime read-only residuals (core fix done 2026-06-06)
 **Core fix landed 2026-06-06** (full narrative now in git history). `OutputLimitConfig`

@@ -151,7 +151,6 @@ const CASES: &[Case] = &[
     Case { name: "read", setup: &[], cmd: "echo hi | read X --json", expect: Expect::Empty },
     Case { name: "readlink", setup: &["ln -s tmp/data.json link.json"], cmd: "readlink link.json --json", expect: Expect::String },
     Case { name: "realpath", setup: &[], cmd: "realpath tmp/data.json --json", expect: Expect::String },
-    Case { name: "rg", setup: &[], cmd: "rg TODO src --json", expect: Expect::Array },
     Case { name: "rm", setup: &["touch del.txt"], cmd: "rm del.txt --json", expect: Expect::Empty },
     Case { name: "sed", setup: &[], cmd: r#"printf 'a\n' | sed 's/a/b/' --json"#, expect: Expect::String },
     Case { name: "seq", setup: &[], cmd: "seq 1 3 --json", expect: Expect::Array },

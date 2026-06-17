@@ -76,14 +76,13 @@ md-5 = "0.10"
 # Pattern matching (grep)
 regex = "1"
 
-# ripgrep family — used for the `rg` builtin, the walker's type-filter
-# system, and the engine swap inside the legacy `grep` builtin. `ignore`
-# provides `Types` (path-name matching, no I/O) and gitignore parsing.
+# ripgrep family — the `grep` builtin's search engine and the walker's
+# type-filter system. `ignore` provides `Types` (path-name matching, no I/O)
+# and gitignore parsing.
 ignore = "0.4"
 grep-searcher = "0.1"
 grep-regex = "0.1"
 grep-matcher = "0.1"
-grep-pcre2 = "0.1"
 bstr = "1"
 
 # Text diffing

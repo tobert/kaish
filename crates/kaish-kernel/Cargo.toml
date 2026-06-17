@@ -67,9 +67,8 @@ chrono = { workspace = true }
 chrono-tz = { workspace = true }
 similar = { workspace = true }
 
-# ripgrep family — `ignore` provides global-gitignore lookup and (later)
-# WalkBuilder for the rg builtin's real-FS path. `grep-*` / `bstr` back
-# the engine swap inside the existing `grep` builtin and the new `rg`.
+# ripgrep family — `ignore` provides global-gitignore lookup + file walking;
+# `grep-*` / `bstr` back the search engine inside the `grep` builtin.
 ignore = { workspace = true }
 grep-searcher = { workspace = true }
 grep-regex = { workspace = true }
@@ -89,10 +88,6 @@ kaish-tools-host = { path = "../kaish-tools-host", version = "0.8.4", optional =
 trash = { workspace = true, optional = true }
 directories = { workspace = true, optional = true }
 tiktoken-rs = { workspace = true, optional = true }
-
-# PCRE2 backing for `rg -P`. Off by default — enabling pulls in a C
-# library, so we keep it opt-in.
-grep-pcre2 = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal", "process", "term"], optional = true }
@@ -141,8 +136,6 @@ full = ["localfs", "overlay", "subprocess", "host", "git", "os-integration", "to
 native = ["full"]
 
 schema = ["dep:schemars", "kaish-types/schema"]
-# Opt-in PCRE2 backend for the `rg` builtin's `-P` flag.
-pcre2 = ["dep:grep-pcre2"]
 
 [build-dependencies]
 chrono = { workspace = true }

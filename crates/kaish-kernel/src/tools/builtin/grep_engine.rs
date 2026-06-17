@@ -1,17 +1,8 @@
-// `grep_engine` is a shared internal API used by both the `grep` builtin
-// (Pillar A) and — once it lands — the `rg` builtin (Pillar B). Some
-// accessors and record fields aren't read yet by `grep` alone but are
-// already part of the contract that rg will consume; suppress dead-code
-// warnings at module scope rather than scattering allows.
-#![allow(dead_code)]
-
-//! Shared search engine glue for the `grep` and `rg` builtins.
+//! Search engine glue for the `grep` builtin.
 //!
 //! Wraps `grep_searcher::Searcher` + `grep_matcher::Matcher` with an
-//! accumulator [`Sink`] that emits a linear stream of [`SearchEvent`]s.
-//! Both the legacy `grep` (engine swap, Pillar A) and the new `rg`
-//! builtin (Pillar B) consume this same stream and render it into
-//! kaish's `OutputData` shapes.
+//! accumulator [`Sink`] that emits a linear stream of [`SearchEvent`]s,
+//! which `grep` renders into kaish's `OutputData` shapes.
 
 use std::path::PathBuf;
 
@@ -68,9 +59,7 @@ impl From<&SinkContextKind> for ContextKind {
 /// One non-matching line that was emitted as before/after context.
 #[derive(Debug, Clone)]
 pub struct ContextRecord {
-    pub path: Option<PathBuf>,
     pub line_number: Option<u64>,
-    pub absolute_byte_offset: u64,
     pub line_text: String,
     pub kind: ContextKind,
 }
@@ -91,10 +80,6 @@ pub struct AccumulatorSink<'m, M: Matcher> {
     path: Option<PathBuf>,
     matcher: &'m M,
     events: Vec<SearchEvent>,
-    /// Stop after this many MATCH events (does not count context). When
-    /// `Some(0)`, no matches are accepted (useful for files-with-matches).
-    max_count: Option<u64>,
-    match_count: u64,
 }
 
 impl<'m, M: Matcher> AccumulatorSink<'m, M> {
@@ -103,27 +88,11 @@ impl<'m, M: Matcher> AccumulatorSink<'m, M> {
             path,
             matcher,
             events: Vec::new(),
-            max_count: None,
-            match_count: 0,
         }
-    }
-
-    pub fn with_max_count(mut self, n: Option<u64>) -> Self {
-        self.max_count = n;
-        self
-    }
-
-    /// Total match count seen so far (excludes context).
-    pub fn match_count(&self) -> u64 {
-        self.match_count
     }
 
     pub fn into_events(self) -> Vec<SearchEvent> {
         self.events
-    }
-
-    pub fn events(&self) -> &[SearchEvent] {
-        &self.events
     }
 
     fn submatches_for(&self, line: &[u8]) -> Vec<Submatch> {
@@ -155,16 +124,10 @@ impl<M: Matcher> Sink for AccumulatorSink<'_, M> {
         _searcher: &Searcher,
         mat: &SinkMatch<'_>,
     ) -> Result<bool, Self::Error> {
-        if let Some(limit) = self.max_count
-            && self.match_count >= limit
-        {
-            return Ok(false);
-        }
         let bytes = mat.bytes();
         let trimmed = trim_line_terminator(bytes);
         let line_text = trimmed.to_str_lossy().into_owned();
         let submatches = self.submatches_for(trimmed);
-        self.match_count += 1;
         self.events.push(SearchEvent::Match(MatchRecord {
             path: self.path.clone(),
             line_number: mat.line_number(),
@@ -172,11 +135,6 @@ impl<M: Matcher> Sink for AccumulatorSink<'_, M> {
             line_text,
             submatches,
         }));
-        if let Some(limit) = self.max_count
-            && self.match_count >= limit
-        {
-            return Ok(false);
-        }
         Ok(true)
     }
 
@@ -188,9 +146,7 @@ impl<M: Matcher> Sink for AccumulatorSink<'_, M> {
         let bytes = ctx.bytes();
         let line_text = trim_line_terminator(bytes).to_str_lossy().into_owned();
         self.events.push(SearchEvent::Context(ContextRecord {
-            path: self.path.clone(),
             line_number: ctx.line_number(),
-            absolute_byte_offset: ctx.absolute_byte_offset(),
             line_text,
             kind: ctx.kind().into(),
         }));
@@ -255,19 +211,6 @@ mod tests {
         assert_eq!(matches[2].submatches.len(), 2);
         assert_eq!(matches[2].submatches[0].start, 0);
         assert_eq!(matches[2].submatches[1].start, 4);
-    }
-
-    #[test]
-    fn accumulator_respects_max_count() {
-        let input = b"foo\nfoo\nfoo\nfoo\n";
-        let matcher = RegexMatcher::new("foo").unwrap();
-        let mut sink = AccumulatorSink::new(&matcher, None).with_max_count(Some(2));
-        SearcherBuilder::new()
-            .line_number(true)
-            .build()
-            .search_slice(&matcher, input, &mut sink)
-            .expect("search");
-        assert_eq!(sink.match_count(), 2);
     }
 
     #[test]
