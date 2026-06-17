@@ -223,24 +223,24 @@ async fn mounts_json_resident_bytes_null_for_nolocal_root_unbudgeted() {
 }
 
 // ---------------------------------------------------------------------------
-// mcp() profile has 64 MiB budget by default
+// agent() profile has 64 MiB budget by default
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "localfs")]
 #[tokio::test]
-async fn mcp_profile_has_64mib_budget() {
-    let config = KernelConfig::mcp();
+async fn agent_profile_has_64mib_budget() {
+    let config = KernelConfig::agent();
     assert_eq!(
         config.vfs_budget_bytes,
         Some(64 * 1024 * 1024),
-        "mcp() must default to 64 MiB VFS budget"
+        "agent() must default to 64 MiB VFS budget"
     );
 }
 
 #[cfg(feature = "localfs")]
 #[tokio::test]
-async fn without_vfs_budget_removes_mcp_budget() {
-    let config = KernelConfig::mcp().without_vfs_budget();
+async fn without_vfs_budget_removes_agent_budget() {
+    let config = KernelConfig::agent().without_vfs_budget();
     assert_eq!(config.vfs_budget_bytes, None);
 }
 

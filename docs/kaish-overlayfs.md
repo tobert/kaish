@@ -256,11 +256,11 @@ Counting and limiting are different concerns; split them:
   loudly, ENOSPC-style (`StorageFull`, message naming the budget and the knob)
   — an in-band error a model reads and adapts to; fail loud over quietly eating
   RAM. Defaults ride kernel profiles exactly like `OutputLimitConfig` already
-  does: `KernelConfig::mcp()` gets a conservative default budget,
+  does: `KernelConfig::agent()` gets a conservative default budget,
   interactive/host profiles generous or none. That flips the polarity —
   embedders are protected by default and opt *out* knowingly — at the cost of
   one loud, documented behavior change for existing embedders.
-  `KernelConfig::mcp()` and `mcp_with_root()` default to a 64 MiB budget
+  `KernelConfig::agent()` and `agent_with_root()` default to a 64 MiB budget
   with the label `"vfs-memory"`. Opt out via `without_vfs_budget()` or
   override with `with_vfs_budget(limit, label)`.
 - **Introspection rides the counters**: a `df --json`-style surface (per mount:
@@ -298,21 +298,22 @@ drifts.
   never default-on anywhere.
   - `kaish --overlay` — interactive REPL
   - `kaish --overlay -c 'script'` — one-shot
-  - `kaish-mcp --overlay` — MCP server
-  - `KernelConfig::with_overlay(true)` — embedder API
-  - **MCP per-call semantics**: each `execute()` call creates a fresh kernel
-    with a fresh overlay transaction. `kaish-vfs commit` must run in the
-    **same call** as the writes — if you write in call N and commit in call N+1,
-    the transaction from call N was discarded when its kernel was dropped. This
-    is why default-on for MCP was rejected: a model that issues writes and
-    commits in separate calls would silently lose every write.
+  - `KernelConfig::with_overlay(true)` — embedder API (an embedder, e.g. an MCP
+    server like kaibo/kaijutsu, exposes it however it likes)
+  - **Per-call semantics (agent embedders)**: an agent embedder typically creates
+    a fresh kernel per `execute()` call, each with a fresh overlay transaction.
+    `kaish-vfs commit` must run in the **same call** as the writes — if you write
+    in call N and commit in call N+1, the transaction from call N was discarded
+    when its kernel was dropped. This is why default-on was rejected for that
+    pattern: a model that issues writes and commits in separate calls would
+    silently lose every write.
 - **Builtin name** (settled): `kaish-vfs` with subcommands, superseding the
   earlier design names `vfs-diff` / `vfs-commit`. Subcommands: `status`,
   `diff [path...]`, `commit`, `reset [path]`.
 - **JobFs resident counting**: intentionally excluded from `resident_bytes()`
   and the `vfs-memory` budget. JobFs synthesizes a filesystem over already-bounded
   `BoundedStream` ring buffers; those bytes are accounted separately.
-- **Budget defaults**: `KernelConfig::mcp()` / `mcp_with_root()` default to
+- **Budget defaults**: `KernelConfig::agent()` / `agent_with_root()` default to
   64 MiB with label `"vfs-memory"`. Opt out with `without_vfs_budget()`.
 
 ## Open forks (still)

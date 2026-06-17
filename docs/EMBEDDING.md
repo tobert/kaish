@@ -125,7 +125,7 @@ let config = KernelConfig::repl();
 let config = KernelConfig::isolated();
 
 // Sandboxed-to-$HOME with a 64 MiB in-memory VFS budget (the agent preset)
-let config = KernelConfig::mcp();
+let config = KernelConfig::agent();
 ```
 
 Other builders: `.with_latch(bool)` / `.with_trash(bool)` (destructive-op

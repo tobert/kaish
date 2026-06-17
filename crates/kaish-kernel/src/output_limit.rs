@@ -14,8 +14,8 @@
 //! Either way the exit code is remapped to 3 (`did_spill`) so callers can tell
 //! the output was capped.
 //!
-//! Per-mode defaults: MCP kernels get an 8KB limit, REPL/test kernels
-//! are unlimited. Runtime-switchable via the `kaish-output-limit` builtin.
+//! Per-mode defaults: sandboxed-agent kernels get an 8KB limit, REPL/test
+//! kernels are unlimited. Runtime-switchable via the `kaish-output-limit` builtin.
 
 use std::path::PathBuf;
 
@@ -23,8 +23,8 @@ use crate::interpreter::ExecResult;
 #[cfg(feature = "localfs")]
 use crate::paths;
 
-/// Default output limit for MCP mode (8KB).
-const DEFAULT_MCP_LIMIT: usize = 8 * 1024;
+/// Default output limit for the sandboxed-agent preset (8KB).
+const DEFAULT_AGENT_LIMIT: usize = 8 * 1024;
 
 /// Default head preview size (bytes of output start to keep).
 const DEFAULT_HEAD_BYTES: usize = 1024;
@@ -80,13 +80,13 @@ impl OutputLimitConfig {
 
     /// Default limit used by `on` subcommand and `set -o output-limit`.
     pub fn default_limit() -> usize {
-        DEFAULT_MCP_LIMIT
+        DEFAULT_AGENT_LIMIT
     }
 
-    /// MCP-safe defaults: 8KB limit, 1KB head, 512B tail, disk spill.
-    pub fn mcp() -> Self {
+    /// Sandboxed-agent defaults: 8KB limit, 1KB head, 512B tail, disk spill.
+    pub fn agent() -> Self {
         Self {
-            max_bytes: Some(DEFAULT_MCP_LIMIT),
+            max_bytes: Some(DEFAULT_AGENT_LIMIT),
             head_bytes: DEFAULT_HEAD_BYTES,
             tail_bytes: DEFAULT_TAIL_BYTES,
             spill_mode: SpillMode::Disk,
@@ -847,8 +847,8 @@ mod tests {
     }
 
     #[test]
-    fn test_mcp_is_enabled() {
-        let config = OutputLimitConfig::mcp();
+    fn test_agent_preset_is_enabled() {
+        let config = OutputLimitConfig::agent();
         assert!(config.is_enabled());
         assert_eq!(config.max_bytes(), Some(8 * 1024));
         assert_eq!(config.head_bytes(), 1024);
@@ -870,7 +870,7 @@ mod tests {
 
     #[test]
     fn test_set_head_tail() {
-        let mut config = OutputLimitConfig::mcp();
+        let mut config = OutputLimitConfig::agent();
         config.set_head_bytes(2048);
         config.set_tail_bytes(1024);
         assert_eq!(config.head_bytes(), 2048);
@@ -916,7 +916,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_spill_if_needed_under_limit() {
-        let config = OutputLimitConfig::mcp();
+        let config = OutputLimitConfig::agent();
         let mut result = ExecResult::success("short output");
         let spill = spill_if_needed(&mut result, &config).await;
         assert!(spill.is_none());
@@ -987,11 +987,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_kernel_mcp_truncates_large_output() {
+    async fn test_kernel_agent_truncates_large_output() {
         use crate::kernel::{Kernel, KernelConfig};
 
-        // MCP config has 8K limit by default — use a smaller limit for testing
-        let config = KernelConfig::mcp()
+        // agent preset has 8K limit by default — use a smaller limit for testing
+        let config = KernelConfig::agent()
             .with_output_limit(OutputLimitConfig {
                 max_bytes: Some(200),
                 head_bytes: 50,
@@ -1012,7 +1012,7 @@ mod tests {
     async fn test_spill_exits_3() {
         use crate::kernel::{Kernel, KernelConfig};
 
-        let config = KernelConfig::mcp()
+        let config = KernelConfig::agent()
             .with_output_limit(OutputLimitConfig {
                 max_bytes: Some(100),
                 head_bytes: 30,
@@ -1046,7 +1046,7 @@ mod tests {
         use crate::kernel::{Kernel, KernelConfig};
 
         // Builtins go through post-hoc spill check
-        let config = KernelConfig::mcp()
+        let config = KernelConfig::agent()
             .with_output_limit(OutputLimitConfig {
                 max_bytes: Some(100),
                 head_bytes: 30,
@@ -1281,8 +1281,8 @@ mod tests {
 
     #[test]
     fn test_in_memory_builder_and_default() {
-        assert_eq!(OutputLimitConfig::mcp().spill_mode(), SpillMode::Disk);
-        assert_eq!(OutputLimitConfig::mcp().in_memory().spill_mode(), SpillMode::Memory);
+        assert_eq!(OutputLimitConfig::agent().spill_mode(), SpillMode::Disk);
+        assert_eq!(OutputLimitConfig::agent().in_memory().spill_mode(), SpillMode::Memory);
 
         let mut config = OutputLimitConfig::none();
         config.set_spill_mode(SpillMode::Memory);
@@ -1357,7 +1357,7 @@ mod tests {
     async fn test_kernel_memory_mode_exits_3_preserves_original() {
         use crate::kernel::{Kernel, KernelConfig};
 
-        let config = KernelConfig::mcp().with_output_limit(OutputLimitConfig {
+        let config = KernelConfig::agent().with_output_limit(OutputLimitConfig {
             max_bytes: Some(100),
             head_bytes: 30,
             tail_bytes: 20,
@@ -1380,7 +1380,7 @@ mod tests {
         // NoLocal mount + an explicit Disk spill mode: the kernel must override
         // to Memory so nothing is written to a host spill file, even though
         // `localfs` is compiled in.
-        let config = KernelConfig::mcp()
+        let config = KernelConfig::agent()
             .with_vfs_mode(VfsMountMode::NoLocal)
             .with_output_limit(OutputLimitConfig {
                 max_bytes: Some(100),

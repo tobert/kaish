@@ -382,8 +382,8 @@ is correct. Pinned by `jq_equals_form_arg_is_rejected_not_silently_run`.)
 ## P3 — Scheduler and infra
 
 ### Pre-0.9 punch-list residuals — low-frequency fidelity gaps (2026-06-17)
-Deferred from the pre-0.9 pass (`docs/next.md`); the P1/P2 items there landed
-(`fix/pre-0.9-punch-list`). These are low-frequency, record-then-defer:
+Deferred from the pre-0.9 pass; the P1/P2 items landed (PR #10). These are
+low-frequency, record-then-defer:
 - **sed `p` / `s///p` in non-quiet mode** suppress the auto-print → a single print
   where GNU/POSIX print twice. Invisible in tests (all `p` tests use `-n`). Add a
   non-quiet test at minimum.

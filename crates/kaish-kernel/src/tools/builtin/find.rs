@@ -478,7 +478,7 @@ mod tests {
     async fn test_find_enforced_filters_defaults() {
         // Enforced scope (MCP default): find skips default-ignored dirs
         let mut ctx = make_ctx_with_artifacts().await;
-        ctx.ignore_config = crate::ignore_config::IgnoreConfig::mcp();
+        ctx.ignore_config = crate::ignore_config::IgnoreConfig::agent();
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("/".into()));

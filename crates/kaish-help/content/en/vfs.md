@@ -81,7 +81,7 @@ passthrough (REPL) mode `/dev` is the real host `/dev` instead.
 To block external command execution, set `allow_external_commands=false` in `KernelConfig`:
 
 ```rust
-KernelConfig::mcp().with_allow_external_commands(false)
+KernelConfig::agent().with_allow_external_commands(false)
 ```
 
 When disabled, PATH lookups return "command not found" and the `exec`/`spawn` builtins return errors. `KernelConfig::isolated()` sets this to `false` by default.

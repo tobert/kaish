@@ -14,7 +14,7 @@ mod overlay_tests {
 
     /// Build an overlay kernel rooted at `dir`.
     fn overlay_kernel(dir: &Path) -> Kernel {
-        let config = KernelConfig::mcp_with_root(dir.to_path_buf())
+        let config = KernelConfig::agent_with_root(dir.to_path_buf())
             .with_overlay(true)
             .with_latch(false)
             .with_trash(false)
@@ -389,7 +389,7 @@ mod overlay_tests {
         let root = dir.path();
 
         // 100-byte budget; we'll try to write ~200 bytes.
-        let config = KernelConfig::mcp_with_root(root.to_path_buf())
+        let config = KernelConfig::agent_with_root(root.to_path_buf())
             .with_overlay(true)
             .with_vfs_budget(100)
             .with_latch(false)
@@ -641,7 +641,7 @@ mod diff_header_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
 
-        let config = KernelConfig::mcp_with_root(root.to_path_buf())
+        let config = KernelConfig::agent_with_root(root.to_path_buf())
             .with_overlay(true)
             .with_latch(false)
             .with_trash(false)
