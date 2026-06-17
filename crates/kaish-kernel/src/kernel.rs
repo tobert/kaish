@@ -4461,6 +4461,23 @@ impl Kernel {
             None
         };
 
+        // Abort the stdin-copy task on EVERY exit path (the capture path, both
+        // interactive `inherit_output` returns, and any early error return).
+        // Once the child is reaped the copy has nothing left to deliver; if it
+        // were left parked on `pipe_in.read()` it would leak and hold the
+        // upstream pipe reader open. A drop guard is the single place that
+        // covers all returns — explicit per-return aborts were error-prone (an
+        // earlier version missed the two inherit_output returns).
+        struct AbortStdinCopyOnDrop(Option<tokio::task::JoinHandle<()>>);
+        impl Drop for AbortStdinCopyOnDrop {
+            fn drop(&mut self) {
+                if let Some(t) = self.0.take() {
+                    t.abort();
+                }
+            }
+        }
+        let _stdin_copy_guard = AbortStdinCopyOnDrop(stdin_task);
+
         if inherit_output {
             // Job control path: use waitpid with WUNTRACED for Ctrl-Z support
             #[cfg(unix)]
@@ -4634,7 +4651,7 @@ impl Kernel {
             let status = match wait_or_kill(&mut child, kill_target.as_ref(), &cancel, kill_grace).await {
                 Ok(s) => s,
                 Err(e) => {
-                    if let Some(task) = stdin_task { task.abort(); let _ = task.await; }
+                    // stdin-copy task is aborted by `_stdin_copy_guard` on return.
                     if let Some(task) = stdout_task { task.abort(); let _ = task.await; }
                     if let Some(task) = stderr_task { task.abort(); let _ = task.await; }
                     return Ok(Some(ExecResult::failure(
@@ -4643,13 +4660,6 @@ impl Kernel {
                     )));
                 }
             };
-
-            // The child has been reaped: the stdin-copy task has nothing left to
-            // deliver. Abort it (don't await — it may be parked on a `read` from
-            // a still-live upstream stage), mirroring the stdout/stderr drains.
-            if let Some(task) = stdin_task {
-                task.abort();
-            }
 
             // On cancel, abort the drain tasks (the child's pipes are gone;
             // late output is lost but predictable death beats partial capture).

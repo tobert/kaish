@@ -32,19 +32,25 @@ fn spawn_stdin_bridge(handle: tokio::runtime::Handle) -> Option<PipeReader> {
     if stdin.is_terminal() {
         return None;
     }
-    let (writer, reader) = pipe_stream_default();
+    let (mut writer, reader) = pipe_stream_default();
     let spawned = std::thread::Builder::new()
         .name("kaish-stdin-bridge".to_string())
         .spawn(move || {
+            use tokio::io::AsyncWriteExt;
             let mut buf = [0u8; 64 * 1024];
             let mut lock = stdin.lock();
             loop {
                 match lock.read(&mut buf) {
                     Ok(0) => break, // EOF: dropping `writer` signals EOF to the reader.
                     Ok(n) => {
-                        // BrokenPipe = the reader was dropped (the command never
-                        // read stdin). Stop copying; nothing more to deliver.
-                        if handle.block_on(writer.write_bytes(&buf[..n])).is_err() {
+                        // `write_all`, NOT `write_bytes`: the latter is a single
+                        // `poll_write` that writes at most the pipe's free space
+                        // (≤64 KiB) and returns a short count, so ignoring it
+                        // silently truncates any input larger than one buffer.
+                        // `write_all` loops until every byte lands (or the reader
+                        // is dropped → BrokenPipe, meaning the command never read
+                        // stdin, so we stop — nothing more to deliver).
+                        if handle.block_on(writer.write_all(&buf[..n])).is_err() {
                             return;
                         }
                     }
@@ -73,9 +79,17 @@ fn execute_noninteractive(
     opts: kaish_kernel::ExecuteOptions,
 ) -> Result<kaish_kernel::interpreter::ExecResult> {
     let mut on_output = |r: &kaish_kernel::interpreter::ExecResult| {
-        let text = r.text_out();
-        if !text.is_empty() {
-            print!("{}", text);
+        // A binary (`Bytes`) result must reach stdout byte-for-byte — printing
+        // `text_out()` would lossy-decode it to U+FFFD and corrupt the stream
+        // (e.g. `printf '\xff' | kaish -c cat`). Text results print as-is.
+        if let Some(bytes) = r.out_bytes() {
+            use std::io::Write;
+            let _ = std::io::stdout().write_all(bytes);
+        } else {
+            let text = r.text_out();
+            if !text.is_empty() {
+                print!("{}", text);
+            }
         }
         if !r.err.is_empty() {
             eprint!("{}", r.err);

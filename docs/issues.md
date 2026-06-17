@@ -612,6 +612,27 @@ opts.with_stdin(s) }` (the buffered path fits MCP — a request body is already 
 ready buffer). Deferred because kaibo/kaijutsu feed data via files/VFS, not
 process stdin, so nothing reaches for it today. Surfaced by the DeepSeek review.
 
+### Piped stdin isn't shared across statements in one `kaish -c 'a; b'` call
+From the PR #7 /code-review (2026-06-17). The consume-once logic in
+`execute_pipeline` moves the seeded `pipe_stdin` into the FIRST top-level
+statement's pipeline; if that statement doesn't read stdin, the reader is dropped
+when its pipeline ends, so a later statement that DOES read gets nothing —
+`printf hi | kaish -c 'echo x; cat'` prints only `x`, losing the piped line. A
+real shell leaves fd 0 shared, so `cat` would read it. Pre-existing within the
+branch (the eager `with_stdin(String)` path drained the same way). Fix is a stdin
+lifecycle change — keep the source on the persistent `exec_ctx` and let whichever
+command first reads it take it, rather than moving it into statement 1's snapshot
+eagerly. Niche (multi-statement `-c` with a non-reading first command); defer
+until it bites. (Related vestige: `run_single`'s `stdin` param, below.)
+
+### `head -n -0` / signed-zero line counts can't be distinguished (lexer-level)
+`head -n -0` should mean "all but the last 0 lines" (= whole file) but prints
+nothing, because `-0` lexes as `Int(0)` (the sign is lost at the lexer) and
+`line_spec` only treats a *negative* Int as the all-but-last form. Same root for
+any signed-zero count. Genuinely obscure (who writes `-0`?) and not fixable
+without lexer changes to preserve the sign of zero. Waived; noted for
+completeness from the PR #7 review.
+
 ### `PipelineRunner::run_single`'s `stdin` parameter is vestigial
 `crates/kaish-kernel/src/scheduler/pipeline.rs:362` — `run_single(cmd, ctx,
 stdin: Option<String>)` is always called with `stdin: None` from
