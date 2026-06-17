@@ -1783,7 +1783,9 @@ enum ControlFlow {
     Break,
     Continue,
     Next,
-    Exit(i32),
+    /// `exit [N]`. `None` is a bare `exit`, which keeps the most recently set
+    /// exit status (POSIX) rather than resetting it to 0.
+    Exit(Option<i32>),
 }
 
 /// Runtime state for AWK execution.
@@ -1832,11 +1834,15 @@ impl AwkRuntime {
     }
 
     fn get_field(&self, n: i64) -> AwkValue {
+        // A referenced-but-absent field is the *string* `""` (not Uninitialized,
+        // which is numeric-and-string): gawk compares `$9 == 0` as strings →
+        // false, distinct from an unset *variable*. $0 and in-range fields are
+        // always present.
         if n < 0 {
-            return AwkValue::Uninitialized;
+            return AwkValue::String(String::new());
         }
         let idx = n as usize;
-        self.fields.get(idx).cloned().unwrap_or(AwkValue::Uninitialized)
+        self.fields.get(idx).cloned().unwrap_or_else(|| AwkValue::String(String::new()))
     }
 
     fn set_field(&mut self, n: i64, value: AwkValue) -> Result<(), String> {
@@ -1911,7 +1917,10 @@ impl AwkRuntime {
                 && let ControlFlow::Exit(code) = self.execute_block(&rule.action)?
             {
                 // `exit` in BEGIN skips main + other BEGINs but still runs END.
-                exit_code = Some(code);
+                // A bare `exit` (None) keeps the current code (0 so far here).
+                if let Some(c) = code {
+                    exit_code = Some(c);
+                }
                 return self.run_end_rules(program, exit_code);
             }
         }
@@ -1941,7 +1950,10 @@ impl AwkRuntime {
                     match self.execute_block(&rule.action)? {
                         ControlFlow::Next => continue 'records,
                         ControlFlow::Exit(code) => {
-                            exit_code = Some(code);
+                            // Bare `exit` (None) keeps the current code.
+                            if let Some(c) = code {
+                                exit_code = Some(c);
+                            }
                             break 'records;
                         }
                         ControlFlow::Break | ControlFlow::Continue => {
@@ -1958,7 +1970,7 @@ impl AwkRuntime {
 
     /// Run all END rules, then return the accumulated output and the final exit
     /// code. An `exit N` inside END overrides any prior code and stops further
-    /// END rules.
+    /// END rules; a bare `exit` keeps the current code (POSIX).
     fn run_end_rules(
         &mut self,
         program: &AwkProgram,
@@ -1968,7 +1980,9 @@ impl AwkRuntime {
             if matches!(rule.pattern, Pattern::End)
                 && let ControlFlow::Exit(code) = self.execute_block(&rule.action)?
             {
-                exit_code = Some(code);
+                if let Some(c) = code {
+                    exit_code = Some(c);
+                }
                 break;
             }
         }
@@ -2197,11 +2211,11 @@ impl AwkRuntime {
             Stmt::Continue => Ok(ControlFlow::Continue),
             Stmt::Next => Ok(ControlFlow::Next),
             Stmt::Exit(code) => {
+                // Bare `exit` (no expression) → None: keep the current status.
                 let exit_code = code
                     .as_ref()
                     .map(|e| self.eval_expr(e).map(|v| v.to_number() as i32))
-                    .transpose()?
-                    .unwrap_or(0);
+                    .transpose()?;
                 Ok(ControlFlow::Exit(exit_code))
             }
 

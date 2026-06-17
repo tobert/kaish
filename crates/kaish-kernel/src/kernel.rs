@@ -2974,9 +2974,19 @@ impl Kernel {
         let home = self.scope_home().await;
         let mut collected: Vec<Value> = Vec::with_capacity(consumes.max(1));
         for _ in 0..consumes.max(1) {
+            // A `key=value` (WordAssign) token is consumable only by a
+            // single-value flag (`-v a=1`). For a multi-value flag (`jq --arg
+            // NAME VAL`, consumes>1) it is NOT eligible — otherwise `--arg x=1
+            // filter` would reassemble `x=1` into the first slot and steal the
+            // filter into the second. Multi-value flags take plain positionals.
+            let allow_word_assign = consumes <= 1;
             let next_pos = positional_indices
                 .iter()
-                .find(|idx| **idx > current_idx && !consumed.contains(idx))
+                .find(|idx| {
+                    **idx > current_idx
+                        && !consumed.contains(idx)
+                        && (allow_word_assign || matches!(args[**idx], Arg::Positional(_)))
+                })
                 .copied();
             match next_pos {
                 Some(pos_idx) => match &args[pos_idx] {

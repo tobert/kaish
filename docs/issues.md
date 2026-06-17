@@ -403,6 +403,18 @@ Deferred from the pre-0.9 pass (`docs/next.md`); the P1/P2 items there landed
   `BackendDispatcher::try_external` stdin-task leak** on unreachable error returns
   (missing the `AbortStdinCopyOnDrop` guard the production path has). Both "shouldn't
   fire" but are silent — add the guard / make it loud.
+- **awk multi-char `FS` regex recompiles per record** (`awk.rs` `split_record` —
+  `Regex::new(&fs)` each record). Correct, but a per-record compile+alloc; cache the
+  compiled regex keyed on the FS string (invalidate when FS changes). Single-char FS
+  (the common case) already avoids it. Found in the 2026-06-17 punch-list review.
+- **awk array-element type inconsistency**: `split()` stores `StrNum` elements but
+  `sub()`/`gsub()` on an array element stores `String`, so a mutated element loses its
+  numeric-string attribute. Low impact (compares correctly in common cases); POSIX is
+  ambiguous here. Same review.
+- **head streaming-vs-buffered binary-stdin divergence**: the streaming path emits
+  earlier valid lines to a downstream pipe *before* erroring on a non-UTF-8 line
+  (buffered emits nothing), and uses a different error message than
+  `read_stdin_to_text`. Both loud; cosmetic/edge. Same review.
 
 ### Code formatting (rustfmt) — considered and declined 2026-06-14
 **Decision (Amy): not adopting rustfmt.** The audience for this code is Claude and

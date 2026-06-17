@@ -489,6 +489,32 @@ async fn awk_exit_runs_end_and_keeps_code() {
     assert_eq!(out, "end ran\n");
 }
 
+#[tokio::test]
+async fn awk_bare_exit_in_end_preserves_prior_code() {
+    // A bare `exit` (no expression) keeps the most recently set status (POSIX),
+    // it does not reset it to 0. `exit 7` in BEGIN, then bare `exit` in END → 7.
+    let (out, code) = run(r#"awk 'BEGIN { exit 7 } END { exit }'"#, "").await;
+    assert_eq!(code, 7, "bare exit must not clobber the prior code, out={out:?}");
+}
+
+// ───────────────── awk out-of-range field is the empty string ─────────────────
+// A referenced-but-absent field is the string "" (string compare), not a numeric
+// 0 — `$5 == 0` is false, distinct from an unset *variable*.
+
+#[tokio::test]
+async fn awk_out_of_range_field_is_empty_string_not_zero() {
+    let (out, code) = run(r#"awk '{ print ($5 == 0) }'"#, "a b\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "0\n", "$5 (absent) == 0 is a string compare → false");
+}
+
+#[tokio::test]
+async fn awk_out_of_range_field_equals_empty() {
+    let (out, code) = run(r#"awk '{ print ($5 == "") }'"#, "a b\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "1\n", "$5 (absent) == \"\" is true");
+}
+
 // ─────────────────────────── awk multiple -v ───────────────────────────
 // Every `-v NAME=VALUE` is applied (clap kept only the last before).
 
@@ -568,7 +594,32 @@ async fn jq_non_utf8_file_errors_loudly() {
     let path = dir.path().join("bad.json");
     std::fs::File::create(&path).unwrap().write_all(&[0xff, 0xfe, 0xfd]).unwrap();
 
-    let (out, code) = run(&format!("jq . {}", path.display()), "").await;
-    assert_ne!(code, 0, "non-UTF-8 file must be a loud error, out={out:?}");
-    assert!(out.is_empty(), "no lossy/parsed output on a binary file: {out:?}");
+    // Assert on the *error channel*, not just the exit code: with the lossy
+    // fallback the bytes become U+FFFD and then fail JSON parsing (also exit 1,
+    // empty stdout), so a code/out-only check passes even with the bug present.
+    // The distinguishing signal is the "invalid UTF-8" message vs "invalid JSON".
+    let kernel = kernel();
+    let result = kernel
+        .execute(&format!("jq . {}", path.display()))
+        .await
+        .expect("kernel execute");
+    assert_ne!(result.code, 0, "non-UTF-8 file must be a loud error: {result:?}");
+    assert!(result.text_out().is_empty(), "no lossy/parsed output: {:?}", result.text_out());
+    assert!(
+        result.err.contains("invalid UTF-8"),
+        "must report the decode failure, not a confusing JSON-parse error: {:?}",
+        result.err
+    );
+}
+
+// ───────────────── jq --arg (consumes>1) keeps both value slots ─────────────────
+// Regression guard for the arg-binder change: a multi-value flag (`--arg NAME
+// VAL`, consumes 2) must NOT treat a following `key=value` token as a value (only
+// single-value flags do), or it would steal the filter into the second slot.
+
+#[tokio::test]
+async fn jq_arg_two_value_form_still_binds_name_and_value() {
+    let (out, code) = run(r#"jq --arg name kaish -n '$name'"#, "").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out.trim(), "\"kaish\"", "--arg NAME VAL binds both slots: {out:?}");
 }
