@@ -471,10 +471,9 @@ retries work).
 **Nonce store lifecycle:** The kernel creates a fresh `NonceStore` by default.
 Frontends control persistence:
 - **REPL** — one kernel per session; nonces persist across commands naturally.
-- **MCP server** — shares a `NonceStore` across `execute()` calls within a
-  connection, so a nonce issued in one call can be confirmed in the next.
 - **Embedders** — pass a shared store via `KernelConfig::with_nonce_store()`
-  to get cross-call persistence, or accept the default (fresh per kernel).
+  to get cross-call persistence (e.g. a nonce issued in one `execute()` call
+  confirmed in the next), or accept the default (fresh per kernel).
 
 ## Glob Expansion
 
@@ -657,9 +656,9 @@ printenv FOO                        # → "hello"
 
 The bundled `kaish-repl` binary populates `initial_vars` from your shell
 environment at startup, so `cargo`/`git`/`echo $PATH` work as expected
-interactively. The `kaish-mcp` server does the same plus layers per-request
-`env` on top. Embedders that want isolated execution simply leave
-`initial_vars` empty — see `docs/EMBEDDING.md` for the API.
+interactively. An embedder can do the same, and layer per-request `env` on top.
+Embedders that want isolated execution simply leave `initial_vars` empty — see
+`docs/EMBEDDING.md` for the API.
 
 ### Scope Summary
 
@@ -764,8 +763,8 @@ cmp a.bin b.bin                                  # byte-compare, early-exits on 
 ```
 
 **Rendering at the boundary.** Bytes that aren't valid UTF-8 render as a hex dump
-in the REPL and as a base64 envelope under `--json` / MCP structured output, so
-binary never garbles a terminal or a JSON channel.
+in the REPL and as a base64 envelope under `--json` (and any embedder's structured
+output), so binary never garbles a terminal or a JSON channel.
 
 **Text builtins refuse binary.** `grep`, `sed`, `awk`, `sort`, `cut`, `tr`, `jq`,
 and the other text tools **error** on non-UTF-8 input instead of silently

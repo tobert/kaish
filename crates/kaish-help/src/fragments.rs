@@ -195,10 +195,11 @@ pub const FRAGMENTS: &[Fragment] = &[
          the transaction: `kaish-vfs status` (dirty flag + counts), `kaish-vfs diff` \
          (unified diff), `kaish-vfs commit` (write to real files), \
          `kaish-vfs reset [path]` (discard edits). \
-         **MCP per-call rule**: each `execute()` call gets a fresh kernel and a fresh \
-         overlay transaction. `kaish-vfs commit` MUST run in the same call as the \
-         writes — if you commit in a later call the transaction from the write call \
-         was already discarded.",
+         **Fresh-kernel-per-call rule**: when an embedder runs a fresh kernel per \
+         `execute()` call (the common pattern), each call gets a fresh overlay \
+         transaction. `kaish-vfs commit` MUST run in the same call as the writes — if \
+         you commit in a later call the transaction from the write call was already \
+         discarded.",
     ),
     // ---- Syntax reference (single source for content/en/syntax.md) -----------
     syntax_section(
@@ -228,9 +229,8 @@ $$ ${$}                   # kaish session id — see note below
 **`$$` is a kaish-internal session identifier**, not the OS PID. It's a
 monotonic `u64` counter (starts at 1) assigned at kernel construction;
 forks/subshells inherit the parent's value. This is an intentional
-divergence from bash — kaish runs as a long-lived MCP server or
-embedded inside other binaries, where the host PID is meaningless to
-the script."#,
+divergence from bash — kaish runs embedded inside long-lived host
+processes, where the host PID is meaningless to the script."#,
     ),
     syntax_section(
         "paths",
@@ -428,9 +428,9 @@ If trash fails, rm errors (no silent fallthrough to permanent delete).
 Configure threshold: `kaish-trash config max-size <bytes>`.
 
 **Nonce persistence:** The kernel creates a fresh nonce store by default.
-The MCP server shares one store across all `execute()` calls in a session,
-so a nonce from call 1 can confirm in call 2. The REPL keeps one kernel
-alive — nonces persist naturally. Embedders control this via
+An embedder can share one store across `execute()` calls in a session, so a
+nonce from call 1 can confirm in call 2. The REPL keeps one kernel alive —
+nonces persist naturally. Embedders control this via
 `KernelConfig::with_nonce_store()`."#,
     ),
     syntax_section(

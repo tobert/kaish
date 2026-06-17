@@ -27,7 +27,7 @@
 | `alias` | First word only; not in pipelines or compound commands |
 | `set` | `-e`, `-o latch`, `-o trash`, `-o glob`, `-o output-limit[=SIZE]` (no `-u`, `-x`, `pipefail`) |
 | `rm` (trash) | Trash failure = error, no fallthrough to permanent delete. Dirs always trash (stat size unreliable). |
-| `rm` (latch) | Nonces scoped to (command, paths). Subset confirmation only. 60s TTL. Persist within MCP session, not across reconnects. |
+| `rm` (latch) | Nonces scoped to (command, paths). Subset confirmation only. 60s TTL. Persist within an embedder session, not across reconnects. |
 | `ps` | Linux-only (reads `/proc`) |
 | `head`/`tail -c` | Counts bytes (POSIX); can split multi-byte UTF-8 — prefer `-n` for text |
 | `**` globs | Slow on deep trees; use specific prefixes |

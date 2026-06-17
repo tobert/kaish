@@ -8,7 +8,6 @@ members = [
     "crates/kaish-vfs",
     "crates/kaish-tools-host",
     "crates/kaish-kernel",
-    "crates/kaish-mcp",
     "crates/kaish-client",
     "crates/kaish-repl",
     "crates/kaish-wasi",
@@ -19,11 +18,11 @@ version = "0.8.4"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Amy Tobey <tobert@gmail.com>"]
-description = "kaish (会sh) — a predictable shell for MCP tool orchestration"
+description = "kaish (会sh) — an embeddable shell for AI agents: familiar syntax, strong validation, and clear errors"
 license = "MIT"
 homepage = "https://github.com/tobert/kaish"
 repository = "https://github.com/tobert/kaish"
-keywords = ["shell", "mcp", "ai", "agent", "cli"]
+keywords = ["shell", "ai", "agent", "embeddable", "repl"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
 
@@ -45,7 +44,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "trace"] }
 tracing-opentelemetry = "0.32"
 
 # Lexer/Parser (L1-L2)
@@ -95,9 +93,6 @@ chrono-tz = "0.10"
 jaq-core = "2.2"
 jaq-std = "2.1"
 jaq-json = "1.1"
-
-# MCP (rmcp)
-rmcp = { version = "0.16", default-features = false }
 
 # Async utilities
 tokio-util = { version = "0.7", features = ["compat"] }

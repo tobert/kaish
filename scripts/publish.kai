@@ -1,14 +1,18 @@
 #!/usr/bin/env kaish
 
 # Publish kaish crates to crates.io in dependency order.
+# Authoritative order + wait-for-propagation lives in the `/release` skill
+# (.claude/commands/release.md); this is the quick convenience version.
 #
 # Leaf crates first (no internal deps), then up the tree:
-#   kaish-glob, kaish-types      (no internal deps)
-#   kaish-kernel                  (depends on glob, types)
-#   kaish-client                  (depends on kernel)
-#   kaish-mcp, kaish-repl         (depends on kernel, client)
+#   kaish-types, kaish-glob                          (no internal deps)
+#   kaish-tool-api, kaish-vfs, kaish-help            (depend on types)
+#   kaish-tools-host                                 (depends on types, tool-api)
+#   kaish-kernel                                     (depends on all the above)
+#   kaish-client, kaish-repl                         (depend on kernel/client)
+# (kaish-wasi is never published — wasm binary target.)
 
-for crate in kaish-glob kaish-types kaish-kernel kaish-client kaish-mcp kaish-repl; do
+for crate in kaish-types kaish-glob kaish-tool-api kaish-vfs kaish-help kaish-tools-host kaish-kernel kaish-client kaish-repl; do
     echo "📦 Publishing $crate..."
     cargo publish -p "$crate"
     echo "✅ $crate published"
