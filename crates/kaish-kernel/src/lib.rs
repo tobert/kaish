@@ -81,10 +81,6 @@ pub use output_limit::OutputLimitConfig;
 // }, |_| {})?;
 // ```
 
-// Git types (for embedders that want direct GitVfs access)
-#[cfg(feature = "git")]
-pub use vfs::{FileStatus, GitVfs, LogEntry, StatusSummary, WorktreeInfo};
-
 // Job observability (for embedders capturing command output)
 pub use scheduler::{BoundedStream, StreamStats, DEFAULT_STREAM_MAX_SIZE, drain_to_stream};
 // Streaming stdin seam: a frontend (REPL `-c`/script) hands the kernel a lazy

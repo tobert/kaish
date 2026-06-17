@@ -11,6 +11,7 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Removed
+- **BREAKING: the `git` builtin and `GitVfs` backend are removed**, and with them the `git` cargo feature and the entire `kaish-tools-git` crate (along with its `git2`/libgit2 dependency). Git is a complex, heavyweight subsystem that doesn't belong in kaish core: run your system `git` as an ordinary external command instead (`git status`, `git log` work via the `subprocess` capability). Embedders lose `GitVfs` and the `FileStatus`/`StatusSummary`/`LogEntry`/`WorktreeInfo` re-exports; the `full`/`native` feature aliases no longer include `git`. (`docs/EMBEDDING-GIT.md` is removed.)
 - **BREAKING: the `rg` builtin is removed.** kaish's 80%-rule search surface is the single `grep` builtin; the separate ripgrep-flavored `rg` was redundant and carried the registry's largest flag surface. Use `grep` (recursive, gitignore-aware) instead — or your system's real `rg`, which now runs as an external command. Accepted lost features (rg-only, not ported to `grep`): `--type`/`-t`/`-T` (file-type filters), `--hidden`, `--max-count`, `--files`, `-P`/`--pcre2` (PCRE2 lookarounds/backrefs), and `--no-ignore`. The optional `pcre2` build feature and its `grep-pcre2` dependency are dropped with it.
 
 ### Added

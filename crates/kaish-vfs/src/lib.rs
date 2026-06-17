@@ -2,8 +2,7 @@
 //!
 //! This leaf crate holds the [`Filesystem`] trait every VFS backend implements
 //! and the [`LocalFs`] real-filesystem backend. It exists so backends that
-//! aren't part of the kernel — most importantly `GitVfs`, which wraps a
-//! `LocalFs` working tree — can live in their own crates without depending on
+//! aren't part of the kernel can live in their own crates without depending on
 //! `kaish-kernel`.
 //!
 //! `DirEntry`/`DirEntryKind` (the data the trait traffics in) live one layer

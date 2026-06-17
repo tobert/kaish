@@ -3,8 +3,8 @@
 //! This leaf crate defines the contract that every kaish tool — builtin or
 //! third-party — implements, without pulling in `kaish-kernel`'s parser,
 //! interpreter, or async runtime internals. It exists so out-of-tree tool
-//! bundles (`kaish-tools-host`, `kaish-tools-git`, a hypothetical
-//! `kaish-tools-perl`) can be written against a small, audited surface.
+//! bundles (`kaish-tools-host`, a hypothetical `kaish-tools-perl`) can be
+//! written against a small, audited surface.
 //!
 //! # The surface
 //!
