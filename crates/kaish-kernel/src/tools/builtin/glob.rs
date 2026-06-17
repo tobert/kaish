@@ -480,7 +480,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_glob_mcp_config_filters_defaults() {
+    async fn test_glob_agent_config_filters_defaults() {
         // IgnoreConfig::agent() — glob should skip target/ and node_modules/
         let mut ctx = make_ctx_with_artifacts().await;
         ctx.ignore_config = crate::ignore_config::IgnoreConfig::agent();
@@ -492,7 +492,7 @@ mod tests {
         assert!(result.ok());
         assert!(result.text_out().contains("main.rs"));
         // MCP config has defaults on — target/ should be filtered
-        assert!(!result.text_out().contains("app.rs"), "mcp config should filter target/debug/app.rs");
+        assert!(!result.text_out().contains("app.rs"), "agent config should filter target/debug/app.rs");
     }
 
     #[tokio::test]

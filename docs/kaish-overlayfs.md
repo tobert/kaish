@@ -298,14 +298,15 @@ drifts.
   never default-on anywhere.
   - `kaish --overlay` — interactive REPL
   - `kaish --overlay -c 'script'` — one-shot
-  - `kaish-mcp --overlay` — MCP server
-  - `KernelConfig::with_overlay(true)` — embedder API
-  - **MCP per-call semantics**: each `execute()` call creates a fresh kernel
-    with a fresh overlay transaction. `kaish-vfs commit` must run in the
-    **same call** as the writes — if you write in call N and commit in call N+1,
-    the transaction from call N was discarded when its kernel was dropped. This
-    is why default-on for MCP was rejected: a model that issues writes and
-    commits in separate calls would silently lose every write.
+  - `KernelConfig::with_overlay(true)` — embedder API (an embedder, e.g. an MCP
+    server like kaibo/kaijutsu, exposes it however it likes)
+  - **Per-call semantics (agent embedders)**: an agent embedder typically creates
+    a fresh kernel per `execute()` call, each with a fresh overlay transaction.
+    `kaish-vfs commit` must run in the **same call** as the writes — if you write
+    in call N and commit in call N+1, the transaction from call N was discarded
+    when its kernel was dropped. This is why default-on was rejected for that
+    pattern: a model that issues writes and commits in separate calls would
+    silently lose every write.
 - **Builtin name** (settled): `kaish-vfs` with subcommands, superseding the
   earlier design names `vfs-diff` / `vfs-commit`. Subcommands: `status`,
   `diff [path...]`, `commit`, `reset [path]`.
