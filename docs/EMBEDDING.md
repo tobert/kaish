@@ -124,7 +124,7 @@ let config = KernelConfig::repl();
 // Memory-only VFS, external commands disabled (tests, untrusted scripts)
 let config = KernelConfig::isolated();
 
-// Sandboxed-to-$HOME with a 64 MiB in-memory VFS budget (what the MCP server uses)
+// Sandboxed-to-$HOME with a 64 MiB in-memory VFS budget (the agent preset)
 let config = KernelConfig::mcp();
 ```
 
@@ -177,8 +177,8 @@ vfs.mount("/", MemoryFs::with_budget(budget.clone()));
 The kernel is **hermetic by default** — it never reads `std::env::vars()`,
 and external commands launched from inside the kernel see only the
 variables kaish has marked as exported. Frontends that want shell-like UX
-(the bundled REPL, the MCP server) opt in to OS-env passthrough by
-populating `initial_vars`:
+(the bundled REPL, or an embedder that mirrors the host shell) opt in to
+OS-env passthrough by populating `initial_vars`:
 
 ```rust
 use kaish_kernel::ast::Value;

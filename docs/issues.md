@@ -30,10 +30,6 @@ Hunk 1 `69c42e3`+`2a62a72` (MemoryFs lift, overlay core), accounting vfs half
 hunk 3 + accounting kernel half `d0e0deb` (64 MiB mcp budget "vfs-memory",
 MountInfo.resident_bytes + kaish-mounts, --overlay opt-in REPL/MCP/embedder,
 kaish-vfs builtin status/diff/commit/reset). Residuals:
-- **MCP overlay persistence**: MCP kernels are fresh per execute call, so an
-  MCP overlay is a per-call transaction (commit in the same script). Cross-call
-  overlays need a session map in kaish-mcp — revisit if a consumer wants it;
-  would also unlock the originally-floated default-on for MCP. (P3)
 - **External commands under overlay** fail with exit 127 inside the overlay
   mount (real_path=None, accidental but correct guard); cd /tmp escapes. A
   friendlier in-band error naming the overlay would help. (P3)
@@ -588,29 +584,6 @@ currently known besides the now-fixed `sleep`).
 ### `JobManager::spawn` busy-waits
 Uses `std::hint::spin_loop()` to guarantee immediate visibility. Works,
 wastes CPU on contention. Channel-based coordination would be cleaner.
-
-### MCP per-request OS thread + 16MB stack
-`crates/kaish-mcp/src/server/execute.rs:192` documents it. Fine at
-agent-call rates, will be a problem in a hot loop. Replace with a pool
-of LocalSet workers + mpsc channel. Benchmark first to confirm the win.
-
-### MCP resource watcher channel fixed at 256
-`subscriptions.rs:33` bounds the file-watch channel; high-churn
-environments drop events silently.
-
-### MCP `execute` has no `stdin` param (frontend stdin gap)
-`ExecuteOptions::stdin` + `with_stdin()` landed 2026-06-16 (the `kaish -c`
-piped-stdin fix); `kaish-repl` forwards its *open* process stdin via the lazy
-`Kernel::execute_with_pipe_stdin_streaming(PipeReader)` seam added 2026-06-17,
-while the eager `with_stdin(String)` path remains for embedders with a ready
-buffer. The MCP server (`crates/kaish-mcp/src/server/execute.rs:264`) builds
-`ExecuteOptions` without either, and `ExecuteParams` has no `stdin` field — so an
-MCP client cannot feed a program's stdin (it must use a heredoc/here-string in
-the script, or files/VFS). Low-effort follow-up: add `stdin: Option<String>` to
-`ExecuteParams` (+ schema doc), then `if let Some(s) = params.stdin { opts =
-opts.with_stdin(s) }` (the buffered path fits MCP — a request body is already a
-ready buffer). Deferred because kaibo/kaijutsu feed data via files/VFS, not
-process stdin, so nothing reaches for it today. Surfaced by the DeepSeek review.
 
 ### Piped stdin isn't shared across statements in one `kaish -c 'a; b'` call
 From the PR #7 /code-review (2026-06-17). The consume-once logic in

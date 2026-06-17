@@ -5,7 +5,7 @@
 | Mode | Access | Context |
 |------|--------|---------|
 | **Passthrough** | Full filesystem | REPL (human) |
-| **Sandboxed** | `$HOME` + `/tmp` only | MCP (agent) |
+| **Sandboxed** | `$HOME` + `/tmp` only | agent (embedded) |
 | **NoLocal** | Memory only | Tests |
 
 In sandboxed mode, paths look native but access outside `$HOME` fails (except `/tmp`).
@@ -13,7 +13,7 @@ In sandboxed mode, paths look native but access outside `$HOME` fails (except `/
 ## Mount Points
 
 ```
-/home/user/    real filesystem (sandboxed to $HOME in MCP mode)
+/home/user/    real filesystem (sandboxed to $HOME in sandboxed mode)
 /tmp/          real /tmp (always accessible, tmpfs on Linux)
 /dev/null      sink: discards writes, reads empty
 /dev/zero      endless zero bytes (counted reads only — see below)

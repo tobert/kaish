@@ -7,12 +7,12 @@ Controls which files are filtered by file-walking tools (glob, tree, ls -R, grep
 | Mode | Scope | Defaults | Auto-gitignore | Effect |
 |------|-------|----------|----------------|--------|
 | REPL | Advisory | off | off | No filtering. `find` always unrestricted. |
-| MCP | Enforced | on | on | All tools filter. Prevents context flooding. |
+| Agent | Enforced | on | on | All tools filter. Prevents context flooding. |
 
 ## Scope
 
 - **Advisory** — polite tools (glob, tree, grep, ls) respect config. `find` ignores it (POSIX tradition).
-- **Enforced** — all tools respect config, including `find`. Default for MCP/agent mode.
+- **Enforced** — all tools respect config, including `find`. Default for agent (embedded) mode.
 
 Per-tool `--no-ignore` flags override for that invocation.
 

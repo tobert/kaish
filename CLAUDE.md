@@ -1,14 +1,18 @@
 # kaish
 
-**kaish** (会sh) is a predictable shell for AI agents, embeddable, and available as an MCP server.
+**kaish** (会sh) is a predictable shell for AI agents: an embeddable Rust library with a
+reference REPL.
 
 ## Project Overview
 
 会sh is stable and the language has settled down. There may still be some changes before 1.0
-for ergonomics or correctness. The MCP is mature and will continue to follow rmcp updates and
-utilize maximum MCP features. The repl is kept up to date to ensure that use case is possible.
-[Kaijutsu](https://github.com/tobert/kaijutsu) is the only known embedder of kaish and has the
-same maintainer, so API changes are still straightforward where they improve both projects.
+for ergonomics or correctness. The focus is the embeddable kernel/library and a reference REPL
+that keeps the interactive use case honest. kaish does **not** ship its own MCP server — that
+surface lives in the embedders: [kaibo](https://github.com/tobert/kaibo) (解剖) is the MCP
+showcase (a read-only codebase-analysis MCP that drives kaish), and
+[kaijutsu](https://github.com/tobert/kaijutsu) embeds kaish behind its own MCP interface. Both
+have the same maintainer, so API changes are straightforward where they improve the projects
+together.
 
 **Philosophy**: 80% rule applied to POSIX/Bourne/bash shell. Kaish implements a `sh` subset that passes `shellcheck --enable=all`.
 
@@ -27,7 +31,6 @@ crates/
 ├── kaish-help/       # Composable help & instructions content (fragments + recipes); content/en/*.md
 ├── kaish-kernel/     # Core: lexer, parser, interpreter, tools, VFS router, validator
 ├── kaish-tools-host/ # Host introspection tools (ps; behind the `host` feature)
-├── kaish-mcp/        # MCP server (expose kaish as an MCP tool)
 ├── kaish-client/     # Client implementations (embedded)
 ├── kaish-repl/       # Interactive REPL with rustyline
 └── kaish-wasi/       # WASI target (wasm32-wasip1)
@@ -97,7 +100,7 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
 The 核 (kaku/kernel) is the unit of execution. Multiple frontends connect to the same kernel:
 
 ```
-Frontends (REPL, Embedded, MCP)
+Frontends (REPL, Embedded — e.g. kaibo/kaijutsu)
     ↓ KernelClient trait
         └── EmbeddedClient (direct in-process)
     ↓
@@ -123,7 +126,7 @@ Tests live in `crates/kaish-kernel/tests/`. Snapshots in `crates/kaish-kernel/te
   features, ExecuteOptions, custom tools)
 - `crates/kaish-help/content/en/*.md` — help system content, embedded at compile time
   via the `kaish-help` crate (repo-root `docs/help` symlinks here). Shared by the
-  kernel `help` builtin, the REPL, the MCP server, and embedders.
+  kernel `help` builtin, the REPL, and embedders.
 - `crates/kaish-help/src/` — composition surface: `fragments.rs` (the English
   fragment registry, concept-organized) + `compose.rs` (recipes). Design:
   `docs/composable-help.md`.

@@ -4,9 +4,9 @@
   <img src="docs/banner.svg" alt="Kai the hermit crab — kaish mascot — looking at kaish code" width="720">
 </p>
 
-Kaish is a predictable Bourne-like shell for AI agents — embeddable in Rust and available as an
-MCP server. It ships many in-process builtins and a virtual filesystem that can be bridged to an
-underlying system or completely sandboxed.
+Kaish is a predictable Bourne-like shell for AI agents — an embeddable Rust library
+with a reference REPL. It ships many in-process builtins and a virtual filesystem that
+can be bridged to an underlying system or completely sandboxed.
 
 ## Install
 
@@ -168,8 +168,8 @@ Latch and trash can also be toggled at runtime with `set -o latch` / `set -o tra
 
 **Latch details:** Nonces are scoped to command + path — a nonce issued for `rm fileA`
 cannot confirm `rm fileB`. Confirmed paths must be a subset of authorized paths.
-Nonces persist within a session — in the REPL across commands, in MCP across
-`execute()` calls. Each new connection starts a fresh nonce store.
+Nonces persist within a session — in the REPL across commands, and across an
+embedder's `execute()` calls. Each new connection starts a fresh nonce store.
 Embedders control this via `KernelConfig::with_nonce_store()`.
 
 **Trash details:** Files under 10MB and all directories go to trash (configurable via
@@ -209,65 +209,28 @@ kaish> for f in *.rs; do wc -l "$f"; done
 kaish>
 ```
 
-### kaish-mcp
+### Embedding
 
-MCP server exposing kaish to AI agents as a single tool, `execute`. Help
-content ships as MCP prompts (`kaish-overview`, `kaish-syntax`, …), and VFS
-files are addressable as MCP resources (`kaish://vfs/{path}`).
+kaish is built to be embedded: construct a `Kernel`, give it a backend, and call
+`execute()`. The kernel is hermetic (it never reads ambient OS env — the frontend
+supplies vars), the VFS can be bridged to the host or fully sandboxed, and the
+OS-touching capability features (`subprocess`, `host`, `os-integration`, `tokens`)
+are opt-in so the dangerous surface is named, not inherited. The default build is
+real-file I/O plus an in-memory overlay — nothing that spawns a process or reads the
+host. See [docs/EMBEDDING.md](docs/EMBEDDING.md) for the full guide.
 
-#### Installation
+**Using kaish as an MCP server?** kaish core doesn't ship one — the showcase is
+[**kaibo**](https://github.com/tobert/kaibo) (解剖), a read-only codebase-analysis
+MCP that drives kaish to read and reason about a project and answers with cited
+`file:line` spans. [**kaijutsu**](https://github.com/tobert/kaijutsu) embeds kaish
+behind its own MCP interface too. Both show the pattern: embed the kernel, then
+expose it however your agent needs.
 
-Add to your MCP client configuration:
-
-```json
-{
-  "mcpServers": {
-    "kaish": {
-      "command": "kaish-mcp",
-      "args": ["--init", "/home/you/.config/kaish/agent.kai"]
-    }
-  }
-}
-```
-
-The `--init <path>` flag loads a `.kai` script before every `execute` call —
-aliases, safety options, environment setup. Repeatable (multiple `--init` flags
-load in order). Hot-reloaded: edit the file, next call picks up changes without
-restarting. Omit `args` entirely if no init scripts are needed.
-
-#### The `execute` tool
-
-Runs a kaish script: pipes, redirects, here-docs, if/for/while, functions,
-`${VAR:-default}`, `$((arithmetic))`, scatter/gather parallelism. Not
-supported: process substitution `<()`, backticks, `eval`. Native paths work
-within `$HOME`; `/tmp` for interop; `/v/` is in-memory scratch.
-
-Every call returns human-readable text content plus a machine-readable
-`structured_content` envelope:
-
-```json
-{
-  "code": 0,
-  "ok": true,
-  "stdout": "...",
-  "stderr": "...",
-  "data": null,
-  "output": null,
-  "content_type": null,
-  "baggage": {}
-}
-```
-
-Output is clean text by default — simple commands return plain text,
-structured builtins (`ls`, `kaish-mounts`, `kaish-vars`) render readable
-tab-separated values. Add `--json` to any command to get JSON on stdout and
-the parsed value in `data`; `output` carries the renderable structured form
-(tables and trees) from structured builtins. `data` is only ever set
-explicitly by builtins — kaish never infers it by sniffing stdout. When `data` or `output` already
-carry the same information, `stdout` is omitted from the envelope; the text
-content blocks always have the rendered form.
-
-Exit codes agents can branch on:
+Every `execute()` returns an `ExecResult`. Output is clean text by default — simple
+commands return plain text, structured builtins (`ls`, `kaish-mounts`, `kaish-vars`)
+render readable tab-separated values, and `--json` on any command emits JSON plus a
+parsed value (`data`) that builtins set explicitly — kaish never infers it by
+sniffing stdout. The exit code is something agents can branch on:
 
 | `code` | Meaning | Recovery |
 |--------|---------|----------|
@@ -278,14 +241,10 @@ Exit codes agents can branch on:
 | 124 | Timeout (`timeout_ms`, default 30 s) | — |
 | 130 | Cancelled | — |
 
-Per-call lifecycle — each `execute` call gets a fresh kernel:
-
-| Resets every call | Persists across calls |
-|-------------------|-----------------------|
-| Variables, functions, aliases | Confirmation nonces (60 s TTL) |
-| Working directory (`cwd` param, default `$HOME`) | Trash contents |
-| `set -o` options | Init scripts (re-read each call — edits hot-reload) |
-| `--overlay` writes (commit in the same call) | |
+Embedders typically run a fresh kernel per request (variables, functions, aliases,
+`set -o` options, and `cwd` reset each time) while trash and confirmation nonces
+(60 s TTL) persist — see [docs/EMBEDDING.md](docs/EMBEDDING.md) for the lifecycle and
+`ExecuteOptions`.
 
 #### Sandbox & safety
 
@@ -310,13 +269,12 @@ Per-call lifecycle — each `execute` call gets a fresh kernel:
 - `FOO=bar cmd` scopes `FOO` to that one command (its environment and arguments),
   like bash — it does **not** persist afterward. A plain `FOO=bar` with no
   command following still sets `FOO` persistently.
-- Help is in-band: `help builtins`, `help syntax`, `help <tool>` — or use
-  the MCP prompts.
+- Help is in-band: `help builtins`, `help syntax`, `help <tool>`.
 
-#### Why an MCP shell?
+#### Why a shell for agents?
 
 AI agents need to compose operations — filter outputs, transform data, iterate over results.
-Individual MCP tool calls are atomic operations; kaish lets agents combine them:
+A single tool call per operation is atomic and chatty; kaish lets agents combine them in one script:
 
 ```bash
 # Filter and transform in one script

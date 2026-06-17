@@ -1,7 +1,8 @@
 //! Topic compatibility surface for kaish help.
 //!
-//! Backs the `help <topic>` builtin and the MCP prompts: topic-based whole-document
-//! help embedded at compile time, plus dynamic tool help from the tool registry.
+//! Backs the `help <topic>` builtin and embedder prompt surfaces: topic-based
+//! whole-document help embedded at compile time, plus dynamic tool help from the
+//! tool registry.
 //! Behavior here is intentionally byte-stable — frontends and tests depend on it.
 
 use kaish_types::ToolSchema;

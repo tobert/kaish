@@ -78,7 +78,7 @@ impl Variant {
 /// shared (`audience: None`); the rare divergence is `Some(_)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Audience {
-    /// An agent driving kaish (MCP / embedded) — terse, behavior-focused.
+    /// An agent driving kaish (embedded) — terse, behavior-focused.
     Agent,
     /// A human at the REPL — welcome + discoverability.
     Human,
@@ -316,12 +316,12 @@ pub fn coverage(locale: &str) -> Vec<MissingFragment> {
 
 /// Ready-made [`Selector`]s so frontends never hand-build prose.
 ///
-/// Wiring these into the MCP server instructions / tool description and the REPL
-/// welcome is the next phase (see `docs/composable-help.md`).
+/// Wiring these into an embedder's agent instructions / tool description and the
+/// REPL welcome is the next phase (see `docs/composable-help.md`).
 pub struct Recipe;
 
 impl Recipe {
-    /// What the MCP `instructions:` field and an embedder's agent system prompt use:
+    /// What an embedder's agent instructions / system prompt use:
     /// the model, the operating contract, and the builtin index — terse.
     pub fn agent_onboarding() -> Selector {
         Selector {
@@ -347,7 +347,7 @@ impl Recipe {
         }
     }
 
-    /// The MCP `execute` tool description: the operating contract only, terse.
+    /// An embedder's `execute` tool description: the operating contract only, terse.
     pub fn tool_description() -> Selector {
         Selector {
             concepts: vec![Concept::Foundations],

@@ -11,7 +11,6 @@ Enable it once at session start — it is not a `set -o` option:
 ```
 kaish --overlay                        # interactive REPL
 kaish --overlay -c 'script'           # one-shot
-kaish-mcp --overlay                   # MCP server
 KernelConfig::with_overlay(true)      # embedder API
 ```
 
@@ -52,10 +51,11 @@ already written to the real tree. To recover:
    `AlreadyExists` conflict for an Added overlay entry).
 4. Retry `kaish-vfs commit`.
 
-## MCP per-call semantics
+## Per-call semantics (fresh-kernel embedders)
 
-With `kaish-mcp --overlay`, each `execute()` call gets a **fresh kernel and a
-fresh overlay transaction**. Writes are virtual for that call only.
+When an embedder runs a fresh kernel per `execute()` call (the common agent
+pattern), each call gets a **fresh overlay transaction**. Writes are virtual for
+that call only.
 
 **The commit must run in the same call as the writes.** If you write in one
 `execute()` call and commit in the next, the transaction from the first call

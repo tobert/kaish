@@ -117,13 +117,11 @@ crates/kaish-tool-api/Cargo.toml   → kaish-types
 crates/kaish-glob/Cargo.toml       → (no kaish deps)
 crates/kaish-vfs/Cargo.toml        → kaish-types
 crates/kaish-help/Cargo.toml       → kaish-types
-crates/kaish-tools-git/Cargo.toml  → kaish-types, kaish-tool-api, kaish-vfs
 crates/kaish-tools-host/Cargo.toml → kaish-types, kaish-tool-api
 crates/kaish-kernel/Cargo.toml     → kaish-glob, kaish-types, kaish-help,
                                      kaish-tool-api, kaish-vfs,
-                                     kaish-tools-git, kaish-tools-host (optional deps — still pinned)
+                                     kaish-tools-host (optional dep — still pinned)
 crates/kaish-client/Cargo.toml     → kaish-kernel
-crates/kaish-mcp/Cargo.toml        → kaish-kernel
 crates/kaish-repl/Cargo.toml       → kaish-kernel, kaish-client
 ```
 
@@ -165,15 +163,12 @@ cargo publish -p kaish-glob
 cargo publish -p kaish-tool-api
 cargo publish -p kaish-vfs
 cargo publish -p kaish-help
-# wait 15s — tool bundles need types/tool-api/vfs
-cargo publish -p kaish-tools-git
+# wait 15s — the host tool bundle needs types/tool-api
 cargo publish -p kaish-tools-host
 # wait 15s — the kernel needs everything above (incl. its optional deps)
 cargo publish -p kaish-kernel
 # wait 15s
 cargo publish -p kaish-client
-# wait 15s — client and mcp are independent, but serial is safer
-cargo publish -p kaish-mcp
 # wait 15s
 cargo publish -p kaish-repl
 ```
