@@ -9,30 +9,88 @@ use std::env;
 use std::io::{IsTerminal, Read};
 use std::process::ExitCode;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
+use kaish_kernel::{pipe_stream_default, PipeReader};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-/// Read piped stdin for a non-interactive run so a top-level command (`sort`,
-/// `cut`, `wc`) can consume it — `printf '…' | kaish -c sort`.
+/// Bridge an open process stdin into the kernel as a **lazy** pipe so a
+/// top-level command that reads stdin (`sort`, `cut`, `wc`) consumes it —
+/// `printf '…' | kaish -c sort` — without forcing input to be read before
+/// execution.
 ///
-/// Returns `None` when stdin is a TTY (interactive): we must not block reading
-/// from a keyboard the user isn't piping into. Binary stdin is rejected loudly
-/// rather than lossily decoded — kaish feeds binary through files/VFS, and
-/// silently corrupting it would violate the fail-loud contract.
-fn read_piped_stdin() -> Result<Option<String>> {
-    let mut handle = std::io::stdin();
-    if handle.is_terminal() {
-        return Ok(None);
+/// Returns `None` when stdin is a TTY: we don't seed a pipe whose background
+/// read would block on the terminal (and could raise `SIGTTIN`); a TTY isn't a
+/// piped-input source in `-c`/script mode. Otherwise spawns a **detached** OS
+/// thread that copies process stdin → the pipe writer. The kernel drains the
+/// reader only if a command actually reads stdin, so a command that doesn't
+/// (`echo`) returns immediately even when stdin is an open pipe that never
+/// sends EOF (`sleep 10 | kaish -c 'echo hi'`). The thread is abandoned at
+/// process exit, so a read parked on such a pipe never delays shutdown — and
+/// because the copy is byte-clean, binary stdin survives losslessly.
+fn spawn_stdin_bridge(handle: tokio::runtime::Handle) -> Option<PipeReader> {
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return None;
     }
-    let mut buf = Vec::new();
-    handle.read_to_end(&mut buf).context("reading stdin")?;
-    if buf.is_empty() {
-        return Ok(None);
+    let (writer, reader) = pipe_stream_default();
+    let spawned = std::thread::Builder::new()
+        .name("kaish-stdin-bridge".to_string())
+        .spawn(move || {
+            let mut buf = [0u8; 64 * 1024];
+            let mut lock = stdin.lock();
+            loop {
+                match lock.read(&mut buf) {
+                    Ok(0) => break, // EOF: dropping `writer` signals EOF to the reader.
+                    Ok(n) => {
+                        // BrokenPipe = the reader was dropped (the command never
+                        // read stdin). Stop copying; nothing more to deliver.
+                        if handle.block_on(writer.write_bytes(&buf[..n])).is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => return, // read error: stop; reader sees EOF on drop.
+                }
+            }
+        });
+    match spawned {
+        Ok(_) => Some(reader),
+        Err(e) => {
+            // Couldn't spawn the bridge: drop the pipe and run without stdin
+            // rather than hang. Loud, not silent.
+            eprintln!("kaish: could not spawn stdin reader: {e}; running without stdin");
+            None
+        }
     }
-    match String::from_utf8(buf) {
-        Ok(s) => Ok(Some(s)),
-        Err(_) => bail!("stdin is not valid UTF-8; pipe binary data through a file or the VFS"),
-    }
+}
+
+/// Execute `source` non-interactively, printing each statement's output as it
+/// completes, with a lazily-bridged process stdin (see [`spawn_stdin_bridge`]).
+fn execute_noninteractive(
+    rt: &tokio::runtime::Runtime,
+    client: &kaish_client::EmbeddedClient,
+    source: &str,
+    opts: kaish_kernel::ExecuteOptions,
+) -> Result<kaish_kernel::interpreter::ExecResult> {
+    let mut on_output = |r: &kaish_kernel::interpreter::ExecResult| {
+        let text = r.text_out();
+        if !text.is_empty() {
+            print!("{}", text);
+        }
+        if !r.err.is_empty() {
+            eprint!("{}", r.err);
+        }
+    };
+    let result = match spawn_stdin_bridge(rt.handle().clone()) {
+        Some(reader) => rt.block_on(client.execute_with_pipe_stdin_streaming(
+            source,
+            opts,
+            reader,
+            &mut on_output,
+        )),
+        None => rt.block_on(client.execute_with_options_streaming(source, opts, &mut on_output)),
+    };
+    result.context("execution failed")
 }
 
 fn main() -> ExitCode {
@@ -157,19 +215,8 @@ fn run_script(path: &str, overlay: bool) -> Result<ExitCode> {
     rt.block_on(client.kernel().set_positional(path, vec![]));
     // Forward any upstream W3C trace context (TRACEPARENT/TRACESTATE/BAGGAGE)
     // so e.g. `otel-cli exec -- kaish script.kai` traces across the boundary.
-    let mut opts = kaish_repl::trace_options_from_env();
-    if let Some(stdin) = read_piped_stdin()? {
-        opts = opts.with_stdin(stdin);
-    }
-    let result = rt.block_on(client.execute_with_options_streaming(&source, opts, &mut |r| {
-        let text = r.text_out();
-        if !text.is_empty() {
-            print!("{}", text);
-        }
-        if !r.err.is_empty() {
-            eprint!("{}", r.err);
-        }
-    }))?;
+    let opts = kaish_repl::trace_options_from_env();
+    let result = execute_noninteractive(&rt, &client, &source, opts)?;
 
     if result.ok() {
         Ok(ExitCode::SUCCESS)
@@ -196,19 +243,8 @@ fn run_command(cmd: &str, overlay: bool) -> Result<ExitCode> {
     let rt = tokio::runtime::Runtime::new()?;
     // Forward any upstream W3C trace context (TRACEPARENT/TRACESTATE/BAGGAGE)
     // so e.g. `otel-cli exec -- kaish -c '…'` traces across the boundary.
-    let mut opts = kaish_repl::trace_options_from_env();
-    if let Some(stdin) = read_piped_stdin()? {
-        opts = opts.with_stdin(stdin);
-    }
-    let result = rt.block_on(client.execute_with_options_streaming(cmd, opts, &mut |r| {
-        let text = r.text_out();
-        if !text.is_empty() {
-            print!("{}", text);
-        }
-        if !r.err.is_empty() {
-            eprint!("{}", r.err);
-        }
-    }))?;
+    let opts = kaish_repl::trace_options_from_env();
+    let result = execute_noninteractive(&rt, &client, cmd, opts)?;
 
     if result.ok() {
         Ok(ExitCode::SUCCESS)

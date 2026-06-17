@@ -569,14 +569,17 @@ environments drop events silently.
 
 ### MCP `execute` has no `stdin` param (frontend stdin gap)
 `ExecuteOptions::stdin` + `with_stdin()` landed 2026-06-16 (the `kaish -c`
-piped-stdin fix), and `kaish-repl` wires its process stdin through it. The MCP
-server (`crates/kaish-mcp/src/server/execute.rs:264`) builds `ExecuteOptions`
-without it, and `ExecuteParams` has no `stdin` field — so an MCP client cannot
-feed a program's stdin (it must use a heredoc/here-string in the script, or
-files/VFS). Low-effort follow-up: add `stdin: Option<String>` to `ExecuteParams`
-(+ schema doc), then `if let Some(s) = params.stdin { opts = opts.with_stdin(s) }`.
-Deferred because kaibo/kaijutsu feed data via files/VFS, not process stdin, so
-nothing reaches for it today. Surfaced by the DeepSeek review of the stdin fix.
+piped-stdin fix); `kaish-repl` forwards its *open* process stdin via the lazy
+`Kernel::execute_with_pipe_stdin_streaming(PipeReader)` seam added 2026-06-17,
+while the eager `with_stdin(String)` path remains for embedders with a ready
+buffer. The MCP server (`crates/kaish-mcp/src/server/execute.rs:264`) builds
+`ExecuteOptions` without either, and `ExecuteParams` has no `stdin` field — so an
+MCP client cannot feed a program's stdin (it must use a heredoc/here-string in
+the script, or files/VFS). Low-effort follow-up: add `stdin: Option<String>` to
+`ExecuteParams` (+ schema doc), then `if let Some(s) = params.stdin { opts =
+opts.with_stdin(s) }` (the buffered path fits MCP — a request body is already a
+ready buffer). Deferred because kaibo/kaijutsu feed data via files/VFS, not
+process stdin, so nothing reaches for it today. Surfaced by the DeepSeek review.
 
 ### `PipelineRunner::run_single`'s `stdin` parameter is vestigial
 `crates/kaish-kernel/src/scheduler/pipeline.rs:362` — `run_single(cmd, ctx,

@@ -451,6 +451,12 @@ impl PipelineRunner {
                 if stage_ctx.stdin_data.is_none() {
                     stage_ctx.stdin_data = ctx.stdin_data.take();
                 }
+                // Inherit a frontend-seeded lazy stdin pipe (non-Clone, so moved),
+                // unless a redirect already provided stdin — `read_stdin_*` prefers
+                // `pipe_stdin`, and `set_stdin` clears it, so `< file` still wins.
+                if stage_ctx.stdin.is_none() && stage_ctx.pipe_stdin.is_none() {
+                    stage_ctx.pipe_stdin = ctx.pipe_stdin.take();
+                }
             } else {
                 // Intermediate/last stages read from pipe
                 stage_ctx.pipe_stdin = pipe_readers[i - 1].take();

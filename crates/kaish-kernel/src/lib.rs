@@ -87,6 +87,10 @@ pub use vfs::{FileStatus, GitVfs, LogEntry, StatusSummary, WorktreeInfo};
 
 // Job observability (for embedders capturing command output)
 pub use scheduler::{BoundedStream, StreamStats, DEFAULT_STREAM_MAX_SIZE, drain_to_stream};
+// Streaming stdin seam: a frontend (REPL `-c`/script) hands the kernel a lazy
+// `PipeReader` via `Kernel::execute_with_pipe_stdin`, so a command that never
+// reads stdin never blocks on an open pipe. See `execute_pipe_stdin_tests`.
+pub use scheduler::{pipe_stream, pipe_stream_default, PipeReader, PipeWriter, PIPE_BUFFER_SIZE};
 pub use vfs::JobFs;
 
 // XDG path primitives (embedders compose their own paths)

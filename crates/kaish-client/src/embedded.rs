@@ -127,6 +127,26 @@ impl EmbeddedClient {
             .await
             .map_err(|e| ClientError::Execution(e.to_string()))
     }
+
+    /// Execute with options + per-statement callback, feeding a **lazy** process
+    /// stdin as a [`kaish_kernel::PipeReader`].
+    ///
+    /// Unlike [`ExecuteOptions::with_stdin`] (a pre-read `String`), the reader is
+    /// drained only if a command actually reads stdin — so `kaish -c 'echo hi'`
+    /// with an open, never-EOF pipe returns immediately instead of hanging. The
+    /// non-interactive REPL frontend uses this for `-c`/script mode.
+    pub async fn execute_with_pipe_stdin_streaming(
+        &self,
+        input: &str,
+        opts: ExecuteOptions,
+        pipe_stdin: kaish_kernel::PipeReader,
+        on_output: &mut (dyn FnMut(&ExecResult) + Send),
+    ) -> ClientResult<ExecResult> {
+        self.kernel
+            .execute_with_pipe_stdin_streaming(input, opts, pipe_stdin, on_output)
+            .await
+            .map_err(|e| ClientError::Execution(e.to_string()))
+    }
 }
 
 #[async_trait(?Send)]

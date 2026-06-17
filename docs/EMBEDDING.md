@@ -253,12 +253,16 @@ Fields:
   cascades to forks and external children (SIGTERM → grace → SIGKILL on
   the process group).
 - **`cwd`** — per-call working directory override.
-- **`stdin`** — standard input for this call, consumed by the first top-level
-  command that reads stdin (shell draining semantics — a later reader sees
-  nothing). Lets a frontend feed piped input, e.g. `printf '…' | kaish -c
-  'sort'`; the `kaish` CLI wires its process stdin here when non-interactive.
-  `String`-typed to match `ExecContext::set_stdin`; feed binary through files
-  or the VFS.
+- **`stdin`** — standard input for this call as a ready `String` buffer,
+  consumed by the first top-level command that reads stdin (shell draining
+  semantics — a later reader sees nothing). Lets an embedder feed piped input,
+  e.g. `printf '…' | kaish -c 'sort'`. A redirect (`< file`/heredoc) on the
+  command still takes precedence. Eager: the whole buffer must exist before the
+  call. For a **lazy or binary** stream — fed only if a command reads stdin,
+  byte-clean — use `Kernel::execute_with_pipe_stdin(_streaming)` with a
+  `PipeReader` instead (this is how the non-interactive `kaish` CLI forwards its
+  open process stdin without blocking a command that never reads it, e.g.
+  `sleep 10 | kaish -c 'echo hi'`).
 - **`traceparent` / `tracestate` / `baggage`** — W3C trace context;
   kaish's execution span parents onto your trace, and baggage merges back
   out through `ExecResult.baggage`.

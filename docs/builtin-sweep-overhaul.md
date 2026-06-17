@@ -57,7 +57,21 @@ idiom breakage · **P3** coverage gaps · **P4** doc / format-pin / message qual
 - **Test:** `cat A B` (both `\n`-terminated) == raw concat; `cat C D` (C no trailing
   `\n`) == `xy\n`; single-file `cat` unchanged.
 
-### [ ] 0. ⚠ REGRESSION from the stdin fix: `kaish -c` eager-read hangs on open stdin
+### [x] 0. ⚠ REGRESSION from the stdin fix: `kaish -c` eager-read hangs on open stdin — FIXED 2026-06-17
+**Fix landed (lazy, pipe-backed stdin):** the frontend no longer pre-reads. A
+detached OS thread copies process stdin → a `PipeReader` that seeds the first
+top-level command's `pipe_stdin`; the kernel drains it only if a command reads
+stdin, so `echo` returns at once on an open never-EOF pipe (`sleep 10 | kaish -c
+'echo hi'` → `hi`, ~11ms, rc 0). Seam (Amy-confirmed shape): frontend builds the
+`PipeReader`; kernel exposes `execute_with_pipe_stdin(_streaming)` seeding
+`exec_ctx.pipe_stdin` via an RAII guard (mirrors `StdinGuard`), consume-once into
+stage 0; `set_stdin` clears `pipe_stdin` so `< file`/heredoc still win. Binary
+survives losslessly (byte-clean copy). Kept the eager `with_stdin(String)` path
+for embedders with a ready buffer. Tests: `execute_pipe_stdin_tests.rs`
+(no-block-on-open-stdin, feeds-reader, first-stage-of-pipeline, redirect-beats,
+no-leak-between-calls). Docs: CHANGELOG (amended the draft's Added bullet),
+EMBEDDING.md, issues.md MCP follow-up updated.
+
 - **Symptom:** `kaish -c 'echo hi'` **hangs** when stdin is an open, non-TTY pipe
   that never sends EOF (e.g. spawned as a subprocess inheriting an idle pipe — the
   Bash-tool case). bash prints `hi` immediately and never reads stdin; kaish's

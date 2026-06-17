@@ -400,8 +400,14 @@ impl ExecContext {
     }
 
     /// Set stdin for this execution.
+    ///
+    /// An explicit stdin string (`< file`, heredoc, here-string, or a pipeline
+    /// hand-off) supersedes any inherited lazy `pipe_stdin`. Since `read_stdin_*`
+    /// prefers `pipe_stdin`, clear it here so redirect precedence holds — a
+    /// `< file` must beat a frontend-seeded piped stdin.
     pub fn set_stdin(&mut self, stdin: String) {
         self.stdin = Some(stdin);
+        self.pipe_stdin = None;
     }
 
     /// Get stdin, consuming it.
