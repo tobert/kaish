@@ -23,7 +23,8 @@ In sandboxed mode, paths look native but access outside `$HOME` fails (except `/
 /v/jobs/{id}/  live background job state (see below)
 ```
 
-Git is the `git` *builtin* (`git status`, `git log`, `git diff`), not a VFS mount.
+Git is an ordinary external command (`git status`, `git log`, `git diff`) — it
+runs via the `subprocess` capability against your system `git`, not a VFS mount.
 
 ## /v/jobs — Job Observability
 

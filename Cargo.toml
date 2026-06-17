@@ -6,7 +6,6 @@ members = [
     "crates/kaish-help",
     "crates/kaish-tool-api",
     "crates/kaish-vfs",
-    "crates/kaish-tools-git",
     "crates/kaish-tools-host",
     "crates/kaish-kernel",
     "crates/kaish-mcp",
@@ -87,9 +86,6 @@ bstr = "1"
 
 # Text diffing
 similar = "2"
-
-# Git operations
-git2 = "0.20"
 
 # Date/time (date)
 chrono = "0.4"

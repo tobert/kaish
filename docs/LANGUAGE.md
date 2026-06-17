@@ -737,7 +737,8 @@ is a loud error — use a counted read like `head -c 32 /dev/urandom` or `dd`. I
 Passthrough/REPL mode the host's real `/dev` is used.
 
 Embedders can mount additional prefixes (e.g. `/mnt/<name>/`) via `Kernel::with_backend`.
-Git operations are provided by the `git` *builtin*, not a VFS mount.
+Git is an ordinary external command (`git status`, `git log`) that runs via the
+`subprocess` capability against your system `git` — there is no git builtin or VFS mount.
 
 ## Binary Data
 
@@ -829,7 +830,6 @@ These are documented limitations of the current implementation:
 
 - **`set` supports `-e`, `-o latch`, `-o trash`, `-o glob`, `-o output-limit[=SIZE]`** — Unlike bash, only these options are implemented. `set -o output-limit=8K` caps command output (see Output Size Limits); `set +o output-limit` disables it. `-u`, `-x`, `pipefail` and other bash set options are silently ignored for compatibility.
 - **`ps` is Linux-only** — The process listing builtin reads from `/proc` and only works on Linux systems.
-- **`git` requires real filesystem** — The git builtin operates on the actual filesystem, not the VFS. It won't work with memory-backed or remote VFS mounts.
 - **`head`/`tail -c` counts bytes** — POSIX semantics, deliberately. A byte count can split a multi-byte UTF-8 sequence; use line-based forms (`-n`) for text.
 - **`sed` is a "muscle-memory" subset, not full sed** — kaish's `sed` deliberately implements the slice of GNU/BSD (AT&T) `sed` that humans and agents actually reach for by reflex — closest in spirit to **busybox** `sed`, which is a strong influence (the supported set was [chosen from a cross-model usability panel](sed-design.md)). It covers:
   - **Substitution** `s/pat/rep/[flags]` with capture groups (`\1`–`\9`, `&`) and flags `g` (global), `i`/`I` (case-insensitive), `p` (print), `m`/`M` (multiline anchors), and a numeric `N` for the Nth match (`s/x/Y/2`; combine as `Ng` for "Nth onward").

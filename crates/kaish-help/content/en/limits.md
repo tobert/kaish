@@ -29,7 +29,6 @@
 | `rm` (trash) | Trash failure = error, no fallthrough to permanent delete. Dirs always trash (stat size unreliable). |
 | `rm` (latch) | Nonces scoped to (command, paths). Subset confirmation only. 60s TTL. Persist within MCP session, not across reconnects. |
 | `ps` | Linux-only (reads `/proc`) |
-| `git` | Operates on real filesystem, not VFS |
 | `head`/`tail -c` | Counts bytes (POSIX); can split multi-byte UTF-8 — prefer `-n` for text |
 | `**` globs | Slow on deep trees; use specific prefixes |
 | `kaish-ignore` | Runtime changes don't persist across sessions; use `~/.kaishrc` or `--init` |

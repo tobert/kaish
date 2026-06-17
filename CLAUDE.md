@@ -26,7 +26,6 @@ crates/
 ├── kaish-vfs/        # Filesystem trait + LocalFs/MemoryFs/OverlayFs backends
 ├── kaish-help/       # Composable help & instructions content (fragments + recipes); content/en/*.md
 ├── kaish-kernel/     # Core: lexer, parser, interpreter, tools, VFS router, validator
-├── kaish-tools-git/  # git builtin + GitVfs (libgit2; behind the `git` feature)
 ├── kaish-tools-host/ # Host introspection tools (ps; behind the `host` feature)
 ├── kaish-mcp/        # MCP server (expose kaish as an MCP tool)
 ├── kaish-client/     # Client implementations (embedded)
@@ -121,7 +120,7 @@ Tests live in `crates/kaish-kernel/tests/`. Snapshots in `crates/kaish-kernel/te
 
 - `docs/LANGUAGE.md` — complete language reference
 - `docs/EMBEDDING.md` — embedder guide (kernel construction, capability
-  features, ExecuteOptions, custom tools); git integration in `docs/EMBEDDING-GIT.md`
+  features, ExecuteOptions, custom tools)
 - `crates/kaish-help/content/en/*.md` — help system content, embedded at compile time
   via the `kaish-help` crate (repo-root `docs/help` symlinks here). Shared by the
   kernel `help` builtin, the REPL, the MCP server, and embedders.
@@ -189,9 +188,9 @@ Hard-won rules that aren't obvious from the code. Violating these silently break
   `with_output_and_text` when a builtin needs a custom pipe representation;
   `to_argv()` injects a `--` separator, so don't unit-test clap builtins via raw
   `positional` (route through an `execute_argv`-style entrypoint).
-- **Capability features are opt-in axes** (`localfs`, `subprocess`, `host`, `git`,
+- **Capability features are opt-in axes** (`localfs`, `subprocess`, `host`,
   `os-integration`, `tokens`); default is `["localfs"]`. A localfs-only build does
-  not spawn subprocesses. `full`/`native` are aliases for all six. New OS-touching
+  not spawn subprocesses. `full`/`native` are aliases for all five. New OS-touching
   code must sit behind the right axis and compile out cleanly without it (the
   `--no-default-features` gates in Build Commands enforce this).
 

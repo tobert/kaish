@@ -225,14 +225,13 @@ async fn sandbox_help_builtins_lists_available() {
 }
 
 /// When the capability axes are off, their builtins must not appear.
-#[cfg(not(any(feature = "subprocess", feature = "git", feature = "tokens")))]
+#[cfg(not(any(feature = "subprocess", feature = "tokens")))]
 #[tokio::test]
 async fn sandbox_no_native_builtins() {
     let k = sandbox_kernel().await;
     let r = k.execute("help builtins").await.expect("execute failed");
     assert!(r.ok());
     let out = r.text_out();
-    assert!(!out.contains(" git "), "git should not be listed without native");
     assert!(!out.contains("tokens"), "tokens should not be listed without native");
     assert!(!out.contains(" bg "), "bg should not be listed without native");
     assert!(!out.contains(" fg "), "fg should not be listed without native");

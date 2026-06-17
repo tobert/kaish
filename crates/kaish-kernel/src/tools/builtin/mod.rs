@@ -132,8 +132,6 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(glob::Glob);
     registry.register(find::Find);
     registry.register(gather::Gather);
-    #[cfg(feature = "git")]
-    registry.register(kaish_tools_git::Git);
     registry.register(grep::Grep);
     registry.register(head::Head);
     registry.register(help::Help);

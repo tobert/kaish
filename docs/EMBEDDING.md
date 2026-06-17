@@ -2,9 +2,7 @@
 
 This guide shows how to embed the kaish kernel in your application: kernel
 construction, capability features, per-call execution options, custom tools,
-and output capture. Git integration (custom backends mapping VFS paths to
-worktrees, direct `GitVfs` access) has its own guide:
-[EMBEDDING-GIT.md](EMBEDDING-GIT.md).
+and output capture.
 
 ## Stability
 
@@ -78,7 +76,7 @@ Two ways in:
 ## Capability Features
 
 The default build is deliberately minimal: real-file I/O and the
-copy-on-write overlay, **no** process execution, host introspection, git,
+copy-on-write overlay, **no** process execution, host introspection,
 desktop integration, or tokenizer. Each dangerous surface is a named opt-in
 cargo feature on `kaish-kernel`:
 
@@ -88,7 +86,6 @@ cargo feature on `kaish-kernel`:
 | `overlay` | Copy-on-write overlay FS (implies `localfs`) | ✓ |
 | `subprocess` | External commands: exec/spawn/which/bg/fg/kill, PATH, signals, job control | — |
 | `host` | Host introspection: `ps`, `uname --host`, `hostname` | — |
-| `git` | `git` builtin + `GitVfs` (libgit2 stays in `kaish-tools-git`) | — |
 | `os-integration` | Freedesktop trash + XDG base directories | — |
 | `tokens` | BPE tokenization (`tokens` builtin) | — |
 | `full` | All of the above (`native` is an alias) | — |
@@ -98,7 +95,8 @@ Consequences for embedders:
 - **External commands need `subprocess`.** Without it, PATH lookup and
   `exec`/`spawn` don't exist. With it, gate at runtime via
   `allow_external_commands` (see [Sandboxing](#sandboxing-and-external-commands)).
-- **Everything in [EMBEDDING-GIT.md](EMBEDDING-GIT.md) needs `git`.**
+  Git is an ordinary external command (`git status`, `git log`): it runs via
+  `subprocess` against your system `git`, with no in-tree builtin or backend.
 - A read-only agent shell wants the default features plus a custom backend —
   see [with_backend hermeticity](#custom-backend-kernelwith_backend).
 
@@ -478,8 +476,6 @@ The `kaish_kernel` crate root re-exports the embedding surface:
 - **Core**: `Kernel`, `KernelConfig`, `VfsMountMode`, `ExecuteOptions`,
   `KernelBackend`, `LocalBackend`, `Tool`, `ToolRegistry`, `ExecContext`,
   `OutputLimitConfig`
-- **Git** (feature `git`): `GitVfs`, `FileStatus`, `StatusSummary`,
-  `LogEntry`, `WorktreeInfo`
 - **Jobs**: `BoundedStream`, `StreamStats`, `drain_to_stream`,
   `DEFAULT_STREAM_MAX_SIZE`, `JobFs`
 - **Paths**: `home_dir`, `xdg_data_home`, `xdg_config_home`,
@@ -502,8 +498,6 @@ directly if you're writing tools without linking the whole kernel.
 
 3. **Compose paths with XDG primitives** — don't hardcode paths.
 
-4. **Start from the minimal feature set** — add `subprocess`/`git`/`host`
+4. **Start from the minimal feature set** — add `subprocess`/`host`
    only when the embedder needs them; the attack surface is named, not
    inherited.
-
-5. **For git integration** — see [EMBEDDING-GIT.md](EMBEDDING-GIT.md).
