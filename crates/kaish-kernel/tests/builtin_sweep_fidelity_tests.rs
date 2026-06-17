@@ -300,3 +300,55 @@ async fn sort_version_no_digits_is_lexical() {
     assert_eq!(code, 0, "out={out:?}");
     assert_eq!(out, "apple\nbanana\ncherry\n");
 }
+
+// ───────────────── trailing-newline EMIT batch (P4.1) ────────────────────
+// tac / base64-encode / xxd -p newline-terminate their output to match the
+// consensus and kaish's line tools. base64 -d (raw bytes out) does NOT.
+
+#[tokio::test]
+async fn tac_emits_trailing_newline() {
+    let (out, code) = run("tac", "a\nb\nc\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "c\nb\na\n");
+}
+
+#[tokio::test]
+async fn base64_encode_emits_trailing_newline() {
+    let (out, code) = run("base64", "hello").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "aGVsbG8=\n");
+}
+
+#[tokio::test]
+async fn base64_decode_stays_raw_no_added_newline() {
+    let (out, code) = run("base64 -d", "aGVsbG8=").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "hello", "decoded bytes are emitted verbatim, no newline added");
+}
+
+#[tokio::test]
+async fn xxd_plain_emits_trailing_newline() {
+    let (out, code) = run("xxd -p", "hi").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "6869\n");
+}
+
+#[tokio::test]
+async fn xxd_plain_30_byte_wrap_boundary_no_double_newline() {
+    // `xxd -p` wraps every 30 bytes; an exact multiple must not double-terminate.
+    let input = "a".repeat(30);
+    let (out, code) = run("xxd -p", &input).await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, format!("{}\n", "61".repeat(30)), "single trailing newline");
+    assert_eq!(out.matches('\n').count(), 1, "exactly one newline");
+}
+
+#[tokio::test]
+async fn xxd_plain_31_bytes_wraps_then_terminates() {
+    let input = "a".repeat(31);
+    let (out, code) = run("xxd -p", &input).await;
+    assert_eq!(code, 0, "out={out:?}");
+    // 30 bytes on line 1 (wrap newline), 1 byte on line 2 (terminal newline).
+    assert_eq!(out, format!("{}\n61\n", "61".repeat(30)));
+    assert_eq!(out.matches('\n').count(), 2, "wrap newline + terminator");
+}

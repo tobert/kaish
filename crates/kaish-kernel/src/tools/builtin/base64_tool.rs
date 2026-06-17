@@ -113,11 +113,16 @@ impl Tool for Base64Tool {
         } else {
             // Encode: raw input bytes → base64 text.
             let encoded = STANDARD.encode(&data);
-            let output = if wrap_col > 0 {
+            let mut output = if wrap_col > 0 {
                 wrap_lines(&encoded, wrap_col)
             } else {
                 encoded
             };
+            // Trailing-newline policy (builtin-sweep P4.1): encoded output is
+            // newline-terminated, like GNU base64. (Decode stays raw — above.)
+            if !output.is_empty() {
+                output.push('\n');
+            }
             ExecResult::with_output(OutputData::text(output))
         }
     }
@@ -162,7 +167,7 @@ mod tests {
         let args = ToolArgs::new();
         let result = Base64Tool.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.text_out().as_ref(), "aGVsbG8=");
+        assert_eq!(result.text_out().as_ref(), "aGVsbG8=\n");
     }
 
     #[tokio::test]
@@ -187,7 +192,7 @@ mod tests {
 
         let result = Base64Tool.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.text_out().as_ref(), "aGVsbG8=");
+        assert_eq!(result.text_out().as_ref(), "aGVsbG8=\n");
     }
 
     #[tokio::test]
@@ -229,7 +234,7 @@ mod tests {
         args.named.insert("wrap".to_string(), Value::Int(0));
         let result = Base64Tool.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(!result.text_out().as_ref().contains('\n'));
+        assert!(!result.text_out().trim_end_matches('\n').contains('\n'));
     }
 
     #[tokio::test]
@@ -302,7 +307,7 @@ mod tests {
         args.positional.push(Value::String("/blob.bin".into()));
         let result = Base64Tool.execute(args, &mut ctx).await;
         assert!(result.ok(), "stderr: {}", result.err);
-        assert_eq!(result.text_out().as_ref(), STANDARD.encode([0u8, 0xff, 0x10]));
+        assert_eq!(result.text_out().as_ref(), format!("{}\n", STANDARD.encode([0u8, 0xff, 0x10])));
     }
 
     #[tokio::test]

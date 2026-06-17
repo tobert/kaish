@@ -183,10 +183,7 @@ fn classic_hex(bytes: &[u8], base_offset: usize) -> String {
         output.push('\n');
     }
 
-    // Remove trailing newline for consistency
-    if output.ends_with('\n') {
-        output.pop();
-    }
+    // Each line is newline-terminated, including the last (builtin-sweep P4.1).
     output
 }
 
@@ -198,6 +195,10 @@ fn plain_hex(bytes: &[u8]) -> String {
         if i > 0 && (i + 1) % 30 == 0 {
             output.push('\n');
         }
+    }
+    // Terminate the final (partial) line too (builtin-sweep P4.1).
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
     }
     output
 }
@@ -292,7 +293,7 @@ mod tests {
         args.named.insert("plain".to_string(), Value::Bool(true));
         let result = Xxd.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.text_out().as_ref(), "68656c6c6f");
+        assert_eq!(result.text_out().as_ref(), "68656c6c6f\n");
     }
 
     #[tokio::test]
@@ -343,7 +344,7 @@ mod tests {
         args.named.insert("plain".to_string(), Value::Bool(true));
         let result = Xxd.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.text_out().as_ref(), "646566"); // "def" in hex
+        assert_eq!(result.text_out().as_ref(), "646566\n"); // "def" in hex
     }
 
     #[tokio::test]
@@ -356,7 +357,7 @@ mod tests {
         args.named.insert("plain".to_string(), Value::Bool(true));
         let result = Xxd.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.text_out().as_ref(), "616263"); // "abc" in hex
+        assert_eq!(result.text_out().as_ref(), "616263\n"); // "abc" in hex
     }
 
     #[tokio::test]
@@ -374,7 +375,7 @@ mod tests {
         let result = Xxd.execute(args, &mut ctx).await;
         assert!(result.ok(), "stderr: {}", result.err);
         // Exact hex of the real bytes — not a lossy approximation.
-        assert_eq!(result.text_out().as_ref(), "ff0010");
+        assert_eq!(result.text_out().as_ref(), "ff0010\n");
     }
 
     #[tokio::test]

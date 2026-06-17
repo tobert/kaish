@@ -281,7 +281,11 @@ convention; affects `-V -k` but works via to_argv round-trip — separate cleanu
 
 ## P4 — Doc / format-pin / message quality
 
-### [ ] 1. Trailing-newline policy — EMIT (decided)
+### [x] 1. Trailing-newline policy — EMIT (decided) — DONE 2026-06-17
+**Done across:** wc (P2.7), split (P2.6), jq (P2.5) in their commits; tac/base64-
+encode/xxd(classic+plain) here. Decode/reverse paths (base64 -d, xxd -r) stay raw
+bytes — no added newline. `xxd -p` 30/31-byte wrap boundary pinned (no double).
+DeepSeek-reviewed clean.
 - **Cells:** `tac` (TC1), `wc` (P2.7), `split` (SP1/2/4), `jq` (J1/2/3 + J4),
   `base64` (B1/B3), `xxd -p` (X2), `dd|xxd` (D1/D2) all **omit** a trailing newline
   the consensus expects. Core line tools (head/sort/cut/grep/seq/printf) already emit

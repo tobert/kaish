@@ -29,6 +29,7 @@ breaking entries are marked **BREAKING**.
 - **`awk` numeric output matches awk's `OFMT`**: integral values print in full (`100000000000000000`), non-integral values use `%.6g` (6 significant figures, e.g. `sqrt(2)` → `1.41421`). Previously fractions printed with 6 decimal places and large integers were truncated.
 
 ### Fixed
+- **`tac`, `base64` (encode), and `xxd` now newline-terminate their output** (builtin-sweep trailing-newline policy), matching the consensus and kaish's line tools. `base64 -d` and `xxd -r` (decode/reverse) still emit raw bytes verbatim with no added newline.
 - **`tr -c`/`-C`/`--complement` is now supported** — the common idiom `tr -cd '[:digit:]'` (keep only digits) used to be a clap parse error. `-c` complements SET1 across delete, translate, and squeeze modes.
 - **`wc` single-count output is the bare number + newline** (`wc -l` → `2\n`) instead of a leading-tab, newline-less `\t2`; multi-count output is right-justified to a common width, single-space separated, newline-terminated. `wc -l` now counts newline characters (an unterminated final line is not counted: `a\nb` → 1, matching GNU).
 - **`jq -c` (compact) now emits single-line JSON** instead of silently pretty-printing — the flag was parsed but ignored. `jq` output is also now newline-terminated (each value ends in `\n`, matching real jq and the builtin-sweep trailing-newline policy).

@@ -82,6 +82,10 @@ impl Tool for Tac {
                     Err(e) => return ExecResult::failure(1, format!("tac: {}: {}", path, e)),
                 }
             }
+            // Trailing-newline policy (builtin-sweep P4.1).
+            if !output.is_empty() {
+                output.push('\n');
+            }
             return ExecResult::with_output(OutputData::text(output));
         }
 
@@ -111,7 +115,13 @@ impl Tool for Tac {
         let mut lines: Vec<&str> = input.lines().collect();
         lines.reverse();
 
-        ExecResult::with_output(OutputData::text(lines.join("\n")))
+        // Trailing-newline policy (builtin-sweep P4.1); empty input stays empty.
+        let text = if lines.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", lines.join("\n"))
+        };
+        ExecResult::with_output(OutputData::text(text))
     }
 }
 
@@ -149,7 +159,7 @@ mod tests {
 
         let result = Tac.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.text_out().as_ref(), "five\nfour\nthree\ntwo\none");
+        assert_eq!(result.text_out().as_ref(), "five\nfour\nthree\ntwo\none\n");
     }
 
     #[tokio::test]
@@ -160,7 +170,7 @@ mod tests {
         let args = ToolArgs::new();
         let result = Tac.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.text_out().as_ref(), "gamma\nbeta\nalpha");
+        assert_eq!(result.text_out().as_ref(), "gamma\nbeta\nalpha\n");
     }
 
     #[tokio::test]
@@ -171,7 +181,7 @@ mod tests {
 
         let result = Tac.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.text_out().as_ref(), "only");
+        assert_eq!(result.text_out().as_ref(), "only\n");
     }
 
     #[tokio::test]
@@ -194,7 +204,7 @@ mod tests {
 
         let result = Tac.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.text_out().as_ref(), "a2\na1\nb2\nb1");
+        assert_eq!(result.text_out().as_ref(), "a2\na1\nb2\nb1\n");
     }
 
     #[tokio::test]
