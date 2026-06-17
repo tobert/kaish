@@ -35,7 +35,7 @@ struct ValidateArgs {
 
     /// Show warnings in addition to errors.
     #[arg(id = "warnings", short = 'w', long = "warnings")]
-    _warnings: bool,
+    warnings: bool,
 
     #[command(flatten)]
     global: GlobalFlags,
@@ -82,7 +82,10 @@ impl Tool for Validate {
         };
 
         let quiet = args.has_flag("quiet") || args.has_flag("q");
-        let show_warnings = args.has_flag("warnings") || args.has_flag("w") || !args.flags.contains("warnings");
+        // Warnings are opt-in via `-w`/`--warnings`. (The old expression was the
+        // tautology `A || B || !A` — always true — so `-w` was inert.) Read the
+        // parsed clap field, not the raw flag map.
+        let show_warnings = parsed.warnings;
 
         // Get input: from file, -e expression, or stdin
         let (source, label) = if let Some(expr) = args.get_string("expr", usize::MAX) {

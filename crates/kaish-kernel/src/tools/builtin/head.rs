@@ -164,7 +164,10 @@ impl Tool for Head {
                     Err(e) => return ExecResult::failure(1, format!("head: {}: {}", path, e)),
                 }
             }
-            None => ctx.read_stdin_to_string().await.unwrap_or_default(),
+            None => match ctx.read_stdin_to_text().await {
+                Ok(s) => s.unwrap_or_default(),
+                Err(e) => return ExecResult::failure(2, format!("head: {e}")),
+            },
         };
 
         // Line mode: `-n N` = first N; `-n -N` = all but the last N.
@@ -282,6 +285,17 @@ impl Head {
                         buffered.push_str(&line_buf);
                     }
                 }
+                // `read_line` rejects non-UTF-8 with `InvalidData`. Line-mode
+                // head is text-only — error loudly rather than silently
+                // truncating at the bad byte (binary stdin is reachable via the
+                // lazy pipe). Other I/O errors end the stream as before.
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    return ExecResult::failure(
+                        2,
+                        "head: input is not valid UTF-8 (binary data?) — \
+                         use `head -c N` for bytes",
+                    );
+                }
                 Err(_) => break,
             }
         }
@@ -293,6 +307,12 @@ impl Head {
             let _ = out.shutdown().await;
             ExecResult::success("")
         } else {
+            // Empty input → empty output. Without this guard the `format!`
+            // below emits a bare "\n" for `true | head` (the buffered path
+            // guards this the same way).
+            if buffered.is_empty() {
+                return ExecResult::with_output(OutputData::new());
+            }
             // Remove trailing newline for consistency with buffered path
             if buffered.ends_with('\n') {
                 buffered.pop();

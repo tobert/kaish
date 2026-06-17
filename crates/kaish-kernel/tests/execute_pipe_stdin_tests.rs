@@ -165,6 +165,24 @@ async fn lazy_stdin_reaches_a_builtin_that_reads_the_stdin_field() {
 }
 
 #[tokio::test]
+async fn head_rejects_non_utf8_pipe_stdin_loudly() {
+    // Line-mode `head` reading binary stdin must be a loud error, not a lossy
+    // U+FFFD mangle. The lazy-pipe feature newly makes binary stdin reachable;
+    // the strict-decode fix had missed `head`'s line-mode path.
+    let kernel = kernel();
+    let (writer, reader) = pipe_stream_default();
+    writer.write_bytes(&[0xff, 0xfe, b'\n']).await.unwrap();
+    drop(writer);
+
+    let result = kernel
+        .execute_with_pipe_stdin("head", ExecuteOptions::new(), reader)
+        .await
+        .expect("kernel execute");
+    assert!(!result.ok(), "binary stdin must error, got out={:?}", result.text_out());
+    assert!(result.text_out().is_empty(), "no lossy output: {:?}", result.text_out());
+}
+
+#[tokio::test]
 async fn lazy_stdin_does_not_leak_between_calls() {
     // The seeded reader is consume-once: a second call with no stdin sees none.
     let kernel = kernel();

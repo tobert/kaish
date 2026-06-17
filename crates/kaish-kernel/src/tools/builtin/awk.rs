@@ -29,9 +29,9 @@ struct AwkArgs {
     #[arg(short = 'F', long = "field-separator", visible_alias = "field_separator")]
     field_separator: Option<String>,
 
-    /// Variable assignment (-v NAME=VALUE).
+    /// Variable assignment (-v NAME=VALUE). Repeatable; all are applied.
     #[arg(short = 'v', long = "var")]
-    var: Option<String>,
+    var: Vec<String>,
 
     #[command(flatten)]
     global: GlobalFlags,
@@ -123,23 +123,57 @@ impl Tool for Awk {
             runtime.set_var("FS", AwkValue::String(fs));
         }
 
-        // Handle -v assignments (clap value first, then legacy named fallback)
-        if let Some(var_assign) = parsed
-            .var
-            .clone()
-            .or_else(|| args.get_string("var", usize::MAX))
-            .or_else(|| args.get_string("v", usize::MAX))
-            && let Some((name, value)) = var_assign.split_once('=')
-        {
-            runtime.set_var(name.trim(), AwkValue::String(value.to_string()));
+        // Handle -v assignments. Read from the *raw* args, not `parsed.var`: the
+        // kernel accumulates repeated `-v` into a `Value::Json(Array)`, which
+        // `ToolArgs::to_argv()` collapses to one JSON token (it can't tell a
+        // repeatable scalar array from a single array value) — same gotcha as
+        // sed's `-e`. Each assignment is applied in order; later wins.
+        for var_assign in collect_vars(&args) {
+            if let Some((name, value)) = var_assign.split_once('=') {
+                // Command-line assignments are numeric strings (POSIX strnum).
+                runtime.set_var(name.trim(), AwkValue::StrNum(value.to_string()));
+            }
         }
 
         // Execute
         match runtime.execute(&ast, &input) {
-            Ok(output) => ExecResult::with_output(OutputData::text(output)),
+            Ok((output, exit_code)) => {
+                let result = ExecResult::with_output(OutputData::text(output));
+                // `exit N` sets the builtin's exit code; output + END still ran.
+                match exit_code {
+                    Some(code) => result.with_code(code as i64),
+                    None => result,
+                }
+            }
             Err(e) => ExecResult::failure(1, format!("awk: {}", e)),
         }
     }
+}
+
+/// Collect every `-v NAME=VALUE` assignment, in order.
+///
+/// Repeated `-v` flags are accumulated by the kernel into a `Value::Json(Array)`
+/// under the canonical `var` key; a single value may arrive as a bare
+/// `Value::String`. Mirrors sed's `collect_expressions` — see the repeatable
+/// gotcha in `[[arch_repeatable_flags]]`.
+fn collect_vars(args: &ToolArgs) -> Vec<String> {
+    let mut vars = Vec::new();
+    // Both `-v` and `--var` canonicalize to the long name `var`; `v` is
+    // defensive insurance in case a future change binds under the short alias.
+    for key in ["var", "v"] {
+        match args.named.get(key) {
+            Some(crate::ast::Value::Json(serde_json::Value::Array(items))) => {
+                for item in items {
+                    if let serde_json::Value::String(s) = item {
+                        vars.push(s.clone());
+                    }
+                }
+            }
+            Some(crate::ast::Value::String(s)) => vars.push(s.clone()),
+            _ => {}
+        }
+    }
+    vars
 }
 
 // ============================================================================
@@ -1625,7 +1659,14 @@ fn format_awk_ofmt(n: f64) -> String {
 /// AWK value with string/number coercion.
 #[derive(Debug, Clone, Default)]
 enum AwkValue {
+    /// A string *constant* (program literal, concatenation, function result).
+    /// Never compares numerically — `"abc" == 0` is a string compare.
     String(String),
+    /// A *numeric string* (POSIX strnum): a value derived from input — a field,
+    /// a `split()` element, a `-v`/command-line assignment, `getline`. It
+    /// compares numerically *only when it looks like a number* (`"0"` → numeric,
+    /// `"abc"` → string), which is the whole point of the strnum concept.
+    StrNum(String),
     Number(f64),
     #[default]
     Uninitialized,
@@ -1634,7 +1675,7 @@ enum AwkValue {
 impl std::fmt::Display for AwkValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AwkValue::String(s) => f.write_str(s),
+            AwkValue::String(s) | AwkValue::StrNum(s) => f.write_str(s),
             AwkValue::Number(n) => f.write_str(&format_awk_number(*n)),
             AwkValue::Uninitialized => Ok(()),
         }
@@ -1656,7 +1697,7 @@ impl AwkValue {
     fn to_number(&self) -> f64 {
         match self {
             AwkValue::Number(n) => *n,
-            AwkValue::String(s) => parse_awk_number(s),
+            AwkValue::String(s) | AwkValue::StrNum(s) => parse_awk_number(s),
             AwkValue::Uninitialized => 0.0,
         }
     }
@@ -1664,12 +1705,37 @@ impl AwkValue {
     fn to_bool(&self) -> bool {
         match self {
             AwkValue::Number(n) => *n != 0.0,
+            // A string *constant* is true iff non-empty. A *numeric string*
+            // (strnum) follows its numeric value when it looks like a number
+            // (`$1 == "0"` is false in a boolean context), else non-emptiness.
             AwkValue::String(s) => !s.is_empty(),
+            AwkValue::StrNum(s) => {
+                if str_looks_numeric(s) {
+                    parse_awk_number(s) != 0.0
+                } else {
+                    !s.is_empty()
+                }
+            }
             AwkValue::Uninitialized => false,
         }
     }
 }
 
+
+/// Whether the *whole* (trimmed) string is a valid number — the POSIX strnum
+/// test. Stricter than [`parse_awk_number`], which extracts a leading numeric
+/// prefix (`"5abc"` → 5 in numeric context, but `"5abc"` is *not* a numeric
+/// string). Hex/inf/nan are rejected to match awk (`"0x10" != 16`).
+fn str_looks_numeric(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    match s.parse::<f64>() {
+        Ok(n) => n.is_finite(),
+        Err(_) => false,
+    }
+}
 
 fn parse_awk_number(s: &str) -> f64 {
     let s = s.trim();
@@ -1773,9 +1839,14 @@ impl AwkRuntime {
         self.fields.get(idx).cloned().unwrap_or(AwkValue::Uninitialized)
     }
 
-    fn set_field(&mut self, n: i64, value: AwkValue) {
+    fn set_field(&mut self, n: i64, value: AwkValue) -> Result<(), String> {
         if n < 0 {
-            return;
+            return Ok(());
+        }
+        // Assigning `$0` re-splits the record into $1..$NF and resets NF — the
+        // `n > 0` rebuild path below only covers individual-field edits.
+        if n == 0 {
+            return self.split_record(&value.to_string());
         }
         let idx = n as usize;
         if idx >= self.fields.len() {
@@ -1783,55 +1854,65 @@ impl AwkRuntime {
         }
         self.fields[idx] = value;
 
-        // Rebuild $0 if setting a field; also extend NF if assigning past it.
-        if n > 0 {
-            if n > self.nf {
-                self.nf = n;
-                self.set_var("NF", AwkValue::Number(n as f64));
-            }
-            self.rebuild_record();
+        // Rebuild $0 after an individual-field edit; extend NF if past the end.
+        if n > self.nf {
+            self.nf = n;
+            self.set_var("NF", AwkValue::Number(n as f64));
         }
+        self.rebuild_record();
+        Ok(())
     }
 
     fn rebuild_record(&mut self) {
         let ofs = self.get_var("OFS").to_string();
         let parts: Vec<String> = self.fields[1..].iter().map(|f| f.to_string()).collect();
-        self.fields[0] = AwkValue::String(parts.join(&ofs));
+        self.fields[0] = AwkValue::StrNum(parts.join(&ofs));
     }
 
-    fn split_record(&mut self, record: &str) {
+    fn split_record(&mut self, record: &str) -> Result<(), String> {
         let fs = self.get_var("FS").to_string();
-        self.fields = vec![AwkValue::String(record.to_string())];
+        self.fields = vec![AwkValue::StrNum(record.to_string())];
 
         let parts: Vec<&str> = if fs == " " {
             // Default: split on whitespace, trim leading/trailing
             record.split_whitespace().collect()
-        } else if fs.len() == 1 {
+        } else if fs.chars().count() == 1 {
+            // A single-character FS is a literal separator (POSIX), never a
+            // regex — `-F '['` splits on a literal `[`.
             record.split(&fs).collect()
         } else {
-            // FS is a regex
-            match Regex::new(&fs) {
-                Ok(re) => re.split(record).collect(),
-                Err(_) => record.split(&fs).collect(),
-            }
+            // Multi-character FS is an ERE. An invalid regex is a loud error,
+            // not a silent literal-split fallback (which silently miscounts
+            // fields). Matches gawk's fatal behavior.
+            let re = Regex::new(&fs)
+                .map_err(|e| format!("invalid FS regex {:?}: {}", fs, e))?;
+            re.split(record).collect()
         };
 
         for part in &parts {
-            self.fields.push(AwkValue::String(part.to_string()));
+            self.fields.push(AwkValue::StrNum(part.to_string()));
         }
 
         self.nf = (self.fields.len() - 1) as i64;
         self.set_var("NF", AwkValue::Number(self.nf as f64));
+        Ok(())
     }
 
-    fn execute(&mut self, program: &AwkProgram, input: &str) -> Result<String, String> {
+    fn execute(&mut self, program: &AwkProgram, input: &str) -> Result<(String, Option<i32>), String> {
         // Size range_active to the number of rules; non-range rules never touch it.
         self.range_active = vec![false; program.rules.len()];
 
+        // The exit code from the most recent `exit N` (None until one fires).
+        let mut exit_code: Option<i32> = None;
+
         // Run BEGIN rules
         for rule in &program.rules {
-            if matches!(rule.pattern, Pattern::Begin) && let ControlFlow::Exit(_) = self.execute_block(&rule.action)? {
-                return Ok(std::mem::take(&mut self.output));
+            if matches!(rule.pattern, Pattern::Begin)
+                && let ControlFlow::Exit(code) = self.execute_block(&rule.action)?
+            {
+                // `exit` in BEGIN skips main + other BEGINs but still runs END.
+                exit_code = Some(code);
+                return self.run_end_rules(program, exit_code);
             }
         }
 
@@ -1849,7 +1930,7 @@ impl AwkRuntime {
         'records: for record in records {
             self.nr += 1;
             self.set_var("NR", AwkValue::Number(self.nr as f64));
-            self.split_record(record);
+            self.split_record(record)?;
 
             for (rule_idx, rule) in program.rules.iter().enumerate() {
                 if matches!(rule.pattern, Pattern::Begin | Pattern::End) {
@@ -1859,7 +1940,10 @@ impl AwkRuntime {
                 if self.pattern_matches(rule_idx, &rule.pattern)? {
                     match self.execute_block(&rule.action)? {
                         ControlFlow::Next => continue 'records,
-                        ControlFlow::Exit(_) => break 'records,
+                        ControlFlow::Exit(code) => {
+                            exit_code = Some(code);
+                            break 'records;
+                        }
                         ControlFlow::Break | ControlFlow::Continue => {
                             return Err("break/continue outside loop".to_string())
                         }
@@ -1869,14 +1953,26 @@ impl AwkRuntime {
             }
         }
 
-        // Run END rules
+        self.run_end_rules(program, exit_code)
+    }
+
+    /// Run all END rules, then return the accumulated output and the final exit
+    /// code. An `exit N` inside END overrides any prior code and stops further
+    /// END rules.
+    fn run_end_rules(
+        &mut self,
+        program: &AwkProgram,
+        mut exit_code: Option<i32>,
+    ) -> Result<(String, Option<i32>), String> {
         for rule in &program.rules {
-            if matches!(rule.pattern, Pattern::End) && let ControlFlow::Exit(_) = self.execute_block(&rule.action)? {
+            if matches!(rule.pattern, Pattern::End)
+                && let ControlFlow::Exit(code) = self.execute_block(&rule.action)?
+            {
+                exit_code = Some(code);
                 break;
             }
         }
-
-        Ok(std::mem::take(&mut self.output))
+        Ok((std::mem::take(&mut self.output), exit_code))
     }
 
     fn pattern_matches(&mut self, rule_idx: usize, pattern: &Pattern) -> Result<bool, String> {
@@ -2083,7 +2179,9 @@ impl AwkRuntime {
                     .unwrap_or_default();
 
                 for key in keys {
-                    self.set_var(var, AwkValue::String(key));
+                    // Array subscripts are numeric strings — `for (k in a)` then
+                    // `if (k == 1)` compares numerically when the key looks numeric.
+                    self.set_var(var, AwkValue::StrNum(key));
                     match self.execute_block(body)? {
                         ControlFlow::Break => break,
                         ControlFlow::Continue => continue,
@@ -2148,7 +2246,7 @@ impl AwkRuntime {
             }
             LValue::Field(expr) => {
                 let n = self.eval_expr(expr)?.to_number() as i64;
-                self.set_field(n, value);
+                self.set_field(n, value)?;
             }
             LValue::ArrayElem(arr_name, key_expr) => {
                 let key = self.eval_expr(key_expr)?.to_string();
@@ -2334,36 +2432,42 @@ impl AwkRuntime {
     }
 
     fn compare_values(&self, l: &AwkValue, r: &AwkValue) -> std::cmp::Ordering {
-        // AWK comparison: if either operand is numeric (or a numeric string),
-        // compare numerically. Otherwise compare as strings.
-        let l_num = Self::looks_numeric(l);
-        let r_num = Self::looks_numeric(r);
-
-        if l_num || r_num {
-            // At least one is numeric, compare as numbers
+        // POSIX comparison rule: compare numerically iff *both* operands are
+        // numeric-for-comparison — a Number, an uninitialized value, or a
+        // numeric string (strnum) that looks like a number. A string constant
+        // is never numeric, so `"abc" == 0` and `$1("abc") == 0` are string
+        // compares (not a silent `"abc" → 0.0` coercion, the old `||` bug).
+        if Self::numeric_for_compare(l) && Self::numeric_for_compare(r) {
             l.to_number()
                 .partial_cmp(&r.to_number())
                 .unwrap_or(std::cmp::Ordering::Equal)
         } else {
-            // Both are non-numeric strings, compare lexicographically
             l.to_string().cmp(&r.to_string())
         }
     }
 
-    fn looks_numeric(val: &AwkValue) -> bool {
+    /// Whether a value participates in a *numeric* comparison (see POSIX strnum
+    /// rules in [`Self::compare_values`]).
+    fn numeric_for_compare(val: &AwkValue) -> bool {
         match val {
             AwkValue::Number(_) => true,
-            AwkValue::String(s) => {
-                let s = s.trim();
-                !s.is_empty() && s.parse::<f64>().is_ok()
-            }
-            AwkValue::Uninitialized => true, // 0
+            AwkValue::Uninitialized => true, // behaves as 0
+            AwkValue::StrNum(s) => str_looks_numeric(s),
+            AwkValue::String(_) => false, // a string constant never compares numerically
         }
     }
 
     fn call_function(&mut self, name: &str, args: &[Expr]) -> Result<AwkValue, String> {
         match name {
             "length" => {
+                // `length(arr)` on an array name is the element count. A bare
+                // variable that names an array must not be eval'd as a scalar
+                // (that yields Uninitialized → "" → 0).
+                if let [Expr::Var(name)] = args
+                    && let Some(arr) = self.arrays.get(name)
+                {
+                    return Ok(AwkValue::Number(arr.len() as f64));
+                }
                 let s = if args.is_empty() {
                     self.get_field(0).to_string()
                 } else {
@@ -2434,20 +2538,21 @@ impl AwkRuntime {
                 } else if sep.chars().count() == 1 {
                     s.split(sep.as_str()).map(str::to_string).collect()
                 } else {
-                    match Regex::new(&sep) {
-                        Ok(re) => re.split(&s).map(str::to_string).collect(),
-                        Err(_) => s.split(sep.as_str()).map(str::to_string).collect(),
-                    }
+                    // Multi-char separator is an ERE; an invalid regex is a loud
+                    // error, not a silent literal-split fallback (gawk: fatal).
+                    let re = Regex::new(&sep)
+                        .map_err(|e| format!("invalid split() separator regex {:?}: {}", sep, e))?;
+                    re.split(&s).map(str::to_string).collect()
                 };
 
                 let count = parts.len();
 
                 // Clear the target array first (awk semantics: split always empties it),
-                // then fill with 1-indexed string keys.
+                // then fill with 1-indexed keys. Elements are numeric strings.
                 let arr = self.arrays.entry(arr_name).or_default();
                 arr.clear();
                 for (i, part) in parts.into_iter().enumerate() {
-                    arr.insert((i + 1).to_string(), AwkValue::String(part));
+                    arr.insert((i + 1).to_string(), AwkValue::StrNum(part));
                 }
 
                 Ok(AwkValue::Number(count as f64))
@@ -2604,10 +2709,8 @@ impl AwkRuntime {
                     }
                 }
 
-                // Write the substituted string back through the lvalue.
-                // set_lvalue on a Field(0) calls set_field(0, …) which does NOT call
-                // rebuild_record (only n > 0 triggers that), so we handle $0 specially:
-                // writing to $0 re-splits the record.
+                // Write the substituted string back through the lvalue. Fields
+                // are numeric strings; `set_field(0, …)` re-splits $0 itself.
                 match &target_lvalue {
                     LValue::Field(field_expr) => {
                         let field_num = match field_expr.as_ref() {
@@ -2618,12 +2721,7 @@ impl AwkRuntime {
                                 field_expr
                             ),
                         };
-                        if field_num == 0 {
-                            // Assigning to $0 re-splits the record (standard awk behaviour).
-                            self.split_record(&result_str);
-                        } else {
-                            self.set_field(field_num, AwkValue::String(result_str));
-                        }
+                        self.set_field(field_num, AwkValue::StrNum(result_str))?;
                     }
                     LValue::Var(name) => {
                         self.set_var(name, AwkValue::String(result_str));
@@ -2794,7 +2892,7 @@ mod tests {
     fn test_eval_print_fields() {
         let prog = parse_program("{print $2, $1}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "hello world").unwrap();
+        let result = rt.execute(&prog, "hello world").unwrap().0;
         assert_eq!(result, "world hello\n");
     }
 
@@ -2802,7 +2900,7 @@ mod tests {
     fn test_eval_sum() {
         let prog = parse_program("{sum += $1} END {print sum}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "10\n20\n30").unwrap();
+        let result = rt.execute(&prog, "10\n20\n30").unwrap().0;
         assert_eq!(result, "60\n");
     }
 
@@ -2811,7 +2909,7 @@ mod tests {
         let prog = parse_program("{print $1}").unwrap();
         let mut rt = AwkRuntime::new();
         rt.set_var("FS", AwkValue::String(":".to_string()));
-        let result = rt.execute(&prog, "alice:25").unwrap();
+        let result = rt.execute(&prog, "alice:25").unwrap().0;
         assert_eq!(result, "alice\n");
     }
 
@@ -2819,7 +2917,7 @@ mod tests {
     fn test_eval_regex_pattern() {
         let prog = parse_program("/world/ {print \"found\"}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "hello\nworld\nfoo").unwrap();
+        let result = rt.execute(&prog, "hello\nworld\nfoo").unwrap().0;
         assert_eq!(result, "found\n");
     }
 
@@ -2827,7 +2925,7 @@ mod tests {
     fn test_eval_comparison() {
         let prog = parse_program("$1 > 20 {print $1}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "10\n25\n30\n15").unwrap();
+        let result = rt.execute(&prog, "10\n25\n30\n15").unwrap().0;
         assert_eq!(result, "25\n30\n");
     }
 
@@ -2835,7 +2933,7 @@ mod tests {
     fn test_eval_nr_nf() {
         let prog = parse_program("{print NR, NF}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "a b c\nd e").unwrap();
+        let result = rt.execute(&prog, "a b c\nd e").unwrap().0;
         assert_eq!(result, "1 3\n2 2\n");
     }
 
@@ -2843,7 +2941,7 @@ mod tests {
     fn test_eval_begin_end() {
         let prog = parse_program("BEGIN {print \"start\"} {print} END {print \"end\"}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "middle").unwrap();
+        let result = rt.execute(&prog, "middle").unwrap().0;
         assert_eq!(result, "start\nmiddle\nend\n");
     }
 
@@ -2851,7 +2949,7 @@ mod tests {
     fn test_eval_if_else() {
         let prog = parse_program("{if ($1 > 0) print \"pos\"; else print \"neg\"}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "5\n-3").unwrap();
+        let result = rt.execute(&prog, "5\n-3").unwrap().0;
         assert_eq!(result, "pos\nneg\n");
     }
 
@@ -2859,7 +2957,7 @@ mod tests {
     fn test_eval_for_loop() {
         let prog = parse_program("BEGIN {for (i=1; i<=3; i++) print i}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "1\n2\n3\n");
     }
 
@@ -2867,7 +2965,7 @@ mod tests {
     fn test_eval_while_loop() {
         let prog = parse_program("BEGIN {i=1; while (i<=3) {print i; i++}}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "1\n2\n3\n");
     }
 
@@ -2875,7 +2973,7 @@ mod tests {
     fn test_eval_array() {
         let prog = parse_program("{a[$1]=$2} END {print a[\"bob\"]}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "alice 25\nbob 30").unwrap();
+        let result = rt.execute(&prog, "alice 25\nbob 30").unwrap().0;
         assert_eq!(result, "30\n");
     }
 
@@ -2883,7 +2981,7 @@ mod tests {
     fn test_eval_length() {
         let prog = parse_program("{print length($1)}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "hello").unwrap();
+        let result = rt.execute(&prog, "hello").unwrap().0;
         assert_eq!(result, "5\n");
     }
 
@@ -2891,7 +2989,7 @@ mod tests {
     fn test_eval_substr() {
         let prog = parse_program("{print substr($1, 2, 3)}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "hello").unwrap();
+        let result = rt.execute(&prog, "hello").unwrap().0;
         assert_eq!(result, "ell\n");
     }
 
@@ -2899,7 +2997,7 @@ mod tests {
     fn test_eval_tolower_toupper() {
         let prog = parse_program("{print tolower($1), toupper($2)}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "HELLO world").unwrap();
+        let result = rt.execute(&prog, "HELLO world").unwrap().0;
         assert_eq!(result, "hello WORLD\n");
     }
 
@@ -2907,7 +3005,7 @@ mod tests {
     fn test_eval_index() {
         let prog = parse_program("{print index($1, \"ll\")}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "hello").unwrap();
+        let result = rt.execute(&prog, "hello").unwrap().0;
         assert_eq!(result, "3\n");
     }
 
@@ -2915,7 +3013,7 @@ mod tests {
     fn test_eval_sprintf() {
         let prog = parse_program("{print sprintf(\"%s is %d\", $1, $2)}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "answer 42").unwrap();
+        let result = rt.execute(&prog, "answer 42").unwrap().0;
         assert_eq!(result, "answer is 42\n");
     }
 
@@ -2923,7 +3021,7 @@ mod tests {
     fn test_eval_printf() {
         let prog = parse_program("{printf \"%s: %d\\n\", $1, $2}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "count 42").unwrap();
+        let result = rt.execute(&prog, "count 42").unwrap().0;
         assert_eq!(result, "count: 42\n");
     }
 
@@ -2931,7 +3029,7 @@ mod tests {
     fn test_eval_ternary() {
         let prog = parse_program("{print ($1 > 0 ? \"pos\" : \"neg\")}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "5\n-3").unwrap();
+        let result = rt.execute(&prog, "5\n-3").unwrap().0;
         assert_eq!(result, "pos\nneg\n");
     }
 
@@ -2939,7 +3037,7 @@ mod tests {
     fn test_eval_next() {
         let prog = parse_program("$1 == \"skip\" {next} {print}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "keep\nskip\nalso keep").unwrap();
+        let result = rt.execute(&prog, "keep\nskip\nalso keep").unwrap().0;
         assert_eq!(result, "keep\nalso keep\n");
     }
 
@@ -2947,7 +3045,7 @@ mod tests {
     fn test_eval_exit() {
         let prog = parse_program("{if (NR == 2) exit; print}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "line1\nline2\nline3").unwrap();
+        let result = rt.execute(&prog, "line1\nline2\nline3").unwrap().0;
         assert_eq!(result, "line1\n");
     }
 
@@ -2955,7 +3053,7 @@ mod tests {
     fn test_eval_match_operator() {
         let prog = parse_program("$1 ~ /^a/ {print $1}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "alice\nbob\nanna").unwrap();
+        let result = rt.execute(&prog, "alice\nbob\nanna").unwrap().0;
         assert_eq!(result, "alice\nanna\n");
     }
 
@@ -2963,7 +3061,7 @@ mod tests {
     fn test_eval_not_match_operator() {
         let prog = parse_program("$1 !~ /^a/ {print $1}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "alice\nbob\nanna").unwrap();
+        let result = rt.execute(&prog, "alice\nbob\nanna").unwrap().0;
         assert_eq!(result, "bob\n");
     }
 
@@ -2971,7 +3069,7 @@ mod tests {
     fn test_eval_logical_and_or() {
         let prog = parse_program("$1 > 0 && $1 < 10 {print \"single digit\"}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "5\n15\n-3").unwrap();
+        let result = rt.execute(&prog, "5\n15\n-3").unwrap().0;
         assert_eq!(result, "single digit\n");
     }
 
@@ -2979,7 +3077,7 @@ mod tests {
     fn test_eval_concatenation() {
         let prog = parse_program("{print $1 $2}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "hello world").unwrap();
+        let result = rt.execute(&prog, "hello world").unwrap().0;
         assert_eq!(result, "helloworld\n");
     }
 
@@ -2987,7 +3085,7 @@ mod tests {
     fn test_eval_ofs() {
         let prog = parse_program("BEGIN {OFS=\",\"} {print $1, $2}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "hello world").unwrap();
+        let result = rt.execute(&prog, "hello world").unwrap().0;
         assert_eq!(result, "hello,world\n");
     }
 
@@ -3003,7 +3101,7 @@ mod tests {
 test result: ok. 100 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 test result: ok. 50 passed; 1 failed; 2 ignored; 0 measured; 0 filtered out
 test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
-        let result = rt.execute(&prog, input).unwrap();
+        let result = rt.execute(&prog, input).unwrap().0;
         assert_eq!(result, "passed: 779\n");
     }
 
@@ -3019,7 +3117,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
 test result: ok. 100 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out
 test result: ok. 50 passed; 1 failed; 2 ignored; 0 measured; 0 filtered out
 test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
-        let result = rt.execute(&prog, input).unwrap();
+        let result = rt.execute(&prog, input).unwrap().0;
         assert_eq!(result, "passed: 779 ignored: 5 total: 784\n");
     }
 
@@ -3028,7 +3126,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         // Accessing $10+ works correctly
         let prog = parse_program("{print $10}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "a b c d e f g h i j k l").unwrap();
+        let result = rt.execute(&prog, "a b c d e f g h i j k l").unwrap().0;
         assert_eq!(result, "j\n");
     }
 
@@ -3037,7 +3135,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         // Multiple statements in one rule separated by ;
         let prog = parse_program("{a = $1; b = $2; print b, a}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "hello world").unwrap();
+        let result = rt.execute(&prog, "hello world").unwrap().0;
         assert_eq!(result, "world hello\n");
     }
 
@@ -3047,7 +3145,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         let prog =
             parse_program(r#"{a += $1; b += $2} END {print "sum:", a+b, "diff:", a-b}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "10 3\n20 7").unwrap();
+        let result = rt.execute(&prog, "10 3\n20 7").unwrap().0;
         assert_eq!(result, "sum: 40 diff: 20\n");
     }
 
@@ -3191,7 +3289,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_split_comma_separator() {
         let prog = parse_program(r#"BEGIN{n=split("a,b,c",x,","); print n, x[1], x[3]}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "3 a c\n");
     }
 
@@ -3203,7 +3301,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
             parse_program(r#"BEGIN{n=split("  foo  bar  baz  ",x); print n, x[1], x[2]}"#)
                 .unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "3 foo bar\n");
     }
 
@@ -3215,7 +3313,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
             parse_program(r#"BEGIN{n=split("one12two34three",x,"[0-9]+"); print n, x[1], x[3]}"#)
                 .unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "3 one three\n");
     }
 
@@ -3228,7 +3326,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         )
         .unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         // (99 in x) must be 0 (false), x[1]="a", x[2]="b"
         assert_eq!(result, "0 a b\n");
     }
@@ -3260,7 +3358,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         let prog =
             parse_program(r#"BEGIN{s="foo bar foo"; n=sub(/foo/,"baz",s); print n, s}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "1 baz bar foo\n");
     }
 
@@ -3271,7 +3369,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         let prog =
             parse_program(r#"BEGIN{s="hello"; n=sub(/xyz/,"A",s); print n, s}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "0 hello\n");
     }
 
@@ -3281,7 +3379,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_gsub_returns_count_and_replaces_all() {
         let prog = parse_program(r#"{n=gsub(/o/,"0"); print n, $0}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "foo").unwrap();
+        let result = rt.execute(&prog, "foo").unwrap().0;
         assert_eq!(result, "2 f00\n");
     }
 
@@ -3291,7 +3389,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_gsub_ampersand_in_replacement() {
         let prog = parse_program(r#"BEGIN{s="foo"; gsub(/o/,"[&]",s); print s}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "f[o][o]\n");
     }
 
@@ -3301,7 +3399,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_gsub_escaped_ampersand_is_literal() {
         let prog = parse_program(r#"BEGIN{s="foo"; gsub(/o/,"\\&",s); print s}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "f&&\n");
     }
 
@@ -3312,7 +3410,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_gsub_into_named_field_rebuilds_record() {
         let prog = parse_program(r#"{gsub(/a/,"A",$1); print}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "alice adam").unwrap();
+        let result = rt.execute(&prog, "alice adam").unwrap().0;
         // $1 = "alice" → "Alice" (only first field); $2 stays "adam"; rebuilt $0 = "Alice adam"
         assert_eq!(result, "Alice adam\n");
     }
@@ -3323,7 +3421,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_gsub_default_target_is_dollar_zero() {
         let prog = parse_program(r#"{gsub(/o/,"0"); print}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "foo BAR baz").unwrap();
+        let result = rt.execute(&prog, "foo BAR baz").unwrap().0;
         assert_eq!(result, "f00 BAR baz\n");
     }
 
@@ -3353,7 +3451,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         let prog =
             parse_program(r#"BEGIN{n=split("",a,","); print n, (1 in a)}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "0 0\n");
     }
 
@@ -3364,7 +3462,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         let prog =
             parse_program(r#"BEGIN{n=split("",a,"[,;]"); print n, (1 in a)}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "0 0\n");
     }
 
@@ -3374,7 +3472,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_split_empty_string_whitespace_fs_returns_zero() {
         let prog = parse_program(r#"BEGIN{n=split("",a); print n, (1 in a)}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "0 0\n");
     }
 
@@ -3388,7 +3486,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_set_field_extends_nf() {
         let prog = parse_program(r#"{$5="X"; print NF}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "a b").unwrap();
+        let result = rt.execute(&prog, "a b").unwrap().0;
         assert_eq!(result, "5\n");
     }
 
@@ -3398,7 +3496,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_gsub_on_high_field_extends_nf() {
         let prog = parse_program(r#"{gsub(/./,"X",$5); print NF}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "a b").unwrap();
+        let result = rt.execute(&prog, "a b").unwrap().0;
         assert_eq!(result, "5\n");
     }
 
@@ -3408,7 +3506,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_set_field_within_nf_unchanged() {
         let prog = parse_program(r#"{$2="B"; print NF}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "a b c").unwrap();
+        let result = rt.execute(&prog, "a b c").unwrap().0;
         assert_eq!(result, "3\n");
     }
 
@@ -3422,7 +3520,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_gsub_empty_pattern() {
         let prog = parse_program(r#"{gsub(//,"-"); print}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "abc").unwrap();
+        let result = rt.execute(&prog, "abc").unwrap().0;
         assert_eq!(result, "-a-b-c-\n");
     }
 
@@ -3432,7 +3530,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_gsub_star_empty_pattern_no_infinite_loop() {
         let prog = parse_program(r#"{n=gsub(/x*/,"-"); print n, $0}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "abc").unwrap();
+        let result = rt.execute(&prog, "abc").unwrap().0;
         assert_eq!(result, "4 -a-b-c-\n");
     }
 
@@ -3442,7 +3540,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_sub_double_ampersand_in_replacement() {
         let prog = parse_program(r#"{sub(/o/,"&&"); print}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "foo").unwrap();
+        let result = rt.execute(&prog, "foo").unwrap().0;
         assert_eq!(result, "fooo\n");
     }
 
@@ -3452,7 +3550,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_gsub_empty_replacement_deletes() {
         let prog = parse_program(r#"{gsub(/o/,""); print}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "food").unwrap();
+        let result = rt.execute(&prog, "food").unwrap().0;
         assert_eq!(result, "fd\n");
     }
 
@@ -3463,7 +3561,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         // AWK string "\\" is one backslash character — gawk keeps it.
         let prog = parse_program(r#"BEGIN{s="foo"; sub(/o/,"\\",s); print s}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "f\\o\n");
     }
 
@@ -3474,7 +3572,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_sub_backslash_ampersand_replacement() {
         let prog = parse_program(r#"BEGIN{s="foo"; sub(/o/,"\\\\&",s); print s}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "f\\oo\n");
     }
 
@@ -3486,7 +3584,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_sub_backslash_other_char_keeps_backslash() {
         let prog = parse_program(r#"BEGIN{s="foo"; sub(/o/,"\\x",s); print s}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "f\\xo\n");
     }
 
@@ -3501,7 +3599,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         let prog =
             parse_program(r#"BEGIN{match("foobar",/bar/); print RSTART, RLENGTH}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "4 3\n");
     }
 
@@ -3512,7 +3610,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         let prog =
             parse_program(r#"BEGIN{match("foobar",/xyz/); print RSTART, RLENGTH}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "0 -1\n");
     }
 
@@ -3522,7 +3620,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_match_return_value_is_rstart() {
         let prog = parse_program(r#"BEGIN{pos=match("foobar",/bar/); print pos}"#).unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "4\n");
     }
 
@@ -3535,7 +3633,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         )
         .unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "wor\n");
     }
 
@@ -3565,7 +3663,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_bare_length_is_length_dollar_zero() {
         let prog = parse_program("{print length}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "hello").unwrap();
+        let result = rt.execute(&prog, "hello").unwrap().0;
         assert_eq!(result, "5\n");
     }
 
@@ -3575,7 +3673,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_bare_length_counts_unicode_chars() {
         let prog = parse_program("{print length}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "こんにちは").unwrap();
+        let result = rt.execute(&prog, "こんにちは").unwrap().0;
         assert_eq!(result, "5\n");
     }
 
@@ -3585,7 +3683,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_length_explicit_arg_still_works() {
         let prog = parse_program("{print length($1)}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "hello world").unwrap();
+        let result = rt.execute(&prog, "hello world").unwrap().0;
         assert_eq!(result, "5\n");
     }
 
@@ -3595,7 +3693,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_length_empty_parens_defaults_to_dollar_zero() {
         let prog = parse_program("{print length()}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "hello").unwrap();
+        let result = rt.execute(&prog, "hello").unwrap().0;
         assert_eq!(result, "5\n");
     }
 
@@ -3623,7 +3721,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_int_positive_truncates_toward_zero() {
         let prog = parse_program("BEGIN{print int(3.9)}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "3\n");
     }
 
@@ -3633,7 +3731,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_int_negative_truncates_toward_zero() {
         let prog = parse_program("BEGIN{print int(-3.9)}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "-3\n");
     }
 
@@ -3643,7 +3741,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_sqrt_two() {
         let prog = parse_program("BEGIN{print sqrt(2)}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "1.41421\n");
     }
 
@@ -3707,7 +3805,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_range_pattern_multi_record_span() {
         let prog = parse_program("/bob/,/carol/").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "alice\nbob\ndave\ncarol\neve").unwrap();
+        let result = rt.execute(&prog, "alice\nbob\ndave\ncarol\neve").unwrap().0;
         assert_eq!(result, "bob\ndave\ncarol\n");
     }
 
@@ -3718,7 +3816,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_range_pattern_one_record_range() {
         let prog = parse_program("/bob/,/carol/").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "alice\nbobcarol\neve").unwrap();
+        let result = rt.execute(&prog, "alice\nbobcarol\neve").unwrap().0;
         assert_eq!(result, "bobcarol\n");
     }
 
@@ -3732,7 +3830,8 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         let mut rt = AwkRuntime::new();
         let result = rt
             .execute(&prog, "alice\nbob\ncarol\neve\nbob\nfoo\ncarol\ndone")
-            .unwrap();
+            .unwrap()
+            .0;
         assert_eq!(result, "bob\ncarol\nbob\nfoo\ncarol\n");
     }
 
@@ -3746,7 +3845,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_range_pattern_expr_endpoints() {
         let prog = parse_program("NR==2,NR==4").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "a\nb\nc\nd\ne").unwrap();
+        let result = rt.execute(&prog, "a\nb\nc\nd\ne").unwrap().0;
         assert_eq!(result, "b\nc\nd\n");
     }
 
@@ -3757,7 +3856,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_range_pattern_with_action() {
         let prog = parse_program("/bob/,/carol/ {print \">\" $0}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "alice\nbob\ndave\ncarol\neve").unwrap();
+        let result = rt.execute(&prog, "alice\nbob\ndave\ncarol\neve").unwrap().0;
         assert_eq!(result, ">bob\n>dave\n>carol\n");
     }
 
@@ -3820,7 +3919,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_print_parenthesised_comparison_still_works() {
         let prog = parse_program("{print ($1 > 2)}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "5\n1").unwrap();
+        let result = rt.execute(&prog, "5\n1").unwrap().0;
         // 5 > 2 → 1; 1 > 2 → 0
         assert_eq!(result, "1\n0\n");
     }
@@ -3830,7 +3929,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_print_comma_sep_args_still_works() {
         let prog = parse_program("{print $1, $2}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "hello world").unwrap();
+        let result = rt.execute(&prog, "hello world").unwrap().0;
         assert_eq!(result, "hello world\n");
     }
 
@@ -3839,7 +3938,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_print_concat_no_comma_still_works() {
         let prog = parse_program("{print $1 $2}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "hello world").unwrap();
+        let result = rt.execute(&prog, "hello world").unwrap().0;
         assert_eq!(result, "helloworld\n");
     }
 
@@ -3848,7 +3947,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_pattern_comparison_gt_outside_print_unaffected() {
         let prog = parse_program("$3 > 100 {print $1}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "alice bob 50\nbob carol 200").unwrap();
+        let result = rt.execute(&prog, "alice bob 50\nbob carol 200").unwrap().0;
         assert_eq!(result, "bob\n");
     }
 
@@ -3998,7 +4097,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_print_ge_is_comparison_not_redirect() {
         let prog = parse_program("{print 1>=2}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "x").unwrap();
+        let result = rt.execute(&prog, "x").unwrap().0;
         assert_eq!(result, "0\n");
     }
 
@@ -4007,7 +4106,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_print_ge_spaced_is_comparison() {
         let prog = parse_program("{print 1 >= 2}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "x").unwrap();
+        let result = rt.execute(&prog, "x").unwrap().0;
         assert_eq!(result, "0\n");
     }
 
@@ -4016,7 +4115,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_print_ge_true_comparison() {
         let prog = parse_program("{print 2>=1}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "x").unwrap();
+        let result = rt.execute(&prog, "x").unwrap().0;
         assert_eq!(result, "1\n");
     }
 
@@ -4064,7 +4163,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_print_paren_gt_is_comparison() {
         let prog = parse_program("{print ($1>2)}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "5").unwrap();
+        let result = rt.execute(&prog, "5").unwrap().0;
         assert_eq!(result, "1\n");
     }
 
@@ -4075,7 +4174,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_print_call_arg_gt_is_comparison() {
         let prog = parse_program("{print substr($1, 1, 2>1)}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "hello").unwrap();
+        let result = rt.execute(&prog, "hello").unwrap().0;
         assert_eq!(result, "h\n");
     }
 
@@ -4084,7 +4183,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_print_paren_ternary_gt_is_comparison() {
         let prog = parse_program("{print (1 ? 3>2 : 0)}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "x").unwrap();
+        let result = rt.execute(&prog, "x").unwrap().0;
         assert_eq!(result, "1\n");
     }
 
@@ -4094,7 +4193,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_two_independent_range_patterns() {
         let prog = parse_program("/1/,/2/{print} /3/,/4/{print}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "1\n2\n3\n4\n5\n").unwrap();
+        let result = rt.execute(&prog, "1\n2\n3\n4\n5\n").unwrap().0;
         assert_eq!(result, "1\n2\n3\n4\n");
     }
 
@@ -4104,7 +4203,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_range_end_never_matches_runs_to_eof() {
         let prog = parse_program("/2/,/zzz/").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "1\n2\n3\n4\n5\n").unwrap();
+        let result = rt.execute(&prog, "1\n2\n3\n4\n5\n").unwrap().0;
         assert_eq!(result, "2\n3\n4\n5\n");
     }
 
@@ -4114,7 +4213,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_multiple_regex_rules_lex_after_brace() {
         let prog = parse_program("/1/{print} /3/{print}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "1\n2\n3\n4\n5\n").unwrap();
+        let result = rt.execute(&prog, "1\n2\n3\n4\n5\n").unwrap().0;
         assert_eq!(result, "1\n3\n");
     }
 
@@ -4123,7 +4222,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_division_still_lexes_after_value() {
         let prog = parse_program("BEGIN{x=10; print x/2/1}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "5\n");
     }
 
@@ -4133,7 +4232,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_division_in_for_header() {
         let prog = parse_program("BEGIN{ for(i=0; i<10/2; i++) s=s i; print s }").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "01234\n");
     }
 
@@ -4142,7 +4241,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_regex_after_semicolon() {
         let prog = parse_program("{ x=1; if (/3/) print \"hit\" }").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "3\n4\n").unwrap();
+        let result = rt.execute(&prog, "3\n4\n").unwrap().0;
         assert_eq!(result, "hit\n");
     }
 
@@ -4152,7 +4251,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_range_one_record_when_start_equals_end() {
         let prog = parse_program("/3/,/3/").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "1\n2\n3\n4\n5\n").unwrap();
+        let result = rt.execute(&prog, "1\n2\n3\n4\n5\n").unwrap().0;
         assert_eq!(result, "3\n");
     }
 
@@ -4283,7 +4382,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_sqrt_negative_runtime_output() {
         let prog = parse_program("BEGIN{print sqrt(-1)}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "-nan\n", "sqrt(-1) runtime output must be '-nan\\n'");
     }
 
@@ -4292,7 +4391,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
     fn test_pow_overflow_runtime_output() {
         let prog = parse_program("BEGIN{print 2^1024}").unwrap();
         let mut rt = AwkRuntime::new();
-        let result = rt.execute(&prog, "").unwrap();
+        let result = rt.execute(&prog, "").unwrap().0;
         assert_eq!(result, "+inf\n", "2^1024 must print '+inf\\n'");
     }
 }

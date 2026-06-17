@@ -447,7 +447,17 @@ impl Tool for JqNative {
                 let resolved = ctx.resolve_path(&path);
                 match ctx.backend.read(Path::new(&resolved), None).await {
                     Ok(bytes) => {
-                        let text = String::from_utf8_lossy(&bytes);
+                        // Decode strictly: a non-UTF-8 file is a loud error, not
+                        // a U+FFFD mangle that then fails JSON parsing confusingly.
+                        let text = match String::from_utf8(bytes) {
+                            Ok(t) => t,
+                            Err(_) => {
+                                return ExecResult::failure(
+                                    1,
+                                    format!("jq: {}: invalid UTF-8", path),
+                                )
+                            }
+                        };
                         match serde_json::from_str(&text) {
                             Ok(json) => json,
                             Err(e) => return ExecResult::failure(1, format!("jq: invalid JSON in {}: {}", path, e)),

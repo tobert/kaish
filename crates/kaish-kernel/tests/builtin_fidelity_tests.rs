@@ -402,3 +402,173 @@ async fn xxd_plain_31_bytes_wraps_then_terminates() {
     assert_eq!(out, format!("{}\n61\n", "61".repeat(30)));
     assert_eq!(out.matches('\n').count(), 2, "wrap newline + terminator");
 }
+
+// ─────────────────── awk numeric-string (strnum) comparison ───────────────────
+// POSIX: a field/`split`/`-v`/command-line value is a *numeric string* — it
+// compares numerically only when it *looks* like a number. A string *constant*
+// never does. The old `compare_values` used `l_num || r_num`, forcing a numeric
+// compare whenever *either* side was numeric, so a non-numeric field (or string
+// constant) silently coerced to `0.0`. Oracle: gawk 5.4.0.
+
+#[tokio::test]
+async fn awk_field_nonnumeric_vs_zero_is_string_compare() {
+    // `$1 == 0` with $1 = "abc": strnum "abc" doesn't look numeric → string
+    // compare → "abc" != "0" → NE. (Old `||` path coerced "abc"→0.0 → EQ.)
+    let (out, code) = run(r#"awk '{ if ($1 == 0) print "EQ"; else print "NE" }'"#, "abc\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "NE\n");
+}
+
+#[tokio::test]
+async fn awk_field_numericlooking_vs_zero_is_numeric_compare() {
+    // $1 = "0" is a numeric string → numeric compare → 0 == 0 → EQ. Regression
+    // guard: the strnum fix must not break the genuinely-numeric field case.
+    let (out, code) = run(r#"awk '{ if ($1 == 0) print "EQ"; else print "NE" }'"#, "0\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "EQ\n");
+}
+
+#[tokio::test]
+async fn awk_string_constant_vs_zero_is_string_compare() {
+    // A string *constant* is never numeric: "abc" == 0 → string compare → NE.
+    let (out, code) = run(r#"awk 'BEGIN { if ("abc" == 0) print "EQ"; else print "NE" }'"#, "").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "NE\n");
+}
+
+#[tokio::test]
+async fn awk_two_numeric_fields_compare_numerically() {
+    // Both fields are numeric strings → numeric compare → 10 > 9. Regression
+    // guard for the common `$1 > $2` idiom.
+    let (out, code) = run(r#"awk '{ if ($1 > $2) print "GT"; else print "LE" }'"#, "10 9\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "GT\n");
+}
+
+#[tokio::test]
+async fn awk_string_constants_compare_lexically() {
+    // Two string constants → lexical compare → "10" < "9".
+    let (out, code) = run(r#"awk 'BEGIN { if ("10" < "9") print "LT"; else print "GE" }'"#, "").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "LT\n");
+}
+
+// ─────────────────────────── awk length(array) ───────────────────────────
+// `length(arr)` returns the element count. The old code eval'd the array name
+// as a scalar → Uninitialized → "" → length 0.
+
+#[tokio::test]
+async fn awk_length_of_array_is_element_count() {
+    let (out, code) = run(r#"awk 'BEGIN { a[1]=1; a[2]=2; a[3]=3; print length(a) }'"#, "").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "3\n");
+}
+
+#[tokio::test]
+async fn awk_length_bare_still_measures_record() {
+    // Regression guard: bare `length` (on $0) is unaffected by the array case.
+    let (out, code) = run(r#"awk '{ print length }'"#, "hello\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "5\n");
+}
+
+// ─────────────────────────── awk exit N ───────────────────────────
+// `exit N` must set the builtin's exit code; END blocks still run.
+
+#[tokio::test]
+async fn awk_exit_code_propagates() {
+    let (out, code) = run(r#"awk 'BEGIN { exit 3 }'"#, "").await;
+    assert_eq!(code, 3, "out={out:?}");
+    assert_eq!(out, "");
+}
+
+#[tokio::test]
+async fn awk_exit_runs_end_and_keeps_code() {
+    let (out, code) = run(r#"awk '{ exit 2 } END { print "end ran" }'"#, "x\n").await;
+    assert_eq!(code, 2, "out={out:?}");
+    assert_eq!(out, "end ran\n");
+}
+
+// ─────────────────────────── awk multiple -v ───────────────────────────
+// Every `-v NAME=VALUE` is applied (clap kept only the last before).
+
+#[tokio::test]
+async fn awk_multiple_v_assignments_all_apply() {
+    let (out, code) = run(r#"awk -v a=1 -v b=2 'BEGIN { print a, b }'"#, "").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "1 2\n");
+}
+
+// ─────────────────────── awk $0 reassignment re-splits ───────────────────────
+// Assigning `$0` must re-split into $1..$NF and update NF.
+
+#[tokio::test]
+async fn awk_assigning_dollar_zero_resplits_fields() {
+    let (out, code) = run(r#"awk '{ $0 = "x y z"; print NF, $2 }'"#, "one two\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "3 y\n");
+}
+
+// ─────────────────── awk invalid FS regex is a loud error ───────────────────
+// A multi-char invalid regex FS must error, not silently fall back to a literal
+// split (which yields silently-wrong field counts). gawk: fatal. Single-char FS
+// stays literal (that matches gawk and is *not* a regex).
+
+#[tokio::test]
+async fn awk_invalid_multichar_fs_regex_errors() {
+    let (out, code) = run(r#"awk -F 'a[' '{ print NF }'"#, "xa[y\n").await;
+    assert_ne!(code, 0, "invalid FS regex must be a loud error, out={out:?}");
+    assert_eq!(out, "", "no field output on a bad-FS error");
+}
+
+#[tokio::test]
+async fn awk_invalid_split_regex_errors() {
+    let (out, code) = run(r#"awk 'BEGIN { n = split("xa[y", arr, "a["); print n }'"#, "").await;
+    assert_ne!(code, 0, "invalid split() regex must be a loud error, out={out:?}");
+}
+
+// ─────────────────── head on an empty pipe emits nothing ───────────────────
+// The streaming path built `format!("{}\n", lines.join("\n"))` with no
+// is_empty guard, so `true | head` produced "\n" instead of "".
+
+#[tokio::test]
+async fn head_empty_pipe_emits_no_newline() {
+    let (out, code) = run("true | head", "").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "", "empty input yields empty output, not a bare newline");
+}
+
+// ─────────────────── kaish-validate -w gates warnings ───────────────────
+// Warnings (e.g. an unknown command) show only with `-w`; without it the
+// script reads as `valid`. The old `A || B || !A` made `-w` inert (always on).
+
+#[tokio::test]
+async fn validate_suppresses_warnings_without_w() {
+    let (out, code) = run("kaish-validate -e 'notacommand'", "").await;
+    assert_eq!(code, 0, "warning-only script is still valid, out={out:?}");
+    assert!(out.contains("valid"), "default (no -w) suppresses warnings: {out:?}");
+    assert!(!out.contains("not found"), "warning must be hidden without -w: {out:?}");
+}
+
+#[tokio::test]
+async fn validate_shows_warnings_with_w() {
+    let (out, code) = run("kaish-validate -w -e 'notacommand'", "").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert!(out.contains("not found"), "-w surfaces the warning: {out:?}");
+}
+
+// ─────────────────── jq rejects a non-UTF-8 input file loudly ───────────────────
+// The file-read path used `from_utf8_lossy`, silently U+FFFD-corrupting binary
+// before the JSON parse. It must decode strictly and error like the stdin path.
+
+#[tokio::test]
+async fn jq_non_utf8_file_errors_loudly() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bad.json");
+    std::fs::File::create(&path).unwrap().write_all(&[0xff, 0xfe, 0xfd]).unwrap();
+
+    let (out, code) = run(&format!("jq . {}", path.display()), "").await;
+    assert_ne!(code, 0, "non-UTF-8 file must be a loud error, out={out:?}");
+    assert!(out.is_empty(), "no lossy/parsed output on a binary file: {out:?}");
+}
