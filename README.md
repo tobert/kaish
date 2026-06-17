@@ -4,9 +4,12 @@
   <img src="docs/banner.svg" alt="Kai the hermit crab — kaish mascot — looking at kaish code" width="720">
 </p>
 
-Kaish is a predictable Bourne-like shell for AI agents — an embeddable Rust library
-with a reference REPL. It ships many in-process builtins and a virtual filesystem that
-can be bridged to an underlying system or completely sandboxed.
+Kaish is a predictable shell as a rust library. It includes builtin commands so it does
+not need `fork()` or `exec()` to perform most text processing tasks. Kaish has its
+own virtual filesystem layer that can be passed through to a regular filesystem, or
+work completely in-memory. This enables kaish to be sandboxed from its host while
+providing a complete shell scripting environment for agents without backflips to contain
+and parse the output of a traditional shell.
 
 ## Install
 
