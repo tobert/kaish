@@ -1,7 +1,7 @@
 //! Configurable ignore file policy for file-walking tools.
 //!
 //! Controls which gitignore-format files are loaded and how broadly
-//! ignore rules apply. Per-mode defaults protect MCP agents from
+//! ignore rules apply. Per-mode defaults protect sandboxed agents from
 //! context flooding while leaving REPL users unrestricted.
 
 use std::path::{Path, PathBuf};
@@ -53,8 +53,8 @@ impl IgnoreConfig {
         }
     }
 
-    /// MCP-safe defaults: enforced scope, .gitignore loaded, defaults on.
-    pub fn mcp() -> Self {
+    /// Sandboxed-agent defaults: enforced scope, .gitignore loaded, defaults on.
+    pub fn agent() -> Self {
         Self {
             scope: IgnoreScope::Enforced,
             ignore_files: vec![".gitignore".to_string()],
@@ -325,8 +325,8 @@ mod tests {
     }
 
     #[test]
-    fn test_mcp_is_active() {
-        let config = IgnoreConfig::mcp();
+    fn test_agent_preset_is_active() {
+        let config = IgnoreConfig::agent();
         assert!(config.is_active());
         assert_eq!(config.scope(), IgnoreScope::Enforced);
         assert!(config.auto_gitignore());
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn test_clear() {
-        let mut config = IgnoreConfig::mcp();
+        let mut config = IgnoreConfig::agent();
         config.clear();
         assert!(!config.is_active());
         assert!(config.files().is_empty());
@@ -474,7 +474,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_build_filter_defaults_plus_gitignore_merged() {
-            let config = IgnoreConfig::mcp();
+            let config = IgnoreConfig::agent();
 
             let mut files = HashMap::new();
             files.insert(PathBuf::from("/project/.gitignore"), b"*.secret\n".to_vec());

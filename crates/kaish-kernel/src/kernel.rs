@@ -231,14 +231,14 @@ pub struct KernelConfig {
     /// `StorageFull` — an in-band error a model reads and adapts to; fail
     /// loud over quietly eating RAM.
     ///
-    /// **Why MCP is bounded by default:** each `execute()` call creates a fresh
-    /// kernel (see `server/execute.rs`), so the 64 MiB cap is per-call, not
-    /// per-session. Embedders that know their workload needs more opt out with
-    /// `without_vfs_budget()` or raise the cap with `with_vfs_budget(bytes)` —
-    /// protection on by default, opt out knowingly. All other profiles default
-    /// to `None` (unbounded).
+    /// **Why the agent preset is bounded by default:** an agent embedder
+    /// typically creates a fresh kernel per `execute()` call, so the 64 MiB cap
+    /// is per-call, not per-session. Embedders that know their workload needs
+    /// more opt out with `without_vfs_budget()` or raise the cap with
+    /// `with_vfs_budget(bytes)` — protection on by default, opt out knowingly.
+    /// All other profiles default to `None` (unbounded).
     ///
-    /// Follows the same pattern as `OutputLimitConfig`: MCP bounded, rest unbounded.
+    /// Follows the same pattern as `OutputLimitConfig`: agent preset bounded, rest unbounded.
     pub vfs_budget_bytes: Option<u64>,
 
     /// Enable copy-on-write overlay mode (opt-in).
@@ -258,7 +258,7 @@ pub struct KernelConfig {
     /// **with_backend:** incompatible — the embedder controls the VFS; the
     /// kernel cannot wrap it without bypassing the embedder's semantics.
     ///
-    /// **Not default-on for MCP:** each `execute()` call gets a fresh kernel,
+    /// **Not default-on for the agent preset:** each `execute()` call gets a fresh kernel,
     /// making the overlay a per-call transaction — `kaish-vfs commit` must run
     /// in the same call as the writes, or the transaction is discarded on drop.
     /// Frontends (REPL, MCP) expose `--overlay` as an explicit opt-in flag.
@@ -412,27 +412,29 @@ impl KernelConfig {
         }
     }
 
-    /// Create an MCP server config with sandboxed filesystem access.
+    /// Create a sandboxed-agent config with sandboxed filesystem access.
     ///
-    /// Local filesystem is accessible at its real path (e.g., `/home/user`),
-    /// but sandboxed to `$HOME`. Paths outside the sandbox are not accessible
-    /// through builtins. External commands still access the real filesystem —
-    /// use `.with_allow_external_commands(false)` to block them.
+    /// The preset for embedding kaish as an untrusted agent's shell (e.g. an MCP
+    /// server like kaibo/kaijutsu): sandboxed VFS, non-interactive, bounded
+    /// memory and output. Local filesystem is accessible at its real path (e.g.,
+    /// `/home/user`), but sandboxed to `$HOME`. Paths outside the sandbox are not
+    /// accessible through builtins. External commands still access the real
+    /// filesystem — use `.with_allow_external_commands(false)` to block them.
     ///
-    /// VFS memory is bounded at 64 MiB per `execute()` call by default
-    /// (MCP creates a fresh kernel per call). Raise or remove with
+    /// VFS memory is bounded at 64 MiB per `execute()` call by default (an agent
+    /// embedder typically creates a fresh kernel per call). Raise or remove with
     /// `with_vfs_budget` / `without_vfs_budget`.
     #[cfg(feature = "localfs")]
-    pub fn mcp() -> Self {
+    pub fn agent() -> Self {
         let home = default_sandbox_root();
         Self {
-            name: "mcp".to_string(),
+            name: "agent".to_string(),
             vfs_mode: VfsMountMode::Sandboxed { root: None },
             cwd: home,
             skip_validation: false,
             interactive: false,
-            ignore_config: crate::ignore_config::IgnoreConfig::mcp(),
-            output_limit: crate::output_limit::OutputLimitConfig::mcp(),
+            ignore_config: crate::ignore_config::IgnoreConfig::agent(),
+            output_limit: crate::output_limit::OutputLimitConfig::agent(),
             allow_external_commands: cfg!(feature = "subprocess"),
             latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
@@ -445,22 +447,22 @@ impl KernelConfig {
         }
     }
 
-    /// Create an MCP server config with a custom sandbox root.
+    /// Create a sandboxed-agent config with a custom sandbox root.
     ///
     /// Use this to restrict access to a subdirectory like `~/src`.
     ///
     /// VFS memory is bounded at 64 MiB per `execute()` call by default.
     /// Raise or remove with `with_vfs_budget` / `without_vfs_budget`.
     #[cfg(feature = "localfs")]
-    pub fn mcp_with_root(root: PathBuf) -> Self {
+    pub fn agent_with_root(root: PathBuf) -> Self {
         Self {
-            name: "mcp".to_string(),
+            name: "agent".to_string(),
             vfs_mode: VfsMountMode::Sandboxed { root: Some(root.clone()) },
             cwd: root,
             skip_validation: false,
             interactive: false,
-            ignore_config: crate::ignore_config::IgnoreConfig::mcp(),
-            output_limit: crate::output_limit::OutputLimitConfig::mcp(),
+            ignore_config: crate::ignore_config::IgnoreConfig::agent(),
+            output_limit: crate::output_limit::OutputLimitConfig::agent(),
             allow_external_commands: cfg!(feature = "subprocess"),
             latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
@@ -616,7 +618,7 @@ impl KernelConfig {
     /// Remove the VFS memory budget — all `MemoryFs` mounts are unbounded.
     ///
     /// Use when the caller knows the workload and the default 64 MiB cap
-    /// (set by `KernelConfig::mcp`) is too conservative.
+    /// (set by `KernelConfig::agent`) is too conservative.
     pub fn without_vfs_budget(mut self) -> Self {
         self.vfs_budget_bytes = None;
         self

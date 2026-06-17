@@ -256,11 +256,11 @@ Counting and limiting are different concerns; split them:
   loudly, ENOSPC-style (`StorageFull`, message naming the budget and the knob)
   — an in-band error a model reads and adapts to; fail loud over quietly eating
   RAM. Defaults ride kernel profiles exactly like `OutputLimitConfig` already
-  does: `KernelConfig::mcp()` gets a conservative default budget,
+  does: `KernelConfig::agent()` gets a conservative default budget,
   interactive/host profiles generous or none. That flips the polarity —
   embedders are protected by default and opt *out* knowingly — at the cost of
   one loud, documented behavior change for existing embedders.
-  `KernelConfig::mcp()` and `mcp_with_root()` default to a 64 MiB budget
+  `KernelConfig::agent()` and `agent_with_root()` default to a 64 MiB budget
   with the label `"vfs-memory"`. Opt out via `without_vfs_budget()` or
   override with `with_vfs_budget(limit, label)`.
 - **Introspection rides the counters**: a `df --json`-style surface (per mount:
@@ -312,7 +312,7 @@ drifts.
 - **JobFs resident counting**: intentionally excluded from `resident_bytes()`
   and the `vfs-memory` budget. JobFs synthesizes a filesystem over already-bounded
   `BoundedStream` ring buffers; those bytes are accounted separately.
-- **Budget defaults**: `KernelConfig::mcp()` / `mcp_with_root()` default to
+- **Budget defaults**: `KernelConfig::agent()` / `agent_with_root()` default to
   64 MiB with label `"vfs-memory"`. Opt out with `without_vfs_budget()`.
 
 ## Open forks (still)

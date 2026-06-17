@@ -191,7 +191,7 @@ mod tests {
     #[tokio::test]
     async fn test_ignore_clear() {
         let mut ctx = make_ctx();
-        ctx.ignore_config = crate::ignore_config::IgnoreConfig::mcp();
+        ctx.ignore_config = crate::ignore_config::IgnoreConfig::agent();
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("clear".into()));

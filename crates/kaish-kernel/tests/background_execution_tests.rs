@@ -97,7 +97,7 @@ async fn test_with_backend_forces_in_memory_spill_not_host_disk() {
     use kaish_kernel::vfs::{MemoryFs, VfsRouter};
     use kaish_kernel::{KernelBackend, LocalBackend, OutputLimitConfig};
 
-    let mut limit = OutputLimitConfig::mcp(); // SpillMode::Disk (the leaky default)
+    let mut limit = OutputLimitConfig::agent(); // SpillMode::Disk (the leaky default)
     limit.set_limit(Some(16));
     let config = KernelConfig::transient().with_output_limit(limit); // Sandboxed mode
 

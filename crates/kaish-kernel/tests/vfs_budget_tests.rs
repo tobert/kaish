@@ -229,7 +229,7 @@ async fn mounts_json_resident_bytes_null_for_nolocal_root_unbudgeted() {
 #[cfg(feature = "localfs")]
 #[tokio::test]
 async fn mcp_profile_has_64mib_budget() {
-    let config = KernelConfig::mcp();
+    let config = KernelConfig::agent();
     assert_eq!(
         config.vfs_budget_bytes,
         Some(64 * 1024 * 1024),
@@ -240,7 +240,7 @@ async fn mcp_profile_has_64mib_budget() {
 #[cfg(feature = "localfs")]
 #[tokio::test]
 async fn without_vfs_budget_removes_mcp_budget() {
-    let config = KernelConfig::mcp().without_vfs_budget();
+    let config = KernelConfig::agent().without_vfs_budget();
     assert_eq!(config.vfs_budget_bytes, None);
 }
 
