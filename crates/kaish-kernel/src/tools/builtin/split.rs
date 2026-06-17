@@ -129,25 +129,29 @@ impl Tool for Split {
                 Ok(r) => r,
                 Err(e) => return ExecResult::failure(1, format!("split: invalid regex: {}", e)),
             };
+            // `--limit=N` caps the result at N fields (N-1 splits); the final
+            // field keeps the rest of the string. `splitn(N)` does exactly that
+            // — the old `limit + 1` produced N+1 fields (one split too many).
             if limit > 0 {
-                re.splitn(&input, limit + 1).collect()
+                re.splitn(&input, limit).collect()
             } else {
                 re.split(&input).collect()
             }
         } else if let Some(d) = delimiter {
             // Literal delimiter split
             if limit > 0 {
-                input.splitn(limit + 1, &d).collect()
+                input.splitn(limit, &d).collect()
             } else {
                 input.split(&d).collect()
             }
         } else {
             // Default: whitespace (like Python str.split())
             if limit > 0 {
-                // splitn with whitespace needs custom handling
+                // Custom whitespace splitn: emit N-1 fields, then the remainder
+                // as the Nth field (matching the literal/regex `splitn(limit)`).
                 let mut result = Vec::new();
                 let mut remaining = input.as_str();
-                for _ in 0..limit {
+                for _ in 0..limit.saturating_sub(1) {
                     remaining = remaining.trim_start();
                     if let Some(pos) = remaining.find(char::is_whitespace) {
                         result.push(&remaining[..pos]);
@@ -178,7 +182,15 @@ impl Tool for Split {
             .map(|s| serde_json::Value::String((*s).to_string()))
             .collect();
 
-        let mut result = ExecResult::with_output(OutputData::nodes(nodes));
+        // Emit a trailing newline (builtin-sweep P4.1 decision) so split's text
+        // output matches the consensus and kaish's line tools; an empty result
+        // stays empty rather than a bare newline.
+        let text = if parts.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", parts.join("\n"))
+        };
+        let mut result = ExecResult::with_output_and_text(OutputData::nodes(nodes), text);
         // Preserve data for `for i in $(split ...)` iteration
         result.data = Some(Value::Json(serde_json::Value::Array(json_array)));
         result
@@ -205,7 +217,7 @@ mod tests {
 
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), "hello\nworld\nfoo");
+        assert_eq!(&*result.text_out(), "hello\nworld\nfoo\n");
 
         // Check structured data
         let data = result.data.unwrap();
@@ -228,7 +240,7 @@ mod tests {
 
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), "a\nb\nc");
+        assert_eq!(&*result.text_out(), "a\nb\nc\n");
     }
 
     #[tokio::test]
@@ -240,7 +252,7 @@ mod tests {
 
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), "a\nb\nc\n");  // trailing empty string from split
+        assert_eq!(&*result.text_out(), "a\nb\nc\n\n");  // trailing empty field + trailing-newline policy
     }
 
     #[tokio::test]
@@ -253,7 +265,7 @@ mod tests {
 
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), "a\nb\nc:d");
+        assert_eq!(&*result.text_out(), "a\nb:c:d\n");
     }
 
     #[tokio::test]
@@ -288,7 +300,7 @@ mod tests {
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Default whitespace split should handle multiple spaces
-        assert_eq!(&*result.text_out(), "a\nb\nc");
+        assert_eq!(&*result.text_out(), "a\nb\nc\n");
     }
 
     #[tokio::test]
@@ -301,7 +313,7 @@ mod tests {
 
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), "a\nb\nc");
+        assert_eq!(&*result.text_out(), "a\nb\nc\n");
     }
 
     #[tokio::test]
@@ -312,7 +324,7 @@ mod tests {
 
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), "hello\nworld\nfoo");
+        assert_eq!(&*result.text_out(), "hello\nworld\nfoo\n");
     }
 
     #[tokio::test]
@@ -335,6 +347,6 @@ mod tests {
 
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), "a\nb\nc");
+        assert_eq!(&*result.text_out(), "a\nb\nc\n");
     }
 }

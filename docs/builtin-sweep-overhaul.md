@@ -196,7 +196,13 @@ Tests in `builtin_sweep_fidelity_tests.rs`. DeepSeek-reviewed.
   (all but last N), or fail loud if declared out of scope. Pin via panel if contested.
 - **Test:** `head -n -1` == first N-1 lines.
 
-### [ ] 4. `cut` drops a line with no delimiter (`-f`, no `-s`)
+### [x] 4. `cut` drops a line with no delimiter (`-f`, no `-s`) — FIXED 2026-06-17
+**Fix:** non-delimited line passes through whole (`!line.contains(delim)` →
+push line); added `-s`/`--only-delimited` to suppress. Field mode only (`-c`
+unaffected). Tests in `builtin_sweep_fidelity_tests.rs`. DeepSeek-reviewed.
+*Discovered (deferred):* `cut -d ''` (empty delim) isn't rejected → silently
+becomes tab; pre-existing.
+
 - **Symptom (C6):** `cut -d, -f2` on `nodelim` (no comma) emits **empty**; consensus
   passes the line through unchanged (GNU prints non-delimited lines unless `-s`).
 - **Verdict:** SILENT-WRONG. **Fix:** print the whole line when the delimiter is
@@ -209,7 +215,14 @@ Tests in `builtin_sweep_fidelity_tests.rs`. DeepSeek-reviewed.
 - **Verdict:** SILENT-WRONG (wrong shape for downstream parsing). **Fix:** honor `-c`.
 - **Test:** `jq -c .` over `{"a":1}` == `{"a":1}` (+ trailing-newline pin, P4.1).
 
-### [ ] 6. `split --limit=N` off-by-one
+### [x] 6. `split --limit=N` off-by-one — FIXED 2026-06-17
+**Fix:** `splitn(limit)` not `limit+1` (literal+regex); whitespace loop
+`0..limit-1`. So `--limit=N` = at most N fields. Also emits trailing newline
+(P4.1, folded here). Legacy direct-`.execute()` unit tests updated. Tests in
+`builtin_sweep_fidelity_tests.rs`. DeepSeek-reviewed. *Discovered (deferred):*
+`SplitArgs.limit`/`.regex` clap fields are dead (read from raw args) — works but
+violates the read-from-parsed convention; pre-existing, separate cleanup.
+
 - **Symptom (SP3):** `split : --limit=2` over `a:b:c:d` yields `a,b,c:d` (3 parts)
   instead of `a,b:c:d` (2 parts — first N-1 splits, remainder intact).
 - **Verdict:** SILENT-WRONG. **Fix:** `--limit=N` = at most N fields (N-1 splits).

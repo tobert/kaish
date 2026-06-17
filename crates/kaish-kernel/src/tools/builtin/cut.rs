@@ -27,6 +27,10 @@ struct CutArgs {
     #[arg(short = 'c', long = "characters")]
     characters: Option<String>,
 
+    /// Suppress lines with no delimiter character (-s)
+    #[arg(short = 's', long = "only-delimited")]
+    only_delimited: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -124,6 +128,16 @@ impl Tool for Cut {
             } else if let Some(ref field_spec) = fields {
                 // Field mode
                 let delim_char = delimiter.chars().next().unwrap_or('\t');
+                // A line without the delimiter has no fields to cut. GNU passes
+                // it through unchanged unless `-s` (only-delimited) is set, which
+                // suppresses it. Emitting an empty line (the old behavior) was
+                // silent data loss.
+                if !line.contains(delim_char) {
+                    if !parsed.only_delimited {
+                        output.push(line.to_string());
+                    }
+                    continue;
+                }
                 let parts: Vec<&str> = line.split(delim_char).collect();
                 let selected = select_indices(field_spec, parts.len());
                 let result: Vec<&str> = selected
