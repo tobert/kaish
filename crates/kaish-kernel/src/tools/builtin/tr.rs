@@ -21,6 +21,10 @@ struct TrArgs {
     #[arg(short = 's', long = "squeeze")]
     squeeze: bool,
 
+    /// Use the complement of SET1 (operate on chars NOT in SET1) (-c/-C)
+    #[arg(short = 'c', short_alias = 'C', long = "complement")]
+    complement: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -42,6 +46,7 @@ impl Tool for Tr {
             [
                 ("Lowercase to uppercase", "echo hello | tr a-z A-Z"),
                 ("Delete characters", "echo 'a1b2c3' | tr -d '0-9'"),
+                ("Keep only digits (complement)", "echo 'a1b2c3' | tr -cd '[:digit:]'"),
             ],
         )
     }
@@ -66,6 +71,7 @@ impl Tool for Tr {
         let set2 = args.get_string("set2", 1);
         let delete = parsed.delete;
         let squeeze = parsed.squeeze;
+        let complement = parsed.complement;
 
         let input = match ctx.read_stdin_to_text().await {
             Ok(s) => s.unwrap_or_default(),
@@ -76,27 +82,55 @@ impl Tool for Tr {
         let chars1 = expand_char_set(&set1);
         let chars2 = set2.as_ref().map(|s| expand_char_set(s));
 
+        // `-c` complements SET1: every membership test against chars1 is
+        // inverted, so the operation applies to characters NOT in SET1.
+        let in_set1 = |c: &char| chars1.contains(c) != complement;
+
         let output = if delete {
-            // Delete mode: remove all characters in set1
+            // Delete mode: remove all characters in (the possibly-complemented)
+            // set1 — `tr -cd '[:digit:]'` keeps only digits.
             input
                 .chars()
-                .filter(|c| !chars1.contains(c))
+                .filter(|c| !in_set1(c))
                 .collect::<String>()
         } else if let Some(ref c2) = chars2 {
-            // Translate mode
+            // Translate mode. Plain: a char in set1 maps positionally to set2.
+            // Complement: every char in the complement (i.e. NOT in the original
+            // set1) maps to set2's *last* char — a simplification of GNU's
+            // positional mapping that's right whenever set2 is a single char
+            // (the overwhelmingly common `tr -c SET ' '` idiom).
             let translated: String = input
                 .chars()
-                .map(|c| translate_char(c, &chars1, c2))
+                .map(|c| {
+                    if complement {
+                        if in_set1(&c) {
+                            *c2.last().unwrap_or(&c)
+                        } else {
+                            c
+                        }
+                    } else {
+                        translate_char(c, &chars1, c2)
+                    }
+                })
                 .collect();
 
             if squeeze {
-                squeeze_chars(&translated, c2)
+                // Squeeze only the characters translation can actually emit. In
+                // complement mode that's just set2's last char; otherwise all of
+                // set2. (Squeezing all of set2 in complement mode would wrongly
+                // collapse pass-through set1 chars that happen to be in set2.)
+                if complement {
+                    let last: Vec<char> = c2.last().copied().into_iter().collect();
+                    squeeze_chars(&translated, &last)
+                } else {
+                    squeeze_chars(&translated, c2)
+                }
             } else {
                 translated
             }
         } else if squeeze {
-            // Squeeze-only mode
-            squeeze_chars(&input, &chars1)
+            // Squeeze-only mode: squeeze runs of chars in the (complemented) set1.
+            squeeze_set(&input, |c| in_set1(c))
         } else {
             return ExecResult::failure(1, "tr: SET2 required for translation");
         };
@@ -183,11 +217,21 @@ fn translate_char(c: char, set1: &[char], set2: &[char]) -> char {
 
 /// Squeeze repeated characters from a set.
 fn squeeze_chars(input: &str, squeeze_set: &[char]) -> String {
+    squeeze_set_pred(input, |c| squeeze_set.contains(c))
+}
+
+/// Squeeze runs of characters matching `in_set` (predicate form, so `-c`
+/// complement squeezing can invert membership).
+fn squeeze_set(input: &str, in_set: impl Fn(&char) -> bool) -> String {
+    squeeze_set_pred(input, in_set)
+}
+
+fn squeeze_set_pred(input: &str, in_set: impl Fn(&char) -> bool) -> String {
     let mut result = String::new();
     let mut prev: Option<char> = None;
 
     for c in input.chars() {
-        let should_squeeze = squeeze_set.contains(&c) && prev == Some(c);
+        let should_squeeze = in_set(&c) && prev == Some(c);
         if !should_squeeze {
             result.push(c);
         }

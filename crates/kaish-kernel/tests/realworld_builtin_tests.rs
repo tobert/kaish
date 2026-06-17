@@ -518,12 +518,11 @@ mod wc_realworld {
         let (_dir, kernel) = fixture();
         let (out, code) = run(&kernel, "wc -l src/api.rs").await;
         assert_eq!(code, 0, "wc -l failed: {out:?}");
-        // Output is TSV format: filename\tcount - get count from last column
+        // Format is `<count> <filename>` — the count is the first whitespace token.
         let count: i32 = out
-            .split('\t')
-            .next_back()
+            .split_whitespace()
+            .next()
             .unwrap_or("0")
-            .trim()
             .parse()
             .unwrap_or(-1);
         assert!(count > 0, "Expected positive line count, got: {out:?}");

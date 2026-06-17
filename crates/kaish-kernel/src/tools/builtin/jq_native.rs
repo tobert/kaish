@@ -153,6 +153,7 @@ fn execute_filter_json(
     filter: &Filter,
     json: serde_json::Value,
     raw_output: bool,
+    compact: bool,
     var_values: Vec<serde_json::Value>,
 ) -> Result<JqRun, String> {
     // Convert serde_json::Value to jaq_json::Val
@@ -176,6 +177,8 @@ fn execute_filter_json(
             Ok(val) => {
                 let formatted = if raw_output {
                     format_raw(&val)
+                } else if compact {
+                    format_compact(&val)
                 } else {
                     format_json(&val)
                 };
@@ -189,6 +192,13 @@ fn execute_filter_json(
                 return Err(format!("jq runtime error: {}", e));
             }
         }
+    }
+
+    // Terminate the output with a newline (builtin-sweep P4.1) so jq matches
+    // the consensus and real jq, which newline-terminate each value. Empty
+    // output (no values) stays empty.
+    if !text.is_empty() {
+        text.push('\n');
     }
 
     Ok(JqRun { text, values })
@@ -243,6 +253,11 @@ fn format_raw(val: &Val) -> String {
 /// Format a jaq value as JSON.
 fn format_json(val: &Val) -> String {
     serde_json::to_string_pretty(&val_to_json(val)).unwrap_or_default()
+}
+
+/// Format a jaq value as compact single-line JSON (`jq -c`).
+fn format_compact(val: &Val) -> String {
+    serde_json::to_string(&val_to_json(val)).unwrap_or_default()
 }
 
 /// Convert ast::Value to serde_json::Value for jq processing.
@@ -417,7 +432,7 @@ impl Tool for JqNative {
         };
 
         let raw_output = parsed.raw || args.has_flag("raw") || args.has_flag("r");
-        let _compact = parsed.compact || args.has_flag("compact") || args.has_flag("c");
+        let compact = parsed.compact || args.has_flag("compact") || args.has_flag("c");
         let null_input =
             parsed.null_input || args.has_flag("null-input") || args.has_flag("n");
 
@@ -478,7 +493,7 @@ impl Tool for JqNative {
         };
 
         // Execute filter with the JSON input
-        match execute_filter_json(&filter, input_json, raw_output, global_var_values) {
+        match execute_filter_json(&filter, input_json, raw_output, compact, global_var_values) {
             Ok(run) => build_exec_result(run),
             Err(e) => ExecResult::failure(1, e),
         }

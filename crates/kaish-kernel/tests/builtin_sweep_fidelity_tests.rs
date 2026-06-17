@@ -145,3 +145,112 @@ async fn split_limit_whitespace() {
     assert_eq!(code, 0, "out={out:?}");
     assert_eq!(out, "a\nb c d\n", "whitespace --limit=2 = at most 2 fields");
 }
+
+// ───────────────────────── jq -c (compact) (P2.5) ────────────────────────
+// `-c` emits compact single-line JSON; it used to be silently ignored
+// (pretty-printed). Output ends in a trailing newline (P4.1, folded here).
+
+#[tokio::test]
+async fn jq_compact_emits_single_line() {
+    let (out, code) = run("jq -c .", "{\"a\":1,\"b\":[2,3]}\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "{\"a\":1,\"b\":[2,3]}\n", "-c = compact one-line JSON + newline");
+}
+
+#[tokio::test]
+async fn jq_pretty_default_and_trailing_newline() {
+    let (out, code) = run("jq .", "{\"a\":1}\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "{\n  \"a\": 1\n}\n", "default = pretty, terminated by newline");
+}
+
+#[tokio::test]
+async fn jq_compact_array_iteration() {
+    // -c over a stream still ends each value on its own line, newline-terminated.
+    let (out, code) = run("jq -c '.[]'", "[{\"x\":1},{\"y\":2}]\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "{\"x\":1}\n{\"y\":2}\n", "compact per-value, newline-terminated");
+}
+
+// ─────────────────────────── wc format (P2.7) ────────────────────────────
+// Single-count `wc -l/-w/-c` is the bare unpadded number + newline (was a
+// leading tab and no trailing newline). `wc -l` counts newlines (W5): an
+// unterminated final line is NOT a line.
+
+#[tokio::test]
+async fn wc_lines_is_bare_number_with_newline() {
+    let (out, code) = run("wc -l", "a\nb\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "2\n", "wc -l = bare count + newline, no leading tab");
+}
+
+#[tokio::test]
+async fn wc_lines_counts_newlines_not_final_unterminated_line() {
+    // W5: "a\nb" has one newline → 1, not 2.
+    let (out, code) = run("wc -l", "a\nb").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "1\n", "wc -l counts newline chars, not str::lines segments");
+}
+
+#[tokio::test]
+async fn wc_words_and_bytes_single_count() {
+    let (out, code) = run("wc -w", "one two three\nfour five\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "5\n");
+
+    let (outc, codec) = run("wc -c", "hello world\n").await;
+    assert_eq!(codec, 0, "out={outc:?}");
+    assert_eq!(outc, "12\n");
+}
+
+#[tokio::test]
+async fn wc_all_counts_right_justified_space_separated() {
+    // lines=2, words=5, bytes=24 → right-justified to common width, 1-space sep.
+    let (out, code) = run("wc", "one two three\nfour five\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, " 2  5 24\n", "multi-count right-justified, space-separated");
+}
+
+// ──────────────────── tr -c / --complement (P2.8) ────────────────────────
+// `-c` complements SET1 (operate on chars NOT in SET1). The common idiom is
+// `-cd` (delete everything not in the set); it used to be a clap parse error.
+
+#[tokio::test]
+async fn tr_complement_delete_keeps_only_set() {
+    let (out, code) = run("tr -cd '[:digit:]'", "a1b2c3\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "123", "tr -cd '[:digit:]' keeps only digits");
+}
+
+#[tokio::test]
+async fn tr_complement_long_flag() {
+    let (out, code) = run("tr --complement --delete '[:alpha:]'", "a1b2c3\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "abc", "--complement --delete keeps only letters");
+}
+
+#[tokio::test]
+async fn tr_complement_translate_maps_non_set() {
+    // Non-lowercase chars become '_'.
+    let (out, code) = run("tr -c 'a-z' '_'", "ab12cd\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "ab__cd_", "complement translate maps non-set1 to set2");
+}
+
+#[tokio::test]
+async fn tr_complement_squeeze_only_squeezes_the_replacement() {
+    // -cs with a multi-char SET2: complement chars all become set2's last char
+    // ('z') and squeeze; a pass-through set1 char that happens to be in SET2
+    // ('x') must NOT be squeezed.
+    let (out, code) = run("tr -cs 'a-z' 'xyz'", "xx12\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "xxz", "only the emitted replacement (z) squeezes, not pass-through x");
+}
+
+#[tokio::test]
+async fn tr_plain_delete_still_works() {
+    // Regression guard: non-complement delete unaffected.
+    let (out, code) = run("tr -d '0-9'", "a1b2c3\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "abc\n", "tr -d removes the set (newline preserved)");
+}

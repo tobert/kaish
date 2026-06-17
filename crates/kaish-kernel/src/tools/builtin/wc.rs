@@ -87,12 +87,15 @@ impl Tool for Wc {
             let input = ctx.read_stdin_to_bytes().await.unwrap_or_default();
             let (lc, wc, cc, bc) = count_content(&input);
             let cells = build_cells(lc, wc, cc, bc, lines_only, words_only, chars_only, bytes_only, show_all);
+            let text = format_counts_text(&[("".to_string(), cells.clone())]);
             let node = OutputNode::new("").with_cells(cells);
-            return ExecResult::with_output(OutputData::table(headers, vec![node]));
+            return ExecResult::with_output_and_text(OutputData::table(headers, vec![node]), text);
         }
 
         // Process each file
         let mut nodes = Vec::new();
+        // (label, count-cells) per row, for the right-justified text rendering.
+        let mut rows: Vec<(String, Vec<String>)> = Vec::new();
         let mut total_lines = 0usize;
         let mut total_words = 0usize;
         let mut total_chars = 0usize;
@@ -122,6 +125,7 @@ impl Tool for Wc {
                     total_bytes += bc;
 
                     let cells = build_cells(lc, wc, cc, bc, lines_only, words_only, chars_only, bytes_only, show_all);
+                    rows.push((path.clone(), cells.clone()));
                     nodes.push(OutputNode::new(path.as_str()).with_cells(cells));
                 }
                 Err(e) => {
@@ -137,19 +141,21 @@ impl Tool for Wc {
                 total_lines, total_words, total_chars, total_bytes,
                 lines_only, words_only, chars_only, bytes_only, show_all,
             );
+            rows.push(("total".to_string(), cells.clone()));
             nodes.push(OutputNode::new("total").with_cells(cells));
         }
 
         let output = OutputData::table(headers, nodes);
+        let text = format_counts_text(&rows);
 
         if had_error {
             // Return with error but include the output we did get
-            let mut result = ExecResult::with_output(output);
+            let mut result = ExecResult::with_output_and_text(output, text);
             result.code = 1;
             result.err = error_messages.join("\n");
             result
         } else {
-            ExecResult::with_output(output)
+            ExecResult::with_output_and_text(output, text)
         }
     }
 }
@@ -202,14 +208,14 @@ impl WcCounter {
     }
 
     fn finish(mut self) -> (usize, usize, usize, usize) {
-        // A non-empty remainder is the final line with no trailing newline. It
-        // counts as a line, matching `str::lines()` (which yields a final
-        // unterminated segment).
-        let has_trailing = !self.carry.is_empty();
-        if has_trailing {
+        // The final remainder (bytes after the last `\n`) still contributes its
+        // words and chars, so count it — but it is NOT a line. `wc -l` counts
+        // newline characters (like GNU): an unterminated final line is not
+        // counted (`a\nb` → 1, not 2).
+        if !self.carry.is_empty() {
             self.count_line(0, self.carry.len());
         }
-        let lines = self.newlines + usize::from(has_trailing);
+        let lines = self.newlines;
         // Every consumed `\n` is one character that line-splitting removed.
         let chars = self.chars + self.newlines;
         (lines, self.words, chars, self.bytes)
@@ -223,10 +229,37 @@ fn count_content(input: &[u8]) -> (usize, usize, usize, usize) {
     // copy), best-effort for binary. This keeps `wc -c` honest on binary input.
     let bytes = input.len();
     let text = String::from_utf8_lossy(input);
-    let lines = text.lines().count();
+    // `wc -l` counts newline characters (GNU semantics): an unterminated final
+    // line is not a line. `str::lines()` would over-count it.
+    let lines = input.iter().filter(|&&b| b == b'\n').count();
     let words = text.split_whitespace().count();
     let chars = text.chars().count();
     (lines, words, chars, bytes)
+}
+
+/// Render wc's text output: each row is the count fields right-justified to a
+/// common width (the widest field in the whole output), single-space separated,
+/// followed by the filename (omitted for stdin's empty label). A single-count
+/// invocation (`wc -l`) naturally comes out unpadded — its lone field's width
+/// is its own digit count. Every row is newline-terminated. The byte shape is
+/// pinned by `builtin_sweep_fidelity_tests` so it's contractual, not surprising.
+fn format_counts_text(rows: &[(String, Vec<String>)]) -> String {
+    let width = rows
+        .iter()
+        .flat_map(|(_, cells)| cells.iter().map(|c| c.len()))
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for (label, cells) in rows {
+        let cols: Vec<String> = cells.iter().map(|c| format!("{c:>width$}")).collect();
+        out.push_str(&cols.join(" "));
+        if !label.is_empty() {
+            out.push(' ');
+            out.push_str(label);
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// Build headers based on which counts are shown.

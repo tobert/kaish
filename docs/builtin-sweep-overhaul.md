@@ -209,7 +209,10 @@ becomes tab; pre-existing.
   absent and `-s` is not set.
 - **Test:** `cut -d, -f2` over `nodelim\n` == `nodelim\n`; `cut -s …` still suppresses.
 
-### [ ] 5. `jq -c` (compact) ignored — pretty-prints
+### [x] 5. `jq -c` (compact) ignored — pretty-prints — FIXED 2026-06-17
+**Fix:** thread `compact` into `execute_filter_json` + `format_compact` (serde
+`to_string`); also newline-terminate jq output (P4.1, folded). DeepSeek-reviewed.
+
 - **Symptom (J4):** `jq -c .` emits multi-line pretty JSON (`{\n  "a": 1\n}`) instead
   of `{"a":1}`. The compact flag is not honored.
 - **Verdict:** SILENT-WRONG (wrong shape for downstream parsing). **Fix:** honor `-c`.
@@ -228,7 +231,14 @@ violates the read-from-parsed convention; pre-existing, separate cleanup.
 - **Verdict:** SILENT-WRONG. **Fix:** `--limit=N` = at most N fields (N-1 splits).
 - **Test:** `split : --limit=2` over `a:b:c:d` == `a\nb:c:d`.
 
-### [ ] 7. `wc` output format: leading tab + no trailing newline
+### [x] 7. `wc` output format: leading tab + no trailing newline — FIXED 2026-06-17
+**Fix:** single-count = bare unpadded number + `
+` (drop leading tab); multi-count
+right-justified common-width, space-sep, newline-terminated (`format_counts_text`).
+`wc -l` counts newlines (W5: `a
+b`→1). DeepSeek-reviewed. One realworld wc test
+updated off the old TSV format.
+
 - **Symptom (W1/W2/W3/W5):** `wc -l/-w/-c` emit `\t<n>` (leading tab, no trailing
   `\n`) vs consensus `<n>\n`. Single-count form should be the bare number + newline,
   no leading whitespace.
@@ -237,7 +247,12 @@ violates the read-from-parsed convention; pre-existing, separate cleanup.
   via panel.
 - **Test:** `wc -l` over `a\nb\n` == `2\n`; `wc -w`, `wc -c` likewise.
 
-### [ ] 8. `tr -c` / `-cd` (complement) rejected by clap
+### [x] 8. `tr -c` / `-cd` (complement) rejected by clap — FIXED 2026-06-17
+**Fix:** added `-c`/`-C`/`--complement`; `in_set1` predicate inverts membership
+across delete/translate/squeeze. `tr -cd '[:digit:]'` keeps only digits.
+DeepSeek-reviewed (caught + fixed complement-translate squeeze using full SET2
+when only set2.last() is emitted).
+
 - **Symptom (T5/T7):** `tr -cd '[:digit:]'`, `tr -c …` → "unexpected argument '-c'".
   The complement flag is missing; common idiom `tr -cd '[:digit:]'`.
 - **Verdict:** LOUD, misleading message. **Fix:** add `-c`/`-C`/`--complement` to tr
