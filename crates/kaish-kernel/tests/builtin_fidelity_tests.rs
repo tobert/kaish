@@ -56,11 +56,29 @@ async fn tail_plus_n_past_end_is_empty() {
 }
 
 #[tokio::test]
-async fn tail_negative_n_still_means_last_n() {
+async fn tail_plain_n_means_last_n() {
     // Regression guard: the plain "last N" form must be unaffected.
     let (out, code) = run("tail -n 2", "alpha\nbeta\ncherry\ndate\n").await;
     assert_eq!(code, 0, "out={out:?}");
     assert_eq!(out, "cherry\ndate\n", "tail -n 2 = last 2 lines");
+}
+
+#[tokio::test]
+async fn tail_explicit_negative_n_means_last_n() {
+    // `tail -n -N` is the explicit "from the end" form — same as plain `-n N`.
+    // The count arrives as `Int(-2)`; a bare `as usize` wrapped to ~usize::MAX
+    // and `saturating_sub` skipped 0 lines, silently emitting the whole input.
+    let (out, code) = run("tail -n -2", "alpha\nbeta\ncherry\ndate\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "cherry\ndate\n", "tail -n -2 = last 2 lines");
+}
+
+#[tokio::test]
+async fn tail_explicit_negative_c_means_last_bytes() {
+    // Same wrapping bug in byte mode: `tail -c -3` must emit the last 3 bytes.
+    let (out, code) = run("tail -c -3", "abcdef\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "ef\n", "tail -c -3 = last 3 bytes");
 }
 
 // ─────────────────────────── head -n -N (P2.3) ───────────────────────────

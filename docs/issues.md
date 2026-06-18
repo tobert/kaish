@@ -415,6 +415,13 @@ low-frequency, record-then-defer:
   earlier valid lines to a downstream pipe *before* erroring on a non-UTF-8 line
   (buffered emits nothing), and uses a different error message than
   `read_stdin_to_text`. Both loud; cosmetic/edge. Same review.
+- **sed `-e <numeric>` is dropped**: `collect_expressions` only matches string
+  values, so a numeric `-e` token (`sed -e 5 -e 's/a/b/'`) is silently ignored
+  rather than applied. Surfaces loudly as "missing expression" when it's the only
+  `-e` (since the expr list ends up empty), but a *mix* with a valid `-e` drops it
+  silently. `-e 5` isn't valid sed anyway, so low impact — coerce non-string values
+  to their string form (or reject loudly) to close the silent-drop window.
+  (0.9.0 release-review finding, Gemini Pro, 2026-06-18.)
 
 ### Code formatting (rustfmt) — considered and declined 2026-06-14
 **Decision (Amy): not adopting rustfmt.** The audience for this code is Claude and

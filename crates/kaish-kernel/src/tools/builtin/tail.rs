@@ -85,9 +85,12 @@ impl Tool for Tail {
 
         // Byte mode (-c) resolved up front: it reads raw bytes so binary tails
         // to a Bytes result instead of being rejected or lossy-decoded.
+        // `-c -N` (explicit "from the end" sign) means the same as `-c N`: last
+        // N bytes. A bare `as usize` on the negative `Int` would wrap and emit
+        // the whole input.
         let bytes = args.get("bytes", usize::MAX).and_then(|v| match v {
-            Value::Int(i) => Some(*i as usize),
-            Value::String(s) => s.parse().ok(),
+            Value::Int(i) => Some(i.unsigned_abs() as usize),
+            Value::String(s) => s.trim_start_matches('-').parse().ok(),
             _ => None,
         });
 
@@ -166,15 +169,18 @@ impl Tool for Tail {
 }
 
 /// Resolve the `-n` line spec into `(count, from_start)`. `-n +N` (lexed as a
-/// String with a leading `+`) means "from line N" (1-based); plain `-n N` means
-/// "last N". A bare `parse()` would silently drop the `+` and conflate the two.
+/// String with a leading `+`) means "from line N" (1-based); plain `-n N` and
+/// the explicit `-n -N` both mean "last N". A bare `parse()` would silently drop
+/// the `+` and conflate the first two; a bare `as usize` on a negative `Int`
+/// wraps to ~`usize::MAX` and silently emits the whole input.
 fn parse_line_spec(args: &ToolArgs) -> (usize, bool) {
     match args.get("lines", usize::MAX) {
         Some(Value::String(s)) if s.starts_with('+') => {
             (s[1..].parse().unwrap_or(1), true)
         }
-        Some(Value::Int(i)) => (*i as usize, false),
-        Some(Value::String(s)) => (s.parse().unwrap_or(10), false),
+        Some(Value::Int(i)) => (i.unsigned_abs() as usize, false),
+        // A leading `-` is the explicit "from the end" sign (same as no sign).
+        Some(Value::String(s)) => (s.trim_start_matches('-').parse().unwrap_or(10), false),
         _ => (10, false),
     }
 }

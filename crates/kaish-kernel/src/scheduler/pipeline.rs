@@ -890,7 +890,7 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
     // Map remaining positionals to unfilled non-bool schema params (in order).
     // This enables `drift_push "abc" "hello"` → named["target_ctx"] = "abc", named["content"] = "hello"
     // Positionals that appeared after `--` are never mapped (they're raw data).
-    // Only for MCP/external tools (map_positionals=true). Builtins handle their own positionals.
+    // Only for backend/external tools (map_positionals=true). Builtins handle their own positionals.
     if let Some(schema) = schema.filter(|s| s.map_positionals) {
         // Count how many positionals were added before `--`
         let pre_dash_count = if past_double_dash {
