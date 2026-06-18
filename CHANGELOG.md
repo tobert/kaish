@@ -10,29 +10,27 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
-### Removed
-- **BREAKING: the `kaish-mcp` crate (the MCP server) is removed.** kaish refocuses on being an embeddable shell library with a reference REPL; the MCP surface now lives in the embedders. The showcase is [kaibo](https://github.com/tobert/kaibo), a read-only codebase-analysis MCP that drives kaish, and [kaijutsu](https://github.com/tobert/kaijutsu) embeds kaish behind its own MCP interface. To run kaish as an MCP tool, embed the kernel and expose `execute()` — see `docs/EMBEDDING.md`. The `rmcp`/`opentelemetry-otlp` dependencies and the `kaish-mcp` binary are dropped with it.
-- **BREAKING: the `git` builtin and `GitVfs` backend are removed**, and with them the `git` cargo feature and the entire `kaish-tools-git` crate (along with its `git2`/libgit2 dependency). Git is a complex, heavyweight subsystem that doesn't belong in kaish core: run your system `git` as an ordinary external command instead (`git status`, `git log` work via the `subprocess` capability). Embedders lose `GitVfs` and the `FileStatus`/`StatusSummary`/`LogEntry`/`WorktreeInfo` re-exports; the `full`/`native` feature aliases no longer include `git`. (`docs/EMBEDDING-GIT.md` is removed.)
-- **BREAKING: the `rg` builtin is removed.** kaish's 80%-rule search surface is the single `grep` builtin; the separate ripgrep-flavored `rg` was redundant and carried the registry's largest flag surface. Use `grep` (recursive, gitignore-aware) instead — or your system's real `rg`, which now runs as an external command. Accepted lost features (rg-only, not ported to `grep`): `--type`/`-t`/`-T` (file-type filters), `--hidden`, `--max-count`, `--files`, `-P`/`--pcre2` (PCRE2 lookarounds/backrefs), and `--no-ignore`. The optional `pcre2` build feature and its `grep-pcre2` dependency are dropped with it.
+## [0.9.0] - 2026-06-18
 
 ### Added
 - **`sort -V` / `--version-sort`** orders version-like strings naturally — digit runs compare by value, so `v1.2` < `v1.9` < `v1.10` (was an `unexpected argument` error).
 - **`kaish -c '…'` (and `kaish script.kai`) now read piped stdin** when invoked non-interactively, so `printf 'data' | kaish -c 'sort'` feeds the top-level builtin instead of silently producing nothing. Stdin is fed **lazily**: a command that reads stdin drains it, but one that doesn't (`echo`) returns immediately even when stdin is an open pipe that never sends EOF — `sleep 10 | kaish -c 'echo hi'` prints `hi` and exits at once rather than hanging. Stdin is consumed by the first command that reads it (shell draining semantics); a redirect (`< file`/heredoc) still takes precedence; binary stdin survives losslessly. Two embedder seams: `ExecuteOptions::with_stdin(String)` for a ready buffer, and `Kernel::execute_with_pipe_stdin(_streaming)` taking a `PipeReader` for a lazy, byte-clean stream (the CLI uses the latter).
 - **`sed` ergonomics pass** (gaps chosen from a cross-model usability panel — see `docs/sed-design.md`): `;` now chains multiple commands in one expression (`sed 's/a/b/; s/c/d/'`); `s///N` / `s///Ng` act on the Nth match; `a TEXT`/`i TEXT`/`c TEXT` append/insert/change lines (all of `a\TEXT`, `a TEXT`, `aTEXT`); `y/abc/xyz/` transliterates; and `-E`/`-r` are accepted as no-ops (kaish sed is always ERE).
-
-### Changed
-- **BREAKING: the `mcp()` config presets are renamed to `agent()`.** `KernelConfig::mcp()` → `KernelConfig::agent()`, `KernelConfig::mcp_with_root()` → `agent_with_root()`, `OutputLimitConfig::mcp()` → `OutputLimitConfig::agent()`, `IgnoreConfig::mcp()` → `IgnoreConfig::agent()`. These are the sandboxed-agent preset (sandboxed VFS, non-interactive, bounded memory/output) — never MCP-specific — and the old name was a misnomer after the `kaish-mcp` drop. Embedders update the call name only; behavior is identical. Parallels the existing `KernelConfig::repl()`.
-- **`sed` rejects the BRE escapes that silently mis-behave under ERE**: kaish sed is *always* ERE, so BRE `\(…\)` capture groups, `\|` alternation, and `\{N,M\}` intervals used to match the wrong thing with no error. They now error with a hint to the ERE form (`(…)`, `a|b`, `a{2,5}`), and a pattern-side backreference (`\1` in the pattern) gets a sed-specific message instead of the raw engine error. `\+`/`\?` are left alone — they're valid ERE escapes for a literal `+`/`?`.
-
-### Added
 - **`awk` range patterns** `/start/,/end/` (and expression endpoints like `NR==2,NR==5`) — fire inclusively from the record matching `start` through the record matching `end`.
 - **`awk` fails loud on unsupported constructs** instead of mis-parsing or silently doing nothing: output redirection (`print > f`, `>>`) — previously silently parsed as a `>` comparison — `getline`, command pipes, user-defined `function`s, and multi-dimensional subscripts `a[i,j]` now each error with a hint pointing at the kaish alternative.
 - **`awk` `match()` sets `RSTART` and `RLENGTH`** (1-based start / match length, `0` and `-1` on no match), so the `substr($0, RSTART, RLENGTH)` extraction idiom works.
 - **`awk` numeric builtins `int()` and `sqrt()`** are implemented. The rest of the math set (`sin`/`cos`/`atan2`/`exp`/`log`/`rand`/`srand`) errors with an honest "not supported" message — kaish awk is a text-processing subset.
 
 ### Changed
+- **BREAKING: the `mcp()` config presets are renamed to `agent()`.** `KernelConfig::mcp()` → `KernelConfig::agent()`, `KernelConfig::mcp_with_root()` → `agent_with_root()`, `OutputLimitConfig::mcp()` → `OutputLimitConfig::agent()`, `IgnoreConfig::mcp()` → `IgnoreConfig::agent()`. These are the sandboxed-agent preset (sandboxed VFS, non-interactive, bounded memory/output) — never MCP-specific — and the old name was a misnomer after the `kaish-mcp` drop. Embedders update the call name only; behavior is identical. Parallels the existing `KernelConfig::repl()`.
+- **`sed` rejects the BRE escapes that silently mis-behave under ERE**: kaish sed is *always* ERE, so BRE `\(…\)` capture groups, `\|` alternation, and `\{N,M\}` intervals used to match the wrong thing with no error. They now error with a hint to the ERE form (`(…)`, `a|b`, `a{2,5}`), and a pattern-side backreference (`\1` in the pattern) gets a sed-specific message instead of the raw engine error. `\+`/`\?` are left alone — they're valid ERE escapes for a literal `+`/`?`.
 - **`awk` bare `length`** (no parentheses) now means `length($0)`, matching awk; it previously read as an unset variable (empty).
 - **`awk` numeric output matches awk's `OFMT`**: integral values print in full (`100000000000000000`), non-integral values use `%.6g` (6 significant figures, e.g. `sqrt(2)` → `1.41421`). Previously fractions printed with 6 decimal places and large integers were truncated.
+
+### Removed
+- **BREAKING: the `kaish-mcp` crate (the MCP server) is removed.** kaish refocuses on being an embeddable shell library with a reference REPL; the MCP surface now lives in the embedders. The showcase is [kaibo](https://github.com/tobert/kaibo), a read-only codebase-analysis MCP that drives kaish, and [kaijutsu](https://github.com/tobert/kaijutsu) embeds kaish behind its own MCP interface. To run kaish as an MCP tool, embed the kernel and expose `execute()` — see `docs/EMBEDDING.md`. The `rmcp`/`opentelemetry-otlp` dependencies and the `kaish-mcp` binary are dropped with it.
+- **BREAKING: the `git` builtin and `GitVfs` backend are removed**, and with them the `git` cargo feature and the entire `kaish-tools-git` crate (along with its `git2`/libgit2 dependency). Git is a complex, heavyweight subsystem that doesn't belong in kaish core: run your system `git` as an ordinary external command instead (`git status`, `git log` work via the `subprocess` capability). Embedders lose `GitVfs` and the `FileStatus`/`StatusSummary`/`LogEntry`/`WorktreeInfo` re-exports; the `full`/`native` feature aliases no longer include `git`. (`docs/EMBEDDING-GIT.md` is removed.)
+- **BREAKING: the `rg` builtin is removed.** kaish's 80%-rule search surface is the single `grep` builtin; the separate ripgrep-flavored `rg` was redundant and carried the registry's largest flag surface. Use `grep` (recursive, gitignore-aware) instead — or your system's real `rg`, which now runs as an external command. Accepted lost features (rg-only, not ported to `grep`): `--type`/`-t`/`-T` (file-type filters), `--hidden`, `--max-count`, `--files`, `-P`/`--pcre2` (PCRE2 lookarounds/backrefs), and `--no-ignore`. The optional `pcre2` build feature and its `grep-pcre2` dependency are dropped with it.
 
 ### Fixed
 - **`patch` follows `patch(1)` output** — it no longer prints a kaish-specific `N changes applied` summary line after `patching file <name>`.
@@ -450,7 +448,8 @@ Initial public release of **kaish** (会sh) — a predictable Bourne-like shell 
 - **REPL** (`kaish-repl`) with multi-line input, completion, and history; **MCP server** (`kaish-mcp`) exposing `kaish_execute` with help resources and structured + plain-text content blocks.
 - **`KernelClient` trait** + `EmbeddedClient` for in-process embedding; topic-based help system; `kaish-wasi` `wasm32-wasip1` target.
 
-[Unreleased]: https://github.com/tobert/kaish/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/tobert/kaish/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/tobert/kaish/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/tobert/kaish/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/tobert/kaish/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/tobert/kaish/compare/v0.8.1...v0.8.2
