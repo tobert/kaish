@@ -9,7 +9,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// kaish-clear: reset session state (variables, cwd).
 pub struct KaishClear;
 
-/// clap-derived argv layer for kaish-clear. See docs/clap-migration.md.
+/// clap-derived argv layer for kaish-clear.
 #[derive(Parser, Debug)]
 #[command(name = "kaish-clear", about = "Clear session state (variables, cwd)")]
 struct KaishClearArgs {

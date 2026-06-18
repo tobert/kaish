@@ -9,7 +9,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Jobs tool: list and manage background jobs.
 pub struct Jobs;
 
-/// clap-derived argv layer for jobs. See docs/clap-migration.md.
+/// clap-derived argv layer for jobs.
 #[derive(Parser, Debug)]
 #[command(name = "jobs", about = "List and manage background jobs")]
 struct JobsArgs {

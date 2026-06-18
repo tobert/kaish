@@ -13,7 +13,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// KaishTrash tool: manage the system trash.
 pub struct KaishTrash;
 
-/// clap-derived argv layer for kaish-trash. See docs/clap-migration.md.
+/// clap-derived argv layer for kaish-trash.
 #[derive(Parser, Debug)]
 #[command(name = "kaish-trash", about = "Manage the freedesktop.org Trash")]
 struct KaishTrashArgs {

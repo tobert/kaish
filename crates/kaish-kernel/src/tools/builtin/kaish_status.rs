@@ -9,7 +9,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// kaish-status: display kernel name, variable count, and job count.
 pub struct KaishStatus;
 
-/// clap-derived argv layer for kaish-status. See docs/clap-migration.md.
+/// clap-derived argv layer for kaish-status.
 #[derive(Parser, Debug)]
 #[command(name = "kaish-status", about = "Show kernel session status")]
 struct KaishStatusArgs {

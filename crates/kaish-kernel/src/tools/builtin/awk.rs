@@ -17,7 +17,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Awk tool: pattern-directed scanning and processing.
 pub struct Awk;
 
-/// clap-derived argv layer for awk. See docs/clap-migration.md.
+/// clap-derived argv layer for awk.
 ///
 /// awk's program body is read off `args.positional[0]` directly so the rich
 /// AWK syntax stays out of clap. clap only handles argv-level flags like
@@ -2774,7 +2774,7 @@ impl AwkRuntime {
             }
             "sin" | "cos" | "atan2" | "exp" | "log" | "rand" | "srand" => {
                 // Math functions outside the 80/20 text-processing subset — declared
-                // unsupported forever (see docs/awk-overhaul.md). rand/srand also
+                // unsupported forever (a TEACH boundary; see docs/designing-syntax-with-llms.md). rand/srand also
                 // conflict with the hermetic/deterministic stance.
                 Err(format!(
                     "{name}() is not supported (kaish awk is a text-processing subset; only int and sqrt are provided)"

@@ -13,7 +13,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Readlink tool: read symlink target or canonicalize a path.
 pub struct Readlink;
 
-/// clap-derived argv layer for readlink. See docs/clap-migration.md.
+/// clap-derived argv layer for readlink.
 #[derive(Parser, Debug)]
 #[command(name = "readlink", about = "Print symlink target or resolved path")]
 struct ReadlinkArgs {

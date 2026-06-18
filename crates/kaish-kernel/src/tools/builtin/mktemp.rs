@@ -25,7 +25,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Mktemp tool: creates temporary files or directories with unique names.
 pub struct Mktemp;
 
-/// clap-derived argv layer for mktemp. See docs/clap-migration.md.
+/// clap-derived argv layer for mktemp.
 #[derive(Parser, Debug)]
 #[command(name = "mktemp", about = "Create temporary file or directory with unique name")]
 struct MktempArgs {

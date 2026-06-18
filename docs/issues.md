@@ -1,809 +1,399 @@
 # Known Issues & Open Work
 
-Actionable punch list. Narrative context lives in [reviews.md](reviews.md).
-Last validation pass: 2026-06-09 (Fable 5 systemic review — 61-agent fleet with
-adversarial verification + DeepSeek/Gemini resonance panel; narrative in
-[reviews.md](reviews.md), panel report in [resonance-2026-06.md](resonance-2026-06.md)).
+Actionable punch list — **open work only**. Landed-work narrative and standing
+decisions live in [devlog.md](devlog.md); per-version history is in `CHANGELOG.md`.
 Path note: the 0.8.0 crate split moved some cited files — `vfs/local.rs` →
 `kaish-vfs`, host `ps` → `kaish-tools-host/src/ps.rs`, Tool/ToolCtx/KernelBackend
 → `kaish-tool-api`.
 
-Priorities follow the convention from `reviews.md`:
-
-- **P1** — high-leverage features and diagnostics
-- **P2** — focused refactors
-- **P3** — scheduler and infra
-- **P4** — eventually
-
-The old P0 from the Feb-2026 integration-test pass (5 concrete bugs:
-unknown-command socket error, missing `$0`, alias concatenation,
-subprocess capture, arithmetic token leak) **all validate as fixed** on
-2026-04-16 and have been removed from this list.
+Priorities: **P1** high-leverage features/diagnostics · **P2** focused refactors
+& real bugs · **P3** scheduler and infra · **P4** eventually.
 
 ---
 
 ## P1 — High-leverage features and diagnostics
 
-### OverlayFs — ALL HUNKS LANDED 2026-06-10; residuals only
-Hunk 1 `69c42e3`+`2a62a72` (MemoryFs lift, overlay core), accounting vfs half
-`dddc85d` (resident_bytes, ByteBudget), hunk 2 `6fe2225` (inspection API),
-hunk 3 + accounting kernel half `d0e0deb` (64 MiB mcp budget "vfs-memory",
-MountInfo.resident_bytes + kaish-mounts, --overlay opt-in REPL/MCP/embedder,
-kaish-vfs builtin status/diff/commit/reset). Residuals:
-- **External commands under overlay** fail with exit 127 inside the overlay
-  mount (real_path=None, accidental but correct guard); cd /tmp escapes. A
-  friendlier in-band error naming the overlay would help. (P3)
-- **JobFs resident counting skipped deliberately**: synthesized fs over
-  JobManager's already-bounded BoundedStream ring buffers — nothing unbounded
-  to count. Revisit only if job buffers become configurable/unbounded. (P4)
-- **kaish-mounts --json shape changed** (breaking): was a bare array, now
-  {mounts, budget?}. Flag in next release notes. (P2 — release-notes item)
-- **Punted in core** (revisit if a consumer hits them): cross-layer symlink
-  resolution is layer-local; whiteout of a directory is per-file only;
-  commit_into doesn't propagate mtimes. `VirtualOverlayBackend`
-  (backend/overlay.rs) is unrelated prefix routing, not CoW.
-
-### Silent lossy UTF-8 decodes in text builtins — MOSTLY FIXED 2026-06-13
-The in-process text builtins used to `from_utf8_lossy` stdin/files, silently
-replacing invalid bytes with `U+FFFD` (corruption that looks like success). Fixed
-with a strict `ExecContext::read_stdin_to_text()` (errors on non-UTF-8) wired into
-`grep`, `rg`, `sed`, `awk`, `sort`, `uniq`, `cut`, `tr`, `jq`, `tac`, `split`,
-`scatter`, `gather`, `read`, `tokens`; strict file reads in `diff`/`patch` (point
-to `cmp`); `grep` validates file bytes before its engine; `tail -c` joined the
-byte-aware movers. Text tools now loud-error on binary; byte-aware tools
-(`cat`/`dd`/`base64`/`xxd`/`checksum`/`wc`/`tee`/`head -c`/`tail -c`/`cmp`) consume
-it. Regression tests in `sandbox_mode_tests`.
-
-**External-command binary I/O — FIXED 2026-06-13.** External commands now keep
-binary intact in both directions: stdin is forwarded raw (`env`/`spawn` read
-`read_stdin_to_bytes`; the pipeline path already streamed raw), and captured
-stdout becomes a `Bytes` result (text if valid UTF-8) at all three capture sites
-— `kernel.rs::try_execute_external` (`BoundedStream::read()` not `read_string`),
-`dispatch.rs` (`spill_aware_collect` returns `Vec<u8>`), and `env`/`spawn`. So
-`curl url`, `curl url > file.bin`, `… | gzip`, `printf … | base64` all round-trip.
-stderr stays text. The output limiter's binary spill/truncate (already
-byte-aware) composes. `grep_engine`'s `from_utf8_lossy` is safe (grep validates
-upstream). Residual: buffered-`String` stdin (`take_stdin`, heredoc/here-string)
-is still text — binary there would need `ctx.stdin` to become bytes, rare.
-
-**Bug found + fixed in the same pass:** `accumulate_result` (kernel.rs) folded
-every top-level statement's result via `push_out(text_out())` — lossy-decoding
-*any* `Bytes` final result (so even `cat blob.bin` or `echo ff | xxd -r -p`
-standalone came back mangled, independent of external commands). Now concatenates
-raw bytes when binary is involved.
-
-**Round-2 DeepSeek + Gemini review (2026-06-13)** caught more silent-corruption
-sites, all FIXED: `cat` as a pipeline's last stage (read_stdin_to_string),
-`$()`/block/function-body capture (`execute_block_capturing` +
-`execute_user_tool` now accumulate raw bytes → `$()` yields `Value::Bytes`),
-command-subst inside a string (loud error), `kaish-last` (preserves bytes),
-background-job output file (notes binary, doesn't dump lossy), `for` over a
-`Bytes` value (loud error), `dd skip*bs` (checked_mul). Regression tests in
-`sandbox_mode_tests`.
-
-**Residuals (NOT silent corruption — visible/loud, deferred):**
-- **Buffered-`String` stdin** (`ExecContext::stdin: Option<String>`): `< binfile`
-  and binary here-strings/heredocs error (`from_utf8`) or stringify a
-  `Value::Bytes` to the `[binary: N bytes]` placeholder. Making `ctx.stdin` hold
-  bytes is the real fix; rare in practice.
-- **Var interpolation** `"$x"` where `x` is `Value::Bytes` → `[binary: N bytes]`
-  placeholder (visible marker, not lossy). Command-subst-in-string already
-  errors; var-in-string could too if `value_to_string` grew a fallible path.
-- **Output-limit spill preview**: the head/tail *preview text* in the spill
-  notice still `from_utf8_lossy`s (U+FFFD); the spilled file itself is correct
-  raw bytes. Cosmetic — switch the preview to a hex dump.
-- **`cmp`/`cat`/… whole-file reads** OOM on huge inputs (general kaish model, not
-  binary-specific); add a size cap if it bites.
-- **`wc -l`** counts `str::lines()` not `\n` — overcounts by 1 with no trailing
-  newline (pre-existing, unrelated to binary). **`wc -m`** on binary over-counts
-  via U+FFFD (documented).
-
-### Binary-data path — typed `Bytes`, `dd`, `/dev/urandom` — LANDED (residuals only)
-Surfaced 2026-06-13 while adding the synthetic `/dev` (DevFs: `/dev/null`,
-`/dev/zero` shipped). kaish is UTF-8 text end to end (`ExecResult.out: String`,
-`OutputData` string-shaped, pipe consumed as text), so raw bytes can't transit
-intact and `/dev/urandom` can't exist. **Design committed: typed `Bytes`
-through pipes, nushell-style** — full plan in
-[binary-data.md](binary-data.md). Spine: a `Value::Bytes`/`OutputData::Bytes`
-that flows through pipes, **coerces to text iff valid UTF-8 (else loud error)**,
-and renders at the boundary (REPL hex dump, `--json`/MCP structured base64).
-
-All phases LANDED (commits `e612d69` → `818a22e`):
-1. **Value + boundary** — `Value::Bytes` (single binary type; dead
-   `Value::Blob`/`BlobRef` deleted), `ExecResult.out` as `OutputPayload::{Text,
-   Bytes}` (wire-compatible serde), coercion rule (`text_out` lossy /
-   `try_text_out` loud guard / `success_text_or_bytes` at producers), base64
-   envelope + `hex_dump`, boundary rendering (REPL hex dump, `--json` envelope).
-2. **Transit** — `read_stdin_to_bytes`; byte-clean pipe-write + `>`/`>>`/`&>`
-   redirects; `accumulate_result` concats raw bytes (it was lossy-decoding every
-   binary final result). `1>&2` of binary is a loud error.
-3. **dd + devices** — `dd` (`if=…` parser fix), `/dev/urandom`/`/dev/random`.
-   North-star green.
-4. **Movers byte-aware** — cat, head -c, tail -c, base64, xxd, checksum, wc -c,
-   tee, `cmp` (new). Text tools (grep/sed/awk/…) loud-error on binary, no lossy.
-5. **External commands** — capture → Bytes, stdin forwarded raw (`818a22e`).
-
-**Decision: no generic `encode`/`decode`** (2026-06-13) — `base64` + `xxd`
-already bridge text↔bytes; a generic pair would duplicate them and invite a
-basenc-style format×flag matrix. Add a flagless `urlencode`/`urldecode` only if
-web work needs it. **No `random` builtin** (Amy): `dd if=/dev/urandom` covers it.
-Residual: buffered-`String` stdin (`take_stdin`, binary heredocs — rare).
-
-**Definition of done (north-star test):** `dd if=/dev/urandom of=/dev/null
-bs=1024 count=10` exits 0 having copied exactly 10240 bytes; the same into a
-`/tmp` file verifies an exact `wc -c`; two 16-byte draws have differing
-checksums (entropy is real). Home: a NoLocal kernel-routed test beside the
-DevFs tests in `tests/sandbox_mode_tests.rs`. DevFs:
-`crates/kaish-vfs/src/dev.rs`; range plumbing: `Filesystem::read_range`.
-
 ### Port useful `rg`-only features into `kaish-glob` / `grep` (Amy, 2026-06-17)
-The `rg` builtin was removed 2026-06-17 (builtin-sweep Decision #1; 80%-rule:
-one search builtin). Some of its dropped flags are genuinely useful and could
-be re-homed in `kaish-glob` (which already depends on `ignore` and wraps
-`ignore::types::Types`/`TypesBuilder`) and surfaced through `grep`/`glob`/`find`
-rather than a second search builtin:
-- **`--type`/`-t`/`-T`** (file-type filters, e.g. `-t rust`) — the strongest
-  candidate; `kaish-glob` already has the `Types` machinery, so this is mostly
-  surface wiring on the existing walkers.
-- **`--hidden`** — kaish-glob already has dotglob-style hidden handling
-  (`[[project_dotfile_glob_fix]]`); a `grep --hidden` could thread it through.
-- **`--no-ignore`** (bypass gitignore), **`--max-count`** (early-stop; the
-  `grep_engine` sink had the hook, removed with rg — re-add on demand).
+`rg` was removed (80%-rule: one search builtin). Some dropped flags are worth
+re-homing in `kaish-glob` (which already wraps `ignore::types::Types`) and
+surfacing through `grep`/`glob`/`find` rather than a second search builtin:
+- **`--type`/`-t`/`-T`** (file-type filters) — strongest candidate; the `Types`
+  machinery already exists, so it's mostly surface wiring on the walkers.
+- **`--hidden`** — kaish-glob already has dotglob-style hidden handling; thread it
+  through a `grep --hidden`.
+- **`--no-ignore`** (bypass gitignore), **`--max-count`** (early-stop).
 Design first: decide whether these live on `grep` flags or on the file-walking
-layer (`find`/`glob`) so search and listing share one type/hidden/ignore model.
-Not urgent; pick up when an agent reaches for `-t`.
+layer so search and listing share one type/hidden/ignore model. Not urgent.
 
-### Output disk-spill — runtime read-only residuals (core fix done 2026-06-06)
-**Core fix landed 2026-06-06** (full narrative now in git history). `OutputLimitConfig`
-carries a runtime `SpillMode` (`Disk` | `Memory`); `Memory` truncates in memory with
-no disk I/O, and `Kernel::assemble` auto-forces `Memory` for `NoLocal` mounts.
-Remaining open work:
-- `Disk` is still the default for *mode-based* `localfs` kernels built via
-  `Kernel::new` (`Sandboxed`/`Passthrough`) — those genuinely own their host
-  mounts, so disk spill is legitimate there. The auto-force to `Memory` now also
-  fires for **any `with_backend` kernel** (not just `NoLocal`): a custom-backend
-  kernel owns no host mounts, so a host spill — or a background-job output file —
-  is always a VFS bypass (fixed 2026-06-08, see git history; this closed the kaibo
-  gap — kaibo uses `with_backend` and did *not* opt into `Memory`, contrary to a
-  prior note here). Residual: a mode-based `Sandboxed` kernel an embedder runs
-  read-only via `Kernel::new` without `.in_memory()` still spills; none known in
-  the wild, and `with_backend` is the read-only embedder path.
-- No runtime switch via the `kaish-output-limit` builtin / `set -o` yet — mode is
-  config-only. Add a `memory`/`disk` subcommand if interactive control is wanted.
-- `host`'s `/proc` and `/etc` reads still bypass the VFS by design — if
-  "read-only" is ever marketed as "no host observation," those need a runtime
-  gate too.
+### OverlayFs residuals
+(Core landed — see devlog.) Open:
+- **External commands under overlay** fail with exit 127 (real_path=None guard);
+  a friendlier in-band error naming the overlay would help. (P3)
+- **`kaish-mounts --json` shape changed** (breaking): bare array → `{mounts,
+  budget?}`. Flag in release notes. (P2)
+- **Punted in core** (revisit if a consumer hits them): cross-layer symlink
+  resolution is layer-local; directory whiteout is per-file only; `commit_into`
+  doesn't propagate mtimes. JobFs resident-counting skipped deliberately (its
+  ring buffers are already bounded). (P4)
+
+### Binary-data residuals (NOT silent corruption — visible/loud)
+(Typed `Bytes` landed — see devlog.) Open:
+- **Buffered-`String` stdin** (`ExecContext::stdin: Option<String>`): `< binfile`
+  and binary here-strings/heredocs error or stringify to `[binary: N bytes]`.
+  Making `ctx.stdin` hold bytes is the real fix; rare in practice.
+- **Var interpolation** `"$x"` where `x` is `Value::Bytes` → `[binary: N bytes]`
+  placeholder (visible marker, not lossy). Could loud-error if `value_to_string`
+  grew a fallible path.
+- **Output-limit spill preview** still `from_utf8_lossy`s the head/tail preview
+  text (the spilled file itself is correct raw bytes). Cosmetic — switch the
+  preview to a hex dump.
+- **`wc -l`** counts `str::lines()` not `\n` — overcounts by 1 with no trailing
+  newline; **`wc -m`** on binary over-counts via U+FFFD. Whole-file reads
+  (`cmp`/`cat`/…) can OOM on huge inputs (general kaish model); add a size cap if
+  it bites.
+
+### Output disk-spill residuals
+(Core fix landed — see devlog.) Open:
+- A mode-based `Sandboxed` kernel an embedder runs read-only via `Kernel::new`
+  without `.in_memory()` still spills to `Disk`; none known in the wild
+  (`with_backend` is the read-only embedder path, already auto-forced to `Memory`).
+- No runtime switch via `kaish-output-limit` / `set -o` — mode is config-only. Add
+  a `memory`/`disk` subcommand if interactive control is wanted.
+- `host`'s `/proc` and `/etc` reads bypass the VFS by design; if "read-only" is
+  ever marketed as "no host observation," gate those at runtime too.
 
 ---
 
 ## P2 — Focused refactors & real bugs
 
 ### Repeatable flags: glued short-flag form still overwrites (`-es/a/b/`)
-DeepSeek review of the `sed-fixes` branch (2026-06-16) found that the `-e A -e B`
-space form and the `--expression=A --expression=B` `=` form now both accumulate
-correctly (fixed on the branch), but the *glued* short-flag value path in
-`kernel.rs` (the one that parses `cut -f1`, `head -c5`) still does an
-unconditional `named.insert` of a single `Value::String`. So `sed -es/a/b/`
-followed by `-e X` overwrites the accumulated array (or hard-errors with
-"already holds a non-array value"). Low severity — nobody glues `-e`'s value —
-but it's the same silent-drop class the branch otherwise closed. Fix: route the
-glued path through `push_repeatable_value` when the matched param is repeatable
-(the helper already exists). Lift it once and the three flag surfaces converge.
+The `-e A -e B` and `--expression=A --expression=B` forms accumulate correctly,
+but the *glued* short-flag value path in `kernel.rs` (parses `cut -f1`, `head -c5`)
+still does an unconditional `named.insert` of a single `Value::String`. So
+`sed -es/a/b/` then `-e X` overwrites the accumulated array. Nobody glues `-e`'s
+value, but it's the same silent-drop class. Fix: route the glued path through
+`push_repeatable_value` when the matched param is repeatable.
 
 ### `sed` `detect_bre_idiom` false positives
-The BRE-rejection heuristic (`s/\(…\)/\1/` → loud ERE hint) fires on
-`pattern contains \( or \)` AND `replacement contains \<digit>`. Two false
-positives DeepSeek flagged: (a) a *literal* `\\1` in the replacement (escaped
-backslash + digit, not a backreference) trips the `\<digit>` check; (b) a pattern
-mixing a real ERE group `(a)` with a literal escaped paren `\(b\)` plus a
-legitimate `\1` backref is valid ERE but gets rejected. Both turn a valid command
-into a hard error. Tighten: only treat `\<digit>` as a backref when the preceding
-backslash isn't itself escaped, and consider requiring the absence of any
-unescaped `(` group before concluding "BRE intent." Low frequency, but a false
-error is worse than the silent-no-op it replaced for these exact inputs.
+The BRE-rejection heuristic fires on `pattern has \( or \)` AND `replacement has
+\<digit>`. Two false positives: (a) a *literal* `\\1` in the replacement trips the
+`\<digit>` check; (b) a pattern mixing a real ERE group `(a)` with a literal `\(b\)`
+plus a legit `\1` backref is valid ERE but rejected. Tighten: only treat `\<digit>`
+as a backref when the preceding backslash isn't itself escaped. A false error is
+worse than the silent no-op it replaced for these inputs.
 
 ### `sed -i` (in-place edit) — deferred pending a write-model design
-Both lite models in the 2026-06-15 sed usability panel (see `docs/sed-design.md`)
-reached for `sed -i 's/…/…/' file`, making it the strongest remaining ergonomic
-gap after the `;`/`s///N`/`a`-`i`-`c`/`y` pass landed. It's deferred because
-in-place editing is a file-mutating side effect that must route through kaish's
-write machinery — VFS resolution, overlay transactions, and the latch/trash
-confirmation rails — so that sandbox, `--overlay`, and confirmation modes all
-hold. That's a design (where does the write go under overlay? does `-i` need a
-latch nonce like `rm`? `-i.bak` backup suffix?), not a parser tweak. Today `sed`
-loud-errors on `-i` rather than pretending. Revisit when an embedder (kaibo/kj)
-actually needs agent-driven in-place edits; until then `s/…/…/ … > file` via a
-real external `sed`, or the overlay, covers it.
+Both lite models in the sed usability panel reached for `sed -i 's/…/…/' file` —
+the strongest remaining ergonomic gap. Deferred because in-place editing is a
+file-mutating side effect that must route through kaish's write machinery (VFS
+resolution, overlay transactions, latch/trash rails) so sandbox/`--overlay`/confirm
+modes all hold. That's a design (where does the write go under overlay? does `-i`
+need a latch nonce? `-i.bak`?), not a parser tweak. Today `sed` loud-errors on
+`-i`. Pairs with the tee/patch write-model work below.
 
 ### `tee` / `patch` bypass the latch + trash machinery (write-model design)
-From the builtin sweep (was punch-list P1.2; deferred here 2026-06-17 to keep the
-release scoped). `tee` and `patch` mutate files through the VFS (overlay-safe)
-but do **not** honor `set -o latch` (confirmation nonce) or trash-on-overwrite the
-way `rm` does — same hazard class as the deferred `sed -i` above. An agent can
-silently overwrite a file via `tee` with no confirm and no recoverable prior copy.
+`tee`/`patch` mutate files through the VFS (overlay-safe) but don't honor
+`set -o latch` or trash-on-overwrite the way `rm` does — an agent can silently
+overwrite a file with no confirm and no recoverable prior copy. NOT a reuse of
+`rm`'s `decide_rm_action` ("trash IS the op"); tee/patch need a *pre-write safety
+copy then overwrite* — a new `decide_mutation_action → {TrashFirst(path), Latch,
+Proceed}` (same priority chain + `/tmp`,`/v` excludes; tee can create a nonexistent
+file with no trash). **Amy decisions (2026-06-17):** latch+trash stay ON even in
+overlay mode (the protections are about agent-operation safety, not just real-FS
+data); truncating overwrite gates, `tee -a` append does NOT (for now); new file →
+just write. Open impl detail: the `--confirm` flag name (tee/patch have none), and
+how trash captures prior content in overlay mode. Do it with the `sed -i` work.
 
-**NOT a reuse of `rm`'s path:** `decide_rm_action → {Trash,Delete,Latch}` means
-"trash IS the op." tee/patch need a *pre-write safety copy then overwrite* — a new
-`decide_mutation_action → {TrashFirst(path), Latch, Proceed}` (same priority chain
-+ `/tmp`,`/v` excludes). tee can create a nonexistent file (no trash, just write)
-where rm requires existence.
+### Streaming file reads — remaining
+(wc/checksum/grep/cmp/cat landed — see devlog.) Open:
+- **`base64`** — deferred; only a pipe-case win, the 3-byte/4-char carry is
+  fiddly, and big-file base64 is unlikely in kaish.
+- **`read_range` re-opens the file per chunk** on LocalFs (open+seek per 256 KiB).
+  Cheap relative to the read; a stateful streaming handle would cut syscalls but
+  reintroduces the tokio-in-trait problem the chunk approach avoided. Revisit only
+  if a profile shows it matters.
 
-**Amy decisions (2026-06-17):**
-- **Latch + trash stay ON consistently, even in overlay mode** — the protections
-  are about agent-operation safety, not just real-FS data; latch guards a
-  dangerous op even in virtual space. So a tee/patch overwrite gates regardless of
-  `--overlay`. (Don't skip the confirm just because the overlay is reversible.)
-- **Truncating overwrite gates (trash + latch); `tee -a` append does NOT gate —
-  for now.** Append is non-destructive; keep the first cut simple and revisit
-  latch/trash-on-append when a concrete use case appears. New file (no prior
-  content) → just write, no trash.
-
-**Open impl detail (resolve when building):** the `decide_mutation_action` shape,
-the `--confirm` flag name (tee/patch have none today), and how trash physically
-captures prior content in overlay mode (overlay preserves the original via
-`reset`, so it may be a copy-within-overlay vs real-trash). Pairs naturally with
-the `sed -i` write-model work — do them together. Tests: tee/patch over an
-existing file under `set -o latch` → exit 2 + nonce, applies on `--confirm`; trash
-captures prior content; `/tmp`,`/v` excluded.
-
-### Streaming file reads — wc/checksum/grep/cmp/cat landed 2026-06-14; residuals
-Scan-oriented builtins no longer read whole files into memory. Mechanism
-(chosen to respect kaish-vfs's runtime-free trait — no `AsyncRead`/tokio in the
-`Filesystem` trait, so WASI stays clean):
-- `LocalFs::read_range` does a true positional `seek + take` for byte ranges
-  instead of read-whole-then-slice. Bonus: this also fixed `head -c bigfile`,
-  which previously slurped the whole file before slicing.
-- `ExecContext::read_file_chunked(path, chunk_size, f)` pulls a file forward in
-  `STREAM_CHUNK_SIZE` (256 KiB) windows via `read_range(bytes)` and feeds each
-  chunk to a sync closure; bounded memory, EOF on first empty chunk. Builtins
-  whose sink is async (cmp's lockstep, cat→pipe) can't use the closure form and
-  run their own offset loop over `read_range(bytes)` instead.
-
-Landed:
-- `wc` — incremental line-buffered `WcCounter` (`a610044`).
-- `checksum` — incremental `StreamHasher` (`770766c`).
-- `grep` (single-file simple path) — `GrepLineScanner`, incremental UTF-8/binary
-  detection, byte-identical to the whole-buffer path incl. rich `--json`
-  (`0fce8c4`). Complex flags (-A/-B/-C/-c/-q/-l/-o) stay whole-buffer.
-- `cmp` — lockstep two-file streaming with early exit on first difference
-  (`dcb806c`); a `-` stdin operand keeps the whole-buffer path.
-- `cat` (single-file, piped) — streams raw bytes to `pipe_stdout`, early-exits on
-  broken pipe (`e220767`); terminal `cat` still materialises (must, to return).
-
-Each landed conversion has a parity test against the **production whole-buffer
-path** (not a self-comparison) across chunk-split points, plus a `RecordingFs`
-bounded-read proof. The compare-against-production lesson came from a grep draft
-that hardcoded `byte_offset=0`/`path=null` in `--json` and still passed a
-text-only self-comparison.
-
-Remaining:
-- **`base64`** — deferred. Only a pipe-case win (output grows with input), the
-  3-byte/4-char carry is the fiddliest of the set, and big-file base64 is
-  unlikely in kaish. Revisit if a workload needs it.
-- **Deliberately NOT streamed** (need all input or random access — leave whole-
-  buffer): `sort`, `uniq` (global dedup), `diff`, `jq`, anything emitting
-  structured `.data`. The `.data`/`OutputData` channel is whole-value by design
-  (it powers `--json` and `for x in $(cmd)`); streaming only ever applies to the
-  raw-byte path.
-- **`read_range` re-opens the file per chunk** on LocalFs (open+seek per 256 KiB
-  — affects `read_file_chunked` and the cmp/cat offset loops). Cheap relative to
-  the read, but a stateful streaming handle would cut the syscalls. Deferred —
-  would mean an `AsyncRead`-returning method, which reintroduces the
-  tokio-in-trait problem the chunk approach avoided. Revisit only if a profile
-  shows the re-opens matter.
-
-### Kernel-routed port residuals: `read`, `env`, `exec` deep coverage
-The realworld port is **done 2026-06-11** (see git history) — 48 tests through
-`kernel.execute`, plus a new rg section; the port immediately caught the
-grep/rg value-flag binding bug. Still worth dedicated kernel-routed suites:
-`read` (pipeline/scope semantics are pure kernel interaction) and `env`/`exec`
-(hermetic-env overlay, two-spawn-site sync) — each has a single smoke case in
-the `--json` sweep now, but no flag-surface depth.
+### Kernel-routed test depth: `read`, `env`, `exec`
+The realworld port runs 48 tests through `kernel.execute`, but `read`
+(pipeline/scope semantics), `env`, and `exec` (hermetic-env overlay, two-spawn-site
+sync) each have only a single smoke case in the `--json` sweep — no flag-surface
+depth. Worth dedicated kernel-routed suites.
 
 ### Composable help — remaining phases
-Phases 1–3 done 2026-06-06: the `kaish-help` crate (concept fragments + `compose`/
-recipes + byte-stable `get_help`) is the single source for help content; `syntax.md`
-is generated + drift-tested; and MCP `instructions:`, the REPL welcome, the `execute`
-tool description, and the MCP prompt set all compose from it (no hand-rolled prose
-left in the MCP frontend). Remaining:
-- **Phase 4:** publish half **done 2026-06-08** (`kaish-help` 0.8.0 on
-  crates.io); remaining: kaijutsu/kaibo adoption (tracked in those repos).
-- **Phase 5:** i18n scaffolding + first `ja` fragments.
-
-Full design + resolved decisions: [composable-help.md](composable-help.md).
+(Phases 1–3 landed — see devlog.) **Phase 4:** kaijutsu/kaibo adoption (tracked in
+those repos). **Phase 5:** i18n scaffolding + first `ja` fragments. Full design:
+[composable-help.md](composable-help.md).
 
 ### Split `kernel.rs::execute_stmt_flow`
-`kernel.rs:1463`–~1913 (kernel.rs is now 6,838 lines) is a 16-arm async match.
-Each arm reaches into `scope`,
-`exec_ctx`, and `user_tools` RwLocks; `For`/`While`/`Case` are 100+
-lines apiece. Natural refactor: `mod kernel/exec/{assignment, command,
-pipeline, control, …}` with `execute_stmt_flow` reduced to a dispatch
-arm-per-module.
+`kernel.rs:1463`–~1913 is a 16-arm async match (kernel.rs is ~6,838 lines); each
+arm reaches into `scope`/`exec_ctx`/`user_tools` RwLocks, and `For`/`While`/`Case`
+are 100+ lines apiece. Natural refactor: `mod kernel/exec/{assignment, command,
+pipeline, control, …}` with `execute_stmt_flow` reduced to dispatch-arm-per-module.
 
 ### Extract `dispatch_command` ctx-sync helper
-The six-field `ExecContext` ↔ kernel-state sync appears near every
-call site that fields a fork (`kernel.rs:~4100-4140` and duplicates;
-citation refreshed 2026-06-09). One helper, one truth.
+The six-field `ExecContext` ↔ kernel-state sync appears near every fork call site
+(`kernel.rs:~4100-4140` and duplicates). One helper, one truth.
 
-
-### No unquoted token-pasting — adjacent bare lexemes are not one word
-kaish's lexer/parser does **no token pasting**: a run of adjacent *unquoted*
-lexemes is never concatenated into a single word. `/tmp/$(echo x).txt` lexes as
-three tokens (`RelativePath` `/tmp/`, `CommandSubst $(…)`, `DottedIdent .txt`)
-and `$dir/out.txt` as two (`SimpleVarRef`, path) — there is no word-assembly
-step that joins them. The **quoted** form is the supported idiom and works
-everywhere because a double-quoted string lexes as one `Interpolated` token:
-`"/tmp/$(echo x).txt"`, `"$dir/out.txt"`. This aligns with the
-`shellcheck --enable=all` north star, which already requires `"$var"`/`"$(cmd)"`
-quoting (SC2086). **Decision (2026-06-08): keep the quoting requirement; do not
-add bare word-pasting.** kaish is not aiming to be a human REPL (bash/zsh/fish
-fill that niche) — the goal is to guide agents to write reliable scripts, and
-"always quote interpolated words" is a simpler, lint-aligned rule than bash's
-implicit pasting. Two surfaces expose the no-pasting behavior differently:
-
-- **Redirect target** (`crates/kaish-kernel/src/parser.rs`, `redirect_parser`)
-  binds with a single `primary_expr_parser()`, so `> /tmp/$(echo x).txt` is a
-  hard parse error (`found '$(' expected redirect, …`). Bare-subst
-  (`> $(echo /tmp/x)`) and quoted (`> "/tmp/$(echo x).txt"`) both work.
-  *Polish (P4, deferred):* turn the parse error into a "quote the redirect
-  target" hint instead of the generic expected-token list.
-- **Argv** now also rejects glued positionals with a "quote the whole word"
-  hint (fixed 2026-06-11 — see git history). Residual (P4): the check covers
-  positional args *before* `--`; post-`--` positionals and a flag-adjacent-to-
-  positional glue are not yet flagged (rare; the pre-`--` positional case is the
-  documented bug class).
-
-Surfaced 2026-06-08 while adding command-substitution support to redirect
-targets.
-
----
+### No unquoted token-pasting — residual polish
+(Decision recorded in devlog — keep the quoting requirement.) Live residuals (P4):
+- **Redirect target** (`parser.rs`, `redirect_parser`): `> /tmp/$(echo x).txt` is a
+  hard parse error; turn it into a "quote the redirect target" hint.
+- **Argv**: the glued-positional "quote the whole word" check covers pre-`--`
+  positionals only; post-`--` and flag-adjacent-to-positional glue aren't flagged.
 
 ### v0.8.4 review residuals (Gemini Pro, 2026-06-14)
-
-Three genuine findings from the v0.8.4 release review that are **pre-existing or
-low-impact**, deferred out of the release. (A fourth — jq `--arg=NAME` falsely
-E007-ing — was investigated and rejected: the equals form is not a legal jq
-invocation, real jq exits 2 "Unknown option", so rejecting it before execution
-is correct. Pinned by `jq_equals_form_arg_is_rejected_not_silently_run`.)
-
 - **Combined short flags only bind a glued value when the value-flag is first**
-  (feature gap, pre-existing — `cut -f1` works, but `grep -ivC 3` treats `C` as a
-  bool because the leading `i`/`v` are bool flags, leaving `3` as a stray
-  positional → runtime arity error). Fix: in `build_args_async`'s multi-char
-  short-flag arm, walk the chars and consume the tail/next positional once a
-  value-taking flag is reached.
-- **`diff -C 3 -C 4` (redundant context flags) miscounts arity** (P4-trivial —
-  `context_steals_positional` subtracts 1 for a `HashSet`-deduped `-C`, so two
-  occurrences leave a surplus positional and false E011). Redundant usage; fix
-  only if it ever bites.
+  (`cut -f1` works, but `grep -ivC 3` treats `C` as a bool, leaving `3` a stray
+  positional → arity error). Fix: in `build_args_async`'s multi-char short-flag
+  arm, consume the tail/next positional once a value-taking flag is reached.
+- **`diff -C 3 -C 4` miscounts arity** (P4-trivial — `context_steals_positional`
+  subtracts 1 for a deduped `-C`). Redundant usage; fix only if it bites.
 
 ---
 
 ## P3 — Scheduler and infra
 
 ### Pre-0.9 punch-list residuals — low-frequency fidelity gaps (2026-06-17)
-Deferred from the pre-0.9 pass; the P1/P2 items landed (PR #10). These are
-low-frequency, record-then-defer:
-- **sed `p` / `s///p` in non-quiet mode** suppress the auto-print → a single print
-  where GNU/POSIX print twice. Invisible in tests (all `p` tests use `-n`). Add a
-  non-quiet test at minimum.
-- **sed `s///0`** is silently treated as first-match (GNU errors); **empty `//`**
-  compiles an always-match regex instead of reusing the last pattern. Pin with tests.
-- **awk `"1e"` → 0** (`parse_awk_number` accepts a partial exponent, then
-  `unwrap_or(0.0)`); **`FILENAME` always empty** (never set from the input path);
-  **`RS=""` paragraph mode** splits on exactly `"\n\n"` so runs of blank lines yield
-  stray records; **`OFMT` ignored** (format hardcoded `%.6g`).
+Low-frequency, record-then-defer:
+- **sed `p` / `s///p` in non-quiet mode** suppress the auto-print → one print where
+  GNU/POSIX print twice (invisible in tests — all `p` tests use `-n`).
+- **sed `s///0`** silently treated as first-match (GNU errors); **empty `//`**
+  compiles an always-match regex instead of reusing the last pattern.
+- **awk `"1e"` → 0** (partial-exponent parse + `unwrap_or(0.0)`); **`FILENAME`
+  always empty**; **`RS=""` paragraph mode** splits on exactly `"\n\n"`; **`OFMT`
+  ignored** (hardcoded `%.6g`).
 - **multi-file `head`/`tail` strip the trailing newline** while single-file emits
-  one — inconsistent (`head.rs`/`tail.rs` `*_files`).
-- **stdin bridge-thread leak / `block_on`-after-shutdown race**: the REPL detaches an
-  OS thread blocked in `read(2)` that can't observe `PipeReader::drop` while parked
-  (CLI: bounded, no hang; a long-lived embedder with a never-closing producer would
-  leak a thread permanently). Harden with `select!`/cancellation.
-- **`PipeStdinGuard::try_write` silent skip** (`kernel.rs`) and the **test-only
-  `BackendDispatcher::try_external` stdin-task leak** on unreachable error returns
-  (missing the `AbortStdinCopyOnDrop` guard the production path has). Both "shouldn't
-  fire" but are silent — add the guard / make it loud.
-- **awk multi-char `FS` regex recompiles per record** (`awk.rs` `split_record` —
-  `Regex::new(&fs)` each record). Correct, but a per-record compile+alloc; cache the
-  compiled regex keyed on the FS string (invalidate when FS changes). Single-char FS
-  (the common case) already avoids it. Found in the 2026-06-17 punch-list review.
-- **awk array-element type inconsistency**: `split()` stores `StrNum` elements but
-  `sub()`/`gsub()` on an array element stores `String`, so a mutated element loses its
-  numeric-string attribute. Low impact (compares correctly in common cases); POSIX is
-  ambiguous here. Same review.
+  one (inconsistent `*_files`).
+- **stdin bridge-thread leak / `block_on`-after-shutdown race**: the REPL detaches
+  an OS thread blocked in `read(2)` that can't observe `PipeReader::drop` while
+  parked (CLI bounded; a long-lived embedder with a never-closing producer would
+  leak it). Harden with `select!`/cancellation.
+- **`PipeStdinGuard::try_write` silent skip** (`kernel.rs`) and the test-only
+  `BackendDispatcher::try_external` stdin-task leak on unreachable error returns
+  (missing the `AbortStdinCopyOnDrop` guard the production path has). Make loud.
+- **awk multi-char `FS` regex recompiles per record** (`split_record` —
+  `Regex::new(&fs)` each record). Cache it keyed on the FS string. Single-char FS
+  already avoids it.
+- **awk array-element type inconsistency**: `split()` stores `StrNum`, `sub`/`gsub`
+  on an element stores `String`, so a mutated element loses its numeric-string
+  attribute. Low impact; POSIX is ambiguous.
 - **head streaming-vs-buffered binary-stdin divergence**: the streaming path emits
-  earlier valid lines to a downstream pipe *before* erroring on a non-UTF-8 line
-  (buffered emits nothing), and uses a different error message than
-  `read_stdin_to_text`. Both loud; cosmetic/edge. Same review.
+  earlier valid lines downstream before erroring on a non-UTF-8 line (buffered
+  emits nothing) and uses a different message. Both loud; cosmetic.
 - **sed `-e <numeric>` is dropped**: `collect_expressions` only matches string
-  values, so a numeric `-e` token (`sed -e 5 -e 's/a/b/'`) is silently ignored
-  rather than applied. Surfaces loudly as "missing expression" when it's the only
-  `-e` (since the expr list ends up empty), but a *mix* with a valid `-e` drops it
-  silently. `-e 5` isn't valid sed anyway, so low impact — coerce non-string values
-  to their string form (or reject loudly) to close the silent-drop window.
-  (0.9.0 release-review finding, Gemini Pro, 2026-06-18.)
-
-### Code formatting (rustfmt) — considered and declined 2026-06-14
-**Decision (Amy): not adopting rustfmt.** The audience for this code is Claude and
-other agents, not human reviewers, so rustfmt's payoff (consistent visual style,
-stable git blame, smaller PR diffs) is mostly cosmetic here; the compiler enforces
-correctness and `cargo clippy --all --all-targets` now enforces the lints that
-actually affect clarity. Against that thin benefit, a first `cargo fmt --all`
-rewrites **~202 files / ~2127 hunks** (rustfmt 1.8.0-stable, edition 2024) and no
-small config shrinks it meaningfully — measured: `use_small_heuristics` Off/Max
-both make it *worse* (2261/2214), `max_width=80` far worse (3247), `max_width=120`
-only ~8% better (1966) at the cost of wider lines everywhere; the knobs that would
-preserve the hand-style (`chain_width`, `imports_granularity`, `group_imports`)
-are nightly-only and can't back a stable gate. So **no `rustfmt.toml`** is added
-(a dormant one would make an ad-hoc `cargo fmt --check` fail confusingly). If this
-is ever revisited, it must be its OWN commit (never bundled with a feature) and
-pin `edition = "2024"` (bare `rustfmt` defaults to 2015; `cargo fmt` already reads
-2024 from Cargo.toml).
+  values, so `sed -e 5 -e 's/a/b/'` silently ignores the `5`. Loud when it's the
+  only `-e` (empty expr list), silent when mixed. `-e 5` isn't valid sed anyway;
+  coerce non-string values to string (or reject loudly). (0.9.0 review, 2026-06-18.)
 
 ### `GlobPath::walk_match` globstar recursion has no work bound
-`walk_match` (and the older `match_segments` it parallels) backtrack on globstar
-with no `MAX_MATCH_CALLS` guard — unlike the single-component `match_bounded` in
-`glob.rs`, which caps at 100_000 calls for ReDoS safety. Calls are bounded by
-`C(n+g-1, g)` for `g` collapsed globstars and `n` path components: polynomial in
-real filesystem depth, but an adversarial pattern (`a/**/b/**/c/**/…`) against a
-deep path could blow up. Practical risk is low today — the walker only matches
-against real FS paths, and this is **not a regression** (`match_segments`/`matches()`
-already share the unbounded shape). If kaish ever matches user-supplied patterns
-against user-supplied path *strings*, add a call counter to `walk_match`.
-Surfaced by DeepSeek review of the dotfile-glob fix (2026-06-14).
+`walk_match`/`match_segments` backtrack on globstar with no `MAX_MATCH_CALLS` guard
+(unlike `match_bounded` in `glob.rs`, capped at 100_000). Calls are bounded by
+`C(n+g-1, g)` — polynomial in real FS depth, but an adversarial pattern
+(`a/**/b/**/c/**/…`) against a deep path could blow up. Low risk today (walker only
+matches real FS paths; not a regression). If kaish ever matches user patterns
+against user-supplied path *strings*, add a call counter.
 
 ### `kill -<sig>` bash shorthand (`kill -9 %1`, `kill -STOP %1`) isn't accepted
-`kill` takes the signal via `--signal NAME` / `-s NAME` only; the bash idioms
-`kill -9 %1`, `kill -KILL %1`, `kill -STOP %1` fail at clap arg parsing (`-9`
-lexes as `Int(-9)`, `-STOP`/`-KILL` as a `ShortFlag`, neither a declared flag).
-Job-control-heavy users reach for these constantly. Fix: give `kill` bespoke
-argv handling (à la `set.rs`) that strips a leading `-<signum>` / `-<SIGNAME>`
-token and maps it to the signal before clap sees the rest. The signal *delivery*
-mechanism is already in place (see git history `kill %N` entry); this is purely the
-front-door syntax. **Demoted P2→P3 2026-06-11 (Amy):** the `-<signum>` shorthand
-leans POSIX-y and starts to touch underlying OS signal-number variance; the
-loud `--signal NAME %N` form already covers the need. Defer.
+`kill` takes the signal via `--signal NAME` / `-s NAME` only; `-9`/`-STOP` fail at
+clap arg parsing. Fix: bespoke argv handling (à la `set.rs`) stripping a leading
+`-<signum>`/`-<SIGNAME>` before clap. Delivery is already in place. **Demoted
+P2→P3 (Amy):** the shorthand leans POSIX-y and touches OS signal-number variance;
+the loud `--signal NAME %N` form covers the need. Defer.
 
-### Process-group kill still has a (small) PID-reuse window
-The direct-child kill path now uses `pidfd_send_signal` on Linux (see
-`crates/kaish-kernel/src/pidfd.rs`), so the bound generation immunises
-us from PID reuse for the spawned child itself. **But** the PG-wide kill
-that catches grandchildren still goes through `killpg(pgid, sig)` —
-there is no PGID equivalent of pidfd. If the leader is reaped and its
-PID/PGID is reused before our `killpg` fires, grandchildren of an
-unrelated process group could be signalled. Mitigations: cgroup v2
-`cgroup.kill` (Linux ≥ 5.14) for atomic tree kill, or
-`PR_SET_CHILD_SUBREAPER` to enumerate descendants and pidfd each. Both
-are significant complexity; defer until we see a real failure.
+### Process-group kill PID-reuse window
+The direct-child path uses `pidfd_send_signal` on Linux (immune to PID reuse for
+the child), but the PG-wide kill that catches grandchildren goes through
+`killpg(pgid, sig)` — no PGID equivalent of pidfd. If the leader is reaped and its
+PGID reused before `killpg` fires, an unrelated group could be signalled.
+Mitigations (cgroup v2 `cgroup.kill`, `PR_SET_CHILD_SUBREAPER`) are significant
+complexity; defer until a real failure.
 
-### Non-Linux unix targets (macOS, BSD) keep PID-based kill
-`pidfd` is Linux-only. On other unix targets we still send `kill(pid,
-sig)` and accept the PID-reuse race for the direct child. macOS has no
-direct equivalent (FreeBSD has `procctl`/`pdfork` but the model differs).
-Acceptable today since kaish runs predominantly on Linux.
+### Non-Linux unix targets keep PID-based kill
+`pidfd` is Linux-only; elsewhere we send `kill(pid, sig)` and accept the PID-reuse
+race for the direct child. Acceptable — kaish runs predominantly on Linux.
 
 ### Sync `build_tool_args` lacks the undeclared-space-flag guard
-The async `build_args_async` (kernel.rs) fails loud when an undeclared flag under
-a `map_positionals` schema would silently divorce a space-form value (fixed
-2026-06-08, see git history). The sync twin `build_tool_args`
-(`scheduler/pipeline.rs:705`, `unwrap_or(true)` at `:822`; citation refreshed
-2026-06-09) shares the same `unwrap_or(true)` default-to-bool
-and has **no** equivalent guard. It can't trigger the production bug today — its
-only production callers are scatter/gather option parsing (builtin schemas,
-`map_positionals=false`); the backend-tool caller is the `#[cfg(test)]`
-`BackendDispatcher`. Applying the guard would require changing the return type to
-`Result` across ~22 call sites, so it was deferred. If the sync path ever fields a
-`map_positionals` backend tool in production, add the same guard (lift a shared
-helper) to keep the two builders in sync.
-
-The two builders have since drifted further: the glued short-flag value handling
-(`cut -f1`, `head -c5`) added 2026-06-14 lives only in `build_args_async`, so a
-glued short flag on a sync-path builtin (e.g. a hypothetical `scatter -n5`) would
-not bind. Same low-impact-today reasoning (sync callers are scatter/gather option
-parsing), same fix: lift a shared helper, or fold into the twin-elimination below.
+The async `build_args_async` fails loud when an undeclared flag under a
+`map_positionals` schema would silently divorce a space-form value; the sync twin
+`build_tool_args` (`scheduler/pipeline.rs`) has no equivalent guard, and also lacks
+the glued short-flag handling (`cut -f1`) the async path gained. Can't trigger the
+production bug today (only production callers are scatter/gather option parsing,
+`map_positionals=false`). Subsumed by the twin-elimination below.
 
 ### Eliminate the sync `build_tool_args` twin entirely
-Bigger than the guard above: retire the sync arg builder so there's one path to
-reason about. Real commands already bind through the async `build_args_async`
-(foreground via `execute_command`; in pipelines via `Kernel::dispatch` →
-`dispatch_command`). The sync `build_tool_args` survives only in (a) scatter/gather
-*option* parsing in `run_scatter_gather` (`scheduler/pipeline.rs`, an `async fn`
-that already holds a `&dyn CommandDispatcher`, so it could `await
-dispatcher.eval_expr`) and (b) the `#[cfg(test)]` `BackendDispatcher`, plus ~27
-in-module test call sites. Eliminating it means giving the scheduler an async
-arg-builder (e.g. a `CommandDispatcher::build_args` trait method, or a free
-`build_tool_args_async` that routes `$(...)` through `eval_expr`) and converting
-those test sites to async. Deferred 2026-06-08 while landing per-subcommand tool
-schemas — `select_leaf` lives only in the async builder, so the twin never sees a
-subcommand tool and routing isn't at risk; this is purely a "fewer paths to
-reason about" cleanup. Doing it would also subsume the guard-parity item above.
-**Also subsumes the repeatable/consumes>1 gap** (2026-06-15): the sync builder
-honors neither `consumes > 1` nor the new `repeatable` flag — it overwrites on a
-repeated occurrence where the async builder accumulates into a `Json(Array)`.
-Safe today because the only production sync caller (scatter/gather option parsing)
-exposes scalar flags only; would silently drop values the moment a repeatable or
-multi-consume flag routed through it. Noted at the insert site in `pipeline.rs`.
+Retire the sync arg builder so there's one path. Real commands already bind through
+`build_args_async`; the sync twin survives only in (a) scatter/gather *option*
+parsing in `run_scatter_gather` (an `async fn` that already holds a `&dyn
+CommandDispatcher`) and (b) the `#[cfg(test)]` `BackendDispatcher` + ~27 test sites.
+Eliminating it means an async scheduler arg-builder and converting those test sites.
+Subsumes the guard-parity item above **and** the repeatable/`consumes>1` gap (the
+sync builder overwrites on a repeated occurrence where the async one accumulates
+into `Json(Array)` — safe today only because scatter/gather expose scalar flags).
 
 ### `to_argv()` flattens a repeatable scalar array to one JSON token
-`ParamSchema.repeatable` (added 2026-06-15 for `sed -e A -e B`) stores repeated
-single-value flags as `named[key] = Json(Array([scalar, ...]))`.
-`ToolArgs::to_argv()` / `render_named_value` only splits the *array-of-arrays*
-shape (`consumes > 1`); a flat scalar array falls through to one JSON-text token
-(`--expression=["s/a/b/","s/c/d/"]`). `sed` is unaffected because it reads the raw
-`ToolArgs` (not the clap-parsed `Vec`), and clap accepts the blob without error —
-but a *future* repeatable-flag builtin that trusts its clap-parsed struct after a
-`to_argv()` round-trip would see one mangled value instead of N. The fix needs
-schema context in `to_argv` (it currently has none) to know a flat array is
-repeatable vs. a single genuine `Json(Array)` value — the two are indistinguishable
-at that layer. Revisit when a second repeatable flag lands. (P3)
+`ParamSchema.repeatable` stores repeated single-value flags as `named[key] =
+Json(Array([scalar, ...]))`; `to_argv()`/`render_named_value` only splits the
+*array-of-arrays* (`consumes > 1`) shape, so a flat scalar array becomes one
+JSON-text token. `sed` is unaffected (it reads the raw `ToolArgs`, not the
+clap-parsed `Vec`), but a future repeatable-flag builtin that trusts its clap struct
+after a `to_argv()` round-trip would see one mangled value. Needs schema context in
+`to_argv` (it has none) to tell a flat repeatable array from a single `Json(Array)`.
 
 ### Undeclared space-flag guard covers long flags only (`-t val` still divorces)
-The 2026-06-08 fix errors on undeclared `--type value` but not single-char
-`-t value`, because short flags followed by a positional (`-r path`, `-f file`)
-are overwhelmingly legitimate bool+positional and erroring there would be too
-aggressive. Net: an undeclared short flag that *should* take a value still
-silently drops it under a `map_positionals` schema. Lower-risk than the long-flag
-case (backend/MCP tools rarely expose single-char value flags) and the real fix
-is the same — declare the flag in the schema. Revisit if a backend tool surfaces a
-`-x VALUE`-style flag.
+The guard errors on undeclared `--type value` but not single-char `-t value`
+(short-flag+positional is overwhelmingly legit bool+positional). Net: an undeclared
+short flag that should take a value still silently drops it under a `map_positionals`
+schema. Lower risk (backend/MCP tools rarely expose single-char value flags); real
+fix is declaring the flag.
 
 ### `dispatch_command` cancel sync is one-way (in only)
-`ec.cancel = ctx.cancel` is synced INTO `self.exec_ctx` at the start of
-each dispatch, but there's no `ctx.cancel = ec.cancel` reverse sync at
-the end. Today this is fine because the only known mutators of
-`ctx.cancel` (the `timeout` builtin) save and restore the original token
-themselves. If we add another builtin that wants to propagate a token
-swap *outward* through dispatch_command, it would need either explicit
-restoration or a reverse sync added.
+`ec.cancel = ctx.cancel` is synced INTO `exec_ctx` per dispatch, but there's no
+reverse sync at the end. Fine today (only `timeout` mutates `ctx.cancel`, and it
+saves/restores itself). A future builtin propagating a token swap *outward* would
+need explicit restoration or a reverse sync.
 
 ### Test-effectiveness residuals (2026-06-09 fleet review)
-Smaller verified gaps from the systemic review, grouped; the headline test
-items (destructive rails, realworld port, `--json` sweep) are all closed as
-of 2026-06-11 — see git history. Five smaller bullets also fixed 2026-06-11
-(snapshot-isolation race, both tautological asserts, external argv no-split,
-kill/wait e2e). Each remaining bullet is independently actionable:
-- **`builtin_kernel_tests.rs` happy-path gap — PARTIALLY FIXED 2026-06-14:** added
-  6 negative cases (cat/wc/sort missing file → exit 1 + named file, cut missing
-  -f/-c → exit 1, head unknown flag → clap exit 2, grep no-match → exit 1), each
-  pinning the specific code + err substring. More per-builtin negatives still
-  welcome, but the "zero nonzero-exit assertions" state is gone.
-- **Bare-glob validation backstop is single-site:** the bare-glob validation
-  tests at `validation_tests.rs:321-391` are environment-dependent
-  (transient-kernel cwd) — backstopped by the deterministic inline
-  `test_bare_glob_no_matches_errors` (`kernel.rs:6135`), but that test only
-  covers the builtin-argv site; the `execute_stmt_flow` and `build_args_flat`
-  "no matches" sites lack their own, and the inline module is feature-gated
-  such that `cargo test -p kaish-kernel --lib` alone skips it.
-- **Lexer negative tests assert only `is_err` — FIXED 2026-06-14:** float and
-  unterminated-string cases now assert the exact `LexerError` variant via
-  `run_lexer_error_variant`; the ambiguous-boolean cases match the
-  `AmbiguousBoolean(_)`/`AmbiguousBooleanLike(_)` family via
-  `run_lexer_error_matching`. Tightening surfaced a real **diagnostic gap**: an
-  unterminated double-quoted string (`"unterminated`) never matches the logos
-  `String` regex, so it emits the generic `UnexpectedCharacter`, not the curated
-  `UnterminatedString` (which only the complete/interpolated-string helper
-  reaches). The test pins the *actual* variant with a comment; improving it to
-  `UnterminatedString` needs a logos fallback rule on the string token (P4).
-- **7 never-emitted `IssueCode` variants — REMOVED 2026-06-14, then 3 re-added
-  with emitters:** E006 sed, E007 jq, E010, E011 diff, W003, W004, W005 were
-  deleted from `kaish-tool-api/src/issue.rs` as silent aspiration (advertised
-  validations that didn't exist). E011 (diff), E006 (sed), and E007 (jq) have
-  since been re-added *with* real `Tool::validate` emitters + tests, honoring the
-  no-variant-without-an-emitter rule; E010/W003/W004/W005 stay retired (gaps
-  documented in `code()`).
-- **bg/fg coverage is PTY-only** (unix-gated, timing-sensitive,
-  `pty_job_control.rs`). The `wait`/`kill %1` half of this bullet closed
-  2026-06-11 (see git history); bg/fg still have no non-PTY coverage.
+(Headline items closed — see devlog.) Still open:
+- **Bare-glob validation backstop is single-site:** `validation_tests.rs:321-391`
+  are environment-dependent (transient-kernel cwd), backstopped only by the inline
+  `test_bare_glob_no_matches_errors` (`kernel.rs:6135`) — which covers the
+  builtin-argv site only; `execute_stmt_flow` and `build_args_flat` "no matches"
+  sites lack their own, and the inline module is feature-gated such that `cargo test
+  -p kaish-kernel --lib` skips it.
+- **`UnterminatedString` diagnostic gap:** an unterminated double-quoted string
+  emits the generic `UnexpectedCharacter` (only the complete/interpolated-string
+  helper reaches the curated variant); needs a logos fallback rule. (P4)
+- **bg/fg coverage is PTY-only** (`pty_job_control.rs`, unix-gated,
+  timing-sensitive); no non-PTY coverage.
 - **Timing margins:** `background_job_does_not_block_foreground`
-  (`concurrency_tests.rs:159`, 300ms headroom — the file's only hard
-  wall-clock bound) and bare 5-10ms registration sleeps in `job.rs` unit
-  tests (`:719/:738/:759`) — poll instead.
-- **Bash-compat leg never runs automatically:** with `KAISH_BASH_COMPAT=1`,
-  71+27 bash-side tests pass (verified) — but nothing sets it and there is no
-  CI workflow at all, so the divergence detector depends on someone
-  remembering. (CI is deliberately deferred per project memory; recorded here
-  so the deferral stays a decision, not a drift.)
+  (`concurrency_tests.rs:159`, 300ms headroom) and bare 5-10ms registration sleeps
+  in `job.rs` unit tests — poll instead.
+- **Bash-compat leg never runs automatically:** `KAISH_BASH_COMPAT=1` passes 71+27
+  bash-side tests, but nothing sets it and there's no CI. (CI deliberately deferred
+  per project memory; recorded so the deferral stays a decision, not drift.)
 
 ### Test gaps around kill discipline
-- No test for `kill_grace = Duration::ZERO` (immediate SIGKILL).
-- No test that a user-defined tool (`tool name { ... }`) inside a
-  scatter worker dispatches correctly under cancellation — current
-  scatter test uses an external `bash -c "sleep 60"`.
-- No test for the JC inherit-output path being killed via cancel —
-  that path requires a real TTY which is awkward in test infra.
+No test for `kill_grace = Duration::ZERO` (immediate SIGKILL); no test that a
+user-defined tool inside a scatter worker dispatches correctly under cancellation
+(current test uses external `bash -c`); no test for the JC inherit-output path
+killed via cancel (needs a real TTY).
 
 ### `ExecuteOptions` callback type is awkward
-`Option<&mut (dyn FnMut(&ExecResult) + Send)>` is hard to call. A
-trait-object alias or a dedicated `Callback` trait would smooth the
-ergonomics. Not blocking; do it once we see real downstream pain.
+`Option<&mut (dyn FnMut(&ExecResult) + Send)>` is hard to call. A trait-object alias
+or a dedicated `Callback` trait would smooth it. Not blocking.
 
 ### Long-blocking builtins other than `sleep` may not honor cancellation
-`sleep` is done (see git history 2026-06-07). The guidance stands for any *other*
-builtin that holds a long time/IO future without yielding through `ctx.cancel`:
-audit and apply the same `tokio::select!` pattern where one is found (none
-currently known besides the now-fixed `sleep`).
+`sleep` honors `ctx.cancel`. The guidance stands for any *other* builtin holding a
+long time/IO future without yielding — audit and apply the same `tokio::select!`
+pattern. None currently known.
 
 ### `JobManager::spawn` busy-waits
-Uses `std::hint::spin_loop()` to guarantee immediate visibility. Works,
-wastes CPU on contention. Channel-based coordination would be cleaner.
+Uses `std::hint::spin_loop()` for immediate visibility — works, wastes CPU on
+contention. Channel-based coordination would be cleaner.
 
 ### Piped stdin isn't shared across statements in one `kaish -c 'a; b'` call
-From the PR #7 /code-review (2026-06-17). The consume-once logic in
-`execute_pipeline` moves the seeded `pipe_stdin` into the FIRST top-level
-statement's pipeline; if that statement doesn't read stdin, the reader is dropped
-when its pipeline ends, so a later statement that DOES read gets nothing —
-`printf hi | kaish -c 'echo x; cat'` prints only `x`, losing the piped line. A
-real shell leaves fd 0 shared, so `cat` would read it. Pre-existing within the
-branch (the eager `with_stdin(String)` path drained the same way). Fix is a stdin
-lifecycle change — keep the source on the persistent `exec_ctx` and let whichever
-command first reads it take it, rather than moving it into statement 1's snapshot
-eagerly. Niche (multi-statement `-c` with a non-reading first command); defer
-until it bites. (Related vestige: `run_single`'s `stdin` param, below.)
+The consume-once logic in `execute_pipeline` moves the seeded `pipe_stdin` into the
+FIRST top-level statement's pipeline; if that statement doesn't read stdin, the
+reader is dropped, so a later reader gets nothing — `printf hi | kaish -c 'echo x;
+cat'` prints only `x`. A real shell leaves fd 0 shared. Fix: keep the source on the
+persistent `exec_ctx` and let whichever command first reads it take it. Niche; defer.
 
 ### `head -n -0` / signed-zero line counts can't be distinguished (lexer-level)
 `head -n -0` should mean "all but the last 0 lines" (= whole file) but prints
-nothing, because `-0` lexes as `Int(0)` (the sign is lost at the lexer) and
-`line_spec` only treats a *negative* Int as the all-but-last form. Same root for
-any signed-zero count. Genuinely obscure (who writes `-0`?) and not fixable
-without lexer changes to preserve the sign of zero. Waived; noted for
-completeness from the PR #7 review.
+nothing — `-0` lexes as `Int(0)` (sign lost at the lexer) and `line_spec` only
+treats a *negative* Int as all-but-last. Obscure; not fixable without lexer changes
+to preserve signed zero. Waived.
 
 ### `PipelineRunner::run_single`'s `stdin` parameter is vestigial
-`crates/kaish-kernel/src/scheduler/pipeline.rs:362` — `run_single(cmd, ctx,
-stdin: Option<String>)` is always called with `stdin: None` from
-`run_sequential` (`pipeline.rs:304`); the real stdin travels through `ctx.stdin`
-set by the `execute_pipeline` snapshot. The override branch (line ~371, "Set
-stdin from pipeline overrides redirect stdin") is dead. Drop the parameter, or
-add a note that it's forward-looking. Pre-existing; surfaced by the DeepSeek
-review of the stdin fix.
+`scheduler/pipeline.rs:362` — `run_single(cmd, ctx, stdin)` is always called with
+`stdin: None`; the real stdin travels through `ctx.stdin`. The override branch is
+dead. Drop the parameter or note it's forward-looking.
 
 ### `ToolCtx::backend()` forces a full `KernelBackend` mock for out-of-tree tests
-`crates/kaish-tool-api/src/ctx.rs`. `backend()` returns a non-optional
-`&Arc<dyn KernelBackend>`, so a third-party tool author who wants to unit-test
-their tool must construct a complete `KernelBackend` mock (~16 async methods)
-even if the tool never touches I/O. We sidestepped this in-tree by relocating
-the git/host tool tests to kernel-routed integration tests — which doesn't help
-external authors. Surfaced by the dpal review 2026-06-03. Options: (a) ship a
-`#[cfg(feature = "test-util")]` no-op `KernelBackend` + `ToolCtx` harness from
-`kaish-tool-api` so any tool crate can spin up a context in one line; (b) make
-`backend()` return `Option<&Arc<dyn KernelBackend>>` (kernel always `Some`,
-pure-compute/test contexts `None`). (a) is less invasive and keeps the common
-path honest. Revisit when the first external tool bundle wants unit tests.
+`kaish-tool-api/src/ctx.rs`: `backend()` returns a non-optional `&Arc<dyn
+KernelBackend>`, so an external tool author must construct a complete mock (~16
+async methods) even for an I/O-free tool. Options: (a) ship a `#[cfg(feature =
+"test-util")]` no-op `KernelBackend`+`ToolCtx` harness from `kaish-tool-api`; (b)
+make `backend()` return `Option<…>` (kernel always `Some`). (a) is less invasive.
+Revisit when the first external tool bundle wants unit tests.
 
 ---
 
 ## P4 — Eventually
 
 ### Control structures inside `$()` are not supported
-The `$()` body accepts the full *statement* grammar — pipelines, `&&`/`||`
-chains, `;`/newline sequences, `#` comments (landed 2026-06-11, see git history) —
-but **not** `if`/`for`/`while`/`case`. The chain/sequence grammar is built
-locally in `cmd_subst_parser`; wiring control structures in would require
-threading the recursive `stmt` parser through ~17 expression call sites
-(`primary_expr_parser`/`expr_parser` and their callers), a much larger parser
-refactor. `$(if …; then …; fi)` is exotic in command-substitution position;
-revisit if a real workload needs it. Workaround: compute at statement level and
-capture the variable.
+The `$()` body accepts the full *statement* grammar (pipelines, `&&`/`||`,
+`;`/newline, `#` comments) but not `if`/`for`/`while`/`case` — wiring those in would
+thread the recursive `stmt` parser through ~17 expression call sites, a large parser
+refactor. Exotic in command-substitution position; workaround: compute at statement
+level and capture the variable.
 
 ### Soften the "sh subset that passes shellcheck" framing
-CLAUDE.md (and the README) describe kaish as "a `sh` subset that passes
-`shellcheck --enable=all`." That framing is now more aspirational than accurate
-and undersells what kaish actually is. The skeleton is sh-shaped — `if/then/fi`,
-`for…in…do/done`, `case…esac`, `NAME=value`, `$()`, `$(())`, `${VAR:-}`, pipes,
-heredocs — but:
-
-- The dominant test form is `[[ ]]` (LANGUAGE.md:173), which is a bash-ism, not
-  POSIX: shellcheck flags it **SC3010** under `sh` dialect. kaish then extends it
-  past bash too (quoted-regex `=~ "\.rs$"`, `!~`). Here-strings `<<<` are bash
-  (SC3011).
-- Core shell *semantics* are deliberately dropped: word splitting, `eval`,
-  backticks, process substitution.
-- Typed data (floats, strict booleans, JSON), structured `$()`, the `split`
-  builtin, E-code diagnostics, and the proposed collections
-  ([arrays-and-hashes.md](arrays-and-hashes.md)) are modelled by **no** shellcheck
-  dialect at all.
-
-Net: kaish is neither a strict POSIX-`sh` subset nor a bash subset. "Passes
-`shellcheck --enable=all`" holds only for the genuinely-shared core and only under
-`bash` dialect. Recommend reframing the docs to something like *"inspired by POSIX
-sh and bash, and informed by shellcheck's lints"* rather than implying compliance.
-Corollary worth stating in the same place: shellcheck offers **zero** coverage for
-kaish's extensions by construction, so the kaish validator is the sole safety net
-for them (e.g. discarded-`append`, `len`/`in` type mismatches). One nice point in
-kaish's favour — bare `$arr` = whole value is exactly the bash footgun shellcheck
-warns about with SC2128 ("expanding an array without an index"), designed out.
+CLAUDE.md and the README describe kaish as "a `sh` subset that passes `shellcheck
+--enable=all`." More aspirational than accurate: the dominant test form `[[ ]]` is a
+bash-ism (SC3010 under `sh`), here-strings `<<<` are bash (SC3011), and typed data /
+structured `$()` / `split` / E-codes / the proposed collections are modelled by no
+shellcheck dialect at all. Net: kaish is neither a strict POSIX-`sh` nor a bash
+subset. Reframe to something like *"inspired by POSIX sh and bash, informed by
+shellcheck's lints."* Corollary worth stating: shellcheck gives zero coverage for
+kaish's extensions, so the kaish validator is their sole safety net.
 
 ### `mktemp` random suffix has slight modulo bias
-`random_suffix` (`tools/builtin/mktemp.rs`) maps random bytes onto a 36-char
-alphabet with `byte % 36`. Since `256 % 36 = 4`, bytes 252–255 land on the first
-four chars, giving them ~3.1% vs ~2.7% probability. Negligible for temp-file
-suffixes — the 36^N search space is dominated by N, not the per-char skew — so
-not worth the rejection-sampling loop (which also complicates the
-fail-loud-on-no-entropy contract). Flagged by dpal review 2026-06-03; recorded
-rather than fixed by deliberate choice.
+`random_suffix` maps random bytes onto a 36-char alphabet with `byte % 36`; since
+`256 % 36 = 4`, bytes 252–255 skew the first four chars (~3.1% vs ~2.7%). Negligible
+for temp suffixes; not worth the rejection-sampling loop (which complicates the
+fail-loud-on-no-entropy contract). Recorded by choice.
 
 ### `uname -v` discloses build provenance unconditionally
-`tools/builtin/uname.rs` formats the version field as
-`kaish {version} ({git_hash} {build_date})` from compile-time `option_env!`
-values. If an embedder sets `KAISH_GIT_HASH`/`KAISH_BUILD_DATE`, `uname -v`
-fingerprints the exact commit and build time even in a minimal build. Not host
-info, but a build fingerprint; gate behind a `verbose-identity`-style feature if
-a threat model cares. Flagged by dpal review 2026-06-03.
+`uname.rs` formats the version field as `kaish {version} ({git_hash} {build_date})`
+from compile-time `option_env!`. If an embedder sets `KAISH_GIT_HASH`/
+`KAISH_BUILD_DATE`, `uname -v` fingerprints the exact commit/build even in a minimal
+build. Gate behind a `verbose-identity`-style feature if a threat model cares.
 
 ### `mktemp` entropy-failure message is unhelpful on wasm
-On `wasm32-wasip1`, a `getrandom::fill` failure surfaces an opaque
-`getrandom::Error` whose `Display` may be near-empty, so the
-`mktemp: could not obtain system entropy: {e}` message loses its detail. Minor;
-add a `cfg!(target_arch = "wasm32")` hint to the message if it ever matters.
-Flagged by dpal review 2026-06-03.
+On `wasm32-wasip1` a `getrandom::fill` failure surfaces an opaque error whose
+`Display` may be near-empty, so `mktemp: could not obtain system entropy: {e}` loses
+detail. Add a `cfg!(target_arch = "wasm32")` hint if it ever matters.
 
 ### `touch <dir>` on a local mount fails (EISDIR); memory mounts succeed
-Hardening on 2026-06-07 routed `touch`-on-existing through the VFS via a new
-`set_mtime` op (Filesystem + KernelBackend), removing the old
-`resolve_real_path` escape to the host and its silent no-op on virtual mounts
-(read-only mounts now reject loudly; `MemoryFs` updates its per-entry mtime).
-Residual: `LocalFs::set_mtime` opens the path with `write(true)` (preserving the
-old `update_mtime` semantics), so `touch existing_directory/` fails with EISDIR
-on a local mount, while `MemoryFs::set_mtime` updates a directory's mtime fine.
-POSIX `touch` works on directories. Fix is to bump the time via `utimensat`/an
-O_RDONLY fd (works on dir fds; on Linux futimens needs only ownership/write
-perm, not a write-mode handle) instead of opening for write — deferred to keep
-the cross-platform `File::set_modified` contract unchanged for now.
+`LocalFs::set_mtime` opens the path with `write(true)`, so `touch existing_dir/`
+fails EISDIR on a local mount while `MemoryFs::set_mtime` works. POSIX `touch` works
+on directories. Fix: bump the time via `utimensat`/an O_RDONLY fd instead of opening
+for write — deferred to keep the cross-platform `File::set_modified` contract
+unchanged.
 
 ### Recursive/tree `--json` carries structure but no size/type metadata
-`tree --json DIR` and `ls -R --json DIR` (without `-l`) serialize the
-directory *shape* but every leaf value is `null` — there is nowhere in the
-tree JSON shape (`OutputData::to_json`'s nested-object branch, `name → children`)
-to hang per-node metadata, and `tree` never collects sizes in the first place.
-So neither can produce a recursive "rip of the filesystem + sizes" on its own.
-`ls -lR --json` *does* now carry sizes (the table-with-children path, fixed
-2026-06-14 — see git history), but the bare-tree shapes don't. Working alternative
-today: `for f in $(find DIR -type f); do stat -c '%s %n' "$f"; done`. Proper
-fix is a shape decision — either teach `tree`/recursive-`ls` to emit a
-table-with-children (so the metadata-bearing serializer applies) or extend the
-tree-JSON branch to carry a metadata slot per node. Surfaced 2026-06-14 while
-probing fs-rip ergonomics. (P3)
+`tree --json DIR` and `ls -R --json DIR` (without `-l`) serialize the directory
+*shape* but every leaf is `null` — the tree-JSON shape (`name → children`) has
+nowhere to hang per-node metadata, and `tree` never collects sizes. `ls -lR --json`
+does carry sizes (table-with-children path). Fix is a shape decision: teach
+`tree`/recursive-`ls` to emit table-with-children, or extend the tree-JSON branch
+with a per-node metadata slot. (P3)
 
 ### `--flag=true` on bool flags rejected for builtins that skip flagify
-Sibling of the `spawn --command true` fix above, surfaced by the DeepSeek
-review. The explicit `seq --json=true` / `find --type=…`-style `=true` form on a
-**bool** flag binds into `named` as `Bool(true)` (the `Arg::Named` branch, which
-skips the `LongFlag` bool check), and the ~20 builtins that never call
-`flagify_bool_named` (seq, find, stat, cp, mkdir, pwd, basename, …) hand clap a
-`--json=true` their plain-`bool` field rejects (`seq --json=true` → exit 2
-"unexpected value 'true'"). The bare `seq --json` form works. Two routes: call
-`flagify_bool_named(&schema)` in every clap builtin (tedious, easy to forget —
-this is exactly how the gap arose), or — better — flagify **once in the kernel**
-before dispatch (the kernel already builds the schema at `kernel.rs:~2699`) and
-drop the per-builtin calls, giving one path. The global `--json` stripper also
-misses the `=true` form because it scans `flags`, not `named`. (P3)
+The explicit `=true` form on a bool flag binds into `named` as `Bool(true)` (the
+`Arg::Named` branch skips the `LongFlag` bool check), and the ~20 builtins that
+never call `flagify_bool_named` (seq, find, stat, cp, mkdir, …) hand clap a
+`--json=true` their plain-`bool` field rejects (`seq --json=true` → exit 2). The
+bare `seq --json` works. Better fix: flagify **once in the kernel** before dispatch
+and drop the per-builtin calls. The global `--json` stripper also misses the `=true`
+form (it scans `flags`, not `named`). (P3)
 
-### Extract `skip_quoted_content()` shared by arithmetic/heredoc preprocessing
-`preprocess_arithmetic()` (~150 lines) and `preprocess_heredocs()`
-(~150 lines) both implement quote/escape tracking. Also a dependency
-of the heredoc span-tracking work under P1.
-
-### `parse_interpolated_string` is ~200 lines
-Handles `$VAR`, `${VAR}`, `$(…)` with nested paren tracking. Could
-split into smaller helpers for maintainability.
-
-### chumsky alpha → 1.0 before kaish 1.0
-Updated 2026-06-09: chumsky moved to crates.io `1.0.0-alpha.8` in `229f363`
-(release prep) — the old "pin a git commit" option is moot. Residual: upgrade
-to a stable chumsky 1.0 when it ships, before kaish 1.0. (The stale
-`LANGUAGE.md` "sourced from git" line was fixed 2026-06-11.)
+### Smaller refactors
+- **Extract `skip_quoted_content()`** shared by `preprocess_arithmetic()` and
+  `preprocess_heredocs()` (~150 lines each of duplicated quote/escape tracking).
+- **`parse_interpolated_string` is ~200 lines** (`$VAR`/`${VAR}`/`$(…)` with nested
+  paren tracking) — split into helpers.
+- **chumsky alpha → 1.0 before kaish 1.0**: on `1.0.0-alpha.8`; upgrade to stable
+  chumsky 1.0 when it ships.
 
 ### REPL polish
-Syntax highlighting (chumsky already produces structured tokens),
-abbreviation expansion, multi-line paste detection. `kaish-repl`
-highlighter and hinter are currently no-ops; multi-line paste
-re-validates on each keystroke.
+Syntax highlighting (chumsky already produces structured tokens), abbreviation
+expansion, multi-line paste detection. The highlighter and hinter are currently
+no-ops; multi-line paste re-validates on each keystroke.
 
 ### Bash-prior "did-you-mean" validator pass
-Agents will write `[ -z "$VAR" ]` (single bracket) when `[[ ]]` is
-preferred. The biggest historical bash-prior trap — `for i in $LIST`
-silently iterating once — is now caught: bare `$VAR` in for-position
-is E012 hard error, and `$(cmd)` in for-position splits on `\n`. What
-remains is "soft" guidance for less-common ports; a shellcheck-style
-actionable warning without rejection would steer without frustrating.
-Optional but moderate leverage now that the loud cases are handled.
+Agents write `[ -z "$VAR" ]` (single bracket) when `[[ ]]` is preferred. The biggest
+historical trap — `for i in $LIST` iterating once — is already caught (bare `$VAR`
+in for-position is E012; `$(cmd)` splits on `\n`). What remains is soft guidance for
+less-common ports: a shellcheck-style actionable warning without rejection.

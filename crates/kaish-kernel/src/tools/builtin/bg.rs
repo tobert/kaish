@@ -15,7 +15,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Bg tool: resume a stopped job in the background.
 pub struct Bg;
 
-/// clap-derived argv layer for bg. See docs/clap-migration.md.
+/// clap-derived argv layer for bg.
 #[derive(Parser, Debug)]
 #[command(name = "bg", about = "Resume a stopped job in the background")]
 struct BgArgs {

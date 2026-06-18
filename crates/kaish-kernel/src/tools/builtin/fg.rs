@@ -13,7 +13,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Fg tool: resume a stopped job in the foreground.
 pub struct Fg;
 
-/// clap-derived argv layer for fg. See docs/clap-migration.md.
+/// clap-derived argv layer for fg.
 #[derive(Parser, Debug)]
 #[command(name = "fg", about = "Resume a stopped job in the foreground")]
 struct FgArgs {

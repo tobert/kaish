@@ -11,7 +11,7 @@ use kaish_types::Value;
 use kaish_types::{ExecResult, OutputData, OutputNode};
 use kaish_tool_api::{schema_from_clap, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
 
-/// clap-derived argv layer for ps. See docs/clap-migration.md.
+/// clap-derived argv layer for ps.
 #[derive(Parser, Debug)]
 #[command(name = "ps", about = "List processes")]
 struct PsArgs {

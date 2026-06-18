@@ -16,7 +16,7 @@ use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, T
 /// cmp tool.
 pub struct Cmp;
 
-/// clap-derived argv layer for cmp. See docs/clap-migration.md.
+/// clap-derived argv layer for cmp.
 #[derive(Parser, Debug)]
 #[command(name = "cmp", about = "Compare two files byte by byte")]
 struct CmpArgs {

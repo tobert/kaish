@@ -14,7 +14,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// - `alias name` — show one alias
 pub struct Alias;
 
-/// clap-derived argv layer for alias. See docs/clap-migration.md.
+/// clap-derived argv layer for alias.
 #[derive(Parser, Debug)]
 #[command(name = "alias", about = "Define or display command aliases")]
 struct AliasArgs {
@@ -132,7 +132,7 @@ fn list_aliases(ctx: &ExecContext) -> ExecResult {
 /// Unalias tool: remove command aliases.
 pub struct Unalias;
 
-/// clap-derived argv layer for unalias. See docs/clap-migration.md.
+/// clap-derived argv layer for unalias.
 #[derive(Parser, Debug)]
 #[command(name = "unalias", about = "Remove command aliases")]
 struct UnaliasArgs {

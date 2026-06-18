@@ -130,6 +130,9 @@ Tests live in `crates/kaish-kernel/tests/`. Snapshots in `crates/kaish-kernel/te
 - `crates/kaish-help/src/` — composition surface: `fragments.rs` (the English
   fragment registry, concept-organized) + `compose.rs` (recipes). Design:
   `docs/composable-help.md`.
+- `docs/issues.md` — open work only (P1–P4). `docs/devlog.md` — landed-work
+  narrative + standing decisions (don't re-litigate). Keep history out of
+  `issues.md` so it stays cheap to read for actual open work.
 
 **Keep in sync:** When adding builtins or changing syntax, update the relevant help files.
 The builtin list in `help builtins` is generated dynamically from tool schemas.
@@ -187,6 +190,20 @@ Hard-won rules that aren't obvious from the code. Violating these silently break
   `kernel.rs::try_execute_external` (production) and
   `dispatch.rs::BackendDispatcher::try_external` (test-only). The kernel never reads
   OS env — frontends populate `KernelConfig::initial_vars`.
+- **Adding a builtin (clap pattern).** Every builtin parses argv with a private
+  `clap::Parser` struct inside `execute()` — copy the nearest existing builtin;
+  it's the living reference. The non-obvious parts: derive the `ToolSchema` with
+  `schema_from_clap` (params come from the struct; description + examples stay
+  hand-written); always `#[command(flatten)] global: GlobalFlags` and call
+  `parsed.global.apply(ctx)` so `--json` works; a parse failure returns
+  `failure(2, ...)` (POSIX usage). **Read `Value`-typed positionals off
+  `args.positional`, not the clap struct** — `to_argv()` stringifies values
+  (lossy), so the clap positional field is a `#[arg(hide = true)]` sink for
+  validation only. Don't add `trailing_var_arg`/`allow_hyphen_values` normally
+  (`to_argv()` already emits `--` before positionals); DO add them on the
+  variadic field for passthrough builtins (`timeout`/`exec`). Domain parsing
+  (sed expressions, awk programs, find predicates) stays hand-rolled — clap only
+  owns the argv layer.
 - **clap builtin gotchas:** `with_output` drops the `rich_json` payload — use
   `with_output_and_text` when a builtin needs a custom pipe representation;
   `to_argv()` injects a `--` separator, so don't unit-test clap builtins via raw

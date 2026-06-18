@@ -11,7 +11,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Mv tool: move/rename files and directories.
 pub struct Mv;
 
-/// clap-derived argv layer for mv. See docs/clap-migration.md.
+/// clap-derived argv layer for mv.
 #[derive(Parser, Debug)]
 #[command(name = "mv", about = "Move (rename) files and directories")]
 struct MvArgs {

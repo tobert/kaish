@@ -11,7 +11,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Wait tool: wait for background jobs.
 pub struct Wait;
 
-/// clap-derived argv layer for wait. See docs/clap-migration.md.
+/// clap-derived argv layer for wait.
 #[derive(Parser, Debug)]
 #[command(name = "wait", about = "Wait for background jobs to complete")]
 struct WaitArgs {

@@ -22,7 +22,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Patch tool: applies unified diffs to files.
 pub struct Patch;
 
-/// clap-derived argv layer for patch. See docs/clap-migration.md.
+/// clap-derived argv layer for patch.
 #[derive(Parser, Debug)]
 #[command(name = "patch", about = "Apply unified diff to files")]
 struct PatchArgs {

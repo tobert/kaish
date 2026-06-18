@@ -11,7 +11,7 @@ use super::format_string::{self, FormatArg};
 /// Printf tool: formatted output.
 pub struct Printf;
 
-/// clap-derived argv layer for printf. See docs/clap-migration.md.
+/// clap-derived argv layer for printf.
 #[derive(Parser, Debug)]
 #[command(name = "printf", about = "Format and print data")]
 struct PrintfArgs {

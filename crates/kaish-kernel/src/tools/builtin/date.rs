@@ -2,7 +2,7 @@
 //!
 //! Re-specced against the **empirical** `date` — what language models actually
 //! type when they reach for it — rather than an imagined one. See
-//! `docs/date-design.md` for the fleet survey that drove this. The headline
+//! `docs/designing-syntax-with-llms.md` for the fleet-survey method behind this. The headline
 //! behaviors:
 //!
 //! - **GNU dialect, deliberately.** 9/9 surveyed models were GNU-shaped, so we
@@ -78,7 +78,7 @@ impl Date {
     }
 }
 
-/// clap-derived argv layer for date. See docs/clap-migration.md.
+/// clap-derived argv layer for date.
 #[derive(Parser, Debug)]
 #[command(name = "date", about = "Display the date and time")]
 struct DateArgs {

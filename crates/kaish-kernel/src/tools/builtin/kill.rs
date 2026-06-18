@@ -20,7 +20,7 @@ use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, T
 /// Kill tool: send signals to processes or jobs.
 pub struct Kill;
 
-/// clap-derived argv layer for kill. See docs/clap-migration.md.
+/// clap-derived argv layer for kill.
 #[derive(Parser, Debug)]
 #[command(name = "kill", about = "Send a signal to a process or job")]
 struct KillArgs {

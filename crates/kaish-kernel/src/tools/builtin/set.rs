@@ -17,7 +17,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Unrecognized options are silently ignored for bash compatibility.
 pub struct Set;
 
-/// clap-derived argv layer for set. See docs/clap-migration.md.
+/// clap-derived argv layer for set.
 ///
 /// `set` has bespoke argv handling — it reads `-e`/`+e`/`-o NAME` from
 /// args.flags and args.positional directly. clap is only used here as a

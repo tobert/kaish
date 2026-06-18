@@ -2,7 +2,7 @@
 //!
 //! `GlobalFlags` moved to the leaf `kaish-tool-api` crate so out-of-tree tools
 //! flatten the same `--json` surface. Re-exported here so existing
-//! `crate::tools::GlobalFlags` paths keep working. See `docs/clap-migration.md`.
+//! `crate::tools::GlobalFlags` paths keep working.
 
 pub use kaish_tool_api::GlobalFlags;
 

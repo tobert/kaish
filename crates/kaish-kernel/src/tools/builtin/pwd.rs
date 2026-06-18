@@ -9,7 +9,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Pwd tool: print current working directory.
 pub struct Pwd;
 
-/// clap-derived argv layer for pwd. See docs/clap-migration.md.
+/// clap-derived argv layer for pwd.
 #[derive(Parser, Debug)]
 #[command(name = "pwd", about = "Print current working directory")]
 struct PwdArgs {

@@ -12,7 +12,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Touch tool: change file timestamps or create files.
 pub struct Touch;
 
-/// clap-derived argv layer for touch. See docs/clap-migration.md.
+/// clap-derived argv layer for touch.
 #[derive(Parser, Debug)]
 #[command(name = "touch", about = "Change file timestamps or create empty files")]
 struct TouchArgs {

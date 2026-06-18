@@ -18,7 +18,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Read tool: reads a line from stdin into variable(s).
 pub struct Read;
 
-/// clap-derived argv layer for read. See docs/clap-migration.md.
+/// clap-derived argv layer for read.
 #[derive(Parser, Debug)]
 #[command(name = "read", about = "Read a line from standard input into variables")]
 struct ReadArgs {

@@ -11,7 +11,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Xxd tool: hex dump or reverse.
 pub struct Xxd;
 
-/// clap-derived argv layer for xxd. See docs/clap-migration.md.
+/// clap-derived argv layer for xxd.
 #[derive(Parser, Debug)]
 #[command(name = "xxd", about = "Make a hex dump or reverse it")]
 struct XxdArgs {

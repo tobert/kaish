@@ -4,7 +4,7 @@
 //! own clap struct and calls `parsed.global.apply(ctx)` after parsing; the
 //! kernel reads the output format the flag set (via
 //! [`ToolCtx::set_output_format`](crate::ToolCtx::set_output_format)) after
-//! `execute()` returns and applies it. See `docs/clap-migration.md`.
+//! `execute()` returns and applies it.
 
 use clap::Args;
 

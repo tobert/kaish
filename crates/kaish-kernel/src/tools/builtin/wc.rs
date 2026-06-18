@@ -9,7 +9,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Wc tool: count lines, words, characters, and bytes.
 pub struct Wc;
 
-/// clap-derived argv layer for wc. See docs/clap-migration.md.
+/// clap-derived argv layer for wc.
 #[derive(Parser, Debug)]
 #[command(name = "wc", about = "Print line, word, and byte counts")]
 struct WcArgs {

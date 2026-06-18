@@ -17,7 +17,7 @@ use super::uname::read_hostname;
 /// Hostname tool: print the system hostname.
 pub struct Hostname;
 
-/// clap-derived argv layer for hostname. See docs/clap-migration.md.
+/// clap-derived argv layer for hostname.
 #[derive(Parser, Debug)]
 #[command(name = "hostname", about = "Print the system hostname")]
 struct HostnameArgs {

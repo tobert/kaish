@@ -11,7 +11,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Cut tool: select portions of each line.
 pub struct Cut;
 
-/// clap-derived argv layer for cut. See docs/clap-migration.md.
+/// clap-derived argv layer for cut.
 #[derive(Parser, Debug)]
 #[command(name = "cut", about = "Remove sections from each line")]
 struct CutArgs {

@@ -12,7 +12,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Checksum tool: compute or verify file hashes.
 pub struct Checksum;
 
-/// clap-derived argv layer for checksum. See docs/clap-migration.md.
+/// clap-derived argv layer for checksum.
 #[derive(Parser, Debug)]
 #[command(name = "checksum", about = "Compute or verify file hashes")]
 struct ChecksumArgs {

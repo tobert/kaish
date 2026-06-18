@@ -2044,7 +2044,7 @@ impl Kernel {
                     // only position where multi-line stdout auto-splits per
                     // line. Arrays still spread element-by-element; bare
                     // $VAR is rejected upstream by validator E012. See
-                    // docs/plan-for-loop-newline-split.md.
+                    // docs/LANGUAGE.md.
                     let from_command_subst = matches!(item_expr, Expr::CommandSubst(_));
                     let item = self.eval_expr_async(item_expr).await?;
                     match item {

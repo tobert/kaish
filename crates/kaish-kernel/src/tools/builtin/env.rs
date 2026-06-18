@@ -20,7 +20,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Env tool: print environment or run command with modified environment.
 pub struct Env;
 
-/// clap-derived argv layer for env. See docs/clap-migration.md.
+/// clap-derived argv layer for env.
 ///
 /// `args.named` and `args.flags` are read directly for VAR=value & -0/-i/-u
 /// because env's positional layer is (env-overrides, command, child-argv) —

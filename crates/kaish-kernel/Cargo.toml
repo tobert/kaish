@@ -52,7 +52,7 @@ logos = { workspace = true }
 chumsky = { workspace = true }
 ariadne = { workspace = true }
 
-# CLI parsing inside builtins — see docs/clap-migration.md
+# CLI parsing inside builtins (clap_derive inside each execute())
 clap = { workspace = true }
 
 # Builtins (pure-Rust, always available)

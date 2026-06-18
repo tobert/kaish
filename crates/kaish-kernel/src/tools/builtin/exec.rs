@@ -26,7 +26,7 @@ use super::spawn::resolve_in_path;
 /// Exec tool: replaces the current process (POSIX `exec`).
 pub struct Exec;
 
-/// clap-derived argv layer for exec. See docs/clap-migration.md.
+/// clap-derived argv layer for exec.
 ///
 /// `trailing_var_arg` + `allow_hyphen_values` because exec is a passthrough —
 /// everything after the command name is the child's argv, including flags.

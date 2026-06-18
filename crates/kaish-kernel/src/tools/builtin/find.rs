@@ -26,7 +26,7 @@ use crate::walker::{EntryTypes, FileWalker, GlobPath, WalkOptions};
 /// Find tool: searches for files in directory hierarchy.
 pub struct Find;
 
-/// clap-derived argv layer for find. See docs/clap-migration.md.
+/// clap-derived argv layer for find.
 ///
 /// Find's predicates (`-name`, `-type`, `-maxdepth`, etc.) are kaish-style
 /// named values, not real POSIX find predicates — they're declared here for

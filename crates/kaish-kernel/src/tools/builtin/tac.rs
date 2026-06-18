@@ -10,7 +10,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Tac tool: output lines in reverse order.
 pub struct Tac;
 
-/// clap-derived argv layer for tac. See docs/clap-migration.md.
+/// clap-derived argv layer for tac.
 #[derive(Parser, Debug)]
 #[command(name = "tac", about = "Reverse lines of files or stdin")]
 struct TacArgs {

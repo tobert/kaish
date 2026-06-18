@@ -24,7 +24,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// - `export -p` - print all exported variables
 pub struct Export;
 
-/// clap-derived argv layer for export. See docs/clap-migration.md.
+/// clap-derived argv layer for export.
 #[derive(Parser, Debug)]
 #[command(name = "export", about = "Mark variables for export to child processes")]
 struct ExportArgs {

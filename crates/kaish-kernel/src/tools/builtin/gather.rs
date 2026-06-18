@@ -26,7 +26,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// detects gather in a pipeline.
 pub struct Gather;
 
-/// clap-derived argv layer for gather. See docs/clap-migration.md.
+/// clap-derived argv layer for gather.
 #[derive(Parser, Debug)]
 #[command(name = "gather", about = "Collect results from parallel scatter processing")]
 struct GatherArgs {

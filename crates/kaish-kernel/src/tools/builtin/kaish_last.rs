@@ -21,7 +21,7 @@ use kaish_types::value_to_json;
 
 pub struct KaishLast;
 
-/// clap-derived argv layer for kaish-last. See docs/clap-migration.md.
+/// clap-derived argv layer for kaish-last.
 #[derive(Parser, Debug)]
 #[command(
     name = "kaish-last",

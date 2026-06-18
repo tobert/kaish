@@ -14,7 +14,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Cat tool: read and output file contents.
 pub struct Cat;
 
-/// clap-derived argv layer for cat. See docs/clap-migration.md.
+/// clap-derived argv layer for cat.
 #[derive(Parser, Debug)]
 #[command(name = "cat", about = "Read and output file contents")]
 struct CatArgs {

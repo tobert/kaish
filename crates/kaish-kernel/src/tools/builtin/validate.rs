@@ -21,7 +21,7 @@ use crate::validator::{Severity, Validator};
 /// Validate tool: check kaish scripts for errors before execution.
 pub struct Validate;
 
-/// clap-derived argv layer for kaish-validate. See docs/clap-migration.md.
+/// clap-derived argv layer for kaish-validate.
 #[derive(Parser, Debug)]
 #[command(name = "kaish-validate", about = "Validate kaish scripts without executing")]
 struct ValidateArgs {

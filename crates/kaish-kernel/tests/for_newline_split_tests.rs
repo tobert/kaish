@@ -1,10 +1,8 @@
 //! Spec tests for the newline-split rule in for-loop `$(cmd)` position.
 //!
-//! These tests describe the *intended* behavior outlined in
-//! `docs/plan-for-loop-newline-split.md`. They are staged BEFORE the kernel
-//! change lands — most of them should fail today and turn green when the
-//! rule ships. Each test is a fact about the spec, not a description of
-//! the implementation.
+//! These tests describe the behavior specified in `docs/LANGUAGE.md` (the
+//! for-loop `$(cmd)` newline-split rule). Each test is a fact about the spec,
+//! not a description of the implementation.
 //!
 //! The rule (one-line): when a `for` iteration item is `$(cmd)` and the
 //! substitution returns `Value::String` containing `\n`, split on `\n`

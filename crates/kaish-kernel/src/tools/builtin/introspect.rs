@@ -15,7 +15,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Tools builtin: lists all available tools and their schemas.
 pub struct Tools;
 
-/// clap-derived argv layer for kaish-tools. See docs/clap-migration.md.
+/// clap-derived argv layer for kaish-tools.
 #[derive(Parser, Debug)]
 #[command(name = "kaish-tools", about = "List available tools and their schemas")]
 struct ToolsArgs {
@@ -115,7 +115,7 @@ fn format_tool_detail(schemas: &[ToolSchema], name: &str) -> ExecResult {
 /// Mounts builtin: lists all VFS mount points.
 pub struct Mounts;
 
-/// clap-derived argv layer for kaish-mounts. See docs/clap-migration.md.
+/// clap-derived argv layer for kaish-mounts.
 #[derive(Parser, Debug)]
 #[command(name = "kaish-mounts", about = "List VFS mount points")]
 struct MountsArgs {

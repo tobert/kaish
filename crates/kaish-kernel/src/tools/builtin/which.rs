@@ -19,7 +19,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Which tool: locates commands in PATH.
 pub struct Which;
 
-/// clap-derived argv layer for which. See docs/clap-migration.md.
+/// clap-derived argv layer for which.
 #[derive(Parser, Debug)]
 #[command(name = "which", about = "Locate a command in PATH")]
 struct WhichArgs {

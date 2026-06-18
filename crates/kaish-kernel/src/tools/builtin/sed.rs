@@ -16,7 +16,7 @@ use crate::validator::{IssueCode, ValidationIssue};
 /// Sed tool: stream editor for text transformations.
 pub struct Sed;
 
-/// clap-derived argv layer for sed. See docs/clap-migration.md.
+/// clap-derived argv layer for sed.
 ///
 /// Sed expression syntax stays hand-rolled — only argv-level flags like
 /// `-n` (quiet) and `-e EXPR` go through clap.

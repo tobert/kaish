@@ -9,7 +9,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Tr tool: translate, squeeze, or delete characters.
 pub struct Tr;
 
-/// clap-derived argv layer for tr. See docs/clap-migration.md.
+/// clap-derived argv layer for tr.
 #[derive(Parser, Debug)]
 #[command(name = "tr", about = "Translate or delete characters")]
 struct TrArgs {

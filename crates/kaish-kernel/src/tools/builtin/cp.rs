@@ -11,7 +11,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Cp tool: copy files and directories.
 pub struct Cp;
 
-/// clap-derived argv layer for cp. See docs/clap-migration.md.
+/// clap-derived argv layer for cp.
 #[derive(Parser, Debug)]
 #[command(name = "cp", about = "Copy files and directories")]
 struct CpArgs {

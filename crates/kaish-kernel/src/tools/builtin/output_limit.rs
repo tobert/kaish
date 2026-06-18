@@ -10,7 +10,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Output limit tool: inspect and modify output size limit configuration.
 pub struct KaishOutputLimit;
 
-/// clap-derived argv layer for kaish-output-limit. See docs/clap-migration.md.
+/// clap-derived argv layer for kaish-output-limit.
 #[derive(Parser, Debug)]
 #[command(name = "kaish-output-limit", about = "Inspect or modify output size limit configuration")]
 struct KaishOutputLimitArgs {

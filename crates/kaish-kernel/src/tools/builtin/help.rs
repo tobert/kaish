@@ -10,7 +10,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Help tool: display help for topics and tools.
 pub struct Help;
 
-/// clap-derived argv layer for help. See docs/clap-migration.md.
+/// clap-derived argv layer for help.
 #[derive(Parser, Debug)]
 #[command(name = "help", about = "Display help for kaish topics and tools")]
 struct HelpArgs {

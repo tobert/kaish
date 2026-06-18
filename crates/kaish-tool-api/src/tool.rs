@@ -156,7 +156,7 @@ pub fn validate_against_schema(args: &ToolArgs, schema: &ToolSchema) -> Vec<Vali
 // `--json` is declared per-builtin via `GlobalFlags` flatten
 // (`crate::global_flags`). Builtins parse it inside execute() and write the
 // output format via `ToolCtx::set_output_format`; the kernel applies the
-// format after execute() returns. See `docs/clap-migration.md`.
+// format after execute() returns.
 
 /// Check if a flag name is the kernel-owned `--json` flag.
 ///

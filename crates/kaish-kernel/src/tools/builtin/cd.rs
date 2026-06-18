@@ -11,7 +11,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Cd tool: change current working directory.
 pub struct Cd;
 
-/// clap-derived argv layer for cd. See docs/clap-migration.md.
+/// clap-derived argv layer for cd.
 #[derive(Parser, Debug)]
 #[command(name = "cd", about = "Change current working directory")]
 struct CdArgs {

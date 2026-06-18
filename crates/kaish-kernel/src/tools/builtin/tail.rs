@@ -11,7 +11,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Tail tool: output the last part of files or stdin.
 pub struct Tail;
 
-/// clap-derived argv layer for tail. See docs/clap-migration.md.
+/// clap-derived argv layer for tail.
 #[derive(Parser, Debug)]
 #[command(name = "tail", about = "Output the last part of files")]
 struct TailArgs {

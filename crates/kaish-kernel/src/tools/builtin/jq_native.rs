@@ -31,7 +31,7 @@ use crate::validator::{IssueCode, ValidationIssue};
 /// Native jq tool using jaq (pure Rust jq implementation).
 pub struct JqNative;
 
-/// clap-derived argv layer for jq. See docs/clap-migration.md.
+/// clap-derived argv layer for jq.
 ///
 /// jq's filter syntax stays hand-rolled — only argv-level flags are declared
 /// here. `--arg` / `--argjson` are accept-and-ignore at the clap level; the
