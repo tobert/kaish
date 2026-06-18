@@ -12,7 +12,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Head tool: output the first part of files or stdin.
 pub struct Head;
 
-/// clap-derived argv layer for head. See docs/clap-migration.md.
+/// clap-derived argv layer for head.
 #[derive(Parser, Debug)]
 #[command(name = "head", about = "Output the first part of files")]
 struct HeadArgs {

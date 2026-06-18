@@ -18,7 +18,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// kaish-ast: parse expressions and display their AST.
 pub struct KaishAst;
 
-/// clap-derived argv layer for kaish-ast. See docs/clap-migration.md.
+/// clap-derived argv layer for kaish-ast.
 #[derive(Parser, Debug)]
 #[command(name = "kaish-ast", about = "Parse and display AST without executing")]
 struct KaishAstArgs {

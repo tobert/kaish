@@ -12,7 +12,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Basename tool: extract filename from path.
 pub struct Basename;
 
-/// clap-derived argv layer for basename. See docs/clap-migration.md.
+/// clap-derived argv layer for basename.
 #[derive(Parser, Debug)]
 #[command(name = "basename", about = "Strip directory and suffix from filenames")]
 struct BasenameArgs {

@@ -25,7 +25,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Timeout tool: run a command with a deadline.
 pub struct Timeout;
 
-/// clap-derived argv layer for timeout. See docs/clap-migration.md.
+/// clap-derived argv layer for timeout.
 ///
 /// `timeout` wraps a command — its positionals are `DURATION COMMAND ARGS...`.
 /// The inner command tokens may themselves look like flags (e.g. `timeout 5

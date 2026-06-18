@@ -24,7 +24,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// detects scatter in a pipeline.
 pub struct Scatter;
 
-/// clap-derived argv layer for scatter. See docs/clap-migration.md.
+/// clap-derived argv layer for scatter.
 #[derive(Parser, Debug)]
 #[command(name = "scatter", about = "Fan out input items for parallel processing")]
 struct ScatterArgs {

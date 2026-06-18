@@ -10,7 +10,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Dirname tool: extract directory from path.
 pub struct Dirname;
 
-/// clap-derived argv layer for dirname. See docs/clap-migration.md.
+/// clap-derived argv layer for dirname.
 #[derive(Parser, Debug)]
 #[command(name = "dirname", about = "Strip last component from filename")]
 struct DirnameArgs {

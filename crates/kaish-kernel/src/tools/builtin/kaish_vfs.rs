@@ -21,7 +21,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// kaish-vfs tool: inspect and manage the overlay VFS transaction.
 pub struct KaishVfs;
 
-/// clap-derived argv layer for kaish-vfs. See docs/clap-migration.md.
+/// clap-derived argv layer for kaish-vfs.
 #[derive(Parser, Debug)]
 #[command(name = "kaish-vfs", about = "Inspect and manage the overlay VFS transaction")]
 struct KaishVfsArgs {

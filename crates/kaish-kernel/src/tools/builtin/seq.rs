@@ -11,7 +11,7 @@ use crate::validator::{IssueCode, ValidationIssue};
 /// Seq tool: print a sequence of numbers.
 pub struct Seq;
 
-/// clap-derived argv layer for seq. See docs/clap-migration.md.
+/// clap-derived argv layer for seq.
 #[derive(Parser, Debug)]
 #[command(name = "seq", about = "Print sequences of numbers")]
 struct SeqArgs {

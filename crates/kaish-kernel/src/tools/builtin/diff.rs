@@ -22,7 +22,7 @@ use crate::validator::{IssueCode, ValidationIssue};
 /// Diff tool: compares two files line by line.
 pub struct Diff;
 
-/// clap-derived argv layer for diff. See docs/clap-migration.md.
+/// clap-derived argv layer for diff.
 #[derive(Parser, Debug)]
 #[command(name = "diff", about = "Compare files line by line")]
 struct DiffArgs {

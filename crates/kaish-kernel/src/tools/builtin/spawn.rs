@@ -27,7 +27,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Spawn tool: runs an external command as a subprocess and captures output.
 pub struct Spawn;
 
-/// clap-derived argv layer for spawn. See docs/clap-migration.md.
+/// clap-derived argv layer for spawn.
 #[derive(Parser, Debug)]
 #[command(name = "spawn", about = "Spawn an external command as a subprocess")]
 struct SpawnArgs {

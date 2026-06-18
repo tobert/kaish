@@ -10,7 +10,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Uniq tool: report or filter out repeated adjacent lines.
 pub struct Uniq;
 
-/// clap-derived argv layer for uniq. See docs/clap-migration.md.
+/// clap-derived argv layer for uniq.
 #[derive(Parser, Debug)]
 #[command(name = "uniq", about = "Report or filter out repeated lines")]
 struct UniqArgs {

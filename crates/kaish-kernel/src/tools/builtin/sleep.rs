@@ -11,7 +11,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Sleep tool: pause execution for a specified duration.
 pub struct Sleep;
 
-/// clap-derived argv layer for sleep. See docs/clap-migration.md.
+/// clap-derived argv layer for sleep.
 #[derive(Parser, Debug)]
 #[command(name = "sleep", about = "Delay for a specified time")]
 struct SleepArgs {

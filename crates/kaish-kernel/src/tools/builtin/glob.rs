@@ -12,7 +12,7 @@ use crate::walker::{EntryTypes, FileWalker, GlobPath, IncludeExclude, WalkOption
 /// Glob tool: expand glob patterns to matching file paths.
 pub struct Glob;
 
-/// clap-derived argv layer for glob. See docs/clap-migration.md.
+/// clap-derived argv layer for glob.
 #[derive(Parser, Debug)]
 #[command(name = "glob", about = "Expand glob patterns to matching file paths")]
 struct GlobArgs {

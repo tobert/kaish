@@ -309,7 +309,7 @@ impl ScatterGatherRunner {
 ///
 /// Structured `.data` (a JSON array from split/seq/glob/find) wins and fans out
 /// element-by-element. Plain-text stdin is split on newlines only — one item per
-/// line — matching the for-loop `$(cmd)` contract (docs/plan-for-loop-newline-split.md):
+/// line — matching the for-loop `$(cmd)` contract (docs/LANGUAGE.md):
 /// trailing newlines are trimmed once (no phantom tail item), each line's trailing
 /// `\r` is stripped, interior blank lines are preserved, and whitespace within a
 /// line is never split. Empty / newline-only input yields zero items.
@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn test_extract_items_multiline_fans_out_per_line() {
         // Plain-text stdin splits on newlines, matching for-loop $(cmd)
-        // semantics (docs/plan-for-loop-newline-split.md) — one worker per line.
+        // semantics (docs/LANGUAGE.md) — one worker per line.
         let items = extract_items(None, "one\ntwo\nthree").unwrap();
         assert_eq!(items, vec!["one", "two", "three"]);
     }

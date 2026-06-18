@@ -12,7 +12,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Sort tool: sort lines of text files or stdin.
 pub struct Sort;
 
-/// clap-derived argv layer for sort. See docs/clap-migration.md.
+/// clap-derived argv layer for sort.
 #[derive(Parser, Debug)]
 #[command(name = "sort", about = "Sort lines of text")]
 struct SortArgs {

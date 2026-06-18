@@ -23,7 +23,7 @@ use crate::walker::{FileWalker, GlobPath, IncludeExclude, WalkOptions};
 /// Grep tool: search for patterns in text.
 pub struct Grep;
 
-/// clap-derived argv layer for grep. See docs/clap-migration.md.
+/// clap-derived argv layer for grep.
 #[derive(Parser, Debug)]
 #[command(name = "grep", about = "Search for patterns in files or stdin")]
 struct GrepArgs {

@@ -15,7 +15,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// True builtin: always succeeds (exit code 0).
 pub struct True;
 
-/// clap-derived argv layer for true. See docs/clap-migration.md.
+/// clap-derived argv layer for true.
 #[derive(Parser, Debug)]
 #[command(name = "true", about = "Exit with success (code 0)")]
 struct TrueArgs {
@@ -62,7 +62,7 @@ impl Tool for True {
 /// False builtin: always fails (exit code 1).
 pub struct False;
 
-/// clap-derived argv layer for false. See docs/clap-migration.md.
+/// clap-derived argv layer for false.
 #[derive(Parser, Debug)]
 #[command(name = "false", about = "Exit with failure (code 1)")]
 struct FalseArgs {

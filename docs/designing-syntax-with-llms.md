@@ -47,6 +47,17 @@ Nothing fancy. The instruments:
 
 That's it. The leverage isn't the tooling, it's the loop.
 
+**A note on the cheap and local models,** since they're the MVPs here and the
+most finicky to run. Reasoning models return the answer in a separate
+`reasoning_content` channel — with a small output budget a verbose one hits the
+token cap mid-thought and hands back an *empty* `content`, scoring zero on a
+correct answer. Give them a large `max_tokens` and server context, or grade the
+reasoning trace directly. Forcing `enable_thinking: false` for brevity trades
+accuracy for speed — the reasoning is doing real work, and amputating it drops
+sigils and operators. And "local" is gated by what actually fits in VRAM beside
+its KV cache, not by the spec sheet; probe `/v1/models` across listening ports
+rather than trusting documented ones.
+
 ---
 
 ## The loop
@@ -256,6 +267,58 @@ for completeness. The strong models will be fine. They were always going to be f
 
 ---
 
+## The other variant: tuning an existing tool
+
+Everything above is about inventing *new* syntax. The same lab runs in reverse —
+when the tool already exists (`sed`, `awk`, `date`) and the question isn't "what
+should this look like" but "does kaish do what an agent expects when it reaches
+for the tool by reflex." A few things change, and the one thing you'd assume is a
+free oracle turns out to be a trap.
+
+**The panel becomes the spec, not the jury.** For novel syntax you grade whether a
+model can *emit* your design. For an existing tool you survey, cold, what the fleet
+*reaches for*: ask nine models to write `date` or `awk` one-liners with no docs and
+no priming, and the convergence is the specification. When 9/9 reach for
+`date -d "2 weeks ago"` or 3/3 reach for `awk -F:`, that agreement *is* the
+definition of correct — the thing kaish must do consistently. Divergence among the
+models maps the genuinely ambiguous corners; unanimous convergence is a behavior
+you must either support or loudly refuse.
+
+**Sort every gap into FIX / ADD / TEACH.** A claimed feature that misbehaves is a
+FIX. A form the panel reaches for unprompted that kaish lacks is an ADD. A form
+outside the 80% slice is a TEACH — error loudly with a hint, never a silent no-op.
+The hazard ranking is the usual kaish posture, sharpened: *silent* wrong (wrong
+answer, exit 0) is the enemy; a loud "not supported" is fine. The reflex forms land
+squarely on the silent paths — both lite models reached for `sed`'s `;` separator
+and `awk`'s `gsub`, both silently wrong before we fixed them. A mechanical
+differential sweep catches these precisely because it can't look away: every output
+mismatch is a finding, where a hand-written suite quietly omits the case that's
+broken.
+
+**A reference implementation is a sanity check, not the oracle — and here's the
+trap.** It's tempting to diff kaish against `gawk` or GNU `coreutils` and call
+parity "correct." Don't promote the reference to oracle. The `date` survey is the
+cautionary tale: *every* model, flagship down to 4B-active, assumed GNU/Linux
+(`date -d`, `%N`, flags that break on macOS/BSD) and **not one corrected for it
+unprompted.** One even confessed the bias in its reasoning trace — "I'll focus on
+GNU, that's most common" — and then didn't correct for it anyway. The monoculture
+isn't a small-model artifact or a flagship artifact; *it's the weights, top to
+bottom.* So the cross-model consensus you're treating as ground truth can be a
+**shared training bias** wearing the costume of agreement. That's usable — it even
+tells you which dialect to *be* (kaish chose to be GNU-shaped because the agents
+that drive it are too) — as long as you name it. Use the reference impl
+defensively ("did we introduce a silent divergence from what the fleet expects?"),
+never prescriptively ("the reference is right, match it").
+
+**These studies are disposable, by design.** The per-tool surveys that produced
+this (sed, awk, date) were always meant to be ephemeral — a snapshot of what
+*today's* models reach for. Re-run them as models advance; the convergence will
+drift, and the GNU monoculture may not hold forever. What's durable is the method,
+not the verdicts. That's why this is the one doc that survives and the per-tool
+writeups don't.
+
+---
+
 ## The recipe (steal this)
 
 A checklist for using an LLM panel as a syntax usability lab:
@@ -292,6 +355,10 @@ Be honest about the method's blind spots:
   emitting `${xs[0]}` once says nothing about debugging it three turns later.
 - It's biased toward **today's** training priors. Re-weighting on the bash default
   is a moving target as models change.
+- A **unanimous** panel can be unanimously *wrong* in the same direction. Shared
+  monoculture bias (every model assumed GNU/Linux for `date`) reads as consensus
+  but is really just the training distribution agreeing with itself. Agreement is
+  evidence, not proof — name the bias, don't launder it into truth.
 - It can't price **human** readability, long-term maintenance, or how the syntax
   composes with the *rest* of the language. Models judge the local form, not the
   global grammar.

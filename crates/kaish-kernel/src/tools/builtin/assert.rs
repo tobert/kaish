@@ -10,7 +10,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Assert tool: verify conditions in tests.
 pub struct Assert;
 
-/// clap-derived argv layer for assert. See docs/clap-migration.md.
+/// clap-derived argv layer for assert.
 #[derive(Parser, Debug)]
 #[command(name = "assert", about = "Assert a condition is true (for testing)")]
 struct AssertArgs {

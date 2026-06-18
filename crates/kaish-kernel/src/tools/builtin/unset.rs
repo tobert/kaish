@@ -10,7 +10,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Unset tool: removes variables from the current scope.
 pub struct Unset;
 
-/// clap-derived argv layer for unset. See docs/clap-migration.md.
+/// clap-derived argv layer for unset.
 #[derive(Parser, Debug)]
 #[command(name = "unset", about = "Remove variables from scope")]
 struct UnsetArgs {

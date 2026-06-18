@@ -507,7 +507,7 @@ async fn awk_prints_selected_field() {
     assert_eq!(out, "y", "awk field: {out:?}");
 }
 
-// --- awk -F: field separator (P1 #1 in docs/awk-overhaul.md) ----------------
+// --- awk -F: field separator (the most common awk invocation) ----------------
 //
 // `awk -F: '{print $1}'` is the most common awk invocation. Before the fix,
 // kaish's lexer emitted `-F` as ShortFlag("F") and `:` as a separate Colon

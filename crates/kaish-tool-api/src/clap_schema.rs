@@ -5,7 +5,7 @@
 //! argv surface. Description and examples remain hand-written — clap doesn't
 //! own those concepts.
 //!
-//! See `docs/clap-migration.md` for the full recipe.
+//! See the clap builtin pattern in CLAUDE.md (Contributor conventions).
 
 use clap::{Arg, ArgAction, Command};
 

@@ -12,7 +12,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Write tool: write content to a file.
 pub struct Write;
 
-/// clap-derived argv layer for write. See docs/clap-migration.md.
+/// clap-derived argv layer for write.
 #[derive(Parser, Debug)]
 #[command(name = "write", about = "Write content to a file")]
 struct WriteArgs {

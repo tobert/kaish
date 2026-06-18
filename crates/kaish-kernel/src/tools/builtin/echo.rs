@@ -10,7 +10,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Echo tool: prints arguments to stdout.
 pub struct Echo;
 
-/// clap-derived argv layer for echo. See docs/clap-migration.md.
+/// clap-derived argv layer for echo.
 #[derive(Parser, Debug)]
 #[command(name = "echo", about = "Print arguments to standard output")]
 struct EchoArgs {

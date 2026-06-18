@@ -35,7 +35,7 @@ pub struct Test;
 /// Bracket alias for test: `[`
 pub struct Bracket;
 
-/// clap-derived argv layer for test. See docs/clap-migration.md.
+/// clap-derived argv layer for test.
 ///
 /// POSIX `test`/`[` predicate syntax (`-e FILE`, `-z STR`, `EXPR1 -a EXPR2`,
 /// …) does not fit clap's option model — `-e` etc. are operators, not flags.

@@ -10,7 +10,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Ignore tool: inspect and modify ignore file configuration.
 pub struct KaishIgnore;
 
-/// clap-derived argv layer for kaish-ignore. See docs/clap-migration.md.
+/// clap-derived argv layer for kaish-ignore.
 #[derive(Parser, Debug)]
 #[command(name = "kaish-ignore", about = "Inspect or modify ignore file configuration")]
 struct KaishIgnoreArgs {

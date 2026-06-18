@@ -13,7 +13,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Ln tool: create symbolic links.
 pub struct Ln;
 
-/// clap-derived argv layer for ln. See docs/clap-migration.md.
+/// clap-derived argv layer for ln.
 #[derive(Parser, Debug)]
 #[command(name = "ln", about = "Create symbolic links")]
 struct LnArgs {

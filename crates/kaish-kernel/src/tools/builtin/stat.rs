@@ -10,7 +10,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Stat tool: display file or filesystem status.
 pub struct Stat;
 
-/// clap-derived argv layer for stat. See docs/clap-migration.md.
+/// clap-derived argv layer for stat.
 #[derive(Parser, Debug)]
 #[command(name = "stat", about = "Display file status")]
 struct StatArgs {

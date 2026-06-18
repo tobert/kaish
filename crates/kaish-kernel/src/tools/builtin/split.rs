@@ -39,7 +39,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Split tool: split a string into an array.
 pub struct Split;
 
-/// clap-derived argv layer for split. See docs/clap-migration.md.
+/// clap-derived argv layer for split.
 #[derive(Parser, Debug)]
 #[command(name = "split", about = "Split a string into an array")]
 struct SplitArgs {

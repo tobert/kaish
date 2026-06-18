@@ -11,7 +11,7 @@ use crate::backend::{BackendError, KernelBackend};
 use crate::interpreter::ExecResult;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
-/// clap-derived argv layer for rm. See docs/clap-migration.md.
+/// clap-derived argv layer for rm.
 #[derive(Parser, Debug)]
 #[command(name = "rm", about = "Remove files and directories")]
 struct RmArgs {

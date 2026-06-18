@@ -14,7 +14,7 @@ use crate::vfs::DirEntry;
 /// Ls tool: list directory contents.
 pub struct Ls;
 
-/// clap-derived argv layer for ls. See docs/clap-migration.md.
+/// clap-derived argv layer for ls.
 ///
 /// `disable_help_flag = true` is required because `-h` is taken by `--human`,
 /// not by clap's auto-injected `--help`.

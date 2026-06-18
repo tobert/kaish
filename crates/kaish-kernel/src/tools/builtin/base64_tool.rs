@@ -14,7 +14,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Base64 tool: encode or decode base64 data.
 pub struct Base64Tool;
 
-/// clap-derived argv layer for base64. See docs/clap-migration.md.
+/// clap-derived argv layer for base64.
 #[derive(Parser, Debug)]
 #[command(name = "base64", about = "Encode or decode base64 data")]
 struct Base64Args {

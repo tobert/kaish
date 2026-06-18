@@ -16,8 +16,8 @@ Regenerate after the clap struct changes:
 cargo run --example gen_bash_completion -p kaish-kernel > contrib/echo.bash
 ```
 
-This is a **proof-of-life** that the clap-migration sweep
-(`docs/clap-migration.md`) gives us shell completions for free. Every
+This is a **proof-of-life** that the clap-derived builtin argv layer
+gives us shell completions for free. Every
 builtin's argv layer is a `clap::Command`, so `clap_complete` can
 generate completions for any of them — `echo` is just the smallest
 example. Future work: a single `kaish-complete` generator that walks

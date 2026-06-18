@@ -1,5 +1,5 @@
 //! Regression tests for the `execute_lock` and `Kernel::fork` concurrency fix
-//! described in `docs/april-reviews.md` Finding 1.
+//! for the kernel's serialized-execute + per-worker-fork design.
 //!
 //! Two categories:
 //!

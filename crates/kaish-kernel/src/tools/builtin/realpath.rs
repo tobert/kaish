@@ -10,7 +10,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Realpath tool: resolve path to absolute, canonical form.
 pub struct Realpath;
 
-/// clap-derived argv layer for realpath. See docs/clap-migration.md.
+/// clap-derived argv layer for realpath.
 #[derive(Parser, Debug)]
 #[command(name = "realpath", about = "Print the resolved absolute pathname")]
 struct RealpathArgs {

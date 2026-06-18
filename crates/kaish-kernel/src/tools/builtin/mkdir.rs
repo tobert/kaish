@@ -10,7 +10,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Mkdir tool: create directories.
 pub struct Mkdir;
 
-/// clap-derived argv layer for mkdir. See docs/clap-migration.md.
+/// clap-derived argv layer for mkdir.
 #[derive(Parser, Debug)]
 #[command(name = "mkdir", about = "Create directories")]
 struct MkdirArgs {

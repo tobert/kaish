@@ -447,7 +447,7 @@ impl ToolArgs {
     /// by `--` so trailing-passthrough builtins still see them as positionals
     /// even if a value happens to begin with `-`.
     ///
-    /// See docs/clap-migration.md for the full recipe.
+    /// See the clap builtin pattern in CLAUDE.md (Contributor conventions).
     pub fn to_argv(&self) -> Vec<String> {
         let mut argv = Vec::with_capacity(
             self.flags.len() + self.named.len() * 2 + self.positional.len() + 1,

@@ -11,7 +11,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Tee tool: duplicate stdin to stdout and files.
 pub struct Tee;
 
-/// clap-derived argv layer for tee. See docs/clap-migration.md.
+/// clap-derived argv layer for tee.
 #[derive(Parser, Debug)]
 #[command(name = "tee", about = "Read from stdin and write to stdout and files")]
 struct TeeArgs {

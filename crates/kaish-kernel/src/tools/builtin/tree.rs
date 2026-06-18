@@ -12,7 +12,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Tree tool: display directory structure.
 pub struct Tree;
 
-/// clap-derived argv layer for tree. See docs/clap-migration.md.
+/// clap-derived argv layer for tree.
 #[derive(Parser, Debug)]
 #[command(name = "tree", about = "Display directory structure")]
 struct TreeArgs {
