@@ -279,7 +279,7 @@ async fn scatter_parallel_runs_user_function() {
 
 /// The docs' canonical plain-text example (`cat file | scatter --as ITEM ...`)
 /// must fan out one worker per line, not bind the whole stdin to one worker.
-/// Regression test for the scatter newline-split fix (docs/issues.md #3).
+/// Regression test for the scatter newline-split fix (docs/LANGUAGE.md).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scatter_plain_text_stdin_fans_out_per_line() {
     let kernel = setup().await;

@@ -158,7 +158,7 @@ mod tests {
         vfs.mount("/", MemoryFs::new());
         let mut ctx = ExecContext::new(Arc::new(vfs));
         // Plain-text stdin splits on newlines — one worker per line (matches
-        // for-loop $(cmd) semantics; docs/issues.md #3).
+        // for-loop $(cmd) semantics; docs/LANGUAGE.md).
         ctx.set_stdin("a\nb\nc".to_string());
 
         let result = Scatter.execute(ToolArgs::new(), &mut ctx).await;

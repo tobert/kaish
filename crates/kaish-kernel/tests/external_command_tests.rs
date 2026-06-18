@@ -255,7 +255,7 @@ async fn external_command_sees_initial_vars() {
 async fn env_prefix_reaches_subprocess_then_does_not_leak() {
     // `NAME=value cmd` exports the assignment into the command's environment
     // (so the child sees it), but it must not persist: a later `printenv NAME`
-    // finds nothing. Regression test for docs/issues.md #1.
+    // finds nothing. Regression test for docs/LANGUAGE.md.
     use kaish_kernel::ast::Value;
     use std::collections::HashMap;
 

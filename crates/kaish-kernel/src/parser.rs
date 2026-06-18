@@ -1509,7 +1509,7 @@ where
     // with no whitespace between them (`/tmp/$(echo x).txt` → 3 args). kaish does
     // no token pasting, so an unquoted interpolated word fragments into separate
     // args; the fix is to quote the whole word. Single-token words (`file.txt`,
-    // `v1.2.3`) are one arg and never trigger this. See docs/issues.md #2.
+    // `v1.2.3`) are one arg and never trigger this. See docs/LANGUAGE.md.
     let pre_dash = arg_before_double_dash_parser()
         .map_with(|arg, e| -> (Arg, Span) { (arg, e.span()) })
         .repeated()
@@ -3283,7 +3283,7 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Argv-splat rejection (adjacent unquoted words — docs/issues.md #2)
+    // Argv-splat rejection (adjacent unquoted words — docs/LANGUAGE.md)
     // ═══════════════════════════════════════════════════════════════════════════
 
     fn parse_err_message(source: &str) -> String {
