@@ -1564,6 +1564,28 @@ mod tests {
         assert!(result.text_out().contains("line three"));
     }
 
+    /// `-n` with `-B`/`-A` context must number every emitted line and keep the
+    /// GNU separator convention: matched lines use `:`, context lines use `-`.
+    #[tokio::test]
+    async fn test_grep_line_numbers_with_context() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("two".into()));
+        args.positional.push(Value::String("/lines.txt".into()));
+        args.flags.insert("n".to_string());
+        args.named.insert("before-context".to_string(), Value::Int(1));
+        args.named.insert("after-context".to_string(), Value::Int(1));
+
+        let result = Grep.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // /lines.txt = "line one\nline two\nline three\nfour"; match is line 2.
+        // Before/after context get `-`; the match gets `:`.
+        assert_eq!(
+            &*result.text_out(),
+            "1-line one\n2:line two\n3-line three\n",
+        );
+    }
+
     async fn make_recursive_ctx() -> ExecContext {
         let mut vfs = VfsRouter::new();
         let mem = MemoryFs::new();
