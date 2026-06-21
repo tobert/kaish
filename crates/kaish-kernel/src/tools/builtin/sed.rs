@@ -575,14 +575,23 @@ fn detect_bre_idiom(pattern: &str, replacement: &str) -> Result<(), String> {
     let b = pattern.as_bytes();
     let mut escaped_group = false;
     let mut real_group = false;
+    // Track bracket-expression context so a literal `(` inside `[...]` is not
+    // mistaken for a real ERE group. (The `[]…]` / `[^]…]` literal-`]`-first
+    // edge isn't handled — vanishingly rare in agent-written sed.)
+    let mut in_bracket = false;
     let mut i = 0;
     while i < b.len() {
         if b[i] != b'\\' {
-            // An unescaped `(` opens a real ERE group: the author is already
-            // writing ERE, so any `\(` beside it is a literal paren, not a BRE
-            // capture group. Suppresses the capture-group false positive.
-            if b[i] == b'(' {
-                real_group = true;
+            match b[i] {
+                b'[' if !in_bracket => in_bracket = true,
+                b']' if in_bracket => in_bracket = false,
+                // An unescaped `(` OUTSIDE a bracket class opens a real ERE
+                // group: the author is already writing ERE, so any `\(` beside
+                // it is a literal paren, not a BRE capture group. A `(` inside
+                // `[...]` is a literal and says nothing about ERE intent, so it
+                // must NOT suppress detection (silent-wrong otherwise).
+                b'(' if !in_bracket => real_group = true,
+                _ => {}
             }
             i += 1;
             continue;
@@ -1544,6 +1553,18 @@ mod tests {
         assert!(detect_bre_idiom(r"(a)\(b\)", r"\1").is_ok());
         let expr = parse_expression(r"s/(a)\(b\)/\1/").unwrap();
         assert_eq!(execute_sed("a(b)", &[expr], false), "a\n");
+    }
+
+    #[test]
+    fn literal_paren_in_bracket_class_does_not_suppress_bre_detection() {
+        // `[(]` is a bracket expression matching a literal `(` — NOT a real ERE
+        // group, so it must not arm `real_group` and silently suppress the BRE
+        // error. The `\(x\)` beside it IS a genuine BRE capture-group mistake
+        // and must still fail loud. (code-review finding: unescaped `(` inside
+        // `[...]` was wrongly treated as a real group.)
+        assert!(detect_bre_idiom(r"[(]\(x\)", r"\1").is_err());
+        // The real-group suppression still works for a true unescaped group.
+        assert!(detect_bre_idiom(r"(a)\(b\)", r"\1").is_ok());
     }
 
     #[test]

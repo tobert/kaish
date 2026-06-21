@@ -203,6 +203,21 @@ clap arg parsing. Fix: bespoke argv handling (à la `set.rs`) stripping a leadin
 P2→P3 (Amy):** the shorthand leans POSIX-y and touches OS signal-number variance;
 the loud `--signal NAME %N` form covers the need. Defer.
 
+### Validator's schema-less arg-builder misparses glued value flags (false E-codes)
+`build_tool_args_for_validation` (`validator/walker.rs`) is a *third* arg-builder
+(beside `build_args_async` and the sync `build_tool_args`). It is schema-blind:
+`Arg::ShortFlag("e1d")` becomes `flags={"e1d"}` with no glued-value split, so a
+tool whose `validate()` reads positionals semantically misclassifies them. Concrete:
+`sed -e1d -e2d file` fails validation with `E006 unknown command: f` — with no `-e`
+bound, `collect_expressions` falls back to the *filename* as the expression. (The
+piped form `seq 1 3 | sed -e1d -e2d` validates fine — no file operand to misparse —
+and the execute path now accumulates correctly.) Pre-existing; surfaced by the
+2026-06-21 combined-short-flag work. Right fix is schema-aware validation arg
+binding, which converges with the twin-elimination below (there are really *two*
+non-async builders to retire). Until then, glued domain-value flags on sed/awk with
+a trailing file operand false-error at validation. Affects sed/awk; `grep -ivC`,
+`cut -f1` etc. validate fine (their `validate()` doesn't parse positionals).
+
 ### Eliminate the sync `build_tool_args` twin entirely
 Retire the sync arg builder so there's one path. Real commands already bind through
 `build_args_async`; the sync twin (`scheduler/pipeline.rs`) survives only in (a)
@@ -214,6 +229,8 @@ those test sites. Doing so closes three divergences the sync path carries today
 `map_positionals=false`): it lacks the async path's undeclared-space-flag guard, its
 glued short-flag handling (`cut -f1`), and its repeatable/`consumes>1` accumulation
 (the sync builder overwrites where the async one accumulates into `Json(Array)`).
+Fold the validation arg-builder (above) into the same effort — schema-aware binding
+in one place would fix all three surfaces at once.
 
 ### Undeclared space-flag guard covers long flags only (`-t val` still divorces)
 The guard errors on undeclared `--type value` but not single-char `-t value`
