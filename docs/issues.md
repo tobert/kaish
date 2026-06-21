@@ -74,14 +74,28 @@ still does an unconditional `named.insert` of a single `Value::String`. So
 value, but it's the same silent-drop class. Fix: route the glued path through
 `push_repeatable_value` when the matched param is repeatable.
 
-### `sed -i` (in-place edit) — deferred pending a write-model design
+### `sed -i` (in-place edit) — design decided, ready to build with tee/patch
 Both lite models in the sed usability panel reached for `sed -i 's/…/…/' file` —
-the strongest remaining ergonomic gap. Deferred because in-place editing is a
-file-mutating side effect that must route through kaish's write machinery (VFS
-resolution, overlay transactions, latch/trash rails) so sandbox/`--overlay`/confirm
-modes all hold. That's a design (where does the write go under overlay? does `-i`
-need a latch nonce? `-i.bak`?), not a parser tweak. Today `sed` loud-errors on
-`-i`. Pairs with the tee/patch write-model work below.
+the strongest remaining ergonomic gap. In-place editing is a file-mutating side
+effect that must route through kaish's write machinery (VFS resolution, overlay
+transactions, latch/trash rails) so sandbox/`--overlay`/confirm modes all hold.
+`sed -i` is *always* a truncating overwrite of an existing file, so it inherits
+the tee/patch "truncating overwrite gates" rule below. Today `sed` loud-errors on
+`-i`. **Amy decisions (2026-06-21):**
+- **Confirm flag:** `--confirm=<nonce>` across the whole mutation family
+  (`tee`/`patch`/`sed -i`) — one mental model, matching `rm`.
+- **`-i.bak`:** support the explicit backup suffix to match convention. `sed
+  -i.bak` is the user's deliberate, named backup; trash is the *transparent*
+  safety net for the gating, not a substitute for the explicit `.bak`.
+- **Multi-file:** one nonce scoping the whole path set (like `rm`'s
+  `NonceScope.paths`), not per-file.
+- **Overlay prior-content capture:** trash snapshots the *overlay's current
+  view* (what would actually be lost on overwrite in-transaction), not the
+  real-FS baseline.
+- **No file operands:** loud error (`sed -i requires file operands`) — in-place
+  editing of a stream is meaningless; do not fall back to stdin.
+- **Atomicity:** write-temp-then-atomic-rename through the VFS (crash-safe);
+  this surfaces an atomic-replace capability question on the `Filesystem` trait.
 
 ### `tee` / `patch` bypass the latch + trash machinery (write-model design)
 `tee`/`patch` mutate files through the VFS (overlay-safe) but don't honor
@@ -93,8 +107,9 @@ Proceed}` (same priority chain + `/tmp`,`/v` excludes; tee can create a nonexist
 file with no trash). **Amy decisions (2026-06-17):** latch+trash stay ON even in
 overlay mode (the protections are about agent-operation safety, not just real-FS
 data); truncating overwrite gates, `tee -a` append does NOT (for now); new file →
-just write. Open impl detail: the `--confirm` flag name (tee/patch have none), and
-how trash captures prior content in overlay mode. Do it with the `sed -i` work.
+just write. **Resolved (2026-06-21, with the `sed -i` decisions above):** the
+family-wide confirm flag is `--confirm=<nonce>`; in overlay mode trash captures
+the overlay's current view of the prior content. Do it with the `sed -i` work.
 
 ### Streaming file reads — remaining
 (wc/checksum/grep/cmp/cat landed — see devlog.) Open:
