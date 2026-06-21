@@ -126,3 +126,45 @@ leak — all validated as fixed and were retired from the punch list.
   post-`--` glue — are in issues.md.)
 - **No generic `encode`/`decode`; no `random` builtin (2026-06-13).** See the
   binary-data section above.
+
+## Accepted risks & waived items (decided, not open work)
+
+These were on the issues.md punch list but reached a verdict — recorded so the
+deferral stays a decision, not drift. Reopen only if a real failure surfaces.
+
+- **Non-Linux `kill` keeps PID-based signalling.** `pidfd` is Linux-only;
+  elsewhere we `kill(pid, sig)` and accept the PID-reuse race for the direct
+  child. Acceptable — kaish runs predominantly on Linux.
+- **Process-group kill PID-reuse window.** The PG-wide kill that catches
+  grandchildren goes through `killpg(pgid, sig)` — no PGID equivalent of pidfd.
+  If a leader is reaped and its PGID reused before `killpg` fires, an unrelated
+  group could be signalled. Mitigations (cgroup v2 `cgroup.kill`,
+  `PR_SET_CHILD_SUBREAPER`) are significant complexity; deferred until a real
+  failure.
+- **`JobManager::spawn` busy-waits** with `std::hint::spin_loop()` for immediate
+  visibility — works, wastes CPU under contention. Channel coordination would be
+  cleaner; no trigger.
+- **`head -n -0` / signed-zero line counts (waived).** `-0` lexes as `Int(0)`
+  (sign lost at the lexer) and `line_spec` only treats a *negative* Int as
+  all-but-last, so `head -n -0` prints nothing instead of the whole file. Not
+  fixable without lexer changes to preserve signed zero. Obscure; waived.
+- **`mktemp` random-suffix modulo bias (recorded by choice).** `byte % 36` skews
+  the first four alphabet chars (~3.1% vs ~2.7%, since `256 % 36 = 4`). Negligible
+  for temp suffixes; the rejection-sampling fix complicates the
+  fail-loud-on-no-entropy contract.
+- **`uname -v` discloses build provenance unconditionally.** Formats
+  `kaish {version} ({git_hash} {build_date})` from compile-time `option_env!`; an
+  embedder that sets `KAISH_GIT_HASH`/`KAISH_BUILD_DATE` fingerprints the exact
+  commit even in a minimal build. Gate behind a `verbose-identity` feature only if
+  a threat model cares.
+- **`mktemp` entropy-failure message is unhelpful on wasm.** A
+  `getrandom::fill` failure on `wasm32-wasip1` surfaces a near-empty `Display`.
+  Add a `cfg!(target_arch = "wasm32")` hint if it ever matters.
+- **`to_argv()` flattens a repeatable scalar array to one JSON token (no live
+  trigger).** `ParamSchema.repeatable` stores repeated single-value flags as
+  `named[key] = Json(Array([scalar, …]))`; `to_argv()` only splits the
+  *array-of-arrays* (`consumes > 1`) shape, so a flat scalar array becomes one
+  JSON-text token. `sed` is unaffected (it reads the raw `ToolArgs`); a future
+  repeatable-flag builtin that trusts its clap struct after a `to_argv()`
+  round-trip would see one mangled value. The real fix needs schema context in
+  `to_argv` (it has none). Record-then-defer until a builtin hits it.

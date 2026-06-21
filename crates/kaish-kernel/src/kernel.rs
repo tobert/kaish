@@ -3243,9 +3243,65 @@ impl Kernel {
                             .named
                             .insert(canonical.to_string(), Value::String(name[1..].to_string()));
                     } else {
-                        // Multi-char combined flags like -la: always boolean
-                        for c in name.chars() {
-                            tool_args.flags.insert(c.to_string());
+                        // Multi-char combined short flags. Bool flags stack
+                        // (`-la`), but the FIRST value-taking flag reached
+                        // consumes the rest of the token as its glued value
+                        // (`-ivC3` → C=3) or, if it is the last char, the next
+                        // positional (`grep -ivC 3` → C=3). Before this, a
+                        // trailing value-flag was silently treated as a bool,
+                        // stranding its argument as a stray positional (arity
+                        // error). Undeclared/bool chars stay bare flags, so a
+                        // schemaless tool keeps the old all-boolean behavior.
+                        // The first char being value-taking is handled by the
+                        // glued arm above, so it never reaches here.
+                        let chars: Vec<char> = name.chars().collect();
+                        let mut p = 0;
+                        while p < chars.len() {
+                            let key = chars[p].to_string();
+                            match param_lookup.get(key.as_str()) {
+                                Some(&(canonical, typ, consumes, repeatable))
+                                    if !is_bool_type(typ) =>
+                                {
+                                    // A glued tail is a single value, so it only
+                                    // honors a `consumes <= 1` flag — same
+                                    // assumption as the first-char glued arm
+                                    // above (no builtin short flag declares
+                                    // `consumes > 1`). The last-char branch routes
+                                    // through `consume_flag_positionals`, which
+                                    // does respect `consumes`.
+                                    let glued: String = chars[p + 1..].iter().collect();
+                                    if glued.is_empty() {
+                                        self.consume_flag_positionals(
+                                            args,
+                                            &key,
+                                            canonical,
+                                            consumes,
+                                            repeatable,
+                                            &positional_indices,
+                                            &mut consumed,
+                                            i,
+                                            &mut tool_args,
+                                        )
+                                        .await?;
+                                    } else if repeatable {
+                                        push_repeatable_value(
+                                            &mut tool_args,
+                                            &key,
+                                            canonical,
+                                            Value::String(glued),
+                                        )?;
+                                    } else {
+                                        tool_args
+                                            .named
+                                            .insert(canonical.to_string(), Value::String(glued));
+                                    }
+                                    break;
+                                }
+                                _ => {
+                                    tool_args.flags.insert(key);
+                                    p += 1;
+                                }
+                            }
                         }
                     }
                 }

@@ -74,14 +74,6 @@ still does an unconditional `named.insert` of a single `Value::String`. So
 value, but it's the same silent-drop class. Fix: route the glued path through
 `push_repeatable_value` when the matched param is repeatable.
 
-### `sed` `detect_bre_idiom` false positives
-The BRE-rejection heuristic fires on `pattern has \( or \)` AND `replacement has
-\<digit>`. Two false positives: (a) a *literal* `\\1` in the replacement trips the
-`\<digit>` check; (b) a pattern mixing a real ERE group `(a)` with a literal `\(b\)`
-plus a legit `\1` backref is valid ERE but rejected. Tighten: only treat `\<digit>`
-as a backref when the preceding backslash isn't itself escaped. A false error is
-worse than the silent no-op it replaced for these inputs.
-
 ### `sed -i` (in-place edit) — deferred pending a write-model design
 Both lite models in the sed usability panel reached for `sed -i 's/…/…/' file` —
 the strongest remaining ergonomic gap. Deferred because in-place editing is a
@@ -142,10 +134,6 @@ The six-field `ExecContext` ↔ kernel-state sync appears near every fork call s
   positionals only; post-`--` and flag-adjacent-to-positional glue aren't flagged.
 
 ### v0.8.4 review residuals (Gemini Pro, 2026-06-14)
-- **Combined short flags only bind a glued value when the value-flag is first**
-  (`cut -f1` works, but `grep -ivC 3` treats `C` as a bool, leaving `3` a stray
-  positional → arity error). Fix: in `build_args_async`'s multi-char short-flag
-  arm, consume the tail/next positional once a value-taking flag is reached.
 - **`diff -C 3 -C 4` miscounts arity** (P4-trivial — `context_steals_positional`
   subtracts 1 for a deduped `-C`). Redundant usage; fix only if it bites.
 
@@ -200,44 +188,17 @@ clap arg parsing. Fix: bespoke argv handling (à la `set.rs`) stripping a leadin
 P2→P3 (Amy):** the shorthand leans POSIX-y and touches OS signal-number variance;
 the loud `--signal NAME %N` form covers the need. Defer.
 
-### Process-group kill PID-reuse window
-The direct-child path uses `pidfd_send_signal` on Linux (immune to PID reuse for
-the child), but the PG-wide kill that catches grandchildren goes through
-`killpg(pgid, sig)` — no PGID equivalent of pidfd. If the leader is reaped and its
-PGID reused before `killpg` fires, an unrelated group could be signalled.
-Mitigations (cgroup v2 `cgroup.kill`, `PR_SET_CHILD_SUBREAPER`) are significant
-complexity; defer until a real failure.
-
-### Non-Linux unix targets keep PID-based kill
-`pidfd` is Linux-only; elsewhere we send `kill(pid, sig)` and accept the PID-reuse
-race for the direct child. Acceptable — kaish runs predominantly on Linux.
-
-### Sync `build_tool_args` lacks the undeclared-space-flag guard
-The async `build_args_async` fails loud when an undeclared flag under a
-`map_positionals` schema would silently divorce a space-form value; the sync twin
-`build_tool_args` (`scheduler/pipeline.rs`) has no equivalent guard, and also lacks
-the glued short-flag handling (`cut -f1`) the async path gained. Can't trigger the
-production bug today (only production callers are scatter/gather option parsing,
-`map_positionals=false`). Subsumed by the twin-elimination below.
-
 ### Eliminate the sync `build_tool_args` twin entirely
 Retire the sync arg builder so there's one path. Real commands already bind through
-`build_args_async`; the sync twin survives only in (a) scatter/gather *option*
-parsing in `run_scatter_gather` (an `async fn` that already holds a `&dyn
-CommandDispatcher`) and (b) the `#[cfg(test)]` `BackendDispatcher` + ~27 test sites.
-Eliminating it means an async scheduler arg-builder and converting those test sites.
-Subsumes the guard-parity item above **and** the repeatable/`consumes>1` gap (the
-sync builder overwrites on a repeated occurrence where the async one accumulates
-into `Json(Array)` — safe today only because scatter/gather expose scalar flags).
-
-### `to_argv()` flattens a repeatable scalar array to one JSON token
-`ParamSchema.repeatable` stores repeated single-value flags as `named[key] =
-Json(Array([scalar, ...]))`; `to_argv()`/`render_named_value` only splits the
-*array-of-arrays* (`consumes > 1`) shape, so a flat scalar array becomes one
-JSON-text token. `sed` is unaffected (it reads the raw `ToolArgs`, not the
-clap-parsed `Vec`), but a future repeatable-flag builtin that trusts its clap struct
-after a `to_argv()` round-trip would see one mangled value. Needs schema context in
-`to_argv` (it has none) to tell a flat repeatable array from a single `Json(Array)`.
+`build_args_async`; the sync twin (`scheduler/pipeline.rs`) survives only in (a)
+scatter/gather *option* parsing in `run_scatter_gather` (an `async fn` that already
+holds a `&dyn CommandDispatcher`) and (b) the `#[cfg(test)]` `BackendDispatcher` +
+~27 test sites. Eliminating it means an async scheduler arg-builder and converting
+those test sites. Doing so closes three divergences the sync path carries today
+(all currently un-triggerable because scatter/gather only expose scalar flags with
+`map_positionals=false`): it lacks the async path's undeclared-space-flag guard, its
+glued short-flag handling (`cut -f1`), and its repeatable/`consumes>1` accumulation
+(the sync builder overwrites where the async one accumulates into `Json(Array)`).
 
 ### Undeclared space-flag guard covers long flags only (`-t val` still divorces)
 The guard errors on undeclared `--type value` but not single-char `-t value`
@@ -287,22 +248,12 @@ or a dedicated `Callback` trait would smooth it. Not blocking.
 long time/IO future without yielding — audit and apply the same `tokio::select!`
 pattern. None currently known.
 
-### `JobManager::spawn` busy-waits
-Uses `std::hint::spin_loop()` for immediate visibility — works, wastes CPU on
-contention. Channel-based coordination would be cleaner.
-
 ### Piped stdin isn't shared across statements in one `kaish -c 'a; b'` call
 The consume-once logic in `execute_pipeline` moves the seeded `pipe_stdin` into the
 FIRST top-level statement's pipeline; if that statement doesn't read stdin, the
 reader is dropped, so a later reader gets nothing — `printf hi | kaish -c 'echo x;
 cat'` prints only `x`. A real shell leaves fd 0 shared. Fix: keep the source on the
 persistent `exec_ctx` and let whichever command first reads it take it. Niche; defer.
-
-### `head -n -0` / signed-zero line counts can't be distinguished (lexer-level)
-`head -n -0` should mean "all but the last 0 lines" (= whole file) but prints
-nothing — `-0` lexes as `Int(0)` (sign lost at the lexer) and `line_spec` only
-treats a *negative* Int as all-but-last. Obscure; not fixable without lexer changes
-to preserve signed zero. Waived.
 
 ### `PipelineRunner::run_single`'s `stdin` parameter is vestigial
 `scheduler/pipeline.rs:362` — `run_single(cmd, ctx, stdin)` is always called with
@@ -337,23 +288,6 @@ shellcheck dialect at all. Net: kaish is neither a strict POSIX-`sh` nor a bash
 subset. Reframe to something like *"inspired by POSIX sh and bash, informed by
 shellcheck's lints."* Corollary worth stating: shellcheck gives zero coverage for
 kaish's extensions, so the kaish validator is their sole safety net.
-
-### `mktemp` random suffix has slight modulo bias
-`random_suffix` maps random bytes onto a 36-char alphabet with `byte % 36`; since
-`256 % 36 = 4`, bytes 252–255 skew the first four chars (~3.1% vs ~2.7%). Negligible
-for temp suffixes; not worth the rejection-sampling loop (which complicates the
-fail-loud-on-no-entropy contract). Recorded by choice.
-
-### `uname -v` discloses build provenance unconditionally
-`uname.rs` formats the version field as `kaish {version} ({git_hash} {build_date})`
-from compile-time `option_env!`. If an embedder sets `KAISH_GIT_HASH`/
-`KAISH_BUILD_DATE`, `uname -v` fingerprints the exact commit/build even in a minimal
-build. Gate behind a `verbose-identity`-style feature if a threat model cares.
-
-### `mktemp` entropy-failure message is unhelpful on wasm
-On `wasm32-wasip1` a `getrandom::fill` failure surfaces an opaque error whose
-`Display` may be near-empty, so `mktemp: could not obtain system entropy: {e}` loses
-detail. Add a `cfg!(target_arch = "wasm32")` hint if it ever matters.
 
 ### `touch <dir>` on a local mount fails (EISDIR); memory mounts succeed
 `LocalFs::set_mtime` opens the path with `write(true)`, so `touch existing_dir/`
