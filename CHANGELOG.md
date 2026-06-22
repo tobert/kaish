@@ -10,6 +10,12 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`diff --json` emits structured hunks** instead of the unified-diff text wrapped as a JSON string: `{old_file, new_file, hunks:[{old_start, old_lines, new_start, new_lines, changes:[{tag, content}]}]}` (`tag` ∈ `equal`/`delete`/`insert`, `content` newline-stripped for clean `jq`). Plain `diff` output is unchanged; `diff -q --json` reports `{old_file, new_file, differ:true}`.
+
+### Changed
+- **BREAKING: `patch` now applies with offset search and fuzz, like GNU `patch`** — instead of hard-failing on any line drift. A hunk is located by matching its context near the header position (reporting `Hunk #N succeeded at L (offset O lines)` when it lands elsewhere) and, if exact context fails, by ignoring up to 2 lines of context at each end (`with fuzz F`, searched within a bounded window of the header position). Offsets/fuzz are reported loudly; a hunk that matches nowhere still fails loud (`Hunk #N FAILED`) and the file is left untouched (whole-file compare-and-swap write). A clean apply stays quiet. CRLF line endings are preserved. **Exit-code contract change:** a near-miss patch that previously exited non-zero (drift rejected) now applies and exits 0 — scripts that branched on `patch`'s exit to detect drift should read the `offset`/`fuzz` report instead. This relaxes kaish's previously stricter-than-GNU behavior so agents' near-miss diffs apply instead of looping; content-anchored editing remains an embedder concern (see `docs/editing-for-agents.md`).
+
 ### Fixed
 - **Combined short flags now bind a trailing value flag** (`grep -ivC 3`, `grep -inC1`): the value-taking flag in a bundle used to be treated as a boolean, stranding its argument as a stray positional → arity error. Bool flags still stack (`ls -la`); the first value-taking flag in the bundle consumes the rest of the token (`-ivC3` → `C=3`) or, if it's the last char, the next positional (`-ivC 3` → `C=3`).
 - **Glued repeatable short flags accumulate instead of clobbering**: the glued first-char form of a repeatable flag (e.g. `sed -e1d -e2d`) now keeps every value like the separated `-e 1d -e 2d`, instead of silently dropping all but the last.

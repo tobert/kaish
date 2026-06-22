@@ -9,6 +9,37 @@ Newest themes first within each area; dates are when the work landed.
 
 ---
 
+## diff/patch improvements — `diff --json` + GNU-fuzz `patch` (landed 2026-06-22)
+
+The diff/patch half of the [editing-for-agents](editing-for-agents.md) design
+pass (the `edit` builtin was declined for kaish — embedder concern). Two changes,
+both on branch `feat/diff-patch-improvements`:
+
+- **`diff --json`** attaches structured hunks via `OutputData::with_rich_json`
+  (same mechanism as `grep --json`) while the text node keeps serving pipes/humans.
+  Built from `similar`'s `iter_hunks()` ranges + `iter_changes()` tags. The kernel
+  only serializes the rich_json when `--json` is requested, so plain `diff` is
+  byte-for-byte unchanged.
+- **`patch` gained GNU-style offset search + fuzz**, replacing the
+  stricter-than-GNU exact-context matcher that hard-failed on any drift (an
+  "attractive nuisance" — agents pipe a near-miss diff, it rejects, they loop). The
+  new pure `apply_hunks` locates each hunk by matching its context near the
+  header position (searching outward → *offset*) and, failing exact, trimming up to
+  2 context lines per end (*fuzz*); only the verified span is rewritten, so fuzz
+  never overwrites unverified lines. Offset/fuzz are reported loudly (`Hunk #N
+  succeeded at L (offset O lines)`); no-match still fails loud (`Hunk #N FAILED`),
+  file untouched. Applied via a whole-file `PatchOp::Replace { offset:0, expected:
+  Some(original) }` — TOCTOU-safe CAS, uniform across local/overlay backends.
+
+**Decisions worth keeping:** the strict→fuzzy relaxation is *within one algorithm,
+reported* — explicitly NOT the rejected "hijack patch → auto content-anchor on
+failure" (a silent algorithm switch, the footgun kaish forbids). Reflex survey
+showed agents reach for `patch`/`sed -i` by reflex; research showed line-numbered
+diffs are the format LLMs generate worst — so `patch` stays a faithful workalike
+and the reliable content-anchored path lives in the embedders (kaijutsu's hashline
+`edit`), not here. The `apply_hunks` core is pure and unit-tested (clean/offset/
+fuzz/no-match/reverse); execute-level tests confirm loud non-destructive failure.
+
 ## OverlayFs — copy-on-write overlay (landed 2026-06-10)
 
 A CoW overlay filesystem composing with `LocalFs`/`MemoryFs`, for kaibo coder

@@ -150,7 +150,9 @@ The six-field `ExecContext` ↔ kernel-state sync appears near every fork call s
 
 ### v0.8.4 review residuals (Gemini Pro, 2026-06-14)
 - **`diff -C 3 -C 4` miscounts arity** (P4-trivial — `context_steals_positional`
-  subtracts 1 for a deduped `-C`). Redundant usage; fix only if it bites.
+  subtracts 1 for a deduped `-C`). Redundant usage; the execute-time clap backstop
+  (`parsed.files.len() > 2`) already catches the real surplus-operand case, so the
+  validator heuristic is cosmetic. Fix only if it bites.
 
 ---
 
@@ -303,6 +305,20 @@ Revisit when the first external tool bundle wants unit tests.
 ---
 
 ## P4 — Eventually
+
+### `patch` residuals — final-newline intent and file creation (2026-06-22)
+Surfaced by the diff/patch code review; both pre-existing, both low-frequency:
+- **Final-newline intent isn't honored.** `parse_unified_diff` discards the
+  `\ No newline at end of file` marker, and `apply_hunks` derives the result's
+  trailing newline solely from the input file — so a patch whose intent is to add
+  or remove the file's terminal newline can't. Fixing means threading
+  no-newline-at-EOF state through `DiffLine`/hunk parsing. Rare (final-newline-only
+  changes); the applied file just doesn't match patch intent (no data loss).
+- **No file-creation path.** `patch` reads the target then issues a whole-file
+  `Replace`, so a `--- /dev/null` / `+++ b/new.txt` creation diff errors
+  (`cannot read 'new.txt'`) instead of creating the file. The whole-file-Replace
+  design cements the pre-existing limitation. Add an "old side empty → create"
+  branch if agents start emitting creation diffs.
 
 ### Control structures inside `$()` are not supported
 The `$()` body accepts the full *statement* grammar (pipelines, `&&`/`||`,
