@@ -10,6 +10,11 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+- **Combined short flags now bind a trailing value flag** (`grep -ivC 3`, `grep -inC1`): the value-taking flag in a bundle used to be treated as a boolean, stranding its argument as a stray positional → arity error. Bool flags still stack (`ls -la`); the first value-taking flag in the bundle consumes the rest of the token (`-ivC3` → `C=3`) or, if it's the last char, the next positional (`-ivC 3` → `C=3`).
+- **Glued repeatable short flags accumulate instead of clobbering**: the glued first-char form of a repeatable flag (e.g. `sed -e1d -e2d`) now keeps every value like the separated `-e 1d -e 2d`, instead of silently dropping all but the last.
+- **`sed` no longer false-errors valid ERE as a BRE capture-group idiom**: a literal `\\1` in the replacement (escaped backslash + `1`) is no longer mistaken for a `\1` backref; a pattern that mixes a real ERE group `(a)` with literal escaped parens `\(b\)` plus a `\1` backref is accepted; and — conversely — a literal `(` inside a bracket class (`[(]\(x\)`) no longer *suppresses* the BRE error, so a genuine BRE capture-group mistake beside it still fails loud.
+
 ## [0.9.0] - 2026-06-18
 
 ### Added

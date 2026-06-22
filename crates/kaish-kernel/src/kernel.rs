@@ -3228,24 +3228,80 @@ impl Kernel {
                             )
                             .await?;
                         }
-                    } else if let Some(&(canonical, _, _, _)) = param_lookup
+                    } else if let Some(&(canonical, _, consumes, repeatable)) = param_lookup
                         .get(&name[..1])
                         .filter(|(_, typ, ..)| !is_bool_type(typ))
                     {
                         // Glued short-flag value: `cut -f1`, `head -c5`, `cut -f1-3`,
-                        // `grep -A1`. The first char is a declared value-taking short
-                        // flag, so the rest of the token is its value — the coreutils
-                        // idiom. The lexer's flag char class is `[a-zA-Z][a-zA-Z0-9-]*`,
-                        // so the first byte is always ASCII (safe to slice) and the tail
-                        // is a plain literal. Single value only; no builtin short flag
-                        // declares consumes>1.
-                        tool_args
-                            .named
-                            .insert(canonical.to_string(), Value::String(name[1..].to_string()));
+                        // `grep -A1`, `sed -e1d`. The first char is a declared
+                        // value-taking short flag, so the rest of the token is its
+                        // value — the coreutils idiom. The lexer's flag char class is
+                        // `[a-zA-Z][a-zA-Z0-9-]*`, so the first byte is always ASCII
+                        // (safe to slice) and the tail is a plain literal.
+                        bind_glued_short_value(
+                            &mut tool_args,
+                            &name[..1],
+                            canonical,
+                            consumes,
+                            repeatable,
+                            name[1..].to_string(),
+                        )?;
                     } else {
-                        // Multi-char combined flags like -la: always boolean
-                        for c in name.chars() {
-                            tool_args.flags.insert(c.to_string());
+                        // Multi-char combined short flags. Bool flags stack
+                        // (`-la`), but the FIRST value-taking flag reached
+                        // consumes the rest of the token as its glued value
+                        // (`-ivC3` → C=3) or, if it is the last char, the next
+                        // positional (`grep -ivC 3` → C=3). Before this, a
+                        // trailing value-flag was silently treated as a bool,
+                        // stranding its argument as a stray positional (arity
+                        // error). Undeclared/bool chars stay bare flags, so a
+                        // schemaless tool keeps the old all-boolean behavior.
+                        // The first char being value-taking is handled by the
+                        // glued arm above, so it never reaches here. The flag
+                        // char class is ASCII, so byte indexing is char indexing
+                        // (no `Vec<char>` allocation needed).
+                        let bytes = name.as_bytes();
+                        let mut p = 0;
+                        while p < bytes.len() {
+                            let key = &name[p..p + 1];
+                            match param_lookup.get(key) {
+                                Some(&(canonical, typ, consumes, repeatable))
+                                    if !is_bool_type(typ) =>
+                                {
+                                    let glued = name[p + 1..].to_string();
+                                    if glued.is_empty() {
+                                        // Value flag is the last char: take the
+                                        // next positional. `consume_flag_positionals`
+                                        // respects `consumes`.
+                                        self.consume_flag_positionals(
+                                            args,
+                                            key,
+                                            canonical,
+                                            consumes,
+                                            repeatable,
+                                            &positional_indices,
+                                            &mut consumed,
+                                            i,
+                                            &mut tool_args,
+                                        )
+                                        .await?;
+                                    } else {
+                                        bind_glued_short_value(
+                                            &mut tool_args,
+                                            key,
+                                            canonical,
+                                            consumes,
+                                            repeatable,
+                                            glued,
+                                        )?;
+                                    }
+                                    break;
+                                }
+                                _ => {
+                                    tool_args.flags.insert(key.to_string());
+                                    p += 1;
+                                }
+                            }
                         }
                     }
                 }
@@ -5119,6 +5175,35 @@ fn push_repeatable_value(
         Ok(())
     } else {
         anyhow::bail!("--{flag_name}: named[{canonical}] already holds a non-array value")
+    }
+}
+
+/// Bind a *glued* short-flag value (`-f1` → f=1, `-e1d`, `-A2`). The whole tail
+/// is one token, so it carries a single value: a repeatable flag accumulates
+/// (never clobbers — `-e1d -e2d` keeps both), a plain one inserts. Shared by the
+/// first-char glued arm and the combined-bundle arm so the two can't drift on
+/// `repeatable` handling. A `consumes > 1` flag can't be expressed glued — that
+/// is a loud error, not a silent single-value bind.
+fn bind_glued_short_value(
+    tool_args: &mut ToolArgs,
+    flag_name: &str,
+    canonical: &str,
+    consumes: usize,
+    repeatable: bool,
+    value: String,
+) -> anyhow::Result<()> {
+    if consumes > 1 {
+        anyhow::bail!(
+            "-{flag_name} takes {consumes} arguments; use the separated form, not a glued value"
+        );
+    }
+    if repeatable {
+        push_repeatable_value(tool_args, flag_name, canonical, Value::String(value))
+    } else {
+        tool_args
+            .named
+            .insert(canonical.to_string(), Value::String(value));
+        Ok(())
     }
 }
 

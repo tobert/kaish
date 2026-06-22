@@ -70,6 +70,58 @@ async fn grep_glued_after_context() {
 }
 
 #[tokio::test]
+async fn combined_bools_then_glued_value_flag() {
+    // `-inA1`: bools `i`,`n` stack, then value-taking `A` glues its value `1`.
+    // Before the fix, `A` was treated as a bool and `1`... had nowhere to go.
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("f.txt"), "alpha\nMATCH\nbeta\n").unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    let (out, code) = run(&kernel, "grep -inA1 match f.txt").await;
+    assert_eq!(code, 0, "got: {out}");
+    assert!(out.contains("MATCH"), "case-insensitive match missing: {out}");
+    assert!(out.contains("beta"), "after-context line missing: {out}");
+    assert!(out.contains("2:"), "line numbers (-n) missing: {out}");
+}
+
+#[tokio::test]
+async fn combined_bools_then_value_flag_takes_next_positional() {
+    // `grep -ivC 3` — the headline case from issues.md. `i`,`v` are bools and
+    // `C` is value-taking as the LAST char, so it must consume the next
+    // positional `3` (context). Before the fix `C` was a bool and `3` was a
+    // stray positional → arity error.
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("f.txt"), "alpha\nMATCH\nbeta\n").unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    // Use -n (not -v) so the assertion is deterministic; the binding path for
+    // `C`-as-last-char is identical.
+    let (out, code) = run(&kernel, "grep -inC 1 match f.txt").await;
+    assert_eq!(code, 0, "got: {out}");
+    assert!(out.contains("MATCH"), "match missing: {out}");
+    assert!(out.contains("alpha"), "before-context missing: {out}");
+    assert!(out.contains("beta"), "after-context missing: {out}");
+}
+
+#[tokio::test]
+async fn glued_first_char_repeatable_accumulates() {
+    // `sed -e1d -e2d`: the GLUED first-char form of a repeatable flag (`-e`)
+    // must accumulate both expressions (delete lines 1 and 2 of `1\n2\n3` → "3"),
+    // not keep only the last (which left "1\n3"). Matches the separated
+    // `-e 1d -e 2d`. (code-review finding: the first-char glued arm did a plain
+    // `named.insert` and ignored `repeatable`, clobbering earlier values.)
+    // NB: piped (no file operand) on purpose — the file-positional form
+    // (`sed -e1d f`) is separately blocked by the schema-less validation
+    // arg-builder; tracked in issues.md.
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    let (out, code) = run(&kernel, "seq 1 3 | sed -e1d -e2d").await;
+    assert_eq!(code, 0, "got: {out}");
+    assert_eq!(out.trim(), "3", "both -e expressions must apply: {out}");
+}
+
+#[tokio::test]
 async fn combined_bool_flags_still_split() {
     // `ls -la` is a run of bare bool flags, not a glued value — must keep
     // splitting into individual flags, not bind "a" as a value of "-l".

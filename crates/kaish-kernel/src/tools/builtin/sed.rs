@@ -574,9 +574,25 @@ fn compile_pattern(pattern: &str, case_insensitive: bool, multiline: bool) -> Re
 fn detect_bre_idiom(pattern: &str, replacement: &str) -> Result<(), String> {
     let b = pattern.as_bytes();
     let mut escaped_group = false;
+    let mut real_group = false;
+    // Track bracket-expression context so a literal `(` inside `[...]` is not
+    // mistaken for a real ERE group. (The `[]…]` / `[^]…]` literal-`]`-first
+    // edge isn't handled — vanishingly rare in agent-written sed.)
+    let mut in_bracket = false;
     let mut i = 0;
     while i < b.len() {
         if b[i] != b'\\' {
+            match b[i] {
+                b'[' if !in_bracket => in_bracket = true,
+                b']' if in_bracket => in_bracket = false,
+                // An unescaped `(` OUTSIDE a bracket class opens a real ERE
+                // group: the author is already writing ERE, so any `\(` beside
+                // it is a literal paren, not a BRE capture group. A `(` inside
+                // `[...]` is a literal and says nothing about ERE intent, so it
+                // must NOT suppress detection (silent-wrong otherwise).
+                b'(' if !in_bracket => real_group = true,
+                _ => {}
+            }
             i += 1;
             continue;
         }
@@ -603,12 +619,7 @@ fn detect_bre_idiom(pattern: &str, replacement: &str) -> Result<(), String> {
         i += 2;
     }
 
-    let bytes = replacement.as_bytes();
-    let has_backref = bytes
-        .iter()
-        .enumerate()
-        .any(|(i, &b)| b == b'\\' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit));
-    if escaped_group && has_backref {
+    if escaped_group && !real_group && replacement_has_backref(replacement) {
         return Err(
             "pattern uses BRE capture groups \\(...\\); kaish sed is ERE \
              (egrep-style) — write (...) and backreference \\1, not \\(...\\)"
@@ -616,6 +627,28 @@ fn detect_bre_idiom(pattern: &str, replacement: &str) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// True if the replacement holds a `\N` backreference (N a digit) whose
+/// backslash is not itself escaped. A literal `\\1` (escaped backslash + `1`)
+/// is text, not a backref, and must not arm BRE capture-group detection —
+/// mirrors the pattern scan's `\\`-as-a-unit consumption.
+fn replacement_has_backref(replacement: &str) -> bool {
+    let b = replacement.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'\\' {
+            i += 1;
+            continue;
+        }
+        if b.get(i + 1).is_some_and(u8::is_ascii_digit) {
+            return true;
+        }
+        // `\` + the next byte form one escape unit; consume both so a `\\` pair
+        // can't leave a dangling backslash that re-arms detection on a digit.
+        i += 2;
+    }
+    false
 }
 
 /// Given `start` pointing just past a `\{`, return true if a BRE interval body
@@ -1499,6 +1532,39 @@ mod tests {
     fn ere_groups_with_backref_work_normally() {
         let expr = parse_expression(r"s/(a)(b)/\2\1/").unwrap();
         assert_eq!(execute_sed("ab", &[expr], false), "ba\n");
+    }
+
+    #[test]
+    fn literal_double_backslash_digit_in_replacement_is_not_a_backref() {
+        // `\\1` is an escaped backslash + literal `1`, not a `\1` backref. The
+        // detector must consume `\\` as a unit so it doesn't see a phantom
+        // backref alongside `\(...\)` and reject valid ERE. (issues.md P2 (a))
+        assert!(detect_bre_idiom(r"\(x\)", r"\\1").is_ok());
+        // End to end: `\(x\)` matches literal `(x)`, `\\1` emits literal `\1`.
+        let expr = parse_expression(r"s/\(x\)/\\1/").unwrap();
+        assert_eq!(execute_sed("(x)", &[expr], false), "\\1\n");
+    }
+
+    #[test]
+    fn real_ere_group_alongside_literal_escaped_parens_is_allowed() {
+        // A genuine ERE group `(a)` means the author is writing ERE, so the
+        // `\(b\)` beside it is a literal paren — `\1` backrefs the real group.
+        // Must not be mistaken for BRE capture groups. (issues.md P2 (b))
+        assert!(detect_bre_idiom(r"(a)\(b\)", r"\1").is_ok());
+        let expr = parse_expression(r"s/(a)\(b\)/\1/").unwrap();
+        assert_eq!(execute_sed("a(b)", &[expr], false), "a\n");
+    }
+
+    #[test]
+    fn literal_paren_in_bracket_class_does_not_suppress_bre_detection() {
+        // `[(]` is a bracket expression matching a literal `(` — NOT a real ERE
+        // group, so it must not arm `real_group` and silently suppress the BRE
+        // error. The `\(x\)` beside it IS a genuine BRE capture-group mistake
+        // and must still fail loud. (code-review finding: unescaped `(` inside
+        // `[...]` was wrongly treated as a real group.)
+        assert!(detect_bre_idiom(r"[(]\(x\)", r"\1").is_err());
+        // The real-group suppression still works for a true unescaped group.
+        assert!(detect_bre_idiom(r"(a)\(b\)", r"\1").is_ok());
     }
 
     #[test]
