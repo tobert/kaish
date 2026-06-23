@@ -11,7 +11,7 @@
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
-use similar::TextDiff;
+use similar::{ChangeTag, TextDiff};
 use std::path::Path;
 
 use crate::ast::Value;
@@ -184,21 +184,36 @@ impl Tool for Diff {
             })
             .unwrap_or(3);
 
-        // Quick check if files are identical
+        // Quick check if files are identical. The human/pipe path stays empty
+        // (exit 0, no output), but a `--json` consumer still gets a consistent
+        // object — `differ:false` plus empty `hunks` — instead of an empty
+        // string that won't parse. Mirrors the quiet-mode `differ` signal.
         if content1 == content2 {
-            return ExecResult::success("");
-        }
-
-        // Quiet mode: just report difference
-        if quiet {
-            let text = format!("Files {} and {} differ\n", file1, file2);
-            let mut result = ExecResult::from_output(1, text.clone(), String::new());
-            result.set_output(Some(OutputData::text(text)));
-            return result;
+            let rich = serde_json::json!({
+                "old_file": file1,
+                "new_file": file2,
+                "differ": false,
+                "hunks": [],
+            });
+            let data = OutputData::text(String::new()).with_rich_json(rich);
+            return ExecResult::with_output_and_text(data, String::new());
         }
 
         // Generate diff using similar's built-in unified format
         let diff = TextDiff::from_lines(&content1, &content2);
+
+        // Quiet mode: just report difference. `--json` consumers still get a
+        // structured signal (`{old_file, new_file, differ}`) via rich_json.
+        if quiet {
+            let text = format!("Files {} and {} differ\n", file1, file2);
+            let rich = serde_json::json!({
+                "old_file": file1,
+                "new_file": file2,
+                "differ": true,
+            });
+            let data = OutputData::text(text.clone()).with_rich_json(rich);
+            return ExecResult::with_output_and_text(data, text).with_code(1);
+        }
 
         let plain = diff
             .unified_diff()
@@ -212,11 +227,84 @@ impl Tool for Diff {
             plain
         };
 
-        // Exit code 1 if files differ (POSIX convention)
-        let mut result = ExecResult::from_output(1, output.clone(), String::new());
-        result.set_output(Some(OutputData::text(output)));
-        result
+        // Structured hunks for `--json` (always built — cheap; the kernel only
+        // serializes it when `--json` was requested). Mirrors grep's rich_json.
+        let rich = diff_to_json(&diff, &file1, &file2, context_lines);
+        let data = OutputData::text(output.clone()).with_rich_json(rich);
+
+        // Exit code 1 if files differ (POSIX convention).
+        ExecResult::with_output_and_text(data, output).with_code(1)
     }
+}
+
+/// Build the structured `--json` representation: one object per file pair with
+/// `hunks`, each hunk carrying its `@@` line ranges (1-indexed) and a `changes`
+/// list of `{tag, content}` (tag ∈ equal|delete|insert; content has its trailing
+/// newline stripped so `jq` sees clean line text).
+fn diff_to_json<'a>(
+    diff: &TextDiff<'a, 'a, 'a, str>,
+    file1: &str,
+    file2: &str,
+    context: usize,
+) -> serde_json::Value {
+    let mut unified = diff.unified_diff();
+    unified.context_radius(context);
+
+    let mut hunks = Vec::new();
+    for hunk in unified.iter_hunks() {
+        let ops = hunk.ops();
+        let (Some(first), Some(last)) = (ops.first(), ops.last()) else {
+            continue;
+        };
+        let old_start = first.old_range().start;
+        let old_end = last.old_range().end;
+        let new_start = first.new_range().start;
+        let new_end = last.new_range().end;
+        // Match the unified `@@` convention (and `similar`'s own header): a
+        // non-empty range is 1-indexed (start + 1); a zero-length range (a pure
+        // insertion or deletion) reports the 0-indexed line it sits *after*, so
+        // we don't point one past the edit site.
+        let line_no = |start: usize, len: usize| if len == 0 { start } else { start + 1 };
+
+        let mut changes = Vec::new();
+        for change in hunk.iter_changes() {
+            let tag = match change.tag() {
+                ChangeTag::Equal => "equal",
+                ChangeTag::Delete => "delete",
+                ChangeTag::Insert => "insert",
+            };
+            let mut content = change.value().to_string();
+            if content.ends_with('\n') {
+                content.pop();
+                if content.ends_with('\r') {
+                    content.pop();
+                }
+            }
+            // `missing_newline` preserves the terminal-newline signal the text
+            // path shows as `\ No newline at end of file` — without it a change
+            // that only toggles the file's final newline is byte-identical to a
+            // no-op (both sides strip to the same `content`).
+            changes.push(serde_json::json!({
+                "tag": tag,
+                "content": content,
+                "missing_newline": change.missing_newline(),
+            }));
+        }
+
+        hunks.push(serde_json::json!({
+            "old_start": line_no(old_start, old_end - old_start),
+            "old_lines": old_end - old_start,
+            "new_start": line_no(new_start, new_end - new_start),
+            "new_lines": new_end - new_start,
+            "changes": changes,
+        }));
+    }
+
+    serde_json::json!({
+        "old_file": file1,
+        "new_file": file2,
+        "hunks": hunks,
+    })
 }
 
 /// Apply ANSI color codes to pre-formatted unified diff output.
@@ -412,5 +500,171 @@ mod tests {
         assert_eq!(result.code, 1);
         // Check for ANSI escape codes
         assert!(result.text_out().contains("\x1b["));
+    }
+
+    #[tokio::test]
+    async fn test_diff_json_structured_hunks() {
+        use crate::interpreter::{apply_output_format, OutputFormat};
+        // file1.txt = line1/line2/line3, file2.txt = line1/modified/line3.
+        let mut ctx = make_test_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("file1.txt".into()));
+        args.positional.push(Value::String("file2.txt".into()));
+
+        let result = Diff.execute(args, &mut ctx).await;
+        assert_eq!(result.code, 1);
+        // The text payload is still the unified diff (pipe/human path).
+        assert!(result.text_out().contains("-line2"));
+
+        // --json path: rich_json structured hunks, not the text wrapped.
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json: serde_json::Value =
+            serde_json::from_str(&formatted.text_out()).expect("valid JSON");
+        assert_eq!(json["old_file"], "file1.txt");
+        assert_eq!(json["new_file"], "file2.txt");
+        let hunks = json["hunks"].as_array().expect("hunks array");
+        assert_eq!(hunks.len(), 1, "one hunk: {json}");
+        let changes = hunks[0]["changes"].as_array().expect("changes array");
+        // The hunk must carry the delete (line2) and insert (modified) with
+        // clean, newline-stripped content.
+        assert!(changes.iter().any(|c| c["tag"] == "delete" && c["content"] == "line2"));
+        assert!(changes.iter().any(|c| c["tag"] == "insert" && c["content"] == "modified"));
+        assert!(changes.iter().any(|c| c["tag"] == "equal" && c["content"] == "line1"));
+    }
+
+    #[tokio::test]
+    async fn test_diff_json_correct_line_ranges() {
+        use crate::interpreter::{apply_output_format, OutputFormat};
+        // Change is on line 5 of 6 — the hunk header must report line 5, not 1.
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(Path::new("a.txt"), b"l1\nl2\nl3\nl4\nl5\nl6\n").await.unwrap();
+        mem.write(Path::new("b.txt"), b"l1\nl2\nl3\nl4\nCHANGED\nl6\n").await.unwrap();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("a.txt".into()));
+        args.positional.push(Value::String("b.txt".into()));
+        let result = Diff.execute(args, &mut ctx).await;
+
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json: serde_json::Value =
+            serde_json::from_str(&formatted.text_out()).expect("valid JSON");
+        let hunk = &json["hunks"][0];
+        // Default context 3: hunk spans lines 2..6, change at 5.
+        assert_eq!(hunk["old_start"], 2, "hunk: {hunk}");
+        assert!(hunk["changes"].as_array().unwrap().iter()
+            .any(|c| c["tag"] == "delete" && c["content"] == "l5"));
+    }
+
+    #[tokio::test]
+    async fn test_diff_json_pure_insertion_line_numbers() {
+        use crate::interpreter::{apply_output_format, OutputFormat};
+        // Old side empty (0 lines): a zero-length range reports the line it
+        // follows (0), not one past it (1) — matches the `@@` convention.
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(Path::new("empty.txt"), b"").await.unwrap();
+        mem.write(Path::new("full.txt"), b"new line\n").await.unwrap();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("empty.txt".into()));
+        args.positional.push(Value::String("full.txt".into()));
+        let result = Diff.execute(args, &mut ctx).await;
+
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json: serde_json::Value =
+            serde_json::from_str(&formatted.text_out()).expect("valid JSON");
+        let hunk = &json["hunks"][0];
+        assert_eq!(hunk["old_lines"], 0, "hunk: {hunk}");
+        assert_eq!(hunk["old_start"], 0, "count-0 range reports the preceding line: {hunk}");
+    }
+
+    #[tokio::test]
+    async fn test_diff_json_marks_missing_newline() {
+        use crate::interpreter::{apply_output_format, OutputFormat};
+        // A change that only toggles the file's terminal newline must stay
+        // distinguishable in --json: old "A" (no newline) and new "A" (with
+        // newline) both strip to "A", so without `missing_newline` the two
+        // changes are byte-identical and the intent is lost (the text path
+        // shows it as `\ No newline at end of file`).
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(Path::new("no_nl.txt"), b"A").await.unwrap();
+        mem.write(Path::new("with_nl.txt"), b"A\n").await.unwrap();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("no_nl.txt".into()));
+        args.positional.push(Value::String("with_nl.txt".into()));
+        let result = Diff.execute(args, &mut ctx).await;
+
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json: serde_json::Value =
+            serde_json::from_str(&formatted.text_out()).expect("valid JSON");
+        let changes = json["hunks"][0]["changes"].as_array().expect("changes array");
+        assert!(
+            changes.iter().any(|c| c["tag"] == "delete"
+                && c["content"] == "A"
+                && c["missing_newline"] == true),
+            "deleted line lacked a trailing newline; must be flagged: {json}"
+        );
+        assert!(
+            changes.iter().any(|c| c["tag"] == "insert"
+                && c["content"] == "A"
+                && c["missing_newline"] == false),
+            "inserted line has a trailing newline: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_diff_json_identical_emits_object() {
+        use crate::interpreter::{apply_output_format, OutputFormat};
+        // Identical files must still yield a well-formed `--json` object so an
+        // agent iterating file pairs gets a consistent shape (`differ:false`,
+        // empty `hunks`), not an empty string that won't parse.
+        let mut ctx = make_test_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("same1.txt".into()));
+        args.positional.push(Value::String("same2.txt".into()));
+
+        let result = Diff.execute(args, &mut ctx).await;
+        assert!(result.ok(), "identical files exit 0: {}", result.err);
+        // Plain/pipe path stays empty (unchanged human-facing output).
+        assert!(result.text_out().is_empty());
+
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json: serde_json::Value = serde_json::from_str(&formatted.text_out())
+            .expect("identical files must still emit valid JSON");
+        assert_eq!(json["differ"], false);
+        assert_eq!(json["old_file"], "same1.txt");
+        assert_eq!(json["new_file"], "same2.txt");
+        assert_eq!(
+            json["hunks"].as_array().expect("hunks array").len(),
+            0,
+            "no hunks for identical files: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_diff_json_quiet_emits_differ_object() {
+        use crate::interpreter::{apply_output_format, OutputFormat};
+        let mut ctx = make_test_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("file1.txt".into()));
+        args.positional.push(Value::String("file2.txt".into()));
+        args.flags.insert("q".to_string());
+
+        let result = Diff.execute(args, &mut ctx).await;
+        assert_eq!(result.code, 1);
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json: serde_json::Value =
+            serde_json::from_str(&formatted.text_out()).expect("valid JSON");
+        assert_eq!(json["differ"], true);
+        assert_eq!(json["old_file"], "file1.txt");
     }
 }

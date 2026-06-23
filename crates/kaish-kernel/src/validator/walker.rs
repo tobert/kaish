@@ -1,13 +1,15 @@
 //! AST walker for pre-execution validation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     Arg, Assignment, CaseBranch, CaseStmt, Command, Expr, ForLoop, IfStmt, Pipeline, Program,
     SpannedPart, Stmt, StringPart, TestExpr, ToolDef, VarPath, VarSegment, WhileLoop, Value,
 };
+use crate::kernel::{bind_glued_short_value, push_repeatable_value};
+use crate::scheduler::{is_bool_type, schema_param_lookup};
 use crate::validator::issue::Span;
-use crate::tools::{ToolArgs, ToolRegistry};
+use crate::tools::{ToolArgs, ToolRegistry, ToolSchema};
 
 use super::issue::{IssueCode, ValidationIssue};
 use super::scope_tracker::ScopeTracker;
@@ -123,9 +125,13 @@ impl<'a> Validator<'a> {
             self.validate_arg(arg);
         }
 
-        // If we have a schema, validate args against it
+        // If we have a schema, validate args against it. Pass the schema so the
+        // arg-builder binds glued/value short-flags the same way execute does —
+        // otherwise a tool whose validate() reads positionals semantically (sed,
+        // awk) misreads them (docs/issues.md: schema-blind validation builder).
         if let Some(tool) = self.registry.get(&cmd.name) {
-            let tool_args = build_tool_args_for_validation(&cmd.args);
+            let schema = tool.schema();
+            let tool_args = build_tool_args_for_validation(&cmd.args, Some(&schema));
             let tool_issues = tool.validate(&tool_args);
             self.issues.extend(tool_issues);
         } else if let Some(user_tool) = self.user_tools.get(&cmd.name) {
@@ -534,16 +540,37 @@ fn is_special_command(name: &str) -> bool {
 ///
 /// This is a simplified version that doesn't evaluate expressions -
 /// it uses placeholder values since we only care about argument structure.
-pub fn build_tool_args_for_validation(args: &[Arg]) -> ToolArgs {
+pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>) -> ToolArgs {
     let mut tool_args = ToolArgs::new();
+    // Schema-aware param table: flag name → (canonical, type, consumes, repeatable).
+    // Empty when there's no schema, in which case every flag stays a bare flag
+    // (the old schema-blind behavior).
+    let param_lookup = schema.map(schema_param_lookup).unwrap_or_default();
+    let mut consumed: HashSet<usize> = HashSet::new();
+    let mut past_double_dash = false;
 
-    for arg in args {
-        match arg {
+    for i in 0..args.len() {
+        match &args[i] {
+            Arg::DoubleDash => past_double_dash = true,
             Arg::Positional(expr) => {
-                tool_args.positional.push(expr_to_placeholder(expr));
+                if !consumed.contains(&i) {
+                    tool_args.positional.push(expr_to_placeholder(expr));
+                }
             }
             Arg::Named { key, value } => {
-                tool_args.named.insert(key.clone(), expr_to_placeholder(value));
+                let v = expr_to_placeholder(value);
+                match param_lookup.get(key.as_str()) {
+                    // Repeatable `--flag=a --flag=b` accumulates (matches execute).
+                    Some(&(canonical, _, _, true)) => {
+                        let _ = push_repeatable_value(&mut tool_args, key, canonical, v);
+                    }
+                    Some(&(canonical, ..)) => {
+                        tool_args.named.insert(canonical.to_string(), v);
+                    }
+                    None => {
+                        tool_args.named.insert(key.clone(), v);
+                    }
+                }
             }
             Arg::WordAssign { key, value } => {
                 // Validation walker doesn't know which command is receiving;
@@ -551,17 +578,183 @@ pub fn build_tool_args_for_validation(args: &[Arg]) -> ToolArgs {
                 // consistent with previous validator output.
                 tool_args.named.insert(key.clone(), expr_to_placeholder(value));
             }
-            Arg::ShortFlag(flag) => {
-                tool_args.flags.insert(flag.clone());
+            Arg::ShortFlag(name) => {
+                if past_double_dash {
+                    tool_args.positional.push(Value::String(format!("-{name}")));
+                } else {
+                    bind_short_flag_for_validation(
+                        name,
+                        &param_lookup,
+                        args,
+                        i,
+                        &mut consumed,
+                        &mut tool_args,
+                    );
+                }
             }
-            Arg::LongFlag(flag) => {
-                tool_args.flags.insert(flag.clone());
+            Arg::LongFlag(name) => {
+                if past_double_dash {
+                    tool_args.positional.push(Value::String(format!("--{name}")));
+                } else {
+                    match param_lookup.get(name.as_str()) {
+                        Some(&(canonical, typ, consumes, repeatable)) if !is_bool_type(typ) => {
+                            bind_value_or_flag(
+                                &mut tool_args, name, canonical, consumes, repeatable, args, i,
+                                &mut consumed,
+                            );
+                        }
+                        Some(&(canonical, ..)) => {
+                            tool_args.flags.insert(canonical.to_string());
+                        }
+                        None => {
+                            tool_args.flags.insert(name.clone());
+                        }
+                    }
+                }
             }
-            Arg::DoubleDash => {}
         }
     }
 
     tool_args
+}
+
+/// Bind a (possibly glued/combined) short-flag token, schema-aware, mirroring
+/// `kernel::build_args_async`: a value-taking first char consumes the rest of the
+/// token as its glued value (`-e1d` → e=`1d`) or, if it is the last char, the next
+/// positional (`-e d` → e=`d`); bool flags stack (`-la`). Unknown chars stay bare
+/// flags so a schemaless tool keeps all-boolean behavior.
+fn bind_short_flag_for_validation(
+    name: &str,
+    param_lookup: &HashMap<String, (&str, &str, usize, bool)>,
+    args: &[Arg],
+    i: usize,
+    consumed: &mut HashSet<usize>,
+    tool_args: &mut ToolArgs,
+) {
+    // Whole-name match first (POSIX `-name value` or a multi-char bool).
+    if let Some(&(canonical, typ, consumes, repeatable)) = param_lookup.get(name) {
+        if is_bool_type(typ) {
+            tool_args.flags.insert(canonical.to_string());
+        } else {
+            bind_value_or_flag(tool_args, name, canonical, consumes, repeatable, args, i, consumed);
+        }
+        return;
+    }
+    // First char is a declared value-taking short flag: the tail is its glued value.
+    if let Some(&(canonical, _, consumes, repeatable)) = param_lookup
+        .get(&name[..1])
+        .filter(|(_, typ, ..)| !is_bool_type(typ))
+    {
+        let glued = name[1..].to_string();
+        if glued.is_empty() {
+            bind_value_or_flag(
+                tool_args, &name[..1], canonical, consumes, repeatable, args, i, consumed,
+            );
+        } else {
+            let _ =
+                bind_glued_short_value(tool_args, &name[..1], canonical, consumes, repeatable, glued);
+        }
+        return;
+    }
+    // Combined short flags: bools stack until the first value-taking char, which
+    // consumes the rest of the token (or the next positional).
+    let bytes = name.as_bytes();
+    let mut p = 0;
+    while p < bytes.len() {
+        let key = &name[p..p + 1];
+        match param_lookup.get(key) {
+            Some(&(canonical, typ, consumes, repeatable)) if !is_bool_type(typ) => {
+                let glued = name[p + 1..].to_string();
+                if glued.is_empty() {
+                    bind_value_or_flag(
+                        tool_args, key, canonical, consumes, repeatable, args, i, consumed,
+                    );
+                } else {
+                    let _ = bind_glued_short_value(
+                        tool_args, key, canonical, consumes, repeatable, glued,
+                    );
+                }
+                return;
+            }
+            _ => {
+                tool_args.flags.insert(key.to_string());
+                p += 1;
+            }
+        }
+    }
+}
+
+/// Bind a bare value-flag by consuming the next `consumes` not-yet-consumed
+/// positionals as its value(s) — mirroring `kernel::consume_flag_positionals`:
+/// a single-value flag stores a scalar (repeatable → canonical array), a
+/// multi-value flag (`jq --arg NAME VALUE`, `consumes==2`) stores an
+/// array-of-arrays. A single-value flag may also consume a `key=value`
+/// (`awk -v a=1`); multi-value flags take plain positionals only. With nothing
+/// to consume it falls back to a bare flag.
+#[allow(clippy::too_many_arguments)] // mirrors kernel::consume_flag_positionals
+fn bind_value_or_flag(
+    tool_args: &mut ToolArgs,
+    flag_name: &str,
+    canonical: &str,
+    consumes: usize,
+    repeatable: bool,
+    args: &[Arg],
+    i: usize,
+    consumed: &mut HashSet<usize>,
+) {
+    let want = consumes.max(1);
+    let allow_word_assign = consumes <= 1;
+    let mut collected: Vec<Value> = Vec::with_capacity(want);
+    for _ in 0..want {
+        let found = args[i + 1..].iter().enumerate().find_map(|(off, a)| {
+            let idx = i + 1 + off;
+            if consumed.contains(&idx) {
+                return None;
+            }
+            match a {
+                Arg::Positional(expr) => Some((idx, expr_to_placeholder(expr))),
+                Arg::WordAssign { key, value } if allow_word_assign => {
+                    let s = crate::interpreter::value_to_string(&expr_to_placeholder(value));
+                    Some((idx, Value::String(format!("{key}={s}"))))
+                }
+                _ => None,
+            }
+        });
+        match found {
+            Some((idx, v)) => {
+                consumed.insert(idx);
+                collected.push(v);
+            }
+            None => break,
+        }
+    }
+
+    if collected.is_empty() {
+        tool_args.flags.insert(canonical.to_string());
+        return;
+    }
+    if consumes <= 1 {
+        if let Some(v) = collected.into_iter().next() {
+            if repeatable {
+                let _ = push_repeatable_value(tool_args, flag_name, canonical, v);
+            } else {
+                tool_args.named.insert(canonical.to_string(), v);
+            }
+        }
+        return;
+    }
+    // Multi-consume: accumulate under named[canonical] as array-of-arrays.
+    let occ: Vec<serde_json::Value> = collected
+        .iter()
+        .map(crate::interpreter::value_to_json)
+        .collect();
+    let entry = tool_args
+        .named
+        .entry(canonical.to_string())
+        .or_insert_with(|| Value::Json(serde_json::Value::Array(Vec::new())));
+    if let Value::Json(serde_json::Value::Array(outer)) = entry {
+        outer.push(serde_json::Value::Array(occ));
+    }
 }
 
 /// Convert an expression to a placeholder value for validation.
@@ -631,6 +824,36 @@ mod tests {
         let issues = validator.validate(&program);
         // echo should not produce an undefined command error
         assert!(!issues.iter().any(|i| i.code == IssueCode::UndefinedCommand));
+    }
+
+    #[test]
+    fn glued_value_flags_dont_false_error_at_validation() {
+        // Regression for the schema-blind validation builder (docs/issues.md):
+        // `sed -e1d -e2d FILE` must validate clean. Before schema-aware binding,
+        // the glued `-e` values weren't split, so `collect_expressions` fell back
+        // to parsing the FILE PATH as the sed program — a path-dependent false
+        // E006 (here `file.txt` → its leading `f` is an "unknown command").
+        let (registry, user_tools) = make_validator();
+        let validator = Validator::new(&registry, &user_tools);
+
+        let program = Program {
+            statements: vec![Stmt::Command(Command {
+                name: "sed".to_string(),
+                args: vec![
+                    Arg::ShortFlag("e1d".to_string()),
+                    Arg::ShortFlag("e2d".to_string()),
+                    Arg::Positional(Expr::Literal(Value::String("file.txt".to_string()))),
+                ],
+                redirects: vec![],
+            })],
+        };
+
+        let issues = validator.validate(&program);
+        assert!(
+            !issues.iter().any(|i| i.code == IssueCode::InvalidSedExpr),
+            "glued -e flags false-errored at validation: {:?}",
+            issues.iter().map(|i| &i.message).collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -13,6 +13,21 @@ Priorities: **P1** high-leverage features/diagnostics · **P2** focused refactor
 
 ## P1 — High-leverage features and diagnostics
 
+### `execute_argv` — argv-native kernel entry point (+ multicall binary) (Amy, 2026-06-23)
+Embeddable surface is string-native (`execute(&str)` → lex/parse). A structured
+embedder (kaijutsu) or a busybox-style `kaish-multicall` binary arrives with argv
+*already tokenized*, and today must re-quote it back into a string for the lexer —
+lossy for typed `Value`s (`to_argv()` stringifies `Bytes`/`Json`). Add
+`execute_argv(&self, name, &[Value]) -> ExecResult` as a **peer** of `execute`,
+joining the dispatch chain at `ToolArgs` (new helper `build_args_from_argv`
+mirroring `build_args_async` minus `Expr` eval; reuses validation/`--json`/latch/
+dispatch unchanged). argv tokens are literal — no glob/`$VAR`/split. Test plan:
+proptest binder-equivalence vs `build_args_async` (first proptest use — greenlit),
+a differential harness over the single-command corpus (argv door ≡ string door),
+`Bytes`/`Json` round-trip pins, latch/`--json` smoke. Wrinkle: the two-layer clap
+model (`to_argv()` re-parse) caps typed passthrough to `args.positional`-reading
+builtins. Full writeup: [multicall.md](multicall.md).
+
 ### Port useful `rg`-only features into `kaish-glob` / `grep` (Amy, 2026-06-17)
 `rg` was removed (80%-rule: one search builtin). Some dropped flags are worth
 re-homing in `kaish-glob` (which already wraps `ignore::types::Types`) and
@@ -150,7 +165,9 @@ The six-field `ExecContext` ↔ kernel-state sync appears near every fork call s
 
 ### v0.8.4 review residuals (Gemini Pro, 2026-06-14)
 - **`diff -C 3 -C 4` miscounts arity** (P4-trivial — `context_steals_positional`
-  subtracts 1 for a deduped `-C`). Redundant usage; fix only if it bites.
+  subtracts 1 for a deduped `-C`). Redundant usage; the execute-time clap backstop
+  (`parsed.files.len() > 2`) already catches the real surplus-operand case, so the
+  validator heuristic is cosmetic. Fix only if it bites.
 
 ---
 
@@ -203,20 +220,20 @@ clap arg parsing. Fix: bespoke argv handling (à la `set.rs`) stripping a leadin
 P2→P3 (Amy):** the shorthand leans POSIX-y and touches OS signal-number variance;
 the loud `--signal NAME %N` form covers the need. Defer.
 
-### Validator's schema-less arg-builder misparses glued value flags (false E-codes)
-`build_tool_args_for_validation` (`validator/walker.rs`) is a *third* arg-builder
-(beside `build_args_async` and the sync `build_tool_args`). It is schema-blind:
-`Arg::ShortFlag("e1d")` becomes `flags={"e1d"}` with no glued-value split, so a
-tool whose `validate()` reads positionals semantically misclassifies them. Concrete:
-`sed -e1d -e2d file` fails validation with `E006 unknown command: f` — with no `-e`
-bound, `collect_expressions` falls back to the *filename* as the expression. (The
-piped form `seq 1 3 | sed -e1d -e2d` validates fine — no file operand to misparse —
-and the execute path now accumulates correctly.) Pre-existing; surfaced by the
-2026-06-21 combined-short-flag work. Right fix is schema-aware validation arg
-binding, which converges with the twin-elimination below (there are really *two*
-non-async builders to retire). Until then, glued domain-value flags on sed/awk with
-a trailing file operand false-error at validation. Affects sed/awk; `grep -ivC`,
-`cut -f1` etc. validate fine (their `validate()` doesn't parse positionals).
+### ~~Validator's schema-less arg-builder misparses glued value flags~~ — FIXED 2026-06-23
+`build_tool_args_for_validation` (`validator/walker.rs`) was schema-blind:
+`Arg::ShortFlag("e1d")` became `flags={"e1d"}` with no glued-value split, so a
+tool whose `validate()` reads positionals semantically (sed/awk) misclassified
+them — `sed -e1d -e2d FILE` fell back to parsing the *filename* as the program, a
+path-dependent false `E006`. **Fixed**: the validation builder now takes the tool
+schema and binds glued/combined/space-form and multi-consume (`jq --arg NAME VAL`)
+short-flags exactly as `build_args_async` does, reusing the shared
+`schema_param_lookup`/`bind_glued_short_value`/`push_repeatable_value` helpers
+(now `pub(crate)`), so the two paths can't drift. jq's `validate()` skip-guard was
+moved off the old unbound-`flags` representation onto the bound `named` pair
+(still rejecting the illegal `--arg=NAME` equals form). Regression test:
+`glued_value_flags_dont_false_error_at_validation`. The full twin-elimination
+below is still open, but the false-E-code class this caused is closed.
 
 ### Eliminate the sync `build_tool_args` twin entirely
 Retire the sync arg builder so there's one path. Real commands already bind through
@@ -303,6 +320,20 @@ Revisit when the first external tool bundle wants unit tests.
 ---
 
 ## P4 — Eventually
+
+### `patch` residuals — final-newline intent and file creation (2026-06-22)
+Surfaced by the diff/patch code review; both pre-existing, both low-frequency:
+- **Final-newline intent isn't honored.** `parse_unified_diff` discards the
+  `\ No newline at end of file` marker, and `apply_hunks` derives the result's
+  trailing newline solely from the input file — so a patch whose intent is to add
+  or remove the file's terminal newline can't. Fixing means threading
+  no-newline-at-EOF state through `DiffLine`/hunk parsing. Rare (final-newline-only
+  changes); the applied file just doesn't match patch intent (no data loss).
+- **No file-creation path.** `patch` reads the target then issues a whole-file
+  `Replace`, so a `--- /dev/null` / `+++ b/new.txt` creation diff errors
+  (`cannot read 'new.txt'`) instead of creating the file. The whole-file-Replace
+  design cements the pre-existing limitation. Add an "old side empty → create"
+  branch if agents start emitting creation diffs.
 
 ### Control structures inside `$()` are not supported
 The `$()` body accepts the full *statement* grammar (pipelines, `&&`/`||`,

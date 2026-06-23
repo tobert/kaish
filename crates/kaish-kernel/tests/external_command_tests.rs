@@ -8,6 +8,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(feature = "subprocess")]
 
+use std::time::Duration;
+
 use kaish_kernel::{Kernel, KernelConfig};
 
 /// Helper to create a kernel with passthrough filesystem and PATH access.
@@ -394,17 +396,39 @@ async fn minus_alone_lexes_correctly() {
 /// `kill -<sig> %N` can deliver an arbitrary signal (STOP/CONT), not just
 /// terminate. If the PGID weren't recorded, `kill --signal STOP %1` would be
 /// refused as an "in-process task" — so its exit 0 proves the killpg path.
-///
-/// The foreground builtin `sleep` gives the backgrounded external time to
-/// spawn and register its PGID before the signals fire.
 #[tokio::test]
 async fn kill_signals_external_background_job_process_group() {
     let kernel = repl_kernel();
+    kernel
+        .execute("/usr/bin/sleep 30 &")
+        .await
+        .expect("background");
+
+    // Wait until the backgrounded external's process group is actually
+    // registered before signalling. A fixed `sleep` here raced the child's
+    // fork/exec + PGID registration under load (flaked the suite). `CONT` is a
+    // harmless probe: it's refused as an "in-process task" (exit 1) until the
+    // PGID lands, then delivered via killpg (exit 0) — so its success is the
+    // readiness gate. Bounded so a job that never registers still fails loudly.
+    let mut ready = false;
+    for _ in 0..150 {
+        if kernel
+            .execute("kill --signal CONT %1")
+            .await
+            .expect("execute")
+            .code
+            == 0
+        {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(ready, "background external job never registered its PGID (~3s)");
+
+    // The real verification: STOP/CONT/TERM all delivered via the process group.
     let result = kernel
-        .execute(
-            "/usr/bin/sleep 30 & sleep 0.3; \
-             kill --signal STOP %1; kill --signal CONT %1; kill %1",
-        )
+        .execute("kill --signal STOP %1; kill --signal CONT %1; kill %1")
         .await
         .expect("execute");
     assert_eq!(

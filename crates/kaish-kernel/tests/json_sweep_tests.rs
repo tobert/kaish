@@ -98,7 +98,10 @@ const CASES: &[Case] = &[
     // (an object). Reads a finite fixture — never a real /dev device, which
     // would hang here in passthrough mode.
     Case { name: "dd", setup: &[], cmd: "dd if=tmp/data.json bs=4 count=1 --json", expect: Expect::Object },
-    Case { name: "diff", setup: &[], cmd: "diff tmp/data.json tmp/data.json --json", expect: Expect::Empty },
+    // Identical files → exit 0 with empty *text*, but `--json` still emits a
+    // consistent object (`{old_file, new_file, differ:false, hunks:[]}`) so a
+    // consumer iterating file pairs always parses an object, never "".
+    Case { name: "diff", setup: &[], cmd: "diff tmp/data.json tmp/data.json --json", expect: Expect::Object },
     Case { name: "dirname", setup: &[], cmd: "dirname /a/b.txt --json", expect: Expect::String },
     Case { name: "echo", setup: &[], cmd: "echo hi --json", expect: Expect::String },
     Case { name: "env", setup: &["export FOO=bar"], cmd: "env --json", expect: Expect::String },
