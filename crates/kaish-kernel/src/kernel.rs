@@ -5159,7 +5159,7 @@ fn apply_tilde_expansion(value: Value, home: Option<&str>) -> Value {
 /// (`consume_flag_positionals`) and the `--flag=value` form (`Arg::Named`) — so
 /// `-e A -e B`, `--expression=A --expression=B`, and any mix all converge on one
 /// ordered array.
-fn push_repeatable_value(
+pub(crate) fn push_repeatable_value(
     tool_args: &mut ToolArgs,
     flag_name: &str,
     canonical: &str,
@@ -5184,7 +5184,7 @@ fn push_repeatable_value(
 /// first-char glued arm and the combined-bundle arm so the two can't drift on
 /// `repeatable` handling. A `consumes > 1` flag can't be expressed glued — that
 /// is a loud error, not a silent single-value bind.
-fn bind_glued_short_value(
+pub(crate) fn bind_glued_short_value(
     tool_args: &mut ToolArgs,
     flag_name: &str,
     canonical: &str,

@@ -79,6 +79,18 @@ struct JqArgs {
 
 type Filter = jaq_core::Filter<jaq_core::Native<Val>>;
 
+/// True when `key` (`arg`/`argjson`) carries a legal `consumes=2` binding: an
+/// array whose elements are themselves arrays (NAME/VALUE pairs from the space
+/// form `--arg NAME VAL`). The illegal `--arg=NAME` equals form binds scalar
+/// elements instead, so it returns false and the filter compile check still runs.
+fn has_arg_pair_binding(args: &ToolArgs, key: &str) -> bool {
+    matches!(
+        args.named.get(key),
+        Some(Value::Json(serde_json::Value::Array(items)))
+            if items.iter().any(|it| matches!(it, serde_json::Value::Array(_)))
+    )
+}
+
 /// Parse and compile a jq filter expression.
 ///
 /// `global_vars` are the bindings introduced by `--arg` / `--argjson`, in
@@ -377,12 +389,19 @@ impl Tool for JqNative {
         // compile-step check to avoid false "undefined variable" errors on valid
         // filters like `.foo + $x` used with `--arg x 1`.
         //
-        // At validation time `--arg` appears as `Arg::LongFlag("arg")` → stored in
-        // `args.flags`; the execute-time Array-of-pairs form (`consumes=2` result
-        // in `args.named`) is not available until the kernel's runtime pre-parser runs.
-        // (The `--arg=NAME` equals form is not a legal jq invocation — real jq
-        // rejects it as "Unknown option" — so we deliberately do not skip on it.)
-        if args.flags.contains("arg") || args.flags.contains("argjson") {
+        // Schema-aware validation binds the legal `--arg NAME VALUE` space form
+        // into `named["arg"]` as the same `consumes=2` Array-of-*pairs* the execute
+        // path sees (each occurrence an inner 2-element array). Its presence means
+        // extra `$var`s are in scope, so skip the compile check. The illegal
+        // `--arg=NAME` equals form instead binds an Array-of-*scalars* — real jq
+        // rejects that as "Unknown option", so we deliberately do NOT skip on it,
+        // letting the filter compile reject the undefined `$NAME` loudly. A malformed
+        // `--arg` with nothing to consume falls back to `flags`.
+        if has_arg_pair_binding(args, "arg")
+            || has_arg_pair_binding(args, "argjson")
+            || args.flags.contains("arg")
+            || args.flags.contains("argjson")
+        {
             return issues;
         }
 
