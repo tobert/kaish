@@ -69,9 +69,32 @@ mod common_cancel {
         script_path
     }
 
+    /// Reads the child PID from the *first* line of `pid_file`. First-line (not
+    /// whole-file) so scripts that append more lines after their pid (e.g. the
+    /// vars-combo test writes `WHO=…` on line 2) still parse.
     pub fn read_pid(pid_file: &Path) -> Option<u32> {
         let s = fs::read_to_string(pid_file).ok()?;
-        s.trim().parse().ok()
+        s.lines().next()?.trim().parse().ok()
+    }
+
+    /// Polls for the child's recorded PID up to `max`. The `pid_writer` script
+    /// writes its PID as its very first action, but the write can land a beat
+    /// after `execute()` returns (fs flush) — and the *test's* job is to act
+    /// once the child is actually running. Polling here (instead of a bare
+    /// `read_pid().expect()`) is what keeps these tests from flaking under load:
+    /// a kill/cancel window that fires during bash startup must not race the
+    /// pid write into a panic. Returns `None` only if the pid never appears.
+    pub async fn wait_for_pid(pid_file: &Path, max: Duration) -> Option<u32> {
+        let deadline = Instant::now() + max;
+        loop {
+            if let Some(pid) = read_pid(pid_file) {
+                return Some(pid);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     pub fn kernel_for_test() -> Arc<Kernel> {
@@ -85,7 +108,7 @@ mod common_cancel {
     }
 }
 
-use common_cancel::{child_alive, kernel_for_test, pid_writer, read_pid, wait_for_dead};
+use common_cancel::{child_alive, kernel_for_test, pid_writer, wait_for_dead, wait_for_pid};
 
 // ════════════════════════════════════════════════════════════════════════════
 // 1. request_timeout kills a foreground external
@@ -98,16 +121,20 @@ async fn request_timeout_kills_external_child() {
     let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
 
     let kernel = kernel_for_test();
+    // 500ms (not 150ms): the timeout must outlast worst-case bash fork/exec +
+    // pid-write under load, or the child is killed before recording its pid and
+    // the read below has nothing to check. Still vastly under `sleep 60`, so the
+    // timeout path is exactly what fires.
     let result = kernel
         .execute_with_options(
             &format!("bash {}", script.display()),
-            ExecuteOptions::new().with_timeout(Duration::from_millis(150)))
+            ExecuteOptions::new().with_timeout(Duration::from_millis(500)))
         .await
         .expect("execute");
 
     assert_eq!(result.code, 124, "expected timeout exit 124, got {} err={}", result.code, result.err);
 
-    let pid = read_pid(&pid_file).expect("pid_file");
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
     assert!(
         wait_for_dead(pid, Duration::from_secs(2)).await,
         "child pid {} still alive after timeout + grace",
@@ -135,15 +162,17 @@ async fn per_call_timeout_overrides_config_default() {
     let pid_file = tmp.path().join("pid");
     let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
 
+    // 500ms per-call timeout (see test 1): outlast bash startup so the child
+    // records its pid before the kill, while still overriding the 60s config.
     let result = kernel
         .execute_with_options(
             &format!("bash {}", script.display()),
-            ExecuteOptions::new().with_timeout(Duration::from_millis(150)))
+            ExecuteOptions::new().with_timeout(Duration::from_millis(500)))
         .await
         .expect("execute");
 
     assert_eq!(result.code, 124);
-    let pid = read_pid(&pid_file).expect("pid_file");
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
     assert!(
         wait_for_dead(pid, Duration::from_secs(2)).await,
         "per-call timeout did not kill child {}",
@@ -186,10 +215,13 @@ async fn kernel_cancel_kills_running_external() {
 
     let kernel = kernel_for_test();
     let kernel_clone = kernel.clone();
+    let pid_file_clone = pid_file.clone();
 
-    // Cancel after 100ms.
+    // Cancel once the child is actually running (its pid is recorded), not after
+    // a fixed sleep — otherwise the cancel can fire during bash startup and race
+    // the pid write, the flake this suite suffered under load.
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = wait_for_pid(&pid_file_clone, Duration::from_secs(2)).await;
         kernel_clone.cancel();
     });
 
@@ -206,7 +238,7 @@ async fn kernel_cancel_kills_running_external() {
         result.code,
     );
 
-    let pid = read_pid(&pid_file).expect("pid_file");
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
     assert!(
         wait_for_dead(pid, Duration::from_secs(2)).await,
         "Kernel::cancel did not kill external pid {}",
@@ -231,7 +263,7 @@ async fn timeout_builtin_kills_inner_external() {
         .expect("execute");
 
     assert_eq!(result.code, 124, "expected 124, got code={} err={}", result.code, result.err);
-    let pid = read_pid(&pid_file).expect("pid_file");
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
     assert!(
         wait_for_dead(pid, Duration::from_secs(3)).await,
         "timeout builtin left pid {} alive",
@@ -252,16 +284,18 @@ async fn pipeline_cascade_kills_both_stages() {
     let s2 = pid_writer(tmp.path(), &p2, "cat");
 
     let kernel = kernel_for_test();
+    // 500ms (not 200ms): both pipeline stages are separate bash forks that must
+    // each record their pid before the timeout kills the group (see test 1).
     let result = kernel
         .execute_with_options(
             &format!("bash {} | bash {}", s1.display(), s2.display()),
-            ExecuteOptions::new().with_timeout(Duration::from_millis(200)))
+            ExecuteOptions::new().with_timeout(Duration::from_millis(500)))
         .await
         .expect("execute");
 
     assert_eq!(result.code, 124);
-    let pid1 = read_pid(&p1).expect("pid1");
-    let pid2 = read_pid(&p2).expect("pid2");
+    let pid1 = wait_for_pid(&p1, Duration::from_secs(2)).await.expect("pid1");
+    let pid2 = wait_for_pid(&p2, Duration::from_secs(2)).await.expect("pid2");
     assert!(wait_for_dead(pid1, Duration::from_secs(2)).await, "pid1 {} alive", pid1);
     assert!(wait_for_dead(pid2, Duration::from_secs(2)).await, "pid2 {} alive", pid2);
 }
@@ -286,16 +320,19 @@ async fn grace_escalation_sigkills_term_trapping_child() {
     .into_arc();
 
     let started = Instant::now();
+    // 500ms timeout so the (nested) bash records its pid before the kill; the
+    // 200ms grace above is what this test really exercises — SIGKILL after the
+    // TERM-trapping child ignores SIGTERM.
     let result = kernel
         .execute_with_options(
             &format!("bash {}", script.display()),
-            ExecuteOptions::new().with_timeout(Duration::from_millis(100)))
+            ExecuteOptions::new().with_timeout(Duration::from_millis(500)))
         .await
         .expect("execute");
     let elapsed = started.elapsed();
 
     assert_eq!(result.code, 124);
-    let pid = read_pid(&pid_file).expect("pid");
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid");
     assert!(
         wait_for_dead(pid, Duration::from_secs(3)).await,
         "TERM-trapping pid {} survived SIGKILL escalation",
@@ -326,12 +363,8 @@ async fn background_amp_job_survives_parent_cancel() {
         .await
         .expect("execute");
 
-    // Wait briefly for the bg child to record its PID.
-    let started = Instant::now();
-    while !pid_file.exists() && started.elapsed() < Duration::from_secs(1) {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let pid = read_pid(&pid_file).expect("pid");
+    // Wait for the bg child to record its PID (2s budget for load headroom).
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid");
 
     // Cancel the parent kernel — bg job should NOT be killed.
     kernel.cancel();
@@ -362,10 +395,12 @@ async fn embedder_cancel_token_does_not_leak_into_kernel_state() {
     let kernel = kernel_for_test();
     let embedder_token = tokio_util::sync::CancellationToken::new();
 
-    // Fire embedder token after 100ms.
+    // Fire the embedder token once the child is running, not after a fixed
+    // sleep — avoids cancelling during bash startup (the load-flake).
     let token_clone = embedder_token.clone();
+    let pid_file_clone = pid_file.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = wait_for_pid(&pid_file_clone, Duration::from_secs(2)).await;
         token_clone.cancel();
     });
 
@@ -377,7 +412,7 @@ async fn embedder_cancel_token_does_not_leak_into_kernel_state() {
         .expect("execute");
 
     // The cancellation cascaded; child is dead.
-    let pid = read_pid(&pid_file).expect("pid");
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid");
     assert!(
         wait_for_dead(pid, Duration::from_secs(2)).await,
         "embedder cancel did not kill pid {}",
@@ -455,13 +490,17 @@ async fn vars_plus_timeout_combo_kills_child_with_vars_visible() {
             &format!("bash {}", inner_path.display()),
             ExecuteOptions::new()
                 .with_vars(vars)
-                .with_timeout(Duration::from_millis(200)))
+                // 500ms (see test 1): outlast bash startup so the child records
+                // both its pid and the WHO line before the timeout kills it.
+                .with_timeout(Duration::from_millis(500)))
         .await
         .expect("execute");
 
     assert_eq!(result.code, 124, "expected 124, got {}", result.code);
 
-    // Child wrote its PID and the WHO line before sleeping.
+    // Child wrote its PID and the WHO line before sleeping. Poll: the second
+    // line (WHO) may flush a beat after execute() returns under load.
+    let _ = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
     let contents = std::fs::read_to_string(&pid_file).expect("read pid_file");
     let mut lines = contents.lines();
     let pid: u32 = lines.next().expect("pid line").parse().expect("parse pid");
@@ -489,8 +528,10 @@ async fn cancel_token_plus_vars_combo() {
     let token = tokio_util::sync::CancellationToken::new();
 
     let token_clone = token.clone();
+    let pid_file_clone = pid_file.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Cancel once the child is running, not after a fixed sleep (load-flake).
+        let _ = wait_for_pid(&pid_file_clone, Duration::from_secs(2)).await;
         token_clone.cancel();
     });
 
@@ -506,7 +547,7 @@ async fn cancel_token_plus_vars_combo() {
         .await
         .expect("execute");
 
-    let pid = read_pid(&pid_file).expect("pid");
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid");
     assert!(wait_for_dead(pid, Duration::from_secs(2)).await);
 }
 
