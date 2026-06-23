@@ -184,9 +184,19 @@ impl Tool for Diff {
             })
             .unwrap_or(3);
 
-        // Quick check if files are identical
+        // Quick check if files are identical. The human/pipe path stays empty
+        // (exit 0, no output), but a `--json` consumer still gets a consistent
+        // object — `differ:false` plus empty `hunks` — instead of an empty
+        // string that won't parse. Mirrors the quiet-mode `differ` signal.
         if content1 == content2 {
-            return ExecResult::success("");
+            let rich = serde_json::json!({
+                "old_file": file1,
+                "new_file": file2,
+                "differ": false,
+                "hunks": [],
+            });
+            let data = OutputData::text(String::new()).with_rich_json(rich);
+            return ExecResult::with_output_and_text(data, String::new());
         }
 
         // Generate diff using similar's built-in unified format
@@ -563,6 +573,35 @@ mod tests {
         let hunk = &json["hunks"][0];
         assert_eq!(hunk["old_lines"], 0, "hunk: {hunk}");
         assert_eq!(hunk["old_start"], 0, "count-0 range reports the preceding line: {hunk}");
+    }
+
+    #[tokio::test]
+    async fn test_diff_json_identical_emits_object() {
+        use crate::interpreter::{apply_output_format, OutputFormat};
+        // Identical files must still yield a well-formed `--json` object so an
+        // agent iterating file pairs gets a consistent shape (`differ:false`,
+        // empty `hunks`), not an empty string that won't parse.
+        let mut ctx = make_test_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("same1.txt".into()));
+        args.positional.push(Value::String("same2.txt".into()));
+
+        let result = Diff.execute(args, &mut ctx).await;
+        assert!(result.ok(), "identical files exit 0: {}", result.err);
+        // Plain/pipe path stays empty (unchanged human-facing output).
+        assert!(result.text_out().is_empty());
+
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json: serde_json::Value = serde_json::from_str(&formatted.text_out())
+            .expect("identical files must still emit valid JSON");
+        assert_eq!(json["differ"], false);
+        assert_eq!(json["old_file"], "same1.txt");
+        assert_eq!(json["new_file"], "same2.txt");
+        assert_eq!(
+            json["hunks"].as_array().expect("hunks array").len(),
+            0,
+            "no hunks for identical files: {json}"
+        );
     }
 
     #[tokio::test]

@@ -319,6 +319,12 @@ Surfaced by the diff/patch code review; both pre-existing, both low-frequency:
   (`cannot read 'new.txt'`) instead of creating the file. The whole-file-Replace
   design cements the pre-existing limitation. Add an "old side empty → create"
   branch if agents start emitting creation diffs.
+- **`diff --json` drops final-newline metadata** (diff-side twin of the above).
+  `diff_to_json` strips each change's trailing newline, so a change to the file's
+  terminal newline (`A` vs `A\n`) serializes as a delete+insert of identical
+  `"A"` — the text path's `\ No newline at end of file` signal is lost. Add
+  `missing_newline` (`similar::Change::missing_newline()`) to each change object
+  if agents need to reconstruct files byte-exactly from `--json`.
 
 ### Control structures inside `$()` are not supported
 The `$()` body accepts the full *statement* grammar (pipelines, `&&`/`||`,

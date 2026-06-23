@@ -479,17 +479,27 @@ fn search_block(buf: &[String], src: &[&str], center: usize, limit: usize) -> Op
         return None;
     }
     let max_start = buf.len() - src.len();
-    let center = center.min(max_start);
-    let max_dist = max_start.max(center).min(limit);
+    // Distance from the *unclamped* center to the farthest valid start in
+    // `0..=max_start`. Clamping center to the buffer first (the old bug) would
+    // measure `limit` from the clamped position, silently defeating the fuzz
+    // window when the header points past EOF — a fuzzed hunk could then splice
+    // into a coincidental match ~the-whole-file away. Keeping the true center
+    // means `dist > limit` correctly rejects far matches; an exact (full-context)
+    // match still searches file-wide because its `limit` is `usize::MAX`.
+    let max_possible = center.max(max_start.saturating_sub(center));
+    let max_dist = max_possible.min(limit);
     for dist in 0..=max_dist {
         if dist == 0 {
-            if matches_at(buf, src, center) {
+            if center <= max_start && matches_at(buf, src, center) {
                 return Some(center);
             }
             continue;
         }
-        if center >= dist && matches_at(buf, src, center - dist) {
-            return Some(center - dist);
+        if center >= dist {
+            let backward = center - dist;
+            if backward <= max_start && matches_at(buf, src, backward) {
+                return Some(backward);
+            }
         }
         let forward = center + dist;
         if forward <= max_start && matches_at(buf, src, forward) {
@@ -893,6 +903,31 @@ mod tests {
         let content = format!("{}\n", lines.join("\n"));
         let err = apply_hunks(&content, &files[0].hunks, false, DEFAULT_FUZZ).unwrap_err();
         assert!(err.contains("FAILED"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_hunks_fuzz_window_bounded_past_eof() {
+        // A hunk header pointing far past EOF must not let a *fuzzed* match
+        // splice into a coincidental hit elsewhere in a short file. The bug:
+        // `search_block` clamped the expected center to the buffer end and then
+        // measured the fuzz window from the *clamped* position, silently
+        // defeating FUZZ_SEARCH_WINDOW — the change applied ~999 lines from
+        // where the header claimed (offset -999), instead of failing loud.
+        let patch = concat!(
+            "--- a/t.txt\n",
+            "+++ b/t.txt\n",
+            "@@ -1000,3 +1000,3 @@\n",
+            " ctxA\n",
+            "-old\n",
+            "+new\n",
+            " ctxB\n",
+        );
+        let files = parse_unified_diff(patch).unwrap();
+        let err = apply_hunks("x\nold\ny\n", &files[0].hunks, false, DEFAULT_FUZZ).unwrap_err();
+        assert!(
+            err.contains("FAILED"),
+            "a fuzzed match far outside the window must fail loud, got: {err}"
+        );
     }
 
     // ── execute-level: offset reported, failure loud + non-destructive ───────
