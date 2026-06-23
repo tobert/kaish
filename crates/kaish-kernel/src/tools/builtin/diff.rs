@@ -280,7 +280,15 @@ fn diff_to_json<'a>(
                     content.pop();
                 }
             }
-            changes.push(serde_json::json!({ "tag": tag, "content": content }));
+            // `missing_newline` preserves the terminal-newline signal the text
+            // path shows as `\ No newline at end of file` — without it a change
+            // that only toggles the file's final newline is byte-identical to a
+            // no-op (both sides strip to the same `content`).
+            changes.push(serde_json::json!({
+                "tag": tag,
+                "content": content,
+                "missing_newline": change.missing_newline(),
+            }));
         }
 
         hunks.push(serde_json::json!({
@@ -573,6 +581,44 @@ mod tests {
         let hunk = &json["hunks"][0];
         assert_eq!(hunk["old_lines"], 0, "hunk: {hunk}");
         assert_eq!(hunk["old_start"], 0, "count-0 range reports the preceding line: {hunk}");
+    }
+
+    #[tokio::test]
+    async fn test_diff_json_marks_missing_newline() {
+        use crate::interpreter::{apply_output_format, OutputFormat};
+        // A change that only toggles the file's terminal newline must stay
+        // distinguishable in --json: old "A" (no newline) and new "A" (with
+        // newline) both strip to "A", so without `missing_newline` the two
+        // changes are byte-identical and the intent is lost (the text path
+        // shows it as `\ No newline at end of file`).
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(Path::new("no_nl.txt"), b"A").await.unwrap();
+        mem.write(Path::new("with_nl.txt"), b"A\n").await.unwrap();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("no_nl.txt".into()));
+        args.positional.push(Value::String("with_nl.txt".into()));
+        let result = Diff.execute(args, &mut ctx).await;
+
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json: serde_json::Value =
+            serde_json::from_str(&formatted.text_out()).expect("valid JSON");
+        let changes = json["hunks"][0]["changes"].as_array().expect("changes array");
+        assert!(
+            changes.iter().any(|c| c["tag"] == "delete"
+                && c["content"] == "A"
+                && c["missing_newline"] == true),
+            "deleted line lacked a trailing newline; must be flagged: {json}"
+        );
+        assert!(
+            changes.iter().any(|c| c["tag"] == "insert"
+                && c["content"] == "A"
+                && c["missing_newline"] == false),
+            "inserted line has a trailing newline: {json}"
+        );
     }
 
     #[tokio::test]
