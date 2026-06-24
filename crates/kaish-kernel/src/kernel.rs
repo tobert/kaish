@@ -3587,16 +3587,18 @@ impl Kernel {
                     } else {
                         // Strip trailing newlines only (POSIX command-subst),
                         // not all trailing whitespace — spaces/tabs are
-                        // significant, matching the interpolation and for-loop
-                        // paths (`trim_end_matches(['\n', '\r'])`).
+                        // significant. Use the exact same trim as the quoted
+                        // `"$(…)"` interpolation path (`StringPart::CommandSubst`,
+                        // `trim_end_matches('\n')`) so bare and quoted command
+                        // substitution agree.
                         Ok(Value::String(
-                            result.text_out().trim_end_matches(['\n', '\r']).to_string(),
+                            result.text_out().trim_end_matches('\n').to_string(),
                         ))
                     }
                 } else {
                     // Otherwise return stdout as single string (NO implicit splitting)
                     Ok(Value::String(
-                        result.text_out().trim_end_matches(['\n', '\r']).to_string(),
+                        result.text_out().trim_end_matches('\n').to_string(),
                     ))
                 }
             }

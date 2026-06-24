@@ -19,8 +19,10 @@ Three small independent silent/surprise fixes (`correctness_oneoffs_tests.rs`):
   when *no* file matched; a read-error still overrides to 2).
 - **`$()` strips only trailing newlines**, not all trailing whitespace. The bare
   `Expr::CommandSubst` arms used `.trim_end()` (ate spaces/tabs); now
-  `trim_end_matches(['\n', '\r'])`, matching the interpolation (`StringPart::CommandSubst`)
-  and for-loop split paths. Significant trailing spaces survive (`x=$(printf 'a  ')`).
+  `trim_end_matches('\n')` — the *exact* trim the quoted `"$(…)"` interpolation path
+  (`StringPart::CommandSubst`) uses, so bare and quoted command substitution agree
+  (they're the same operation; the for-loop split path's extra `\r` strip is its own
+  line-splitting concern). Significant trailing spaces survive (`x=$(printf 'a  ')`).
 - **jq `. / 0` fails loudly** instead of silently returning `null`. The mechanism:
   jaq evaluates `n/0` to a non-finite `Val::Float` (inf, or NaN for `0/0`), and
   `val_to_json` did `from_f64(inf) → None → unwrap_or(Null)` — a silent-wrong null.
