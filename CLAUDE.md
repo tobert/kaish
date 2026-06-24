@@ -95,6 +95,13 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
     (`--all-targets` so test code is linted too; see Build Commands for the
     test-code allow convention)
 
+### Commit messages
+
+Explain **why, not what** — the diff shows what changed. Write the body as a short
+summary of the decisions behind the change, drawn from the working conversation with
+the user: what we chose, what we rejected, and why. Subject is imperative (the decision
+or outcome). Set a `Co-Authored-By:` trailer crediting the model that did the work.
+
 ## Architecture
 
 The 核 (kaku/kernel) is the unit of execution. Multiple frontends connect to the same kernel:
@@ -130,8 +137,8 @@ Tests live in `crates/kaish-kernel/tests/`. Snapshots in `crates/kaish-kernel/te
 - `crates/kaish-help/src/` — composition surface: `fragments.rs` (the English
   fragment registry, concept-organized) + `compose.rs` (recipes). Design:
   `docs/composable-help.md`.
-- `docs/issues.md` — open work only (P1–P4). `docs/devlog.md` — landed-work
-  narrative + standing decisions (don't re-litigate). Keep history out of
+- `docs/issues.md` — open work only (P1–P4). `docs/devlog.md` — a durable narrative
+  from the agent's perspective; write your story there. Keep history out of
   `issues.md` so it stays cheap to read for actual open work.
 
 **Keep in sync:** When adding builtins or changing syntax, update the relevant help files.
