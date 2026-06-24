@@ -322,7 +322,9 @@ sites in job.rs for other across-await holds while there.
 Low-frequency sub-cases left after the P1 builtin fixes:
 - **`sort`**: only one `-k` accepted (clap `Option<String>`) — GNU chains `-k` for
   tiebreaking; `.C` char-within-field offsets are accepted but ignored; per-key
-  `b`/`d`/`f`/`i` modifiers are accepted but not implemented. (`tools/builtin/sort.rs`)
+  `b`/`d`/`f`/`i` modifiers are accepted but not implemented; **`-k2,1` (stop <
+  start)** sorts by field 2, but GNU treats the lower field as the stop boundary
+  (sorts by field 1). (`tools/builtin/sort.rs`; spot-check 2026-06-24)
 - **`printf`**: `%b` doesn't honor `\c` (stop *all* output) at the whole-format
   level; `%c` ignores width/flags. (`tools/builtin/format_string.rs`)
 - **`ls -1`**: the fix recovers `-1` by stripping a `Value::Int(-1)` positional,

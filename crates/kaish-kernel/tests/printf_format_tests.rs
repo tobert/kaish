@@ -277,11 +277,31 @@ async fn printf_b_plain_string_passthrough() {
 
 #[tokio::test]
 async fn printf_format_octal_escape_zero_prefix() {
-    // printf '\0101' → A (octal 101 = 65 = 'A')
-    // \0NNN is the octal escape in format strings
+    // `\0NNN`: the leading `0` is the FIRST of up to 3 octal digits, so at most
+    // 2 more follow — matching GNU coreutils, bash, and dash (all verified).
+    // `\0101` → octal `010` (BS) then a literal `1`; NOT octal 101 ('A').
     let k = kernel();
     let result = k.execute(r#"printf '\0101'"#).await.expect("execute");
-    assert_eq!(result.text_out(), "A", "printf '\\0101' should produce A (octal 101)");
+    assert_eq!(
+        result.text_out(),
+        "\u{8}1",
+        "printf '\\0101' → BS + '1' (octal 010, then literal 1), like GNU printf"
+    );
+    // \012 = octal 12 = newline (2 digits after the 0).
+    assert_eq!(
+        kernel().execute(r#"printf '\012'"#).await.expect("execute").text_out(),
+        "\n",
+    );
+    // \0377 → octal 037 (0x1f) then a literal '7'.
+    assert_eq!(
+        kernel().execute(r#"printf '\0377'"#).await.expect("execute").text_out(),
+        "\u{1f}7",
+    );
+    // Bare \NNN (no leading 0) still takes the full 3 digits: \101 = 'A'.
+    assert_eq!(
+        kernel().execute(r#"printf '\101'"#).await.expect("execute").text_out(),
+        "A",
+    );
 }
 
 #[tokio::test]
