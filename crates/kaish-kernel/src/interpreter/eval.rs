@@ -794,8 +794,13 @@ fn result_to_value(result: &ExecResult) -> Value {
     if let Some(data) = &result.data {
         return data.clone();
     }
-    // Otherwise return stdout as single string (NO implicit splitting)
-    Value::String(result.text_out().trim_end().to_string())
+    // Otherwise return stdout as single string (NO implicit splitting).
+    // Strip trailing newlines only, not all trailing whitespace — same trim as
+    // the async kernel command-subst path (`kernel.rs` Expr::CommandSubst) and
+    // the quoted `"$(…)"` interpolation, so this sync evaluator (dead today —
+    // it runs under `NoOpExecutor` — but a trap for a future non-async embedder)
+    // can't silently diverge.
+    Value::String(result.text_out().trim_end_matches('\n').to_string())
 }
 
 /// Perform regex match or not-match on two values.
