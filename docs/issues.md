@@ -74,16 +74,18 @@ Residuals filed below/P3: sort multi-`-k` + `.C` offsets + `b/d/f` modifiers;
 printf `%b \c` whole-format stop + `%c` width.
 
 Still open:
-- **Structured-data pipeline race.** `seq 1 3 | jq .` *fails* ("trailing
-  characters"): the consumer `try_recv`s the `.data` oneshot before the producer
-  sends it (producer sends only after dispatch completes), so structured data is lost
-  and it falls back to text (`scheduler/pipeline.rs`). Breaks builtin→builtin
-  structured-data flow. Fix: hand the receiver to the consumer (await-on-demand)
-  instead of racing a pre-read.
-- **`&&`/`||` precedence inverted.** The parser folds `&&` tighter than `||`
-  (`parser.rs`); POSIX gives them equal, left-to-right precedence. `true || echo A &&
-  echo B` prints nothing (bash prints `B`). The `[[ ]]` path is correct; this is the
-  statement-list path.
+- ~~**Structured-data pipeline race.**~~ FIXED 2026-06-24 (`fix/p1-correctness`).
+  Consumers (`jq`, `scatter`) now `ctx.resolve_stdin()`: drain the pipe first
+  (unblocks a streaming upstream), then await the structured-data sideband
+  (`stdin_data_rx` threaded through `dispatch_command`), instead of a one-shot
+  `try_recv` that lost the race on a multi-thread runtime. Test:
+  `pipeline_structured_data_tests` (multi-thread, looped — pre-fix `seq|jq` failed
+  ~197/200). NOTE: the scatter/gather *runner* (`scheduler/scatter.rs:136`) still
+  uses the old `take_stdin_data` pre-read — fold it into resolve_stdin if a
+  `… | scatter … | gather` structured-data race surfaces.
+- ~~**`&&`/`||` precedence inverted.**~~ FIXED 2026-06-24 (`fix/p1-correctness`):
+  single left-associative fold, equal precedence (POSIX). Test:
+  `and_or_precedence_tests` + 3 updated parser snapshots.
 - **Syntax error inside a quoted `$()` silently becomes literal text** — `echo "$(if
   true; echo 1; fi)"` prints the literal string (`parser.rs`; unquoted `$()` errors
   loudly).

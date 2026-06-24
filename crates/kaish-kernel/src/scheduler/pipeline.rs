@@ -487,18 +487,14 @@ impl PipelineRunner {
                     return (ExecResult::failure(1, e), stage_ctx);
                 }
 
-                // Receive structured data from previous stage (non-blocking).
-                // Using try_recv avoids a deadlock: streaming builtins (e.g. grep)
-                // write to their pipe_stdout during dispatch. If we blocked here
-                // waiting for the upstream's oneshot (sent after dispatch), the
-                // downstream couldn't start draining the pipe → circular wait.
-                // Builtins that use stdin_data (e.g. jq) fall back to pipe text.
-                if let Some(mut rx) = data_receiver {
-                    if let Ok(data) = rx.try_recv() {
-                        stage_ctx.stdin_data = data;
-                    }
-                    // Err → not ready yet; builtin will read from pipe text
-                }
+                // Hand the structured-data sideband receiver to the stage; do
+                // NOT pre-read it. A consuming builtin resolves it via
+                // `ctx.resolve_stdin()`, which drains the pipe first (so a
+                // streaming upstream can't deadlock) and only then awaits this —
+                // by which point the producer has sent it. The old `try_recv`
+                // here raced the producer's post-dispatch send and silently
+                // dropped structured data (`seq 1 3 | jq .` → text → parse error).
+                stage_ctx.stdin_data_rx = data_receiver;
 
                 // Execute the command
                 let mut result = match task_dispatcher.dispatch(&cmd, &mut stage_ctx).await {

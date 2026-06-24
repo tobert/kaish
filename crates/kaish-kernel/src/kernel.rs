@@ -2477,6 +2477,7 @@ impl Kernel {
                 // (`< file`/heredoc) already set it, so redirect precedence holds.
                 stdin: ec.stdin.clone(),
                 stdin_data: ec.stdin_data.clone(),
+                stdin_data_rx: None,
                 pipe_stdin: None,
                 pipe_stdout: None,
                 stderr: ec.stderr.clone(),
@@ -2846,6 +2847,7 @@ impl Kernel {
                 prev_cwd: ec.prev_cwd.clone(),
                 stdin: ec.stdin.clone(),
                 stdin_data: ec.stdin_data.clone(),
+                stdin_data_rx: None,
                 pipe_stdin: None, // streaming pipes are per-pipeline; not snapshotted
                 pipe_stdout: None,
                 stderr: ec.stderr.clone(),
@@ -2884,6 +2886,7 @@ impl Kernel {
             let mut ec = self.exec_ctx.write().await;
             ctx.stdin = ec.stdin.take();
             ctx.stdin_data = ec.stdin_data.take();
+            ctx.stdin_data_rx = ec.stdin_data_rx.take();
             ctx.pipe_stdin = ec.pipe_stdin.take();
             ctx.pipe_stdout = ec.pipe_stdout.take();
         }
@@ -4953,6 +4956,11 @@ impl Kernel {
             ec.prev_cwd = ctx.prev_cwd.clone();
             ec.stdin = ctx.stdin.take();
             ec.stdin_data = ctx.stdin_data.take();
+            // The structured-data sideband receiver (set by the concurrent
+            // pipeline runner on the stage ctx) must reach the tool's snapshot
+            // too — same reason as the pipe endpoints below. Without this a
+            // pipeline consumer never sees the producer's `.data`.
+            ec.stdin_data_rx = ctx.stdin_data_rx.take();
             // Streaming pipe endpoints and kernel stderr must flow to the
             // tool via self.exec_ctx — execute_command reads that, not the
             // passed-in ctx. Without moving these, concurrent pipeline

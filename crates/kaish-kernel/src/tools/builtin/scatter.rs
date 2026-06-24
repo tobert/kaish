@@ -82,10 +82,10 @@ impl Tool for Scatter {
         // Parse options for reporting (reads args.named to preserve Value::Int etc.)
         let opts = parse_scatter_options(&args);
 
-        // Get structured data and text from stdin
-        let data = ctx.take_stdin_data();
-        let text = match ctx.read_stdin_to_text().await {
-            Ok(s) => s.unwrap_or_default(),
+        // Get structured data and text from stdin (drains the pipe first, then
+        // resolves the structured-data sideband — no startup race).
+        let (data, text) = match ctx.resolve_stdin().await {
+            Ok(pair) => pair,
             Err(e) => return ExecResult::failure(2, format!("scatter: {e}")),
         };
 
