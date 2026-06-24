@@ -274,12 +274,16 @@ impl BackendDispatcher {
                 })
             })
         } else if let Some(data) = ctx.stdin.take() {
-            // Buffered string stdin
-            if let Some(mut child_stdin) = child.stdin.take() {
-                let _ = child_stdin.write_all(data.as_bytes()).await;
-                // Drop child_stdin signals EOF
-            }
-            None
+            // Buffered string stdin written from a DETACHED task, not inline:
+            // an inline write deadlocks once the stdin pipe fills before the
+            // output drain below has spawned (mirrors the kernel.rs fix; keeps
+            // the two spawn sites in sync). Drop signals EOF; a broken pipe
+            // (child closed stdin early) is fine.
+            child.stdin.take().map(|mut child_stdin| {
+                tokio::spawn(async move {
+                    let _ = child_stdin.write_all(data.as_bytes()).await;
+                })
+            })
         } else {
             None
         };
@@ -343,9 +347,15 @@ impl BackendDispatcher {
                 &cancel,
                 std::time::Duration::from_secs(2),
             ).await;
-            // Child has exited (naturally or via kill). Abort stdin/stderr drain tasks.
+            // Child has exited (naturally or via kill). Abort the stdin writer
+            // (nothing more to feed a dead child). Let the stderr drain FINISH
+            // — the child's stderr pipe EOFs now that it exited, so awaiting it
+            // captures all stderr; aborting first would truncate it. Only abort
+            // the drain if we were cancelled (then we don't care about output).
             if let Some(task) = stdin_task { task.abort(); }
-            stderr_task.abort();
+            if cancel.is_cancelled() {
+                stderr_task.abort();
+            }
             let stderr = stderr_task.await.unwrap_or_default();
             let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
             // Output was streamed to pipe, so result.out is empty

@@ -139,11 +139,18 @@ async fn move_path(
         Err(e) => return Err(e),
     }
 
-    // Fall back to copy + remove (for cross-mount moves)
+    // Fall back to copy + remove (for cross-mount moves). We've already passed
+    // the no-clobber early-return, so either no-clobber is off (overwrite is
+    // wanted) or the dest doesn't exist. Unlink any existing dest FIRST so this
+    // mirrors `mv`'s overwrite semantics: recreating a symlink can't fail
+    // EEXIST, and overwriting replaces a dest *symlink* itself rather than
+    // writing through it to its target. `remove` is symlink-safe and tolerates
+    // a missing dest.
     if info.is_symlink() {
         // Recreate the link at the destination — never copy *through* it to the
         // target (that would duplicate the target's data and drop the link).
         let target = backend.read_link(src).await?;
+        let _ = backend.remove(&final_dst, false).await;
         backend.symlink(&target, &final_dst).await?;
         backend.remove(src, false).await?;
     } else if info.is_dir() {
@@ -154,6 +161,7 @@ async fn move_path(
     } else {
         // Copy file, then remove source
         let data = backend.read(src, None).await?;
+        let _ = backend.remove(&final_dst, false).await;
         backend.write(&final_dst, &data, WriteMode::Overwrite).await?;
         backend.remove(src, false).await?;
     }

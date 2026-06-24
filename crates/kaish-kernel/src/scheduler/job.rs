@@ -542,74 +542,39 @@ impl JobManager {
     /// `wait %N` would deadlock. The lock is re-acquired only to finalize
     /// (persist output, cache the result).
     pub async fn wait(&self, id: JobId) -> Option<ExecResult> {
-        enum Pending {
-            Handle(JoinHandle<ExecResult>),
-            Channel(oneshot::Receiver<ExecResult>),
-            /// Another waiter already took the awaitable; poll for its result.
-            AlreadyWaiting,
-        }
-
-        let pending = {
-            let mut jobs = self.jobs.lock().await;
-            let job = jobs.get_mut(&id)?;
-            if let Some(result) = &job.result {
-                return Some(result.clone());
-            }
-            if let Some(handle) = job.handle.take() {
-                Pending::Handle(handle)
-            } else if let Some(rx) = job.result_rx.take() {
-                Pending::Channel(rx)
-            } else {
-                Pending::AlreadyWaiting
-            }
-        };
-        // Lock released — concurrent job ops can proceed while we await.
-
-        let result = match pending {
-            Pending::Handle(handle) => match handle.await {
-                Ok(r) => r,
-                Err(e) => ExecResult::failure(1, format!("job panicked: {}", e)),
-            },
-            Pending::Channel(rx) => match rx.await {
-                Ok(r) => r,
-                Err(_) => ExecResult::failure(1, "job channel closed"),
-            },
-            Pending::AlreadyWaiting => {
-                // Another waiter owns the awaitable and will cache the result.
-                // Poll for it, yielding between checks — never holding the lock
-                // across the wait. Returns None if the job is reaped meanwhile.
-                loop {
+        // Poll for completion WITHOUT removing the job's `JoinHandle` from the
+        // map: `Job::try_poll` (via `is_done`) consumes the handle only once it
+        // has finished. That matters two ways:
+        //   * Drop-safe: a waiter dropped mid-wait (e.g. `timeout N wait %1`)
+        //     never carries the handle off and orphans the result, so a later
+        //     `wait %1` still completes instead of hanging.
+        //   * No lock-across-await: we sleep between polls rather than holding
+        //     the `jobs` mutex over the wait (which would block every other job
+        //     op — the deadlock this method exists to avoid) or busy-spinning.
+        // Cost is up to one poll interval of latency on completion — imperceptible
+        // for a job wait, and the sleep keeps idle CPU at zero.
+        loop {
+            {
+                let mut jobs = self.jobs.lock().await;
+                let job = jobs.get_mut(&id)?;
+                if job.is_done() {
+                    let result = job
+                        .result
+                        .clone()
+                        .unwrap_or_else(|| ExecResult::failure(1, "no result"));
+                    // Finalize once: persist output (idempotent on output_file).
+                    if job.persist_output
+                        && job.output_file.is_none()
+                        && let Some(path) = job.write_output_file(&result)
                     {
-                        let jobs = self.jobs.lock().await;
-                        match jobs.get(&id) {
-                            Some(job) => {
-                                if let Some(result) = &job.result {
-                                    return Some(result.clone());
-                                }
-                            }
-                            None => return None,
-                        }
+                        job.output_file = Some(path);
                     }
-                    tokio::task::yield_now().await;
+                    return Some(result);
                 }
             }
-        };
-
-        // Re-acquire only to finalize: persist output once, cache the result.
-        {
-            let mut jobs = self.jobs.lock().await;
-            if let Some(job) = jobs.get_mut(&id) {
-                if job.persist_output
-                    && job.output_file.is_none()
-                    && let Some(path) = job.write_output_file(&result)
-                {
-                    job.output_file = Some(path);
-                }
-                job.result = Some(result.clone());
-            }
+            // Lock released between polls — other job ops run freely.
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-
-        Some(result)
     }
 
     /// Wait for all jobs to complete, returning results in completion order.
@@ -1149,5 +1114,43 @@ mod tests {
             .expect("waiter join timed out")
             .expect("waiter task panicked");
         assert_eq!(result.map(|r| r.code), Some(0), "waiter should see exit 0");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wait_survives_a_dropped_waiter() {
+        // Regression (Gemini review): a waiter dropped mid-wait (e.g.
+        // `timeout N wait %1`) must NOT orphan the job's result. The buggy
+        // version took the JoinHandle out to await it, so dropping that waiter
+        // detached the task and lost its result, and a SECOND `wait %1` then
+        // hung forever (busy-spinning in the AlreadyWaiting branch). `wait` must
+        // never take the handle until it's finished.
+        let manager = Arc::new(JobManager::new());
+        manager.set_persist_output_files(false);
+
+        let (tx, rx) = oneshot::channel::<()>();
+        let id = manager
+            .spawn("blocker".to_string(), async move {
+                let _ = rx.await;
+                ExecResult::success("done")
+            })
+            .await;
+
+        // Waiter A parks on the job, then is aborted (dropped) before it finishes.
+        {
+            let m = manager.clone();
+            let a = tokio::spawn(async move { m.wait(id).await });
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            a.abort();
+            let _ = a.await;
+        }
+
+        // The job completes after A is gone.
+        let _ = tx.send(());
+
+        // Waiter B must still observe the result, not hang.
+        let res = tokio::time::timeout(Duration::from_secs(2), manager.wait(id))
+            .await
+            .expect("wait must not hang after a prior waiter was dropped");
+        assert_eq!(res.map(|r| r.code), Some(0), "B should see the completed job");
     }
 }
