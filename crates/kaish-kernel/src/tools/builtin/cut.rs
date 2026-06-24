@@ -166,9 +166,14 @@ impl Tool for Cut {
 }
 
 /// Parse a field/character specification like "1,3,5" or "1-3" or "2-"
-/// Returns 0-indexed positions.
+/// Returns 0-indexed positions as a sorted, deduplicated list.
+///
+/// GNU cut behaviour: the selected set is the UNION of all ranges/positions,
+/// each position emitted at most once, in increasing order — regardless of
+/// the order the ranges were specified (`cut -f 3,1` outputs field 1 then 3).
 fn select_indices(spec: &str, max_len: usize) -> Vec<usize> {
-    let mut indices = Vec::new();
+    use std::collections::BTreeSet;
+    let mut set = BTreeSet::new();
 
     for part in spec.split(',') {
         let part = part.trim();
@@ -192,16 +197,17 @@ fn select_indices(spec: &str, max_len: usize) -> Vec<usize> {
 
             for i in start..=end {
                 if i > 0 && i <= max_len {
-                    indices.push(i - 1); // Convert to 0-indexed
+                    set.insert(i - 1); // Convert to 0-indexed
                 }
             }
         } else if let Ok(n) = part.parse::<usize>()
-            && n > 0 && n <= max_len {
-                indices.push(n - 1); // Convert to 0-indexed
-            }
+            && n > 0 && n <= max_len
+        {
+            set.insert(n - 1); // Convert to 0-indexed
+        }
     }
 
-    indices
+    set.into_iter().collect()
 }
 
 #[cfg(test)]

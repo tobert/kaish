@@ -26,11 +26,11 @@ struct FormatSpec {
 
 /// Format a printf-style format string with the given arguments.
 ///
-/// Supports: `%s`, `%d`, `%i`, `%f`, `%g`, `%e`, `%x`, `%X`, `%o`, `%c`, `%%`
+/// Supports: `%s`, `%d`, `%i`, `%u`, `%f`, `%g`, `%G`, `%e`, `%E`, `%x`, `%X`, `%o`, `%c`, `%b`, `%%`
 /// With flags: `-` (left-align), `0` (zero-pad), `+`, ` `, `#`
 /// With width and `.precision`.
 ///
-/// Backslash escapes: `\n`, `\t`, `\r`, `\\`, `\0`
+/// Backslash escapes: `\n`, `\t`, `\r`, `\\`, `\0`, `\NNN` (octal)
 ///
 /// This is a single pass: each conversion consumes one argument in order, and
 /// missing arguments fall back to defaults (`""`, `0`, `0.0`). awk's `sprintf`
@@ -86,24 +86,94 @@ fn format_pass<A: FormatArg>(format: &str, args: &[A], output: &mut String) -> u
                 }
             }
         } else if c == '\\' {
-            match chars.next() {
-                Some('n') => output.push('\n'),
-                Some('t') => output.push('\t'),
-                Some('r') => output.push('\r'),
-                Some('\\') => output.push('\\'),
-                Some('0') => output.push('\0'),
-                Some(ch) => {
-                    output.push('\\');
-                    output.push(ch);
-                }
-                None => output.push('\\'),
-            }
+            parse_backslash_escape(&mut chars, output);
         } else {
             output.push(c);
         }
     }
 
     arg_index
+}
+
+/// Parse and emit a backslash escape sequence, starting after the `\`.
+///
+/// Handles: `\n`, `\t`, `\r`, `\\`, `\0`, `\0NNN` (octal, `\0` prefix),
+/// and `\NNN` (octal without leading zero). Unknown escapes pass through
+/// literally as `\X`.
+fn parse_backslash_escape(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    output: &mut String,
+) {
+    match chars.peek().copied() {
+        Some('n') => { chars.next(); output.push('\n'); }
+        Some('t') => { chars.next(); output.push('\t'); }
+        Some('r') => { chars.next(); output.push('\r'); }
+        Some('\\') => { chars.next(); output.push('\\'); }
+        Some('0') => {
+            chars.next();
+            // May be \0NNN (octal) or just \0 (null byte).
+            let mut octal = String::new();
+            while octal.len() < 3 {
+                match chars.peek().copied() {
+                    Some(d) if d.is_ascii_digit() && d != '8' && d != '9' => {
+                        octal.push(d);
+                        chars.next();
+                    }
+                    _ => break,
+                }
+            }
+            if octal.is_empty() {
+                output.push('\0');
+            } else {
+                let codepoint = u32::from_str_radix(&octal, 8).unwrap_or(0);
+                output.push(char::from_u32(codepoint).unwrap_or('\0'));
+            }
+        }
+        Some(d) if d.is_ascii_digit() && d != '8' && d != '9' => {
+            // \NNN octal (no leading zero required — GNU printf supports both)
+            let mut octal = String::new();
+            while octal.len() < 3 {
+                match chars.peek().copied() {
+                    Some(d2) if d2.is_ascii_digit() && d2 != '8' && d2 != '9' => {
+                        octal.push(d2);
+                        chars.next();
+                    }
+                    _ => break,
+                }
+            }
+            let codepoint = u32::from_str_radix(&octal, 8).unwrap_or(0);
+            output.push(char::from_u32(codepoint).unwrap_or('\0'));
+        }
+        Some(ch) => {
+            chars.next();
+            output.push('\\');
+            output.push(ch);
+        }
+        None => output.push('\\'),
+    }
+}
+
+/// Interpret backslash escapes in an argument string, as done by `%b`.
+///
+/// Same escape set as the format string itself, but applied to the argument
+/// value rather than the format template. `\c` stops output (like GNU printf).
+fn interpret_backslash_escapes(s: &str) -> String {
+    let mut output = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek().copied() {
+                Some('c') => {
+                    // \c: suppress further output (like GNU printf %b)
+                    break;
+                }
+                _ => parse_backslash_escape(&mut chars, &mut output),
+            }
+        } else {
+            output.push(c);
+        }
+    }
+    output
 }
 
 /// Parse a format specifier after the initial `%`.
@@ -170,7 +240,7 @@ fn parse_specifier(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Opti
     // Parse conversion character
     if let Some(&c) = chars.peek() {
         match c {
-            's' | 'd' | 'i' | 'f' | 'g' | 'e' | 'x' | 'X' | 'o' | 'c' => {
+            's' | 'd' | 'i' | 'u' | 'f' | 'g' | 'G' | 'e' | 'E' | 'x' | 'X' | 'o' | 'c' | 'b' => {
                 spec.conversion = c;
                 chars.next();
             }
@@ -190,31 +260,72 @@ fn apply_specifier<A: FormatArg>(spec: &FormatSpec, arg: Option<&A>, output: &mu
     match spec.conversion {
         's' => {
             let val = arg.map(|a| a.as_format_string()).unwrap_or_default();
+            // Precision truncates the string.
+            let val = if let Some(prec) = spec.precision {
+                // Truncate to at most `prec` characters (Unicode-aware).
+                let truncated: String = val.chars().take(prec).collect();
+                truncated
+            } else {
+                val
+            };
             apply_string_padding(spec, &val, output);
         }
         'd' | 'i' => {
             let val = arg.map(|a| a.as_format_int()).unwrap_or(0);
             apply_int_format(spec, val, output, IntBase::Decimal);
         }
+        'u' => {
+            // Unsigned decimal: reinterpret the i64 bits as u64.
+            let val = arg.map(|a| a.as_format_int()).unwrap_or(0);
+            let unsigned = val as u64;
+            let raw = format!("{unsigned}");
+            let with_sign = apply_sign_and_prefix(spec, false, false, &raw);
+            apply_padded(spec, false, &with_sign, spec.precision, false, output);
+        }
         'f' => {
             let val = arg.map(|a| a.as_format_float()).unwrap_or(0.0);
             let precision = spec.precision.unwrap_or(6);
             let formatted = format!("{:.prec$}", val, prec = precision);
-            apply_string_padding(spec, &formatted, output);
-        }
-        'g' => {
-            let val = arg.map(|a| a.as_format_float()).unwrap_or(0.0);
-            let precision = spec.precision.unwrap_or(6);
-            // %g uses the shorter of %e and %f, removing trailing zeros
-            let formatted = format!("{:.prec$}", val, prec = precision);
-            let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
-            apply_string_padding(spec, trimmed, output);
+            let negative = val.is_sign_negative() && val != 0.0 || formatted.starts_with('-');
+            let body = formatted.trim_start_matches('-');
+            let with_sign = apply_sign_and_prefix(spec, negative, false, body);
+            apply_padded(spec, false, &with_sign, None, false, output);
         }
         'e' => {
             let val = arg.map(|a| a.as_format_float()).unwrap_or(0.0);
             let precision = spec.precision.unwrap_or(6);
-            let formatted = format!("{:.prec$e}", val, prec = precision);
-            apply_string_padding(spec, &formatted, output);
+            let formatted = format_scientific(val, precision, false);
+            let negative = val.is_sign_negative();
+            let body = formatted.trim_start_matches('-');
+            let with_sign = apply_sign_and_prefix(spec, negative, false, body);
+            apply_padded(spec, false, &with_sign, None, false, output);
+        }
+        'E' => {
+            let val = arg.map(|a| a.as_format_float()).unwrap_or(0.0);
+            let precision = spec.precision.unwrap_or(6);
+            let formatted = format_scientific(val, precision, true);
+            let negative = val.is_sign_negative();
+            let body = formatted.trim_start_matches('-');
+            let with_sign = apply_sign_and_prefix(spec, negative, false, body);
+            apply_padded(spec, false, &with_sign, None, false, output);
+        }
+        'g' => {
+            let val = arg.map(|a| a.as_format_float()).unwrap_or(0.0);
+            let precision = spec.precision.unwrap_or(6).max(1);
+            let formatted = format_g(val, precision, false);
+            let negative = val.is_sign_negative();
+            let body = formatted.trim_start_matches('-');
+            let with_sign = apply_sign_and_prefix(spec, negative, false, body);
+            apply_padded(spec, false, &with_sign, None, false, output);
+        }
+        'G' => {
+            let val = arg.map(|a| a.as_format_float()).unwrap_or(0.0);
+            let precision = spec.precision.unwrap_or(6).max(1);
+            let formatted = format_g(val, precision, true);
+            let negative = val.is_sign_negative();
+            let body = formatted.trim_start_matches('-');
+            let with_sign = apply_sign_and_prefix(spec, negative, false, body);
+            apply_padded(spec, false, &with_sign, None, false, output);
         }
         'x' => {
             let val = arg.map(|a| a.as_format_int()).unwrap_or(0);
@@ -233,6 +344,12 @@ fn apply_specifier<A: FormatArg>(spec: &FormatSpec, arg: Option<&A>, output: &mu
                 output.push(ch);
             }
         }
+        'b' => {
+            // %b: interpret backslash escapes in the argument string.
+            let raw = arg.map(|a| a.as_format_string()).unwrap_or_default();
+            let val = interpret_backslash_escapes(&raw);
+            apply_string_padding(spec, &val, output);
+        }
         other => {
             // Unknown conversion — output literally
             output.push('%');
@@ -248,36 +365,124 @@ enum IntBase {
     Octal,
 }
 
+/// Format an integer with flags, width, and precision.
+///
+/// For integers, precision sets the minimum digit count (zero-pads the digits).
+/// When precision is set, the `0` flag is ignored (POSIX). Width then pads the
+/// whole result. Sign/space/alt-form prefixes are applied before width padding.
 fn apply_int_format(spec: &FormatSpec, val: i64, output: &mut String, base: IntBase) {
-    let raw = match base {
-        IntBase::Decimal => format!("{}", val),
-        IntBase::LowerHex => format!("{:x}", val),
-        IntBase::UpperHex => format!("{:X}", val),
-        IntBase::Octal => format!("{:o}", val),
+    let negative = val < 0 && matches!(base, IntBase::Decimal);
+    // Format the absolute value (or unsigned reinterpretation for hex/octal).
+    let raw_digits: String = match base {
+        IntBase::Decimal => {
+            if val < 0 {
+                // Format the absolute value — we handle the sign separately.
+                format!("{}", val.unsigned_abs())
+            } else {
+                format!("{val}")
+            }
+        }
+        IntBase::LowerHex => format!("{:x}", val as u64),
+        IntBase::UpperHex => format!("{:X}", val as u64),
+        IntBase::Octal => format!("{:o}", val as u64),
     };
 
-    let width = spec.width.unwrap_or(0);
-    if width > raw.len() {
-        let pad_count = width - raw.len();
-        if spec.left_align {
-            output.push_str(&raw);
-            for _ in 0..pad_count { output.push(' '); }
-        } else if spec.zero_pad {
-            // Handle sign with zero padding
-            if val < 0 && matches!(base, IntBase::Decimal) {
-                output.push('-');
-                for _ in 0..(pad_count) { output.push('0'); }
-                output.push_str(&raw[1..]); // skip the '-'
-            } else {
-                for _ in 0..pad_count { output.push('0'); }
-                output.push_str(&raw);
+    // Precision zero-pads the digits themselves. When precision is set, the
+    // `0` flag is ignored (POSIX/GNU behavior).
+    let min_digits = spec.precision.unwrap_or(0);
+    let precision_set = spec.precision.is_some();
+
+    let digit_str = if min_digits > raw_digits.len() {
+        let pad = min_digits - raw_digits.len();
+        let mut s = String::with_capacity(min_digits);
+        for _ in 0..pad {
+            s.push('0');
+        }
+        s.push_str(&raw_digits);
+        s
+    } else {
+        raw_digits
+    };
+
+    // Alternate form prefix (#). Special case: 0 with # stays "0" for hex/oct.
+    let alt_prefix: &str = if spec.alt_form && val != 0 {
+        match base {
+            IntBase::LowerHex => "0x",
+            IntBase::UpperHex => "0X",
+            IntBase::Octal => {
+                // Only add "0" if the digit string doesn't already start with "0".
+                if digit_str.starts_with('0') { "" } else { "0" }
             }
-        } else {
-            for _ in 0..pad_count { output.push(' '); }
-            output.push_str(&raw);
+            IntBase::Decimal => "",
         }
     } else {
-        output.push_str(&raw);
+        ""
+    };
+
+    let body = format!("{alt_prefix}{digit_str}");
+    let with_sign = apply_sign_and_prefix(spec, negative, false, &body);
+    // precision_set suppresses the `0` flag for width padding.
+    apply_padded(spec, precision_set, &with_sign, None, negative, output);
+}
+
+/// Prepend sign/space to `body` based on flags and whether the value is negative.
+///
+/// Returns the sign-prefixed string. The sign is NOT counted again by
+/// `apply_padded` — the whole returned string is the body for width purposes.
+fn apply_sign_and_prefix(spec: &FormatSpec, negative: bool, _is_float: bool, body: &str) -> String {
+    if negative {
+        format!("-{body}")
+    } else if spec.plus_sign {
+        format!("+{body}")
+    } else if spec.space_sign {
+        format!(" {body}")
+    } else {
+        body.to_string()
+    }
+}
+
+/// Apply width padding to `with_sign` (which already has its sign/prefix).
+///
+/// `precision_set`: when true, suppresses zero-padding (POSIX: precision
+/// overrides the `0` flag for integer conversions).
+/// `negative`: used to place the `-` sign before zero-padding.
+fn apply_padded(
+    spec: &FormatSpec,
+    precision_set: bool,
+    with_sign: &str,
+    _precision: Option<usize>,
+    _negative: bool,
+    output: &mut String,
+) {
+    let width = spec.width.unwrap_or(0);
+    let len = with_sign.len();
+    if width <= len {
+        output.push_str(with_sign);
+        return;
+    }
+    let pad_count = width - len;
+    if spec.left_align {
+        output.push_str(with_sign);
+        for _ in 0..pad_count {
+            output.push(' ');
+        }
+    } else if spec.zero_pad && !precision_set {
+        // Zero-pad: sign comes first, then the zeros.
+        let (sign_part, digit_part) = if with_sign.starts_with(['-', '+', ' ']) {
+            (&with_sign[..1], &with_sign[1..])
+        } else {
+            ("", with_sign)
+        };
+        output.push_str(sign_part);
+        for _ in 0..pad_count {
+            output.push('0');
+        }
+        output.push_str(digit_part);
+    } else {
+        for _ in 0..pad_count {
+            output.push(' ');
+        }
+        output.push_str(with_sign);
     }
 }
 
@@ -297,6 +502,104 @@ fn apply_string_padding(spec: &FormatSpec, val: &str, output: &mut String) {
         }
     } else {
         output.push_str(val);
+    }
+}
+
+/// Format `val` in scientific notation matching GNU printf's `%e`/`%E`.
+///
+/// GNU always uses at least 2 exponent digits and an explicit sign: `1.000000e+03`.
+/// Rust's `{:.6e}` produces `1.000000e3` — we normalise the exponent part.
+fn format_scientific(val: f64, precision: usize, uppercase: bool) -> String {
+    // Use Rust's built-in formatter, then fix the exponent.
+    let raw = if uppercase {
+        format!("{:.prec$E}", val, prec = precision)
+    } else {
+        format!("{:.prec$e}", val, prec = precision)
+    };
+    normalise_exponent(&raw, uppercase)
+}
+
+/// Reformat a Rust scientific-notation string to GNU printf's exponent format.
+///
+/// Rust: `1.000000e3` or `1.000000e-3`
+/// GNU:  `1.000000e+03` or `1.000000e-03`
+fn normalise_exponent(raw: &str, uppercase: bool) -> String {
+    let e_char = if uppercase { 'E' } else { 'e' };
+    if let Some(e_pos) = raw.rfind(e_char) {
+        let mantissa = &raw[..e_pos];
+        let exp_str = &raw[e_pos + 1..];
+        // exp_str is like "3", "-3", "+3" (Rust omits leading zeros and the '+')
+        let (sign, digits) = if let Some(rest) = exp_str.strip_prefix('-') {
+            ("-", rest)
+        } else if let Some(rest) = exp_str.strip_prefix('+') {
+            ("+", rest)
+        } else {
+            ("+", exp_str)
+        };
+        // At least 2 exponent digits.
+        let exp_num: i32 = digits.parse().unwrap_or(0);
+        format!("{}{}{}{:02}", mantissa, e_char, sign, exp_num)
+    } else {
+        raw.to_string()
+    }
+}
+
+/// Format `val` using `%g`/`%G` semantics.
+///
+/// Uses the shorter of `%e` and `%f` representations, with `precision`
+/// significant digits (not decimal places). Trailing zeros are removed.
+/// If the exponent is < -4 or >= precision, uses scientific notation.
+fn format_g(val: f64, precision: usize, uppercase: bool) -> String {
+    if val == 0.0 {
+        return "0".to_string();
+    }
+    let exp = val.abs().log10().floor() as i32;
+    // GNU %g uses scientific notation when exp < -4 or exp >= precision.
+    if exp < -4 || exp >= precision as i32 {
+        // Scientific notation with (precision - 1) decimal places.
+        let sci_prec = if precision > 0 { precision - 1 } else { 0 };
+        let raw = if uppercase {
+            format!("{:.prec$E}", val, prec = sci_prec)
+        } else {
+            format!("{:.prec$e}", val, prec = sci_prec)
+        };
+        let normalised = normalise_exponent(&raw, uppercase);
+        // Remove trailing zeros from the mantissa.
+        trim_trailing_zeros_sci(&normalised, uppercase)
+    } else {
+        // Fixed notation with enough decimal places to show `precision` sig figs.
+        let decimal_places = if precision as i32 - 1 - exp > 0 {
+            (precision as i32 - 1 - exp) as usize
+        } else {
+            0
+        };
+        let raw = format!("{:.prec$}", val, prec = decimal_places);
+        // Remove trailing zeros after the decimal point.
+        trim_trailing_zeros_fixed(&raw)
+    }
+}
+
+/// Remove trailing zeros from a fixed-point string like "3.140000" → "3.14".
+/// If no decimal point, return as-is.
+fn trim_trailing_zeros_fixed(s: &str) -> String {
+    if !s.contains('.') {
+        return s.to_string();
+    }
+    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+    trimmed.to_string()
+}
+
+/// Remove trailing zeros from the mantissa of a scientific notation string.
+/// E.g. `1.230000e+03` → `1.23e+03`, `1.000000e+03` → `1e+03`.
+fn trim_trailing_zeros_sci(s: &str, uppercase: bool) -> String {
+    let e_char = if uppercase { 'E' } else { 'e' };
+    if let Some(e_pos) = s.rfind(e_char) {
+        let mantissa = &s[..e_pos];
+        let exp_part = &s[e_pos..];
+        let trimmed = mantissa.trim_end_matches('0').trim_end_matches('.');
+        format!("{trimmed}{exp_part}")
+    } else {
+        s.to_string()
     }
 }
 
@@ -464,5 +767,100 @@ mod tests {
     fn test_cycling_no_args_still_runs_once() {
         let args: Vec<TestVal> = vec![];
         assert_eq!(format_string_cycling("%s\\n", &args), "\n");
+    }
+
+    // --- new tests covering previously broken cases --------------------------
+
+    #[test]
+    fn test_plus_flag() {
+        let args = vec![TestVal::Int(5)];
+        assert_eq!(format_string("%+d", &args), "+5");
+    }
+
+    #[test]
+    fn test_space_flag() {
+        let args = vec![TestVal::Int(5)];
+        assert_eq!(format_string("% d", &args), " 5");
+    }
+
+    #[test]
+    fn test_hash_hex() {
+        let args = vec![TestVal::Int(255)];
+        assert_eq!(format_string("%#x", &args), "0xff");
+    }
+
+    #[test]
+    fn test_hash_octal() {
+        let args = vec![TestVal::Int(8)];
+        assert_eq!(format_string("%#o", &args), "010");
+    }
+
+    #[test]
+    fn test_precision_string() {
+        let args = vec![TestVal::Str("abcdef".into())];
+        assert_eq!(format_string("%.3s", &args), "abc");
+    }
+
+    #[test]
+    fn test_precision_decimal() {
+        let args = vec![TestVal::Int(5)];
+        assert_eq!(format_string("%.3d", &args), "005");
+    }
+
+    #[test]
+    fn test_precision_overrides_zero_flag() {
+        // POSIX: precision for integers suppresses the 0 flag.
+        let args = vec![TestVal::Int(5)];
+        assert_eq!(format_string("%05.3d", &args), "  005");
+    }
+
+    #[test]
+    fn test_u_conversion() {
+        let args = vec![TestVal::Int(5)];
+        assert_eq!(format_string("%u", &args), "5");
+    }
+
+    #[test]
+    fn test_big_e_conversion() {
+        let args = vec![TestVal::Float(1000.0)];
+        assert_eq!(format_string("%E", &args), "1.000000E+03");
+    }
+
+    #[test]
+    fn test_little_e_conversion() {
+        let args = vec![TestVal::Float(1000.0)];
+        assert_eq!(format_string("%e", &args), "1.000000e+03");
+    }
+
+    #[test]
+    fn test_big_g_large() {
+        let args = vec![TestVal::Float(1234567.0)];
+        assert_eq!(format_string("%G", &args), "1.23457E+06");
+    }
+
+    #[test]
+    fn test_little_g_large() {
+        let args = vec![TestVal::Float(1234567.0)];
+        assert_eq!(format_string("%g", &args), "1.23457e+06");
+    }
+
+    #[test]
+    fn test_b_tab() {
+        let args = vec![TestVal::Str("\\t".into())];
+        assert_eq!(format_string("%b", &args), "\t");
+    }
+
+    #[test]
+    fn test_octal_escape_format() {
+        // \0101 in format → 'A' (octal 101 = 65)
+        let args: Vec<TestVal> = vec![];
+        assert_eq!(format_string("\\0101", &args), "A");
+    }
+
+    #[test]
+    fn test_octal_escape_no_zero_prefix() {
+        // \101 in format → 'A'
+        let args: Vec<TestVal> = vec![];
+        assert_eq!(format_string("\\101", &args), "A");
     }
 }

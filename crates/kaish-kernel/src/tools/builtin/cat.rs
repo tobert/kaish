@@ -98,12 +98,16 @@ impl Tool for Cat {
                 if stdin.is_empty() {
                     return ExecResult::with_output(OutputData::text(stdin));
                 }
-                let numbered = stdin
+                let trailing_newline = stdin.ends_with('\n');
+                let mut numbered = stdin
                     .lines()
                     .enumerate()
                     .map(|(i, line)| format!("{:6}\t{}", i + 1, line))
                     .collect::<Vec<_>>()
                     .join("\n");
+                if trailing_newline {
+                    numbered.push('\n');
+                }
                 return ExecResult::with_output(OutputData::text(numbered));
             }
             let stdin = ctx.read_stdin_to_bytes().await.unwrap_or_default();
@@ -149,6 +153,10 @@ impl Tool for Cat {
 
         let mut all_content = String::new();
         let mut line_num = 1;
+        // Track whether the last file processed ends with a newline so we can
+        // restore it after `.lines()` strips it (`.lines()` is newline-agnostic
+        // and silently drops the trailing newline — we must add it back).
+        let mut last_had_trailing_newline = false;
 
         for path in paths.iter() {
             let resolved = ctx.resolve_path(path);
@@ -157,6 +165,7 @@ impl Tool for Cat {
                 Ok(data) => match String::from_utf8(data) {
                     Ok(content) => {
                         if number_lines {
+                            last_had_trailing_newline = content.ends_with('\n');
                             for line in content.lines() {
                                 if !all_content.is_empty() {
                                     all_content.push('\n');
@@ -177,6 +186,12 @@ impl Tool for Cat {
                 },
                 Err(e) => return ExecResult::failure(1, format!("cat: {}: {}", path, e)),
             }
+        }
+
+        // `.lines()` strips trailing newlines; restore one if the last file
+        // ended with `\n` (which it almost always does — this was the bug).
+        if number_lines && last_had_trailing_newline {
+            all_content.push('\n');
         }
 
         ExecResult::with_output(OutputData::text(all_content))
