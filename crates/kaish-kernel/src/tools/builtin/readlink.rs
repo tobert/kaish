@@ -252,9 +252,20 @@ fn normalize_path_buf(path: PathBuf) -> PathBuf {
             std::path::Component::RootDir => {}
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
-                if components.is_empty() && !is_absolute {
-                    components.push("..".into());
-                } else if !components.is_empty() {
+                // A `..` cancels a preceding *normal* component, but on a
+                // relative path it must ACCUMULATE past the start (and past
+                // other leading `..`s): `../../a` normalizes to `../../a`, not
+                // `a`. Only pop when the last component is a real name.
+                let last_is_parent = components
+                    .last()
+                    .map(|s| s.as_os_str() == std::ffi::OsStr::new(".."))
+                    .unwrap_or(false);
+                if components.is_empty() || last_is_parent {
+                    if !is_absolute {
+                        components.push("..".into());
+                    }
+                    // Absolute: a leading `..` at root is a no-op (stays at /).
+                } else {
                     components.pop();
                 }
             }
@@ -408,6 +419,26 @@ mod tests {
         assert_eq!(
             normalize_path_buf(PathBuf::from("a/b/../c")),
             PathBuf::from("a/c")
+        );
+    }
+
+    #[test]
+    fn test_normalize_path_buf_relative_leading_parents_accumulate() {
+        // Regression (Gemini review): leading/consecutive `..` on a relative
+        // path must accumulate, not cancel each other — `../../a` is `../../a`,
+        // not `a`. A trailing `..` past the start likewise accumulates.
+        assert_eq!(
+            normalize_path_buf(PathBuf::from("../../a")),
+            PathBuf::from("../../a")
+        );
+        assert_eq!(
+            normalize_path_buf(PathBuf::from("../a/../..")),
+            PathBuf::from("../..")
+        );
+        // A `..` still cancels a preceding real component.
+        assert_eq!(
+            normalize_path_buf(PathBuf::from("../a/b/..")),
+            PathBuf::from("../a")
         );
     }
 }

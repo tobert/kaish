@@ -325,6 +325,10 @@ Low-frequency sub-cases left after the P1 builtin fixes:
   `b`/`d`/`f`/`i` modifiers are accepted but not implemented. (`tools/builtin/sort.rs`)
 - **`printf`**: `%b` doesn't honor `\c` (stop *all* output) at the whole-format
   level; `%c` ignores width/flags. (`tools/builtin/format_string.rs`)
+- **`ls -1`**: the fix recovers `-1` by stripping a `Value::Int(-1)` positional,
+  so `ls -- -1` (listing a file literally named `-1`) misfires and lists cwd
+  instead. Rare; the real fix is lexing `-1` as a flag, not an int. (`$VAR=-1`
+  is safe — interpolation yields a `String`, not `Int(-1)`.) (`tools/builtin/ls.rs`)
 
 ### `mv` cross-mount copy of a symlink *child* follows it (fidelity, not data loss)
 Surfaced consolidating the rm/mv symlink-safety fix (2026-06-24). The top-level

@@ -62,7 +62,7 @@ impl Tool for Basename {
         // POSIX: a path consisting entirely of slashes (e.g. `//`) has itself
         // reduced to a single `/`. `Path::file_name()` returns `None` for such
         // paths, so we special-case before delegating to it.
-        let filename = if path_str.chars().all(|c| c == '/') {
+        let filename = if !path_str.is_empty() && path_str.chars().all(|c| c == '/') {
             "/"
         } else {
             path.file_name()

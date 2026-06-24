@@ -121,3 +121,26 @@ async fn dirname_single_slash_returns_slash() {
     assert_eq!(code, 0, "dirname / should succeed: {out:?}");
     assert_eq!(out.trim(), "/", "dirname / must return '/': {out:?}");
 }
+
+// ── empty-string operand: the all-slash check must not be vacuously true ──────
+
+#[tokio::test]
+async fn basename_empty_string_is_empty() {
+    // `chars().all('/')` is vacuously true on "" — must not return "/".
+    // GNU `basename ""` prints an empty line.
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, r#"basename """#).await;
+    assert_eq!(code, 0, "{out:?}");
+    assert_eq!(out, "", "basename \"\" should be empty, not /: {out:?}");
+}
+
+#[tokio::test]
+async fn dirname_empty_string_is_dot() {
+    // GNU `dirname ""` prints ".".
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, r#"dirname """#).await;
+    assert_eq!(code, 0, "{out:?}");
+    assert_eq!(out, ".", "dirname \"\" should be ., not /: {out:?}");
+}
