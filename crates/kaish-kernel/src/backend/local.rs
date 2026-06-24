@@ -295,9 +295,11 @@ impl KernelBackend for LocalBackend {
 
     async fn remove(&self, path: &Path, recursive: bool) -> BackendResult<()> {
         if recursive {
-            // For recursive removal, we need to check if it's a directory
-            // and remove contents first
-            if let Ok(entry) = self.vfs.stat(path).await
+            // lstat, never stat: a symlink-to-dir must be unlinked, not
+            // descended into. lstat reports the link itself (is_dir() == false
+            // for a symlink), so we skip recursion and just unlink it below —
+            // never deleting the link target's contents.
+            if let Ok(entry) = self.vfs.lstat(path).await
                 && entry.is_dir()
             {
                 // List and remove children

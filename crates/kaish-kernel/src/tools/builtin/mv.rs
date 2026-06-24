@@ -108,7 +108,10 @@ async fn move_path(
     dst: &Path,
     no_clobber: bool,
 ) -> Result<(), BackendError> {
-    let info = backend.stat(src).await?;
+    // lstat, not stat: classify the link itself so a symlink source (incl. a
+    // dangling one, which stat would fail to find) is moved as a link, never
+    // followed to its target.
+    let info = backend.lstat(src).await?;
 
     // Determine final destination path
     let final_dst = match backend.stat(dst).await {
@@ -136,15 +139,29 @@ async fn move_path(
         Err(e) => return Err(e),
     }
 
-    // Fall back to copy + remove (for cross-mount moves)
-    if info.is_dir() {
-        // Copy directory recursively, then remove source
-        move_dir_recursive(backend, src, &final_dst).await?;
-        remove_dir_recursive(backend, src).await?;
+    // Fall back to copy + remove (for cross-mount moves). We've already passed
+    // the no-clobber early-return, so either no-clobber is off (overwrite is
+    // wanted) or the dest doesn't exist. Unlink any existing dest FIRST so this
+    // mirrors `mv`'s overwrite semantics: recreating a symlink can't fail
+    // EEXIST, and overwriting replaces a dest *symlink* itself rather than
+    // writing through it to its target. `remove` is symlink-safe and tolerates
+    // a missing dest.
+    if info.is_symlink() {
+        // Recreate the link at the destination — never copy *through* it to the
+        // target (that would duplicate the target's data and drop the link).
+        let target = backend.read_link(src).await?;
+        let _ = backend.remove(&final_dst, false).await;
+        backend.symlink(&target, &final_dst).await?;
         backend.remove(src, false).await?;
+    } else if info.is_dir() {
+        // Copy directory recursively, then remove source tree via the single
+        // symlink-safe recursive remover on the backend.
+        move_dir_recursive(backend, src, &final_dst).await?;
+        backend.remove(src, true).await?;
     } else {
         // Copy file, then remove source
         let data = backend.read(src, None).await?;
+        let _ = backend.remove(&final_dst, false).await;
         backend.write(&final_dst, &data, WriteMode::Overwrite).await?;
         backend.remove(src, false).await?;
     }
@@ -172,28 +189,6 @@ fn move_dir_recursive<'a>(
             } else {
                 let data = backend.read(&src_child, None).await?;
                 backend.write(&dst_child, &data, WriteMode::Overwrite).await?;
-            }
-        }
-
-        Ok(())
-    })
-}
-
-/// Recursively remove directory contents (for cleanup after copy).
-fn remove_dir_recursive<'a>(
-    backend: &'a dyn KernelBackend,
-    dir: &'a Path,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BackendError>> + Send + 'a>> {
-    Box::pin(async move {
-        let entries = backend.list(dir).await?;
-
-        for entry in entries {
-            let child_path: PathBuf = dir.join(&entry.name);
-            if entry.is_dir() {
-                remove_dir_recursive(backend, &child_path).await?;
-                backend.remove(&child_path, false).await?;
-            } else {
-                backend.remove(&child_path, false).await?;
             }
         }
 

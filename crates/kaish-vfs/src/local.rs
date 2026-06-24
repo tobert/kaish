@@ -138,6 +138,44 @@ impl LocalFs {
         Ok(normalized)
     }
 
+    /// Resolve a path for an unlink/remove: follow intermediate symlinks but
+    /// NOT the final component, mirroring `unlink(2)`/`rmdir(2)` semantics.
+    ///
+    /// `resolve()` canonicalizes the *whole* path, so removing a symlink would
+    /// resolve to (and operate on) its target — `rm symlink-to-dir` could then
+    /// delete the target's contents. Here we canonicalize the parent only and
+    /// re-attach the literal final component, so `symlink_metadata` + `remove_*`
+    /// act on the link itself. The root-containment check still applies to the
+    /// resolved parent, so an intermediate symlink escaping the root is rejected.
+    fn resolve_for_unlink(&self, path: &Path) -> io::Result<PathBuf> {
+        let path = path.strip_prefix("/").unwrap_or(path);
+        let full = self.root.join(path);
+
+        let parent = full
+            .parent()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?;
+        let filename = full
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?;
+
+        // Canonicalize the parent (following intermediate symlinks); if the
+        // parent doesn't exist there's nothing to remove, so surface NotFound.
+        let canonical = parent.canonicalize()?.join(filename);
+
+        let canonical_root = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
+        if !canonical.starts_with(&canonical_root) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "path escapes root: {} is not under {}",
+                    canonical.display(),
+                    canonical_root.display()
+                ),
+            ));
+        }
+        Ok(canonical)
+    }
+
     /// Check if write operations are allowed.
     fn check_writable(&self) -> io::Result<()> {
         if self.read_only {
@@ -390,8 +428,11 @@ impl Filesystem for LocalFs {
 
     async fn remove(&self, path: &Path) -> io::Result<()> {
         self.check_writable()?;
-        let full_path = self.resolve(path)?;
-        let meta = fs::metadata(&full_path).await?;
+        // Never follow the final symlink: a symlink (even to a directory) must
+        // be unlinked, not resolved to its target. `symlink_metadata` reports
+        // the link itself, so a symlink takes the `remove_file` (unlink) branch.
+        let full_path = self.resolve_for_unlink(path)?;
+        let meta = fs::symlink_metadata(&full_path).await?;
 
         if meta.is_dir() {
             fs::remove_dir(&full_path).await
@@ -402,7 +443,11 @@ impl Filesystem for LocalFs {
 
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         self.check_writable()?;
-        let from_path = self.resolve(from)?;
+        // Don't follow the source's final symlink: `mv link new` must rename the
+        // link itself, not canonicalize to (and move) its target. The dest keeps
+        // normal resolution — it's the path we're creating, and resolve()'s
+        // missing-parent fallback pairs with the create_dir_all below.
+        let from_path = self.resolve_for_unlink(from)?;
         let to_path = self.resolve(to)?;
 
         // Ensure parent directory exists for destination
@@ -655,6 +700,68 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+
+        cleanup(&dir).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_remove_symlink_to_dir_unlinks_link_not_target() {
+        // Safety regression: `rm <symlink-to-dir>` must unlink the link and
+        // leave the target directory (and its contents) intact. resolve()
+        // canonicalizes, so before the resolve_for_unlink fix remove() would
+        // operate on the target — deleting/erroring on real data.
+        let (fs, dir) = setup().await;
+
+        fs.mkdir(Path::new("realdir")).await.unwrap();
+        fs.write(Path::new("realdir/keep.txt"), b"precious")
+            .await
+            .unwrap();
+        fs.symlink(Path::new("realdir"), Path::new("link"))
+            .await
+            .unwrap();
+
+        fs.remove(Path::new("link")).await.unwrap();
+
+        // The symlink is gone...
+        assert!(
+            fs.lstat(Path::new("link")).await.is_err(),
+            "symlink should be unlinked"
+        );
+        // ...but the target dir and its file survive untouched.
+        assert!(
+            fs.exists(Path::new("realdir")).await,
+            "target dir must survive"
+        );
+        assert_eq!(
+            fs.read(Path::new("realdir/keep.txt")).await.unwrap(),
+            b"precious"
+        );
+
+        cleanup(&dir).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_remove_symlink_to_file_unlinks_link_not_target() {
+        let (fs, dir) = setup().await;
+
+        fs.write(Path::new("target.txt"), b"content").await.unwrap();
+        fs.symlink(Path::new("target.txt"), Path::new("link.txt"))
+            .await
+            .unwrap();
+
+        fs.remove(Path::new("link.txt")).await.unwrap();
+
+        assert!(
+            fs.lstat(Path::new("link.txt")).await.is_err(),
+            "symlink should be unlinked"
+        );
+        assert_eq!(
+            fs.read(Path::new("target.txt")).await.unwrap(),
+            b"content",
+            "target file must survive"
+        );
 
         cleanup(&dir).await;
     }

@@ -215,43 +215,6 @@ impl Job {
         self.stderr_stream.as_ref()
     }
 
-    /// Wait for the job to complete and return its result.
-    ///
-    /// On completion, the job's output is written to a temp file for later retrieval.
-    pub async fn wait(&mut self) -> ExecResult {
-        if let Some(result) = self.result.take() {
-            self.result = Some(result.clone());
-            return result;
-        }
-
-        let result = if let Some(handle) = self.handle.take() {
-            match handle.await {
-                Ok(r) => r,
-                Err(e) => ExecResult::failure(1, format!("job panicked: {}", e)),
-            }
-        } else if let Some(rx) = self.result_rx.take() {
-            match rx.await {
-                Ok(r) => r,
-                Err(_) => ExecResult::failure(1, "job channel closed"),
-            }
-        } else {
-            // Already waited
-            self.result.clone().unwrap_or_else(|| ExecResult::failure(1, "no result"))
-        };
-
-        // Write output to a host temp file for later retrieval — but only when
-        // persistence is enabled. A hermetic / read-only kernel disables it so
-        // job output never bypasses the VFS onto the real filesystem.
-        if self.persist_output
-            && self.output_file.is_none()
-            && let Some(path) = self.write_output_file(&result) {
-                self.output_file = Some(path);
-            }
-
-        self.result = Some(result.clone());
-        result
-    }
-
     /// Write job output to a temp file.
     fn write_output_file(&self, result: &ExecResult) -> Option<PathBuf> {
         // This is a human-readable text log; a binary stdout is noted, not
@@ -515,7 +478,7 @@ impl JobManager {
     ///
     /// The job is inserted into the map synchronously before returning,
     /// guaranteeing it's immediately queryable via `exists()` or `get()`.
-    pub fn spawn<F>(&self, command: String, future: F) -> JobId
+    pub async fn spawn<F>(&self, command: String, future: F) -> JobId
     where
         F: std::future::Future<Output = ExecResult> + Send + 'static,
     {
@@ -526,23 +489,13 @@ impl JobManager {
         let mut job = Job::new(id, self.session_id, command, handle);
         job.persist_output = self.persist_output_files();
 
-        // Spin on try_lock to guarantee the job is in the map on return.
-        // The lock is tokio::sync::Mutex which is only held briefly during
-        // HashMap operations, so contention resolves quickly.
-        let mut job_opt = Some(job);
-        loop {
-            match self.jobs.try_lock() {
-                Ok(mut guard) => {
-                    if let Some(j) = job_opt.take() {
-                        guard.insert(id, j);
-                    }
-                    break;
-                }
-                Err(_) => {
-                    std::hint::spin_loop();
-                }
-            }
-        }
+        // Insert under an async lock — NOT a busy-spin on try_lock. The old
+        // sync spin could livelock the executor: on a current-thread runtime it
+        // blocks the only worker thread, so a task holding the lock across an
+        // await can never make progress to release it. `lock().await` yields
+        // instead. The insert still completes before we return, so the job is
+        // immediately queryable via `exists()`/`get()`.
+        self.jobs.lock().await.insert(id, job);
 
         id
     }
@@ -580,12 +533,47 @@ impl JobManager {
     }
 
     /// Wait for a specific job to complete.
+    ///
+    /// The job's pending awaitable (its task handle or result channel) is taken
+    /// out of the map under the lock, then the lock is **released before**
+    /// awaiting completion. Holding the `jobs` mutex across the await would
+    /// block every other job operation (spawn/register/list/status/kill) for the
+    /// whole duration of the job — so a nested `&` started under a parked
+    /// `wait %N` would deadlock. The lock is re-acquired only to finalize
+    /// (persist output, cache the result).
     pub async fn wait(&self, id: JobId) -> Option<ExecResult> {
-        let mut jobs = self.jobs.lock().await;
-        if let Some(job) = jobs.get_mut(&id) {
-            Some(job.wait().await)
-        } else {
-            None
+        // Poll for completion WITHOUT removing the job's `JoinHandle` from the
+        // map: `Job::try_poll` (via `is_done`) consumes the handle only once it
+        // has finished. That matters two ways:
+        //   * Drop-safe: a waiter dropped mid-wait (e.g. `timeout N wait %1`)
+        //     never carries the handle off and orphans the result, so a later
+        //     `wait %1` still completes instead of hanging.
+        //   * No lock-across-await: we sleep between polls rather than holding
+        //     the `jobs` mutex over the wait (which would block every other job
+        //     op — the deadlock this method exists to avoid) or busy-spinning.
+        // Cost is up to one poll interval of latency on completion — imperceptible
+        // for a job wait, and the sleep keeps idle CPU at zero.
+        loop {
+            {
+                let mut jobs = self.jobs.lock().await;
+                let job = jobs.get_mut(&id)?;
+                if job.is_done() {
+                    let result = job
+                        .result
+                        .clone()
+                        .unwrap_or_else(|| ExecResult::failure(1, "no result"));
+                    // Finalize once: persist output (idempotent on output_file).
+                    if job.persist_output
+                        && job.output_file.is_none()
+                        && let Some(path) = job.write_output_file(&result)
+                    {
+                        job.output_file = Some(path);
+                    }
+                    return Some(result);
+                }
+            }
+            // Lock released between polls — other job ops run freely.
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 
@@ -848,7 +836,7 @@ mod tests {
 
         let id = manager.spawn("leaky".to_string(), async {
             ExecResult::success("output that must not hit host disk")
-        });
+        }).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         let result = manager.wait(id).await;
         assert!(result.is_some());
@@ -871,7 +859,7 @@ mod tests {
         let id = manager.spawn("test".to_string(), async {
             tokio::time::sleep(Duration::from_millis(10)).await;
             ExecResult::success("done")
-        });
+        }).await;
 
         // Wait a bit for the job to be registered
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -890,12 +878,12 @@ mod tests {
         manager.spawn("job1".to_string(), async {
             tokio::time::sleep(Duration::from_millis(10)).await;
             ExecResult::success("one")
-        });
+        }).await;
 
         manager.spawn("job2".to_string(), async {
             tokio::time::sleep(Duration::from_millis(5)).await;
             ExecResult::success("two")
-        });
+        }).await;
 
         // Wait for jobs to register
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -911,7 +899,7 @@ mod tests {
         manager.spawn("test job".to_string(), async {
             tokio::time::sleep(Duration::from_millis(50)).await;
             ExecResult::success("")
-        });
+        }).await;
 
         // Wait for job to register
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -928,7 +916,7 @@ mod tests {
 
         let id = manager.spawn("quick".to_string(), async {
             ExecResult::success("")
-        });
+        }).await;
 
         // Wait for job to complete
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -945,7 +933,7 @@ mod tests {
 
         let id = manager.spawn("done".to_string(), async {
             ExecResult::success("")
-        });
+        }).await;
 
         // Wait for completion
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -968,7 +956,7 @@ mod tests {
 
         let id = manager.spawn("output job".to_string(), async {
             ExecResult::success("some output that gets written to a temp file")
-        });
+        }).await;
 
         // Wait for completion (triggers output file creation)
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1018,7 +1006,7 @@ mod tests {
         let id = manager.spawn("instant".to_string(), async {
             tokio::time::sleep(Duration::from_millis(100)).await;
             ExecResult::success("done")
-        });
+        }).await;
 
         // Should be immediately visible without any sleep
         let exists = manager.exists(id).await;
@@ -1041,7 +1029,7 @@ mod tests {
         // stops a pure-builtin job that has no OS process group.
         let manager = JobManager::new();
         let token = tokio_util::sync::CancellationToken::new();
-        let id = manager.spawn("bg".to_string(), async { ExecResult::success("") });
+        let id = manager.spawn("bg".to_string(), async { ExecResult::success("") }).await;
         manager.set_cancel_token(id, token.clone()).await;
 
         assert!(!token.is_cancelled());
@@ -1052,7 +1040,7 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_without_token_returns_false() {
         let manager = JobManager::new();
-        let id = manager.spawn("bg".to_string(), async { ExecResult::success("") });
+        let id = manager.spawn("bg".to_string(), async { ExecResult::success("") }).await;
         // No token recorded → nothing to cancel.
         assert!(!manager.cancel(id).await);
         // Unknown id → also false.
@@ -1062,7 +1050,7 @@ mod tests {
     #[tokio::test]
     async fn test_pgids_recorded_and_deduped() {
         let manager = JobManager::new();
-        let id = manager.spawn("bg".to_string(), async { ExecResult::success("") });
+        let id = manager.spawn("bg".to_string(), async { ExecResult::success("") }).await;
         assert!(manager.job_pgids(id).await.is_empty());
 
         manager.add_pgid(id, 4242).await;
@@ -1072,5 +1060,97 @@ mod tests {
 
         // Unknown id → empty, no panic.
         assert!(manager.job_pgids(JobId(999)).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_does_not_block_other_job_ops() {
+        // Regression: `wait(id)` must NOT hold the jobs mutex across the job's
+        // completion. The buggy version did, so while a `wait %N` was parked,
+        // every other job op (list/spawn/status) blocked until the job finished
+        // — a nested `&` under `wait %N` deadlocked. (Also covers the old
+        // `spawn` try_lock busy-spin, which on a current-thread runtime livelocked
+        // the executor when the lock was held.)
+        let manager = Arc::new(JobManager::new());
+        manager.set_persist_output_files(false);
+
+        // A job that blocks until we release it.
+        let (tx, rx) = oneshot::channel::<()>();
+        let id = manager
+            .spawn("blocker".to_string(), async move {
+                let _ = rx.await;
+                ExecResult::success("done")
+            })
+            .await;
+
+        // Park a waiter on it (in the buggy version, holds the lock for the
+        // job's whole lifetime).
+        let waiter = {
+            let m = manager.clone();
+            tokio::spawn(async move { m.wait(id).await })
+        };
+        // Let the waiter acquire the lock and park on the job's completion.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Other job ops must stay responsive while the waiter is parked.
+        let listed = tokio::time::timeout(Duration::from_secs(2), manager.list()).await;
+        assert!(
+            listed.is_ok(),
+            "list() blocked while wait() was parked — jobs lock held across await"
+        );
+        let second = tokio::time::timeout(
+            Duration::from_secs(2),
+            manager.spawn("second".to_string(), async { ExecResult::success("2") }),
+        )
+        .await;
+        assert!(
+            second.is_ok(),
+            "spawn() blocked/spun while wait() was parked"
+        );
+
+        // Release the job; the parked waiter must observe the result.
+        let _ = tx.send(());
+        let result = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("waiter join timed out")
+            .expect("waiter task panicked");
+        assert_eq!(result.map(|r| r.code), Some(0), "waiter should see exit 0");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wait_survives_a_dropped_waiter() {
+        // Regression (Gemini review): a waiter dropped mid-wait (e.g.
+        // `timeout N wait %1`) must NOT orphan the job's result. The buggy
+        // version took the JoinHandle out to await it, so dropping that waiter
+        // detached the task and lost its result, and a SECOND `wait %1` then
+        // hung forever (busy-spinning in the AlreadyWaiting branch). `wait` must
+        // never take the handle until it's finished.
+        let manager = Arc::new(JobManager::new());
+        manager.set_persist_output_files(false);
+
+        let (tx, rx) = oneshot::channel::<()>();
+        let id = manager
+            .spawn("blocker".to_string(), async move {
+                let _ = rx.await;
+                ExecResult::success("done")
+            })
+            .await;
+
+        // Waiter A parks on the job, then is aborted (dropped) before it finishes.
+        {
+            let m = manager.clone();
+            let a = tokio::spawn(async move { m.wait(id).await });
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            a.abort();
+            let _ = a.await;
+        }
+
+        // The job completes after A is gone.
+        let _ = tx.send(());
+
+        // Waiter B must still observe the result, not hang.
+        let res = tokio::time::timeout(Duration::from_secs(2), manager.wait(id))
+            .await
+            .expect("wait must not hang after a prior waiter was dropped");
+        assert_eq!(res.map(|r| r.code), Some(0), "B should see the completed job");
     }
 }

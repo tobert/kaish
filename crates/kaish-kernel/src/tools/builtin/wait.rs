@@ -172,11 +172,11 @@ mod tests {
         manager.spawn("job1".to_string(), async {
             tokio::time::sleep(Duration::from_millis(10)).await;
             ExecResult::success("")
-        });
+        }).await;
         manager.spawn("job2".to_string(), async {
             tokio::time::sleep(Duration::from_millis(5)).await;
             ExecResult::success("")
-        });
+        }).await;
 
         // Wait for jobs to register
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -198,7 +198,7 @@ mod tests {
         let id = manager.spawn("test".to_string(), async {
             tokio::time::sleep(Duration::from_millis(10)).await;
             ExecResult::success("")
-        });
+        }).await;
 
         // Wait for job to register
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -221,7 +221,7 @@ mod tests {
         let id = manager.spawn("test".to_string(), async {
             tokio::time::sleep(Duration::from_millis(10)).await;
             ExecResult::success("")
-        });
+        }).await;
         tokio::time::sleep(Duration::from_millis(5)).await;
 
         let mut args = ToolArgs::new();
@@ -242,11 +242,11 @@ mod tests {
         let id1 = manager.spawn("j1".to_string(), async {
             tokio::time::sleep(Duration::from_millis(10)).await;
             ExecResult::success("")
-        });
+        }).await;
         let id2 = manager.spawn("j2".to_string(), async {
             tokio::time::sleep(Duration::from_millis(5)).await;
             ExecResult::success("")
-        });
+        }).await;
         tokio::time::sleep(Duration::from_millis(5)).await;
 
         let mut args = ToolArgs::new();
@@ -281,7 +281,7 @@ mod tests {
         // Spawn a failing job
         manager.spawn("fail".to_string(), async {
             ExecResult::failure(1, "intentional failure")
-        });
+        }).await;
 
         // Wait for job to register
         tokio::time::sleep(Duration::from_millis(5)).await;

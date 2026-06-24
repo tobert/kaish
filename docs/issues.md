@@ -13,6 +13,88 @@ Priorities: **P1** high-leverage features/diagnostics · **P2** focused refactor
 
 ## P1 — High-leverage features and diagnostics
 
+### Release-blocking bugs — pre-release review sweep (2026-06-23)
+Cross-model sweep (deepseek on builtins, gemini-pro on internals), **every item
+reproduced against the local build** before filing; ~10 reviewer false positives
+discarded (notably: jq `//`-on-`false` is correct; the watchdog `duration_since`
+"panic" — tokio's `Instant` saturates; the "overlay write escapes to real FS" —
+overlay CoW is correctly wired; multibyte/empty short-flag "panics" — the lexer
+guarantees ASCII flags; the validator does *not* invent block scoping). Fix these
+before release.
+
+**Safety / security**
+- ~~**`rm -r <symlink-to-dir>` deletes the link target's contents on the real FS.**~~
+  FIXED 2026-06-24 (`fix/p1-safety-hangs`). Root cause was deeper than one site:
+  `LocalFs::remove`/`rename` canonicalized the *whole* path (following the final
+  symlink), and `rm`/`mv` each hand-rolled a recursive walk that `stat`'d through
+  links. Consolidated onto a single symlink-safe `backend.remove(path, recursive)`
+  (lstat recurse decision); added `LocalFs::resolve_for_unlink` (parent
+  canonicalized, final component literal) for `remove`/`rename`; `rm` uses `lstat`
+  for the trash/latch decision and symlinks bypass trash; `mv` recreates a symlink
+  rather than copying through it. Tests: `rm_mv_symlink_safety_tests.rs` (13
+  kernel-routed) + `LocalFs` unit tests. Residual filed P3 below (mv cross-mount
+  child-symlink copy fidelity).
+- ~~**Hermeticity leak: production reads OS `PATH`.**~~ FIXED 2026-06-24
+  (`fix/p1-safety-hangs`). Dropped the `std::env::var("PATH")` fallback in both
+  `kernel.rs::try_execute_external` and the test-only `dispatch.rs::try_external`;
+  `PATH` now comes from scope only. Frontends seed it via `initial_vars`
+  (REPL: `os_env_vars()`). Test `external_resolution_is_hermetic_no_os_path_fallback`
+  + updated fixtures that were silently leaning on the fallback (they now seed PATH
+  like the real frontend).
+
+**Deadlocks / hangs**
+- ~~**Large buffered stdin deadlocks.**~~ FIXED 2026-06-24 (`fix/p1-safety-hangs`).
+  The buffered-`String` stdin write now runs in a detached task (matching the
+  `pipe_stdin` path) instead of inline-before-drain, so a child emitting a lot
+  before draining its input no longer wedges both pipes. Broken-pipe-on-stdin
+  (child closes early, e.g. `head`) is no longer reported as a failure. Test:
+  `large_buffered_stdin_does_not_deadlock` (8 MiB through external `cat`, 10s
+  watchdog — reproduced the hang pre-fix).
+- ~~**Job `wait`/`spawn` deadlock.**~~ FIXED 2026-06-24 (`fix/p1-safety-hangs`).
+  `JobManager::wait` now takes the job's awaitable out under the lock, releases
+  the lock before awaiting completion, and re-acquires only to finalize;
+  `JobManager::spawn` is `async` and inserts via `lock().await` (no `try_lock`
+  busy-spin). Test: `wait_does_not_block_other_job_ops` (verified red against a
+  bug-simulating revert). Related latent holds noted P3 below
+  (`/v/jobs/{id}/stdout` reads hold the lock across `stream.read().await`).
+
+**Correctness — silent wrong output**
+- **Structured-data pipeline race.** `seq 1 3 | jq .` *fails* ("trailing
+  characters"): the consumer `try_recv`s the `.data` oneshot before the producer
+  sends it (producer sends only after dispatch completes), so structured data is lost
+  and it falls back to text (`scheduler/pipeline.rs`). Breaks builtin→builtin
+  structured-data flow. Fix: hand the receiver to the consumer (await-on-demand)
+  instead of racing a pre-read.
+- **`&&`/`||` precedence inverted.** The parser folds `&&` tighter than `||`
+  (`parser.rs`); POSIX gives them equal, left-to-right precedence. `true || echo A &&
+  echo B` prints nothing (bash prints `B`). The `[[ ]]` path is correct; this is the
+  statement-list path.
+- **`printf` flags/precision/conversions broadly broken** — one root cause
+  (`tools/builtin/format_string.rs`: parsed into `FormatSpec`, never applied). Silent:
+  `+`/` `/`#` flags ignored; `.precision` ignored for `%s` and for `%d`/`%x`/`%o`;
+  precision doesn't override the `0` flag; `%E`/`%G`/`%b`/`%u` emit the literal `%X`;
+  `\0NNN` octal escape broken. (Width, `-`, and basic `%s`/`%d`/`%x`/`%f` work.)
+  High-frequency builtin — agent-facing.
+- **`tr` doesn't interpret escapes** in SET1/SET2 — `tr '\n' ' '` matches a literal
+  `n`. Ubiquitous idiom. (`tools/builtin/tr.rs`)
+- **`sort` glued `-k` dropped** — `sort -k2n`/`-k2,2` silently fall back to full-line
+  sort; `-k N` ignores the field-to-EOL tiebreak; `-u` dedups the full line, not the
+  key. (`tools/builtin/sort.rs`)
+- **awk numeric comparison wrong** — strnum/absent fields compare as strings:
+  `$1=="foo"` makes `$1 > 5` true and `$1 == 0` false. (`tools/builtin/awk.rs`)
+- **`cat -n` drops the final newline** of the last line — every `cat -n` through a
+  pipe silently corrupts the last line (`.lines().join("\n")`). (`tools/builtin/cat.rs`)
+- **`find` predicates broken**: `find <regular-file>` prints nothing (exit 0);
+  `find -maxdepth 0` lists children instead of the start path; `find -mindepth` /
+  `-path` / `-ipath` are swallowed as `-h` and print help (exit 0). (`tools/builtin/find.rs`)
+- **`[[ =~ ]]` silently false** on an uncompilable regex (error swallowed).
+  (`interpreter/eval.rs`)
+- **Syntax error inside a quoted `$()` silently becomes literal text** — `echo "$(if
+  true; echo 1; fi)"` prints the literal string (`parser.rs`; unquoted `$()` errors
+  loudly).
+- **`cut -f "1-3,2-4"` duplicates fields** (no dedup, `tools/builtin/cut.rs`);
+  **`jq '. / 0'` returns `null`** silently while `%` errors (jaq-core).
+
 ### `execute_argv` — argv-native kernel entry point (+ multicall binary) (Amy, 2026-06-23)
 Embeddable surface is string-native (`execute(&str)` → lex/parse). A structured
 embedder (kaijutsu) or a busybox-style `kaish-multicall` binary arrives with argv
@@ -80,6 +162,46 @@ layer so search and listing share one type/hidden/ignore model. Not urgent.
 ---
 
 ## P2 — Focused refactors & real bugs
+
+### Pre-release sweep — real bugs (2026-06-23, verified local)
+- **POSIX `test` / `[` are unreachable.** `test "a" = "a"`, `test a != b`, and
+  `[ -f x ]` all fail to parse — the parser never routes a bare `=`/`!=` or a single
+  `[` to the registered `test`/`Bracket` builtins (`parser.rs`; the tools exist in
+  `test_builtin.rs`). Only `[[ ]]` works. Breaks a universal sh idiom. (Distinct from
+  the P4 "did-you-mean" guidance below — these builtins are *registered but
+  undispatchable*, a real wiring bug.)
+- **`glob` returns exit 0 on zero matches** — violates kaish's own documented
+  strict-glob guarantee ("zero matches is an error"). `glob '*.none'` → empty, exit 0.
+  (`tools/builtin/glob.rs`)
+- **`env -u` / `env -i` silently ignored when listing** (no positional arg) —
+  `env -u SECRET` still prints `SECRET`; the override path is only taken when a
+  positional exists. Can leak vars meant to be filtered. (`tools/builtin/env.rs`)
+- **`readlink -f` / `realpath` don't resolve symlinks** — they only normalize
+  `.`/`..`, returning the un-canonicalized path (silent wrong location); both also
+  accept nonexistent paths with exit 0. (`tools/builtin/{readlink,realpath}.rs`)
+- **`ls -1` treated as a path**, not a flag (`--one` works). (`tools/builtin/ls.rs`)
+- **`basename //` → `//`** (POSIX `/`); **`dirname //` → `.`** (POSIX `/`).
+  (`tools/builtin/{basename,dirname}.rs`)
+- **`tail -c +N` ignores the `+`** (returns the last N bytes). (`tools/builtin/tail.rs`)
+- **`tree <nonexistent>` exits 0** with a bare root node (silent success).
+  (`tools/builtin/tree.rs`)
+- **`diff --json` emits three different shapes** (identical vs quiet vs full differ in
+  whether `differ`/`hunks` are present) — a `--json` contract bug for consumers.
+  (`tools/builtin/diff.rs`)
+- **`write`/`tee` write binary-via-`$()` as the literal text `[binary: N bytes]`**
+  (silent corruption; the stdin path is safe). Extends the binary-data
+  var-interpolation placeholder (P1 binary-data residuals) — here the placeholder
+  reaches a file. (`tools/builtin/write.rs`)
+- **Interpreter:** `export` inside a function is dropped on return (writes the
+  innermost frame, `interpreter/scope.rs`); file tests skip tilde — `[[ -f ~/x ]]`
+  false (`eval.rs`); `<<-` tab-stripping runs *after* interpolation, eating tabs that
+  came from a variable's value (`eval.rs`).
+- **`scatter` silently corrupts a single JSON object/int `.data`** — ignores it and
+  newline-splits the pretty-printed text (`echo '{"k":1}' | jq . | scatter` fans out
+  3 bogus items). (`scheduler/scatter.rs`)
+- **`dd skip=` ignored unless `count=` is also given** (`tools/builtin/dd.rs`);
+  **`xxd -r -p` silently drops a trailing odd hex nibble** (`tools/builtin/xxd.rs`);
+  **`seq -w` doesn't pad negative numbers** (`tools/builtin/seq.rs`).
 
 ### Repeatable flags: glued short-flag form still overwrites (`-es/a/b/`)
 The `-e A -e B` and `--expression=A --expression=B` forms accumulate correctly,
@@ -163,6 +285,20 @@ The six-field `ExecContext` ↔ kernel-state sync appears near every fork call s
 - **Argv**: the glued-positional "quote the whole word" check covers pre-`--`
   positionals only; post-`--` and flag-adjacent-to-positional glue aren't flagged.
 
+**Common-idiom lexer gaps surfaced by the 2026-06-23 sweep** (verified; loud but
+hit ubiquitous inputs — worth raising above polish):
+- **Bare `@` is rejected everywhere** ("unexpected character"): `user@host`,
+  `a@b.com`, `@scope/pkg`, and `date -d @0` (epoch) all fail to lex. Emails, scoped
+  package names, and epoch-date arguments are common; `@` should lex as a bareword
+  char.
+- **Digit-leading barewords with an embedded hyphen split** and trip the
+  no-token-pasting rule: `echo 2024-01-02`, `10-20`, `1.5-2`, and unquoted `cut -f
+  1-3` / `cut -c 1-3` are parse errors (`a-b`, `v1-2`, UUIDs are fine). ISO dates and
+  `N-M` ranges are everyday agent inputs. The error ("adjacent words…") is also
+  misleading for this case. (`lexer.rs` `NumberIdent` / `InvalidFloat*` — extend the
+  digit-leading bareword to span `-`/`.` runs, or special-case it. NOT a panic — the
+  toolless reviewer's "crash on IP/UUID" claim was rejected; these fail loud.)
+
 ### v0.8.4 review residuals (Gemini Pro, 2026-06-14)
 - **`diff -C 3 -C 4` miscounts arity** (P4-trivial — `context_steals_positional`
   subtracts 1 for a deduped `-C`). Redundant usage; the execute-time clap backstop
@@ -172,6 +308,71 @@ The six-field `ExecContext` ↔ kernel-state sync appears near every fork call s
 ---
 
 ## P3 — Scheduler and infra
+
+### `JobManager` output-stream reads hold the jobs lock across `await`
+Surfaced fixing the `wait`/`spawn` deadlock (2026-06-24). `read_stdout`/`read_stderr`
+(`scheduler/job.rs`, the `/v/jobs/{id}/stdout|stderr` reads) do
+`return Some(stream.read().await)` *while still holding* `self.jobs.lock()`. Same
+class as the (now-fixed) `wait` bug: if the stream read blocks, every other job op
+stalls. Lower-frequency than `wait` and the `spawn`-async fix keeps it from
+hard-deadlocking the executor, but it should clone the `Arc<BoundedStream>` out
+under the lock, drop the lock, then `read().await`. Audit all `*.lock().await`
+sites in job.rs for other across-await holds while there.
+
+### `mv` cross-mount copy of a symlink *child* follows it (fidelity, not data loss)
+Surfaced consolidating the rm/mv symlink-safety fix (2026-06-24). The top-level
+cross-mount move now preserves a symlink source (recreates the link). But
+`move_dir_recursive` (the copy half of the cross-mount fallback) reads+writes
+each child by content, so a *symlink child* inside a moved directory is copied as
+a regular file/dir (read through to the target) rather than recreated as a link.
+Not data loss — the source tree is removed via the symlink-safe
+`backend.remove(src, true)`, and the external target survives; the moved copy just
+loses link-ness. Fix: teach `move_dir_recursive` to `lstat` children and
+`read_link`+`symlink` the symlinks (mirroring the top-level branch in
+`move_path`). Cross-mount only (same-mount uses atomic `rename`, already correct).
+
+### Pre-release sweep — lower-frequency fidelity gaps (2026-06-23, verified)
+- **`cp -p`/`--preserve` parsed then discarded** (no mode/mtime preserve; VFS has no
+  attributes) — silent. (`tools/builtin/cp.rs`)
+- **`rm <empty-dir>` without `-r` silently removes it** (coreutils needs `-d`/`-r`);
+  **`mkdir` is always `-p`-like** — `mkdir existing` → exit 0 (no "File exists"),
+  `mkdir a/b/c` (no `-p`) creates the chain. (`tools/builtin/{rm,mkdir}.rs`)
+- **awk fidelity (adjacent to the pre-0.9 awk gaps below):** `FNR` uninitialized
+  (empty); setting `NF` doesn't truncate fields/`$0`; `split(s,a,/re/)` evaluates the
+  regex as a `$0`-match (wrong count); `sub`/`gsub` replacements lack `\1`..`\9`
+  backrefs. (`tools/builtin/awk.rs`)
+- **jq:** `keys_unsorted` returns *sorted* keys; `1e10` serializes as
+  `10000000000.0`; indexing `null` (`null | .a`) errors where real jq returns `null`.
+  (jaq-core / `jq_native.rs`)
+- **`grep -c` exits 0 on zero matches** (GNU exits 1); **`readlink` on a non-symlink**
+  reports "Invalid argument" not "not a symbolic link" (`tools/builtin/readlink.rs`).
+- **`$(cmd)` trims *all* trailing whitespace** (`.trim_end()`) not just trailing
+  newlines — inconsistent with the interpolation/for-loop paths that trim only `\n`.
+  (`kernel.rs`)
+- **External output via `BoundedStream` keeps only the tail and sets no spill signal**
+  in the `output_limit::none()` path (repl/transient/default) — silent truncation,
+  head lost. (When output-limit is enabled — agent presets — spill + exit-3 work.)
+  (`kernel.rs`)
+- **Embedder-facing VFS:** `PatchOp::*Line` ops strip CRLF / add a trailing newline
+  (the `patch` builtin uses whole-file Replace, so end-user `patch` is unaffected;
+  embedder line-ops aren't); `stat` on an *intermediate* mount path fails though
+  `list_root` shows it; `JobFs` doesn't override `read_range` (O(n²) on chunked reads,
+  small files); router `find_mount` uses `to_string_lossy` (corrupts non-UTF-8 paths).
+  (`backend/local.rs`, `vfs/router.rs`, `vfs/jobfs.rs`)
+- **`date`:** `%Z` renders the numeric offset, not the zone name (UTC/EST); compound
+  `-d '2025-01-15 - 1 day'` (spaced operator) fails (the no-space `-1 day` form works).
+- **rm latch can't be confirmed across separate `kaish -c` processes** (NonceStore is
+  per-process; by design for embedder/REPL sessions) — worth a CLI doc note.
+- **Multiple heredocs on one line** (`cat <<A | cmd <<B`): in the REPL the second
+  body can be executed as commands (data-as-code); in `-c`/script mode it's a loud
+  parse error. REPL-only. (`lexer.rs` `preprocess_heredocs`)
+- **Scheduler (lower than the toolless review claimed):** concurrent stages/workers
+  use `Vec<JoinHandle>` (not `JoinSet`) with no abort, but the normal path joins all
+  and cancellation cascades via `fork_attached` tokens, so a drop-mid-await leak is
+  *bounded*, not unbounded (`scheduler/{pipeline,scatter}.rs`); the redirect
+  "stream-to-disk" comment overstates — it materializes the buffer in memory first;
+  the sync `build_tool_args` silently drops a `$()`-valued scatter/gather *option*
+  (inserts a bool flag) — folds into the "eliminate the sync twin" item below.
 
 ### Pre-0.9 punch-list residuals — low-frequency fidelity gaps (2026-06-17)
 Low-frequency, record-then-defer:
@@ -321,6 +522,26 @@ Revisit when the first external tool bundle wants unit tests.
 
 ## P4 — Eventually
 
+### Pre-release sweep — minor / edge (2026-06-23, verified)
+- **Backticks inside double-quotes and heredoc bodies are silently literal** — bare
+  backticks are a loud lexer error, but quoted/heredoc ones slip through
+  `parse_string_literal`. Should reject with the same `$(cmd)` hint. (`lexer.rs`)
+- **Unterminated arithmetic `$(( 1 + 2`** reaches EOF and is silently evaluated as `3`
+  instead of erroring. (`lexer.rs` `preprocess_arithmetic`)
+- **Comment `#` mid-word truncates** — `echo http://x/#frag` → `http://x/`, `echo a#b`
+  → `a`; any `#` outside double-quotes starts a comment with no word-boundary check.
+  (`lexer.rs`)
+- **Empty assignment `VAR=` / `export VAR=` rejected** — the parser requires a RHS
+  expression; bash accepts it as setting an empty/cleared value. (`parser.rs`)
+- **`xxd -l -1` / `-s -1` and `base64 -w -1`** accept negative counts via `i64 as
+  usize` wrap (full output, exit 0). (`tools/builtin/{xxd,base64_tool}.rs`)
+- **`<`/`>` in `[[ ]]` compare numerically when both operands are `Value::Int`** (bare
+  numeric literals), where bash always compares lexicographically; quoted strings
+  match bash. (`interpreter/eval.rs`)
+- **`kill_with_grace` has no else-fallback** when the pidfd target is `None` (only
+  reachable for an already-reaped child, so a live hang is implausible) — robustness
+  gap, not a live bug. (`kernel.rs`)
+
 ### `patch` residuals — final-newline intent and file creation (2026-06-22)
 Surfaced by the diff/patch code review; both pre-existing, both low-frequency:
 - **Final-newline intent isn't honored.** `parse_unified_diff` discards the
@@ -334,6 +555,12 @@ Surfaced by the diff/patch code review; both pre-existing, both low-frequency:
   (`cannot read 'new.txt'`) instead of creating the file. The whole-file-Replace
   design cements the pre-existing limitation. Add an "old side empty → create"
   branch if agents start emitting creation diffs.
+- **`search_block` integer overflow on a crafted header (2026-06-23 sweep).** A hunk
+  header with a huge `old_start` makes `center + dist` overflow (debug panic; release
+  wraps and can match at the wrong offset), and the `0..=max_dist` search loop is
+  unbounded when the header points far past EOF (watchdog-bounded in practice). Clamp
+  `center`/`max_dist` to the buffer length and use checked/saturating add.
+  (`tools/builtin/patch.rs`)
 
 ### Control structures inside `$()` are not supported
 The `$()` body accepts the full *statement* grammar (pipelines, `&&`/`||`,

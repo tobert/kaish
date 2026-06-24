@@ -140,7 +140,7 @@ mod tests {
         manager.spawn("test command".to_string(), async {
             tokio::time::sleep(Duration::from_millis(100)).await;
             ExecResult::success("")
-        });
+        }).await;
 
         // Wait for job to register
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -162,7 +162,7 @@ mod tests {
         // Spawn a quick job that will complete
         let id = manager.spawn("quick job".to_string(), async {
             ExecResult::success("")
-        });
+        }).await;
 
         // Wait for it to complete
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -193,7 +193,7 @@ mod tests {
         manager.spawn("long job".to_string(), async {
             tokio::time::sleep(Duration::from_secs(10)).await;
             ExecResult::success("")
-        });
+        }).await;
 
         // Wait for registration
         tokio::time::sleep(Duration::from_millis(10)).await;
