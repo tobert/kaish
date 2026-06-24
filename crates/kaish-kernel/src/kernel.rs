@@ -3585,11 +3585,19 @@ impl Kernel {
                             .collect();
                         Ok(Value::Json(serde_json::Value::Array(items)))
                     } else {
-                        Ok(Value::String(result.text_out().trim_end().to_string()))
+                        // Strip trailing newlines only (POSIX command-subst),
+                        // not all trailing whitespace — spaces/tabs are
+                        // significant, matching the interpolation and for-loop
+                        // paths (`trim_end_matches(['\n', '\r'])`).
+                        Ok(Value::String(
+                            result.text_out().trim_end_matches(['\n', '\r']).to_string(),
+                        ))
                     }
                 } else {
                     // Otherwise return stdout as single string (NO implicit splitting)
-                    Ok(Value::String(result.text_out().trim_end().to_string()))
+                    Ok(Value::String(
+                        result.text_out().trim_end_matches(['\n', '\r']).to_string(),
+                    ))
                 }
             }
             Expr::Test(test_expr) => {

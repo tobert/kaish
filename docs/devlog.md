@@ -9,6 +9,30 @@ Newest themes first within each area; dates are when the work landed.
 
 ---
 
+## Correctness one-offs — grep -c exit, `$()` trim, jq /0 (landed 2026-06-24)
+
+Three small independent silent/surprise fixes (`correctness_oneoffs_tests.rs`):
+
+- **`grep -c` exits 1 on zero matches** (GNU). Was always exit 0 — the count is
+  printed but the status must still signal "no match." Both the single-buffer and
+  multi-file count paths now set `code = 1` when the total is 0 (multi-file: only
+  when *no* file matched; a read-error still overrides to 2).
+- **`$()` strips only trailing newlines**, not all trailing whitespace. The bare
+  `Expr::CommandSubst` arms used `.trim_end()` (ate spaces/tabs); now
+  `trim_end_matches(['\n', '\r'])`, matching the interpolation (`StringPart::CommandSubst`)
+  and for-loop split paths. Significant trailing spaces survive (`x=$(printf 'a  ')`).
+- **jq `. / 0` fails loudly** instead of silently returning `null`. The mechanism:
+  jaq evaluates `n/0` to a non-finite `Val::Float` (inf, or NaN for `0/0`), and
+  `val_to_json` did `from_f64(inf) → None → unwrap_or(Null)` — a silent-wrong null.
+  New `has_nonfinite_float` (recurses arrays/objects) gates the result loop and
+  errors. **Decision:** this also errors on jq's `infinite`/`nan` *literals*, where
+  real jq clamps `infinite` to max-f64 and renders `nan` as null. We can't tell a
+  division-by-zero inf from an `infinite`-literal inf at serialization time (jaq
+  doesn't error at the division like real jq does), and a loud error beats a silent
+  null (the no-silent-fallbacks / crash-over-corruption directive). `infinite`/`nan`
+  literals are rare; accepted divergence. The separate jaq float-formatting quirk (`3.0` for `6/2`,
+  `1e10`→`10000000000.0`) is untouched — still in issues.md P3.
+
 ## Common-idiom lexer gaps — `@`, hyphenated numbers, `-1k` (landed 2026-06-24)
 
 Three everyday agent inputs used to fragment into adjacent tokens and trip the

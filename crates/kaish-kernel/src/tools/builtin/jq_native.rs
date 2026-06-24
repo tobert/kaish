@@ -187,6 +187,16 @@ fn execute_filter_json(
     for result in results {
         match result {
             Ok(val) => {
+                // jaq evaluates `n / 0` to a non-finite float (`inf`/`-inf`/
+                // `NaN`) rather than erroring like real jq; `val_to_json` would
+                // then silently coerce it to `null` (JSON has no infinity).
+                // Fail loudly instead of emitting that silent-wrong null.
+                if has_nonfinite_float(&val) {
+                    return Err(
+                        "jq runtime error: numeric result is not finite (division by zero?)"
+                            .to_string(),
+                    );
+                }
                 let formatted = if raw_output {
                     format_raw(&val)
                 } else if compact {
@@ -294,6 +304,18 @@ fn ast_value_to_json(value: &Value) -> serde_json::Value {
         Value::Json(json) => json.clone(),
         // Binary jq input surfaces as the self-describing base64 envelope.
         Value::Bytes(b) => kaish_types::bytes_to_envelope(b),
+    }
+}
+
+/// True if `val` contains a non-finite float (`inf`/`-inf`/`NaN`) anywhere,
+/// including nested in arrays/objects. Used to turn jaq's silent division-by-
+/// zero (a non-finite float that JSON renders as `null`) into a loud error.
+fn has_nonfinite_float(val: &Val) -> bool {
+    match val {
+        Val::Float(n) => !n.is_finite(),
+        Val::Arr(arr) => arr.iter().any(has_nonfinite_float),
+        Val::Obj(obj) => obj.iter().any(|(_, v)| has_nonfinite_float(v)),
+        _ => false,
     }
 }
 

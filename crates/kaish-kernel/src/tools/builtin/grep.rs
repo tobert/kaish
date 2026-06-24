@@ -504,7 +504,14 @@ impl Tool for Grep {
         }
 
         if count_only {
-            ExecResult::with_output(OutputData::text(format!("{}\n", render.match_count)))
+            // GNU `grep -c`: the count is printed *and* the exit status still
+            // reflects whether anything matched (1 = no match).
+            let mut result =
+                ExecResult::with_output(OutputData::text(format!("{}\n", render.match_count)));
+            if render.match_count == 0 {
+                result.code = 1;
+            }
+            result
         } else if render.match_count == 0 {
             ExecResult::from_output(1, render.text, "")
         } else {
@@ -660,7 +667,13 @@ impl Grep {
                 ExecResult::with_output(OutputData::text(files_with_matches.join("\n") + "\n"))
             }
         } else if count_only {
-            ExecResult::with_output(OutputData::text(format!("{}\n", total_matches)))
+            // GNU `grep -c` over multiple files prints a per-file/total count
+            // but still exits 1 when nothing matched in any file.
+            let mut r = ExecResult::with_output(OutputData::text(format!("{}\n", total_matches)));
+            if total_matches == 0 {
+                r.code = 1;
+            }
+            r
         } else if total_matches == 0 {
             ExecResult::from_output(1, total_output, "")
         } else {
