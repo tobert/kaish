@@ -95,7 +95,6 @@ Still open:
   error (matching unquoted `$()`). Test: `quoted_cmdsubst_error_tests`. Residual:
   a malformed `$()` inside a `${VAR:-default}` *default word* still falls back to
   literal (two infallible Expr-returning call sites; rare edge).
-- **`jq '. / 0'` returns `null`** silently while `%` errors (jaq-core).
 
 ### `execute_argv` — argv-native kernel entry point (+ multicall binary) (Amy, 2026-06-23)
 Embeddable surface is string-native (`execute(&str)` → lex/parse). A structured
@@ -339,11 +338,6 @@ loses link-ness. Fix: teach `move_dir_recursive` to `lstat` children and
 - **jq:** `keys_unsorted` returns *sorted* keys; `1e10` serializes as
   `10000000000.0`; indexing `null` (`null | .a`) errors where real jq returns `null`.
   (jaq-core / `jq_native.rs`)
-- **`grep -c` exits 0 on zero matches** (GNU exits 1); **`readlink` on a non-symlink**
-  reports "Invalid argument" not "not a symbolic link" (`tools/builtin/readlink.rs`).
-- **`$(cmd)` trims *all* trailing whitespace** (`.trim_end()`) not just trailing
-  newlines — inconsistent with the interpolation/for-loop paths that trim only `\n`.
-  (`kernel.rs`)
 - **External output via `BoundedStream` keeps only the tail and sets no spill signal**
   in the `output_limit::none()` path (repl/transient/default) — silent truncation,
   head lost. (When output-limit is enabled — agent presets — spill + exit-3 work.)
