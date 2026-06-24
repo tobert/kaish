@@ -1,5 +1,6 @@
 ---
 source: crates/kaish-kernel/tests/parser_tests.rs
+assertion_line: 21
 expression: sexpr
 ---
-(or-chain (and-chain (cmd a) (cmd b)) (and-chain (cmd c) (cmd d)))
+(and-chain (or-chain (and-chain (cmd a) (cmd b)) (cmd c)) (cmd d))

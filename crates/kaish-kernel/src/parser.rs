@@ -979,26 +979,32 @@ where
         ))
         .boxed();
 
-        // Statement chaining with precedence: && binds tighter than ||
-        // and_chain = base_stmt { "&&" base_stmt }
-        // or_chain  = and_chain { "||" and_chain }
-        let and_chain = base_statement
+        // Statement chaining: `&&` and `||` have EQUAL precedence and associate
+        // left-to-right (POSIX), so `true || echo A && echo B` parses as
+        // `((true || echo A) && echo B)` and prints B — NOT `&&`-binds-tighter.
+        // A single left fold over a stream of (operator, statement) pairs gives
+        // that: each operator wraps the accumulated left side with the next stmt.
+        base_statement
             .clone()
             .foldl(
-                just(Token::And).ignore_then(base_statement).repeated(),
-                |left, right| Stmt::AndChain {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            );
-
-        and_chain
-            .clone()
-            .foldl(
-                just(Token::Or).ignore_then(and_chain).repeated(),
-                |left, right| Stmt::OrChain {
-                    left: Box::new(left),
-                    right: Box::new(right),
+                choice((
+                    just(Token::And).to(true), // true = &&
+                    just(Token::Or).to(false), // false = ||
+                ))
+                .then(base_statement)
+                .repeated(),
+                |left, (is_and, right): (bool, Stmt)| {
+                    if is_and {
+                        Stmt::AndChain {
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        }
+                    } else {
+                        Stmt::OrChain {
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        }
+                    }
                 },
             )
             .then_ignore(terminator)
