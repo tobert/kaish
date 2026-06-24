@@ -50,10 +50,13 @@ before release.
   (child closes early, e.g. `head`) is no longer reported as a failure. Test:
   `large_buffered_stdin_does_not_deadlock` (8 MiB through external `cat`, 10s
   watchdog — reproduced the hang pre-fix).
-- **Job `wait`/`spawn` deadlock.** `JobManager::wait` holds the `jobs` mutex across
-  `job.wait().await`, and `JobManager::spawn` busy-spins on `try_lock`
-  (`scheduler/job.rs`). A nested `&` spawn while a `wait %1` is parked hangs (live
-  repro, exit 124). Fix: drop the lock before awaiting; don't spin-lock.
+- ~~**Job `wait`/`spawn` deadlock.**~~ FIXED 2026-06-24 (`fix/p1-safety-hangs`).
+  `JobManager::wait` now takes the job's awaitable out under the lock, releases
+  the lock before awaiting completion, and re-acquires only to finalize;
+  `JobManager::spawn` is `async` and inserts via `lock().await` (no `try_lock`
+  busy-spin). Test: `wait_does_not_block_other_job_ops` (verified red against a
+  bug-simulating revert). Related latent holds noted P3 below
+  (`/v/jobs/{id}/stdout` reads hold the lock across `stream.read().await`).
 
 **Correctness — silent wrong output**
 - **Structured-data pipeline race.** `seq 1 3 | jq .` *fails* ("trailing
@@ -305,6 +308,16 @@ hit ubiquitous inputs — worth raising above polish):
 ---
 
 ## P3 — Scheduler and infra
+
+### `JobManager` output-stream reads hold the jobs lock across `await`
+Surfaced fixing the `wait`/`spawn` deadlock (2026-06-24). `read_stdout`/`read_stderr`
+(`scheduler/job.rs`, the `/v/jobs/{id}/stdout|stderr` reads) do
+`return Some(stream.read().await)` *while still holding* `self.jobs.lock()`. Same
+class as the (now-fixed) `wait` bug: if the stream read blocks, every other job op
+stalls. Lower-frequency than `wait` and the `spawn`-async fix keeps it from
+hard-deadlocking the executor, but it should clone the `Arc<BoundedStream>` out
+under the lock, drop the lock, then `read().await`. Audit all `*.lock().await`
+sites in job.rs for other across-await holds while there.
 
 ### `mv` cross-mount copy of a symlink *child* follows it (fidelity, not data loss)
 Surfaced consolidating the rm/mv symlink-safety fix (2026-06-24). The top-level
