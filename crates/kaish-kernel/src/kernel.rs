@@ -4538,18 +4538,20 @@ impl Kernel {
                     // Dropping child_stdin signals EOF to the child.
                 })
             })
-        } else if let Some(data) = stdin_string
-            && let Some(mut stdin) = child.stdin.take()
-        {
-            use tokio::io::AsyncWriteExt;
-            if let Err(e) = stdin.write_all(data.as_bytes()).await {
-                return Ok(Some(ExecResult::failure(
-                    1,
-                    format!("{}: failed to write stdin: {}", name, e),
-                )));
-            }
-            // Drop stdin to signal EOF
-            None
+        } else if let Some(data) = stdin_string {
+            // Write the buffered String from a detached task too — NOT inline.
+            // An inline write blocks once the stdin pipe fills, and the output
+            // drain hasn't spawned yet, so a child that emits a lot before
+            // consuming all its input (every pipe buffer full) deadlocks. A
+            // write error here is normal, not a failure: a child that closes
+            // stdin early (e.g. `head`) breaks the pipe. Dropping child_stdin
+            // signals EOF.
+            child.stdin.take().map(|mut child_stdin| {
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = child_stdin.write_all(data.as_bytes()).await;
+                })
+            })
         } else {
             None
         };

@@ -43,10 +43,13 @@ before release.
   like the real frontend).
 
 **Deadlocks / hangs**
-- **Large buffered stdin deadlocks.** External-command buffered-`String` stdin is
-  `write_all`'d *inline* before the stdout/stderr drain tasks spawn (`kernel.rs`), so
-  >64 KiB stdin + a child emitting >64 KiB output fills both pipes and hangs. The
-  lazy `pipe_stdin` path is already spawned; the string path isn't. Fix: spawn the write.
+- ~~**Large buffered stdin deadlocks.**~~ FIXED 2026-06-24 (`fix/p1-safety-hangs`).
+  The buffered-`String` stdin write now runs in a detached task (matching the
+  `pipe_stdin` path) instead of inline-before-drain, so a child emitting a lot
+  before draining its input no longer wedges both pipes. Broken-pipe-on-stdin
+  (child closes early, e.g. `head`) is no longer reported as a failure. Test:
+  `large_buffered_stdin_does_not_deadlock` (8 MiB through external `cat`, 10s
+  watchdog — reproduced the hang pre-fix).
 - **Job `wait`/`spawn` deadlock.** `JobManager::wait` holds the `jobs` mutex across
   `job.wait().await`, and `JobManager::spawn` busy-spins on `try_lock`
   (`scheduler/job.rs`). A nested `&` spawn while a `wait %1` is parked hangs (live

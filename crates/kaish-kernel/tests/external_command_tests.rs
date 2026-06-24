@@ -52,6 +52,33 @@ async fn external_command_with_args() {
 }
 
 #[tokio::test]
+async fn large_buffered_stdin_does_not_deadlock() {
+    // A buffered String stdin used to be write_all'd INLINE, before the
+    // stdout/stderr drain tasks spawned. With >64 KiB of input AND a child that
+    // emits >64 KiB before draining its input, both pipes fill and neither side
+    // can progress → deadlock. `cat` echoes stdin to stdout, so a 256 KiB
+    // payload through external `cat` (via bash, since `cat` is a kaish builtin)
+    // fills both 64 KiB pipe buffers. The fix writes stdin from a detached task
+    // that runs concurrently with the output drain.
+    let kernel = repl_kernel();
+    let payload = "x".repeat(8 * 1024 * 1024);
+    let fut = kernel.execute_with_options(
+        "bash -c \"cat\"",
+        kaish_kernel::ExecuteOptions::new().with_stdin(payload.clone()),
+    );
+    let result = tokio::time::timeout(Duration::from_secs(10), fut)
+        .await
+        .expect("large buffered stdin must not deadlock")
+        .expect("execute");
+    assert_eq!(result.code, 0, "cat should succeed: {}", result.err);
+    assert_eq!(
+        result.text_out().len(),
+        payload.len(),
+        "all stdin bytes should round-trip through cat"
+    );
+}
+
+#[tokio::test]
 async fn external_resolution_is_hermetic_no_os_path_fallback() {
     // A kernel with no PATH in scope must NOT reach into the OS PATH to resolve
     // external commands — the execution core never reads OS env. `printenv` is a
