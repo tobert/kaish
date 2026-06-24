@@ -23,11 +23,17 @@ guarantees ASCII flags; the validator does *not* invent block scoping). Fix thes
 before release.
 
 **Safety / security**
-- **`rm -r <symlink-to-dir>` deletes the link target's contents on the real FS.**
-  The recursive dir-vs-file decision stats *through* the symlink (`backend/local.rs`
-  recursive `remove` → `self.vfs.stat`; `LocalFs::remove` uses `fs::metadata`)
-  instead of `lstat`. `OverlayFs::remove` already lstats; the kernel backend layer
-  doesn't. Live-reproduced real-file deletion. Fix: `lstat` for the recursion decision.
+- ~~**`rm -r <symlink-to-dir>` deletes the link target's contents on the real FS.**~~
+  FIXED 2026-06-24 (`fix/p1-safety-hangs`). Root cause was deeper than one site:
+  `LocalFs::remove`/`rename` canonicalized the *whole* path (following the final
+  symlink), and `rm`/`mv` each hand-rolled a recursive walk that `stat`'d through
+  links. Consolidated onto a single symlink-safe `backend.remove(path, recursive)`
+  (lstat recurse decision); added `LocalFs::resolve_for_unlink` (parent
+  canonicalized, final component literal) for `remove`/`rename`; `rm` uses `lstat`
+  for the trash/latch decision and symlinks bypass trash; `mv` recreates a symlink
+  rather than copying through it. Tests: `rm_mv_symlink_safety_tests.rs` (13
+  kernel-routed) + `LocalFs` unit tests. Residual filed P3 below (mv cross-mount
+  child-symlink copy fidelity).
 - **Hermeticity leak: production reads OS `PATH`.** `kernel.rs::try_execute_external`
   falls back to `std::env::var("PATH")` when `PATH` isn't in kernel scope (same in
   the test-only `dispatch.rs::try_external`). Contradicts "the kernel never reads OS
@@ -293,6 +299,18 @@ hit ubiquitous inputs — worth raising above polish):
 ---
 
 ## P3 — Scheduler and infra
+
+### `mv` cross-mount copy of a symlink *child* follows it (fidelity, not data loss)
+Surfaced consolidating the rm/mv symlink-safety fix (2026-06-24). The top-level
+cross-mount move now preserves a symlink source (recreates the link). But
+`move_dir_recursive` (the copy half of the cross-mount fallback) reads+writes
+each child by content, so a *symlink child* inside a moved directory is copied as
+a regular file/dir (read through to the target) rather than recreated as a link.
+Not data loss — the source tree is removed via the symlink-safe
+`backend.remove(src, true)`, and the external target survives; the moved copy just
+loses link-ness. Fix: teach `move_dir_recursive` to `lstat` children and
+`read_link`+`symlink` the symlinks (mirroring the top-level branch in
+`move_path`). Cross-mount only (same-mount uses atomic `rename`, already correct).
 
 ### Pre-release sweep — lower-frequency fidelity gaps (2026-06-23, verified)
 - **`cp -p`/`--preserve` parsed then discarded** (no mode/mtime preserve; VFS has no

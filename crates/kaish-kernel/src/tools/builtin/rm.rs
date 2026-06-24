@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::path::{Path, PathBuf};
 
-use crate::backend::{BackendError, KernelBackend};
+use crate::backend::BackendError;
 use crate::interpreter::ExecResult;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -60,7 +60,20 @@ fn decide_rm_action(
     file_size: Option<u64>,
     trash_max_size: u64,
     is_dir: bool,
+    is_symlink: bool,
 ) -> RmAction {
+    // A symlink is a pointer, not the data it names. `real_path` canonicalizes
+    // *through* the link, so trashing a symlink would move its TARGET to trash —
+    // exactly the follow-the-symlink hazard we're closing. The link itself is
+    // trivially recreatable, so symlinks bypass trash and are unlinked directly.
+    // Latch still applies (it gates on the kaish path, not the resolved target).
+    if is_symlink {
+        if latch_enabled {
+            return RmAction::Latch;
+        }
+        return RmAction::Delete;
+    }
+
     if trash_enabled {
         if let Some(rp) = real_path {
             // Skip trash for excluded paths (/tmp, /v/*)
@@ -153,7 +166,10 @@ impl Tool for Rm {
         for value in &args.positional {
             let path = crate::interpreter::value_to_string(value);
             let resolved = ctx.resolve_path(&path);
-            let stat = match ctx.backend.stat(Path::new(&resolved)).await {
+            // lstat, never stat: classify the link itself, so a symlink-to-dir
+            // is treated as a (non-dir) symlink rather than its target. This is
+            // what keeps `rm`/`rm -r` from following a link to its target.
+            let entry = match ctx.backend.lstat(Path::new(&resolved)).await {
                 Ok(info) => Some(info),
                 Err(BackendError::NotFound(_)) if force => continue, // -f skips missing
                 Err(BackendError::NotFound(_)) => {
@@ -162,8 +178,9 @@ impl Tool for Rm {
                 Err(e) => return ExecResult::failure(1, format!("rm: {}: {}", path, e)),
             };
             let real_path = ctx.backend.resolve_real_path(Path::new(&resolved));
-            let file_size = stat.as_ref().map(|s| s.size);
-            let is_dir = stat.as_ref().is_some_and(|s| s.is_dir());
+            let file_size = entry.as_ref().map(|s| s.size);
+            let is_dir = entry.as_ref().is_some_and(|s| s.is_dir());
+            let is_symlink = entry.as_ref().is_some_and(|s| s.is_symlink());
             let action = decide_rm_action(
                 trash_enabled,
                 latch_enabled,
@@ -171,6 +188,7 @@ impl Tool for Rm {
                 file_size,
                 trash_max_size,
                 is_dir,
+                is_symlink,
             );
             decisions.push(Decision { path, resolved, action });
         }
@@ -225,9 +243,14 @@ impl Tool for Rm {
                     })
                 }
                 RmAction::Latch | RmAction::Delete => {
-                    remove_path(&*ctx.backend, &d.resolved, recursive, force)
-                        .await
-                        .map_err(|e| format!("rm: {}: {}", d.path, e))
+                    // Single recursive remover lives on the backend (symlink-safe:
+                    // it lstats the recurse decision and unlinks links directly).
+                    match ctx.backend.remove(Path::new(&d.resolved), recursive).await {
+                        Ok(()) => Ok(()),
+                        // -f swallows a path that vanished between stat and remove.
+                        Err(BackendError::NotFound(_)) if force => Ok(()),
+                        Err(e) => Err(format!("rm: {}: {}", d.path, e)),
+                    }
                 }
             };
             if let Err(msg) = result {
@@ -239,48 +262,6 @@ impl Tool for Rm {
             None => ExecResult::success(""),
         }
     }
-}
-
-/// Remove a path, optionally recursively.
-async fn remove_path(backend: &dyn KernelBackend, path: &Path, recursive: bool, force: bool) -> Result<(), BackendError> {
-    // Check if path exists
-    match backend.stat(path).await {
-        Ok(info) => {
-            if info.is_dir() && recursive {
-                // Remove contents first
-                remove_dir_recursive(backend, path).await?;
-            }
-            backend.remove(path, false).await
-        }
-        Err(BackendError::NotFound(_)) if force => {
-            // -f ignores nonexistent files
-            Ok(())
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// Recursively remove directory contents, then the directory itself.
-fn remove_dir_recursive<'a>(
-    backend: &'a dyn KernelBackend,
-    dir: &'a Path,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BackendError>> + Send + 'a>> {
-    Box::pin(async move {
-        let entries = backend.list(dir).await?;
-
-        for entry in entries {
-            let child_path: PathBuf = dir.join(&entry.name);
-            if entry.is_dir() {
-                // Recurse into subdirectory
-                remove_dir_recursive(backend, &child_path).await?;
-                backend.remove(&child_path, false).await?;
-            } else {
-                backend.remove(&child_path, false).await?;
-            }
-        }
-
-        Ok(())
-    })
 }
 
 #[cfg(test)]
@@ -590,20 +571,20 @@ mod tests {
 
     #[test]
     fn test_decide_rm_action_no_flags() {
-        let action = decide_rm_action(false, false, None, Some(100), 10_000_000, false);
+        let action = decide_rm_action(false, false, None, Some(100), 10_000_000, false, false);
         assert_eq!(action, RmAction::Delete);
     }
 
     #[test]
     fn test_decide_rm_action_latch_only() {
-        let action = decide_rm_action(false, true, None, Some(100), 10_000_000, false);
+        let action = decide_rm_action(false, true, None, Some(100), 10_000_000, false, false);
         assert_eq!(action, RmAction::Latch);
     }
 
     #[test]
     fn test_decide_rm_action_trash_small_file() {
         let real = PathBuf::from("/home/user/file.txt");
-        let action = decide_rm_action(true, false, Some(&real), Some(100), 10_000_000, false);
+        let action = decide_rm_action(true, false, Some(&real), Some(100), 10_000_000, false, false);
         assert_eq!(action, RmAction::Trash(real));
     }
 
@@ -611,42 +592,42 @@ mod tests {
     fn test_decide_rm_action_trash_small_with_latch() {
         // Small file → trash catches it, latch irrelevant
         let real = PathBuf::from("/home/user/file.txt");
-        let action = decide_rm_action(true, true, Some(&real), Some(100), 10_000_000, false);
+        let action = decide_rm_action(true, true, Some(&real), Some(100), 10_000_000, false, false);
         assert_eq!(action, RmAction::Trash(real));
     }
 
     #[test]
     fn test_decide_rm_action_trash_large_no_latch() {
         let real = PathBuf::from("/home/user/bigfile.bin");
-        let action = decide_rm_action(true, false, Some(&real), Some(100_000_000), 10_000_000, false);
+        let action = decide_rm_action(true, false, Some(&real), Some(100_000_000), 10_000_000, false, false);
         assert_eq!(action, RmAction::Delete);
     }
 
     #[test]
     fn test_decide_rm_action_trash_large_with_latch() {
         let real = PathBuf::from("/home/user/bigfile.bin");
-        let action = decide_rm_action(true, true, Some(&real), Some(100_000_000), 10_000_000, false);
+        let action = decide_rm_action(true, true, Some(&real), Some(100_000_000), 10_000_000, false, false);
         assert_eq!(action, RmAction::Latch);
     }
 
     #[test]
     fn test_decide_rm_action_trash_virtual_path() {
         // Virtual path (resolve_real_path returns None) → normal delete
-        let action = decide_rm_action(true, false, None, Some(100), 10_000_000, false);
+        let action = decide_rm_action(true, false, None, Some(100), 10_000_000, false, false);
         assert_eq!(action, RmAction::Delete);
     }
 
     #[test]
     fn test_decide_rm_action_trash_excluded_tmp() {
         let real = PathBuf::from("/tmp/scratch");
-        let action = decide_rm_action(true, false, Some(&real), Some(100), 10_000_000, false);
+        let action = decide_rm_action(true, false, Some(&real), Some(100), 10_000_000, false, false);
         assert_eq!(action, RmAction::Delete);
     }
 
     #[test]
     fn test_decide_rm_action_trash_excluded_v() {
         let real = PathBuf::from("/v/jobs/something");
-        let action = decide_rm_action(true, false, Some(&real), Some(100), 10_000_000, false);
+        let action = decide_rm_action(true, false, Some(&real), Some(100), 10_000_000, false, false);
         assert_eq!(action, RmAction::Delete);
     }
 
@@ -656,7 +637,7 @@ mod tests {
     fn test_decide_rm_action_dir_always_trashes() {
         let real = PathBuf::from("/home/user/mydir");
         // Directory with size=0 (stat behavior) — should trash regardless of threshold
-        let action = decide_rm_action(true, false, Some(&real), Some(0), 10_000_000, true);
+        let action = decide_rm_action(true, false, Some(&real), Some(0), 10_000_000, true, false);
         assert_eq!(action, RmAction::Trash(real));
     }
 
@@ -664,7 +645,7 @@ mod tests {
     fn test_decide_rm_action_dir_trashes_with_latch() {
         let real = PathBuf::from("/home/user/mydir");
         // Directory always trashes when trash enabled — latch irrelevant
-        let action = decide_rm_action(true, true, Some(&real), Some(0), 10_000_000, true);
+        let action = decide_rm_action(true, true, Some(&real), Some(0), 10_000_000, true, false);
         assert_eq!(action, RmAction::Trash(real));
     }
 
@@ -672,7 +653,7 @@ mod tests {
     fn test_decide_rm_action_dir_excluded_tmp() {
         let real = PathBuf::from("/tmp/mydir");
         // Excluded path — directory still gets excluded
-        let action = decide_rm_action(true, false, Some(&real), Some(0), 10_000_000, true);
+        let action = decide_rm_action(true, false, Some(&real), Some(0), 10_000_000, true, false);
         assert_eq!(action, RmAction::Delete);
     }
 
@@ -700,31 +681,38 @@ mod tests {
         let large = 100_000_000u64;
         let max = 10_000_000u64;
 
-        // (trash, latch, size, is_dir) → expected outcome
+        // (trash, latch, size, is_dir, is_symlink) → expected outcome
         let cases = vec![
-            (false, false, small, false, Outcome::Deleted),
-            (false, true,  small, false, Outcome::Latched),
-            (true,  false, small, false, Outcome::Trashed),
-            (true,  true,  small, false, Outcome::Trashed),   // trash catches small, latch irrelevant
-            (false, false, large, false, Outcome::Deleted),
-            (false, true,  large, false, Outcome::Latched),
-            (true,  false, large, false, Outcome::Deleted),    // too big for trash, no latch → delete
-            (true,  true,  large, false, Outcome::Latched),    // too big for trash + latch → gate
+            (false, false, small, false, false, Outcome::Deleted),
+            (false, true,  small, false, false, Outcome::Latched),
+            (true,  false, small, false, false, Outcome::Trashed),
+            (true,  true,  small, false, false, Outcome::Trashed),   // trash catches small, latch irrelevant
+            (false, false, large, false, false, Outcome::Deleted),
+            (false, true,  large, false, false, Outcome::Latched),
+            (true,  false, large, false, false, Outcome::Deleted),    // too big for trash, no latch → delete
+            (true,  true,  large, false, false, Outcome::Latched),    // too big for trash + latch → gate
             // Directories always trash (size irrelevant)
-            (true,  false, 0,     true,  Outcome::Trashed),
-            (true,  true,  0,     true,  Outcome::Trashed),
+            (true,  false, 0,     true,  false, Outcome::Trashed),
+            (true,  true,  0,     true,  false, Outcome::Trashed),
             // Dir without trash enabled → normal flow
-            (false, false, 0,     true,  Outcome::Deleted),
-            (false, true,  0,     true,  Outcome::Latched),
+            (false, false, 0,     true,  false, Outcome::Deleted),
+            (false, true,  0,     true,  false, Outcome::Latched),
+            // Symlinks NEVER trash (trashing follows to the target); they unlink
+            // directly, but latch still gates. is_dir is moot for a symlink.
+            (true,  false, small, false, true,  Outcome::Deleted),
+            (true,  true,  small, false, true,  Outcome::Latched),
+            (true,  false, 0,     true,  true,  Outcome::Deleted),    // symlink-to-dir: still just unlink
+            (false, false, small, false, true,  Outcome::Deleted),
+            (false, true,  small, false, true,  Outcome::Latched),
         ];
 
-        for (trash, latch, size, is_dir, expected) in cases {
-            let action = decide_rm_action(trash, latch, Some(&real), Some(size), max, is_dir);
+        for (trash, latch, size, is_dir, is_symlink, expected) in cases {
+            let action = decide_rm_action(trash, latch, Some(&real), Some(size), max, is_dir, is_symlink);
             let outcome = matrix_action_to_outcome(&action);
             assert_eq!(
                 outcome, expected,
-                "trash={}, latch={}, size={}, is_dir={}: expected {:?}, got {:?}",
-                trash, latch, size, is_dir, expected, outcome
+                "trash={}, latch={}, size={}, is_dir={}, is_symlink={}: expected {:?}, got {:?}",
+                trash, latch, size, is_dir, is_symlink, expected, outcome
             );
         }
     }

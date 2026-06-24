@@ -210,7 +210,7 @@ impl KernelBackend for VirtualOverlayBackend {
     async fn remove(&self, path: &Path, recursive: bool) -> BackendResult<()> {
         if Self::is_virtual_path(path) {
             if recursive
-                && let Ok(entry) = self.vfs.stat(path).await
+                && let Ok(entry) = self.vfs.lstat(path).await
                 && entry.is_dir()
                 && let Ok(entries) = self.vfs.list(path).await
             {
