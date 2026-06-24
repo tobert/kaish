@@ -133,6 +133,8 @@ fn format_token(token: &Token) -> String {
         // Identifiers and paths
         Token::Ident(s) => format!("IDENT({})", s),
         Token::NumberIdent(s) => format!("NUMIDENT({})", s),
+        Token::DashNumWord(s) => format!("DASHNUM({})", s),
+        Token::AtWord(s) => format!("ATWORD({})", s),
         Token::DottedIdent(s) => format!("DOTIDENT({})", s),
         Token::Path(s) => format!("PATH({})", s),
 
@@ -586,7 +588,9 @@ fn lexer_plus_bare(#[case] input: &str, #[case] expected: &[&str]) {
 #[case::negative_123("-123", &["INT(-123)"])]
 #[case::negative_1("-1", &["INT(-1)"])]
 #[case::flag_l("-l", &["SHORTFLAG(l)"])]
-#[case::negative_1_then_ident("-1a", &["INT(-1)", "IDENT(a)"])]
+// A minus-led numeric word with a non-numeric suffix (`-1a`, `-1k`, `-30d`)
+// is one contiguous word (the `find -size -1k` class), not Int(-1)+Ident(a).
+#[case::negative_1_then_ident("-1a", &["DASHNUM(-1a)"])]
 fn lexer_flag_vs_number(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }

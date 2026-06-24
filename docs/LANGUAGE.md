@@ -618,7 +618,7 @@ date -I                            # ISO 8601 date (2026-06-14)
 date -R                            # RFC 2822
 date -d "2 days ago" +%Y-%m-%d     # relative dates
 date -d "next friday"              # weekdays
-date -d "@1700000000"             # decode an epoch (quote the @)
+date -d @1700000000                # decode an epoch (a leading @ is a bareword)
 date -d "2026-06-01 -1 day"        # absolute date + offset
 date --tz Asia/Tokyo               # honor an IANA timezone (also reads $TZ)
 date -r file.txt                   # the file's last-modified time

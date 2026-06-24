@@ -1293,6 +1293,8 @@ where
         select! { Token::GlobWord(s) => s },
         select! { Token::Ident(s) => s },
         select! { Token::NumberIdent(s) => s },
+        select! { Token::DashNumWord(s) => s },
+        select! { Token::AtWord(s) => s },
         select! { Token::DottedIdent(s) => s },
         select! { Token::String(s) => s },
         select! { Token::SingleString(s) => s },
@@ -2083,6 +2085,11 @@ where
                 Token::DotSlashPath(s) => Expr::Literal(Value::String(s)),
                 // Digit-leading bareword (SHA prefix `019dda1c`, UUIDs).
                 Token::NumberIdent(s) => Expr::Literal(Value::String(s)),
+                // Hyphenated/minus-led numeric word (`2024-01-02`, `10-20`,
+                // `1.5-2`, `cut -f 1-3`, `find -size -1k`) — one contiguous word.
+                Token::DashNumWord(s) => Expr::Literal(Value::String(s)),
+                // Leading-`@` bareword (`@scope/pkg`, `@0`, bare `@`).
+                Token::AtWord(s) => Expr::Literal(Value::String(s)),
                 // Dot-prefixed bareword (`.gitignore`, `.parent`, `.parent.parent`).
                 // Distinct from `Token::Dot` (the source alias), which only
                 // matches a bare `.` and requires whitespace before its file

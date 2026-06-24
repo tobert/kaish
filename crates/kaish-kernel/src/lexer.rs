@@ -541,6 +541,27 @@ pub enum Token {
     #[regex(r"[0-9]+[a-zA-Z_][a-zA-Z0-9_.-]*", lex_number_ident, priority = 3)]
     NumberIdent(String),
 
+    /// Numeric word containing an embedded hyphen run, or a minus-led numeric
+    /// word with a non-numeric suffix. These are single contiguous shell words
+    /// the user typed — ISO dates (`2024-01-02`), `N-M` ranges (`10-20`,
+    /// `cut -f 1-3`, `tr -d 0-9`), float-dash forms (`1.5-2`), and `find`
+    /// predicate values like `-1k` (smaller than 1k). Without this token they
+    /// fragment into adjacent `Int`/`Float`/flag tokens and trip the
+    /// no-token-pasting guard. The raw slice is preserved verbatim (so leading
+    /// zeros survive). A plain `2024`/`1.5`/`-1` stays `Int`/`Float` — the
+    /// digit-hyphen form requires a `-segment`, and the minus-led form requires
+    /// an alpha after the digits.
+    #[regex(r"[0-9]+(\.[0-9]+)?(-[0-9a-zA-Z._]+)+", lex_slice_word, priority = 3)]
+    #[regex(r"-[0-9]+[a-zA-Z_][0-9a-zA-Z._-]*", lex_slice_word, priority = 3)]
+    DashNumWord(String),
+
+    /// Leading-`@` bareword: `@scope/pkg` (scoped package), `@0` (epoch in
+    /// `date -d @0`), or bare `@`. Mid-word `@` (`user@host`) is handled by
+    /// `Ident`; this covers the leading-`@` cases that would otherwise be an
+    /// "unexpected character" lexer error.
+    #[regex(r"@[a-zA-Z0-9_./@-]*", lex_slice_word, priority = 3)]
+    AtWord(String),
+
     /// Invalid: float without leading digit (like .5)
     #[regex(r"\.[0-9]+", lex_invalid_float_no_leading, priority = 3)]
     InvalidFloatNoLeading,
@@ -563,8 +584,9 @@ pub enum Token {
     // ═══════════════════════════════════════════════════════════════════
 
     /// Identifier - value is the identifier string
-    /// Allows dots for filenames like `script.kai`
-    #[regex(r"[a-zA-Z_][a-zA-Z0-9_.-]*", lex_ident)]
+    /// Allows dots for filenames like `script.kai` and `@` for `user@host`,
+    /// `a@b.com` (bare `@` is an ordinary word character, as in bash).
+    #[regex(r"[a-zA-Z_][a-zA-Z0-9_.@-]*", lex_ident)]
     Ident(String),
 
     // ═══════════════════════════════════════════════════════════════════
@@ -740,6 +762,8 @@ impl Token {
             | Token::MinusBare(_)
             | Token::MinusAlone
             | Token::NumberIdent(_)
+            | Token::DashNumWord(_)
+            | Token::AtWord(_)
             | Token::DottedIdent(_)
             | Token::JobSpec(_) => TokenCategory::Command,
 
@@ -807,6 +831,12 @@ fn lex_number_ident(lex: &mut logos::Lexer<Token>) -> String {
 
 /// Lex a dot-prefixed bareword like `.gitignore` or `.parent.parent`.
 fn lex_dotted_ident(lex: &mut logos::Lexer<Token>) -> String {
+    lex.slice().to_string()
+}
+
+/// Lex a bareword by capturing its raw slice verbatim (used by `DashNumWord`
+/// and `AtWord`, where exact characters — e.g. leading zeros — must survive).
+fn lex_slice_word(lex: &mut logos::Lexer<Token>) -> String {
     lex.slice().to_string()
 }
 
@@ -998,6 +1028,8 @@ impl fmt::Display for Token {
             Token::Path(s) => write!(f, "PATH({})", s),
             Token::Ident(s) => write!(f, "IDENT({})", s),
             Token::NumberIdent(s) => write!(f, "NUMIDENT({})", s),
+            Token::DashNumWord(s) => write!(f, "DASHNUM({})", s),
+            Token::AtWord(s) => write!(f, "ATWORD({})", s),
             Token::DottedIdent(s) => write!(f, "DOTIDENT({})", s),
             Token::Comment => write!(f, "COMMENT"),
             Token::Newline => write!(f, "NEWLINE"),
@@ -1648,6 +1680,8 @@ fn mergeable_text(token: &Token) -> Option<String> {
     match token {
         Token::Ident(s) => Some(s.clone()),
         Token::NumberIdent(s) => Some(s.clone()),
+        Token::DashNumWord(s) => Some(s.clone()),
+        Token::AtWord(s) => Some(s.clone()),
         Token::DottedIdent(s) => Some(s.clone()),
         Token::Colon => Some(":".to_string()),
         Token::Int(n) => Some(n.to_string()),
@@ -1743,6 +1777,8 @@ fn glob_mergeable_text(token: &Token) -> Option<String> {
         Token::DotDot => Some("..".to_string()),
         Token::Ident(s) => Some(s.clone()),
         Token::NumberIdent(s) => Some(s.clone()),
+        Token::DashNumWord(s) => Some(s.clone()),
+        Token::AtWord(s) => Some(s.clone()),
         Token::DottedIdent(s) => Some(s.clone()),
         Token::Path(s) => Some(s.clone()),
         Token::Int(n) => Some(n.to_string()),

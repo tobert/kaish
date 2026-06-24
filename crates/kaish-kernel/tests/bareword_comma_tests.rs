@@ -4,9 +4,15 @@
 //! `cut -d,` / `tr -d ,` reach for a lone comma as a delimiter/set argument —
 //! a comma now lexes-and-parses as the literal `","` in argument position, so
 //! the common `cut -d, -f2` idiom works without quoting. The no-pasting rule
-//! still guards the genuinely ambiguous cases: `echo 1,2,3` and `tr -d 0-9`
-//! (a digit range) are loud parse errors with a "quote the whole word" hint,
-//! never the silent no-op the range form used to produce.
+//! still guards the genuinely ambiguous cases: `echo 1,2,3` (a run of
+//! comma-touching positional words) is a loud parse error with a "quote the
+//! whole word" hint.
+//!
+//! A digit range like `0-9` / `1-3` is a *single contiguous word* the user
+//! typed, so it now lexes as one bareword (`DashNumWord`) and reaches the tool
+//! verbatim — `tr -d 0-9` deletes digits, matching bash/GNU. This supersedes
+//! the earlier loud-error decision, which was only the best available while
+//! `0-9` could only fragment into `Int(0)`+`Int(-9)`. See `lexer_idiom_tests`.
 
 #![cfg(feature = "localfs")]
 
@@ -57,20 +63,20 @@ async fn adjacent_commas_are_loud_not_pasted() {
 }
 
 #[tokio::test]
-async fn numeric_range_is_loud_not_silent() {
-    // Regression: `tr -d 0-9` used to lex as Int(0) + Int(-9) and silently
-    // delete only '0'. It must now be a loud parse error pointing at quoting.
+async fn unquoted_numeric_range_deletes_digits() {
+    // `tr -d 0-9` used to lex as Int(0) + Int(-9) and was made a loud error as
+    // a stopgap. `0-9` is one contiguous word, so it now reaches tr verbatim
+    // and the range applies — matching bash/GNU.
     let tmp = tempfile::tempdir().unwrap();
     let kernel = kernel_at(tmp.path());
-    let result = kernel.execute("echo 'abc123' | tr -d 0-9").await;
-    assert!(result.is_err(), "bare digit range must be a loud error");
-    let msg = format!("{:#}", result.unwrap_err());
-    assert!(msg.contains("quote"), "should hint to quote: {msg}");
+    let (out, code) = run(&kernel, "echo 'abc123def' | tr -d 0-9").await;
+    assert_eq!(code, 0, "got: {out}");
+    assert_eq!(out, "abcdef");
 }
 
 #[tokio::test]
 async fn quoted_numeric_range_works() {
-    // The remedy the error points at: quote the range.
+    // Quoting the range is equivalent (and still the safe habit).
     let tmp = tempfile::tempdir().unwrap();
     let kernel = kernel_at(tmp.path());
     let (out, code) = run(&kernel, "echo 'abc123def' | tr -d '0-9'").await;

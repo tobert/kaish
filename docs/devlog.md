@@ -9,6 +9,33 @@ Newest themes first within each area; dates are when the work landed.
 
 ---
 
+## Common-idiom lexer gaps — `@`, hyphenated numbers, `-1k` (landed 2026-06-24)
+
+Three everyday agent inputs used to fragment into adjacent tokens and trip the
+no-token-pasting guard — a *loud but wrong* parse error on ubiquitous text. All
+fixed at the lexer with raw-slice tokens (so leading zeros survive), wired
+through the parser exactly where `NumberIdent` already flows (argv/case/merge):
+
+- **Bare `@`** — `@` is now an ordinary word char. Mid-word (`user@host`,
+  `a@b.com`) joined the `Ident` trailing class; leading-`@` (`@scope/pkg`, `@0`,
+  bare `@`) got a new `AtWord` token. `user@host:8080` still colon-merges into
+  one word for free (Ident is colon-mergeable).
+- **Digit-leading hyphenated words** (`2024-01-02`, `10-20`, `1.5-2`,
+  `cut -f 1-3`) and **minus-led numeric predicate values** (`find -size -1k`,
+  `-30d`) got one `DashNumWord` token (two regexes). A plain `2024`/`1.5`/`-1`
+  stays `Int`/`Float` — the hyphen form requires a `-segment`, the minus form an
+  alpha after the digits, so the two never overlap with `Int`/`Float`/`NumberIdent`.
+
+**A deliberate decision reversed, intentionally.** `tr -d 0-9` was previously
+made a *loud error* (and pinned by `bareword_comma_tests::numeric_range_is_loud_not_silent`)
+because `0-9` could only fragment into `Int(0)`+`Int(-9)` and silently delete just
+`0`. That was the best available then, not a desired end state. A contiguous `0-9`
+the user typed is *one word*, not two pasted tokens — so it now reaches `tr`
+verbatim and the range applies, matching bash/GNU. The test was rewritten to assert
+the new behavior; the comma run (`echo 1,2,3`) stays a loud no-pasting error
+(commas aren't part of the word). Strictly additive otherwise: every newly-valid
+input was a parse error before, so no previously-valid program changes meaning.
+
 ## diff/patch improvements — `diff --json` + GNU-fuzz `patch` (landed 2026-06-22)
 
 The diff/patch half of the [editing-for-agents](editing-for-agents.md) design
