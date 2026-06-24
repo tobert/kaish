@@ -86,9 +86,12 @@ Still open:
 - ~~**`&&`/`||` precedence inverted.**~~ FIXED 2026-06-24 (`fix/p1-correctness`):
   single left-associative fold, equal precedence (POSIX). Test:
   `and_or_precedence_tests` + 3 updated parser snapshots.
-- **Syntax error inside a quoted `$()` silently becomes literal text** — `echo "$(if
-  true; echo 1; fi)"` prints the literal string (`parser.rs`; unquoted `$()` errors
-  loudly).
+- ~~**Syntax error inside a quoted `$()` silently becomes literal text**~~ FIXED
+  2026-06-24 (`fix/p1-correctness`): `parse_interpolated_string` is now fallible
+  and the double-quoted path `try_map`s the cmdsubst parse error into a loud Rich
+  error (matching unquoted `$()`). Test: `quoted_cmdsubst_error_tests`. Residual:
+  a malformed `$()` inside a `${VAR:-default}` *default word* still falls back to
+  literal (two infallible Expr-returning call sites; rare edge).
 - **`jq '. / 0'` returns `null`** silently while `%` errors (jaq-core).
 
 ### `execute_argv` — argv-native kernel entry point (+ multicall binary) (Amy, 2026-06-23)

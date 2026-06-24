@@ -39,7 +39,12 @@ fn parse_var_expr(raw: &str) -> Expr {
         // Extract default value (between :- and }) and recursively parse it,
         // after stripping shell quoting from the word (quotes are syntax).
         let default_str = &raw[colon_idx + 2..raw.len() - 1];
-        let default = parse_interpolated_string(&unquote_default_word(default_str));
+        // This `${VAR:-WORD}` expr path is infallible; a malformed `$()` inside
+        // the default word stays literal here (rare edge). The common quoted
+        // `"$(…)"` path is the loud one (see `parse_interpolated_string`).
+        let default_word = unquote_default_word(default_str);
+        let default = parse_interpolated_string(&default_word)
+            .unwrap_or_else(|_| vec![StringPart::Literal(default_word.clone())]);
         return Expr::VarWithDefault { name, default };
     }
 
@@ -369,7 +374,9 @@ fn parse_interpolated_string_spanned(s: &str, base_offset: usize) -> Vec<Spanned
                     // outer body — the inner parts get their own offsets via
                     // the recursive call when needed. For now, the default's
                     // parts are stored without spans (default is a Vec<StringPart>).
-                    let default = parse_interpolated_string(&unquote_default_word(default_str));
+                    let default_word = unquote_default_word(default_str);
+                    let default = parse_interpolated_string(&default_word)
+                        .unwrap_or_else(|_| vec![StringPart::Literal(default_word.clone())]);
                     StringPart::VarWithDefault { name, default }
                 } else {
                     StringPart::Var(parse_varpath(&format!("${{{}}}", var_content)))
@@ -479,7 +486,7 @@ fn parse_interpolated_string_spanned(s: &str, base_offset: usize) -> Vec<Spanned
     parts
 }
 
-fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
+fn parse_interpolated_string(s: &str) -> Result<Vec<StringPart>, String> {
     // First, replace escaped dollar markers with a temporary placeholder
     // The lexer uses __KAISH_ESCAPED_DOLLAR__ for \$ to prevent re-interpretation
     let s = s.replace("__KAISH_ESCAPED_DOLLAR__", "\x00DOLLAR\x00");
@@ -535,21 +542,27 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
 
                 // Parse the command content as a full statement block
                 // (pipelines, `&&`/`||` chains, `;`/newline sequences, comments).
-                if let Ok(program) = parse(&cmd_content) {
-                    let stmts = strip_empty_stmts(program.statements);
-                    if stmts.is_empty() {
-                        // Nothing runnable — treat as literal text.
-                        current_text.push_str("$(");
-                        current_text.push_str(&cmd_content);
-                        current_text.push(')');
-                    } else {
-                        parts.push(StringPart::CommandSubst(stmts));
+                match parse(&cmd_content) {
+                    Ok(program) => {
+                        let stmts = strip_empty_stmts(program.statements);
+                        if stmts.is_empty() {
+                            // Nothing runnable (e.g. `$()` or only a comment) —
+                            // bash treats this as the empty string. Keep literal.
+                            current_text.push_str("$(");
+                            current_text.push_str(&cmd_content);
+                            current_text.push(')');
+                        } else {
+                            parts.push(StringPart::CommandSubst(stmts));
+                        }
                     }
-                } else {
-                    // Parse failed - treat as literal
-                    current_text.push_str("$(");
-                    current_text.push_str(&cmd_content);
-                    current_text.push(')');
+                    Err(_) => {
+                        // A syntax error inside the substitution is loud, exactly
+                        // like the unquoted `$(...)` form — never silently demoted
+                        // to literal text.
+                        return Err(format!(
+                            "syntax error in command substitution: $({cmd_content})"
+                        ));
+                    }
                 }
             } else if chars.peek() == Some(&'{') {
                 // Braced variable reference ${...}
@@ -593,7 +606,7 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
                     // Variable with default: ${VAR:-default} - recursively parse the default
                     let name = var_content[..colon_idx].to_string();
                     let default_str = &var_content[colon_idx + 2..];
-                    let default = parse_interpolated_string(&unquote_default_word(default_str));
+                    let default = parse_interpolated_string(&unquote_default_word(default_str))?;
                     StringPart::VarWithDefault { name, default }
                 } else {
                     // Regular variable: ${VAR} or ${VAR.field}
@@ -669,7 +682,7 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
         parts.push(StringPart::Literal(current_text));
     }
 
-    parts
+    Ok(parts)
 }
 
 /// Parse error with location and context.
@@ -2235,18 +2248,20 @@ where
     let double_quoted = select! {
         Token::String(s) => s,
     }
-    .map(|s| {
+    .try_map(|s, span| {
         // Check if string contains interpolation markers (${} or $NAME) or escaped dollars
         if s.contains('$') || s.contains("__KAISH_ESCAPED_DOLLAR__") {
-            // Parse interpolated parts
-            let parts = parse_interpolated_string(&s);
+            // Parse interpolated parts. A syntax error inside a `$(…)` is loud
+            // (Rich error at this string's span), not silently demoted to text.
+            let parts = parse_interpolated_string(&s)
+                .map_err(|msg| Rich::custom(span, msg))?;
             if parts.len() == 1
                 && let StringPart::Literal(text) = &parts[0] {
-                    return Expr::Literal(Value::String(text.clone()));
+                    return Ok(Expr::Literal(Value::String(text.clone())));
                 }
-            Expr::Interpolated(parts)
+            Ok(Expr::Interpolated(parts))
         } else {
-            Expr::Literal(Value::String(s))
+            Ok(Expr::Literal(Value::String(s)))
         }
     });
 
@@ -4073,7 +4088,7 @@ cmd < "input.txt"
             "$$ $? $#",
         ];
         for s in &cases {
-            let unspanned = parse_interpolated_string(s);
+            let unspanned = parse_interpolated_string(s).expect("test input parses");
             let spanned = parse_interpolated_string_spanned(s, 0);
             assert_eq!(
                 unspanned.len(),
