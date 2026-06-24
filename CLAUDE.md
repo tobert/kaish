@@ -102,8 +102,6 @@ change, **drawn from the conversation with the user**. Commit messages briefly e
 what happened as context for the more important task of explaining the decisions we
 made.
 
-Set a `Co-Authored-By:` trailer crediting the model that did the work.
-
 ## Architecture
 
 The 核 (kaku/kernel) is the unit of execution. Multiple frontends connect to the same kernel:
