@@ -97,10 +97,12 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
 
 ### Commit messages
 
-Explain **why, not what** — the diff shows what changed. Write the body as a short
-summary of the decisions behind the change, drawn from the working conversation with
-the user: what we chose, what we rejected, and why. Subject is imperative (the decision
-or outcome). Set a `Co-Authored-By:` trailer crediting the model that did the work.
+Commit and pull request bodies should usually summarize the decisions behind the
+change, **drawn from the conversation with the user**. Commit messages briefly explain
+what happened as context for the more important task of explaining the decisions we
+made.
+
+Set a `Co-Authored-By:` trailer crediting the model that did the work.
 
 ## Architecture
 
