@@ -207,6 +207,14 @@ impl Tool for Glob {
             Err(e) => return ExecResult::failure(1, format!("glob: {}", e)),
         };
 
+        // Strict-glob guarantee: zero matches is an error, not silent success.
+        // This is consistent with how the kernel treats a bare glob in argv
+        // position (no matches → error). The `glob` builtin must enforce the
+        // same contract so agents can rely on a non-zero exit to detect misses.
+        if paths.is_empty() {
+            return ExecResult::failure(1, format!("glob: no matches for pattern '{pattern}'"));
+        }
+
         // Build OutputNodes for each matched path (relative to root)
         let nodes: Vec<OutputNode> = paths
             .iter()

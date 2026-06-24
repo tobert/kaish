@@ -59,10 +59,16 @@ impl Tool for Basename {
         };
 
         let path = Path::new(&path_str);
-        let filename = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(&path_str);
+        // POSIX: a path consisting entirely of slashes (e.g. `//`) has itself
+        // reduced to a single `/`. `Path::file_name()` returns `None` for such
+        // paths, so we special-case before delegating to it.
+        let filename = if path_str.chars().all(|c| c == '/') {
+            "/"
+        } else {
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&path_str)
+        };
 
         let suffix = args.get_string("suffix", 1);
         let result = match suffix {

@@ -1,8 +1,10 @@
 //! realpath — Print the resolved absolute pathname.
+//!
+//! Canonicalizes through symlinks via the VFS backend. Errors on nonexistent
+//! paths (GNU realpath default; `-m`/`-e` variants not yet implemented).
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
-use std::path::Path;
 
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
@@ -55,54 +57,62 @@ impl Tool for Realpath {
             return ExecResult::failure(1, "realpath: missing path argument");
         }
 
-        // GNU: `realpath a b c` prints one resolved path per line.
+        // GNU realpath (no flags): canonicalize each path fully; all components
+        // including the final one must exist. Errors are printed but we continue
+        // processing remaining paths (exit code 1 at end if any failed).
         let mut output = String::new();
+        let mut exit_code = 0i64;
+        let mut last_err: Option<String> = None;
+
         for value in &args.positional {
             let path_str = crate::interpreter::value_to_string(value);
             let resolved = ctx.resolve_path(&path_str);
-            let resolved_str = resolved.to_string_lossy();
-            let normalized = normalize_path(&resolved_str);
-            output.push_str(&normalized);
-            output.push('\n');
+
+            match canonicalize_path_full(ctx, &resolved).await {
+                Ok(canonical) => {
+                    output.push_str(&canonical.to_string_lossy());
+                    output.push('\n');
+                }
+                Err(msg) => {
+                    last_err = Some(format!("realpath: {}: {}", path_str, msg));
+                    exit_code = 1;
+                }
+            }
         }
-        ExecResult::with_output(OutputData::text(output))
+
+        let mut result = ExecResult::with_output(OutputData::text(output));
+        if let Some(msg) = last_err {
+            result.err = msg;
+            result = result.with_code(exit_code);
+        }
+        result
     }
 }
 
-/// Normalize a path by resolving . and .. components.
-fn normalize_path(path: &str) -> String {
-    let path = Path::new(path);
-    let mut components = Vec::new();
-    let is_absolute = path.is_absolute();
+/// Canonicalize a path through the VFS, requiring all components including the
+/// final one to exist. Uses the shared symlink-following logic from `readlink`.
+async fn canonicalize_path_full(
+    ctx: &ExecContext,
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    use super::readlink::canonicalize_path_allow_missing_final;
+    use std::path::Path;
 
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                if !components.is_empty() && components.last() != Some(&"..") {
-                    components.pop();
-                } else if !is_absolute {
-                    components.push("..");
-                }
-            }
-            std::path::Component::CurDir => {}
-            std::path::Component::Normal(s) => {
-                if let Some(s) = s.to_str() {
-                    components.push(s);
-                }
-            }
-            std::path::Component::RootDir => {
-                components.clear();
-            }
-            std::path::Component::Prefix(_) => {}
+    let canonical = canonicalize_path_allow_missing_final(ctx, path).await?;
+
+    // For realpath (no -m), the final resolved path must exist.
+    match ctx.backend.stat(Path::new(&canonical)).await {
+        Ok(_) => Ok(canonical),
+        Err(e) => {
+            use crate::backend::BackendError;
+            Err(match &e {
+                BackendError::NotFound(_) => format!(
+                    "No such file or directory: {}",
+                    canonical.display()
+                ),
+                _ => e.to_string(),
+            })
         }
-    }
-
-    if is_absolute {
-        format!("/{}", components.join("/"))
-    } else if components.is_empty() {
-        ".".to_string()
-    } else {
-        components.join("/")
     }
 }
 
@@ -120,50 +130,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_realpath_absolute() {
-        let mut ctx = make_ctx();
+    async fn test_realpath_absolute_existing() {
+        use crate::vfs::Filesystem;
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(std::path::Path::new("bin/sort"), b"").await.unwrap();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
         let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/usr/bin/sort".into()));
+        args.positional.push(Value::String("/bin/sort".into()));
 
         let result = Realpath.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        assert_eq!(result.text_out().trim(), "/usr/bin/sort");
+        assert!(result.ok(), "err: {}", result.err);
+        assert_eq!(result.text_out().trim(), "/bin/sort");
     }
 
     #[tokio::test]
     async fn test_realpath_with_dotdot() {
-        let mut ctx = make_ctx();
+        use crate::vfs::Filesystem;
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(std::path::Path::new("usr/lib/libfoo.so"), b"").await.unwrap();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
         let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/usr/bin/../lib".into()));
+        args.positional.push(Value::String("/usr/bin/../lib/libfoo.so".into()));
 
         let result = Realpath.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        assert_eq!(result.text_out().trim(), "/usr/lib");
+        assert!(result.ok(), "err: {}", result.err);
+        assert_eq!(result.text_out().trim(), "/usr/lib/libfoo.so");
     }
 
     #[tokio::test]
-    async fn test_realpath_with_dot() {
+    async fn test_realpath_nonexistent_fails() {
         let mut ctx = make_ctx();
         let mut args = ToolArgs::new();
-        args.positional
-            .push(Value::String("/usr/./bin/./sort".into()));
+        args.positional.push(Value::String("/nonexistent".into()));
 
         let result = Realpath.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        assert_eq!(result.text_out().trim(), "/usr/bin/sort");
-    }
-
-    #[tokio::test]
-    async fn test_realpath_relative() {
-        let mut ctx = make_ctx();
-        ctx.set_cwd(std::path::PathBuf::from("/home/user"));
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("documents/file.txt".into()));
-
-        let result = Realpath.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        assert_eq!(result.text_out().trim(), "/home/user/documents/file.txt");
+        assert!(!result.ok(), "expected failure for nonexistent path");
     }
 
     #[tokio::test]
@@ -171,13 +178,5 @@ mod tests {
         let mut ctx = make_ctx();
         let result = Realpath.execute(ToolArgs::new(), &mut ctx).await;
         assert!(!result.ok());
-    }
-
-    #[test]
-    fn test_normalize_path() {
-        assert_eq!(normalize_path("/usr/bin/../lib"), "/usr/lib");
-        assert_eq!(normalize_path("/usr/./bin"), "/usr/bin");
-        assert_eq!(normalize_path("/a/b/c/../../d"), "/a/d");
-        assert_eq!(normalize_path("/"), "/");
     }
 }

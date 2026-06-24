@@ -157,10 +157,15 @@ impl Tool for Seq {
         let is_integer = numbers.iter().all(|n| n.fract().abs() < f64::EPSILON);
 
         let formatted: Vec<String> = if is_integer {
+            // Compute the total display width (including sign character) of the
+            // widest element so that every formatted number gets the same width.
+            // GNU seq -w counts the minus sign as part of the width:
+            //   seq -w -3 3  → width 2 ("-3"), positives padded as "00".."03"
+            //   seq -w -10 2 → width 3 ("-10"), positives padded as "000".."002"
             let max_width = if pad_width {
                 numbers
                     .iter()
-                    .map(|n| (*n as i64).abs().to_string().len())
+                    .map(|n| (*n as i64).to_string().len()) // includes the '-' for negatives
                     .max()
                     .unwrap_or(1)
             } else {
@@ -172,7 +177,15 @@ impl Tool for Seq {
                 .map(|n| {
                     let i = *n as i64;
                     if pad_width {
-                        format!("{:0>width$}", i, width = max_width)
+                        if i < 0 {
+                            // Pad the absolute value to (max_width - 1) digits, then
+                            // prepend the minus sign.  This keeps the total width equal
+                            // to max_width for every element.
+                            let abs_width = max_width - 1; // subtract one for the '-'
+                            format!("-{:0>width$}", i.unsigned_abs(), width = abs_width)
+                        } else {
+                            format!("{:0>width$}", i, width = max_width)
+                        }
                     } else {
                         i.to_string()
                     }

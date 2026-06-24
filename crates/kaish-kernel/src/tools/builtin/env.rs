@@ -36,9 +36,15 @@ struct EnvArgs {
     #[arg(short = 'i', long = "i")]
     ignore_environment: bool,
 
-    /// Unset variable from environment (-u VAR)
-    #[arg(short = 'u', long = "u")]
-    u: Option<String>,
+    /// Unset variable from environment (-u VAR); repeatable: -u A -u B.
+    ///
+    /// Clap sees a single occurrence via `to_argv()` (the kernel accumulates
+    /// repeated `-u` into a `Value::Json(Array)` that `to_argv()` can't split
+    /// back out). The actual collection uses `collect_unset_vars(&args)` which
+    /// reads from the raw ToolArgs — same pattern as sed's `collect_expressions`.
+    /// This field is a validation sink only.
+    #[arg(short = 'u', long = "u", action = clap::ArgAction::Append)]
+    u: Vec<String>,
 
     #[command(flatten)]
     global: GlobalFlags,
@@ -80,19 +86,17 @@ impl Tool for Env {
         let null_sep = parsed.nul;
         let clear_env = parsed.ignore_environment;
 
-        // Collect -u (unset) value if specified
-        let unset_vars: Vec<String> = args
-            .get_named("u")
-            .iter()
-            .filter_map(|v| match v {
-                Value::String(s) => Some(s.clone()),
-                _ => None,
-            })
-            .collect();
+        // Collect -u names from the raw ToolArgs, not `parsed.u`.
+        // The kernel accumulates repeated `-u` into a `Value::Json(Array)` in
+        // named["u"], but `to_argv()` re-renders that as a single JSON token
+        // that clap can't split back into individual strings. Read the raw map
+        // directly (same approach sed uses for repeatable `-e`).
+        let unset_vars = collect_unset_vars(&args);
 
-        // No positional arguments: just print environment
+        // No positional arguments: print environment with -u/-i applied.
+        // -u and -i must filter the listing even when no command is given.
         if args.positional.is_empty() {
-            return print_env(ctx, null_sep);
+            return print_env_with_overrides(ctx, &[], &unset_vars, clear_env, null_sep);
         }
 
         // Parse arguments: VAR=value pairs, then optional command
@@ -161,26 +165,35 @@ impl Tool for Env {
     }
 }
 
-/// Print current environment variables.
-fn print_env(ctx: &ExecContext, null_sep: bool) -> ExecResult {
-    // Build sorted list of vars
-    let mut vars: Vec<_> = ctx.scope.exported_vars().into_iter().collect();
-    vars.sort_by(|(a, _), (b, _)| a.cmp(b));
-
-    let sep = if null_sep { '\0' } else { '\n' };
-    let mut output = String::new();
-
-    for (name, value) in vars {
-        let value_str = value_to_string(&value);
-        output.push_str(&format!("{}={}{}", name, value_str, sep));
+/// Collect the list of variable names to unset from `-u` / `--u` flags.
+///
+/// The kernel accumulates repeated `-u NAME` occurrences into a
+/// `Value::Json(Array([...]))` stored under `named["u"]`.  `to_argv()` cannot
+/// split that array back into individual `-u=NAME` tokens, so we must read the
+/// raw `ToolArgs::named` map directly — the same pattern sed uses for its
+/// repeatable `-e` expressions.
+fn collect_unset_vars(args: &ToolArgs) -> Vec<String> {
+    // The kernel canonicalises the flag to the long name; "u" is a defensive
+    // fallback in case a future change binds under the short alias.
+    for key in ["u"] {
+        match args.named.get(key) {
+            Some(Value::Json(serde_json::Value::Array(items))) => {
+                return items
+                    .iter()
+                    .filter_map(|v| {
+                        if let serde_json::Value::String(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+            }
+            Some(Value::String(s)) => return vec![s.clone()],
+            _ => {}
+        }
     }
-
-    // Remove trailing separator for consistency (unless null-sep)
-    if !null_sep && !output.is_empty() {
-        output.pop();
-    }
-
-    ExecResult::with_output(OutputData::text(output))
+    Vec::new()
 }
 
 /// Print environment with overrides applied.

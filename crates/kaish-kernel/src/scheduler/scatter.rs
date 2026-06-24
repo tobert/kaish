@@ -314,15 +314,31 @@ impl ScatterGatherRunner {
 /// `\r` is stripped, interior blank lines are preserved, and whitespace within a
 /// line is never split. Empty / newline-only input yields zero items.
 pub fn extract_items(data: Option<&Value>, text: &str) -> Result<Vec<String>, String> {
-    // 1. Structured data (JSON array from split/seq/glob/find) — use it
-    if let Some(Value::Json(serde_json::Value::Array(arr))) = data {
-        return Ok(arr.iter().map(|v| match v {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        }).collect());
-    }
-    if let Some(Value::String(s)) = data {
-        return Ok(vec![s.clone()]);
+    // 1. Structured data wins over text (arch_data_iteration contract).
+    match data {
+        // JSON array — fan out per element (seq/split/glob/find).
+        Some(Value::Json(serde_json::Value::Array(arr))) => {
+            return Ok(arr.iter().map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            }).collect());
+        }
+        // Kaish String — one item.
+        Some(Value::String(s)) => return Ok(vec![s.clone()]),
+        // Kaish Int/Float/Bool/Null — one item serialized as its display form.
+        Some(Value::Int(i)) => return Ok(vec![i.to_string()]),
+        Some(Value::Float(f)) => return Ok(vec![f.to_string()]),
+        Some(Value::Bool(b)) => return Ok(vec![b.to_string()]),
+        Some(Value::Null) => return Ok(vec!["null".to_string()]),
+        // Single JSON non-array value (object, number, string, bool, null) —
+        // one item.  Use compact serialization; the caller gets the item as a
+        // string and the pretty-printed text is NOT used here (that is the bug:
+        // a multi-line pretty-print would be newline-split into N bogus items).
+        Some(Value::Json(json)) => return Ok(vec![json.to_string()]),
+        // Binary data in a scatter context — treat as one opaque item.
+        Some(Value::Bytes(b)) => return Ok(vec![format!("[binary: {} bytes]", b.len())]),
+        // No structured data — fall through to plain-text newline-split.
+        None => {}
     }
 
     // 2. Plain text — newline-split, mirroring kernel.rs for-loop $(cmd) semantics.

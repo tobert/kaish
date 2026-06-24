@@ -90,6 +90,15 @@ impl Tool for Ls {
         // named entries to flag form before clap parsing.
         args.flagify_bool_named(&self.schema());
 
+        // The kaish lexer's ShortFlag regex is `-[a-zA-Z][a-zA-Z0-9-]*`, so `-1`
+        // is tokenized as Int(-1) and lands in positionals. Intercept it here and
+        // convert to the `one` flag before clap sees the argv.
+        let had_dash_one = args.positional.iter().any(|v| matches!(v, Value::Int(-1)));
+        if had_dash_one {
+            args.positional.retain(|v| !matches!(v, Value::Int(-1)));
+            args.flags.insert("1".to_string());
+        }
+
         let parsed = match LsArgs::try_parse_from(
             std::iter::once("ls".to_string()).chain(args.to_argv()),
         ) {
@@ -105,6 +114,10 @@ impl Tool for Ls {
         let sort_size = parsed.sort_size;
         let reverse = parsed.reverse;
         let recursive = parsed.recursive;
+        // `one_per_line` is parsed so that `-1` is recognized as a flag (not an
+        // error). Canonical (piped) output is already one-per-line for nodes;
+        // the interactive multi-column renderer will need to respect this flag
+        // separately — tracked in docs/issues.md.
         let _one_per_line = parsed.one;
 
         let opts = ListOptions {

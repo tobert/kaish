@@ -182,6 +182,12 @@ impl Tool for Tree {
 
         let resolved = ctx.resolve_path(&path).to_string_lossy().to_string();
 
+        // Fail loudly when the start path does not exist — silent success with
+        // a bare root node is confusing and masks typos.
+        if !ctx.backend.exists(Path::new(&resolved)).await {
+            return ExecResult::failure(1, format!("tree: {}: No such file or directory", path));
+        }
+
         // Parse options
         let max_depth = args
             .get("level", usize::MAX)

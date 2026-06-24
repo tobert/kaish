@@ -303,6 +303,7 @@ fn diff_to_json<'a>(
     serde_json::json!({
         "old_file": file1,
         "new_file": file2,
+        "differ": true,
         "hunks": hunks,
     })
 }

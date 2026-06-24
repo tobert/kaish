@@ -85,16 +85,15 @@ impl Tool for Tail {
 
         // Byte mode (-c) resolved up front: it reads raw bytes so binary tails
         // to a Bytes result instead of being rejected or lossy-decoded.
-        // `-c -N` (explicit "from the end" sign) means the same as `-c N`: last
-        // N bytes. A bare `as usize` on the negative `Int` would wrap and emit
-        // the whole input.
-        let bytes = args.get("bytes", usize::MAX).and_then(|v| match v {
-            Value::Int(i) => Some(i.unsigned_abs() as usize),
-            Value::String(s) => s.trim_start_matches('-').parse().ok(),
-            _ => None,
-        });
+        // `-c N` / `-c -N` (no sign or explicit negative) = last N bytes.
+        // `-c +N` (leading `+` preserved as a String by the lexer) = from byte N
+        // (1-based) to EOF — matching GNU tail semantics and mirroring how `-n +N`
+        // works for lines. A bare `as usize` on a negative `Int` would wrap to
+        // ~`usize::MAX` and silently emit the whole input, so we use
+        // `i.unsigned_abs()` for the Int case.
+        let byte_spec = parse_byte_spec(&args);
 
-        if let Some(byte_count) = bytes {
+        if let Some((byte_count, from_start)) = byte_spec {
             let data: Vec<u8> = match paths.first() {
                 Some(path) => {
                     let resolved = ctx.resolve_path(path);
@@ -105,8 +104,13 @@ impl Tool for Tail {
                 }
                 None => ctx.read_stdin_to_bytes().await.unwrap_or_default(),
             };
-            // Last N bytes; valid UTF-8 stays text, otherwise a Bytes result.
-            let start = data.len().saturating_sub(byte_count);
+            let start = if from_start {
+                // `+N` is 1-based: byte 1 = index 0, byte N = index N-1.
+                byte_count.saturating_sub(1).min(data.len())
+            } else {
+                // Last N bytes.
+                data.len().saturating_sub(byte_count)
+            };
             return ExecResult::success_text_or_bytes(data[start..].to_vec());
         }
 
@@ -182,6 +186,23 @@ fn parse_line_spec(args: &ToolArgs) -> (usize, bool) {
         // A leading `-` is the explicit "from the end" sign (same as no sign).
         Some(Value::String(s)) => (s.trim_start_matches('-').parse().unwrap_or(10), false),
         _ => (10, false),
+    }
+}
+
+/// Resolve the `-c` byte spec into `Some((count, from_start))`, or `None` if
+/// `-c` was not supplied. `-c +N` (lexed as String `"+N"`) means "from byte N"
+/// (1-based, GNU tail semantics); plain `-c N` and `-c -N` both mean "last N
+/// bytes". Returns `None` when `-c` is absent so the caller can fall through to
+/// line mode.
+fn parse_byte_spec(args: &ToolArgs) -> Option<(usize, bool)> {
+    match args.get("bytes", usize::MAX) {
+        Some(Value::String(s)) if s.starts_with('+') => {
+            Some((s[1..].parse().unwrap_or(1), true))
+        }
+        Some(Value::Int(i)) => Some((i.unsigned_abs() as usize, false)),
+        // A leading `-` is the explicit "from the end" sign (same as no sign).
+        Some(Value::String(s)) => Some((s.trim_start_matches('-').parse().unwrap_or(0), false)),
+        _ => None,
     }
 }
 

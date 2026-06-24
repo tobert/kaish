@@ -101,9 +101,12 @@ impl Tool for Dd {
             return ExecResult::failure(2, "dd: bs must be greater than 0");
         }
 
-        // A counted transfer reads exactly count*bs bytes from offset skip*bs.
-        // No count → read the whole input (a finite file; an endless device
-        // errors loudly on the unbounded read).
+        // Build a ReadRange that covers the requested window:
+        //   offset = skip * bs  (always applied when skip > 0)
+        //   limit  = count * bs (only when count= is given)
+        //
+        // No count → read from the skip offset to end of input (a finite file;
+        // an endless device errors loudly on an unbounded read).
         let range = match count {
             Some(c) => {
                 let total = c.checked_mul(bs);
@@ -124,7 +127,21 @@ impl Tool for Dd {
                     None => return ExecResult::failure(2, "dd: count*bs overflow"),
                 }
             }
-            None => None,
+            // No count: skip to offset and read the rest.  When skip is zero
+            // the range is a no-op (offset=0, no limit) which the backend
+            // treats identically to a bare `None`.
+            None => {
+                match skip.checked_mul(bs) {
+                    Some(0) => None, // no skip, no limit — pass None for efficiency
+                    Some(offset) => Some(ReadRange {
+                        offset: Some(offset),
+                        limit: None,
+                        start_line: None,
+                        end_line: None,
+                    }),
+                    None => return ExecResult::failure(2, "dd: skip*bs overflow"),
+                }
+            }
         };
 
         let Some(input) = input else {

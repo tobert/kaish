@@ -59,8 +59,10 @@ impl Tool for Dirname {
         let mut output = String::new();
         for value in &args.positional {
             let path_str = crate::interpreter::value_to_string(value);
-            // Special case: root "/" has itself as parent.
-            let result = if path_str == "/" {
+            // POSIX: a path consisting entirely of slashes (e.g. `//`, `///`)
+            // has itself as its own dirname — just like `/`. `Path::parent()`
+            // returns `None` for such paths, so we special-case before using it.
+            let result = if path_str.chars().all(|c| c == '/') {
                 "/".to_string()
             } else {
                 let parent = Path::new(&path_str)
