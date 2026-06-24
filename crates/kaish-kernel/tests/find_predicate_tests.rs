@@ -222,3 +222,37 @@ async fn find_ipath_does_not_match_wrong_case_sensitive_path() {
         "-path should be case-sensitive, got: {out:?}"
     );
 }
+
+// ── -size on a regular-file operand / -maxdepth 0 must be applied (not bypassed) ──
+
+#[tokio::test]
+async fn find_file_operand_honors_size_filter() {
+    // A regular-file operand short-circuit must still apply -size, not print
+    // the file unconditionally. (Gemini review of PR #20.)
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "small.txt", "tiny"); // 4 bytes
+    let kernel = kernel_at(dir.path());
+
+    // 4 bytes is NOT > 1K → no output.
+    let (out, code) = run(&kernel, "find small.txt -size +1k").await;
+    assert_eq!(code, 0, "{out:?}");
+    assert!(out.is_empty(), "-size +1k should exclude a 4-byte file: {out:?}");
+
+    // 4 bytes IS > 0 → printed (the short-circuit applies the filter and passes).
+    // (`-size -1k` would be the natural inclusion test, but kaish's lexer can't
+    // parse a `-N` size token yet — a separate limitation, noted in issues.md.)
+    let (out, code) = run(&kernel, "find small.txt -size +0").await;
+    assert_eq!(code, 0, "{out:?}");
+    assert!(out.contains("small.txt"), "-size +0 should include a 4-byte file: {out:?}");
+}
+
+#[tokio::test]
+async fn find_maxdepth0_honors_size_filter() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "small.txt", "tiny");
+    let kernel = kernel_at(dir.path());
+    // The start file itself, maxdepth 0, with a size that excludes it.
+    let (out, code) = run(&kernel, "find small.txt -maxdepth 0 -size +1k").await;
+    assert_eq!(code, 0, "{out:?}");
+    assert!(out.is_empty(), "-maxdepth 0 -size +1k should exclude a 4-byte file: {out:?}");
+}

@@ -224,3 +224,30 @@ carol 2" | sort -k2n"#).await;
     assert_eq!(lines, vec!["carol 2", "bob 9", "alice 10"],
         "piped sort -k2n: {out:?}");
 }
+
+// ─── -u uses the active comparator, not raw string equality ──────────────────
+
+#[tokio::test]
+async fn sort_n_u_dedups_numerically_equal() {
+    // `sort -n -u` must collapse numerically-equal lines (10 == 10.0), like GNU.
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, r#"echo "10
+10.0
+2" | sort -n -u"#).await;
+    assert_eq!(code, 0, "{out:?}");
+    assert_eq!(out.lines().collect::<Vec<_>>(), vec!["2", "10"],
+        "10 and 10.0 are numerically equal — keep one: {out:?}");
+}
+
+#[tokio::test]
+async fn sort_n_u_keydedups_numerically_equal() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, r#"echo "a 10
+a 10.0
+b 2" | sort -n -u -k2"#).await;
+    assert_eq!(code, 0, "{out:?}");
+    assert_eq!(out.lines().collect::<Vec<_>>(), vec!["b 2", "a 10"],
+        "field-2 numerically equal — keep first: {out:?}");
+}

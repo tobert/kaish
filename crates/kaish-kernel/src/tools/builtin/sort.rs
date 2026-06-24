@@ -141,21 +141,19 @@ impl Tool for Sort {
             }
         });
 
-        // Handle unique flag: when a key spec is active, dedup by the key
-        // extracted from each line, not the full line. GNU sort -u keeps the
-        // first of each group of lines that compare equal under the active key.
+        // Handle unique flag: GNU `sort -u` drops lines that compare EQUAL under
+        // the ACTIVE comparator (numeric/version/key aware), not by raw string.
+        // So `sort -n -u` collapses "10" and "10.0", and `-k` dedups by the key.
+        // Reusing `compare_lines` keeps -u consistent with the sort order above.
         if unique {
-            if let Some(ks) = &key_spec {
-                let delim = delimiter.as_deref();
-                lines.dedup_by(|b, a| {
-                    // `dedup_by` visits (later, earlier) pairs; we keep `a` (first
-                    // seen) when the two lines' keys are equal. Note: `b` is the
-                    // candidate to drop, `a` is the one being kept.
-                    extract_key(a, ks, delim) == extract_key(b, ks, delim)
-                });
-            } else {
-                lines.dedup();
-            }
+            let delim = delimiter.as_deref();
+            lines.dedup_by(|b, a| {
+                // `dedup_by` visits (later=b, earlier=a) pairs; keep `a` (first
+                // seen) when the two compare equal. `reverse` is irrelevant to
+                // equality, so the raw comparator suffices.
+                compare_lines(a, b, numeric, version, key_spec.as_ref(), delim)
+                    == std::cmp::Ordering::Equal
+            });
         }
 
         if lines.is_empty() {

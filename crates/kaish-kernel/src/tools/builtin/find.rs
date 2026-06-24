@@ -22,6 +22,7 @@ use std::time::SystemTime;
 
 use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
+use crate::vfs::DirEntry;
 use crate::ignore_config::IgnoreScope;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
@@ -216,6 +217,9 @@ impl Tool for Find {
                 if !path_matches(&path_glob, &ipath_glob, start_path) {
                     continue;
                 }
+                if !passes_mtime_size(start_stat.as_ref(), mtime_filter, size_filter) {
+                    continue;
+                }
                 let entry_type = EntryType::File;
                 nodes.push(OutputNode::new(start_path).with_entry_type(entry_type));
                 json_array.push(serde_json::Value::String(start_path.clone()));
@@ -239,6 +243,9 @@ impl Tool for Find {
                         }
                     }
                     if !path_matches(&path_glob, &ipath_glob, start_path) {
+                        continue;
+                    }
+                    if !passes_mtime_size(start_stat.as_ref(), mtime_filter, size_filter) {
                         continue;
                     }
                     nodes.push(
@@ -413,6 +420,44 @@ fn parse_relative_int(value: &Value) -> Option<(char, u64)> {
         let num: u64 = s.parse().ok()?;
         Some(('=', num))
     }
+}
+
+/// Apply the `-mtime`/`-size` predicates to an already-stat'd entry, matching
+/// the walker's (lenient) semantics: a filter whose stat field is unavailable
+/// passes. Used by the regular-file-operand and `-maxdepth 0` short-circuits so
+/// they don't bypass these filters the way the main walker applies them.
+fn passes_mtime_size(
+    info: Option<&DirEntry>,
+    mtime: Option<(char, u64)>,
+    size: Option<(char, u64)>,
+) -> bool {
+    if let Some((sign, days)) = mtime
+        && let Some(info) = info
+        && let Some(modified) = info.modified
+    {
+        let age_days = modified.elapsed().map(|d| d.as_secs()).unwrap_or(0) / 86400;
+        let ok = match sign {
+            '+' => age_days > days,
+            '-' => age_days < days,
+            _ => age_days == days,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    if let Some((sign, sz)) = size
+        && let Some(info) = info
+    {
+        let ok = match sign {
+            '+' => info.size > sz,
+            '-' => info.size < sz,
+            _ => info.size == sz,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
 }
 
 /// Parse a size filter like "+1000", "-500", "1M", "+10K".

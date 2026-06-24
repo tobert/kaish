@@ -2192,26 +2192,32 @@ where
     // keeping the AST shape uniform with the rest of the parser.
     let pipeline_stmt = pipeline.map(pipeline_into_stmt);
 
-    // Statement chaining inside `$()`, same precedence as the top level
-    // (`&&` binds tighter than `||`). This is the full statement grammar a
-    // command substitution body accepts — pipelines, `&&`/`||` chains, and
-    // (via the sequence below) `;`/newline separators and `#` comments.
-    // Control structures (`if`/`for`/`while`/`case`) are intentionally out of
-    // scope here; they require threading the recursive statement parser through
-    // every expression site (see docs/issues.md). The body grammar otherwise
-    // mirrors `statement_parser`.
-    let and_chain = pipeline_stmt.clone().foldl(
-        just(Token::And).ignore_then(pipeline_stmt.clone()).repeated(),
-        |left, right| Stmt::AndChain {
-            left: Box::new(left),
-            right: Box::new(right),
-        },
-    );
-    let chained = and_chain.clone().foldl(
-        just(Token::Or).ignore_then(and_chain).repeated(),
-        |left, right| Stmt::OrChain {
-            left: Box::new(left),
-            right: Box::new(right),
+    // Statement chaining inside `$()`. `&&` and `||` have EQUAL precedence and
+    // associate left-to-right (POSIX) — the same single left fold as the top
+    // level (`statement_parser`), NOT `&&`-binds-tighter. This is the full
+    // statement grammar a command substitution body accepts — pipelines,
+    // `&&`/`||` chains, and (via the sequence below) `;`/newline separators and
+    // `#` comments. Control structures (`if`/`for`/`while`/`case`) are
+    // intentionally out of scope here (see docs/issues.md).
+    let chained = pipeline_stmt.clone().foldl(
+        choice((
+            just(Token::And).to(true), // true = &&
+            just(Token::Or).to(false), // false = ||
+        ))
+        .then(pipeline_stmt.clone())
+        .repeated(),
+        |left, (is_and, right): (bool, Stmt)| {
+            if is_and {
+                Stmt::AndChain {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }
+            } else {
+                Stmt::OrChain {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }
+            }
         },
     );
 

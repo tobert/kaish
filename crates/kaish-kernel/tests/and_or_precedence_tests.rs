@@ -35,3 +35,11 @@ async fn and_success_skips_or_branch() {
 async fn or_recovers_then_and_runs() {
     assert_eq!(out("false || echo A && echo B").await, "A\nB");
 }
+
+// Unquoted `$(...)` goes through cmd_subst_parser, which had its own &&-tighter
+// fold — it must use the same equal/left-assoc precedence as the top level.
+#[tokio::test]
+async fn cmdsubst_or_then_and_left_assoc() {
+    // ((true || echo A) && echo B) -> the cmdsubst prints B
+    assert_eq!(out("echo $(true || echo A && echo B)").await, "B");
+}

@@ -84,8 +84,11 @@ Still open:
   uses the old `take_stdin_data` pre-read — fold it into resolve_stdin if a
   `… | scatter … | gather` structured-data race surfaces.
 - ~~**`&&`/`||` precedence inverted.**~~ FIXED 2026-06-24 (`fix/p1-correctness`):
-  single left-associative fold, equal precedence (POSIX). Test:
-  `and_or_precedence_tests` + 3 updated parser snapshots.
+  single left-associative fold, equal precedence (POSIX), in BOTH
+  `statement_parser` and `cmd_subst_parser` (the latter caught in the Gemini-Pro
+  review — unquoted `$(a || b && c)` had the same bug). The `[[ ]]`
+  `condition_parser` intentionally keeps `&&` tighter (test-expr precedence).
+  Test: `and_or_precedence_tests` (incl. cmdsubst) + 3 updated parser snapshots.
 - ~~**Syntax error inside a quoted `$()` silently becomes literal text**~~ FIXED
   2026-06-24 (`fix/p1-correctness`): `parse_interpolated_string` is now fallible
   and the double-quoted path `try_map`s the cmdsubst parse error into a loud Rich
@@ -297,6 +300,10 @@ hit ubiquitous inputs — worth raising above polish):
   misleading for this case. (`lexer.rs` `NumberIdent` / `InvalidFloat*` — extend the
   digit-leading bareword to span `-`/`.` runs, or special-case it. NOT a panic — the
   toolless reviewer's "crash on IP/UUID" claim was rejected; these fail loud.)
+- **A leading-`-` numeric arg token doesn't lex**: `find x -size -1k` (GNU "less
+  than 1k") and similar `-N` predicate values are a parse error. Same
+  digit/hyphen lexer class as above; `+N` and bare `N` parse fine. Surfaced
+  fixing the `find` short-circuit filters (2026-06-24).
 
 ### v0.8.4 review residuals (Gemini Pro, 2026-06-14)
 - **`diff -C 3 -C 4` miscounts arity** (P4-trivial — `context_steals_positional`
