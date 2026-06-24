@@ -4361,13 +4361,12 @@ impl Kernel {
             }
             resolved.to_string_lossy().into_owned()
         } else {
-            // Get PATH from scope or environment
+            // Get PATH from scope only. The kernel never reads OS env: a
+            // frontend that wants host PATH seeds it via initial_vars (the REPL
+            // does, with os_env_vars()). No PATH in scope → nothing resolves.
             let path_var = {
                 let scope = self.scope.read().await;
-                scope
-                    .get("PATH")
-                    .map(value_to_string)
-                    .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+                scope.get("PATH").map(value_to_string).unwrap_or_default()
             };
 
             // Resolve command in PATH
@@ -7694,8 +7693,14 @@ AFTER="yes"'"#)
     #[tokio::test]
     async fn test_external_command_sees_exported_var() {
         let kernel = Kernel::transient().expect("failed to create kernel");
+        // PATH must be in scope to resolve the external `printenv` — the kernel
+        // never falls back to OS PATH. Seeding it via a scope assignment mirrors
+        // what a frontend does through initial_vars.
+        let path = std::env::var("PATH").unwrap_or_default();
         let result = kernel
-            .execute("export EXT_FOO=bar; printenv EXT_FOO")
+            .execute(&format!(
+                "PATH=\"{path}\"; export EXT_FOO=bar; printenv EXT_FOO"
+            ))
             .await
             .expect("execute failed");
 
@@ -7757,6 +7762,11 @@ AFTER="yes"'"#)
         let kernel = Kernel::transient().expect("failed to create kernel");
         let mut overlay = HashMap::new();
         overlay.insert("SUB_FOO".to_string(), Value::String("subproc".into()));
+        // PATH in the overlay so the external `printenv` resolves (no OS fallback).
+        overlay.insert(
+            "PATH".to_string(),
+            Value::String(std::env::var("PATH").unwrap_or_default()),
+        );
 
         let result = kernel
             .execute_with_options("printenv SUB_FOO", ExecuteOptions::new().with_vars(overlay))

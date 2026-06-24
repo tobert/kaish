@@ -8,13 +8,25 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(feature = "subprocess")]
 
+use std::collections::HashMap;
 use std::time::Duration;
 
+use kaish_kernel::ast::Value;
 use kaish_kernel::{Kernel, KernelConfig};
 
 /// Helper to create a kernel with passthrough filesystem and PATH access.
+///
+/// The kernel execution core is hermetic — it never reads OS env — so PATH must
+/// be supplied via `initial_vars`, exactly as the real REPL frontend does with
+/// `os_env_vars()`. (Reading OS env *here*, in test fixture code, is fine.)
 fn repl_kernel() -> Kernel {
-    Kernel::new(KernelConfig::repl()).expect("Failed to create kernel")
+    let mut vars = HashMap::new();
+    vars.insert(
+        "PATH".to_string(),
+        Value::String(std::env::var("PATH").unwrap_or_default()),
+    );
+    let config = KernelConfig::repl().with_initial_vars(vars);
+    Kernel::new(config).expect("Failed to create kernel")
 }
 
 // ============================================================================
@@ -37,6 +49,21 @@ async fn external_command_with_args() {
     // Note: we have a builtin echo, so this tests builtin echo
     // Let's use a command that's definitely external
     assert!(result.ok());
+}
+
+#[tokio::test]
+async fn external_resolution_is_hermetic_no_os_path_fallback() {
+    // A kernel with no PATH in scope must NOT reach into the OS PATH to resolve
+    // external commands — the execution core never reads OS env. `printenv` is a
+    // real external (not a kaish builtin, unlike `true`) present on every Linux
+    // PATH, so resolving it here would prove a hermeticity leak.
+    let kernel = Kernel::new(KernelConfig::repl()).expect("kernel"); // initial_vars empty → no PATH
+    let result = kernel.execute("printenv").await.unwrap();
+    assert_eq!(
+        result.code, 127,
+        "with no PATH in scope, external resolution must report command-not-found, \
+         not fall back to the OS PATH: {result:?}"
+    );
 }
 
 #[tokio::test]
@@ -219,8 +246,9 @@ async fn external_command_is_hermetic_by_default() {
     // The kernel does not inherit OS env — `KernelConfig::repl()` alone does
     // not seed PATH. Frontends (the REPL binary, the MCP server) populate
     // `initial_vars` from `std::env::vars()`; embedders that don't populate
-    // get a hermetic child env.
-    let kernel = repl_kernel();
+    // get a hermetic kernel that can't even resolve an external command,
+    // because resolution reads PATH from scope and never from OS env.
+    let kernel = Kernel::new(KernelConfig::repl()).expect("kernel"); // no initial_vars → no PATH
     assert!(
         std::env::var_os("PATH").is_some(),
         "test precondition: PATH must be set for cargo test"

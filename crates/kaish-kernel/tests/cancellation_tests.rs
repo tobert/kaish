@@ -19,7 +19,20 @@ use kaish_kernel::ast::Value;
 
 mod common_cancel {
     use super::*;
+    use std::collections::HashMap;
     use std::fs;
+
+    /// PATH (from OS env) as `initial_vars`, mirroring what the real REPL
+    /// frontend does with `os_env_vars()`. The kernel never reads OS PATH, so
+    /// these tests must seed it to resolve external commands (`bash`, `sleep`).
+    pub fn path_vars() -> HashMap<String, Value> {
+        let mut vars = HashMap::new();
+        vars.insert(
+            "PATH".to_string(),
+            Value::String(std::env::var("PATH").unwrap_or_default()),
+        );
+        vars
+    }
 
     /// Returns true while the OS sees `pid` as a live process. Uses `kill(pid, 0)`,
     /// which signals nothing but errors with ESRCH when the PID is gone.
@@ -101,14 +114,15 @@ mod common_cancel {
         Kernel::new(
             KernelConfig::repl()
                 .with_skip_validation(true)
-                .with_kill_grace(Duration::from_millis(500)),
+                .with_kill_grace(Duration::from_millis(500))
+                .with_initial_vars(path_vars()),
         )
         .expect("kernel")
         .into_arc()
     }
 }
 
-use common_cancel::{child_alive, kernel_for_test, pid_writer, wait_for_dead, wait_for_pid};
+use common_cancel::{child_alive, kernel_for_test, path_vars, pid_writer, wait_for_dead, wait_for_pid};
 
 // ════════════════════════════════════════════════════════════════════════════
 // 1. request_timeout kills a foreground external
@@ -153,7 +167,8 @@ async fn per_call_timeout_overrides_config_default() {
         KernelConfig::repl()
             .with_skip_validation(true)
             .with_request_timeout(Duration::from_secs(60))
-            .with_kill_grace(Duration::from_millis(300)),
+            .with_kill_grace(Duration::from_millis(300))
+            .with_initial_vars(path_vars()),
     )
     .expect("kernel")
     .into_arc();
@@ -314,7 +329,8 @@ async fn grace_escalation_sigkills_term_trapping_child() {
     let kernel = Kernel::new(
         KernelConfig::repl()
             .with_skip_validation(true)
-            .with_kill_grace(Duration::from_millis(200)),
+            .with_kill_grace(Duration::from_millis(200))
+            .with_initial_vars(path_vars()),
     )
     .expect("kernel")
     .into_arc();

@@ -182,9 +182,11 @@ impl BackendDispatcher {
                 return Some(ExecResult::failure(127, format!("{}: No such file or directory", name)));
             }
         } else {
+            // PATH from scope only — never OS env (keeps this test-only spawn
+            // site in sync with kernel.rs::try_execute_external).
             let path_var = ctx.scope.get("PATH")
                 .map(crate::interpreter::value_to_string)
-                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
+                .unwrap_or_default();
             resolve_in_path(name, &path_var)?
         };
 

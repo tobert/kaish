@@ -34,10 +34,13 @@ before release.
   rather than copying through it. Tests: `rm_mv_symlink_safety_tests.rs` (13
   kernel-routed) + `LocalFs` unit tests. Residual filed P3 below (mv cross-mount
   child-symlink copy fidelity).
-- **Hermeticity leak: production reads OS `PATH`.** `kernel.rs::try_execute_external`
-  falls back to `std::env::var("PATH")` when `PATH` isn't in kernel scope (same in
-  the test-only `dispatch.rs::try_external`). Contradicts "the kernel never reads OS
-  env." Child env is otherwise hermetic (`env_clear`). Fix: drop the OS fallback.
+- ~~**Hermeticity leak: production reads OS `PATH`.**~~ FIXED 2026-06-24
+  (`fix/p1-safety-hangs`). Dropped the `std::env::var("PATH")` fallback in both
+  `kernel.rs::try_execute_external` and the test-only `dispatch.rs::try_external`;
+  `PATH` now comes from scope only. Frontends seed it via `initial_vars`
+  (REPL: `os_env_vars()`). Test `external_resolution_is_hermetic_no_os_path_fallback`
+  + updated fixtures that were silently leaning on the fallback (they now seed PATH
+  like the real frontend).
 
 **Deadlocks / hangs**
 - **Large buffered stdin deadlocks.** External-command buffered-`String` stdin is
