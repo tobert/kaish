@@ -517,11 +517,11 @@ impl PipelineRunner {
                     }
                 }
 
-                // Send structured data to next stage via oneshot BEFORE pipe write.
-                // The pipe write may block on backpressure (>64KB output), and the
-                // consumer awaits this oneshot before starting execution. Sending
-                // first prevents a circular wait (producer blocked on pipe write,
-                // consumer blocked on oneshot).
+                // Send structured data to the next stage via the oneshot BEFORE
+                // the pipe write. The consumer's `resolve_stdin` drains the pipe
+                // FIRST and only THEN awaits this oneshot, so by the time it
+                // reads the sideband the value is already here — sending before
+                // the (possibly backpressured) pipe write keeps that ordering.
                 if let Some(tx) = data_sender {
                     let _ = tx.send(result.data.clone());
                 }

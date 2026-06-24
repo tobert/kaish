@@ -111,9 +111,13 @@ fn parse_backslash_escape(
         Some('\\') => { chars.next(); output.push('\\'); }
         Some('0') => {
             chars.next();
-            // May be \0NNN (octal) or just \0 (null byte).
+            // \0NNN: GNU printf reads the leading `0` as the FIRST of up to 3
+            // octal digits, so at most 2 more follow (`\0101` → octal `010` = BS,
+            // then a literal `1`; `\0377` → octal `037`, then `7`). Reading 3
+            // more here would make `\0101` = octal 101 = 'A', diverging from
+            // GNU/bash/dash. Bare `\NNN` (no leading 0, below) takes the full 3.
             let mut octal = String::new();
-            while octal.len() < 3 {
+            while octal.len() < 2 {
                 match chars.peek().copied() {
                     Some(d) if d.is_ascii_digit() && d != '8' && d != '9' => {
                         octal.push(d);
@@ -852,9 +856,11 @@ mod tests {
 
     #[test]
     fn test_octal_escape_format() {
-        // \0101 in format → 'A' (octal 101 = 65)
+        // \0NNN: leading 0 is the first of up to 3 octal digits (≤2 more), like
+        // GNU/bash/dash. \0101 → octal 010 (BS) + literal '1', NOT 'A'.
         let args: Vec<TestVal> = vec![];
-        assert_eq!(format_string("\\0101", &args), "A");
+        assert_eq!(format_string("\\0101", &args), "\u{8}1");
+        assert_eq!(format_string("\\012", &args), "\n");
     }
 
     #[test]
