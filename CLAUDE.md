@@ -130,9 +130,14 @@ Tests live in `crates/kaish-kernel/tests/`. Snapshots in `crates/kaish-kernel/te
 - `crates/kaish-help/src/` — composition surface: `fragments.rs` (the English
   fragment registry, concept-organized) + `compose.rs` (recipes). Design:
   `docs/composable-help.md`.
-- `docs/issues.md` — open work only (P1–P4). `docs/devlog.md` — landed-work
-  narrative + standing decisions (don't re-litigate). Keep history out of
-  `issues.md` so it stays cheap to read for actual open work.
+- **Working notes (three-file pattern)** — kept current *as you go*, not at the end.
+  `signoff.md` (repo root, ephemeral, **not committed**) is the cross-session handoff
+  a fresh process can't reconstruct — what we were doing and what's next; melt it into
+  the two durable docs and delete it once it has a home. `docs/issues.md` (committed)
+  is open work only (P1–P4) — **delete an entry when it ships**, don't mark it done.
+  `docs/devlog.md` (committed) is the landed-work narrative + standing decisions
+  (don't re-litigate). Keep history out of `issues.md` so it stays cheap to read for
+  actual open work. Code is truth; the notes track what isn't in it yet.
 
 **Keep in sync:** When adding builtins or changing syntax, update the relevant help files.
 The builtin list in `help builtins` is generated dynamically from tool schemas.
