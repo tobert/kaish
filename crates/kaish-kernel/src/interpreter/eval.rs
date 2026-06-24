@@ -254,19 +254,17 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                     TestCmpOp::Eq => values_equal(&left_val, &right_val),
                     TestCmpOp::NotEq => !values_equal(&left_val, &right_val),
                     TestCmpOp::Match => {
-                        // Regex match
-                        match regex_match(&left_val, &right_val, false) {
-                            Ok(Value::Bool(b)) => b,
-                            Ok(_) => false,
-                            Err(_) => false,
+                        // Regex match — propagate compile errors loudly (no silent false).
+                        match regex_match(&left_val, &right_val, false)? {
+                            Value::Bool(b) => b,
+                            _ => false,
                         }
                     }
                     TestCmpOp::NotMatch => {
-                        // Regex not match
-                        match regex_match(&left_val, &right_val, true) {
-                            Ok(Value::Bool(b)) => b,
-                            Ok(_) => true,
-                            Err(_) => true,
+                        // Regex not match — propagate compile errors loudly (no silent true).
+                        match regex_match(&left_val, &right_val, true)? {
+                            Value::Bool(b) => b,
+                            _ => true,
                         }
                     }
                     TestCmpOp::Gt | TestCmpOp::Lt | TestCmpOp::GtEq | TestCmpOp::LtEq => {

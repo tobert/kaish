@@ -486,38 +486,42 @@ impl Tool for JqNative {
                         return ExecResult::failure(1, format!("jq: failed to read {}: {}", path, e))
                     }
                 }
-            } else if let Some(data) = ctx.take_stdin_data() {
-                // Fast path: use pre-parsed structured data from pipeline
-                ast_value_to_json(&data)
             } else {
-                let text = match ctx.read_stdin_to_text().await {
-                    Ok(s) => s.unwrap_or_default(),
+                // Resolve stdin: structured `.data` from the pipeline if the
+                // upstream produced it, else the raw text. resolve_stdin drains
+                // the pipe before awaiting the data sideband — no startup race.
+                let (data, text) = match ctx.resolve_stdin().await {
+                    Ok(pair) => pair,
                     Err(e) => return ExecResult::failure(2, format!("jq: {e}")),
                 };
+                if let Some(data) = data {
+                    ast_value_to_json(&data)
+                } else {
+                    if text.is_empty() {
+                        return ExecResult::failure(1, "jq: no input provided");
+                    }
+                    match serde_json::from_str(&text) {
+                        Ok(json) => json,
+                        Err(e) => return ExecResult::failure(1, format!("jq: invalid JSON input: {}", e)),
+                    }
+                }
+            }
+        } else {
+            // Same structured-or-text resolution as the no-files branch above.
+            let (data, text) = match ctx.resolve_stdin().await {
+                Ok(pair) => pair,
+                Err(e) => return ExecResult::failure(2, format!("jq: {e}")),
+            };
+            if let Some(data) = data {
+                ast_value_to_json(&data)
+            } else {
                 if text.is_empty() {
                     return ExecResult::failure(1, "jq: no input provided");
                 }
-                // Fallback: parse stdin text as JSON
                 match serde_json::from_str(&text) {
                     Ok(json) => json,
                     Err(e) => return ExecResult::failure(1, format!("jq: invalid JSON input: {}", e)),
                 }
-            }
-        } else if let Some(data) = ctx.take_stdin_data() {
-            // Fast path: use pre-parsed structured data from pipeline
-            ast_value_to_json(&data)
-        } else {
-            let text = match ctx.read_stdin_to_text().await {
-                Ok(s) => s.unwrap_or_default(),
-                Err(e) => return ExecResult::failure(2, format!("jq: {e}")),
-            };
-            if text.is_empty() {
-                return ExecResult::failure(1, "jq: no input provided");
-            }
-            // Fallback: parse stdin text as JSON
-            match serde_json::from_str(&text) {
-                Ok(json) => json,
-                Err(e) => return ExecResult::failure(1, format!("jq: invalid JSON input: {}", e)),
             }
         };
 

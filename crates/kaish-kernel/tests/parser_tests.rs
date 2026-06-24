@@ -352,20 +352,21 @@ fn parser_mixed_chain() {
 
 #[test]
 fn parser_precedence_or_then_and() {
-    // CRITICAL: && binds tighter than ||, so this should parse as: a || (b && c)
-    // NOT as: (a || b) && c
+    // POSIX: `&&` and `||` are EQUAL precedence, left-associative, so this parses
+    // as ((a || b) && c) — NOT a || (b && c).
     parse_and_snapshot("precedence_or_then_and", "a || b && c");
 }
 
 #[test]
 fn parser_precedence_complex() {
-    // Tests both levels: a && b || c && d → (a && b) || (c && d)
+    // Left-to-right, equal precedence: a && b || c && d → (((a && b) || c) && d).
     parse_and_snapshot("precedence_complex", "a && b || c && d");
 }
 
 #[test]
 fn parser_precedence_deeply_chained() {
-    // Stress test: a || b || c && d && e → a || b || ((c && d) && e)
+    // Left-to-right, equal precedence:
+    // a || b || c && d && e → ((((a || b) || c) && d) && e).
     parse_and_snapshot("precedence_deeply_chained", "a || b || c && d && e");
 }
 

@@ -16,6 +16,7 @@ use crate::tools::ToolRegistry;
 use crate::trash::TrashBackend;
 use crate::vfs::VfsRouter;
 use kaish_vfs::ByteBudget;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::interpreter::OutputFormat;
@@ -63,6 +64,12 @@ pub struct ExecContext {
     /// Structured data from pipeline (pre-parsed JSON from previous command).
     /// Tools can check this before parsing stdin to avoid redundant JSON parsing.
     pub stdin_data: Option<Value>,
+    /// Sideband receiver for the previous stage's structured `.data`, set by the
+    /// concurrent pipeline runner. Resolved lazily via [`Self::resolve_stdin`]
+    /// AFTER the pipe is drained — never pre-read — so a streaming upstream that
+    /// only sends its data after writing the pipe can't deadlock a consumer that
+    /// awaits it. Non-`Clone`, so it's moved on resolve.
+    pub stdin_data_rx: Option<oneshot::Receiver<Option<Value>>>,
     /// Streaming pipe input (set when this command is in a concurrent pipeline).
     pub pipe_stdin: Option<PipeReader>,
     /// Streaming pipe output (set when this command is in a concurrent pipeline).
@@ -172,6 +179,7 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             stdin_data: None,
+            stdin_data_rx: None,
             pipe_stdin: None,
             pipe_stdout: None,
             stderr: None,
@@ -210,6 +218,7 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             stdin_data: None,
+            stdin_data_rx: None,
             pipe_stdin: None,
             pipe_stdout: None,
             stderr: None,
@@ -245,6 +254,7 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             stdin_data: None,
+            stdin_data_rx: None,
             pipe_stdin: None,
             pipe_stdout: None,
             stderr: None,
@@ -280,6 +290,7 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             stdin_data: None,
+            stdin_data_rx: None,
             pipe_stdin: None,
             pipe_stdout: None,
             stderr: None,
@@ -318,6 +329,7 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             stdin_data: None,
+            stdin_data_rx: None,
             pipe_stdin: None,
             pipe_stdout: None,
             stderr: None,
@@ -353,6 +365,7 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             stdin_data: None,
+            stdin_data_rx: None,
             pipe_stdin: None,
             pipe_stdout: None,
             stderr: None,
@@ -430,6 +443,36 @@ impl ExecContext {
     /// by a previous command in the pipeline.
     pub fn take_stdin_data(&mut self) -> Option<Value> {
         self.stdin_data.take()
+    }
+
+    /// Resolve stdin for a builtin that can consume *either* structured `.data`
+    /// or raw text from the previous pipeline stage (jq, scatter, …). Returns
+    /// `(Some(data), _)` when the upstream produced structured data, else
+    /// `(None, text)`.
+    ///
+    /// Ordering matters and is the whole point: the pipe is drained to text
+    /// FIRST, which runs the upstream producer to completion (it can't be parked
+    /// on pipe backpressure), and only THEN is the structured-data sideband
+    /// awaited — by which point the producer has definitely sent it (it sends
+    /// before writing/closing its pipe). A streaming upstream that emits a lot
+    /// of text before sending its (absent) data therefore can't deadlock us, and
+    /// a fast structured producer (`seq`) is no longer lost to a startup race
+    /// that a one-shot `try_recv` used to drop on the floor.
+    pub async fn resolve_stdin(&mut self) -> Result<(Option<Value>, String), String> {
+        // Data set directly on the context (not via the pipeline sideband) wins
+        // and needs no pipe — e.g. a non-pipeline caller seeded `stdin_data`.
+        if let Some(data) = self.stdin_data.take() {
+            return Ok((Some(data), String::new()));
+        }
+        // Drain the pipe (and/or buffered stdin) to text — unblocks the upstream.
+        let text = self.read_stdin_to_text().await?.unwrap_or_default();
+        // Upstream has now finished; its structured data (if any) is waiting.
+        if let Some(rx) = self.stdin_data_rx.take()
+            && let Ok(Some(data)) = rx.await
+        {
+            return Ok((Some(data), text));
+        }
+        Ok((None, text))
     }
 
     /// Resolve a path relative to cwd, normalizing `.` and `..` components.
@@ -519,6 +562,7 @@ impl ExecContext {
             prev_cwd: self.prev_cwd.clone(),
             stdin: None,
             stdin_data: None,
+            stdin_data_rx: None,
             pipe_stdin: None,
             pipe_stdout: None,
             stderr: self.stderr.clone(),

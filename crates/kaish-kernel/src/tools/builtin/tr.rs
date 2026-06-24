@@ -139,11 +139,94 @@ impl Tool for Tr {
     }
 }
 
+/// Interpret C-style backslash escapes in a tr SET string, producing a new
+/// string with escape sequences replaced by their actual characters.
+///
+/// Supported escapes (matching GNU tr):
+/// - `\a` → BEL (0x07)
+/// - `\b` → BS  (0x08)
+/// - `\f` → FF  (0x0C)
+/// - `\n` → LF  (0x0A)
+/// - `\r` → CR  (0x0D)
+/// - `\t` → HT  (0x09)
+/// - `\v` → VT  (0x0B)
+/// - `\\` → `\`
+/// - `\NNN` → octal codepoint (1–3 octal digits)
+/// - Any other `\X` is kept as-is (GNU tr passes unknown escapes through).
+fn parse_escapes(spec: &str) -> String {
+    let mut result = String::with_capacity(spec.len());
+    let mut chars = spec.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            result.push(c);
+            continue;
+        }
+
+        match chars.next() {
+            None => {
+                // Trailing backslash — keep literally (GNU tr behavior).
+                result.push('\\');
+            }
+            Some('a') => result.push('\x07'),
+            Some('b') => result.push('\x08'),
+            Some('f') => result.push('\x0C'),
+            Some('n') => result.push('\n'),
+            Some('r') => result.push('\r'),
+            Some('t') => result.push('\t'),
+            Some('v') => result.push('\x0B'),
+            Some('\\') => result.push('\\'),
+            Some(d) if d.is_ascii_digit() && d != '8' && d != '9' => {
+                // Octal: consume up to 2 more octal digits (total 1–3).
+                let mut octal = String::with_capacity(3);
+                octal.push(d);
+                for _ in 0..2 {
+                    match chars.peek() {
+                        Some(&next)
+                            if next.is_ascii_digit() && next != '8' && next != '9' =>
+                        {
+                            octal.push(next);
+                            chars.next();
+                        }
+                        _ => break,
+                    }
+                }
+                // `octal` contains 1–3 digits from '0'–'7'; u32 parse cannot
+                // fail — but we propagate gracefully rather than panicking.
+                let Ok(codepoint) = u32::from_str_radix(&octal, 8) else {
+                    result.push('\\');
+                    result.push_str(&octal);
+                    continue;
+                };
+                // Values above 0x7F are byte values; map them directly.
+                if let Some(ch) = char::from_u32(codepoint) {
+                    result.push(ch);
+                } else {
+                    // Non-scalar codepoint — keep original escape literally.
+                    result.push('\\');
+                    result.push_str(&octal);
+                }
+            }
+            Some(other) => {
+                // Unknown escape — pass through as-is (GNU tr behavior).
+                result.push('\\');
+                result.push(other);
+            }
+        }
+    }
+
+    result
+}
+
 /// Expand a character set specification.
-/// Supports: literal characters, ranges (a-z), and classes ([:alpha:], [:digit:], etc.)
+/// Supports: C-style escapes (\n, \t, \ooo, etc.), literal characters,
+/// ranges (a-z), and classes ([:alpha:], [:digit:], etc.)
 fn expand_char_set(spec: &str) -> Vec<char> {
+    // First pass: interpret C-style backslash escapes.
+    let unescaped = parse_escapes(spec);
+
     let mut chars = Vec::new();
-    let mut iter = spec.chars().peekable();
+    let mut iter = unescaped.chars().peekable();
 
     while let Some(c) = iter.next() {
         if c == '[' && iter.peek() == Some(&':') {

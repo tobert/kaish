@@ -59,41 +59,43 @@ before release.
   (`/v/jobs/{id}/stdout` reads hold the lock across `stream.read().await`).
 
 **Correctness — silent wrong output**
-- **Structured-data pipeline race.** `seq 1 3 | jq .` *fails* ("trailing
-  characters"): the consumer `try_recv`s the `.data` oneshot before the producer
-  sends it (producer sends only after dispatch completes), so structured data is lost
-  and it falls back to text (`scheduler/pipeline.rs`). Breaks builtin→builtin
-  structured-data flow. Fix: hand the receiver to the consumer (await-on-demand)
-  instead of racing a pre-read.
-- **`&&`/`||` precedence inverted.** The parser folds `&&` tighter than `||`
-  (`parser.rs`); POSIX gives them equal, left-to-right precedence. `true || echo A &&
-  echo B` prints nothing (bash prints `B`). The `[[ ]]` path is correct; this is the
-  statement-list path.
-- **`printf` flags/precision/conversions broadly broken** — one root cause
-  (`tools/builtin/format_string.rs`: parsed into `FormatSpec`, never applied). Silent:
-  `+`/` `/`#` flags ignored; `.precision` ignored for `%s` and for `%d`/`%x`/`%o`;
-  precision doesn't override the `0` flag; `%E`/`%G`/`%b`/`%u` emit the literal `%X`;
-  `\0NNN` octal escape broken. (Width, `-`, and basic `%s`/`%d`/`%x`/`%f` work.)
-  High-frequency builtin — agent-facing.
-- **`tr` doesn't interpret escapes** in SET1/SET2 — `tr '\n' ' '` matches a literal
-  `n`. Ubiquitous idiom. (`tools/builtin/tr.rs`)
-- **`sort` glued `-k` dropped** — `sort -k2n`/`-k2,2` silently fall back to full-line
-  sort; `-k N` ignores the field-to-EOL tiebreak; `-u` dedups the full line, not the
-  key. (`tools/builtin/sort.rs`)
-- **awk numeric comparison wrong** — strnum/absent fields compare as strings:
-  `$1=="foo"` makes `$1 > 5` true and `$1 == 0` false. (`tools/builtin/awk.rs`)
-- **`cat -n` drops the final newline** of the last line — every `cat -n` through a
-  pipe silently corrupts the last line (`.lines().join("\n")`). (`tools/builtin/cat.rs`)
-- **`find` predicates broken**: `find <regular-file>` prints nothing (exit 0);
-  `find -maxdepth 0` lists children instead of the start path; `find -mindepth` /
-  `-path` / `-ipath` are swallowed as `-h` and print help (exit 0). (`tools/builtin/find.rs`)
-- **`[[ =~ ]]` silently false** on an uncompilable regex (error swallowed).
-  (`interpreter/eval.rs`)
-- **Syntax error inside a quoted `$()` silently becomes literal text** — `echo "$(if
-  true; echo 1; fi)"` prints the literal string (`parser.rs`; unquoted `$()` errors
-  loudly).
-- **`cut -f "1-3,2-4"` duplicates fields** (no dedup, `tools/builtin/cut.rs`);
-  **`jq '. / 0'` returns `null`** silently while `%` errors (jaq-core).
+
+Builtin batch FIXED 2026-06-24 (`fix/p1-correctness`, kernel-routed regression
+tests per fix): **`printf`** flags/precision/`%u%E%G%b`/`\0NNN` now applied
+(`printf_format_tests`); **`tr`** interprets SET escapes (`tr_escape_tests`);
+**`sort -k`** honors glued/separated keys + `-u` key-dedup (`sort_key_tests`);
+**`cut`** unions/dedups/orders ranges (`cut_range_dedup_tests`); **`cat -n`**
+preserves the trailing newline (`cat_number_newline_tests`); **`find`**
+regular-file/`-maxdepth 0`/`-mindepth`/`-path`/`-ipath` (`find_predicate_tests`);
+**`[[ =~ ]]`** loud on uncompilable regex (`regex_match_error_tests`). **awk
+numeric comparison** was already fixed in `5abecdf` (strnum `compare_values`) —
+this entry was stale; pinned now by `awk_numeric_compare_tests` (12, gawk-checked).
+Residuals filed below/P3: sort multi-`-k` + `.C` offsets + `b/d/f` modifiers;
+printf `%b \c` whole-format stop + `%c` width.
+
+Still open:
+- ~~**Structured-data pipeline race.**~~ FIXED 2026-06-24 (`fix/p1-correctness`).
+  Consumers (`jq`, `scatter`) now `ctx.resolve_stdin()`: drain the pipe first
+  (unblocks a streaming upstream), then await the structured-data sideband
+  (`stdin_data_rx` threaded through `dispatch_command`), instead of a one-shot
+  `try_recv` that lost the race on a multi-thread runtime. Test:
+  `pipeline_structured_data_tests` (multi-thread, looped — pre-fix `seq|jq` failed
+  ~197/200). NOTE: the scatter/gather *runner* (`scheduler/scatter.rs:136`) still
+  uses the old `take_stdin_data` pre-read — fold it into resolve_stdin if a
+  `… | scatter … | gather` structured-data race surfaces.
+- ~~**`&&`/`||` precedence inverted.**~~ FIXED 2026-06-24 (`fix/p1-correctness`):
+  single left-associative fold, equal precedence (POSIX), in BOTH
+  `statement_parser` and `cmd_subst_parser` (the latter caught in the Gemini-Pro
+  review — unquoted `$(a || b && c)` had the same bug). The `[[ ]]`
+  `condition_parser` intentionally keeps `&&` tighter (test-expr precedence).
+  Test: `and_or_precedence_tests` (incl. cmdsubst) + 3 updated parser snapshots.
+- ~~**Syntax error inside a quoted `$()` silently becomes literal text**~~ FIXED
+  2026-06-24 (`fix/p1-correctness`): `parse_interpolated_string` is now fallible
+  and the double-quoted path `try_map`s the cmdsubst parse error into a loud Rich
+  error (matching unquoted `$()`). Test: `quoted_cmdsubst_error_tests`. Residual:
+  a malformed `$()` inside a `${VAR:-default}` *default word* still falls back to
+  literal (two infallible Expr-returning call sites; rare edge).
+- **`jq '. / 0'` returns `null`** silently while `%` errors (jaq-core).
 
 ### `execute_argv` — argv-native kernel entry point (+ multicall binary) (Amy, 2026-06-23)
 Embeddable surface is string-native (`execute(&str)` → lex/parse). A structured
@@ -298,6 +300,10 @@ hit ubiquitous inputs — worth raising above polish):
   misleading for this case. (`lexer.rs` `NumberIdent` / `InvalidFloat*` — extend the
   digit-leading bareword to span `-`/`.` runs, or special-case it. NOT a panic — the
   toolless reviewer's "crash on IP/UUID" claim was rejected; these fail loud.)
+- **A leading-`-` numeric arg token doesn't lex**: `find x -size -1k` (GNU "less
+  than 1k") and similar `-N` predicate values are a parse error. Same
+  digit/hyphen lexer class as above; `+N` and bare `N` parse fine. Surfaced
+  fixing the `find` short-circuit filters (2026-06-24).
 
 ### v0.8.4 review residuals (Gemini Pro, 2026-06-14)
 - **`diff -C 3 -C 4` miscounts arity** (P4-trivial — `context_steals_positional`
@@ -318,6 +324,14 @@ stalls. Lower-frequency than `wait` and the `spawn`-async fix keeps it from
 hard-deadlocking the executor, but it should clone the `Arc<BoundedStream>` out
 under the lock, drop the lock, then `read().await`. Audit all `*.lock().await`
 sites in job.rs for other across-await holds while there.
+
+### Builtin residuals from the 2026-06-24 correctness batch
+Low-frequency sub-cases left after the P1 builtin fixes:
+- **`sort`**: only one `-k` accepted (clap `Option<String>`) — GNU chains `-k` for
+  tiebreaking; `.C` char-within-field offsets are accepted but ignored; per-key
+  `b`/`d`/`f`/`i` modifiers are accepted but not implemented. (`tools/builtin/sort.rs`)
+- **`printf`**: `%b` doesn't honor `\c` (stop *all* output) at the whole-format
+  level; `%c` ignores width/flags. (`tools/builtin/format_string.rs`)
 
 ### `mv` cross-mount copy of a symlink *child* follows it (fidelity, not data loss)
 Surfaced consolidating the rm/mv symlink-safety fix (2026-06-24). The top-level
