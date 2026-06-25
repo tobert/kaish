@@ -179,10 +179,6 @@ NOTE: `xxd -r -p` trailing odd nibble was a **false positive** — kaish already
 matches GNU xxd (silently drops it); pinned by a test, not a bug.
 
 Still open (deferred — bigger than a builtin fix, each its own focused PR):
-- **`write`/`tee` write binary-via-`$()` as the literal text `[binary: N bytes]`**
-  (silent corruption; the stdin path is safe). Extends the binary-data
-  var-interpolation placeholder (P1 binary-data residuals) — here the placeholder
-  reaches a file. Best folded into the tee/patch write-model work below.
 - **Interpreter trio:** `export` inside a function is dropped on return — needs
   scope-frame-model work (the single `Scope.exported` set isn't merged back when a
   function's forked scope returns), `interpreter/scope.rs`; file tests skip tilde —

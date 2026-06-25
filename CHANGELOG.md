@@ -10,6 +10,14 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+- **`write` no longer corrupts binary content from `$(…)`.** `write FILE $(producer)`
+  (and `producer | write FILE`) now persists the raw bytes of a `Value::Bytes`
+  verbatim instead of stringifying it to the `[binary: N bytes]` placeholder — that
+  placeholder reaching a file was silent corruption. Content from a positional,
+  `--content`, or stdin is all read as bytes. (`tee` already read stdin as raw bytes
+  and is unaffected; pinned by a regression test.)
+
 ### Added
 - **Validator advisory `W006` steers `test` to `[[ … ]]`.** Using a bare `test` as a
   command now surfaces a one-time stderr note (`use [[ … ]] …`) and still runs. A

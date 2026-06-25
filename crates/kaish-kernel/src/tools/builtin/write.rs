@@ -66,38 +66,42 @@ impl Tool for Write {
             None => return ExecResult::failure(1, "write: missing path argument"),
         };
 
-        // Content can be positional[1], named "content", or stdin (pipe or
-        // buffered — `read_stdin_to_text` prefers the streaming pipe).
-        let content = if let Some(v) = args.named.get("content") {
-            value_to_string(v)
+        // Content can be positional[1], named "content", or stdin. Read it as
+        // raw bytes so a `Value::Bytes` (e.g. from `$(producer)`) is written
+        // verbatim instead of stringified to the `[binary: N bytes]` marker —
+        // that placeholder reaching a file is silent corruption. Stdin uses the
+        // byte reader (pipe-preferred) for the same reason.
+        let content: Vec<u8> = if let Some(v) = args.named.get("content") {
+            value_to_bytes(v)
         } else if let Some(v) = args.positional.get(1) {
-            value_to_string(v)
+            value_to_bytes(v)
         } else {
-            match ctx.read_stdin_to_text().await {
-                Ok(Some(s)) => s,
-                Ok(None) => return ExecResult::failure(1, "write: missing content argument"),
-                Err(e) => return ExecResult::failure(2, format!("write: {e}")),
+            match ctx.read_stdin_to_bytes().await {
+                Some(bytes) => bytes,
+                None => return ExecResult::failure(1, "write: missing content argument"),
             }
         };
 
         let resolved = ctx.resolve_path(&path);
 
-        match ctx.backend.write(Path::new(&resolved), content.as_bytes(), WriteMode::Overwrite).await {
+        match ctx.backend.write(Path::new(&resolved), &content, WriteMode::Overwrite).await {
             Ok(()) => ExecResult::with_output(OutputData::text(format!("Wrote {} bytes to {}", content.len(), path))),
             Err(e) => ExecResult::failure(1, format!("write: {}: {}", path, e)),
         }
     }
 }
 
-fn value_to_string(value: &Value) -> String {
+/// Render a value as the raw bytes to write. `Bytes` is written verbatim;
+/// every other variant uses its lossless string form.
+fn value_to_bytes(value: &Value) -> Vec<u8> {
     match value {
-        Value::String(s) => s.clone(),
-        Value::Int(i) => i.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => "null".to_string(),
-        Value::Json(json) => json.to_string(),
-        Value::Bytes(b) => format!("[binary: {} bytes]", b.len()),
+        Value::Bytes(b) => b.clone(),
+        Value::String(s) => s.clone().into_bytes(),
+        Value::Int(i) => i.to_string().into_bytes(),
+        Value::Float(f) => f.to_string().into_bytes(),
+        Value::Bool(b) => b.to_string().into_bytes(),
+        Value::Null => b"null".to_vec(),
+        Value::Json(json) => json.to_string().into_bytes(),
     }
 }
 
