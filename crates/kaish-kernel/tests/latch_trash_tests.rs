@@ -501,6 +501,63 @@ async fn patch_overwrite_under_latch_requires_confirm() {
 }
 
 #[tokio::test]
+async fn patch_explicit_file_multi_group_diff_snapshots_once() {
+    // A multi-group diff applied to one explicit target lists that file once per
+    // group; the gate must dedup so it snapshots the prior bytes a single time,
+    // not once per group.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("f.txt"), "alpha\nbeta\n").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    let script = "patch f.txt <<'EOF'\n\
+        --- a/x\n+++ b/x\n@@ -1 +1 @@\n-alpha\n+ALPHA\n\
+        --- a/y\n+++ b/y\n@@ -2 +2 @@\n-beta\n+BETA\n\
+        EOF\n";
+
+    run(&kernel, "set -o trash").await;
+    let r = run(&kernel, script).await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+
+    let snaps = mock.snapshots();
+    assert_eq!(
+        snaps.len(),
+        1,
+        "the explicit target is deduped to one snapshot: {snaps:?}"
+    );
+    assert_eq!(snaps[0].1, b"alpha\nbeta\n", "snapshot captured prior content");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).expect("read"),
+        "ALPHA\nBETA\n"
+    );
+}
+
+#[tokio::test]
+async fn patch_explicit_file_multi_group_latch_lists_target_once() {
+    // The latch prompt must not list the same explicit target once per group.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("f.txt"), "alpha\nbeta\n").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    let script = "patch f.txt <<'EOF'\n\
+        --- a/x\n+++ b/x\n@@ -1 +1 @@\n-alpha\n+ALPHA\n\
+        --- a/y\n+++ b/y\n@@ -2 +2 @@\n-beta\n+BETA\n\
+        EOF\n";
+
+    run(&kernel, "set -o latch").await;
+    let r = run(&kernel, script).await;
+    assert_eq!(r.code, 2, "latch gates: {}", r.err);
+    // The path legitimately appears twice (the "Authorized:" line and the hint),
+    // but a dedup miss would repeat it within each: "f.txt, f.txt" / "f.txt f.txt".
+    assert!(
+        !r.err.contains("f.txt, f.txt") && !r.err.contains("f.txt f.txt"),
+        "the deduped target must not repeat within the prompt: {}",
+        r.err
+    );
+}
+
+#[tokio::test]
 async fn patch_dry_run_does_not_gate() {
     let dir = tempdir();
     std::fs::write(dir.path().join("f.txt"), "old\n").expect("write");

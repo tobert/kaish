@@ -151,7 +151,9 @@ impl Tool for Patch {
                 })
                 .collect();
             if let Err(blocked) = ctx
-                .gate_overwrites("patch", &targets, parsed.confirm.as_deref())
+                .gate_overwrites("patch", &targets, parsed.confirm.as_deref(), |nonce, joined| {
+                    format!("patch --confirm=\"{nonce}\" {joined}")
+                })
                 .await
             {
                 return blocked;
