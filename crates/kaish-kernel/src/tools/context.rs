@@ -711,11 +711,19 @@ impl ExecContext {
     /// targets. `Err(result)` is what the caller must return verbatim (the
     /// latch prompt, an invalid nonce, or a trash failure — never fall through
     /// to a destructive overwrite on error).
+    ///
+    /// `confirm_hint` builds the re-run command shown in the latch prompt, given
+    /// the nonce and the space-joined latched paths. Most callers want
+    /// `|nonce, joined| format!("{command} --confirm=\"{nonce}\" {joined}")`, but
+    /// a tool whose argv carries operands the operation can't run without — e.g.
+    /// `sed -i`'s expression — must reinject them here, or the advertised
+    /// re-run will misbehave (or hang on stdin).
     pub async fn gate_overwrites(
         &mut self,
         command: &str,
         targets: &[(String, bool)],
         confirm: Option<&str>,
+        confirm_hint: impl FnOnce(&str, &str) -> String,
     ) -> Result<(), ExecResult> {
         let trash_enabled = self.scope.trash_enabled();
         let latch_enabled = self.scope.latch_enabled();
@@ -729,9 +737,16 @@ impl ExecContext {
             resolved: PathBuf,
             action: MutationAction,
         }
+        // Dedup by resolved path (keep first): a multi-file patch with an
+        // explicit target lists the same file once per hunk-group, and we must
+        // not snapshot it N times or list it N times in the latch prompt.
+        let mut seen = std::collections::HashSet::new();
         let mut decided = Vec::with_capacity(targets.len());
         for (display, is_append) in targets {
             let resolved = self.resolve_path(display);
+            if !seen.insert(resolved.clone()) {
+                continue;
+            }
             // `real` is used only for the exclusion decision (/tmp, /v); the
             // snapshot reads bytes through the backend, not the real path.
             let real = self.backend.resolve_real_path(Path::new(&resolved));
@@ -762,7 +777,7 @@ impl ExecContext {
                 None => {
                     let joined = latched.join(" ");
                     return Err(self.latch_result(command, &latched, "latch enabled", |nonce| {
-                        format!("{command} --confirm=\"{nonce}\" {joined}")
+                        confirm_hint(nonce, &joined)
                     }));
                 }
             }

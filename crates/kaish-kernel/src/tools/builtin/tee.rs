@@ -76,7 +76,9 @@ impl Tool for Tee {
             .map(|v| (crate::interpreter::value_to_string(v), append))
             .collect();
         if let Err(blocked) = ctx
-            .gate_overwrites("tee", &targets, parsed.confirm.as_deref())
+            .gate_overwrites("tee", &targets, parsed.confirm.as_deref(), |nonce, joined| {
+                format!("tee --confirm=\"{nonce}\" {joined}")
+            })
             .await
         {
             return blocked;
@@ -87,42 +89,34 @@ impl Tool for Tee {
         let input = ctx.read_stdin_to_bytes().await.unwrap_or_default();
 
         // POSIX: tee writes stdin to every file AND to stdout. Continue past
-        // per-file errors (matches POSIX `tee` semantics) and report the last
-        // failure as a non-zero exit so callers can detect partial failure.
-        let mut last_err: Option<String> = None;
+        // per-file errors (matches POSIX `tee` semantics) and report every
+        // failure so the agent sees the full picture, not just the last one.
+        let mut errors: Vec<String> = Vec::new();
         for value in &args.positional {
             let path_str = crate::interpreter::value_to_string(value);
             let resolved = ctx.resolve_path(&path_str);
             let path = Path::new(&resolved);
 
-            let final_content = if append {
-                // kaish VFS lacks an append mode — read-modify-write.
-                match ctx.backend.read(path, None).await {
-                    Ok(existing) => {
-                        let mut combined = existing;
-                        combined.extend_from_slice(&input);
-                        combined
-                    }
-                    Err(_) => input.clone(),
-                }
+            // Overwrite writes the borrowed input directly (no clone); append
+            // needs a read-modify-write since the VFS lacks an append mode.
+            let write_result = if append {
+                let mut combined = ctx.backend.read(path, None).await.unwrap_or_default();
+                combined.extend_from_slice(&input);
+                ctx.backend.write(path, &combined, WriteMode::Overwrite).await
             } else {
-                input.clone()
+                ctx.backend.write(path, &input, WriteMode::Overwrite).await
             };
 
-            if let Err(e) = ctx
-                .backend
-                .write(path, &final_content, WriteMode::Overwrite)
-                .await
-            {
-                last_err = Some(format!("tee: {}: {}", path_str, e));
+            if let Err(e) = write_result {
+                errors.push(format!("tee: {}: {}", path_str, e));
             }
         }
 
         // Pass the input through unchanged: text for text input, binary for
         // binary input.
         let mut result = ExecResult::success_text_or_bytes(input);
-        if let Some(msg) = last_err {
-            result.err = msg;
+        if !errors.is_empty() {
+            result.err = errors.join("\n");
             result = result.with_code(1);
         }
         result
