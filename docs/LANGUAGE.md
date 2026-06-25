@@ -760,6 +760,7 @@ printf '%s' hi | xxd                             # hex dump
 xxd -r -p <<< 6869                               # hex -> bytes
 
 # Inspect and measure
+file key.bin                                     # identify type by magic bytes (content, not extension)
 checksum key.bin                                 # hash arbitrary bytes
 wc -c key.bin                                    # exact byte count
 cmp a.bin b.bin                                  # byte-compare, early-exits on first diff
@@ -772,8 +773,8 @@ output), so binary never garbles a terminal or a JSON channel.
 **Text builtins refuse binary.** `grep`, `sed`, `awk`, `sort`, `cut`, `tr`, `jq`,
 and the other text tools **error** on non-UTF-8 input instead of silently
 replacing bytes with `U+FFFD`. The byte-aware movers (`cat`, `dd`, `base64`,
-`xxd`, `checksum`, `wc`, `tee`, `head -c`, `tail -c`, `cmp`) consume binary
-directly. External commands keep binary intact in both directions, so
+`xxd`, `checksum`, `wc`, `tee`, `head -c`, `tail -c`, `cmp`, `file`) consume
+binary directly. External commands keep binary intact in both directions, so
 `curl url > out.bin` and `... | gzip` round-trip.
 
 ## What's Intentionally Missing

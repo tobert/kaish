@@ -31,6 +31,7 @@ pub use spawn::resolve_in_path;
 mod export;
 #[cfg(feature = "subprocess")]
 mod fg;
+mod file;
 mod glob;
 mod find;
 pub(crate) mod format_string;
@@ -128,6 +129,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(export::Export);
     #[cfg(feature = "subprocess")]
     registry.register(fg::Fg);
+    registry.register(file::File);
     registry.register(glob::Glob);
     registry.register(find::Find);
     registry.register(gather::Gather);

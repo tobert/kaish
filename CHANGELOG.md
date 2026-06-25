@@ -11,6 +11,14 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`file` builtin identifies files by content (magic bytes), not extension.**
+  Reports a broad type word plus MIME (`photo: image (image/png)`); `-i`/`--mime`
+  prints the MIME alone, `-b`/`--brief` drops the filename, `--json` emits a
+  `FILE`/`TYPE`/`MIME` table. Reads a bounded prefix through the VFS (works in
+  sandboxed/overlay backends) and classifies stdin when given no paths.
+  Signature-less bytes (raw PCM, plain prose) report `data` rather than a guess.
+  Detection lives in `kaish-glob`'s new `filetype` module (pure-Rust `infer`, no
+  C deps) so embedders can classify bytes the same way the shell does.
 - **Validator advisory `W006` steers `test` to `[[ … ]]`.** Using a bare `test` as a
   command now surfaces a one-time stderr note (`use [[ … ]] …`) and still runs. A
   path-qualified form (`/usr/bin/test`, `./test`) is left alone — it's an explicit

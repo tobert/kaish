@@ -73,6 +73,13 @@ md-5 = "0.10"
 # Pattern matching (grep)
 regex = "1"
 
+# Content-based file-type detection (magic bytes) — pure Rust, no C deps.
+# `default-features = false` drops the `cfb` matcher (legacy MS Office
+# .doc/.xls, which also pulls in byteorder/uuid) — outside kaish's 80% and
+# not worth the transitive deps; `alloc` keeps every image/audio/archive
+# matcher we actually use.
+infer = { version = "0.19", default-features = false, features = ["alloc"] }
+
 # ripgrep family — the `grep` builtin's search engine and the walker's
 # type-filter system. `ignore` provides `Types` (path-name matching, no I/O)
 # and gitignore parsing.

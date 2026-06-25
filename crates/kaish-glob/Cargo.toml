@@ -19,6 +19,9 @@ thiserror = { workspace = true }
 # gitignore parsing for the global / parent-walk-up paths. Pure
 # path-name matching is used here; no real-FS calls.
 ignore = { workspace = true }
+# Content-based file-type detection (magic bytes) for the `filetype` module.
+# Pure Rust, zero transitive deps — keeps the crate hermetic.
+infer = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

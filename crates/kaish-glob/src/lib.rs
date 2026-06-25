@@ -11,11 +11,13 @@
 //! Consumers implement `WalkerFs` to adapt their own filesystem abstraction.
 
 mod filter;
+pub mod filetype;
 pub mod glob;
 mod glob_path;
 mod ignore;
 mod walker;
 
+pub use filetype::{detect, Category, FileType, SNIFF_PREFIX_LEN};
 pub use filter::{FilterResult, IncludeExclude};
 pub use glob::{contains_glob, expand_braces, glob_match};
 pub use glob_path::{GlobPath, PathSegment, PatternError};
