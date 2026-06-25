@@ -574,3 +574,63 @@ async fn patch_dry_run_does_not_gate() {
         "dry-run leaves the file untouched"
     );
 }
+
+// ============================================================================
+// Write-model gate: sed -i in-place edits honor latch + trash (same gate)
+// ============================================================================
+
+#[tokio::test]
+async fn sed_in_place_under_trash_snapshots_prior_bytes() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("f.txt"), "old\n").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o trash").await;
+    let r = run(&kernel, "sed -i 's/old/new/' f.txt").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+
+    let snaps = mock.snapshots();
+    assert_eq!(snaps.len(), 1, "one byte-snapshot before the in-place write: {snaps:?}");
+    assert_eq!(snaps[0].1, b"old\n", "snapshot captured the prior content");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).expect("read"),
+        "new\n"
+    );
+}
+
+#[tokio::test]
+async fn sed_in_place_under_latch_requires_confirm() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("f.txt"), "old\n").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o latch").await;
+    let r = run(&kernel, "sed -i 's/old/new/' f.txt").await;
+    assert_eq!(r.code, 2, "latch gates the in-place edit: {}", r.err);
+    assert!(r.err.contains("--confirm="));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).expect("read"),
+        "old\n",
+        "the file must be untouched until confirmed"
+    );
+
+    let nonce = latch_data_str(&r, "nonce");
+    let r2 = run(&kernel, &format!("sed -i --confirm=\"{nonce}\" 's/old/new/' f.txt")).await;
+    assert_eq!(r2.code, 0, "confirmed in-place edit succeeds: {}", r2.err);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).expect("read"),
+        "new\n"
+    );
+}
+
+#[tokio::test]
+async fn sed_in_place_without_operands_is_a_loud_error() {
+    let dir = tempdir();
+    let kernel = kernel_at(dir.path());
+    // Editing a stream in place is meaningless — loud error, not a fall-through.
+    let r = run(&kernel, "echo hi | sed -i 's/h/H/'").await;
+    assert_eq!(r.code, 1, "no file operands must error: {}", r.err);
+    assert!(r.err.contains("requires file operands"), "err: {}", r.err);
+}

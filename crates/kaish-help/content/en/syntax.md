@@ -207,7 +207,7 @@ Env vars: `KAISH_LATCH=1`, `KAISH_TRASH=1` enable at startup.
 
 **Latch:** Nonces scoped to (command, paths). A nonce for `rm A` rejects `rm B`.
 Confirmed paths must be subset of authorized paths. Exit code 2 = needs confirmation.
-Applies to `rm` and to truncating overwrites (`tee`, `patch`; `sed -i` next) —
+Applies to `rm` and to truncating overwrites (`tee`, `patch`, `sed -i`) —
 confirm those with `--confirm=<nonce>`. `tee -a` append, new files, and
 `patch --dry-run` don't gate.
 

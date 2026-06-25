@@ -9,6 +9,7 @@ use regex::{Regex, RegexBuilder};
 use std::path::Path;
 
 use crate::ast::Value;
+use crate::backend::WriteMode;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::{IssueCode, ValidationIssue};
@@ -38,6 +39,17 @@ struct SedArgs {
     /// rejected with a hint; see the regex notes in `help sed`.)
     #[arg(short = 'E', short_alias = 'r', long = "regexp-extended")]
     extended: bool,
+
+    /// Edit files in place (-i) instead of streaming to stdout. Requires file
+    /// operands. (The GNU glued backup suffix `-i.bak` is not yet supported —
+    /// kaish's lexer splits `-i.bak` at the dot; the trash snapshot under
+    /// `set -o trash` already keeps a recoverable prior copy. See issues.md.)
+    #[arg(short = 'i', long = "in-place")]
+    in_place: bool,
+
+    /// Confirmation nonce for a latch-gated in-place overwrite.
+    #[arg(long = "confirm")]
+    confirm: Option<String>,
 
     #[command(flatten)]
     global: GlobalFlags,
@@ -125,6 +137,12 @@ impl Tool for Sed {
 
         let quiet = parsed.quiet || args.has_flag("quiet") || args.has_flag("n");
 
+        // In-place editing (-i [SUFFIX]) and its confirm nonce — captured before
+        // `parsed` is shadowed by the built program below. Read raw too: the
+        // kernel may surface `-i.bak` as named["i"]=".bak" or bare `-i` as a flag.
+        let in_place = parsed.in_place || args.has_flag("i");
+        let confirm = parsed.confirm.clone();
+
         // Collect expressions from the *raw* args, not `parsed.expression`: the
         // kernel accumulates repeated `-e` into a `Value::Json(Array)`, which
         // `ToolArgs::to_argv()` renders as one JSON token (it can't tell a
@@ -146,11 +164,69 @@ impl Tool for Sed {
             }
         }
 
-        // Get input: file or stdin. When `-e` supplied the expression(s), every
-        // positional is a file (file at position 0); otherwise the first
-        // positional is the expression and the file is at position 1.
+        // When `-e` supplied the expression(s), every positional is a file (file
+        // at position 0); otherwise the first positional is the expression and
+        // the file is at position 1.
         let file_pos = if expression_from_flag(&args) { 0 } else { 1 };
 
+        // In-place: edit each file operand on disk instead of streaming to
+        // stdout. It is *always* a truncating overwrite of an existing file, so
+        // it routes through the same latch+trash gate as tee/patch. Editing a
+        // stream in place is meaningless, so no operands is a loud error.
+        if in_place {
+            let files: Vec<String> = args
+                .positional
+                .iter()
+                .skip(file_pos)
+                .map(crate::interpreter::value_to_string)
+                .collect();
+            if files.is_empty() {
+                return ExecResult::failure(
+                    1,
+                    "sed: -i requires file operands (cannot edit a stream in place)",
+                );
+            }
+
+            // Gate every target with one nonce before touching any file.
+            let targets: Vec<(String, bool)> = files.iter().map(|f| (f.clone(), false)).collect();
+            if let Err(blocked) = ctx.gate_overwrites("sed", &targets, confirm.as_deref()).await {
+                return blocked;
+            }
+
+            // Apply per file; continue past per-file errors and report the last.
+            let mut last_err: Option<String> = None;
+            for path in &files {
+                let resolved = ctx.resolve_path(path);
+                let target = Path::new(&resolved);
+                let content = match ctx.backend.read(target, None).await {
+                    Ok(data) => match String::from_utf8(data) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            last_err = Some(format!("sed: {}: invalid UTF-8", path));
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        last_err = Some(format!("sed: {}: {}", path, e));
+                        continue;
+                    }
+                };
+                let output = execute_sed(&content, &parsed, quiet);
+                if let Err(e) = ctx
+                    .backend
+                    .write(target, output.as_bytes(), WriteMode::Overwrite)
+                    .await
+                {
+                    last_err = Some(format!("sed: {}: {}", path, e));
+                }
+            }
+            return match last_err {
+                Some(msg) => ExecResult::failure(1, msg),
+                None => ExecResult::success(""),
+            };
+        }
+
+        // Streaming mode: read one file (or stdin) and write to stdout.
         let input = match args.get_string("path", file_pos) {
             Some(path) => {
                 let resolved = ctx.resolve_path(&path);
