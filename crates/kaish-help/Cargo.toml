@@ -13,7 +13,7 @@ categories.workspace = true
 readme = "../../README.md"
 
 [dependencies]
-kaish-types = { path = "../kaish-types", version = "0.9.0" }
+kaish-types = { path = "../kaish-types", version = "0.9.1" }
 
 [lints]
 workspace = true

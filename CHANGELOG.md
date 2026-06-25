@@ -10,6 +10,8 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-06-25
+
 ### Added
 - **BREAKING: `diff --json` emits structured hunks** instead of the unified-diff text wrapped as a JSON string: `{old_file, new_file, differ:true, hunks:[{old_start, old_lines, new_start, new_lines, changes:[{tag, content, missing_newline}]}]}` (`tag` ∈ `equal`/`delete`/`insert`, `content` newline-stripped for clean `jq`, `missing_newline` flags a line with no terminal newline so a final-newline-only change stays distinguishable). Plain `diff` output is unchanged; `diff -q --json` reports `{old_file, new_file, differ:true}`. Identical files emit a consistent `{old_file, new_file, differ:false, hunks:[]}` object (exit 0, empty text) so a `--json` consumer always parses an object, never an empty string.
 
@@ -491,7 +493,8 @@ Initial public release of **kaish** (会sh) — a predictable Bourne-like shell 
 - **REPL** (`kaish-repl`) with multi-line input, completion, and history; **MCP server** (`kaish-mcp`) exposing `kaish_execute` with help resources and structured + plain-text content blocks.
 - **`KernelClient` trait** + `EmbeddedClient` for in-process embedding; topic-based help system; `kaish-wasi` `wasm32-wasip1` target.
 
-[Unreleased]: https://github.com/tobert/kaish/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/tobert/kaish/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/tobert/kaish/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/tobert/kaish/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/tobert/kaish/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/tobert/kaish/compare/v0.8.2...v0.8.3

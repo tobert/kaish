@@ -14,11 +14,11 @@ readme = "../../README.md"
 exclude = ["tests/snapshots/"]
 
 [dependencies]
-kaish-glob = { path = "../kaish-glob", version = "0.9.0" }
-kaish-types = { path = "../kaish-types", version = "0.9.0", features = [] }
-kaish-help = { path = "../kaish-help", version = "0.9.0" }
-kaish-tool-api = { path = "../kaish-tool-api", version = "0.9.0" }
-kaish-vfs = { path = "../kaish-vfs", version = "0.9.0", features = ["memory", "overlay"] }
+kaish-glob = { path = "../kaish-glob", version = "0.9.1" }
+kaish-types = { path = "../kaish-types", version = "0.9.1", features = [] }
+kaish-help = { path = "../kaish-help", version = "0.9.1" }
+kaish-tool-api = { path = "../kaish-tool-api", version = "0.9.1" }
+kaish-vfs = { path = "../kaish-vfs", version = "0.9.1", features = ["memory", "overlay"] }
 
 # Async runtime — minimal base; `localfs` adds tokio/fs, `subprocess` adds
 # tokio/process + tokio/rt-multi-thread (see [features]).
@@ -83,7 +83,7 @@ jaq-json = { workspace = true }
 # Optional deps, each pulled in by its capability feature:
 #   kaish-tools-host → host, trash/directories → os-integration,
 #   tiktoken-rs → tokens.
-kaish-tools-host = { path = "../kaish-tools-host", version = "0.9.0", optional = true }
+kaish-tools-host = { path = "../kaish-tools-host", version = "0.9.1", optional = true }
 trash = { workspace = true, optional = true }
 directories = { workspace = true, optional = true }
 tiktoken-rs = { workspace = true, optional = true }
