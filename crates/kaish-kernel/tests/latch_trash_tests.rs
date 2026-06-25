@@ -441,3 +441,79 @@ async fn tee_overlay_overwrite_snapshots_bytes_via_trash_bytes() {
     let out = run(&kernel, "cat /v/f.txt").await;
     assert_eq!(out.text_out().trim(), "new", "new content written after the snapshot");
 }
+
+// ============================================================================
+// Write-model gate: patch overwrites honor latch + trash (same gate as tee)
+// ============================================================================
+
+/// A one-line unified diff turning `old` into `new` in `f.txt`, fed via a
+/// heredoc. The `f.txt` operand overrides the diff header, so strip level
+/// doesn't matter.
+const PATCH_SCRIPT: &str = "patch f.txt <<'EOF'\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-old\n+new\nEOF\n";
+
+#[tokio::test]
+async fn patch_overwrite_under_trash_snapshots_prior_bytes() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("f.txt"), "old\n").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o trash").await;
+    let r = run(&kernel, PATCH_SCRIPT).await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+
+    // Prior content copied to trash before the patch write; file stays in place
+    // (the read-modify-write still saw it) and now holds the patched content.
+    let snaps = mock.snapshots();
+    assert_eq!(snaps.len(), 1, "one byte-snapshot before the patch: {snaps:?}");
+    assert_eq!(snaps[0].1, b"old\n", "snapshot captured the prior content");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).expect("read"),
+        "new\n"
+    );
+}
+
+#[tokio::test]
+async fn patch_overwrite_under_latch_requires_confirm() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("f.txt"), "old\n").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o latch").await;
+    let r = run(&kernel, PATCH_SCRIPT).await;
+    assert_eq!(r.code, 2, "latch gates the patch: {}", r.err);
+    assert!(r.err.contains("--confirm="));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).expect("read"),
+        "old\n",
+        "the file must be untouched until confirmed"
+    );
+
+    let nonce = latch_data_str(&r, "nonce");
+    let confirmed = PATCH_SCRIPT.replace("patch f.txt", &format!("patch --confirm=\"{nonce}\" f.txt"));
+    let r2 = run(&kernel, &confirmed).await;
+    assert_eq!(r2.code, 0, "confirmed patch succeeds: {}", r2.err);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).expect("read"),
+        "new\n"
+    );
+}
+
+#[tokio::test]
+async fn patch_dry_run_does_not_gate() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("f.txt"), "old\n").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o latch").await;
+    let dry = PATCH_SCRIPT.replace("patch f.txt", "patch --dry-run f.txt");
+    let r = run(&kernel, &dry).await;
+    assert_eq!(r.code, 0, "dry-run never writes, so it never gates: {}", r.err);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).expect("read"),
+        "old\n",
+        "dry-run leaves the file untouched"
+    );
+}

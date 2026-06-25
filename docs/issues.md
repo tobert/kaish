@@ -220,17 +220,17 @@ the tee/patch "truncating overwrite gates" rule below. Today `sed` loud-errors o
 - **Atomicity:** write-temp-then-atomic-rename through the VFS (crash-safe);
   this surfaces an atomic-replace capability question on the `Filesystem` trait.
 
-### `patch` bypasses the latch + trash machinery (write-model design)
-**`tee` DONE** (`feat/mutation-write-gate`): the shared gate landed — pure
-`decide_mutation_action → {TrashFirst, Latch, Proceed}` + `ExecContext::
-gate_overwrites`/`snapshot_for_overwrite` + `TrashBackend::trash_bytes` (overlay
-byte-snapshot) + `tee --confirm=<nonce>`. **`patch` still open** (and `sed -i`
-below): wire it into `gate_overwrites` the same way `tee` is — `patch` already
-reads the target's current content before its whole-file `Replace`, so the snapshot
-is a natural pre-write step. Decisions stand: latch+trash stay ON even in overlay
-mode; truncating overwrite gates, `tee -a` append does NOT; new file → just write;
-family-wide `--confirm=<nonce>`; overlay trash captures the overlay's current view
-of the prior content (`trash_bytes`).
+### Write-model gate — `sed -i` remains
+**`tee` + `patch` DONE** (`feat/mutation-write-gate` → `feat/patch-write-gate`):
+the shared gate landed — pure `decide_mutation_action → {TrashFirst, Latch,
+Proceed}` + `ExecContext::gate_overwrites`/`snapshot_for_overwrite` (copies prior
+content via `TrashBackend::trash_bytes`, leaving the file in place) + family-wide
+`--confirm=<nonce>`; `tee` and `patch` both wired in (`patch` gates non-dry-run
+overwrites with one nonce per diff). **`sed -i` still open** (its own design entry
+below): it's *always* a truncating overwrite, so it inherits the same gate — call
+`gate_overwrites` before the in-place write. Decisions stand: latch+trash stay ON
+even in overlay mode; truncating overwrite gates, `tee -a` append does NOT; new
+file → just write; overlay trash captures the prior content via `trash_bytes`.
 
 ### Streaming file reads — remaining
 (wc/checksum/grep/cmp/cat landed — see devlog.) Open:

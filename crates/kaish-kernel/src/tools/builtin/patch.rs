@@ -42,6 +42,10 @@ struct PatchArgs {
     #[arg(long = "file")]
     file: Option<String>,
 
+    /// Confirmation nonce for a latch-gated overwrite.
+    #[arg(long = "confirm")]
+    confirm: Option<String>,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -127,10 +131,37 @@ impl Tool for Patch {
             return ExecResult::failure(1, "patch: no valid hunks found in input");
         }
 
+        let groups = group_by_file(&hunks);
+
+        // Gate truncating overwrites through latch + trash (no-op when both are
+        // off; skipped for --dry-run, which never writes). patch always rewrites
+        // an existing file, so every target is a non-append overwrite; one nonce
+        // scopes the whole set of files the diff touches. The snapshot copies
+        // the prior content (it doesn't move the file), so the read + CAS write
+        // below still see the file in place.
+        if !dry_run {
+            let targets: Vec<(String, bool)> = groups
+                .iter()
+                .map(|fh| {
+                    let p = match &explicit_file {
+                        Some(explicit) => explicit.clone(),
+                        None => strip_path(&fh.target_file, strip_level),
+                    };
+                    (p, false)
+                })
+                .collect();
+            if let Err(blocked) = ctx
+                .gate_overwrites("patch", &targets, parsed.confirm.as_deref())
+                .await
+            {
+                return blocked;
+            }
+        }
+
         let mut output = String::new();
 
         // Group hunks by target file
-        for file_hunks in group_by_file(&hunks) {
+        for file_hunks in &groups {
             let target_path = if let Some(ref explicit) = explicit_file {
                 explicit.clone()
             } else {
