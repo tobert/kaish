@@ -9,8 +9,14 @@
 | Backticks `` `cmd` `` (lexer error, not silently tolerated) | `$(cmd)` |
 | `eval` | Write explicit code |
 | Implicit word splitting on whitespace | `split "$VAR"` (for-loop `$(cmd)` does split on newlines — see Bash vs kaish below) |
+| `test` / `[ … ]` conditional commands | `[[ … ]]` (the one supported test form) |
 
-`[ expr ]` (single brackets) does not parse — use `[[ ]]` (preferred) or the `test` builtin.
+There is no `test` builtin and no `[` command — conditionals go through `[[ … ]]`.
+This is deliberate: `[[ … ]]` is real syntax the parser understands, so kaish can
+**validate it before running** (catch a malformed test, an unknown operator, an
+unquoted expansion). `test`/`[` are ordinary commands whose operators are just
+string arguments, invisible to the validator until runtime — exactly the kind of
+late-failure footgun kaish avoids. Use `[[ -f x ]]`, `[[ $a = $b ]]`, `[[ -z $s ]]`.
 
 ## Lexer/Parser Limitations
 

@@ -179,14 +179,6 @@ NOTE: `xxd -r -p` trailing odd nibble was a **false positive** — kaish already
 matches GNU xxd (silently drops it); pinned by a test, not a bug.
 
 Still open (deferred — bigger than a builtin fix, each its own focused PR):
-- **POSIX `test` / `[` are unreachable.** `test "a" = "a"`, `test a != b`,
-  `[ -f x ]` fail to **parse**. Diagnosed 2026-06-24: NOT a routing miss — `=`/`!=`
-  lex as `Token::Eq`/`NotEq` and `[`/`]` as `LBracket`/`RBracket`, and the argv
-  parser rejects these operator tokens in command-arg position (`test -z ""` works;
-  any operator arg fails). A correct fix must let the argv parser accept these as
-  barewords in arg position WITHOUT breaking assignment (`x=y` → IDENT Eq EXPR),
-  glob char-classes (`ls [ab]*`), or `[[ ]]`. Delicate lexer/parser change, broad
-  regression surface — wants dedicated work + review, not a batch fix.
 - **`write`/`tee` write binary-via-`$()` as the literal text `[binary: N bytes]`**
   (silent corruption; the stdin path is safe). Extends the binary-data
   var-interpolation placeholder (P1 binary-data residuals) — here the placeholder

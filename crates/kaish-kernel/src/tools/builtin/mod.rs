@@ -78,7 +78,6 @@ mod stat;
 mod tac;
 mod tail;
 mod tee;
-mod test_builtin;
 mod timeout;
 #[cfg(feature = "tokens")]
 mod tokens;
@@ -176,8 +175,6 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(tac::Tac);
     registry.register(tail::Tail);
     registry.register(tee::Tee);
-    registry.register(test_builtin::Test);
-    registry.register(test_builtin::Bracket);
     registry.register(timeout::Timeout);
     #[cfg(feature = "tokens")]
     registry.register(tokens::Tokens);

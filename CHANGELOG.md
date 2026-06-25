@@ -10,6 +10,15 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Removed
+- **BREAKING: the `test` builtin and `[` command are gone.** Use `[[ … ]]`, the one
+  supported test form. The removed builtins never worked end-to-end through the
+  parser anyway: `[` could not be a command name and `test`'s comparison operators
+  (`test a = b`, `-eq`, `<`, `>`) were rejected in argument position — only unary
+  `test -z`/`test -f` routed. `[[ … ]]` is preferred because the validator
+  understands it and can catch a malformed test before runtime, where `test`/`[`
+  hide their operators as runtime string arguments.
+
 ## [0.9.1] - 2026-06-25
 
 ### Added

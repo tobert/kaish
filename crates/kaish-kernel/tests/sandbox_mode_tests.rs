@@ -171,19 +171,19 @@ async fn sandbox_redirect_target_command_substitution() {
 }
 
 #[tokio::test]
-async fn sandbox_test_builtin_cannot_probe_host() {
+async fn sandbox_file_test_cannot_probe_host() {
     let k = sandbox_kernel().await;
-    // test -r should route through VFS, not the real filesystem.
+    // `[[ -r ]]` should route through VFS, not the real filesystem.
     // /etc/passwd exists on the host but not in MemoryFs.
-    let r = k.execute("test -r /etc/passwd").await.expect("execute failed");
-    assert!(!r.ok(), "test -r /etc/passwd should be false in sandbox (file doesn't exist in VFS)");
+    let r = k.execute("[[ -r /etc/passwd ]]").await.expect("execute failed");
+    assert!(!r.ok(), "[[ -r /etc/passwd ]] should be false in sandbox (file doesn't exist in VFS)");
 
-    let r = k.execute("test -w /etc/shadow").await.expect("execute failed");
-    assert!(!r.ok(), "test -w /etc/shadow should be false in sandbox");
+    let r = k.execute("[[ -w /etc/shadow ]]").await.expect("execute failed");
+    assert!(!r.ok(), "[[ -w /etc/shadow ]] should be false in sandbox");
 
     // But files written to VFS should be readable/writable
-    let r = k.execute("echo data > /tmp/probe && test -r /tmp/probe").await.expect("execute failed");
-    assert!(r.ok(), "test -r should work for VFS files");
+    let r = k.execute("echo data > /tmp/probe && [[ -r /tmp/probe ]]").await.expect("execute failed");
+    assert!(r.ok(), "[[ -r ]] should work for VFS files");
 }
 
 #[tokio::test]
