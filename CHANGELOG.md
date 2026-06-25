@@ -25,9 +25,12 @@ breaking entries are marked **BREAKING**.
 - **`sed -i` edits files in place** instead of streaming to stdout, across one or
   more file operands. It is always a truncating overwrite, so it routes through the
   same latch/trash gate as `tee`/`patch` below. With no file operands it's a loud
-  error (editing a stream in place is meaningless). The GNU glued backup suffix
-  (`-i.bak`) is **not yet supported** — kaish's lexer splits `-i.bak` at the dot; the
-  trash snapshot under `set -o trash` already keeps a recoverable prior copy.
+  error (editing a stream in place is meaningless). Each file is written with a
+  whole-file compare-and-swap (like `patch`), so a concurrent change between read and
+  write is a loud conflict, never a silent clobber; a per-file failure doesn't abort
+  the batch and every error is reported. The GNU glued backup suffix (`-i.bak`) is
+  **not yet supported** — kaish's lexer splits `-i.bak` at the dot; the trash snapshot
+  under `set -o trash` already keeps a recoverable prior copy.
 - **`tee`, `patch`, and `sed -i` honor `set -o latch` / `set -o trash` on a truncating
   overwrite**, like `rm` gates a delete. Overwriting an existing file under `trash`
   first copies its prior content to trash (recoverable, via the new

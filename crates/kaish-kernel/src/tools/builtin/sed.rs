@@ -9,7 +9,7 @@ use regex::{Regex, RegexBuilder};
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::backend::WriteMode;
+use crate::backend::PatchOp;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::{IssueCode, ValidationIssue};
@@ -123,10 +123,17 @@ impl Tool for Sed {
         issues
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
+        // A structured call (`{"in-place": true}`) binds a bool into args.named,
+        // which to_argv renders as `--in-place=true` — and clap's SetTrue rejects
+        // a value. Move bool-schema named entries into flags so they render bare.
+        // (`-i.bak` arrives as named["i"]=".bak", a string, so it's left to be
+        // rejected by clap as the unsupported glued-suffix form, as intended.)
+        args.flagify_bool_named(&self.schema());
+
         let parsed = match SedArgs::try_parse_from(
             std::iter::once("sed".to_string()).chain(args.to_argv()),
         ) {
@@ -187,14 +194,32 @@ impl Tool for Sed {
                 );
             }
 
-            // Gate every target with one nonce before touching any file.
+            // Gate every target with one nonce before touching any file. The
+            // latch hint must reinject the flags the operation can't run without:
+            // a bare `sed --confirm=… file` would read `file` as the expression
+            // and then hang on stdin. Rebuild `-i [-n] -e '<expr>'…` so the
+            // advertised re-run actually does the in-place edit.
+            let mut hint_prefix = String::from("sed -i");
+            if quiet {
+                hint_prefix.push_str(" -n");
+            }
+            for expr in &expressions {
+                let escaped = expr.replace('\'', r"'\''");
+                hint_prefix.push_str(&format!(" -e '{escaped}'"));
+            }
             let targets: Vec<(String, bool)> = files.iter().map(|f| (f.clone(), false)).collect();
-            if let Err(blocked) = ctx.gate_overwrites("sed", &targets, confirm.as_deref()).await {
+            if let Err(blocked) = ctx
+                .gate_overwrites("sed", &targets, confirm.as_deref(), |nonce, joined| {
+                    format!("{hint_prefix} --confirm=\"{nonce}\" {joined}")
+                })
+                .await
+            {
                 return blocked;
             }
 
-            // Apply per file; continue past per-file errors and report the last.
-            let mut last_err: Option<String> = None;
+            // Apply per file; continue past per-file errors but report every one
+            // so a multi-file failure isn't masked down to just the last.
+            let mut errors: Vec<String> = Vec::new();
             for path in &files {
                 let resolved = ctx.resolve_path(path);
                 let target = Path::new(&resolved);
@@ -202,27 +227,33 @@ impl Tool for Sed {
                     Ok(data) => match String::from_utf8(data) {
                         Ok(s) => s,
                         Err(_) => {
-                            last_err = Some(format!("sed: {}: invalid UTF-8", path));
+                            errors.push(format!("sed: {}: invalid UTF-8", path));
                             continue;
                         }
                     },
                     Err(e) => {
-                        last_err = Some(format!("sed: {}: {}", path, e));
+                        errors.push(format!("sed: {}: {}", path, e));
                         continue;
                     }
                 };
                 let output = execute_sed(&content, &parsed, quiet);
-                if let Err(e) = ctx
-                    .backend
-                    .write(target, output.as_bytes(), WriteMode::Overwrite)
-                    .await
-                {
-                    last_err = Some(format!("sed: {}: {}", path, e));
+                // Whole-file compare-and-swap, matching patch: the `expected`
+                // makes a concurrent change between read and write a loud
+                // Conflict, never a silent clobber.
+                let ops = vec![PatchOp::Replace {
+                    offset: 0,
+                    len: content.len(),
+                    content: output,
+                    expected: Some(content.clone()),
+                }];
+                if let Err(e) = ctx.backend.patch(target, &ops).await {
+                    errors.push(format!("sed: {}: {}", path, e));
                 }
             }
-            return match last_err {
-                Some(msg) => ExecResult::failure(1, msg),
-                None => ExecResult::success(""),
+            return if errors.is_empty() {
+                ExecResult::success("")
+            } else {
+                ExecResult::failure(1, errors.join("\n"))
             };
         }
 
