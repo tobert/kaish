@@ -11,8 +11,10 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
-- **Validator advisory `W006` steers `test` to `[[ … ]]`.** Using `test` as a
-  command now surfaces a one-time stderr note (`use [[ … ]] …`) and still runs.
+- **Validator advisory `W006` steers `test` to `[[ … ]]`.** Using a bare `test` as a
+  command now surfaces a one-time stderr note (`use [[ … ]] …`) and still runs. A
+  path-qualified form (`/usr/bin/test`, `./test`) is left alone — it's an explicit
+  external-binary call, not the conditional footgun.
   This is the first *agent-surfaced* validation warning: most warnings stay
   trace-only (every external command fires `UndefinedCommand`), but a code can
   opt into surfacing via `IssueCode::surfaces_to_agent` — the seam for a broader

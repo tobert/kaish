@@ -851,6 +851,31 @@ mod tests {
     }
 
     #[test]
+    fn path_qualified_test_is_honored_not_steered() {
+        // A user who writes a path clearly wants that external binary — only the
+        // bare ident `test` is the POSIX-conditional footgun. The parser keeps
+        // the path in `cmd.name` (path_parser / DotSlashPath), so the advisory's
+        // `cmd.name == "test"` guard naturally excludes these.
+        let (registry, user_tools) = make_validator();
+
+        for name in ["./test", "/opt/custom/test"] {
+            let validator = Validator::new(&registry, &user_tools);
+            let program = Program {
+                statements: vec![Stmt::Command(Command {
+                    name: name.to_string(),
+                    args: vec![],
+                    redirects: vec![],
+                })],
+            };
+            let issues = validator.validate(&program);
+            assert!(
+                !issues.iter().any(|i| i.code == IssueCode::PosixTestCommand),
+                "path-qualified '{name}' must not get the test advisory"
+            );
+        }
+    }
+
+    #[test]
     fn validates_known_command() {
         let (registry, user_tools) = make_validator();
         let validator = Validator::new(&registry, &user_tools);
