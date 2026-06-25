@@ -197,40 +197,45 @@ still does an unconditional `named.insert` of a single `Value::String`. So
 value, but it's the same silent-drop class. Fix: route the glued path through
 `push_repeatable_value` when the matched param is repeatable.
 
-### `sed -i` (in-place edit) — design decided, ready to build with tee/patch
-Both lite models in the sed usability panel reached for `sed -i 's/…/…/' file` —
-the strongest remaining ergonomic gap. In-place editing is a file-mutating side
-effect that must route through kaish's write machinery (VFS resolution, overlay
-transactions, latch/trash rails) so sandbox/`--overlay`/confirm modes all hold.
-`sed -i` is *always* a truncating overwrite of an existing file, so it inherits
-the tee/patch "truncating overwrite gates" rule below. Today `sed` loud-errors on
-`-i`. **Amy decisions (2026-06-21):**
-- **Confirm flag:** `--confirm=<nonce>` across the whole mutation family
-  (`tee`/`patch`/`sed -i`) — one mental model, matching `rm`.
-- **`-i.bak`:** support the explicit backup suffix to match convention. `sed
-  -i.bak` is the user's deliberate, named backup; trash is the *transparent*
-  safety net for the gating, not a substitute for the explicit `.bak`.
-- **Multi-file:** one nonce scoping the whole path set (like `rm`'s
-  `NonceScope.paths`), not per-file.
-- **Overlay prior-content capture:** trash snapshots the *overlay's current
-  view* (what would actually be lost on overwrite in-transaction), not the
-  real-FS baseline.
-- **No file operands:** loud error (`sed -i requires file operands`) — in-place
-  editing of a stream is meaningless; do not fall back to stdin.
-- **Atomicity:** write-temp-then-atomic-rename through the VFS (crash-safe);
-  this surfaces an atomic-replace capability question on the `Filesystem` trait.
+### Write-model gate — DONE; two residuals
+**`tee` + `patch` + `sed -i` all gated** (`feat/mutation-write-gate` →
+`feat/patch-write-gate` → `feat/sed-in-place`): pure `decide_mutation_action →
+{TrashFirst, Latch, Proceed}` + `ExecContext::gate_overwrites`/
+`snapshot_for_overwrite` (copies prior content via `TrashBackend::trash_bytes`,
+leaving the file in place) + family-wide `--confirm=<nonce>`, one nonce per command.
+`sed -i` edits one-or-more files in place (no operands → loud error). Latch+trash
+stay ON in overlay mode; `tee -a` append / new file / `patch --dry-run` don't gate.
 
-### Write-model gate — `sed -i` remains
-**`tee` + `patch` DONE** (`feat/mutation-write-gate` → `feat/patch-write-gate`):
-the shared gate landed — pure `decide_mutation_action → {TrashFirst, Latch,
-Proceed}` + `ExecContext::gate_overwrites`/`snapshot_for_overwrite` (copies prior
-content via `TrashBackend::trash_bytes`, leaving the file in place) + family-wide
-`--confirm=<nonce>`; `tee` and `patch` both wired in (`patch` gates non-dry-run
-overwrites with one nonce per diff). **`sed -i` still open** (its own design entry
-below): it's *always* a truncating overwrite, so it inherits the same gate — call
-`gate_overwrites` before the in-place write. Decisions stand: latch+trash stay ON
-even in overlay mode; truncating overwrite gates, `tee -a` append does NOT; new
-file → just write; overlay trash captures the prior content via `trash_bytes`.
+Residuals:
+- **`sed -i.bak` backup suffix.** Not supported: kaish's lexer splits `-i.bak` at
+  the dot (dot-prefixed barewords), and the kernel value-flag binder consumes the
+  *next* token greedily, so GNU's glued-optional-suffix isn't modelable post-lexing.
+  The trash snapshot already gives a recoverable copy, so this is convenience, not
+  safety. Needs lexer/binder work (or a bespoke pre-clap argv pass à la `set.rs`).
+- **Atomicity (whole family).** `tee`/`patch`/`sed -i` overwrite via
+  `backend.write(Overwrite)` (`patch`/`sed -i` use a CAS `Replace`), not write-temp-
+  then-atomic-rename, so a crash mid-write can truncate. The fix surfaces an atomic-
+  replace capability question on the `Filesystem` trait — do it once for the whole
+  family, not per-builtin.
+- **TOCTOU window B — snapshot/CAS double-read (P3).** Gated `patch`/`sed -i` read
+  the file twice: `gate_overwrites → snapshot_for_overwrite` reads state A and copies
+  it to trash, then the builtin re-reads state B for its transform and binds the CAS
+  `expected` to **B**. The read#2→write window is CAS-protected (a change there fails
+  loud), but a concurrent change A→B in the snapshot→read#2 gap leaves the trash
+  holding the *stale* A while B→C is written — recovery is one version behind, and CAS
+  doesn't catch it because `expected` is the later read. **Fixable cheaply:** have
+  `gate_overwrites` return the snapshotted bytes per TrashFirst target and let the
+  builtin transform *those* and set `expected` to *those* — one read, snapshot ==
+  expected, only the CAS-guarded read→write window remains. Contained API change to
+  the three callers.
+- **TOCTOU window A — existence-check race (P3).** `decide_mutation_action` keys on
+  `exists` at gate time; a path absent then returns `Proceed` (no snapshot, no latch).
+  If it's created before the builtin's `write`, it's clobbered ungated. Inherent with
+  today's primitives — `WriteMode` has no `O_EXCL`/create-exclusive or write-if-absent
+  CAS. Closing it needs a new write mode across LocalFs/MemoryFs/OverlayFs. Practical
+  risk is low (foreground `execute` is serialized by `execute_lock`; the window only
+  opens against an external process, a background fork, or a second kernel on the same
+  localfs).
 
 ### Streaming file reads — remaining
 (wc/checksum/grep/cmp/cat landed — see devlog.) Open:

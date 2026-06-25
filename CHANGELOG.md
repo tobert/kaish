@@ -22,14 +22,22 @@ breaking entries are marked **BREAKING**.
   `filetype` module
   (pure-Rust `infer`, no C deps) — `detect` for magic-only, `classify` for the
   text-aware path — so embedders can classify bytes the same way the shell does.
-- **`tee` and `patch` honor `set -o latch` / `set -o trash` on a truncating
+- **`sed -i` edits files in place** instead of streaming to stdout, across one or
+  more file operands. It is always a truncating overwrite, so it routes through the
+  same latch/trash gate as `tee`/`patch` below. With no file operands it's a loud
+  error (editing a stream in place is meaningless). Each file is written with a
+  whole-file compare-and-swap (like `patch`), so a concurrent change between read and
+  write is a loud conflict, never a silent clobber; a per-file failure doesn't abort
+  the batch and every error is reported. The GNU glued backup suffix (`-i.bak`) is
+  **not yet supported** — kaish's lexer splits `-i.bak` at the dot; the trash snapshot
+  under `set -o trash` already keeps a recoverable prior copy.
+- **`tee`, `patch`, and `sed -i` honor `set -o latch` / `set -o trash` on a truncating
   overwrite**, like `rm` gates a delete. Overwriting an existing file under `trash`
   first copies its prior content to trash (recoverable, via the new
   `TrashBackend::trash_bytes`), leaving the file in place for the new content; under
   `latch` it needs `--confirm=<nonce>` (exit 2 until confirmed, one nonce scoping all
   files a command touches). A new file, `tee -a` append, or `patch --dry-run` never
-  gates. Both gates are off by default, so default behavior is unchanged. (`sed -i`
-  adopts the same gate next.)
+  gates. Both gates are off by default, so default behavior is unchanged.
 - **Validator advisory `W006` steers `test` to `[[ … ]]`.** Using a bare `test` as a
   command now surfaces a one-time stderr note (`use [[ … ]] …`) and still runs. A
   path-qualified form (`/usr/bin/test`, `./test`) is left alone — it's an explicit
