@@ -352,7 +352,7 @@ fn isolated_kernel_with_trash(mock: &Arc<MockTrash>) -> Kernel {
 }
 
 #[tokio::test]
-async fn tee_overwrite_under_trash_snapshots_real_file_first() {
+async fn tee_overwrite_under_trash_snapshots_prior_bytes_first() {
     let dir = tempdir();
     std::fs::write(dir.path().join("doc.txt"), "old").expect("write");
     let mock = Arc::new(MockTrash::default());
@@ -362,12 +362,13 @@ async fn tee_overwrite_under_trash_snapshots_real_file_first() {
     let r = run(&kernel, "echo new | tee doc.txt").await;
     assert_eq!(r.code, 0, "err: {}", r.err);
 
-    // Prior content was delegated to trash (the recording mock doesn't move
-    // the file, so the new content lands and the trash call is what proves the
-    // pre-write snapshot happened).
-    let trashed = mock.trashed_paths();
-    assert_eq!(trashed.len(), 1, "one trash call for the overwrite: {trashed:?}");
-    assert!(trashed[0].ends_with("doc.txt"));
+    // The prior content is COPIED to trash (not moved) — the file stays put and
+    // gets the new content, and a recoverable byte-snapshot of "old" is taken.
+    let snaps = mock.snapshots();
+    assert_eq!(snaps.len(), 1, "one byte-snapshot for the overwrite: {snaps:?}");
+    assert!(snaps[0].0.ends_with("doc.txt"));
+    assert_eq!(snaps[0].1, b"old", "the snapshot captured the prior content");
+    assert!(mock.trashed_paths().is_empty(), "overwrite copies, never moves the file");
     let now = std::fs::read_to_string(dir.path().join("doc.txt")).expect("read");
     assert_eq!(now, "new\n", "the new content is written after the snapshot");
 }

@@ -701,10 +701,9 @@ impl ExecContext {
     ///
     /// Each target is `(display_path, is_append)`. A path that doesn't exist yet
     /// or is an append has nothing to lose and passes. For an existing file
-    /// under `set -o trash`, the prior content is snapshotted first (the real
-    /// file is moved to trash, or — for an overlay/in-memory file with no real
-    /// path — its current bytes are captured via `trash_bytes`); the subsequent
-    /// write recreates it. Under `set -o latch` (and trash off) the batch needs
+    /// under `set -o trash`, the prior content is copied to trash first (via
+    /// `trash_bytes`) so it's recoverable; the file is left in place for the
+    /// caller to overwrite. Under `set -o latch` (and trash off) the batch needs
     /// `--confirm=<nonce>`: the first call returns an exit-2 latch result with
     /// one nonce scoping every latched path.
     ///
@@ -728,12 +727,13 @@ impl ExecContext {
         struct Decided {
             display: String,
             resolved: PathBuf,
-            real: Option<PathBuf>,
             action: MutationAction,
         }
         let mut decided = Vec::with_capacity(targets.len());
         for (display, is_append) in targets {
             let resolved = self.resolve_path(display);
+            // `real` is used only for the exclusion decision (/tmp, /v); the
+            // snapshot reads bytes through the backend, not the real path.
             let real = self.backend.resolve_real_path(Path::new(&resolved));
             let exists = self.backend.exists(Path::new(&resolved)).await;
             let action = decide_mutation_action(
@@ -743,7 +743,7 @@ impl ExecContext {
                 exists,
                 *is_append,
             );
-            decided.push(Decided { display: display.clone(), resolved, real, action });
+            decided.push(Decided { display: display.clone(), resolved, action });
         }
 
         // Latch: one nonce scopes every latched path (subset confirmation).
@@ -771,10 +771,7 @@ impl ExecContext {
         // Snapshot prior content for every trash-first target before any write.
         for d in &decided {
             if matches!(d.action, MutationAction::TrashFirst) {
-                if let Err(e) = self
-                    .snapshot_for_overwrite(&d.display, &d.resolved, d.real.as_deref())
-                    .await
-                {
+                if let Err(e) = self.snapshot_for_overwrite(&d.display, &d.resolved).await {
                     return Err(ExecResult::failure(1, format!("{command}: {e}")));
                 }
             }
@@ -782,38 +779,30 @@ impl ExecContext {
         Ok(())
     }
 
-    /// Capture the prior content of `resolved` into the trash before it's
-    /// overwritten. A real file is moved to trash (the write recreates it); an
-    /// overlay/in-memory file (no real path) has its current bytes snapshotted
-    /// via `trash_bytes`. A missing trash backend or a trash failure is an
-    /// error — never a silent fall-through to a destructive overwrite.
-    async fn snapshot_for_overwrite(
-        &self,
-        display: &str,
-        resolved: &Path,
-        real: Option<&Path>,
-    ) -> Result<(), String> {
+    /// Copy the prior content of `resolved` into the trash before it's
+    /// overwritten.
+    ///
+    /// We **copy** (not move): the builtin overwrites the file in place next,
+    /// and read-modify-write callers (`patch`, `sed -i`) still need to read it —
+    /// the file keeps its identity, only its content changes. (`rm` *moves*
+    /// because removal is the op; an overwrite backs up the prior bytes.) Reads
+    /// through the backend so a real, overlay, or in-memory file is handled the
+    /// same way. A missing trash backend or a trash failure is an error — never
+    /// a silent fall-through to a destructive overwrite.
+    async fn snapshot_for_overwrite(&self, display: &str, resolved: &Path) -> Result<(), String> {
         let trash = self
             .trash_backend
             .as_ref()
             .ok_or_else(|| "trash backend not available".to_string())?;
-        match real {
-            Some(rp) => trash
-                .trash(rp)
-                .await
-                .map_err(|e| format!("{display}: trash failed: {e}")),
-            None => {
-                let bytes = self
-                    .backend
-                    .read(resolved, None)
-                    .await
-                    .map_err(|e| format!("{display}: {e}"))?;
-                trash
-                    .trash_bytes(Path::new(display), &bytes)
-                    .await
-                    .map_err(|e| format!("{display}: trash failed: {e}"))
-            }
-        }
+        let bytes = self
+            .backend
+            .read(resolved, None)
+            .await
+            .map_err(|e| format!("{display}: {e}"))?;
+        trash
+            .trash_bytes(Path::new(display), &bytes)
+            .await
+            .map_err(|e| format!("{display}: trash failed: {e}"))
     }
 
     /// Expand a glob pattern to matching file paths.

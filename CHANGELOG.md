@@ -23,12 +23,12 @@ breaking entries are marked **BREAKING**.
   (pure-Rust `infer`, no C deps) — `detect` for magic-only, `classify` for the
   text-aware path — so embedders can classify bytes the same way the shell does.
 - **`tee` honors `set -o latch` / `set -o trash` on a truncating overwrite**, like
-  `rm` gates a delete. Overwriting an existing file under `trash` snapshots its prior
-  content first (the real file is moved to trash, or — for an overlay/in-memory file —
-  its bytes are captured via the new `TrashBackend::trash_bytes`); under `latch` it
-  needs `tee --confirm=<nonce>` (exit 2 until confirmed, one nonce scoping all files).
-  A new file or `tee -a` append never gates. Both gates are off by default, so default
-  `tee` is unchanged. (`patch`/`sed -i` adopt the same gate next.)
+  `rm` gates a delete. Overwriting an existing file under `trash` first copies its
+  prior content to trash (recoverable, via the new `TrashBackend::trash_bytes`),
+  leaving the file in place for the new content; under `latch` it needs
+  `tee --confirm=<nonce>` (exit 2 until confirmed, one nonce scoping all files). A new
+  file or `tee -a` append never gates. Both gates are off by default, so default `tee`
+  is unchanged. (`patch`/`sed -i` adopt the same gate next.)
 - **Validator advisory `W006` steers `test` to `[[ … ]]`.** Using a bare `test` as a
   command now surfaces a one-time stderr note (`use [[ … ]] …`) and still runs. A
   path-qualified form (`/usr/bin/test`, `./test`) is left alone — it's an explicit
