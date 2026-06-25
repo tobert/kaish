@@ -213,10 +213,29 @@ Residuals:
   The trash snapshot already gives a recoverable copy, so this is convenience, not
   safety. Needs lexer/binder work (or a bespoke pre-clap argv pass à la `set.rs`).
 - **Atomicity (whole family).** `tee`/`patch`/`sed -i` overwrite via
-  `backend.write(Overwrite)` (patch uses a CAS `Replace`), not write-temp-then-
-  atomic-rename, so a crash mid-write can truncate. The fix surfaces an atomic-
+  `backend.write(Overwrite)` (`patch`/`sed -i` use a CAS `Replace`), not write-temp-
+  then-atomic-rename, so a crash mid-write can truncate. The fix surfaces an atomic-
   replace capability question on the `Filesystem` trait — do it once for the whole
   family, not per-builtin.
+- **TOCTOU window B — snapshot/CAS double-read (P3).** Gated `patch`/`sed -i` read
+  the file twice: `gate_overwrites → snapshot_for_overwrite` reads state A and copies
+  it to trash, then the builtin re-reads state B for its transform and binds the CAS
+  `expected` to **B**. The read#2→write window is CAS-protected (a change there fails
+  loud), but a concurrent change A→B in the snapshot→read#2 gap leaves the trash
+  holding the *stale* A while B→C is written — recovery is one version behind, and CAS
+  doesn't catch it because `expected` is the later read. **Fixable cheaply:** have
+  `gate_overwrites` return the snapshotted bytes per TrashFirst target and let the
+  builtin transform *those* and set `expected` to *those* — one read, snapshot ==
+  expected, only the CAS-guarded read→write window remains. Contained API change to
+  the three callers.
+- **TOCTOU window A — existence-check race (P3).** `decide_mutation_action` keys on
+  `exists` at gate time; a path absent then returns `Proceed` (no snapshot, no latch).
+  If it's created before the builtin's `write`, it's clobbered ungated. Inherent with
+  today's primitives — `WriteMode` has no `O_EXCL`/create-exclusive or write-if-absent
+  CAS. Closing it needs a new write mode across LocalFs/MemoryFs/OverlayFs. Practical
+  risk is low (foreground `execute` is serialized by `execute_lock`; the window only
+  opens against an external process, a background fork, or a second kernel on the same
+  localfs).
 
 ### Streaming file reads — remaining
 (wc/checksum/grep/cmp/cat landed — see devlog.) Open:
