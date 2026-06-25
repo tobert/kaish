@@ -1,5 +1,5 @@
 ---
-description: Tag and release kaish to crates.io. Runs full test suite, code review, version bump, commit, tag, push, and publish.
+description: Tag and release kaish to crates.io. Runs full test suite, code review, version bump on a release branch, merges the bump via PR, then tags from main and publishes.
 ---
 
 # Release kaish to crates.io
@@ -94,7 +94,19 @@ Before releasing, get a second opinion on changes since the last release tag.
 4. Report the review summary to the user
 5. Ask the user to confirm proceeding with the release
 
-## Phase 5: Version Bump
+## Phase 5: Version Bump (on a release branch)
+
+**The version bump goes through a PR like every other change** — it is no longer
+committed directly to `main`. Only the tag and the publish (Phases 7–8) run from
+`main`, after the bump PR has merged.
+
+Create the release branch off the current (clean, up-to-date) `main`:
+
+```
+git switch -c release/v$ARGUMENTS
+```
+
+Do all of the edits below on this branch.
 
 All crates use `version.workspace = true`, so the crate versions come from one
 place — but every `path + version` inter-crate dependency pin must be bumped
@@ -138,17 +150,36 @@ Now rename the changelog's `Unreleased` section to this release:
    existing pattern (`[$ARGUMENTS]: https://…/compare/v<prev>...v$ARGUMENTS`),
    and update the `[Unreleased]` compare link to point at `v$ARGUMENTS...HEAD`.
 
-## Phase 6: Commit and Tag
+## Phase 6: Commit and Open the Release PR
+
+The bump lands on `main` via a reviewed PR — **do not tag yet** (the tag must
+point at the commit that actually lands on `main`, which may be a squash commit).
 
 1. Stage all modified Cargo.toml files **and `CHANGELOG.md`** by name (never `git add -A`)
-2. Commit with message: `chore: bump to v$ARGUMENTS`
-3. Create annotated tag: `git tag -a v$ARGUMENTS -m "Release v$ARGUMENTS"`
-4. Run `git status` to verify clean tree
+2. Commit on the release branch with message: `chore: bump to v$ARGUMENTS`
+3. Push the branch: `git push -u origin release/v$ARGUMENTS`
+4. Open the PR: `gh pr create --base main --title "chore: bump to v$ARGUMENTS" --body …`
+   — the body summarizes that this is the version bump + changelog stamp for the
+   release, and links the Phase 4 review.
+5. **Have the PR reviewed before merging** (`/code-review` on the diff, or another
+   agent/model). The bump diff itself is mechanical — version strings + the
+   changelog stamp — so this is a light check that the pins all moved together and
+   the changelog stamped cleanly; the substantive review of the release *contents*
+   already happened in Phase 4.
+6. Ask the user to confirm merging, then merge to `main`
+   (`gh pr merge --squash --delete-branch` unless the user prefers a merge commit).
 
-## Phase 7: Push
+## Phase 7: Tag and Push from main
 
-1. Ask the user to confirm pushing to origin
-2. Push commit and tag: `git push origin main && git push origin v$ARGUMENTS`
+Now that the bump is on `main`, tag it there and push the tag:
+
+1. `git switch main && git pull origin main` — fast-forward to the merged bump
+2. Confirm `HEAD` carries the bump: `grep '^version' Cargo.toml` shows `$ARGUMENTS`,
+   and `git log -1 --oneline` is the bump commit
+3. Create the annotated tag at this commit:
+   `git tag -a v$ARGUMENTS -m "Release v$ARGUMENTS"`
+4. Ask the user to confirm pushing the tag, then: `git push origin v$ARGUMENTS`
+   (the commit is already on `origin/main` from the merge — only the tag is pushed)
 
 ## Phase 8: Publish to crates.io
 

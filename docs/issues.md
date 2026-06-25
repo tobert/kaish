@@ -299,6 +299,19 @@ hard-deadlocking the executor, but it should clone the `Arc<BoundedStream>` out
 under the lock, drop the lock, then `read().await`. Audit all `*.lock().await`
 sites in job.rs for other across-await holds while there.
 
+### `JobManager::wait` can lose a result if `cleanup` reaps the job mid-poll
+Surfaced in the v0.9.1 release review (gemini-pro, 2026-06-25). `wait` polls
+`jobs.get_mut(&id)?` under the lock between sleeps; `cleanup` (called by the
+`jobs` builtin) `retain`s out *done* jobs. If `cleanup` removes a finished job in
+the gap between `wait`'s polls, the next poll's `?` returns `None` and `wait`
+reports no result for a job that actually completed — a silent loss, not a hang.
+Narrow today: foreground `execute()` is serialised by `execute_lock`, so a `wait`
+and a `jobs`-triggered `cleanup` can't run concurrently from the same foreground
+path; it needs a background/forked caller. Fix: have `wait` distinguish
+"never existed" from "reaped after completion" (e.g. consult a short-lived
+completed-results cache, or have `cleanup` not drop a job with an outstanding
+waiter). (`scheduler/job.rs::wait`/`cleanup`)
+
 ### Builtin residuals from the 2026-06-24 correctness batch
 Low-frequency sub-cases left after the P1 builtin fixes:
 - **`sort`**: only one `-k` accepted (clap `Option<String>`) — GNU chains `-k` for

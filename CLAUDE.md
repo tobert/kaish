@@ -82,9 +82,10 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
 
 - **Work on a branch, open a PR.** Don't commit changes directly to `main`.
   Branch first (`git switch -c <type>/<short-desc>`), push, and open a PR with
-  `gh pr create` so changes are reviewable before they land. Releases (the
-  `/release` skill) are the deliberate exception — they tag and publish from
-  `main`.
+  `gh pr create` so changes are reviewable before they land. **This includes
+  releases** — the `/release` skill bumps the version on a `release/vX.Y.Z`
+  branch and merges it via PR like any other change. Only the `git tag` and the
+  `cargo publish` run from `main`, after that bump PR has merged.
 - **Have the PR reviewed before merging** — `/code-review` on the diff, or another
   agent/model. A few tokens on review goes a long way (this is what we ask outside
   contributors to do too; see README "Contributing").
