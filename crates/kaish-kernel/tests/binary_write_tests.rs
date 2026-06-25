@@ -63,3 +63,46 @@ async fn tee_preserves_bytes_through_to_file() {
     let written = fs::read(dir.path().join("out.bin")).unwrap();
     assert_eq!(written, BIN, "tee must keep binary intact to the file");
 }
+
+// ── gemini-pro review (#30) follow-ups: named-flag, empty stream, multi-sink ──
+
+#[tokio::test]
+async fn write_named_content_flag_preserves_bytes() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+
+    let kernel = kernel_at(dir.path());
+    // The `--content` named branch must not stringify a `Value::Bytes` either.
+    let (_out, code) = run(&kernel, "write dst.bin --content $(cat src.bin)").await;
+    assert_eq!(code, 0, "write --content should succeed");
+
+    let written = fs::read(dir.path().join("dst.bin")).unwrap();
+    assert_eq!(written, BIN, "named --content must preserve raw bytes");
+}
+
+#[tokio::test]
+async fn write_empty_pipe_creates_empty_file() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    // An empty pipe is `Some(vec![])`, not `None` — write an empty file rather
+    // than erroring with "missing content argument".
+    let (_out, code) = run(&kernel, "printf '' | write dst.bin").await;
+    assert_eq!(code, 0, "empty pipe should write an empty file, not error");
+
+    let written = fs::read(dir.path().join("dst.bin")).unwrap();
+    assert!(written.is_empty(), "empty pipe yields an empty file: {written:?}");
+}
+
+#[tokio::test]
+async fn tee_preserves_bytes_to_multiple_sinks() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+
+    let kernel = kernel_at(dir.path());
+    // The per-file loop must not drain/mangle the buffer after the first sink.
+    let (_out, code) = run(&kernel, "cat src.bin | tee a.bin b.bin").await;
+    assert_eq!(code, 0, "multi-sink tee should succeed");
+
+    assert_eq!(fs::read(dir.path().join("a.bin")).unwrap(), BIN);
+    assert_eq!(fs::read(dir.path().join("b.bin")).unwrap(), BIN, "second sink intact");
+}
