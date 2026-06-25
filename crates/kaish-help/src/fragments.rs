@@ -422,8 +422,9 @@ Env vars: `KAISH_LATCH=1`, `KAISH_TRASH=1` enable at startup.
 
 **Latch:** Nonces scoped to (command, paths). A nonce for `rm A` rejects `rm B`.
 Confirmed paths must be subset of authorized paths. Exit code 2 = needs confirmation.
-Applies to `rm` and to truncating overwrites (`tee`; `patch`/`sed -i` next) —
-confirm those with `--confirm=<nonce>`. `tee -a` append and new files don't gate.
+Applies to `rm` and to truncating overwrites (`tee`, `patch`; `sed -i` next) —
+confirm those with `--confirm=<nonce>`. `tee -a` append, new files, and
+`patch --dry-run` don't gate.
 
 **Trash:** Files <= 10MB and directories always trash. `/tmp`, `/v/*` excluded.
 A truncating overwrite under `trash` snapshots the file's prior content first

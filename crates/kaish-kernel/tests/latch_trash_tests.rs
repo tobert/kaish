@@ -441,3 +441,136 @@ async fn tee_overlay_overwrite_snapshots_bytes_via_trash_bytes() {
     let out = run(&kernel, "cat /v/f.txt").await;
     assert_eq!(out.text_out().trim(), "new", "new content written after the snapshot");
 }
+
+// ============================================================================
+// Write-model gate: patch overwrites honor latch + trash (same gate as tee)
+// ============================================================================
+
+/// A one-line unified diff turning `old` into `new` in `f.txt`, fed via a
+/// heredoc. The `f.txt` operand overrides the diff header, so strip level
+/// doesn't matter.
+const PATCH_SCRIPT: &str = "patch f.txt <<'EOF'\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-old\n+new\nEOF\n";
+
+#[tokio::test]
+async fn patch_overwrite_under_trash_snapshots_prior_bytes() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("f.txt"), "old\n").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o trash").await;
+    let r = run(&kernel, PATCH_SCRIPT).await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+
+    // Prior content copied to trash before the patch write; file stays in place
+    // (the read-modify-write still saw it) and now holds the patched content.
+    let snaps = mock.snapshots();
+    assert_eq!(snaps.len(), 1, "one byte-snapshot before the patch: {snaps:?}");
+    assert_eq!(snaps[0].1, b"old\n", "snapshot captured the prior content");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).expect("read"),
+        "new\n"
+    );
+}
+
+#[tokio::test]
+async fn patch_overwrite_under_latch_requires_confirm() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("f.txt"), "old\n").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o latch").await;
+    let r = run(&kernel, PATCH_SCRIPT).await;
+    assert_eq!(r.code, 2, "latch gates the patch: {}", r.err);
+    assert!(r.err.contains("--confirm="));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).expect("read"),
+        "old\n",
+        "the file must be untouched until confirmed"
+    );
+
+    let nonce = latch_data_str(&r, "nonce");
+    let confirmed = PATCH_SCRIPT.replace("patch f.txt", &format!("patch --confirm=\"{nonce}\" f.txt"));
+    let r2 = run(&kernel, &confirmed).await;
+    assert_eq!(r2.code, 0, "confirmed patch succeeds: {}", r2.err);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).expect("read"),
+        "new\n"
+    );
+}
+
+#[tokio::test]
+async fn patch_explicit_file_multi_group_diff_snapshots_once() {
+    // A multi-group diff applied to one explicit target lists that file once per
+    // group; the gate must dedup so it snapshots the prior bytes a single time,
+    // not once per group.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("f.txt"), "alpha\nbeta\n").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    let script = "patch f.txt <<'EOF'\n\
+        --- a/x\n+++ b/x\n@@ -1 +1 @@\n-alpha\n+ALPHA\n\
+        --- a/y\n+++ b/y\n@@ -2 +2 @@\n-beta\n+BETA\n\
+        EOF\n";
+
+    run(&kernel, "set -o trash").await;
+    let r = run(&kernel, script).await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+
+    let snaps = mock.snapshots();
+    assert_eq!(
+        snaps.len(),
+        1,
+        "the explicit target is deduped to one snapshot: {snaps:?}"
+    );
+    assert_eq!(snaps[0].1, b"alpha\nbeta\n", "snapshot captured prior content");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).expect("read"),
+        "ALPHA\nBETA\n"
+    );
+}
+
+#[tokio::test]
+async fn patch_explicit_file_multi_group_latch_lists_target_once() {
+    // The latch prompt must not list the same explicit target once per group.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("f.txt"), "alpha\nbeta\n").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    let script = "patch f.txt <<'EOF'\n\
+        --- a/x\n+++ b/x\n@@ -1 +1 @@\n-alpha\n+ALPHA\n\
+        --- a/y\n+++ b/y\n@@ -2 +2 @@\n-beta\n+BETA\n\
+        EOF\n";
+
+    run(&kernel, "set -o latch").await;
+    let r = run(&kernel, script).await;
+    assert_eq!(r.code, 2, "latch gates: {}", r.err);
+    // The path legitimately appears twice (the "Authorized:" line and the hint),
+    // but a dedup miss would repeat it within each: "f.txt, f.txt" / "f.txt f.txt".
+    assert!(
+        !r.err.contains("f.txt, f.txt") && !r.err.contains("f.txt f.txt"),
+        "the deduped target must not repeat within the prompt: {}",
+        r.err
+    );
+}
+
+#[tokio::test]
+async fn patch_dry_run_does_not_gate() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("f.txt"), "old\n").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o latch").await;
+    let dry = PATCH_SCRIPT.replace("patch f.txt", "patch --dry-run f.txt");
+    let r = run(&kernel, &dry).await;
+    assert_eq!(r.code, 0, "dry-run never writes, so it never gates: {}", r.err);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).expect("read"),
+        "old\n",
+        "dry-run leaves the file untouched"
+    );
+}
