@@ -171,6 +171,9 @@ async fn latch_off_by_default_rm_deletes_directly() {
 #[derive(Default)]
 struct MockTrash {
     trashed: Mutex<Vec<PathBuf>>,
+    /// Byte snapshots recorded by `trash_bytes` (overlay/in-memory overwrites):
+    /// the logical path and its captured prior content.
+    snapshots: Mutex<Vec<(PathBuf, Vec<u8>)>>,
     fail: bool,
 }
 
@@ -181,6 +184,10 @@ impl MockTrash {
 
     fn trashed_paths(&self) -> Vec<PathBuf> {
         self.trashed.lock().expect("mock lock").clone()
+    }
+
+    fn snapshots(&self) -> Vec<(PathBuf, Vec<u8>)> {
+        self.snapshots.lock().expect("mock lock").clone()
     }
 }
 
@@ -194,6 +201,17 @@ impl TrashBackend for MockTrash {
             .lock()
             .expect("mock lock")
             .push(path.to_path_buf());
+        Ok(())
+    }
+
+    async fn trash_bytes(&self, original_path: &Path, bytes: &[u8]) -> Result<(), TrashError> {
+        if self.fail {
+            return Err(TrashError::Backend("mock trash refused".into()));
+        }
+        self.snapshots
+            .lock()
+            .expect("mock lock")
+            .push((original_path.to_path_buf(), bytes.to_vec()));
         Ok(())
     }
 
@@ -319,4 +337,106 @@ async fn trash_backend_absent_fails_loud() {
         dir.path().join("orphan.txt").exists(),
         "missing trash backend must not fall through to delete"
     );
+}
+
+// ============================================================================
+// Write-model gate: tee overwrites honor latch + trash (like rm gates deletes)
+// ============================================================================
+
+/// In-memory kernel (`/v` mounts have no real path) wired to the mock trash —
+/// for exercising the overlay `trash_bytes` snapshot path.
+fn isolated_kernel_with_trash(mock: &Arc<MockTrash>) -> Kernel {
+    let mut kernel = Kernel::new(KernelConfig::isolated()).expect("kernel");
+    kernel.set_trash_backend(Some(Arc::clone(mock) as Arc<dyn TrashBackend>));
+    kernel
+}
+
+#[tokio::test]
+async fn tee_overwrite_under_trash_snapshots_real_file_first() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("doc.txt"), "old").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o trash").await;
+    let r = run(&kernel, "echo new | tee doc.txt").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+
+    // Prior content was delegated to trash (the recording mock doesn't move
+    // the file, so the new content lands and the trash call is what proves the
+    // pre-write snapshot happened).
+    let trashed = mock.trashed_paths();
+    assert_eq!(trashed.len(), 1, "one trash call for the overwrite: {trashed:?}");
+    assert!(trashed[0].ends_with("doc.txt"));
+    let now = std::fs::read_to_string(dir.path().join("doc.txt")).expect("read");
+    assert_eq!(now, "new\n", "the new content is written after the snapshot");
+}
+
+#[tokio::test]
+async fn tee_overwrite_under_latch_requires_confirm() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("doc.txt"), "keep").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    // latch on, trash off: the overwrite must be confirmed.
+    run(&kernel, "set -o latch").await;
+    let r = run(&kernel, "echo new | tee doc.txt").await;
+    assert_eq!(r.code, 2, "latch gates the overwrite: {}", r.err);
+    assert!(r.err.contains("--confirm="));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("doc.txt")).expect("read"),
+        "keep",
+        "the file must be untouched until confirmed"
+    );
+
+    // Re-run with the issued nonce.
+    let nonce = latch_data_str(&r, "nonce");
+    let r2 = run(&kernel, &format!("echo new | tee --confirm=\"{nonce}\" doc.txt")).await;
+    assert_eq!(r2.code, 0, "confirmed overwrite succeeds: {}", r2.err);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("doc.txt")).expect("read"),
+        "new\n"
+    );
+}
+
+#[tokio::test]
+async fn tee_new_file_and_append_do_not_gate() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("log.txt"), "line1\n").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o latch").await;
+    // New file: nothing to lose, no gate.
+    let r = run(&kernel, "echo hi | tee fresh.txt").await;
+    assert_eq!(r.code, 0, "new file should not gate: {}", r.err);
+    // Append: doesn't destroy prior content, no gate.
+    let r2 = run(&kernel, "echo line2 | tee -a log.txt").await;
+    assert_eq!(r2.code, 0, "append should not gate: {}", r2.err);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("log.txt")).expect("read"),
+        "line1\nline2\n"
+    );
+}
+
+#[tokio::test]
+async fn tee_overlay_overwrite_snapshots_bytes_via_trash_bytes() {
+    let mock = Arc::new(MockTrash::default());
+    let kernel = isolated_kernel_with_trash(&mock);
+
+    run(&kernel, "set -o trash").await;
+    run(&kernel, "write /v/f.txt \"original\"").await; // seed an in-memory file
+    let r = run(&kernel, "echo new | tee /v/f.txt").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+
+    // No real path → prior content captured via trash_bytes, not trash().
+    let snaps = mock.snapshots();
+    assert_eq!(snaps.len(), 1, "one byte-snapshot for the overlay overwrite: {snaps:?}");
+    assert!(snaps[0].0.ends_with("f.txt"));
+    assert_eq!(snaps[0].1, b"original", "the captured bytes are the prior content");
+    assert!(mock.trashed_paths().is_empty(), "no real-path trash for an overlay file");
+
+    let out = run(&kernel, "cat /v/f.txt").await;
+    assert_eq!(out.text_out().trim(), "new", "new content written after the snapshot");
 }

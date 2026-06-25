@@ -220,19 +220,17 @@ the tee/patch "truncating overwrite gates" rule below. Today `sed` loud-errors o
 - **Atomicity:** write-temp-then-atomic-rename through the VFS (crash-safe);
   this surfaces an atomic-replace capability question on the `Filesystem` trait.
 
-### `tee` / `patch` bypass the latch + trash machinery (write-model design)
-`tee`/`patch` mutate files through the VFS (overlay-safe) but don't honor
-`set -o latch` or trash-on-overwrite the way `rm` does — an agent can silently
-overwrite a file with no confirm and no recoverable prior copy. NOT a reuse of
-`rm`'s `decide_rm_action` ("trash IS the op"); tee/patch need a *pre-write safety
-copy then overwrite* — a new `decide_mutation_action → {TrashFirst(path), Latch,
-Proceed}` (same priority chain + `/tmp`,`/v` excludes; tee can create a nonexistent
-file with no trash). **Amy decisions (2026-06-17):** latch+trash stay ON even in
-overlay mode (the protections are about agent-operation safety, not just real-FS
-data); truncating overwrite gates, `tee -a` append does NOT (for now); new file →
-just write. **Resolved (2026-06-21, with the `sed -i` decisions above):** the
-family-wide confirm flag is `--confirm=<nonce>`; in overlay mode trash captures
-the overlay's current view of the prior content. Do it with the `sed -i` work.
+### `patch` bypasses the latch + trash machinery (write-model design)
+**`tee` DONE** (`feat/mutation-write-gate`): the shared gate landed — pure
+`decide_mutation_action → {TrashFirst, Latch, Proceed}` + `ExecContext::
+gate_overwrites`/`snapshot_for_overwrite` + `TrashBackend::trash_bytes` (overlay
+byte-snapshot) + `tee --confirm=<nonce>`. **`patch` still open** (and `sed -i`
+below): wire it into `gate_overwrites` the same way `tee` is — `patch` already
+reads the target's current content before its whole-file `Replace`, so the snapshot
+is a natural pre-write step. Decisions stand: latch+trash stay ON even in overlay
+mode; truncating overwrite gates, `tee -a` append does NOT; new file → just write;
+family-wide `--confirm=<nonce>`; overlay trash captures the overlay's current view
+of the prior content (`trash_bytes`).
 
 ### Streaming file reads — remaining
 (wc/checksum/grep/cmp/cat landed — see devlog.) Open:

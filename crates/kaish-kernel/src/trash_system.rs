@@ -44,6 +44,30 @@ impl TrashBackend for SystemTrash {
         spawn_trash(move || trash::delete(&p)).await
     }
 
+    async fn trash_bytes(&self, original_path: &Path, bytes: &[u8]) -> Result<(), TrashError> {
+        // The platform trash moves real files, so materialize the snapshot to a
+        // staging file (basename preserved for a recognizable entry) under a
+        // unique dir, then trash it. Restore lands at the staging path — the
+        // bytes are what's recoverable, not the location.
+        let basename = original_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "snapshot".to_string());
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("kaish-snapshot-{nanos:x}"));
+        let staged = dir.join(&basename);
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| TrashError::Backend(e.to_string()))?;
+        tokio::fs::write(&staged, bytes)
+            .await
+            .map_err(|e| TrashError::Backend(e.to_string()))?;
+        self.trash(&staged).await
+    }
+
     async fn list(&self, filter: Option<&str>) -> Result<Vec<TrashEntry>, TrashError> {
         let items = spawn_trash(trash::os_limited::list).await?;
         let filter_owned = filter.map(|s| s.to_owned());

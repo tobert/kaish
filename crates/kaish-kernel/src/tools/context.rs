@@ -1,7 +1,7 @@
 //! Execution context for tools.
 
 use std::collections::HashMap;
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use crate::ast::Value;
@@ -164,6 +164,52 @@ pub struct ExecContext {
     /// `None` when no overlay is active (most kernels).
     #[cfg(all(feature = "localfs", feature = "overlay"))]
     pub overlay_handle: Option<Arc<crate::kernel::OverlayHandle>>,
+}
+
+/// What the write-model gate chose for a single truncating overwrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MutationAction {
+    /// Write now — new file, append, excluded path, or both gates off.
+    Proceed,
+    /// Snapshot the prior content to trash, then write.
+    TrashFirst,
+    /// Gate behind a confirmation nonce (exit 2 until `--confirm`).
+    Latch,
+}
+
+/// Decide how to gate a truncating overwrite, mirroring `rm`'s trash/latch
+/// priority. Pure so the decision table is unit-testable in isolation.
+///
+/// - A non-existent target or an append has nothing to lose → `Proceed`.
+/// - A real path under `/tmp` or `/v` is excluded (matches `rm`) → `Proceed`.
+/// - Otherwise trash wins over latch (trash IS the safety net): `TrashFirst`
+///   when trash is on, else `Latch` when latch is on, else `Proceed`.
+///
+/// An overlay/in-memory target has `real_path == None`, so it is *not* excluded
+/// and stays gated — the protection is about agent-operation safety, not just
+/// real-FS data (Amy, 2026-06-17).
+pub(crate) fn decide_mutation_action(
+    trash_enabled: bool,
+    latch_enabled: bool,
+    real_path: Option<&Path>,
+    target_exists: bool,
+    is_append: bool,
+) -> MutationAction {
+    if !target_exists || is_append {
+        return MutationAction::Proceed;
+    }
+    if let Some(rp) = real_path {
+        if rp.starts_with("/tmp") || rp.starts_with("/v") {
+            return MutationAction::Proceed;
+        }
+    }
+    if trash_enabled {
+        return MutationAction::TrashFirst;
+    }
+    if latch_enabled {
+        return MutationAction::Latch;
+    }
+    MutationAction::Proceed
 }
 
 impl ExecContext {
@@ -649,6 +695,127 @@ impl ExecContext {
         result
     }
 
+    /// Gate a batch of truncating overwrites through latch + trash, the way
+    /// `rm` gates deletes — so `tee`/`patch`/`sed -i` can't silently clobber a
+    /// file with no recoverable prior copy and no confirmation.
+    ///
+    /// Each target is `(display_path, is_append)`. A path that doesn't exist yet
+    /// or is an append has nothing to lose and passes. For an existing file
+    /// under `set -o trash`, the prior content is snapshotted first (the real
+    /// file is moved to trash, or — for an overlay/in-memory file with no real
+    /// path — its current bytes are captured via `trash_bytes`); the subsequent
+    /// write recreates it. Under `set -o latch` (and trash off) the batch needs
+    /// `--confirm=<nonce>`: the first call returns an exit-2 latch result with
+    /// one nonce scoping every latched path.
+    ///
+    /// `Ok(())` means every snapshot is done and the caller may write all
+    /// targets. `Err(result)` is what the caller must return verbatim (the
+    /// latch prompt, an invalid nonce, or a trash failure — never fall through
+    /// to a destructive overwrite on error).
+    pub async fn gate_overwrites(
+        &mut self,
+        command: &str,
+        targets: &[(String, bool)],
+        confirm: Option<&str>,
+    ) -> Result<(), ExecResult> {
+        let trash_enabled = self.scope.trash_enabled();
+        let latch_enabled = self.scope.latch_enabled();
+        // Fast path: both gates off, nothing to do.
+        if !trash_enabled && !latch_enabled {
+            return Ok(());
+        }
+
+        struct Decided {
+            display: String,
+            resolved: PathBuf,
+            real: Option<PathBuf>,
+            action: MutationAction,
+        }
+        let mut decided = Vec::with_capacity(targets.len());
+        for (display, is_append) in targets {
+            let resolved = self.resolve_path(display);
+            let real = self.backend.resolve_real_path(Path::new(&resolved));
+            let exists = self.backend.exists(Path::new(&resolved)).await;
+            let action = decide_mutation_action(
+                trash_enabled,
+                latch_enabled,
+                real.as_deref(),
+                exists,
+                *is_append,
+            );
+            decided.push(Decided { display: display.clone(), resolved, real, action });
+        }
+
+        // Latch: one nonce scopes every latched path (subset confirmation).
+        let latched: Vec<&str> = decided
+            .iter()
+            .filter(|d| matches!(d.action, MutationAction::Latch))
+            .map(|d| d.display.as_str())
+            .collect();
+        if !latched.is_empty() {
+            match confirm {
+                Some(nonce) => {
+                    if let Err(e) = self.verify_nonce(nonce, command, &latched) {
+                        return Err(ExecResult::failure(1, format!("{command}: {e}")));
+                    }
+                }
+                None => {
+                    let joined = latched.join(" ");
+                    return Err(self.latch_result(command, &latched, "latch enabled", |nonce| {
+                        format!("{command} --confirm=\"{nonce}\" {joined}")
+                    }));
+                }
+            }
+        }
+
+        // Snapshot prior content for every trash-first target before any write.
+        for d in &decided {
+            if matches!(d.action, MutationAction::TrashFirst) {
+                if let Err(e) = self
+                    .snapshot_for_overwrite(&d.display, &d.resolved, d.real.as_deref())
+                    .await
+                {
+                    return Err(ExecResult::failure(1, format!("{command}: {e}")));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Capture the prior content of `resolved` into the trash before it's
+    /// overwritten. A real file is moved to trash (the write recreates it); an
+    /// overlay/in-memory file (no real path) has its current bytes snapshotted
+    /// via `trash_bytes`. A missing trash backend or a trash failure is an
+    /// error — never a silent fall-through to a destructive overwrite.
+    async fn snapshot_for_overwrite(
+        &self,
+        display: &str,
+        resolved: &Path,
+        real: Option<&Path>,
+    ) -> Result<(), String> {
+        let trash = self
+            .trash_backend
+            .as_ref()
+            .ok_or_else(|| "trash backend not available".to_string())?;
+        match real {
+            Some(rp) => trash
+                .trash(rp)
+                .await
+                .map_err(|e| format!("{display}: trash failed: {e}")),
+            None => {
+                let bytes = self
+                    .backend
+                    .read(resolved, None)
+                    .await
+                    .map_err(|e| format!("{display}: {e}"))?;
+                trash
+                    .trash_bytes(Path::new(display), &bytes)
+                    .await
+                    .map_err(|e| format!("{display}: trash failed: {e}"))
+            }
+        }
+    }
+
     /// Expand a glob pattern to matching file paths.
     ///
     /// Returns the matched paths (absolute). Used by builtins that accept glob
@@ -827,5 +994,59 @@ fn normalize_path(path: &std::path::Path) -> PathBuf {
         PathBuf::from("/")
     } else {
         parts.iter().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decide_mutation_action, MutationAction};
+    use std::path::Path;
+
+    fn decide(
+        trash: bool,
+        latch: bool,
+        real: Option<&str>,
+        exists: bool,
+        append: bool,
+    ) -> MutationAction {
+        decide_mutation_action(trash, latch, real.map(Path::new), exists, append)
+    }
+
+    #[test]
+    fn new_file_and_append_always_proceed() {
+        // Non-existent target: nothing to lose, regardless of gates.
+        assert_eq!(decide(true, true, Some("/work/new"), false, false), MutationAction::Proceed);
+        // Append to an existing file doesn't destroy prior content.
+        assert_eq!(decide(true, true, Some("/work/log"), true, true), MutationAction::Proceed);
+    }
+
+    #[test]
+    fn trash_wins_over_latch_on_existing_file() {
+        assert_eq!(decide(true, true, Some("/work/f"), true, false), MutationAction::TrashFirst);
+        assert_eq!(decide(true, false, Some("/work/f"), true, false), MutationAction::TrashFirst);
+    }
+
+    #[test]
+    fn latch_gates_when_trash_off() {
+        assert_eq!(decide(false, true, Some("/work/f"), true, false), MutationAction::Latch);
+    }
+
+    #[test]
+    fn both_gates_off_proceeds() {
+        assert_eq!(decide(false, false, Some("/work/f"), true, false), MutationAction::Proceed);
+    }
+
+    #[test]
+    fn excluded_real_paths_bypass_the_gate() {
+        // /tmp and /v real paths proceed even with both gates on (matches rm).
+        assert_eq!(decide(true, true, Some("/tmp/scratch"), true, false), MutationAction::Proceed);
+        assert_eq!(decide(true, true, Some("/v/mem/file"), true, false), MutationAction::Proceed);
+    }
+
+    #[test]
+    fn overlay_no_real_path_stays_gated() {
+        // No real path (overlay/in-memory) is NOT excluded — still trash-first.
+        assert_eq!(decide(true, true, None, true, false), MutationAction::TrashFirst);
+        assert_eq!(decide(false, true, None, true, false), MutationAction::Latch);
     }
 }
