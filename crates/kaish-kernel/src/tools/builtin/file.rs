@@ -1,9 +1,10 @@
 //! file — Identify file type by content (magic bytes).
 //!
 //! Content-only, like `file`'s magic test: the extension is never consulted, so
-//! a `.txt` holding PNG bytes reports as an image. Detection is shared with the
-//! `kaish-glob` `filetype` module so embedders (e.g. kaibo's image/TTS path)
-//! classify bytes the same way the shell does.
+//! a `.txt` holding PNG bytes reports as an image. Detection is magic-first with
+//! a UTF-8 text fallback, shared with the `kaish-glob` `filetype` module so
+//! embedders (e.g. kaibo's image/TTS path) classify bytes the same way the shell
+//! does. Genuinely opaque bytes report `data`, never a guess.
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
@@ -120,7 +121,7 @@ fn headers() -> Vec<String> {
 /// honest `data`/`application/octet-stream` pair when nothing matched. Always
 /// carries the full pair regardless of `--mime` so `--json` stays uniform.
 fn cells(bytes: &[u8]) -> Vec<String> {
-    match kaish_glob::detect(bytes) {
+    match kaish_glob::classify(bytes) {
         Some(ft) => vec![ft.category.as_str().to_string(), ft.mime.to_string()],
         None => vec!["data".to_string(), "application/octet-stream".to_string()],
     }
@@ -128,10 +129,11 @@ fn cells(bytes: &[u8]) -> Vec<String> {
 
 /// The human-facing description for one file's bytes.
 ///
-/// Unmatched bytes report `data` (text mode) — the same honest fallback real
-/// `file` uses when no magic test fires — never a guessed type.
+/// Detection is magic-first with a UTF-8 text fallback ([`kaish_glob::classify`]);
+/// only genuinely opaque bytes report `data` — the same honest fallback real
+/// `file` uses when no test fires — never a guessed type.
 fn describe(bytes: &[u8], mime_only: bool) -> String {
-    match kaish_glob::detect(bytes) {
+    match kaish_glob::classify(bytes) {
         Some(ft) if mime_only => ft.mime.to_string(),
         Some(ft) => format!("{} ({})", ft.category, ft.mime),
         None if mime_only => "application/octet-stream".to_string(),
@@ -204,8 +206,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_bytes_report_data_not_a_guess() {
-        let mut ctx = ctx_with(&[("blob", b"just some plain prose, no magic\n")]).await;
+    async fn plain_text_reports_text() {
+        // No magic, but valid UTF-8 — the text fallback fires.
+        let mut ctx = ctx_with(&[("notes", b"just some plain prose, no magic\n")]).await;
+        let result = File.execute(arg("/notes"), &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.text_out(), "/notes: text (text/plain)");
+    }
+
+    #[tokio::test]
+    async fn opaque_binary_reports_data_not_a_guess() {
+        // No magic and not text (NUL + invalid UTF-8): the honest `data` floor.
+        let mut ctx = ctx_with(&[("blob", b"\x00\x01\x02\xff\xfe not utf8 \x80")]).await;
         let result = File.execute(arg("/blob"), &mut ctx).await;
         assert!(result.ok());
         assert_eq!(result.text_out(), "/blob: data");
