@@ -16,9 +16,10 @@ breaking entries are marked **BREAKING**.
   prints the MIME alone, `-b`/`--brief` drops the filename, `--json` emits a
   `FILE`/`TYPE`/`MIME` table. Reads a bounded prefix through the VFS (works in
   sandboxed/overlay backends) and classifies stdin when given no paths.
-  Detection is magic-first with a UTF-8 text fallback (`text/plain`); only
-  genuinely opaque bytes (headerless raw PCM, non-UTF-8 binary) report `data`,
-  never a guess. Detection lives in `kaish-glob`'s new `filetype` module
+  Detection is magic-first with a UTF-8 text fallback (`text/plain`); zero bytes
+  report `empty`, and otherwise-opaque bytes (headerless raw PCM, non-UTF-8
+  binary) report `data` — never a guess. Detection lives in `kaish-glob`'s new
+  `filetype` module
   (pure-Rust `infer`, no C deps) — `detect` for magic-only, `classify` for the
   text-aware path — so embedders can classify bytes the same way the shell does.
 - **Validator advisory `W006` steers `test` to `[[ … ]]`.** Using a bare `test` as a

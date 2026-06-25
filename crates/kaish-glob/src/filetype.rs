@@ -156,20 +156,19 @@ pub fn looks_like_text(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return false;
     }
-    let text = match std::str::from_utf8(bytes) {
-        Ok(text) => text,
-        // A prefix read can slice through a multibyte char: `error_len() == None`
-        // means "valid so far, just an incomplete trailing sequence", so we
-        // accept the good prefix. A mid-stream invalid byte (`Some(_)`) is real
-        // binary. `valid_up_to() == 0` means there's no decodable text at all.
-        Err(e) if e.error_len().is_none() && e.valid_up_to() > 0 => {
-            match std::str::from_utf8(&bytes[..e.valid_up_to()]) {
-                Ok(text) => text,
-                Err(_) => return false,
-            }
-        }
+    // Length of the leading run of valid UTF-8 to inspect. A prefix read can
+    // slice through a multibyte char: `error_len() == None` means "valid so far,
+    // just an incomplete trailing sequence", so we keep the good prefix. A
+    // mid-stream invalid byte (`Some(_)`) is real binary; `valid_up_to() == 0`
+    // means there's no decodable text at all.
+    let valid_len = match std::str::from_utf8(bytes) {
+        Ok(_) => bytes.len(),
+        Err(e) if e.error_len().is_none() && e.valid_up_to() > 0 => e.valid_up_to(),
         Err(_) => return false,
     };
+    // `bytes[..valid_len]` is valid UTF-8 by construction — `valid_up_to()` is
+    // defined as a valid boundary — so the decode cannot actually fail.
+    let text = std::str::from_utf8(&bytes[..valid_len]).unwrap_or_default();
     !text.chars().any(is_binary_control)
 }
 
@@ -306,6 +305,13 @@ mod tests {
     fn invalid_midstream_utf8_is_not_text() {
         // A bad continuation byte in the middle (not a truncation) is binary.
         assert!(!looks_like_text(b"good text \xff\xfe more bytes here"));
+    }
+
+    #[test]
+    fn solo_truncated_lead_byte_is_not_text() {
+        // A buffer that is *only* an incomplete lead byte (`valid_up_to() == 0`)
+        // has no decodable text — must not be classified as text.
+        assert!(!looks_like_text(b"\xc3"));
     }
 
     #[test]

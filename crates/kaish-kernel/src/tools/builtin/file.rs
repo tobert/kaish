@@ -4,12 +4,13 @@
 //! a `.txt` holding PNG bytes reports as an image. Detection is magic-first with
 //! a UTF-8 text fallback, shared with the `kaish-glob` `filetype` module so
 //! embedders (e.g. kaibo's image/TTS path) classify bytes the same way the shell
-//! does. Genuinely opaque bytes report `data`, never a guess.
+//! does. Zero bytes report `empty`; otherwise-opaque bytes report `data` — never
+//! a guess.
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
-use kaish_glob::SNIFF_PREFIX_LEN;
+use kaish_glob::{FileType, SNIFF_PREFIX_LEN};
 use kaish_types::ReadRange;
 
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
@@ -72,10 +73,10 @@ impl Tool for File {
         // No paths: classify stdin. `-` is the conventional name in output.
         if args.positional.is_empty() {
             let bytes = ctx.read_stdin_to_bytes().await.unwrap_or_default();
-            let desc = describe(&bytes, parsed.mime);
-            let text = render_line("-", &desc, parsed.brief);
+            let id = Identity::of(&bytes);
+            let text = render_line("-", &id.describe(parsed.mime), parsed.brief);
             return ExecResult::with_output_and_text(
-                OutputData::table(headers(), vec![OutputNode::new("-").with_cells(cells(&bytes))]),
+                OutputData::table(headers(), vec![OutputNode::new("-").with_cells(id.cells())]),
                 text,
             );
         }
@@ -100,9 +101,9 @@ impl Tool for File {
                 Ok(b) => b,
                 Err(e) => return ExecResult::failure(1, format!("file: {}: {}", path, e)),
             };
-            let desc = describe(&head, parsed.mime);
-            nodes.push(OutputNode::new(path).with_cells(cells(&head)));
-            lines.push(render_line(path, &desc, parsed.brief));
+            let id = Identity::of(&head);
+            nodes.push(OutputNode::new(path).with_cells(id.cells()));
+            lines.push(render_line(path, &id.describe(parsed.mime), parsed.brief));
         }
 
         ExecResult::with_output_and_text(
@@ -117,27 +118,62 @@ fn headers() -> Vec<String> {
     vec!["FILE".to_string(), "TYPE".to_string(), "MIME".to_string()]
 }
 
-/// TYPE/MIME cells for a node: the broad category word and the MIME, or the
-/// honest `data`/`application/octet-stream` pair when nothing matched. Always
-/// carries the full pair regardless of `--mime` so `--json` stays uniform.
-fn cells(bytes: &[u8]) -> Vec<String> {
-    match kaish_glob::classify(bytes) {
-        Some(ft) => vec![ft.category.as_str().to_string(), ft.mime.to_string()],
-        None => vec!["data".to_string(), "application/octet-stream".to_string()],
-    }
+/// One file's identity, resolved from its bytes a single time so the text and
+/// `--json` renderings can't drift apart and we don't classify twice per file.
+///
+/// Detection is magic-first with a UTF-8 text fallback ([`kaish_glob::classify`]).
+/// Two honest floors when nothing matches: `empty` for zero bytes (more useful
+/// to an agent than `data`, matching `file`), and `data` for opaque bytes —
+/// never a guessed type.
+enum Identity {
+    /// A recognized type (magic or text).
+    Known(FileType),
+    /// Zero bytes: `empty` / `inode/x-empty`.
+    Empty,
+    /// No signature and not text: `data` / `application/octet-stream`.
+    Opaque,
 }
 
-/// The human-facing description for one file's bytes.
-///
-/// Detection is magic-first with a UTF-8 text fallback ([`kaish_glob::classify`]);
-/// only genuinely opaque bytes report `data` — the same honest fallback real
-/// `file` uses when no test fires — never a guessed type.
-fn describe(bytes: &[u8], mime_only: bool) -> String {
-    match kaish_glob::classify(bytes) {
-        Some(ft) if mime_only => ft.mime.to_string(),
-        Some(ft) => format!("{} ({})", ft.category, ft.mime),
-        None if mime_only => "application/octet-stream".to_string(),
-        None => "data".to_string(),
+impl Identity {
+    fn of(bytes: &[u8]) -> Self {
+        if bytes.is_empty() {
+            Identity::Empty
+        } else {
+            match kaish_glob::classify(bytes) {
+                Some(ft) => Identity::Known(ft),
+                None => Identity::Opaque,
+            }
+        }
+    }
+
+    /// The type word and MIME used everywhere.
+    fn parts(&self) -> (&str, &str) {
+        match self {
+            Identity::Known(ft) => (ft.category.as_str(), ft.mime),
+            Identity::Empty => ("empty", "inode/x-empty"),
+            Identity::Opaque => ("data", "application/octet-stream"),
+        }
+    }
+
+    /// Human-facing description: `word (mime)` for a recognized type, or the
+    /// bare floor word (`empty`/`data`) otherwise. `--mime` prints MIME alone.
+    fn describe(&self, mime_only: bool) -> String {
+        let (word, mime) = self.parts();
+        if mime_only {
+            mime.to_string()
+        } else {
+            match self {
+                Identity::Known(_) => format!("{word} ({mime})"),
+                _ => word.to_string(),
+            }
+        }
+    }
+
+    /// TYPE/MIME cells for the `--json` table — always the full pair regardless
+    /// of `--mime`/`--brief`, so structured output stays uniform.
+    fn cells(&self) -> Vec<String> {
+        let (word, mime) = self.parts();
+        vec![word.to_string(), mime.to_string()]
     }
 }
 
@@ -221,6 +257,20 @@ mod tests {
         let result = File.execute(arg("/blob"), &mut ctx).await;
         assert!(result.ok());
         assert_eq!(result.text_out(), "/blob: data");
+    }
+
+    #[tokio::test]
+    async fn empty_file_reports_empty() {
+        // Zero bytes: `empty`, not `data` — and `inode/x-empty` under --mime.
+        let mut ctx = ctx_with(&[("nothing", b"")]).await;
+        let result = File.execute(arg("/nothing"), &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.text_out(), "/nothing: empty");
+
+        let mut a = arg("/nothing");
+        a.flags.insert("mime".into());
+        let result = File.execute(a, &mut ctx).await;
+        assert_eq!(result.text_out(), "/nothing: inode/x-empty");
     }
 
     #[tokio::test]
