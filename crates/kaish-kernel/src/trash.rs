@@ -113,6 +113,16 @@ pub trait TrashBackend: Send + Sync {
     /// Move a file or directory to trash.
     async fn trash(&self, path: &Path) -> Result<(), TrashError>;
 
+    /// Snapshot raw bytes into the trash under a name derived from
+    /// `original_path`'s basename.
+    ///
+    /// Used by the write-model gate to back up a file's prior content before a
+    /// truncating overwrite (`tee`/`patch`/`sed -i`). Unlike [`trash`](Self::trash)
+    /// it *copies* rather than moves, so the file stays in place for the overwrite
+    /// (and for read-modify-write callers). What's recoverable is the snapshot's
+    /// bytes (via `list`/`restore`), not its original location.
+    async fn trash_bytes(&self, original_path: &Path, bytes: &[u8]) -> Result<(), TrashError>;
+
     /// List trashed items, optionally filtered by name substring.
     async fn list(&self, filter: Option<&str>) -> Result<Vec<TrashEntry>, TrashError>;
 

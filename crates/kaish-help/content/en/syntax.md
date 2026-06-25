@@ -195,8 +195,8 @@ Zero matches is an error (exit code 1). The `glob` builtin still works for `--ex
 
 ```bash
 set -e                    # exit on first error
-set -o latch              # require nonce confirmation for rm (exit code 2)
-set -o trash              # move rm'd files to Trash
+set -o latch              # require nonce confirmation to delete/overwrite (exit code 2)
+set -o trash              # move rm'd / overwritten files to Trash
 set -o glob               # enable bare glob expansion (on by default)
 set +o latch              # disable latch
 set +o trash              # disable trash
@@ -207,10 +207,13 @@ Env vars: `KAISH_LATCH=1`, `KAISH_TRASH=1` enable at startup.
 
 **Latch:** Nonces scoped to (command, paths). A nonce for `rm A` rejects `rm B`.
 Confirmed paths must be subset of authorized paths. Exit code 2 = needs confirmation.
+Applies to `rm` and to truncating overwrites (`tee`; `patch`/`sed -i` next) —
+confirm those with `--confirm=<nonce>`. `tee -a` append and new files don't gate.
 
 **Trash:** Files <= 10MB and directories always trash. `/tmp`, `/v/*` excluded.
-If trash fails, rm errors (no silent fallthrough to permanent delete).
-Configure threshold: `kaish-trash config max-size <bytes>`.
+A truncating overwrite under `trash` snapshots the file's prior content first
+(recoverable from Trash). If trash fails, the op errors (no silent fallthrough to a
+destructive delete/overwrite). Configure threshold: `kaish-trash config max-size <bytes>`.
 
 **Nonce persistence:** The kernel creates a fresh nonce store by default.
 An embedder can share one store across `execute()` calls in a session, so a

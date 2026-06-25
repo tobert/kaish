@@ -19,6 +19,10 @@ struct TeeArgs {
     #[arg(id = "append", short = 'a', long = "append")]
     _append: bool,
 
+    /// Confirmation nonce for a latch-gated overwrite.
+    #[arg(long = "confirm")]
+    confirm: Option<String>,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -61,47 +65,58 @@ impl Tool for Tee {
         }
 
         let append = args.has_flag("append") || args.has_flag("a");
+
+        // Gate truncating overwrites through latch + trash (no-op when both are
+        // off). Append never gates (it doesn't destroy prior content); a new
+        // file just writes. On latch this returns an exit-2 nonce result; under
+        // trash the prior content is snapshotted before we write below.
+        let targets: Vec<(String, bool)> = args
+            .positional
+            .iter()
+            .map(|v| (crate::interpreter::value_to_string(v), append))
+            .collect();
+        if let Err(blocked) = ctx
+            .gate_overwrites("tee", &targets, parsed.confirm.as_deref(), |nonce, joined| {
+                format!("tee --confirm=\"{nonce}\" {joined}")
+            })
+            .await
+        {
+            return blocked;
+        }
+
         // Read raw bytes so binary passes through tee intact (to files and to
         // the next stage).
         let input = ctx.read_stdin_to_bytes().await.unwrap_or_default();
 
         // POSIX: tee writes stdin to every file AND to stdout. Continue past
-        // per-file errors (matches POSIX `tee` semantics) and report the last
-        // failure as a non-zero exit so callers can detect partial failure.
-        let mut last_err: Option<String> = None;
+        // per-file errors (matches POSIX `tee` semantics) and report every
+        // failure so the agent sees the full picture, not just the last one.
+        let mut errors: Vec<String> = Vec::new();
         for value in &args.positional {
             let path_str = crate::interpreter::value_to_string(value);
             let resolved = ctx.resolve_path(&path_str);
             let path = Path::new(&resolved);
 
-            let final_content = if append {
-                // kaish VFS lacks an append mode — read-modify-write.
-                match ctx.backend.read(path, None).await {
-                    Ok(existing) => {
-                        let mut combined = existing;
-                        combined.extend_from_slice(&input);
-                        combined
-                    }
-                    Err(_) => input.clone(),
-                }
+            // Overwrite writes the borrowed input directly (no clone); append
+            // needs a read-modify-write since the VFS lacks an append mode.
+            let write_result = if append {
+                let mut combined = ctx.backend.read(path, None).await.unwrap_or_default();
+                combined.extend_from_slice(&input);
+                ctx.backend.write(path, &combined, WriteMode::Overwrite).await
             } else {
-                input.clone()
+                ctx.backend.write(path, &input, WriteMode::Overwrite).await
             };
 
-            if let Err(e) = ctx
-                .backend
-                .write(path, &final_content, WriteMode::Overwrite)
-                .await
-            {
-                last_err = Some(format!("tee: {}: {}", path_str, e));
+            if let Err(e) = write_result {
+                errors.push(format!("tee: {}: {}", path_str, e));
             }
         }
 
         // Pass the input through unchanged: text for text input, binary for
         // binary input.
         let mut result = ExecResult::success_text_or_bytes(input);
-        if let Some(msg) = last_err {
-            result.err = msg;
+        if !errors.is_empty() {
+            result.err = errors.join("\n");
             result = result.with_code(1);
         }
         result

@@ -4,6 +4,7 @@
 //! just behind the `TrashBackend` trait.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 
@@ -42,6 +43,46 @@ impl TrashBackend for SystemTrash {
     async fn trash(&self, path: &Path) -> Result<(), TrashError> {
         let p = path.to_owned();
         spawn_trash(move || trash::delete(&p)).await
+    }
+
+    async fn trash_bytes(&self, original_path: &Path, bytes: &[u8]) -> Result<(), TrashError> {
+        // The platform trash moves real files, so materialize the snapshot to a
+        // staging file (basename preserved for a recognizable entry) under a
+        // unique dir, then trash it. Restore lands at the staging path — the
+        // bytes are what's recoverable, not the location.
+        //
+        // Stage under the persistent data dir, NOT /tmp: a tmpfs /tmp would put
+        // the trash at /tmp/.Trash-$UID and lose the snapshot on reboot — the
+        // opposite of a safety net. Staging on the home partition lands it in
+        // the durable ~/.local/share/Trash and keeps the move on one filesystem.
+        let basename = original_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "snapshot".to_string());
+        // nanos alone collides under parallel agents / tight loops; mix in a
+        // process-global counter so two snapshots in the same nanosecond can't
+        // race on the same staging path.
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = crate::paths::data_dir()
+            .join("trash-staging")
+            .join(format!("{nanos:x}-{seq:x}"));
+        let staged = dir.join(&basename);
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| TrashError::Backend(e.to_string()))?;
+        tokio::fs::write(&staged, bytes)
+            .await
+            .map_err(|e| TrashError::Backend(e.to_string()))?;
+        let result = self.trash(&staged).await;
+        // The staged file is now in the trash; the staging dir is empty. Drop it
+        // so repeated overwrites don't leak empty dirs under the data dir.
+        tokio::fs::remove_dir(&dir).await.ok();
+        result
     }
 
     async fn list(&self, filter: Option<&str>) -> Result<Vec<TrashEntry>, TrashError> {
