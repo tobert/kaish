@@ -113,11 +113,27 @@ impl<'a> Validator<'a> {
         let is_special = is_special_command(&cmd.name);
 
         if !is_builtin && !is_user_tool && !is_special {
-            // Warning only - command might be a script in PATH or external tool
-            self.issues.push(ValidationIssue::warning(
-                IssueCode::UndefinedCommand,
-                format!("command '{}' not found in builtin registry", cmd.name),
-            ).with_suggestion("this may be a script in PATH or external command"));
+            // `[ … ]` can't reach here — it's a parse error (`[` opens a `[[ ]]`
+            // test), so `test` is the only POSIX-conditional name that lands as a
+            // command. kaish has no `test` builtin; unguarded it resolves to an
+            // external binary that evaluates against the real host FS, bypassing
+            // the VFS/overlay — a silent wrong answer flowing into `if`/`&&`.
+            // Steer to `[[ … ]]`. Surfaced to the agent (see surfaces_to_agent).
+            if cmd.name == "test" {
+                self.issues.push(ValidationIssue::warning(
+                    IssueCode::PosixTestCommand,
+                    "'test' is not a kaish command".to_string(),
+                ).with_suggestion(
+                    "use [[ … ]] for conditionals — it is validated before running, \
+                     whereas `test` resolves to an external command that bypasses the VFS",
+                ));
+            } else {
+                // Warning only - command might be a script in PATH or external tool
+                self.issues.push(ValidationIssue::warning(
+                    IssueCode::UndefinedCommand,
+                    format!("command '{}' not found in builtin registry", cmd.name),
+                ).with_suggestion("this may be a script in PATH or external command"));
+            }
         }
 
         // Validate arguments expressions
@@ -530,10 +546,10 @@ fn is_static_command_name(name: &str) -> bool {
 
 /// Check if a command is a special built-in that we don't validate.
 fn is_special_command(name: &str) -> bool {
-    matches!(
-        name,
-        "true" | "false" | ":" | "test" | "[" | "[[" | "readonly" | "local"
-    )
+    // `test`/`[`/`[[` are intentionally absent: there is no `test` builtin
+    // (it gets the PosixTestCommand advisory above), and `[`/`[[` parse as
+    // `[[ … ]]` test expressions, never reaching here as a command name.
+    matches!(name, "true" | "false" | ":" | "readonly" | "local")
 }
 
 /// Build ToolArgs from AST Args for validation purposes.
@@ -804,6 +820,34 @@ mod tests {
         let issues = validator.validate(&program);
         assert!(!issues.is_empty());
         assert!(issues.iter().any(|i| i.code == IssueCode::UndefinedCommand));
+    }
+
+    #[test]
+    fn test_command_steers_to_double_bracket() {
+        let (registry, user_tools) = make_validator();
+        let validator = Validator::new(&registry, &user_tools);
+
+        let program = Program {
+            statements: vec![Stmt::Command(Command {
+                name: "test".to_string(),
+                args: vec![
+                    Arg::Positional(Expr::Literal(Value::String("-n".to_string()))),
+                    Arg::Positional(Expr::Literal(Value::String("hi".to_string()))),
+                ],
+                redirects: vec![],
+            })],
+        };
+
+        let issues = validator.validate(&program);
+        let issue = issues
+            .iter()
+            .find(|i| i.code == IssueCode::PosixTestCommand)
+            .expect("`test` should emit a PosixTestCommand advisory");
+        assert_eq!(issue.severity, crate::validator::Severity::Warning);
+        assert!(issue.code.surfaces_to_agent(), "the advisory must surface to the agent");
+        assert!(issue.suggestion.as_deref().unwrap_or_default().contains("[["));
+        // It must NOT also fire the generic undefined-command warning.
+        assert!(!issues.iter().any(|i| i.code == IssueCode::UndefinedCommand));
     }
 
     #[test]

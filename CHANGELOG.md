@@ -10,6 +10,16 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **Validator advisory `W006` steers `test` to `[[ … ]]`.** Using `test` as a
+  command now surfaces a one-time stderr note (`use [[ … ]] …`) and still runs.
+  This is the first *agent-surfaced* validation warning: most warnings stay
+  trace-only (every external command fires `UndefinedCommand`), but a code can
+  opt into surfacing via `IssueCode::surfaces_to_agent` — the seam for a broader
+  "did-you-mean" guidance pass. The advisory matters because a bare `test` would
+  otherwise resolve to an external `/usr/bin/test` that evaluates against the real
+  host filesystem, bypassing the VFS/overlay (a silent wrong boolean into `if`/`&&`).
+
 ### Removed
 - **BREAKING: the `test` builtin and `[` command are gone.** Use `[[ … ]]`, the one
   supported test form. The removed builtins never worked end-to-end through the

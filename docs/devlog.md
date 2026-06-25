@@ -226,6 +226,17 @@ leak — all validated as fixed and were retired from the punch list.
   exists to remove). The fully-written `test`/`[` builtin (with passing
   *direct-`.execute()`* unit tests — the gotcha CLAUDE.md warns about: they
   bypassed the real lex/parse path) was the tell that this never worked end-to-end.
+  **Guard (gemini-batch review of PR #29):** a bare `test` in a subprocess build
+  falls through to an external `/usr/bin/test` that evaluates against the *real*
+  host FS, bypassing the VFS/overlay — a silent wrong boolean into `if`/`&&`. We
+  added validator advisory **W006** (`IssueCode::PosixTestCommand`) that steers to
+  `[[ … ]]` and *still runs* (Amy chose warn-don't-reject over a poison stub). It's
+  the first agent-surfaced validation warning: warnings were trace-only because
+  every external command fires `UndefinedCommand`, so a code now opts into
+  surfacing via `IssueCode::surfaces_to_agent` — the seam for the broader P4
+  "did-you-mean" pass. Surfacing is dual-path: the streaming frontend gets it via a
+  pre-loop `on_output` emission; `kernel.execute` reads it off the aggregate
+  `result.err` (the two consumers are disjoint, so it prints exactly once each).
 
 ## Accepted risks & waived items (decided, not open work)
 

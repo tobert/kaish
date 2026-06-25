@@ -224,7 +224,10 @@ mkdir /tmp/work && cd /tmp/work && echo "ready"
 [[ ! -f a || -d b && -e c ]]    # parsed as: (! -f a) || ((-d b) && (-e c))
 ```
 
-Note: `[ expr ]` (single brackets) is **not** kaish syntax — it does not parse. Use `[[ ]]` (preferred) or the `test` builtin (`test -f file && echo yes`).
+Note: `[ expr ]` (single brackets) is **not** kaish syntax and there is no `test`
+builtin — use `[[ ]]` for all conditionals (`[[ -f file ]] && echo yes`). This is
+deliberate: `[[ ]]` is real grammar the validator checks before runtime, whereas
+`test`/`[` would hide their operators as opaque runtime arguments.
 
 ## Control Flow
 
@@ -782,7 +785,7 @@ These bash features are omitted because they're confusing, error-prone, or ambig
 | Shell brace expansion `echo {a,b,c}` | Tools support globs with braces internally | SC1083 |
 | Process substitution `<(cmd)` | Use temp files | — |
 | Backtick substitution `` `cmd` `` | Use `$(cmd)` — a bare backtick is a lexer error, not silently accepted | SC2006 |
-| Single bracket tests `[ ]` | Not parsed; use `[[ ]]` or the `test` builtin | SC2039 |
+| Single bracket tests `[ ]` and the `test` command | Neither exists; use `[[ ]]` for all conditionals | SC2039 |
 | `eval` | Explicit is better | SC2091 |
 
 ## ShellCheck Alignment
@@ -797,7 +800,7 @@ Features that ShellCheck warns about (word splitting, backticks) don't exist in 
 | SC2086 | Double quote to prevent word splitting | No implicit word splitting on whitespace; `$VAR` is always one value |
 | SC2046 | Quote this to prevent word splitting | `$(cmd)` is one value in argv/assignment/interp; for-loop iteration splits on newlines only |
 | SC2035 | Use `./*` so globs don't expand | Bare globs expand; use `set +o glob` to disable |
-| SC2039 | Use `[[ ]]` in POSIX sh | `[ ]` doesn't parse; `[[ ]]` and `test` are the test forms |
+| SC2039 | Use `[[ ]]` in POSIX sh | `[[ ]]` is the only test form; `[ ]` and `test` are not kaish |
 | SC1083 | Escape literal braces | No shell-level brace expansion |
 
 ## Beyond Bourne

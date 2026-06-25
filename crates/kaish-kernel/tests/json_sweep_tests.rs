@@ -67,7 +67,6 @@ struct Skip {
 }
 
 const SKIPS: &[Skip] = &[
-    Skip { name: "[", reason: "the `[ expr ]` form doesn't parse (use [[ ]] or test); tool unreachable from scripts" },
     Skip { name: "bg", reason: "requires a stopped job (PTY job control)" },
     Skip { name: "fg", reason: "requires a stopped job (PTY job control)" },
     Skip { name: "exec", reason: "replaces the calling process" },

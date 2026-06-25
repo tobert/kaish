@@ -54,6 +54,10 @@ pub enum IssueCode {
     InvalidSedExpr,
     /// jq filter expression is syntactically invalid.
     InvalidJqFilter,
+    /// A POSIX `test` / `[ … ]` conditional was used. kaish has no such command
+    /// (it would resolve to an external binary that bypasses the VFS); use
+    /// `[[ … ]]`, which the validator checks before runtime.
+    PosixTestCommand,
 }
 
 impl IssueCode {
@@ -81,7 +85,19 @@ impl IssueCode {
             IssueCode::ForLoopScalarVar => "E012",
             IssueCode::ScatterWithoutGather => "E014",
             IssueCode::LastResultFieldAccess => "E015",
+            IssueCode::PosixTestCommand => "W006",
         }
+    }
+
+    /// Whether a warning carrying this code should be surfaced to the agent
+    /// (appended to the result's stderr) rather than only trace-logged.
+    ///
+    /// Most warnings stay trace-only — `UndefinedCommand` fires on every
+    /// external command (`grep`, `cargo`), so surfacing them all would be
+    /// noise. Opt a code in here only when its guidance is worth interrupting
+    /// for. This is the surfacing seam for the "did-you-mean" guidance pass.
+    pub fn surfaces_to_agent(&self) -> bool {
+        matches!(self, IssueCode::PosixTestCommand)
     }
 
     /// Default severity for this issue code.
@@ -107,6 +123,7 @@ impl IssueCode {
             | IssueCode::InvalidArgType
             | IssueCode::UndefinedCommand
             | IssueCode::UnknownFlag
+            | IssueCode::PosixTestCommand
             | IssueCode::PossiblyUndefinedVariable => Severity::Warning,
         }
     }

@@ -1821,7 +1821,11 @@ impl Kernel {
             }
         }
 
-        // Pre-execution validation
+        // Pre-execution validation. Most warnings stay trace-only (every
+        // external command fires an `UndefinedCommand` warning), but a warning
+        // whose code opts into agent surfacing is collected here and prepended
+        // to the result's stderr at each return point below.
+        let mut surfaced_warnings = String::new();
         if !self.skip_validation {
             let user_tools = self.user_tools.read().await;
             let validator = Validator::new(&self.tools, &user_tools);
@@ -1842,10 +1846,27 @@ impl Kernel {
                 return Err(anyhow::anyhow!("validation failed:\n{}", error_msg));
             }
 
-            // Log warnings via tracing (trace level to avoid noise)
+            // Log warnings via tracing (trace level to avoid noise); surface the
+            // opted-in ones to the agent so the guidance is actually seen.
             for warning in issues.iter().filter(|i| i.severity == Severity::Warning) {
                 tracing::trace!("validation: {}", warning.format(input));
+                if warning.code.surfaces_to_agent() {
+                    surfaced_warnings.push_str(&warning.format(input));
+                    surfaced_warnings.push('\n');
+                }
             }
+        }
+
+        // Surface opted-in validation warnings to the streaming frontend once,
+        // before any command output. The streaming consumer (`-c`, REPL) prints
+        // per `on_output` and ignores the returned aggregate err; non-streaming
+        // callers (`kernel.execute`) use a noop callback and read the aggregate
+        // `result.err` (prepended at each return below). The two paths are
+        // disjoint, so this prints the advisory exactly once on each.
+        if !surfaced_warnings.is_empty() {
+            let mut advisory = ExecResult::success("");
+            advisory.err = surfaced_warnings.clone();
+            on_output(&advisory);
         }
 
         let mut result = ExecResult::success("");
@@ -1897,6 +1918,9 @@ impl Kernel {
                         result.err.push_str(&drained_stderr);
                     }
                     result.code = code;
+                    if !surfaced_warnings.is_empty() {
+                        result.err = format!("{surfaced_warnings}{}", result.err);
+                    }
                     return Ok(result);
                 }
                 ControlFlow::Return { mut value } => {
@@ -1916,6 +1940,9 @@ impl Kernel {
             }
         }
 
+        if !surfaced_warnings.is_empty() {
+            result.err = format!("{surfaced_warnings}{}", result.err);
+        }
         Ok(result)
     }
 

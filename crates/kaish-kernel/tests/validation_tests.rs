@@ -793,3 +793,41 @@ async fn validation_issue_in_heredoc_body_full_rendering_snapshot() {
 
     insta::assert_snapshot!(undef.format(source));
 }
+
+// ============================================================================
+// Tests that verify selective warning SURFACING (W006 reaches the agent;
+// the generic undefined-command warning stays trace-only)
+// ============================================================================
+
+#[tokio::test]
+async fn posix_test_command_surfaces_advisory_but_still_runs() {
+    let kernel = make_kernel().await;
+    // `test` is not a kaish command; the validator advisory (W006) must reach
+    // the agent on stderr, and the warning must NOT block execution.
+    let result = kernel
+        .execute("test -n hi")
+        .await
+        .expect("a warning must not turn into a validation error");
+    assert!(
+        result.err.contains("W006") && result.err.contains("[["),
+        "the W006 `[[ … ]]` advisory should surface on stderr, got err: {:?}",
+        result.err
+    );
+}
+
+#[tokio::test]
+async fn generic_undefined_command_warning_stays_trace_only() {
+    let kernel = make_kernel().await;
+    // An ordinary unknown command warns at validation, but that warning is
+    // trace-only — it must not be surfaced to stderr (otherwise every external
+    // command would spam it). Only the runtime "command not found" may appear.
+    let result = kernel
+        .execute("frobnicate_xyz_not_a_real_command")
+        .await
+        .expect("an undefined-command warning must not block execution");
+    assert!(
+        !result.err.contains("W006") && !result.err.contains("builtin registry"),
+        "the generic undefined-command validation warning must not surface, got err: {:?}",
+        result.err
+    );
+}
