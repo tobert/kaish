@@ -1000,18 +1000,20 @@ pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> 
         }
         Expr::GlobPattern(s) => Some(Value::String(s.clone())),
         Expr::HereDocBody { parts, strip_tabs } => {
-            // Heredoc body materialization for redirect targets. Reuses the
-            // shared sync part-walker; tab stripping is applied after the
-            // body is assembled, matching the interpreter's eval path.
-            let unwrapped: Vec<crate::ast::StringPart> =
-                parts.iter().map(|sp| sp.part.clone()).collect();
-            let raw = eval_string_parts_sync(&unwrapped, ctx);
-            let body = if *strip_tabs {
-                crate::interpreter::strip_leading_tabs(&raw)
-            } else {
-                raw
-            };
-            Some(Value::String(body))
+            // Heredoc body materialization for redirect targets. `<<-` tab
+            // stripping applies to the literal source, not to tabs from a
+            // `$var` value — matching the interpreter's eval path.
+            let mut asm = crate::interpreter::HeredocAssembler::new(*strip_tabs);
+            for sp in parts {
+                match &sp.part {
+                    crate::ast::StringPart::Literal(s) => asm.push_literal(s),
+                    other => asm.push_interpolated(&eval_string_parts_sync(
+                        std::slice::from_ref(other),
+                        ctx,
+                    )),
+                }
+            }
+            Some(Value::String(asm.into_string()))
         }
         _ => None, // Binary ops and command subst need more context
     }

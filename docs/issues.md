@@ -179,11 +179,17 @@ NOTE: `xxd -r -p` trailing odd nibble was a **false positive** — kaish already
 matches GNU xxd (silently drops it); pinned by a test, not a bug.
 
 Still open (deferred — bigger than a builtin fix, each its own focused PR):
-- **Interpreter pair** (was a trio; the tilde item is fixed below): `export` inside
+- **Interpreter item** (was a trio; two of three fixed below): `export` inside
   a function is dropped on return — needs scope-frame-model work (the single
   `Scope.exported` set isn't merged back when a function's forked scope returns),
-  `interpreter/scope.rs`; `<<-` tab-stripping runs *after* interpolation, eating tabs
-  that came from a variable's value (`eval.rs`).
+  `interpreter/scope.rs`.
+  - ~~**`<<-` tab-stripping runs *after* interpolation**, eating tabs from a
+    variable's value.~~ FIXED 2026-06-26 (`fix/file-test-tilde`): new
+    `HeredocAssembler` (`interpreter/eval.rs`) strips leading tabs from the literal
+    source part-by-part; interpolated values are appended verbatim and terminate the
+    leading-tab run (bash strips source-line tabs before expansion). Wired into all
+    three interpolated-heredoc paths (sync `eval`, async `kernel`, sync `pipeline`
+    redirect-target). Tests in `heredoc_tests.rs`; bash-compat leg green.
   - ~~**File tests skip tilde** — `[[ -f ~/x ]]` always false.~~ FIXED 2026-06-26
     (`fix/file-test-tilde`): `eval_test_async` (the kernel path) now expands `~`
     against the session `HOME` via `apply_tilde_expansion` before stat'ing, matching

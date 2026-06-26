@@ -37,6 +37,6 @@ mod result;
 mod scope;
 
 pub use control_flow::ControlFlow;
-pub use eval::{eval_expr, expand_tilde, strip_leading_tabs, value_to_bool, value_to_exit_code, value_to_string, value_to_string_with_tilde, EvalError, EvalResult, Evaluator, Executor, NoOpExecutor};
+pub use eval::{eval_expr, expand_tilde, strip_leading_tabs, value_to_bool, value_to_exit_code, value_to_string, value_to_string_with_tilde, EvalError, EvalResult, Evaluator, Executor, HeredocAssembler, NoOpExecutor};
 pub use result::{apply_output_format, hex_dump, json_to_value, value_to_json, EntryType, ExecResult, OutputData, OutputFormat, OutputNode, OutputPayload};
 pub use scope::Scope;

@@ -36,6 +36,72 @@ pub fn strip_leading_tabs(s: &str) -> String {
     out
 }
 
+/// Assembles a heredoc body part-by-part, applying POSIX `<<-` leading-tab
+/// stripping to the **source** rather than to the materialized result.
+///
+/// Leading tabs that were literal in the heredoc source are stripped; a tab
+/// that arrives via an interpolation (`$var` value, `$(cmd)` output) at line
+/// start is preserved, because POSIX strips tabs from source lines *before*
+/// parameter expansion (bash agrees). Callers feed literal segments through
+/// [`push_literal`](Self::push_literal) and interpolated values through
+/// [`push_interpolated`](Self::push_interpolated). With `strip_tabs == false`
+/// this is a plain concatenation.
+///
+/// This replaces materialize-then-`strip_leading_tabs`, which ate tabs that
+/// came from a variable's value.
+pub struct HeredocAssembler {
+    out: String,
+    strip_tabs: bool,
+    at_line_start: bool,
+}
+
+impl HeredocAssembler {
+    pub fn new(strip_tabs: bool) -> Self {
+        Self {
+            out: String::new(),
+            strip_tabs,
+            at_line_start: true,
+        }
+    }
+
+    /// Append a literal source segment, stripping leading tabs at line starts
+    /// when in `<<-` mode.
+    pub fn push_literal(&mut self, literal: &str) {
+        if !self.strip_tabs {
+            self.out.push_str(literal);
+            return;
+        }
+        for ch in literal.chars() {
+            match ch {
+                '\n' => {
+                    self.out.push(ch);
+                    self.at_line_start = true;
+                }
+                '\t' if self.at_line_start => {} // strip a leading source tab
+                _ => {
+                    self.out.push(ch);
+                    self.at_line_start = false;
+                }
+            }
+        }
+    }
+
+    /// Append an interpolated value verbatim. The interpolation terminates the
+    /// leading-tab run for the current source line — even when it expands to
+    /// empty — so a following literal tab on the same source line is mid-line
+    /// and kept.
+    pub fn push_interpolated(&mut self, value: &str) {
+        self.out.push_str(value);
+        if self.strip_tabs {
+            self.at_line_start = false;
+        }
+    }
+
+    pub fn into_string(self) -> String {
+        self.out
+    }
+}
+
 /// Errors that can occur during expression evaluation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EvalError {
@@ -152,20 +218,19 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             Expr::VarRef(path) => self.eval_var_ref(path),
             Expr::Interpolated(parts) => self.eval_interpolated(parts),
             Expr::HereDocBody { parts, strip_tabs } => {
-                // Materialize the body using the existing interpolation logic,
-                // then apply POSIX tab stripping for the `<<-` form.
-                let unwrapped: Vec<StringPart> =
-                    parts.iter().map(|sp| sp.part.clone()).collect();
-                let value = self.eval_interpolated(&unwrapped)?;
-                if *strip_tabs {
-                    if let Value::String(s) = value {
-                        Ok(Value::String(strip_leading_tabs(&s)))
-                    } else {
-                        Ok(value)
+                // Assemble the body part-by-part so `<<-` tab stripping applies
+                // to the literal source, not to tabs that came from a `$var`.
+                let mut asm = HeredocAssembler::new(*strip_tabs);
+                for sp in parts {
+                    match &sp.part {
+                        StringPart::Literal(s) => asm.push_literal(s),
+                        other => {
+                            let value = self.eval_interpolated(std::slice::from_ref(other))?;
+                            asm.push_interpolated(&value_to_string(&value));
+                        }
                     }
-                } else {
-                    Ok(value)
                 }
+                Ok(Value::String(asm.into_string()))
             }
             Expr::BinaryOp { left, op, right } => self.eval_binary_op(left, *op, right),
             Expr::CommandSubst(stmts) => self.eval_command_subst(stmts),

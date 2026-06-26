@@ -3542,15 +3542,19 @@ impl Kernel {
                 Ok(Value::String(result))
             }
             Expr::HereDocBody { parts, strip_tabs } => {
-                let mut result = String::new();
+                // Assemble part-by-part so `<<-` tab stripping applies to the
+                // literal source, not to tabs from a `$var` value (bash strips
+                // source-line tabs before parameter expansion).
+                let mut asm = crate::interpreter::HeredocAssembler::new(*strip_tabs);
                 for sp in parts {
-                    result.push_str(&self.eval_string_part_async(&sp.part).await?);
+                    match &sp.part {
+                        StringPart::Literal(s) => asm.push_literal(s),
+                        other => {
+                            asm.push_interpolated(&self.eval_string_part_async(other).await?)
+                        }
+                    }
                 }
-                if *strip_tabs {
-                    Ok(Value::String(crate::interpreter::strip_leading_tabs(&result)))
-                } else {
-                    Ok(Value::String(result))
-                }
+                Ok(Value::String(asm.into_string()))
             }
             Expr::BinaryOp { left, op, right } => match op {
                 BinaryOp::And => {

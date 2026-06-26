@@ -76,6 +76,45 @@ async fn bare_cr_terminated_delimiter_still_matches() {
 }
 
 // ============================================================================
+// `<<-` tab stripping happens on the source, not on expanded values
+// ============================================================================
+//
+// POSIX `<<-` strips leading tabs from each *source* line before parameter
+// expansion. So a literal leading tab in the heredoc is removed, but a tab
+// that arrives via a `$var` value (or `$(cmd)` output) at line start is
+// preserved — bash agrees. The old interpreter path materialized the body and
+// *then* ran `strip_leading_tabs`, eating tabs that came from a variable.
+
+#[tokio::test]
+async fn dash_heredoc_strips_source_tabs_not_var_tabs() {
+    let k = setup().await;
+    // X holds a leading tab; the heredoc's own leading tabs are literal.
+    // Source line 1: <TAB>$X  -> strip the literal tab, keep X's tab.
+    // Source line 2: <TAB>after -> strip the literal tab.
+    let r = k
+        .execute("X=\"\tval\"\ncat <<-EOF\n\t$X\n\tafter\nEOF")
+        .await
+        .expect("ok");
+    assert_eq!(
+        r.text_out(),
+        "\tval\nafter\n",
+        "`<<-` must strip only the literal source tab, not the tab from $X"
+    );
+}
+
+#[tokio::test]
+async fn dash_heredoc_var_at_line_start_terminates_strip_run() {
+    let k = setup().await;
+    // The source line starts with `$X` (no literal leading tab), so a tab that
+    // follows on the same source line is mid-line and must be kept verbatim.
+    let r = k
+        .execute("X=hi\ncat <<-EOF\n$X\tkept\nEOF")
+        .await
+        .expect("ok");
+    assert_eq!(r.text_out(), "hi\tkept\n");
+}
+
+// ============================================================================
 // Unterminated heredoc — error rather than silent truncation
 // ============================================================================
 //
