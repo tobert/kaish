@@ -57,6 +57,15 @@ breaking entries are marked **BREAKING**.
   otherwise resolve to an external `/usr/bin/test` that evaluates against the real
   host filesystem, bypassing the VFS/overlay (a silent wrong boolean into `if`/`&&`).
 
+### Changed
+- **`jq` object keys now preserve insertion order** instead of being sorted
+  alphabetically — `echo '{"b":1,"a":2}' | jq .` emits `{"b":1,"a":2}`, matching
+  real jq. This comes from upgrading the native jq engine to jaq-core 3 / jaq-json 2
+  and enabling `serde_json`'s `preserve_order` workspace-wide, so any tool emitting
+  JSON objects (`--json` output, structured `.data`) now keeps source/insertion
+  order rather than sorting keys. `jq keys` (sorted) is unchanged; `keys_unsorted`
+  now correctly reports source order.
+
 ### Removed
 - **BREAKING: the `test` builtin and `[` command are gone.** Use `[[ … ]]`, the one
   supported test form. The removed builtins never worked end-to-end through the
@@ -78,7 +87,9 @@ breaking entries are marked **BREAKING**.
 - **Hermeticity: external-command resolution no longer falls back to the OS `PATH`.** `try_execute_external` (and the test-only `BackendDispatcher` spawn site) read `PATH` from kernel scope only — when it's absent they no longer reach into `std::env::var("PATH")`, which contradicted the "kernel never reads OS env" contract. A frontend that wants host `PATH` seeds it via `initial_vars` (the REPL already does, with `os_env_vars()`); an embedder that doesn't gets a kernel that can't resolve external commands at all (the strongest hermetic default). No behavior change for the REPL or any embedder that seeds env.
 
 ### Fixed
-- **`jq` renders integral numbers without a trailing `.0`.** `6/2` → `3` (not `3.0`) and the literal `1e10` → `10000000000`, matching jq's number canonicalization; fractional values like `5/2` → `2.5` are unchanged. (jaq produced a float that serialized with `.0`.)
+- **`jq` renders integral numbers without a trailing `.0`.** `6/2` → `3` (not `3.0`) and the literal `1e10` → `10000000000`, matching jq's number canonicalization; fractional values like `5/2` → `2.5` are unchanged. (jaq produces a float that the writer would otherwise print with `.0`.)
+- **`jq` indexing `null` returns `null`** (`echo null | jq '.a'` → `null`), instead of erroring "cannot use null as iterable" — matching real jq (via the jaq 3 upgrade).
+- **`jq` handles large integers exactly.** A big integer literal like `9999999999999999999999` round-trips verbatim instead of degrading to `1e+22` (jaq-json 2's bignum-backed numbers).
 - **`export NAME=VALUE` inside a function publishes to the shared scope.** Like a plain assignment (and like bash), the value now persists after the function returns instead of dying with the function's frame. Previously the export *marking* survived but the value was written to the function frame and dropped — leaving an exported name with no value.
 - **`<<-` heredocs strip tabs from the source, not from `$var` values.** POSIX `<<-` removes leading tabs from each *source* line before parameter expansion, so a tab that arrives via a `$var` value (or `$(cmd)` output) at line start is now preserved (bash parity). Previously the body was materialized and *then* tab-stripped, eating tabs that came from a variable.
 - **`[[ -f ~/x ]]` and other `[[ ]]` file tests expand `~`** to the session `HOME` before stat'ing, the same way argv positionals do. Previously the kernel stat'd the literal `~/x`, so every `~`-prefixed file test (`-f`/`-d`/`-e`/`-r`/`-w`/`-x`) was false. Hermetic kernels (no `HOME` in scope) still leave `~` literal.

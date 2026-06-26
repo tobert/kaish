@@ -75,7 +75,7 @@ grep-regex = { workspace = true }
 grep-matcher = { workspace = true }
 bstr = { workspace = true }
 
-# jq (native implementation via jaq v2)
+# jq (native implementation via jaq v3)
 jaq-core = { workspace = true }
 jaq-std = { workspace = true }
 jaq-json = { workspace = true }

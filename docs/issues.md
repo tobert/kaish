@@ -355,22 +355,30 @@ loses link-ness. Fix: teach `move_dir_recursive` to `lstat` children and
   (empty); setting `NF` doesn't truncate fields/`$0`; `split(s,a,/re/)` evaluates the
   regex as a `$0`-match (wrong count); `sub`/`gsub` replacements lack `\1`..`\9`
   backrefs. (`tools/builtin/awk.rs`)
-- **jq number formatting** — FIXED 2026-06-26 (`fix/file-test-tilde`): integral
-  results render without `.0` (`6/2`→`3`, `1e10`→`10000000000`) via
-  `jq_float_to_json`/`num_str_to_json` in `jq_native.rs`; fractional values
-  unchanged. Tests in `jq_tests.rs`.
-- **jq `keys_unsorted` returns *sorted* keys (dependency-level, deferred).** Root
-  cause: `serde_json` is built **without** `preserve_order`, so objects parse into a
-  sorted `BTreeMap` and insertion order is lost *at parse* — before jaq's
-  `keys_unsorted` ever runs. This also means *all* jq object output is key-sorted, not
-  insertion-ordered as real jq does. Fixing means enabling `serde_json/preserve_order`
-  (IndexMap) workspace-wide and confirming `jaq_json` preserves order; that flips every
-  object's key order to insertion order — its own change with a snapshot/test sweep, not
-  a one-liner. (`jq_native.rs::json_to_val`, workspace `serde_json` feature)
-- **jq indexing `null` (`null | .a`) errors where real jq returns `null` (jaq-core,
-  deferred).** jaq-core's field access on `null` raises "cannot use null as iterable"
-  rather than yielding `null`. Can't fix without patching/upgrading jaq; revisit on a
-  jaq bump. (jaq-core)
+- **jq cluster — ALL FIXED** by the jaq-core 3 / jaq-json 2 upgrade
+  (`chore/jaq-3-bump`, 2026-06-26):
+  - ~~number formatting~~ integral results render without `.0` (`6/2`→`3`,
+    `1e10`→`10000000000`). The `jq_float_to_json`/`num_str_to_json` serde-side
+    helpers were replaced by `canonicalize_numbers` (integral `Num::Float`→`Num::Int`)
+    in front of jaq's native writer.
+  - ~~`keys_unsorted` returns *sorted* keys~~ FIXED: jaq-json 2's `Val::Obj` is an
+    IndexMap and `serde_json` now has `preserve_order` (workspace-wide), so insertion
+    order survives the input parse. *All* jq object output is now insertion-ordered
+    (jq parity); `keys` (sorted) is unchanged.
+  - ~~indexing `null` (`null | .a`) errors~~ FIXED: jaq-json 2's `index_opt` maps
+    `null` → `None` → `null`.
+  - bonus: large integers are now exact (bignum-backed `Num`), no `1e+22` degrade.
+  Tests in `jq_tests.rs`. Residuals (both low-severity, not regressions):
+  - `1e100` renders as `1e100` (jaq) where jq prints `1e+100` — cosmetic, out-of-range
+    float, not worth special-casing.
+  - **Big integers >2^63 are exact on stdout but lossy in `.data`.** jaq's writer
+    prints them exactly, but `val_to_json` round-trips through `serde_json` (no
+    `arbitrary_precision`), which parses an integer past ±2^63 as `f64`. So
+    `jq -cn '9999999999999999999999'` prints 22 exact digits, but
+    `for x in $(jq …)` / `kaish-last` see ~1e22. `.data` was always f64-limited (the
+    pre-upgrade path too); only stdout improved, so this is a widened asymmetry, not a
+    regression. The clean fix is `serde_json/arbitrary_precision` — a broad,
+    independent workspace change; defer until a consumer actually needs big-int `.data`.
 - **External output via `BoundedStream` keeps only the tail and sets no spill signal**
   in the `output_limit::none()` path (repl/transient/default) — silent truncation,
   head lost. (When output-limit is enabled — agent presets — spill + exit-3 work.)
