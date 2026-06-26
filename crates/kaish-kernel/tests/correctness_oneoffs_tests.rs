@@ -94,12 +94,11 @@ async fn jq_zero_over_zero_nan_is_loud() {
 #[tokio::test]
 async fn jq_finite_division_still_works() {
     // Regression guard: ordinary (finite) division is untouched by the
-    // non-finite check. jaq renders the f64 result as `3.0` (a separate
-    // float-formatting quirk, out of scope here) — what matters is exit 0 and
-    // a real numeric value, not `null`.
+    // non-finite check — exit 0 and a real numeric value, not `null`. The
+    // integral result renders as `3` (jq number canonicalization), not `3.0`.
     let tmp = tempfile::tempdir().unwrap();
     let kernel = kernel_at(tmp.path());
     let (out, code) = run(&kernel, "echo '6' | jq '. / 2'").await;
     assert_eq!(code, 0, "got: {out}");
-    assert_eq!(out, "3.0");
+    assert_eq!(out, "3");
 }

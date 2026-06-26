@@ -285,3 +285,49 @@ async fn jq_argjson_invalid_json_errors() {
         r.err
     );
 }
+
+// ============================================================================
+// Number formatting — jq canonicalizes integral floats to integers
+// ============================================================================
+//
+// jaq produces a float for `6/2` and for a literal like `1e10`; serde_json
+// then renders it with a trailing `.0`. Real jq prints integral numbers
+// without a decimal point (`3`, `10000000000`), keeping a fractional value as
+// `2.5`. These pin the canonicalization (see val_to_json / format_raw).
+
+#[tokio::test]
+async fn jq_integral_division_has_no_decimal() {
+    let k = setup().await;
+    let r = k.execute("jq -cn '6/2'").await.expect("ran");
+    assert_eq!(r.text_out().trim(), "3");
+}
+
+#[tokio::test]
+async fn jq_large_integral_literal_has_no_decimal() {
+    let k = setup().await;
+    let r = k.execute("jq -cn '1e10'").await.expect("ran");
+    assert_eq!(r.text_out().trim(), "10000000000");
+}
+
+#[tokio::test]
+async fn jq_fractional_value_keeps_decimal() {
+    let k = setup().await;
+    let r = k.execute("jq -cn '5/2'").await.expect("ran");
+    assert_eq!(r.text_out().trim(), "2.5");
+}
+
+#[tokio::test]
+async fn jq_raw_integral_float_has_no_decimal() {
+    // -r output path goes through format_raw, not val_to_json.
+    let k = setup().await;
+    let r = k.execute("jq -rn '6/2'").await.expect("ran");
+    assert_eq!(r.text_out().trim(), "3");
+}
+
+#[tokio::test]
+async fn jq_integral_float_inside_array_has_no_decimal() {
+    // Nested through val_to_json's recursive array path.
+    let k = setup().await;
+    let r = k.execute("jq -cn '[6/2, 5/2]'").await.expect("ran");
+    assert_eq!(r.text_out().trim(), "[3,2.5]");
+}

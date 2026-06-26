@@ -262,8 +262,9 @@ fn format_raw(val: &Val) -> String {
         Val::Null => "null".to_string(),
         Val::Bool(b) => b.to_string(),
         Val::Int(n) => n.to_string(),
-        Val::Float(n) => format!("{:?}", n),
-        Val::Num(s) => s.to_string(),
+        // Match jq's number canonicalization (`6/2` → `3`, not `3.0`).
+        Val::Float(n) => jq_float_to_json(*n).to_string(),
+        Val::Num(s) => num_str_to_json(s).to_string(),
         Val::Arr(arr) => {
             let items: Vec<String> = arr.iter().map(format_raw).collect();
             items.join("\n")
@@ -319,19 +320,50 @@ fn has_nonfinite_float(val: &Val) -> bool {
     }
 }
 
+/// Render a finite f64 the way jq does: an integral value within f64's
+/// exact-integer range prints without a decimal point (`6/2` → `3`, the literal
+/// `1e10` → `10000000000`), while a fractional value keeps it (`5/2` → `2.5`).
+/// jaq hands us a float for these where jq would print an integer; serde_json
+/// renders `Number::from_f64(3.0)` as `3.0`, so canonicalize to an integer
+/// `Number` when the value is integral. Non-finite floats can't reach here —
+/// `has_nonfinite_float` turns those into a loud error first.
+fn jq_float_to_json(n: f64) -> serde_json::Value {
+    // 2^53 is the largest f64 with exact-integer precision; above it the
+    // `as i64` round-trip is lossy, so keep the float form (jq does too).
+    const EXACT_INT_LIMIT: f64 = 9_007_199_254_740_992.0;
+    if n.is_finite() && n.fract() == 0.0 && n.abs() < EXACT_INT_LIMIT {
+        serde_json::Value::Number((n as i64).into())
+    } else {
+        serde_json::Number::from_f64(n)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null)
+    }
+}
+
+/// Canonicalize a jaq `Val::Num` (a number jaq kept as a string, e.g. the
+/// literal `1e10`) the way jq renders it. A plain integer literal — including
+/// one too big for `i64` — is preserved verbatim so we don't round-trip a big
+/// integer through lossy `f64`; a float/exponent form has its integral values
+/// canonicalized (`1e10` → `10000000000`).
+fn num_str_to_json(s: &str) -> serde_json::Value {
+    if s.parse::<i128>().is_ok() {
+        return serde_json::from_str(s)
+            .unwrap_or_else(|_| serde_json::Value::String(s.to_string()));
+    }
+    match s.parse::<f64>() {
+        Ok(f) => jq_float_to_json(f),
+        Err(_) => serde_json::Value::String(s.to_string()),
+    }
+}
+
 /// Convert jaq Val to serde_json Value.
 fn val_to_json(val: &Val) -> serde_json::Value {
     match val {
         Val::Null => serde_json::Value::Null,
         Val::Bool(b) => serde_json::Value::Bool(*b),
         Val::Int(n) => serde_json::Value::Number((*n as i64).into()),
-        Val::Float(n) => serde_json::Number::from_f64(*n)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        Val::Num(s) => {
-            // Parse the string number back to a JSON number
-            serde_json::from_str(s).unwrap_or(serde_json::Value::String(s.to_string()))
-        }
+        Val::Float(n) => jq_float_to_json(*n),
+        Val::Num(s) => num_str_to_json(s),
         Val::Str(s) => serde_json::Value::String(s.to_string()),
         Val::Arr(arr) => serde_json::Value::Array(arr.iter().map(val_to_json).collect()),
         Val::Obj(obj) => {
