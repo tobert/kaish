@@ -286,11 +286,16 @@ fn canonical_integral(num: &Num) -> Option<Num> {
         // Int/BigInt are already integral; jaq prints them correctly.
         Num::Int(_) | Num::BigInt(_) => return None,
     };
+    // 2^53 is the largest magnitude where every integer is uniquely f64-exact;
+    // the bound is inclusive because 2^53 itself is exactly representable (jq
+    // prints `pow(2;53)` as the integer `9007199254740992`). Above it, an
+    // integral-looking float isn't a distinct integer and jq's own
+    // literal-vs-computed preservation diverges, so we leave it to jaq's writer.
     const EXACT_INT_LIMIT: f64 = 9_007_199_254_740_992.0;
-    // Below 2^53 every integral f64 is exactly an i64; `Num::from_integral`
-    // then picks `Int` (or `BigInt` on a 32-bit `isize` target like wasm32),
-    // so this stays correct off 64-bit — a plain `as isize` would saturate.
-    (f.is_finite() && f.fract() == 0.0 && f.abs() < EXACT_INT_LIMIT)
+    // `f as i64` is exact here; `Num::from_integral` then picks `Int` (or
+    // `BigInt` on a 32-bit `isize` target like wasm32), so this stays correct
+    // off 64-bit — a plain `as isize` would saturate.
+    (f.is_finite() && f.fract() == 0.0 && f.abs() <= EXACT_INT_LIMIT)
         .then(|| Num::from_integral(f as i64))
 }
 
@@ -303,7 +308,10 @@ fn canonicalize_numbers(val: &Val) -> Val {
         Val::Arr(arr) => Val::Arr(Rc::new(arr.iter().map(canonicalize_numbers).collect())),
         Val::Obj(obj) => Val::obj(
             obj.iter()
-                .map(|(k, v)| (k.clone(), canonicalize_numbers(v)))
+                // Canonicalize keys too: jaq (unlike jq) tolerates a numeric
+                // object key, and a number should render the same in key
+                // position as in value position.
+                .map(|(k, v)| (canonicalize_numbers(k), canonicalize_numbers(v)))
                 .collect(),
         ),
         other => other.clone(),

@@ -382,6 +382,16 @@ async fn jq_keys_sorted_still_sorts() {
 }
 
 #[tokio::test]
+async fn jq_two_to_the_53_canonicalizes_to_integer() {
+    // 2^53 is exactly f64-representable, so a computed integral result at the
+    // boundary prints as an integer (jq: `pow(2;53)` → `9007199254740992`),
+    // not `9007199254740992.0`. Pins the inclusive `<=` bound.
+    let k = setup().await;
+    let r = k.execute("jq -cn 'pow(2;53)'").await.expect("ran");
+    assert_eq!(r.text_out().trim(), "9007199254740992");
+}
+
+#[tokio::test]
 async fn jq_big_integer_is_exact() {
     // jaq-json 2.0's BigInt-backed numbers render a large integer literal
     // exactly, instead of going through lossy f64 (`1e+22`).
