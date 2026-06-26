@@ -22,20 +22,25 @@ fn tempdir() -> tempfile::TempDir {
         .expect("tempdir under CARGO_TARGET_TMPDIR")
 }
 
-/// A localfs kernel with cwd and HOME both seeded to `dir` (what the REPL does:
-/// HOME comes from the frontend via `initial_vars`).
-fn kernel_at(dir: &Path) -> Kernel {
+/// A localfs kernel with the given cwd and HOME (HOME comes from the frontend
+/// via `initial_vars`, the way the REPL seeds it).
+fn kernel_with_cwd_home(cwd: &Path, home: &Path) -> Kernel {
     let mut vars = HashMap::new();
     vars.insert(
         "HOME".to_string(),
-        Value::String(dir.to_string_lossy().into_owned()),
+        Value::String(home.to_string_lossy().into_owned()),
     );
     let config = KernelConfig::repl()
-        .with_cwd(dir.to_path_buf())
+        .with_cwd(cwd.to_path_buf())
         .with_initial_vars(vars)
         .with_latch(false)
         .with_trash(false);
     Kernel::new(config).expect("kernel")
+}
+
+/// The common case: cwd and HOME are the same directory.
+fn kernel_at(dir: &Path) -> Kernel {
+    kernel_with_cwd_home(dir, dir)
 }
 
 #[tokio::test]
@@ -65,15 +70,26 @@ async fn file_test_tilde_dir() {
 }
 
 #[tokio::test]
-async fn file_test_tilde_absent_is_false() {
-    let dir = tempdir();
-    let kernel = kernel_at(dir.path());
+async fn file_test_tilde_resolves_against_home_not_cwd() {
+    // HOME and cwd are *different* dirs; the file lives only under HOME. So
+    // `~/only-in-home.txt` is found only if `~` expands to HOME:
+    //   - correct impl  → stats `<HOME>/only-in-home.txt` (present) → "yes"
+    //   - non-expanding → stats the literal `~/only-in-home.txt` relative to
+    //     cwd (absent there) → "no"
+    // This fails if tilde expansion is ever dropped (the absent-file form is
+    // not differential — a literal `~/x` is absent for the wrong reason).
+    let home = tempdir();
+    let cwd = tempdir();
+    std::fs::write(home.path().join("only-in-home.txt"), b"hi").unwrap();
+    let kernel = kernel_with_cwd_home(cwd.path(), home.path());
 
-    // ~ expands, but the file genuinely doesn't exist → false (not a literal
-    // `~/nope` that happens to be absent for the wrong reason).
     let out = kernel
-        .execute("[[ -f ~/nope.txt ]] && echo 'yes' || echo 'no'")
+        .execute("[[ -f ~/only-in-home.txt ]] && echo 'yes' || echo 'no'")
         .await
         .unwrap();
-    assert_eq!(out.text_out().trim(), "no");
+    assert_eq!(
+        out.text_out().trim(),
+        "yes",
+        "`~` did not resolve against the session HOME"
+    );
 }
