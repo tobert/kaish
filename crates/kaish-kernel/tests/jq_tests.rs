@@ -318,7 +318,7 @@ async fn jq_fractional_value_keeps_decimal() {
 
 #[tokio::test]
 async fn jq_raw_integral_float_has_no_decimal() {
-    // -r output path goes through format_raw, not val_to_json.
+    // -r output path.
     let k = setup().await;
     let r = k.execute("jq -rn '6/2'").await.expect("ran");
     assert_eq!(r.text_out().trim(), "3");
@@ -326,8 +326,80 @@ async fn jq_raw_integral_float_has_no_decimal() {
 
 #[tokio::test]
 async fn jq_integral_float_inside_array_has_no_decimal() {
-    // Nested through val_to_json's recursive array path.
+    // Nested through the recursive number-canonicalization path.
     let k = setup().await;
     let r = k.execute("jq -cn '[6/2, 5/2]'").await.expect("ran");
     assert_eq!(r.text_out().trim(), "[3,2.5]");
+}
+
+// ============================================================================
+// jaq 3.x capabilities — fixed by the jaq-core 3 / jaq-json 2 upgrade
+// ============================================================================
+
+#[tokio::test]
+async fn jq_indexing_null_returns_null() {
+    // Real jq: `null | .a` yields `null` (jaq 2.x errored "cannot use null as
+    // iterable"). Fixed by jaq-json 2.0's `index_opt` (null → None → null).
+    let k = setup().await;
+    let r = k.execute("echo 'null' | jq -c '.a'").await.expect("ran");
+    assert!(r.ok(), "null index should not error: {}", r.err);
+    assert_eq!(r.text_out().trim(), "null");
+}
+
+#[tokio::test]
+async fn jq_keys_unsorted_preserves_insertion_order() {
+    // `keys_unsorted` must return keys in source order, not sorted. Requires
+    // both jaq-json 2.0's IndexMap objects AND serde_json `preserve_order` so
+    // order survives the input parse.
+    let k = setup().await;
+    let r = k
+        .execute("echo '{\"b\":1,\"a\":2}' | jq -c 'keys_unsorted'")
+        .await
+        .expect("ran");
+    assert_eq!(r.text_out().trim(), "[\"b\",\"a\"]");
+}
+
+#[tokio::test]
+async fn jq_object_output_preserves_insertion_order() {
+    // A plain object passes through in source order (jq parity), not sorted.
+    let k = setup().await;
+    let r = k
+        .execute("echo '{\"b\":1,\"a\":2}' | jq -c '.'")
+        .await
+        .expect("ran");
+    assert_eq!(r.text_out().trim(), "{\"b\":1,\"a\":2}");
+}
+
+#[tokio::test]
+async fn jq_keys_sorted_still_sorts() {
+    // `keys` (sorted) is unaffected by the insertion-order change.
+    let k = setup().await;
+    let r = k
+        .execute("echo '{\"b\":1,\"a\":2}' | jq -c 'keys'")
+        .await
+        .expect("ran");
+    assert_eq!(r.text_out().trim(), "[\"a\",\"b\"]");
+}
+
+#[tokio::test]
+async fn jq_big_integer_is_exact() {
+    // jaq-json 2.0's BigInt-backed numbers render a large integer literal
+    // exactly, instead of going through lossy f64 (`1e+22`).
+    let k = setup().await;
+    let r = k
+        .execute("jq -cn '9999999999999999999999'")
+        .await
+        .expect("ran");
+    assert_eq!(r.text_out().trim(), "9999999999999999999999");
+}
+
+#[tokio::test]
+async fn jq_pretty_output_is_two_space_indented() {
+    // Default (non -c) output is pretty-printed via jaq's writer.
+    let k = setup().await;
+    let r = k
+        .execute("echo '{\"a\":1}' | jq '.'")
+        .await
+        .expect("ran");
+    assert_eq!(r.text_out(), "{\n  \"a\": 1\n}\n");
 }

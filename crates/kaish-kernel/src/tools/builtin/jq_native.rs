@@ -20,8 +20,10 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
-use jaq_core::{load, compile, Ctx, RcIter};
-use jaq_json::Val;
+use jaq_core::{data, load, unwrap_valr, Compiler, Ctx, Vars};
+use jaq_json::write::Pp;
+use jaq_json::{Num, Val};
+use jaq_std::ValT as _;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
@@ -77,7 +79,10 @@ struct JqArgs {
     rest: Vec<String>,
 }
 
-type Filter = jaq_core::Filter<jaq_core::Native<Val>>;
+/// jaq 3.x data kind: filters that process `Val` and carry only the LUT as
+/// data (no lazy inputs). `JustLut` requires `V: 'static`, which `Val` is.
+type DataKind = data::JustLut<Val>;
+type Filter = jaq_core::Filter<DataKind>;
 
 /// True when `key` (`arg`/`argjson`) carries a legal `consumes=2` binding: an
 /// array whose elements are themselves arrays (NAME/VALUE pairs from the space
@@ -101,8 +106,8 @@ fn compile_filter(filter_str: &str, global_vars: &[String]) -> Result<Filter, St
     // Create arena for parsing
     let arena = load::Arena::default();
 
-    // Load standard library definitions
-    let defs = jaq_std::defs().chain(jaq_json::defs());
+    // Load standard library definitions (jaq 3.x splits core defs out).
+    let defs = jaq_core::defs().chain(jaq_std::defs()).chain(jaq_json::defs());
     let loader = load::Loader::new(defs);
 
     // Parse the filter
@@ -123,8 +128,10 @@ fn compile_filter(filter_str: &str, global_vars: &[String]) -> Result<Filter, St
         })?;
 
     // Compile with standard library functions and any `--arg` / `--argjson` bindings.
-    let funs = jaq_std::funs().chain(jaq_json::funs());
-    let compiler = compile::Compiler::default()
+    let funs = jaq_core::funs::<DataKind>()
+        .chain(jaq_std::funs())
+        .chain(jaq_json::funs());
+    let compiler = Compiler::default()
         .with_funs(funs)
         .with_global_vars(global_vars.iter().map(String::as_str));
     let filter = compiler.compile(modules).map_err(|errs| {
@@ -168,42 +175,33 @@ fn execute_filter_json(
     compact: bool,
     var_values: Vec<serde_json::Value>,
 ) -> Result<JqRun, String> {
-    // Convert serde_json::Value to jaq_json::Val
+    // Convert serde_json::Value to jaq_json::Val (jaq 3.x ships a serde
+    // `Deserialize for Val`, which preserves object insertion order into the
+    // IndexMap-backed `Val::Obj`).
     let input_val = json_to_val(json);
     let vars: Vec<Val> = var_values.into_iter().map(json_to_val).collect();
 
-    // Create execution context with empty inputs iterator
-    let inputs: RcIter<_> = RcIter::new(Box::new(core::iter::empty()));
-    let ctx = Ctx::new(vars, &inputs);
+    // jaq 3.x execution: the context carries the compiled filter's LUT plus the
+    // `--arg`/`--argjson` bindings (in declaration order); `filter.id` is the
+    // entry term, run against the input value. `unwrap_valr` flattens the
+    // exception layer into `Result<Val, Error>`.
+    let ctx = Ctx::<DataKind>::new(&filter.lut, Vars::new(vars));
 
-    // Run the filter
-    let results: Vec<Result<Val, jaq_core::Error<Val>>> = filter
-        .run((ctx, input_val))
-        .collect();
-
-    // Format output and collect raw values in lock-step.
     let mut text = String::new();
-    let mut values = Vec::with_capacity(results.len());
-    for result in results {
+    let mut values = Vec::new();
+    for result in filter.id.run((ctx, input_val)).map(unwrap_valr) {
         match result {
             Ok(val) => {
-                // jaq evaluates `n / 0` to a non-finite float (`inf`/`-inf`/
-                // `NaN`) rather than erroring like real jq; `val_to_json` would
-                // then silently coerce it to `null` (JSON has no infinity).
-                // Fail loudly instead of emitting that silent-wrong null.
+                // jaq still evaluates `n / 0` to a non-finite float
+                // (`inf`/`-inf`/`NaN`) rather than erroring like real jq, and
+                // JSON has no infinity. Fail loudly instead of rendering it.
                 if has_nonfinite_float(&val) {
                     return Err(
                         "jq runtime error: numeric result is not finite (division by zero?)"
                             .to_string(),
                     );
                 }
-                let formatted = if raw_output {
-                    format_raw(&val)
-                } else if compact {
-                    format_compact(&val)
-                } else {
-                    format_json(&val)
-                };
+                let formatted = render_value(&val, raw_output, compact);
                 if !text.is_empty() {
                     text.push('\n');
                 }
@@ -211,7 +209,7 @@ fn execute_filter_json(
                 values.push(val_to_json(&val));
             }
             Err(e) => {
-                return Err(format!("jq runtime error: {}", e));
+                return Err(format!("jq runtime error: {e}"));
             }
         }
     }
@@ -227,60 +225,105 @@ fn execute_filter_json(
 }
 
 /// Convert serde_json::Value to jaq_json::Val.
+///
+/// Objects keep insertion order: with the `preserve_order` feature a
+/// `serde_json::Map` is an IndexMap, and `Val::Obj` is too, so `keys_unsorted`
+/// and plain object output stay in source order (jq parity).
 fn json_to_val(json: serde_json::Value) -> Val {
     use std::rc::Rc;
     match json {
         serde_json::Value::Null => Val::Null,
         serde_json::Value::Bool(b) => Val::Bool(b),
+        // Without serde_json's `arbitrary_precision`, every number is exactly
+        // one of i64/u64/f64; `Num::from_integral` keeps integers exact (via
+        // BigInt when they exceed isize).
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                // Try to fit in isize, fall back to Num for large values
-                if let Ok(i) = isize::try_from(i) {
-                    Val::Int(i)
-                } else {
-                    Val::Num(Rc::new(n.to_string()))
-                }
+                Val::Num(Num::from_integral(i))
+            } else if let Some(u) = n.as_u64() {
+                Val::Num(Num::from_integral(u))
             } else if let Some(f) = n.as_f64() {
-                Val::Float(f)
+                Val::Num(Num::Float(f))
             } else {
-                // Fall back to string representation for very large numbers
-                Val::Num(Rc::new(n.to_string()))
+                Val::Null
             }
         }
-        serde_json::Value::String(s) => Val::Str(Rc::new(s)),
-        serde_json::Value::Array(arr) => Val::Arr(Rc::new(arr.into_iter().map(json_to_val).collect())),
-        serde_json::Value::Object(obj) => {
-            Val::obj(obj.into_iter().map(|(k, v)| (Rc::new(k), json_to_val(v))).collect())
+        serde_json::Value::String(s) => Val::from(s),
+        serde_json::Value::Array(arr) => {
+            Val::Arr(Rc::new(arr.into_iter().map(json_to_val).collect()))
         }
+        serde_json::Value::Object(obj) => Val::obj(
+            obj.into_iter()
+                .map(|(k, v)| (Val::from(k), json_to_val(v)))
+                .collect(),
+        ),
     }
 }
 
-/// Format a jaq value as raw output (strings without quotes).
-fn format_raw(val: &Val) -> String {
+/// Pretty-printer for `jq` default (multi-line) output: two-space indent and a
+/// space after `:`, objects in insertion order (jaq's writer, not serde_json).
+fn pretty_pp() -> Pp {
+    Pp {
+        indent: Some("  ".to_string()),
+        sep_space: true,
+        ..Pp::default()
+    }
+}
+
+/// jq prints an integral number without a decimal point (`6/2` → `3`, the
+/// literal `1e10` → `10000000000`), but jaq keeps the float (`3.0`, `1e10`).
+/// Return an integer `Num` for an integral value within f64's exact-integer
+/// range (2^53), else `None` to leave it as jaq rendered it (a fractional value
+/// like `2.5`, or a huge float like `1e100` that jq also keeps in float form).
+fn canonical_integral(num: &Num) -> Option<Num> {
+    let f = match num {
+        Num::Float(f) => *f,
+        Num::Dec(s) => s.parse::<f64>().ok()?,
+        // Int/BigInt are already integral; jaq prints them correctly.
+        Num::Int(_) | Num::BigInt(_) => return None,
+    };
+    const EXACT_INT_LIMIT: f64 = 9_007_199_254_740_992.0;
+    (f.is_finite() && f.fract() == 0.0 && f.abs() < EXACT_INT_LIMIT)
+        .then_some(Num::Int(f as isize))
+}
+
+/// Recursively canonicalize integral floats to integers so jaq's writer prints
+/// them the jq way (see [`canonical_integral`]). Other values pass through.
+fn canonicalize_numbers(val: &Val) -> Val {
+    use std::rc::Rc;
     match val {
-        Val::Str(s) => s.to_string(),
-        Val::Null => "null".to_string(),
-        Val::Bool(b) => b.to_string(),
-        Val::Int(n) => n.to_string(),
-        // Match jq's number canonicalization (`6/2` → `3`, not `3.0`).
-        Val::Float(n) => jq_float_to_json(*n).to_string(),
-        Val::Num(s) => num_str_to_json(s).to_string(),
-        Val::Arr(arr) => {
-            let items: Vec<String> = arr.iter().map(format_raw).collect();
-            items.join("\n")
-        }
-        Val::Obj(_) => serde_json::to_string(&val_to_json(val)).unwrap_or_default(),
+        Val::Num(n) => Val::Num(canonical_integral(n).unwrap_or_else(|| n.clone())),
+        Val::Arr(arr) => Val::Arr(Rc::new(arr.iter().map(canonicalize_numbers).collect())),
+        Val::Obj(obj) => Val::obj(
+            obj.iter()
+                .map(|(k, v)| (k.clone(), canonicalize_numbers(v)))
+                .collect(),
+        ),
+        other => other.clone(),
     }
 }
 
-/// Format a jaq value as JSON.
-fn format_json(val: &Val) -> String {
-    serde_json::to_string_pretty(&val_to_json(val)).unwrap_or_default()
-}
-
-/// Format a jaq value as compact single-line JSON (`jq -c`).
-fn format_compact(val: &Val) -> String {
-    serde_json::to_string(&val_to_json(val)).unwrap_or_default()
+/// Render a jaq value to text the way jq does, using jaq's native writer
+/// (insertion-ordered objects, exact big integers) after canonicalizing
+/// integral floats (`6/2` → `3`). `-c` is compact (`Pp::default`); the default
+/// is pretty. `-r` prints a top-level string's bytes verbatim (no quotes) and
+/// otherwise falls back to compact JSON.
+fn render_value(val: &Val, raw_output: bool, compact: bool) -> String {
+    if raw_output {
+        if let Some(bytes) = val.as_bytes() {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+    }
+    let val = canonicalize_numbers(val);
+    let pp = if compact || raw_output {
+        Pp::default()
+    } else {
+        pretty_pp()
+    };
+    let mut buf: Vec<u8> = Vec::new();
+    // Writing to a Vec never fails.
+    let _ = jaq_json::write::write(&mut buf, &pp, 0, &val);
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Convert ast::Value to serde_json::Value for jq processing.
@@ -313,67 +356,23 @@ fn ast_value_to_json(value: &Value) -> serde_json::Value {
 /// zero (a non-finite float that JSON renders as `null`) into a loud error.
 fn has_nonfinite_float(val: &Val) -> bool {
     match val {
-        Val::Float(n) => !n.is_finite(),
+        Val::Num(Num::Float(n)) => !n.is_finite(),
         Val::Arr(arr) => arr.iter().any(has_nonfinite_float),
-        Val::Obj(obj) => obj.iter().any(|(_, v)| has_nonfinite_float(v)),
+        Val::Obj(obj) => obj.values().any(has_nonfinite_float),
         _ => false,
     }
 }
 
-/// Render a finite f64 the way jq does: an integral value within f64's
-/// exact-integer range prints without a decimal point (`6/2` → `3`, the literal
-/// `1e10` → `10000000000`), while a fractional value keeps it (`5/2` → `2.5`).
-/// jaq hands us a float for these where jq would print an integer; serde_json
-/// renders `Number::from_f64(3.0)` as `3.0`, so canonicalize to an integer
-/// `Number` when the value is integral. Non-finite floats can't reach here —
-/// `has_nonfinite_float` turns those into a loud error first.
-fn jq_float_to_json(n: f64) -> serde_json::Value {
-    // 2^53 is the largest f64 with exact-integer precision; above it the
-    // `as i64` round-trip is lossy, so keep the float form (jq does too).
-    const EXACT_INT_LIMIT: f64 = 9_007_199_254_740_992.0;
-    if n.is_finite() && n.fract() == 0.0 && n.abs() < EXACT_INT_LIMIT {
-        serde_json::Value::Number((n as i64).into())
-    } else {
-        serde_json::Number::from_f64(n)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null)
-    }
-}
-
-/// Canonicalize a jaq `Val::Num` (a number jaq kept as a string, e.g. the
-/// literal `1e10`) the way jq renders it. A plain integer literal — including
-/// one too big for `i64` — is preserved verbatim so we don't round-trip a big
-/// integer through lossy `f64`; a float/exponent form has its integral values
-/// canonicalized (`1e10` → `10000000000`).
-fn num_str_to_json(s: &str) -> serde_json::Value {
-    if s.parse::<i128>().is_ok() {
-        return serde_json::from_str(s)
-            .unwrap_or_else(|_| serde_json::Value::String(s.to_string()));
-    }
-    match s.parse::<f64>() {
-        Ok(f) => jq_float_to_json(f),
-        Err(_) => serde_json::Value::String(s.to_string()),
-    }
-}
-
-/// Convert jaq Val to serde_json Value.
+/// Convert a jaq `Val` to a `serde_json::Value` for `.data`.
+///
+/// Reuses jaq's own (correct) compact serialization, then parses it back into
+/// serde_json — so number formatting and object key order in `.data` match
+/// stdout exactly, without hand-matching the `Val` enum. A non-UTF-8 byte
+/// string is the only value jaq emits that isn't valid JSON; fall back to its
+/// lossy string form there rather than dropping the datum.
 fn val_to_json(val: &Val) -> serde_json::Value {
-    match val {
-        Val::Null => serde_json::Value::Null,
-        Val::Bool(b) => serde_json::Value::Bool(*b),
-        Val::Int(n) => serde_json::Value::Number((*n as i64).into()),
-        Val::Float(n) => jq_float_to_json(*n),
-        Val::Num(s) => num_str_to_json(s),
-        Val::Str(s) => serde_json::Value::String(s.to_string()),
-        Val::Arr(arr) => serde_json::Value::Array(arr.iter().map(val_to_json).collect()),
-        Val::Obj(obj) => {
-            let map: serde_json::Map<String, serde_json::Value> = obj
-                .iter()
-                .map(|(k, v)| (k.to_string(), val_to_json(v)))
-                .collect();
-            serde_json::Value::Object(map)
-        }
-    }
+    let compact = render_value(val, false, true);
+    serde_json::from_str(&compact).unwrap_or(serde_json::Value::String(compact))
 }
 
 #[async_trait]
