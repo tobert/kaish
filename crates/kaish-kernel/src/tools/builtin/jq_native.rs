@@ -245,7 +245,11 @@ fn json_to_val(json: serde_json::Value) -> Val {
             } else if let Some(f) = n.as_f64() {
                 Val::Num(Num::Float(f))
             } else {
-                Val::Null
+                // Unreachable without serde_json's `arbitrary_precision`, which
+                // we don't enable. Panic rather than silently coerce a number we
+                // can't represent to null (crash over corruption); if a future
+                // feature pulls in arbitrary_precision this fails loudly.
+                panic!("jq: serde_json number is neither i64/u64/f64: {n}")
             }
         }
         serde_json::Value::String(s) => Val::from(s),

@@ -368,8 +368,17 @@ loses link-ness. Fix: teach `move_dir_recursive` to `lstat` children and
   - ~~indexing `null` (`null | .a`) errors~~ FIXED: jaq-json 2's `index_opt` maps
     `null` → `None` → `null`.
   - bonus: large integers are now exact (bignum-backed `Num`), no `1e+22` degrade.
-  Tests in `jq_tests.rs`. Residual: `1e100` renders as `1e100` (jaq) where jq prints
-  `1e+100` — cosmetic, out-of-range float, not worth special-casing.
+  Tests in `jq_tests.rs`. Residuals (both low-severity, not regressions):
+  - `1e100` renders as `1e100` (jaq) where jq prints `1e+100` — cosmetic, out-of-range
+    float, not worth special-casing.
+  - **Big integers >2^63 are exact on stdout but lossy in `.data`.** jaq's writer
+    prints them exactly, but `val_to_json` round-trips through `serde_json` (no
+    `arbitrary_precision`), which parses an integer past ±2^63 as `f64`. So
+    `jq -cn '9999999999999999999999'` prints 22 exact digits, but
+    `for x in $(jq …)` / `kaish-last` see ~1e22. `.data` was always f64-limited (the
+    pre-upgrade path too); only stdout improved, so this is a widened asymmetry, not a
+    regression. The clean fix is `serde_json/arbitrary_precision` — a broad,
+    independent workspace change; defer until a consumer actually needs big-int `.data`.
 - **External output via `BoundedStream` keeps only the tail and sets no spill signal**
   in the `output_limit::none()` path (repl/transient/default) — silent truncation,
   head lost. (When output-limit is enabled — agent presets — spill + exit-3 work.)
