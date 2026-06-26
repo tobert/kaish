@@ -103,7 +103,7 @@ impl Tool for Export {
                     format!("export: `{}': not a valid identifier", name),
                 );
             }
-            ctx.scope.set_exported(name, value.clone());
+            ctx.scope.set_exported_global(name, value.clone());
         }
 
         // Process positional arguments (for `export VAR` without value, or `export VAR=value` as single string)
@@ -125,7 +125,7 @@ impl Tool for Export {
                     );
                 }
 
-                ctx.scope.set_exported(name, Value::String(value.to_string()));
+                ctx.scope.set_exported_global(name, Value::String(value.to_string()));
             } else {
                 // Just mark for export
                 if !is_valid_name(arg_str) {

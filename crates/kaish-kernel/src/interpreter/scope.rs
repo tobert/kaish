@@ -299,10 +299,26 @@ impl Scope {
         self.exported.contains(name)
     }
 
-    /// Set a variable and mark it as exported.
+    /// Set a variable in the **innermost** frame and mark it as exported.
+    ///
+    /// Used for frame-scoped overlays (`execute_with_vars`, `FOO=bar cmd`) and
+    /// for seeding root-frame exports at construction. For the `export`
+    /// builtin's assignment form use [`set_exported_global`](Self::set_exported_global)
+    /// so the value survives a function return (shared-scope semantics).
     pub fn set_exported(&mut self, name: impl Into<String>, value: Value) {
         let name = name.into();
         self.set(&name, value);
+        self.export(name);
+    }
+
+    /// Set a variable with **global** (shared-scope) semantics and mark it as
+    /// exported. This is `export NAME=VALUE`: like a plain assignment, the value
+    /// updates an existing variable wherever it lives or lands in the root frame,
+    /// so it persists past a function return rather than dying with the
+    /// function's frame.
+    pub fn set_exported_global(&mut self, name: impl Into<String>, value: Value) {
+        let name = name.into();
+        self.set_global(&name, value);
         self.export(name);
     }
 

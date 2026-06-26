@@ -179,10 +179,13 @@ NOTE: `xxd -r -p` trailing odd nibble was a **false positive** — kaish already
 matches GNU xxd (silently drops it); pinned by a test, not a bug.
 
 Still open (deferred — bigger than a builtin fix, each its own focused PR):
-- **Interpreter item** (was a trio; two of three fixed below): `export` inside
-  a function is dropped on return — needs scope-frame-model work (the single
-  `Scope.exported` set isn't merged back when a function's forked scope returns),
-  `interpreter/scope.rs`.
+- **Interpreter trio — ALL FIXED** (2026-06-26, `fix/file-test-tilde`):
+  - ~~**`export NAME=VALUE` inside a function is dropped on return.**~~ FIXED: the
+    builtin's assignment form now uses new `Scope::set_exported_global`
+    (`set_global` + export mark) so the value lands in the shared scope and survives
+    the function frame, matching plain assignments and bash. `set_exported`
+    (innermost-frame) stays for the intentional frame-scoped overlays
+    (`execute_with_vars`, `FOO=bar cmd`). Tests: `export_scope_tests.rs`.
   - ~~**`<<-` tab-stripping runs *after* interpolation**, eating tabs from a
     variable's value.~~ FIXED 2026-06-26 (`fix/file-test-tilde`): new
     `HeredocAssembler` (`interpreter/eval.rs`) strips leading tabs from the literal
