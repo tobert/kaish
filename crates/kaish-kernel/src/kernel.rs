@@ -3712,6 +3712,11 @@ impl Kernel {
             match test_expr {
                 TestExpr::FileTest { op, path } => {
                     let path_value = self.eval_expr_async(path).await?;
+                    // Expand `~` against the session HOME before stat'ing, the
+                    // same way argv positionals do — otherwise `[[ -f ~/x ]]`
+                    // stats the literal `~/x` and is always false.
+                    let home = self.scope_home().await;
+                    let path_value = apply_tilde_expansion(path_value, home.as_deref());
                     let path_str = value_to_string(&path_value);
                     let backend = self.exec_ctx.read().await.backend.clone();
                     let entry = backend.stat(std::path::Path::new(&path_str)).await.ok();

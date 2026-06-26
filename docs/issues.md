@@ -179,11 +179,18 @@ NOTE: `xxd -r -p` trailing odd nibble was a **false positive** — kaish already
 matches GNU xxd (silently drops it); pinned by a test, not a bug.
 
 Still open (deferred — bigger than a builtin fix, each its own focused PR):
-- **Interpreter trio:** `export` inside a function is dropped on return — needs
-  scope-frame-model work (the single `Scope.exported` set isn't merged back when a
-  function's forked scope returns), `interpreter/scope.rs`; file tests skip tilde —
-  `[[ -f ~/x ]]` false (`eval.rs`); `<<-` tab-stripping runs *after* interpolation,
-  eating tabs that came from a variable's value (`eval.rs`).
+- **Interpreter pair** (was a trio; the tilde item is fixed below): `export` inside
+  a function is dropped on return — needs scope-frame-model work (the single
+  `Scope.exported` set isn't merged back when a function's forked scope returns),
+  `interpreter/scope.rs`; `<<-` tab-stripping runs *after* interpolation, eating tabs
+  that came from a variable's value (`eval.rs`).
+  - ~~**File tests skip tilde** — `[[ -f ~/x ]]` always false.~~ FIXED 2026-06-26
+    (`fix/file-test-tilde`): `eval_test_async` (the kernel path) now expands `~`
+    against the session `HOME` via `apply_tilde_expansion` before stat'ing, matching
+    the argv-positional path. Hermetic kernels (no `HOME`) keep `~` literal. Test:
+    `file_test_tilde_tests.rs` (3, localfs). NOTE: the sync `Executor::eval_test`
+    (`eval.rs`, non-kernel embedders only) still doesn't expand — it has no `HOME`
+    source on the trait; left as-is until an embedder needs the sync `[[ ]]` path.
 
 ### Repeatable flags: glued short-flag form still overwrites (`-es/a/b/`)
 The `-e A -e B` and `--expression=A --expression=B` forms accumulate correctly,
