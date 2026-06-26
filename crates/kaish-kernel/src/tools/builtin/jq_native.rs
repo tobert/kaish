@@ -283,8 +283,11 @@ fn canonical_integral(num: &Num) -> Option<Num> {
         Num::Int(_) | Num::BigInt(_) => return None,
     };
     const EXACT_INT_LIMIT: f64 = 9_007_199_254_740_992.0;
+    // Below 2^53 every integral f64 is exactly an i64; `Num::from_integral`
+    // then picks `Int` (or `BigInt` on a 32-bit `isize` target like wasm32),
+    // so this stays correct off 64-bit — a plain `as isize` would saturate.
     (f.is_finite() && f.fract() == 0.0 && f.abs() < EXACT_INT_LIMIT)
-        .then_some(Num::Int(f as isize))
+        .then(|| Num::from_integral(f as i64))
 }
 
 /// Recursively canonicalize integral floats to integers so jaq's writer prints
