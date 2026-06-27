@@ -96,7 +96,11 @@ impl Tool for Sed {
         // first positional. Any `<dynamic>` marker means a variable/substitution
         // whose value is unknown at parse time — skip the whole expression so we
         // don't false-error on `F='s/a/b/'; sed $F`.
-        let exprs = collect_expressions(args);
+        // A non-string `-e` is a runtime error; execute() surfaces it loudly.
+        // Validation stays lenient here (don't double-author the message).
+        let Ok(exprs) = collect_expressions(args) else {
+            return issues;
+        };
         for expr in &exprs {
             if expr.contains("<dynamic>") {
                 return issues;
@@ -155,7 +159,10 @@ impl Tool for Sed {
         // `ToolArgs::to_argv()` renders as one JSON token (it can't tell a
         // repeatable scalar array from a single array value). `parsed` above is
         // only consulted for `-n`/global flags; expressions live here.
-        let expressions = collect_expressions(&args);
+        let expressions = match collect_expressions(&args) {
+            Ok(e) => e,
+            Err(msg) => return ExecResult::failure(2, format!("sed: {msg}")),
+        };
         if expressions.is_empty() {
             return ExecResult::failure(1, "sed: missing expression");
         }
@@ -298,24 +305,35 @@ fn expression_from_flag(args: &ToolArgs) -> bool {
 /// `consume_flag_positionals`); a single value may arrive as a bare
 /// `Value::String`. When no `-e` is used, the first positional is the
 /// expression. Order is preserved so `-e A -e B` applies A then B.
-fn collect_expressions(args: &ToolArgs) -> Vec<String> {
+fn collect_expressions(args: &ToolArgs) -> Result<Vec<String>, String> {
     let mut exprs = Vec::new();
 
     // Both paths canonicalize `-e`/`--expression` to the long name `expression`,
     // so `e` is never actually populated today; it's defensive insurance against
     // a future change that binds under the short alias. Because only one key is
     // ever present, iterating both can't double-count or reorder.
+    //
+    // A non-string `-e` value (e.g. `sed -e 5`, which binds `5` as an integer)
+    // is rejected loudly rather than silently dropped — `-e <number>` isn't a
+    // valid sed program, and silently ignoring it once led to the *filename*
+    // being parsed as the program.
     for key in ["expression", "e"] {
         match args.named.get(key) {
             Some(Value::Json(serde_json::Value::Array(items))) => {
                 for item in items {
-                    if let serde_json::Value::String(s) = item {
-                        exprs.push(s.clone());
+                    match item {
+                        serde_json::Value::String(s) => exprs.push(s.clone()),
+                        other => return Err(format!(
+                            "-e expression must be a string, got `{other}`"
+                        )),
                     }
                 }
             }
             Some(Value::String(e)) => exprs.push(e.clone()),
-            _ => {}
+            Some(other) => {
+                return Err(format!("-e expression must be a string, got `{other:?}`"));
+            }
+            None => {}
         }
     }
 
@@ -324,7 +342,7 @@ fn collect_expressions(args: &ToolArgs) -> Vec<String> {
         exprs.push(e.clone());
     }
 
-    exprs
+    Ok(exprs)
 }
 
 // ============================================================================
@@ -1391,7 +1409,7 @@ mod tests {
             Value::Json(serde_json::json!(["s/a/b/", "s/c/d/"])),
         );
         assert_eq!(
-            collect_expressions(&args),
+            collect_expressions(&args).unwrap(),
             vec!["s/a/b/".to_string(), "s/c/d/".to_string()]
         );
         assert!(expression_from_flag(&args));
@@ -1403,7 +1421,7 @@ mod tests {
         let mut args = ToolArgs::new();
         args.named
             .insert("expression".to_string(), Value::String("s/a/b/".into()));
-        assert_eq!(collect_expressions(&args), vec!["s/a/b/".to_string()]);
+        assert_eq!(collect_expressions(&args).unwrap(), vec!["s/a/b/".to_string()]);
         assert!(expression_from_flag(&args));
     }
 
@@ -1413,7 +1431,7 @@ mod tests {
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("s/a/b/".into()));
         args.positional.push(Value::String("file.txt".into()));
-        assert_eq!(collect_expressions(&args), vec!["s/a/b/".to_string()]);
+        assert_eq!(collect_expressions(&args).unwrap(), vec!["s/a/b/".to_string()]);
         assert!(!expression_from_flag(&args));
     }
 

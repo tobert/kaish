@@ -38,7 +38,7 @@ struct FormatSpec {
 /// consumed — see [`format_string_cycling`].
 pub fn format_string<A: FormatArg>(format: &str, args: &[A]) -> String {
     let mut output = String::new();
-    format_pass(format, args, &mut output);
+    let _ = format_pass(format, args, &mut output);
     output
 }
 
@@ -53,22 +53,27 @@ pub fn format_string_cycling<A: FormatArg>(format: &str, args: &[A]) -> String {
     let mut output = String::new();
     // The first pass always runs, so a zero-operand call still prints the
     // literal text and an all-default conversion line.
-    let per_pass = format_pass(format, args, &mut output);
-    if per_pass == 0 {
+    let (per_pass, stop) = format_pass(format, args, &mut output);
+    if stop || per_pass == 0 {
         return output;
     }
     let mut start = per_pass;
     while start < args.len() {
         let end = (start + per_pass).min(args.len());
-        format_pass(format, &args[start..end], &mut output);
+        let (_, stop) = format_pass(format, &args[start..end], &mut output);
+        if stop {
+            break;
+        }
         start = end;
     }
     output
 }
 
 /// Run one formatting pass, appending to `output`. Returns the number of
-/// conversion specifiers applied (i.e. operand slots consumed this pass).
-fn format_pass<A: FormatArg>(format: &str, args: &[A], output: &mut String) -> usize {
+/// conversion specifiers applied (i.e. operand slots consumed this pass) and
+/// whether output should stop entirely (a `\c` was reached, in the format
+/// literal or via a `%b` argument).
+fn format_pass<A: FormatArg>(format: &str, args: &[A], output: &mut String) -> (usize, bool) {
     let mut arg_index = 0;
     let mut chars = format.chars().peekable();
 
@@ -77,8 +82,11 @@ fn format_pass<A: FormatArg>(format: &str, args: &[A], output: &mut String) -> u
             match parse_specifier(&mut chars) {
                 Some(spec) => {
                     let arg = args.get(arg_index);
-                    apply_specifier(&spec, arg, output);
+                    let stop = apply_specifier(&spec, arg, output);
                     arg_index += 1;
+                    if stop {
+                        return (arg_index, true);
+                    }
                 }
                 None => {
                     // Was %% → literal %
@@ -86,13 +94,17 @@ fn format_pass<A: FormatArg>(format: &str, args: &[A], output: &mut String) -> u
                 }
             }
         } else if c == '\\' {
+            // `\c` in the format literal stops all output (GNU printf).
+            if chars.peek() == Some(&'c') {
+                return (arg_index, true);
+            }
             parse_backslash_escape(&mut chars, output);
         } else {
             output.push(c);
         }
     }
 
-    arg_index
+    (arg_index, false)
 }
 
 /// Parse and emit a backslash escape sequence, starting after the `\`.
@@ -160,16 +172,18 @@ fn parse_backslash_escape(
 /// Interpret backslash escapes in an argument string, as done by `%b`.
 ///
 /// Same escape set as the format string itself, but applied to the argument
-/// value rather than the format template. `\c` stops output (like GNU printf).
-fn interpret_backslash_escapes(s: &str) -> String {
+/// value rather than the format template. Returns the interpreted string and
+/// whether a `\c` was seen — `\c` stops *all* further printf output (like GNU
+/// printf), not just the rest of this argument, so the caller propagates it.
+fn interpret_backslash_escapes(s: &str) -> (String, bool) {
     let mut output = String::new();
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\\' {
             match chars.peek().copied() {
                 Some('c') => {
-                    // \c: suppress further output (like GNU printf %b)
-                    break;
+                    // \c: suppress this and all further output.
+                    return (output, true);
                 }
                 _ => parse_backslash_escape(&mut chars, &mut output),
             }
@@ -177,7 +191,7 @@ fn interpret_backslash_escapes(s: &str) -> String {
             output.push(c);
         }
     }
-    output
+    (output, false)
 }
 
 /// Parse a format specifier after the initial `%`.
@@ -260,7 +274,10 @@ fn parse_specifier(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Opti
 }
 
 /// Apply a parsed format specifier to an argument, writing to `output`.
-fn apply_specifier<A: FormatArg>(spec: &FormatSpec, arg: Option<&A>, output: &mut String) {
+///
+/// Returns `true` if output should stop entirely (a `%b` argument contained
+/// `\c`), so the caller can abandon the rest of the format and any cycling.
+fn apply_specifier<A: FormatArg>(spec: &FormatSpec, arg: Option<&A>, output: &mut String) -> bool {
     match spec.conversion {
         's' => {
             let val = arg.map(|a| a.as_format_string()).unwrap_or_default();
@@ -344,15 +361,18 @@ fn apply_specifier<A: FormatArg>(spec: &FormatSpec, arg: Option<&A>, output: &mu
             apply_int_format(spec, val, output, IntBase::Octal);
         }
         'c' => {
+            // %c honors width and the left-align flag (`printf '%5c' x` → `    x`).
             if let Some(ch) = arg.and_then(|a| a.as_format_char()) {
-                output.push(ch);
+                apply_string_padding(spec, &ch.to_string(), output);
             }
         }
         'b' => {
-            // %b: interpret backslash escapes in the argument string.
+            // %b: interpret backslash escapes in the argument string. A `\c`
+            // stops all further output, so propagate the stop signal upward.
             let raw = arg.map(|a| a.as_format_string()).unwrap_or_default();
-            let val = interpret_backslash_escapes(&raw);
+            let (val, stop) = interpret_backslash_escapes(&raw);
             apply_string_padding(spec, &val, output);
+            return stop;
         }
         other => {
             // Unknown conversion — output literally
@@ -360,6 +380,7 @@ fn apply_specifier<A: FormatArg>(spec: &FormatSpec, arg: Option<&A>, output: &mu
             output.push(other);
         }
     }
+    false
 }
 
 enum IntBase {

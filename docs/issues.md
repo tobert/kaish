@@ -201,14 +201,6 @@ Still open (deferred — bigger than a builtin fix, each its own focused PR):
     (`eval.rs`, non-kernel embedders only) still doesn't expand — it has no `HOME`
     source on the trait; left as-is until an embedder needs the sync `[[ ]]` path.
 
-### Repeatable flags: glued short-flag form still overwrites (`-es/a/b/`)
-The `-e A -e B` and `--expression=A --expression=B` forms accumulate correctly,
-but the *glued* short-flag value path in `kernel.rs` (parses `cut -f1`, `head -c5`)
-still does an unconditional `named.insert` of a single `Value::String`. So
-`sed -es/a/b/` then `-e X` overwrites the accumulated array. Nobody glues `-e`'s
-value, but it's the same silent-drop class. Fix: route the glued path through
-`push_repeatable_value` when the matched param is repeatable.
-
 ### Write-model gate — DONE; two residuals
 **`tee` + `patch` + `sed -i` all gated** (`feat/mutation-write-gate` →
 `feat/patch-write-gate` → `feat/sed-in-place`): pure `decide_mutation_action →
@@ -326,8 +318,6 @@ Low-frequency sub-cases left after the P1 builtin fixes:
   `b`/`d`/`f`/`i` modifiers are accepted but not implemented; **`-k2,1` (stop <
   start)** sorts by field 2, but GNU treats the lower field as the stop boundary
   (sorts by field 1). (`tools/builtin/sort.rs`; spot-check 2026-06-24)
-- **`printf`**: `%b` doesn't honor `\c` (stop *all* output) at the whole-format
-  level; `%c` ignores width/flags. (`tools/builtin/format_string.rs`)
 - **`ls -1`**: the fix recovers `-1` by stripping a `Value::Int(-1)` positional,
   so `ls -- -1` (listing a file literally named `-1`) misfires and lists cwd
   instead. Rare; the real fix is lexing `-1` as a flag, not an int. (`$VAR=-1`
@@ -346,8 +336,6 @@ loses link-ness. Fix: teach `move_dir_recursive` to `lstat` children and
 `move_path`). Cross-mount only (same-mount uses atomic `rename`, already correct).
 
 ### Pre-release sweep — lower-frequency fidelity gaps (2026-06-23, verified)
-- **`cp -p`/`--preserve` parsed then discarded** (no mode/mtime preserve; VFS has no
-  attributes) — silent. (`tools/builtin/cp.rs`)
 - **`rm <empty-dir>` without `-r` silently removes it** (coreutils needs `-d`/`-r`);
   **`mkdir` is always `-p`-like** — `mkdir existing` → exit 0 (no "File exists"),
   `mkdir a/b/c` (no `-p`) creates the chain. (`tools/builtin/{rm,mkdir}.rs`)
@@ -431,10 +419,6 @@ Low-frequency, record-then-defer:
 - **head streaming-vs-buffered binary-stdin divergence**: the streaming path emits
   earlier valid lines downstream before erroring on a non-UTF-8 line (buffered
   emits nothing) and uses a different message. Both loud; cosmetic.
-- **sed `-e <numeric>` is dropped**: `collect_expressions` only matches string
-  values, so `sed -e 5 -e 's/a/b/'` silently ignores the `5`. Loud when it's the
-  only `-e` (empty expr list), silent when mixed. `-e 5` isn't valid sed anyway;
-  coerce non-string values to string (or reject loudly). (0.9.0 review, 2026-06-18.)
 
 ### `GlobPath::walk_match` globstar recursion has no work bound
 `walk_match`/`match_segments` backtrack on globstar with no `MAX_MATCH_CALLS` guard
@@ -556,8 +540,6 @@ Revisit when the first external tool bundle wants unit tests.
 - **Backticks inside double-quotes and heredoc bodies are silently literal** — bare
   backticks are a loud lexer error, but quoted/heredoc ones slip through
   `parse_string_literal`. Should reject with the same `$(cmd)` hint. (`lexer.rs`)
-- **Unterminated arithmetic `$(( 1 + 2`** reaches EOF and is silently evaluated as `3`
-  instead of erroring. (`lexer.rs` `preprocess_arithmetic`)
 - **Comment `#` mid-word truncates** — `echo http://x/#frag` → `http://x/`, `echo a#b`
   → `a`; any `#` outside double-quotes starts a comment with no word-boundary check.
   (`lexer.rs`)

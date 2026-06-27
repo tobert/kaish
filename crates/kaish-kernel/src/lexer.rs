@@ -113,6 +113,10 @@ pub enum LexerError {
     InvalidFloatNoTrailing,
     /// Nesting depth exceeded (too many nested parentheses in arithmetic).
     NestingTooDeep,
+    /// Arithmetic expansion `$((` reached end of input without a closing `))`.
+    /// Silently evaluating the partial expression would mask a typo (`$(( 1 + 2`
+    /// would compute `3`), so we surface it loudly instead.
+    UnterminatedArithmetic,
     /// Heredoc body ended without seeing the closing delimiter on its own line.
     /// The user almost certainly meant to type the delimiter — silently using
     /// whatever was collected up to EOF would mask missing data.
@@ -142,6 +146,9 @@ impl fmt::Display for LexerError {
             LexerError::InvalidFloatNoLeading => write!(f, "float must have leading digit"),
             LexerError::InvalidFloatNoTrailing => write!(f, "float must have trailing digit"),
             LexerError::NestingTooDeep => write!(f, "nesting depth exceeded (max {})", MAX_PAREN_DEPTH),
+            LexerError::UnterminatedArithmetic => {
+                write!(f, "unterminated arithmetic expansion, expected closing `))`")
+            }
             LexerError::UnterminatedHeredoc { delimiter } => {
                 write!(f, "unterminated heredoc, expected closing delimiter `{}` on its own line", delimiter)
             }
@@ -1345,6 +1352,7 @@ fn preprocess_arithmetic(source: &str) -> Result<ArithmeticPreprocessResult, Lex
             // Collect expression until matching ))
             let mut expr = String::new();
             let mut paren_depth: usize = 0;
+            let mut closed = false;
 
             while i < chars_vec.len() {
                 let c = chars_vec[i];
@@ -1368,6 +1376,7 @@ fn preprocess_arithmetic(source: &str) -> Result<ArithmeticPreprocessResult, Lex
                             // Found closing ))
                             i += 2;
                             source_pos += 2;
+                            closed = true;
                             break;
                         } else {
                             // Single ) inside - keep going
@@ -1382,6 +1391,12 @@ fn preprocess_arithmetic(source: &str) -> Result<ArithmeticPreprocessResult, Lex
                         source_pos += c.len_utf8();
                     }
                 }
+            }
+
+            // Reached EOF without the closing `))` — don't silently evaluate the
+            // partial expression (`$(( 1 + 2` must not become `3`).
+            if !closed {
+                return Err(LexerError::UnterminatedArithmetic);
             }
 
             // Calculate original length: from $$(( to ))

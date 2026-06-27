@@ -23,10 +23,6 @@ struct CpArgs {
     #[arg(short = 'n', long = "no-clobber", visible_alias = "no_clobber")]
     no_clobber: bool,
 
-    /// Preserve file attributes (-p)
-    #[arg(short = 'p', long = "preserve")]
-    preserve: bool,
-
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -66,8 +62,9 @@ impl Tool for Cp {
 
         let recursive = parsed.recursive;
         let no_clobber = parsed.no_clobber;
-        // preserve flag is recognized but VFS doesn't support attributes
-        let _preserve = parsed.preserve;
+        // `-p`/`--preserve` is intentionally NOT accepted: the VFS has no mode,
+        // mtime, or ownership to preserve, so advertising the flag would be a
+        // silent no-op. clap rejects it loudly as an unknown argument instead.
 
         // POSIX: `cp SRC DST` for one source, `cp SRC... DIR/` for many.
         // Last positional is the destination.
