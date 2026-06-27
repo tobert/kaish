@@ -53,6 +53,23 @@ async fn sed_string_expression_still_works() {
     assert_eq!(result.text_out().trim_end(), "Xbc");
 }
 
+#[tokio::test]
+async fn sed_substitute_zero_occurrence_is_loud() {
+    // `s///0` ("replace the 0th match") is meaningless — GNU sed errors instead
+    // of silently treating it as the first match.
+    let k = kernel();
+    let result = k
+        .execute("echo aaa | sed 's/a/b/0'")
+        .await
+        .expect("execute");
+    assert_ne!(result.code, 0, "s///0 must fail, got {result:?}");
+    assert!(
+        result.err.contains("may not be zero"),
+        "stderr should reject the zero occurrence: {:?}",
+        result.err
+    );
+}
+
 // ---------------------------------------------------------------------------
 // cp -p → rejected
 // ---------------------------------------------------------------------------

@@ -16,6 +16,8 @@ breaking entries are marked **BREAKING**.
   ignored — silently dropping it once let the *filename* be parsed as the program.
 - **Unterminated arithmetic `$(( …` is a lexer error**, not a silent partial
   evaluation — `$(( 1 + 2` (no closing `))`) no longer evaluates to `3`.
+- **`sed 's/x/y/0'` is a loud error**, matching GNU — the `0` occurrence flag
+  ("replace the 0th match") was silently treated as the first match.
 - **`printf '%c'` honors width and the left-align flag** (`printf '%5c' x` →
   `␠␠␠␠x`), and a `\c` in a `%b` argument — or in the format literal — now stops
   *all* output rather than only the rest of that argument, matching GNU `printf`.

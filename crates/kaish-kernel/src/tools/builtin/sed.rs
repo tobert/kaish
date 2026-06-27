@@ -610,7 +610,15 @@ fn parse_substitute(expr: &str) -> Result<(Command, String), String> {
     let occurrence = if digits.is_empty() {
         0
     } else {
-        digits.parse().map_err(|_| "invalid s/// occurrence number")?
+        let n = digits
+            .parse()
+            .map_err(|_| "invalid s/// occurrence number")?;
+        // `s///0` is meaningless ("replace the 0th match") — GNU sed rejects it
+        // rather than silently treating it as the first match.
+        if n == 0 {
+            return Err("number option to `s' command may not be zero".to_string());
+        }
+        n
     };
 
     detect_bre_idiom(&pattern_str, &replacement)?;

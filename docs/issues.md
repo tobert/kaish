@@ -396,8 +396,8 @@ loses link-ness. Fix: teach `move_dir_recursive` to `lstat` children and
 Low-frequency, record-then-defer:
 - **sed `p` / `s///p` in non-quiet mode** suppress the auto-print → one print where
   GNU/POSIX print twice (invisible in tests — all `p` tests use `-n`).
-- **sed `s///0`** silently treated as first-match (GNU errors); **empty `//`**
-  compiles an always-match regex instead of reusing the last pattern.
+- **sed empty `//`** compiles an always-match regex instead of reusing the last
+  pattern (needs runtime last-regex state, not a parse-time fix).
 - **awk `"1e"` → 0** (partial-exponent parse + `unwrap_or(0.0)`); **`FILENAME`
   always empty**; **`RS=""` paragraph mode** splits on exactly `"\n\n"`; **`OFMT`
   ignored** (hardcoded `%.6g`).
