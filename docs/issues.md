@@ -111,17 +111,21 @@ a differential harness over the single-command corpus (argv door ≡ string door
 model (`to_argv()` re-parse) caps typed passthrough to `args.positional`-reading
 builtins. Full writeup: [multicall.md](multicall.md).
 
-### Port useful `rg`-only features into `kaish-glob` / `grep` (Amy, 2026-06-17)
-`rg` was removed (80%-rule: one search builtin). Some dropped flags are worth
-re-homing in `kaish-glob` (which already wraps `ignore::types::Types`) and
-surfacing through `grep`/`glob`/`find` rather than a second search builtin:
-- **`--type`/`-t`/`-T`** (file-type filters) — strongest candidate; the `Types`
-  machinery already exists, so it's mostly surface wiring on the walkers.
-- **`--hidden`** — kaish-glob already has dotglob-style hidden handling; thread it
-  through a `grep --hidden`.
-- **`--no-ignore`** (bypass gitignore), **`--max-count`** (early-stop).
-Design first: decide whether these live on `grep` flags or on the file-walking
-layer so search and listing share one type/hidden/ignore model. Not urgent.
+### Port useful `rg`-only features into `grep` + `glob` (Amy, 2026-06-17) — DESIGNED
+`rg` was removed (80%-rule); the still-useful filtering re-homes on kaish's two
+*modern* search builtins. **Design + punch-list: [search-features-port.md](search-features-port.md)**
+(transient — delete on ship). Driver: kaibo's hot path (`grep -t rust`, `-m N`
+early-stop). Engine is already done — `WalkOptions.types` is live but dormant
+(walker.rs:286); this is surface wiring.
+
+Resolved scope (2026-06-28): **grep + glob only, find untouched** (stays POSIX).
+**`--ftype` is the kaish-wide file-type-filter standard** (not rg `-t`) — both get
+`--ftype`/`--ftype-not`/`--ftype-list`; **all new flags long-only, no shorts**
+(sidesteps GNU grep `-T`/`-m` muscle memory). grep also gets `--hidden` + GNU-semantics
+`--max-count`; glob keeps its fd-style `-t`=entry-kind. **`--no-ignore` DEFERRED on grep**
+("don't ship a flag that lies" — the `Enforced`-scope override semantics aren't designed
+yet); glob's existing one untouched pending an audit. Shared `kaish-glob::build_file_types`
+helper so the two can't drift. Highest-leverage *kaibo*-aligned item on the board.
 
 ### OverlayFs residuals
 (Core landed — see devlog.) Open:
@@ -427,6 +431,14 @@ Low-frequency, record-then-defer:
 (`a/**/b/**/c/**/…`) against a deep path could blow up. Low risk today (walker only
 matches real FS paths; not a regression). If kaish ever matches user patterns
 against user-supplied path *strings*, add a call counter.
+
+### `find --no-ignore` escape under `Enforced` ignore scope (deferred from search-features-port)
+`find` stays POSIX in the rg-features port (see search-features-port.md). But under
+`IgnoreScope::Enforced` (kaibo/agent preset) `find` *does* respect the ignore config,
+diverging from POSIX find (which ignores `.gitignore` entirely). An agent stuck in
+Enforced may want a per-call `find --no-ignore` to recover traditional find behavior.
+Record-don't-build: only meaningful under Enforced, and adds a non-POSIX flag to the
+"trained-in habits" builtin. Add if an Enforced-mode consumer actually hits it.
 
 ### `kill -<sig>` bash shorthand (`kill -9 %1`, `kill -STOP %1`) isn't accepted
 `kill` takes the signal via `--signal NAME` / `-s NAME` only; `-9`/`-STOP` fail at

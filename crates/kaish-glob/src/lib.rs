@@ -10,6 +10,7 @@
 //! The walker is generic over `WalkerFs`, a minimal read-only filesystem trait.
 //! Consumers implement `WalkerFs` to adapt their own filesystem abstraction.
 
+pub mod file_types;
 mod filter;
 pub mod filetype;
 pub mod glob;
@@ -17,6 +18,7 @@ mod glob_path;
 mod ignore;
 mod walker;
 
+pub use file_types::{build_file_types, list_file_types, FileTypeError};
 pub use filetype::{classify, detect, looks_like_text, Category, FileType, SNIFF_PREFIX_LEN};
 pub use filter::{FilterResult, IncludeExclude};
 pub use glob::{contains_glob, expand_braces, glob_match};

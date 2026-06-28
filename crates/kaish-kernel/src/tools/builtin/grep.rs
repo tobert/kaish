@@ -18,7 +18,9 @@ use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::grep_engine::{AccumulatorSink, ContextKind, SearchEvent};
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
-use crate::walker::{FileWalker, GlobPath, IncludeExclude, WalkOptions};
+use crate::walker::{
+    build_file_types, list_file_types, FileWalker, GlobPath, IncludeExclude, WalkOptions,
+};
 
 /// Grep tool: search for patterns in text.
 pub struct Grep;
@@ -110,11 +112,49 @@ struct GrepArgs {
     #[arg(long = "binary")]
     binary: Option<String>,
 
+    /// Filter the recursive walk to files of the given type(s), e.g.
+    /// `--ftype rust`. Repeatable. `--ftype` is the kaish-wide file-type
+    /// filter (see `--ftype-list`).
+    #[arg(long = "ftype")]
+    ftype: Vec<String>,
+
+    /// Exclude files of the given type(s) from the recursive walk. Repeatable.
+    #[arg(long = "ftype-not")]
+    ftype_not: Vec<String>,
+
+    /// List known file types (TYPE → globs) and exit. No pattern needed.
+    #[arg(long = "ftype-list")]
+    ftype_list: bool,
+
+    /// Include hidden files and directories (dotfiles) in the recursive walk.
+    /// Off by default; applies to `-r` only.
+    #[arg(long = "hidden")]
+    hidden: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
     /// Pattern to search for, followed by optional file paths.
     pattern: Vec<String>,
+}
+
+/// Read a repeatable string-valued flag off the raw args.
+///
+/// Repeatable value flags (clap `Append`) are accumulated by the kernel into a
+/// `Value::Json(Array)` under the flag's long name; a single occurrence may
+/// arrive as a bare `Value::String`. Mirrors sed's `collect_expressions` — see
+/// the repeatable-flag gotcha in `arch_repeatable_flags`. `to_argv()` can't
+/// round-trip the array, so the clap field isn't a reliable source.
+fn read_string_list(args: &ToolArgs, key: &str) -> Vec<String> {
+    match args.named.get(key) {
+        Some(Value::Json(serde_json::Value::Array(items))) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(other) => vec![crate::interpreter::value_to_string(other)],
+        None => Vec::new(),
+    }
 }
 
 #[async_trait]
@@ -172,6 +212,32 @@ impl Tool for Grep {
             Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
         };
         parsed.global.apply(ctx);
+
+        // `--ftype-list` is a pure info query: emit the TYPE→globs table and
+        // exit, no pattern required.
+        if parsed.ftype_list {
+            let rows: Vec<OutputNode> = list_file_types()
+                .into_iter()
+                .map(|(name, globs)| OutputNode::new(&name).with_cells(vec![globs.join(", ")]))
+                .collect();
+            let table = OutputData::table(vec!["TYPE".to_string(), "GLOBS".to_string()], rows);
+            return ExecResult::with_output(table);
+        }
+
+        // Build the file-type filter from `--ftype`/`--ftype-not`. Repeatable
+        // value flags arrive as `Json(Array)` (or a bare `String` for one) —
+        // read them off the raw args like sed's `-e`, since `to_argv()` can't
+        // round-trip a repeatable array back through the clap re-parse. An
+        // unknown type name is loud (exit 2), never a silent empty match. The
+        // filter only takes effect on the `-r` walk below, but we validate the
+        // names here regardless so a typo is caught on any invocation.
+        let ftype_select = read_string_list(&args, "ftype");
+        let ftype_negate = read_string_list(&args, "ftype-not");
+        let file_types = match build_file_types(&ftype_select, &ftype_negate) {
+            Ok(t) => t,
+            Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
+        };
+        let include_hidden = parsed.hidden;
 
         let pattern = match args.get_string("pattern", 0) {
             Some(p) => p,
@@ -299,8 +365,9 @@ impl Tool for Grep {
                 max_depth: None,
                 entry_types: crate::walker::EntryTypes::files_only(),
                 respect_gitignore: ctx.ignore_config.auto_gitignore(),
-                include_hidden: false,
+                include_hidden,
                 filter,
+                types: file_types.clone(),
                 ..WalkOptions::default()
             };
 
