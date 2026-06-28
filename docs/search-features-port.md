@@ -131,10 +131,11 @@ GNU/rg faithful, **per file**:
 - [x] grep clap: `--ftype` (Vec), `--ftype-not` (Vec), `--ftype-list`, `--hidden`.
 - [x] grep execute: populate `WalkOptions.types`/`include_hidden`; `--ftype-list`
       short-circuit; loud unknown-type. (`grep_search_features_tests.rs`, 7 kernel-routed.)
-- [ ] **grep `--max-count` — split to its own commit/PR** (touches every match
-      path: streaming-stdin, single-file scanner, whole-buffer, multi-file). Per-file
-      cap + early chunk-reader stop; `-c`/`-l`/`-q`/`-v` interplay. Deferred from the
-      file-type slice to keep that PR tight and reviewable.
+- [x] **grep `--max-count`** — per-file cap across all four match paths
+      (streaming-stdin, single-file scanner, whole-buffer, multi-file). Streaming
+      paths early-stop the chunk reader (`hit_limit`, distinct from the quit-byte
+      fallback); whole-buffer caps in `render_events` (lets trailing after-context
+      through). `--max-count 0` = exit 1, no output. (5 more kernel-routed tests.)
 
 **P2 — glob parity**
 - [ ] glob clap: `--ftype` (Vec), `--ftype-not` (Vec), `--ftype-list`. Keep

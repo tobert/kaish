@@ -20,6 +20,9 @@ breaking entries are marked **BREAKING**.
   TYPE→globs table (works with `--json`); no pattern required.
 - **`grep --hidden`** — include dotfiles/dot-directories in the recursive walk
   (off by default, bash no-dotglob semantics).
+- **`grep --max-count <N>`** — stop after N matching lines per file (GNU
+  semantics; `--max-count 0` matches nothing). Streaming single-file and piped
+  searches stop reading once the cap is hit, so it bounds work on large inputs.
 
 ### Fixed
 - **`sed -e <number>` is a loud error, not a silent drop.** A non-string `-e`

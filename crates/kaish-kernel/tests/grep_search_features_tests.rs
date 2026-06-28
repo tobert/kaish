@@ -138,3 +138,67 @@ async fn hidden_flag_reaches_dotfiles() {
     assert!(out_h.contains(".env"), "--hidden must reach the dotfile: {out_h:?}");
     assert!(out_h.contains("visible.txt"), "visible still matches: {out_h:?}");
 }
+
+/// `--max-count N` caps a single-file search at N matching lines (the
+/// streaming-scanner path).
+#[tokio::test]
+async fn max_count_caps_single_file() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("f.txt"), "x\nx\nx\nx\nx\n").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "grep --max-count 2 x f.txt").await;
+    assert_eq!(code, 0, "match expected; out={out:?}");
+    assert_eq!(out.lines().count(), 2, "must cap at 2 lines: {out:?}");
+}
+
+/// `--max-count 0` matches nothing and exits 1.
+#[tokio::test]
+async fn max_count_zero_matches_nothing() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("f.txt"), "x\nx\nx\n").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    let result = kernel.execute("grep --max-count 0 x f.txt").await.expect("execute");
+    assert_eq!(result.code, 1, "max-count 0 matches nothing → exit 1");
+    assert!(result.text_out().trim().is_empty(), "no output: {:?}", result.text_out());
+}
+
+/// `--max-count` combined with `-c` reports the capped count (whole-buffer
+/// path).
+#[tokio::test]
+async fn max_count_with_count_reports_capped() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("f.txt"), "x\nx\nx\nx\nx\n").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "grep -c --max-count 2 x f.txt").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out.trim(), "2", "count must be capped to max-count: {out:?}");
+}
+
+/// `--max-count` is per-file under a recursive walk: two files of 5 matches
+/// each, capped at 2, yields 4 matching lines total.
+#[tokio::test]
+async fn max_count_is_per_file_when_recursive() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "x\nx\nx\nx\nx\n").expect("write a");
+    fs::write(dir.path().join("b.txt"), "x\nx\nx\nx\nx\n").expect("write b");
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "grep -r --max-count 2 x .").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out.lines().count(), 4, "2 per file across 2 files: {out:?}");
+}
+
+/// `--max-count` caps a piped (streaming-stdin) search.
+#[tokio::test]
+async fn max_count_caps_streaming_stdin() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+
+    // seq 1..5 → grep '.' matches every line; cap at 2 keeps the first two.
+    let (out, code) = run(&kernel, "seq 5 | grep --max-count 2 .").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out.lines().count(), 2, "stdin stream capped at 2: {out:?}");
+}
