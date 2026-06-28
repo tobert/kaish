@@ -172,7 +172,12 @@ GNU/rg faithful, **per file**:
 
 ## Docs to sync (on ship)
 
-- `docs/NAMING.md` — record the `--ftype` file-type-filter convention (decision 2).
-- `help grep` / `help glob` content (`kaish-help/content/en/`) — new flags.
-- `README` builtin notes; `CHANGELOG.md` Added bullets (one per builtin).
-- Delete this file.
+- [x] `docs/NAMING.md` — `--ftype` file-type-filter convention recorded (decision 2).
+- [x] builtin help — flag descriptions live in the clap doc-comments and flow
+      through `schema_from_clap` into `help grep`/`help glob` automatically; no
+      hand-written per-builtin help file exists to edit.
+- [x] `CHANGELOG.md` Added bullets (grep ×3, glob ×1). README describes builtins
+      only at category level (no per-flag list), so nothing to sync there.
+- [ ] **Delete this file** once the port lands (the work is complete; this is the
+      last open box). Deferred `--no-ignore` design + the glob `--no-ignore`-under-
+      Enforced audit live in `docs/issues.md`, so they survive deletion.

@@ -432,6 +432,19 @@ Low-frequency, record-then-defer:
 matches real FS paths; not a regression). If kaish ever matches user patterns
 against user-supplied path *strings*, add a call counter.
 
+### `--no-ignore` for the search builtins (deferred from search-features-port)
+The rg-features port (grep `--ftype`/`--hidden`/`--max-count`, glob `--ftype`)
+landed without `--no-ignore` on grep — the honest semantics of a per-call
+ignore-bypass under an embedder's `Enforced` scope (kaibo's preset) aren't
+designed yet: should an explicit user flag override the embedder's context-flood
+protection? That's an embedder-policy question, not a one-liner. Decide it once,
+then add `--no-ignore` across the search builtins consistently. **Related audit:**
+`glob`'s *existing* `--no-ignore` already bypasses the filter unconditionally,
+regardless of scope (`tools/builtin/glob.rs`) — confirm that's intended (vs.
+silently escaping `Enforced`) as part of the same design. Note: ignore is
+context-control, not a security boundary (the VFS mount is) — so this is about
+predictability, not a sandbox hole.
+
 ### `find --no-ignore` escape under `Enforced` ignore scope (deferred from search-features-port)
 `find` stays POSIX in the rg-features port (see search-features-port.md). But under
 `IgnoreScope::Enforced` (kaibo/agent preset) `find` *does* respect the ignore config,
