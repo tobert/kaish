@@ -948,8 +948,14 @@ impl<'r> GrepLineScanner<'r> {
 
     /// Flush the remaining carry as the final (unterminated) line.
     /// Sets `saw_invalid_utf8` if the remaining bytes are genuinely invalid UTF-8.
+    ///
+    /// `hit_limit` short-circuits like `stopped_early`: once `--max-count` is
+    /// reached the reader stops mid-file, so the leftover carry may be a UTF-8
+    /// multibyte sequence we *artificially* truncated at a chunk boundary.
+    /// Validating it would raise a spurious "binary data" exit-2 and clobber a
+    /// correct capped result — so don't.
     fn finish(&mut self) {
-        if self.saw_invalid_utf8 || self.stopped_early || self.carry.is_empty() {
+        if self.saw_invalid_utf8 || self.stopped_early || self.hit_limit || self.carry.is_empty() {
             return;
         }
         match std::str::from_utf8(&self.carry) {
@@ -2198,5 +2204,29 @@ mod tests {
         let render = scanner.into_render_result();
         // All 40 lines match "line".
         assert_eq!(render.match_count, 40, "expected 40 matches");
+    }
+
+    /// Regression (DeepSeek review, 2026-06-28): when `--max-count` is hit and
+    /// the reader stops mid-file at a chunk boundary that splits a UTF-8
+    /// multibyte sequence, the artificially truncated carry must NOT be reported
+    /// as binary data. Before the `finish()` `hit_limit` guard, the leftover
+    /// `\xC3` (lead byte of `é`) was validated and raised a spurious exit-2 over
+    /// a correct 2-match result.
+    #[test]
+    fn max_count_does_not_flag_truncated_multibyte_carry() {
+        let regex = regex::Regex::new("m").unwrap();
+        let mut scanner = GrepLineScanner::new(&regex, false, false, Some(b'\x00'), None, Some(2));
+        // 3 matching lines (cap is 2) then a lone UTF-8 lead byte with no
+        // continuation — in production the reader stops here because the cap was
+        // hit, so the continuation byte is never fed.
+        scanner.push(b"m\nm\nm\n\xC3");
+        assert!(scanner.hit_limit, "cap of 2 must be reached");
+        scanner.finish();
+        assert!(
+            !scanner.saw_invalid_utf8,
+            "a truncated-at-cap carry must not be flagged as binary",
+        );
+        let render = scanner.into_render_result();
+        assert_eq!(render.match_count, 2, "exactly the capped number of matches");
     }
 }
