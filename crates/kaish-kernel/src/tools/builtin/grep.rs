@@ -16,6 +16,7 @@ use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::grep_engine::{AccumulatorSink, ContextKind, SearchEvent};
+use crate::tools::builtin::read_repeatable_strings;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
 use crate::walker::{
@@ -142,25 +143,6 @@ struct GrepArgs {
     pattern: Vec<String>,
 }
 
-/// Read a repeatable string-valued flag off the raw args.
-///
-/// Repeatable value flags (clap `Append`) are accumulated by the kernel into a
-/// `Value::Json(Array)` under the flag's long name; a single occurrence may
-/// arrive as a bare `Value::String`. Mirrors sed's `collect_expressions` — see
-/// the repeatable-flag gotcha in `arch_repeatable_flags`. `to_argv()` can't
-/// round-trip the array, so the clap field isn't a reliable source.
-fn read_string_list(args: &ToolArgs, key: &str) -> Vec<String> {
-    match args.named.get(key) {
-        Some(Value::Json(serde_json::Value::Array(items))) => items
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect(),
-        Some(Value::String(s)) => vec![s.clone()],
-        Some(other) => vec![crate::interpreter::value_to_string(other)],
-        None => Vec::new(),
-    }
-}
-
 #[async_trait]
 impl Tool for Grep {
     fn name(&self) -> &str {
@@ -235,8 +217,8 @@ impl Tool for Grep {
         // unknown type name is loud (exit 2), never a silent empty match. The
         // filter only takes effect on the `-r` walk below, but we validate the
         // names here regardless so a typo is caught on any invocation.
-        let ftype_select = read_string_list(&args, "ftype");
-        let ftype_negate = read_string_list(&args, "ftype-not");
+        let ftype_select = read_repeatable_strings(&args, "ftype");
+        let ftype_negate = read_repeatable_strings(&args, "ftype-not");
         let file_types = match build_file_types(&ftype_select, &ftype_negate) {
             Ok(t) => t,
             Err(e) => return ExecResult::failure(2, format!("grep: {e}")),

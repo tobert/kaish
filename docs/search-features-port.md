@@ -121,6 +121,11 @@ GNU/rg faithful, **per file**:
 - Unknown type → exit 2 (decision 4).
 - `--ftype` + `--ftype-not` together: rg-defined; pass both to `TypesBuilder`.
 - glob entry-kind `-t d` must remain intact alongside `--ftype` (regression test).
+- **`--ftype` is a no-op on directories** — `Types::matched` returns `None` for a
+  dir, so a file-type filter narrows *files* but never gates dirs (the same
+  property that keeps recursive type-filtered walks traversable). Consequence:
+  `glob -t d --ftype rust` still lists directories. Worth a line in help so it
+  doesn't read as a bug.
 
 ## Punch list
 
@@ -138,9 +143,12 @@ GNU/rg faithful, **per file**:
       through). `--max-count 0` = exit 1, no output. (5 more kernel-routed tests.)
 
 **P2 — glob parity**
-- [ ] glob clap: `--ftype` (Vec), `--ftype-not` (Vec), `--ftype-list`. Keep
+- [x] glob clap: `--ftype` (Vec), `--ftype-not` (Vec), `--ftype-list`. Kept
       `-t`=entry-kind, `-a/--hidden`, existing `--no-ignore`.
-- [ ] glob execute: populate `WalkOptions.types` via shared helper; `--ftype-list`.
+- [x] glob execute: populate `WalkOptions.types` via shared helper; `--ftype-list`.
+      `read_repeatable_strings` lifted to `builtin/mod.rs` so grep+glob share one
+      reader (can't drift). (`glob_search_features_tests.rs`, 6 kernel-routed,
+      incl. the `-t` entry-kind regression + the dirs-no-op interaction.)
 
 **Deferred (record-don't-build)**
 - grep `--no-ignore`: design the `Enforced`-scope interaction first (decision 5).

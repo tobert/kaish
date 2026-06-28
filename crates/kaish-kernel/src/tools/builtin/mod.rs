@@ -100,6 +100,27 @@ mod xxd;
 
 use super::ToolRegistry;
 
+/// Read a repeatable string-valued flag off the raw `ToolArgs`.
+///
+/// Repeatable value flags (clap `Append`) are accumulated by the kernel into a
+/// `Value::Json(Array)` under the flag's long name; a single occurrence may
+/// arrive as a bare `Value::String`. `to_argv()` can't round-trip the array, so
+/// the clap field isn't a reliable source — search builtins read the raw args
+/// here. Shared by grep/glob `--ftype`/`--ftype-not`; mirrors sed's
+/// `collect_expressions` (see the repeatable-flag gotcha in `arch_repeatable_flags`).
+pub(crate) fn read_repeatable_strings(args: &super::ToolArgs, key: &str) -> Vec<String> {
+    use crate::ast::Value;
+    match args.named.get(key) {
+        Some(Value::Json(serde_json::Value::Array(items))) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(other) => vec![crate::interpreter::value_to_string(other)],
+        None => Vec::new(),
+    }
+}
+
 /// Register all built-in tools with the registry.
 pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(alias::Alias);

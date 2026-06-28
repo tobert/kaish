@@ -23,6 +23,11 @@ breaking entries are marked **BREAKING**.
 - **`grep --max-count <N>`** — stop after N matching lines per file (GNU
   semantics; `--max-count 0` matches nothing). Streaming single-file and piped
   searches stop reading once the cap is hit, so it bounds work on large inputs.
+- **`glob --ftype <NAME>` / `--ftype-not <NAME>` / `--ftype-list`** — the same
+  file-type filtering on `glob`, sharing grep's type registry. `--ftype` (rg-style
+  file type, by extension) is distinct from glob's existing `-t`/`--type` (entry
+  *kind*: file/dir); the two compose. A file-type filter narrows files only —
+  directories pass it untouched. Unknown type → loud exit 2.
 
 ### Fixed
 - **`sed -e <number>` is a loud error, not a silent drop.** A non-string `-e`
