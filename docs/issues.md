@@ -96,6 +96,20 @@ Still open:
   a malformed `$()` inside a `${VAR:-default}` *default word* still falls back to
   literal (two infallible Expr-returning call sites; rare edge).
 
+### Optional latch around subprocess spawn (allowlist + future model review)
+The confirmation latch covers the in-process write-model (`rm` + the truncating
+overwrite family), but an external `/bin/rm` on `PATH` bypasses it entirely — the
+gate lives in the builtin. For an embedder using the latch as a safety hook
+(kaijutsu catching latches to apply preapproval policy / a model review — the
+`ExecResult::latch_request()` seam, landed), the subprocess door is the hole.
+Proposal: an opt-in latch around *every* `subprocess` spawn, gated by an
+embedder-supplied **allowlist** (commands that run without confirmation); anything
+off the list returns the standard exit-2 + nonce so the embedder can approve via
+the same `latch_request()` path. Later: a hook for static checks + a model review
+of the argv (mirrors Claude Code "auto" mode). Mechanism in the kernel, judgment
+in the embedder — same split as the write-model latch. Until then, the airtight
+config is `subprocess` off (read-only / no-spawn build). (P2)
+
 ### `kaish-multicall` binary (deferred from the `execute_argv` work)
 `execute_argv` — the argv-native peer of `execute(&str)` — **landed** (see
 devlog); the load-bearing half is done. The cheap second half is still open: a

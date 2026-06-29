@@ -450,6 +450,16 @@ mod tests {
         }
         // File should still exist
         assert!(ctx.backend.exists(Path::new("/file.txt")).await);
+
+        // The typed accessor must decode the same payload — this ties the
+        // kernel-side `latch_result` construction to `LatchRequest` so the keys
+        // can't drift apart silently. (Embedders hook this seam.)
+        let req = result.latch_request().expect("a latch request from exit-2 + nonce data");
+        assert_eq!(req.command, "rm");
+        assert_eq!(req.paths, vec!["/file.txt".to_string()]);
+        assert_eq!(req.ttl, 60);
+        assert!(req.hint.contains("--confirm="));
+        assert!(!req.nonce.is_empty());
     }
 
     #[tokio::test]

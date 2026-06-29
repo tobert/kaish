@@ -10,6 +10,14 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`ExecResult::latch_request()` + `LatchRequest` (kaish-types)** — typed
+  embedder seam for the confirmation latch: decodes a latched result (exit 2 +
+  nonce payload) into `{nonce, command, paths, hint, ttl}` so an embedder can
+  apply preapproval policy or a model review before re-running with
+  `--confirm=<nonce>`, instead of string-matching the error or digging `.data`
+  by key. Returns `None` for plain (non-latch) exit-2 results.
+
 ## [0.10.0] - 2026-06-29
 
 ### Added

@@ -55,6 +55,32 @@ impl<'de> serde::Deserialize<'de> for OutputPayload {
     }
 }
 
+/// A pending confirmation-latch request, decoded from a latched [`ExecResult`].
+///
+/// When the confirmation latch (`set -o latch`) gates a destructive operation,
+/// the kernel returns exit code 2 and attaches this payload to
+/// [`ExecResult::data`] as JSON. Embedders recover it as a typed struct via
+/// [`ExecResult::latch_request`] instead of reaching into the JSON by key — the
+/// seam an embedder hooks to apply preapproval policy or a model review before
+/// approving the operation.
+///
+/// To approve, re-run the *same argv* with `--confirm=<nonce>` (the `hint`
+/// shows the exact form). The nonce is command- and path-scoped, so it cannot
+/// authorize a different command or a path outside `paths`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LatchRequest {
+    /// Confirmation nonce — pass back as `--confirm=<nonce>` on the same command.
+    pub nonce: String,
+    /// The canonical command being gated (e.g. `"rm"`, `"kaish-trash empty"`).
+    pub command: String,
+    /// The resolved paths the operation would touch. Empty for command-only ops.
+    pub paths: Vec<String>,
+    /// A ready-to-run confirmation command string (informational).
+    pub hint: String,
+    /// Seconds until the nonce expires.
+    pub ttl: u64,
+}
+
 /// Returned when a binary result is asked to behave as text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinaryNotText {
@@ -422,6 +448,27 @@ impl ExecResult {
         self.code == 0
     }
 
+    /// Decode a confirmation-latch request from this result, if it is one.
+    ///
+    /// Returns `Some` only when the result is a latch gate: exit code 2 carrying
+    /// the structured nonce payload the latch system attaches to `.data`. This
+    /// is the typed seam an embedder hooks to apply preapproval policy or a
+    /// model review before re-running the command with `--confirm=<nonce>` —
+    /// instead of string-matching the error or digging the JSON by key. A plain
+    /// usage error (also exit 2, but no nonce payload) returns `None`.
+    ///
+    /// Call this on the raw result from `execute()`, before any `--json` output
+    /// formatting (which re-nests `.data` under an error envelope).
+    pub fn latch_request(&self) -> Option<LatchRequest> {
+        if self.code != 2 {
+            return None;
+        }
+        match self.data.as_ref()? {
+            Value::Json(payload) => serde_json::from_value(payload.clone()).ok(),
+            _ => None,
+        }
+    }
+
     /// Set content type hint, returning self for chaining.
     pub fn with_content_type(mut self, ct: impl Into<String>) -> Self {
         self.content_type = Some(ct.into());
@@ -742,6 +789,68 @@ mod tests {
         // Even JSON-shaped text is NOT auto-parsed — .data stays None.
         let json_result = ExecResult::with_output(OutputData::text(r#"{"key": 1}"#));
         assert!(json_result.data.is_none());
+    }
+
+    fn latch_payload(paths: &[&str]) -> Value {
+        Value::Json(serde_json::json!({
+            "nonce": "a3f7b2c1",
+            "command": "rm",
+            "paths": paths,
+            "hint": "rm --confirm=\"a3f7b2c1\" important.dat",
+            "ttl": 60,
+        }))
+    }
+
+    #[test]
+    fn latch_request_decodes_latch_result() {
+        let mut result = ExecResult::failure(2, "rm: confirmation required (latch enabled)");
+        result.data = Some(latch_payload(&["important.dat"]));
+
+        let req = result.latch_request().expect("a latch request");
+        assert_eq!(req.nonce, "a3f7b2c1");
+        assert_eq!(req.command, "rm");
+        assert_eq!(req.paths, vec!["important.dat".to_string()]);
+        assert_eq!(req.ttl, 60);
+        assert!(req.hint.contains("--confirm"));
+    }
+
+    #[test]
+    fn latch_request_handles_command_only_empty_paths() {
+        let mut result = ExecResult::failure(2, "kaish-trash empty: confirmation required");
+        result.data = Some(Value::Json(serde_json::json!({
+            "nonce": "deadbeef",
+            "command": "kaish-trash empty",
+            "paths": [],
+            "hint": "kaish-trash empty --confirm=deadbeef",
+            "ttl": 60,
+        })));
+
+        let req = result.latch_request().expect("a latch request");
+        assert_eq!(req.command, "kaish-trash empty");
+        assert!(req.paths.is_empty());
+    }
+
+    #[test]
+    fn latch_request_none_for_success() {
+        // Same payload shape, but exit 0 is not a latch gate.
+        let mut result = ExecResult::success("");
+        result.data = Some(latch_payload(&["important.dat"]));
+        assert!(result.latch_request().is_none());
+    }
+
+    #[test]
+    fn latch_request_none_for_usage_error() {
+        // A plain exit-2 usage error carries no nonce payload.
+        let result = ExecResult::failure(2, "rm: unknown flag --bogus");
+        assert!(result.latch_request().is_none());
+    }
+
+    #[test]
+    fn latch_request_none_for_unrelated_data() {
+        // Exit 2 with some other structured data is not a latch request.
+        let mut result = ExecResult::failure(2, "boom");
+        result.data = Some(Value::Json(serde_json::json!({"count": 3})));
+        assert!(result.latch_request().is_none());
     }
 
     #[test]
