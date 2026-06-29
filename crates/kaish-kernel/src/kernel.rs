@@ -1419,14 +1419,26 @@ impl Kernel {
     /// pre-execution *syntax* validator does not run: argv has no shell syntax to
     /// validate (a tool's own `validate()`/clap parse still runs at dispatch).
     ///
-    /// Concurrent callers serialize on the same execute lock as [`Self::execute`].
+    /// Concurrent callers serialize on the same execute lock as [`Self::execute`],
+    /// and the kernel's configured `request_timeout` applies (a hung builtin or
+    /// external is interrupted at the deadline with exit code 124, the same as the
+    /// string door). There is no per-call options surface yet — a future
+    /// `execute_argv_with_options` would carry per-call timeout/cancel/vars/cwd.
     #[tracing::instrument(level = "info", skip(self, argv), fields(cmd = name, argc = argv.len()))]
     pub async fn execute_argv(&self, name: &str, argv: &[Value]) -> Result<ExecResult> {
         let _guard = self.acquire_execute_lock().await;
-        // Fresh cancel surface for this call, matching `execute_streaming_inner`:
-        // `execute_pipeline` reads `self.cancel_token`, so a stale cancelled token
-        // from a prior call must be replaced before we dispatch.
-        let _cancel = self.reset_cancel();
+        // Fresh cancel surface for this call: `execute_pipeline` reads
+        // `self.cancel_token`, so a stale cancelled token from a prior call must be
+        // replaced first. The returned clone is the token the watchdog cancels on
+        // an elapsed deadline (it shares state with what `execute_pipeline` reads),
+        // cascading SIGTERM/SIGKILL to any external child.
+        let cancel = self.reset_cancel();
+
+        // Honor the kernel-configured request timeout for parity with `execute`.
+        let timeout = self.request_timeout;
+        if timeout == Some(Duration::ZERO) {
+            return Ok(ExecResult::failure(124, "timeout: timed out after 0s".to_string()));
+        }
 
         let pipeline = crate::ast::Pipeline {
             commands: vec![crate::ast::Command {
@@ -1436,9 +1448,70 @@ impl Kernel {
             }],
             background: false,
         };
-        let result = self.execute_pipeline(&pipeline).await?;
+        let result = self
+            .run_under_watchdog(timeout, &cancel, self.execute_pipeline(&pipeline))
+            .await?;
         self.update_last_result(&result).await;
         Ok(result)
+    }
+
+    /// Run `work` under the movable-deadline watchdog for `timeout`, shared by the
+    /// string door ([`Self::execute_with_options`]) and the argv door
+    /// ([`Self::execute_argv`]).
+    ///
+    /// Mirrors the watchdog into `exec_ctx` (so a builtin can suspend the script
+    /// clock via `ctx.patient`), and when a timeout is set, spawns the watchdog
+    /// racing `cancel` — on an elapsed deadline `cancel` fires (cascading
+    /// SIGTERM/SIGKILL to external children via `wait_or_kill`) and the result's
+    /// code becomes 124. With `timeout == None`, runs `work` directly. Clears the
+    /// watchdog handle from `exec_ctx` on the way out (a patient hold against a
+    /// stale handle would silently suspend nothing). Callers must short-circuit a
+    /// `Some(Duration::ZERO)` timeout (return 124 without spawning) before calling.
+    async fn run_under_watchdog<F>(
+        &self,
+        timeout: Option<Duration>,
+        cancel: &tokio_util::sync::CancellationToken,
+        work: F,
+    ) -> Result<ExecResult>
+    where
+        F: std::future::Future<Output = Result<ExecResult>>,
+    {
+        // Assigned unconditionally (clearing any stale handle); None without a timeout.
+        let watchdog = timeout.map(|d| Arc::new(crate::watchdog::Watchdog::new(d)));
+        {
+            let mut ec = self.exec_ctx.write().await;
+            ec.watchdog = watchdog.clone();
+        }
+
+        let result = if let Some(d) = timeout {
+            #[allow(clippy::expect_used)]
+            let watchdog = watchdog.clone().expect("watchdog constructed when timeout is set");
+            let elapsed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let timer = tokio::spawn(watchdog.run(elapsed.clone(), cancel.clone()));
+            let r = work.await;
+            timer.abort();
+            match r {
+                Ok(mut res) => {
+                    if elapsed.load(std::sync::atomic::Ordering::SeqCst) {
+                        res.code = 124;
+                        if res.err.is_empty() {
+                            res.err = format!("timeout: timed out after {:?}", d);
+                        }
+                    }
+                    Ok(res)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            work.await
+        };
+
+        // The timer task is gone (fired or aborted); drop the stale handle.
+        {
+            let mut ec = self.exec_ctx.write().await;
+            ec.watchdog = None;
+        }
+        result
     }
 
     /// Execute with per-call options. The primary entry point for embedders
@@ -1779,47 +1852,20 @@ impl Kernel {
             *cur = effective_cancel.clone();
         }
 
-        // The movable-deadline watchdog for this call (None without a timeout),
-        // mirrored into exec_ctx — like the cancel token — so builtins can
-        // suspend the script clock via `ctx.patient`. Assigned unconditionally
-        // (clearing any stale handle) and reset to None in the restore block.
-        let watchdog = timeout.map(|d| Arc::new(crate::watchdog::Watchdog::new(d)));
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ec.watchdog = watchdog.clone();
-        }
-
-        // Run inner with optional timeout. The watchdog task cancels our token
-        // on elapsed; the cascade fires SIGTERM/SIGKILL on any external
-        // children via the wait_or_kill discipline in try_execute_external.
+        // Run the script under the movable-deadline watchdog (shared with the
+        // argv door). The watchdog task cancels `effective_cancel` on an elapsed
+        // deadline; the cascade fires SIGTERM/SIGKILL on any external children via
+        // the wait_or_kill discipline in try_execute_external. `Some(ZERO)` was
+        // already handled by the early return above.
         let mut noop_cb: Box<dyn FnMut(&ExecResult) + Send> = Box::new(|_| {});
         let cb_ref: &mut (dyn FnMut(&ExecResult) + Send) = match on_output {
             Some(cb) => cb,
             None => &mut *noop_cb,
         };
 
-        let result = if let Some(d) = timeout {
-            #[allow(clippy::expect_used)]
-            let watchdog = watchdog.clone().expect("watchdog constructed when timeout is set");
-            let elapsed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let timer = tokio::spawn(watchdog.run(elapsed.clone(), effective_cancel.clone()));
-            let r = self.execute_streaming_inner(input, cb_ref).await;
-            timer.abort();
-            match r {
-                Ok(mut res) => {
-                    if elapsed.load(std::sync::atomic::Ordering::SeqCst) {
-                        res.code = 124;
-                        if res.err.is_empty() {
-                            res.err = format!("timeout: timed out after {:?}", d);
-                        }
-                    }
-                    Ok(res)
-                }
-                Err(e) => Err(e),
-            }
-        } else {
-            self.execute_streaming_inner(input, cb_ref).await
-        };
+        let result = self
+            .run_under_watchdog(timeout, &effective_cancel, self.execute_streaming_inner(input, cb_ref))
+            .await;
 
         // Restore self.cancel_token to a fresh, uncancelled token so the
         // embedder's view of `Kernel::cancel()` stays predictable on the
@@ -1829,14 +1875,6 @@ impl Kernel {
             #[allow(clippy::expect_used)]
             let mut cur = self.cancel_token.lock().expect("cancel_token poisoned");
             *cur = tokio_util::sync::CancellationToken::new();
-        }
-
-        // Drop the watchdog handle from exec_ctx — its timer task is gone
-        // (fired or aborted above); a patient hold acquired against a stale
-        // handle would silently suspend nothing.
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ec.watchdog = None;
         }
 
         // Tear down the embedder-token race watcher (if any). Leaving it

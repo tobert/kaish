@@ -177,6 +177,28 @@ async fn json_output_transform_applies_via_argv() {
 }
 
 #[tokio::test]
+async fn request_timeout_interrupts_a_hung_command() {
+    use std::time::Duration;
+    // The kernel's configured request_timeout must apply to the argv door too,
+    // for safety parity with the string door (a hung command can't run forever).
+    let config = KernelConfig::repl()
+        .with_cwd(tempdir().path().to_path_buf())
+        .with_latch(false)
+        .with_trash(false)
+        .with_request_timeout(Duration::from_millis(200));
+    let kernel = Kernel::new(config).expect("kernel");
+
+    // `sleep 5` blocks far past the 200ms deadline; the watchdog must interrupt
+    // it and surface exit 124. The outer tokio timeout fails the test fast rather
+    // than hanging if the watchdog never fires.
+    let r = tokio::time::timeout(Duration::from_secs(10), kernel.execute_argv("sleep", &[s("5")]))
+        .await
+        .expect("execute_argv must return well before 10s (watchdog should fire at 200ms)")
+        .expect("execute_argv");
+    assert_eq!(r.code, 124, "request_timeout should yield exit 124, err: {}", r.err);
+}
+
+#[tokio::test]
 async fn unknown_command_is_127() {
     let kernel = kernel_at(tempdir().path());
     let r = kernel

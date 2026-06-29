@@ -346,7 +346,11 @@ Semantics:
   only for tools that read `args.positional` directly (the documented pattern),
   not those that trust their clap struct after a `to_argv()` round-trip.
 
-Concurrent callers serialize on the same execute lock as `execute`.
+Concurrent callers serialize on the same execute lock as `execute`, and the
+kernel's configured `request_timeout` applies (a hung builtin or external is
+interrupted at the deadline with exit code 124). There is no per-call options
+surface yet — if you need per-call timeout/cancel/vars/cwd, use the string door
+(`execute_with_options`) until an `execute_argv_with_options` lands.
 
 ## Custom Tools
 
