@@ -283,4 +283,21 @@ mod tests {
         ctx.overwrite_checked(path, b"forced\n", None).await.unwrap();
         assert_eq!(ctx.backend.read(path, None).await.unwrap(), b"forced\n");
     }
+
+    #[tokio::test]
+    async fn overwrite_checked_errors_when_reread_fails_even_for_empty_snapshot() {
+        let ctx = make_ctx().await;
+        // Snapshot an EMPTY file, then have it vanish (concurrent delete).
+        let path = Path::new("/empty.txt");
+        ctx.backend.write(path, b"", WriteMode::Overwrite).await.unwrap();
+        let empty_snapshot: Vec<u8> = Vec::new();
+        ctx.backend.remove(path, false).await.unwrap();
+
+        // A failed re-read must surface loudly — not be swallowed to `[]` and
+        // false-match the empty snapshot, which would silently (re)write.
+        let result = ctx
+            .overwrite_checked(path, b"new\n", Some(&empty_snapshot))
+            .await;
+        assert!(result.is_err(), "vanished target must error, got {result:?}");
+    }
 }

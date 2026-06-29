@@ -878,3 +878,20 @@ async fn dd_of_overwrite_under_latch_requires_confirm() {
     assert_eq!(r2.code, 0, "confirmed dd succeeds: {}", r2.err);
     assert_eq!(std::fs::read_to_string(dir.path().join("out.bin")).unwrap(), "fresh");
 }
+
+#[tokio::test]
+async fn dd_of_overwrite_under_trash_snapshots_prior_bytes() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("in.bin"), "fresh").expect("write");
+    std::fs::write(dir.path().join("out.bin"), "old").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o trash").await;
+    let r = run(&kernel, "dd if=in.bin of=out.bin").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+    let snaps = mock.snapshots();
+    assert_eq!(snaps.len(), 1, "snapshot of the prior of= file: {snaps:?}");
+    assert_eq!(snaps[0].1, b"old");
+    assert_eq!(std::fs::read_to_string(dir.path().join("out.bin")).unwrap(), "fresh");
+}

@@ -107,8 +107,18 @@ impl Tool for Cp {
                 .await
                 .map(|info| !info.is_dir())
                 .unwrap_or(false);
-            if dst_is_existing_file {
-                let src_display = crate::interpreter::value_to_string(&sources[0]);
+            let src_display = crate::interpreter::value_to_string(&sources[0]);
+            let src_resolved = ctx.resolve_path(&src_display);
+            let src_is_dir = ctx
+                .backend
+                .stat(Path::new(&src_resolved))
+                .await
+                .map(|info| info.is_dir())
+                .unwrap_or(false);
+            // Only a file→existing-file copy is a truncating overwrite. A dir
+            // source onto a file errors at mkdir anyway, so gating it would just
+            // take a spurious trash snapshot of a file that's never overwritten.
+            if dst_is_existing_file && !src_is_dir {
                 let snapshots = match ctx
                     .gate_overwrites("cp", &[(dest.clone(), false)], parsed.confirm.as_deref(), |nonce, joined| {
                         format!("cp --confirm=\"{nonce}\" {src_display} {joined}")

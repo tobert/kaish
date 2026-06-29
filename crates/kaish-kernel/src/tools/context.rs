@@ -246,7 +246,11 @@ pub(crate) async fn cas_overwrite(
     expected: Option<&[u8]>,
 ) -> Result<(), crate::backend::BackendError> {
     if let Some(exp) = expected {
-        let current = backend.read(resolved, None).await.unwrap_or_default();
+        // Propagate a re-read failure loudly — never `unwrap_or_default()` it to
+        // empty bytes, which would false-match an empty snapshot (silent
+        // overwrite) or report a bogus "file changed" for a real I/O error. A
+        // target that vanished since the gate (NotFound) is a change → abort.
+        let current = backend.read(resolved, None).await?;
         if current != exp {
             return Err(crate::backend::BackendError::InvalidOperation(
                 "file changed since the write-model gate checked it (concurrent write); \
