@@ -5474,11 +5474,19 @@ mod argv_classify_tests {
     ///   The genuine `WordAssign` *detection* on a real identifier LHS is pinned
     ///   separately by `classifies_each_word_class`.
     ///
-    /// Returns `None` for shapes we deliberately don't compare (e.g. a parsed
-    /// glob/interp `Expr`, which argv-native semantics never produce).
+    /// Returns `None` for shapes we deliberately don't compare:
+    /// - a parsed glob/interp `Expr`, which argv-native semantics never produce;
+    /// - a parsed literal the lexer **number-coerced** (`Int`/`Float`). `00`/`-1`
+    ///   lex to `Int`, dropping the literal text, where the classifier keeps the
+    ///   string. That divergence is *intentional* — `execute_argv` preserves a
+    ///   literal numeric string (pass `Value::Int` for a number), the string door
+    ///   can only guess — so the property skips it rather than demanding the
+    ///   classifier replicate a lossy coercion. Numeric edges are pinned exactly
+    ///   by `classifies_each_word_class`.
     fn canonical(arg: &Arg) -> Option<(&'static str, String, String)> {
+        // Only a *string*-valued literal is comparable; a coerced number is not.
         let lit = |e: &Expr| match e {
-            Expr::Literal(v) => Some(crate::interpreter::value_to_string(v)),
+            Expr::Literal(Value::String(s)) => Some(s.clone()),
             _ => None,
         };
         Some(match arg {
@@ -5510,8 +5518,16 @@ mod argv_classify_tests {
             classify("NAME=val"),
             Arg::WordAssign { key: "NAME".into(), value: Expr::Literal(Value::String("val".into())) }
         );
+        // Digits after the first flag char are ordinary (kept verbatim).
+        assert_eq!(classify("-A1"), Arg::ShortFlag("A1".into()));
+        assert_eq!(classify("--type2"), Arg::LongFlag("type2".into()));
         // Leading-digit dash is a number to the lexer, not a flag → positional.
         assert_eq!(classify("-1"), Arg::Positional(Expr::Literal(Value::String("-1".into()))));
+        // Numeric strings keep their literal text — `execute_argv` does NOT
+        // coerce (the string door's lexer would: `00`→`Int(0)`→"0"). A caller
+        // who wants a number passes `Value::Int`; a string stays the string.
+        assert_eq!(classify("00"), Arg::Positional(Expr::Literal(Value::String("00".into()))));
+        assert_eq!(classify("1.50"), Arg::Positional(Expr::Literal(Value::String("1.50".into()))));
         // A lone dash (stdin convention) is a positional, not a flag.
         assert_eq!(classify("-"), Arg::Positional(Expr::Literal(Value::String("-".into()))));
         // Non-identifier LHS is not an assignment.
@@ -5558,7 +5574,13 @@ mod argv_classify_tests {
         /// string door's binder is sound. (First proptest in the workspace.)
         #[test]
         fn classifier_matches_parser_on_clean_tokens(
-            token in "[a-zA-Z0-9_=./@:+-]{1,8}"
+            // No digits: this property tests the *classification* boundary
+            // (dash → flag, `--` → marker, `=` → assignment, colon-merge → one
+            // positional), not numeric coercion. The lexer coerces digit runs to
+            // `Int`/`Float` and drops the literal text (even inside a colon-merged
+            // word: `00:` → `0:`); the classifier intentionally preserves the raw
+            // string. Those numeric edges are pinned exactly by the unit tests.
+            token in "[a-zA-Z_=./@:+-]{1,8}"
         ) {
             let parsed = match parse(&format!("cmd {token}")) {
                 Ok(p) => p,

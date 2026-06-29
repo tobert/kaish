@@ -324,6 +324,10 @@ Semantics:
 - **Tokens are literal.** No glob expansion, no `$VAR` interpolation, no command
   substitution, no word splitting — the "single-quoted word" rule taken to its
   end. `execute_argv("echo", &[Value::String("*.txt".into())])` emits `*.txt`.
+  And no **number coercion**: a `Value::String("00")` stays `"00"` (the string
+  door's lexer would coerce the bare word `00` to an integer and print `0`). Pass
+  a `Value::Int`/`Value::Float` when you mean a number — the type is yours to
+  choose, which is the point of the typed door.
 - **One simple command only.** Pipelines, `&&`/`||`, control flow, and `$()` have
   no argv encoding — use `execute(&str)` for those. The two are *peers*: argv is
   not a subset that drops expressiveness, it's a different door that converges with
