@@ -339,6 +339,22 @@ loses link-ness. Fix: teach `move_dir_recursive` to `lstat` children and
 `read_link`+`symlink` the symlinks (mirroring the top-level branch in
 `move_path`). Cross-mount only (same-mount uses atomic `rename`, already correct).
 
+### `find -mtime`/`-size` emits an un-stattable entry instead of dropping it
+Surfaced by the cross-family review of the LocalFs list TOCTOU fix (PR #41,
+2026-06-29; Gemini Pro caught it, DeepSeek missed it). In the `find` loop
+(`tools/builtin/find.rs:314-342`) the per-entry stat is best-effort
+(`ctx.backend.stat(&path).await.ok()`), and each filter is a chained
+`if let Some(..) = mtime_filter && let Some(ref info) = info { … continue }`.
+When a filter *is* set but `info` is `None` (the entry vanished between the walk
+and the stat, or a backend doesn't populate the field), the whole block
+short-circuits, **no `continue` fires**, and the entry falls through to output
+unfiltered — so `find . -mtime +30` can print a file it can't confirm matches.
+The leniency is deliberate for "stat field unavailable" (comment at
+`passes_mtime_size`, ~`find.rs:425`), but it conflates that with "file is gone."
+Fix: when a filter is requested but `info`/the field is `None`, drop the entry
+(treat as non-match) rather than passing it through. Note this is the *inverse*
+of the PR-#41 bug — a false inclusion, not an aborted walk — and is pre-existing.
+
 ### Pre-release sweep — lower-frequency fidelity gaps (2026-06-23, verified)
 - **`rm <empty-dir>` without `-r` silently removes it** (coreutils needs `-d`/`-r`);
   **`mkdir` is always `-p`-like** — `mkdir existing` → exit 0 (no "File exists"),
@@ -639,6 +655,26 @@ never call `flagify_bool_named` (seq, find, stat, cp, mkdir, …) hand clap a
 bare `seq --json` works. Better fix: flagify **once in the kernel** before dispatch
 and drop the per-builtin calls. The global `--json` stripper also misses the `=true`
 form (it scans `flags`, not `named`). (P3)
+
+### `FileWalker` symlink-following is broken (dormant — no production caller)
+Surfaced by the cross-family review of the LocalFs list TOCTOU fix (PR #41,
+2026-06-29, Gemini Pro). Both bugs are latent: nothing in production sets
+`FileWalkOptions::follow_symlinks: true` (only the doc comment and tests
+reference it), so they bite only once a builtin exposes a `-L`/`--follow` flag.
+- **Dir symlinks are never recursed.** The walker decides recursion on
+  `entry.is_dir()` (`kaish-glob/src/walker.rs:248,308`), but `DirEntry::is_dir()`
+  is `kind == Directory` and a symlink is the distinct `Symlink` kind
+  (`kaish-types/src/dir_entry.rs:72`), so `is_dir()` is always false for a
+  directory symlink — even with `follow_symlinks` on, the link is yielded as a
+  file, never descended. Fix: gate on `is_dir || (is_symlink && follow_symlinks)`
+  and `stat`-through (`self.fs.is_dir(&full_path)`, which follows the link) to
+  decide whether the target is a directory.
+- **Cycle detection is a no-op in production.** Cycle detection keys
+  `visited_dirs` on `self.fs.canonicalize(&full_path)`, but `BackendWalkerFs`
+  (`kaish-kernel/src/backend_walker_fs.rs:37`) doesn't override `canonicalize`,
+  so it returns the path unresolved — a circular symlink would grow unique paths
+  forever (infinite loop / OOM). Fix: implement `canonicalize` on
+  `BackendWalkerFs` via `KernelBackend` link resolution before any `-L` flag ships.
 
 ### Smaller refactors
 - **Extract `skip_quoted_content()`** shared by `preprocess_arithmetic()` and
