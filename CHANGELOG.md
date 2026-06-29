@@ -10,6 +10,8 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-29
+
 ### Added
 - **`grep --ftype <NAME>` / `--ftype-not <NAME>`** — filter the recursive (`-r`)
   walk to (or away from) a named file type, e.g. `grep -r needle . --ftype rust`
@@ -629,7 +631,8 @@ Initial public release of **kaish** (会sh) — a predictable Bourne-like shell 
 - **REPL** (`kaish-repl`) with multi-line input, completion, and history; **MCP server** (`kaish-mcp`) exposing `kaish_execute` with help resources and structured + plain-text content blocks.
 - **`KernelClient` trait** + `EmbeddedClient` for in-process embedding; topic-based help system; `kaish-wasi` `wasm32-wasip1` target.
 
-[Unreleased]: https://github.com/tobert/kaish/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/tobert/kaish/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/tobert/kaish/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/tobert/kaish/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/tobert/kaish/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/tobert/kaish/compare/v0.8.3...v0.8.4
