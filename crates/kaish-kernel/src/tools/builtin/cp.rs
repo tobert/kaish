@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::{BackendError, KernelBackend, WriteMode};
 use crate::interpreter::ExecResult;
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{cas_overwrite, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Cp tool: copy files and directories.
 pub struct Cp;
@@ -20,6 +20,10 @@ struct CpArgs {
     recursive: bool,
 
     /// Do not overwrite existing files (-n)
+    /// Confirmation nonce for a latch-gated overwrite.
+    #[arg(long = "confirm")]
+    confirm: Option<String>,
+
     #[arg(short = 'n', long = "no-clobber", visible_alias = "no_clobber")]
     no_clobber: bool,
 
@@ -91,11 +95,47 @@ impl Tool for Cp {
             }
         }
 
+        // Gate a direct file clobber (`cp SRC EXISTING_FILE`) through latch +
+        // trash. Copying *into* a directory or a recursive directory merge is
+        // not a single-file truncation, so it stays ungated (documented
+        // write-model residual). Only the named destination is gated here.
+        let mut expected_dst: Option<Vec<u8>> = None;
+        if sources.len() == 1 {
+            let dst_is_existing_file = ctx
+                .backend
+                .stat(Path::new(&dst_path))
+                .await
+                .map(|info| !info.is_dir())
+                .unwrap_or(false);
+            if dst_is_existing_file {
+                let src_display = crate::interpreter::value_to_string(&sources[0]);
+                let snapshots = match ctx
+                    .gate_overwrites("cp", &[(dest.clone(), false)], parsed.confirm.as_deref(), |nonce, joined| {
+                        format!("cp --confirm=\"{nonce}\" {src_display} {joined}")
+                    })
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(blocked) => return blocked,
+                };
+                expected_dst = snapshots.get(&dst_path).cloned();
+            }
+        }
+
         let mut last_err: Option<String> = None;
         for src_value in sources {
             let source = crate::interpreter::value_to_string(src_value);
             let src_path = ctx.resolve_path(&source);
-            if let Err(e) = copy_path(&*ctx.backend, &src_path, &dst_path, recursive, no_clobber).await {
+            if let Err(e) = copy_path(
+                &*ctx.backend,
+                &src_path,
+                &dst_path,
+                recursive,
+                no_clobber,
+                expected_dst.as_deref(),
+            )
+            .await
+            {
                 last_err = Some(format!("cp: {}", e));
             }
         }
@@ -113,6 +153,7 @@ async fn copy_path(
     dst: &Path,
     recursive: bool,
     no_clobber: bool,
+    expected: Option<&[u8]>,
 ) -> Result<(), BackendError> {
     let info = backend.stat(src).await?;
 
@@ -143,7 +184,10 @@ async fn copy_path(
         }
 
         let data = backend.read(src, None).await?;
-        backend.write(&final_dst, &data, WriteMode::Overwrite).await
+        // CAS against the gate snapshot (`expected`) when this is a gated direct
+        // file clobber — a concurrent change is a loud conflict, not a silent
+        // clobber. `expected` is `None` for a new file or an ungated path.
+        cas_overwrite(backend, &final_dst, &data, expected).await
     }
 }
 

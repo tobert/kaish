@@ -5,7 +5,6 @@ use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::backend::WriteMode;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -23,6 +22,10 @@ struct WriteArgs {
     /// Content to write (positional or --content). Falls back to stdin when absent.
     #[arg(long)]
     content: Option<String>,
+
+    /// Confirmation nonce for a latch-gated overwrite.
+    #[arg(long = "confirm")]
+    confirm: Option<String>,
 
     #[command(flatten)]
     global: GlobalFlags,
@@ -66,6 +69,21 @@ impl Tool for Write {
             None => return ExecResult::failure(1, "write: missing path argument"),
         };
 
+        let resolved = ctx.resolve_path(&path);
+
+        // Gate the truncating overwrite through latch + trash (no-op when both
+        // are off). On latch this returns an exit-2 nonce result; under trash
+        // the prior content is snapshotted and returned for the CAS below.
+        let snapshots = match ctx
+            .gate_overwrites("write", &[(path.clone(), false)], parsed.confirm.as_deref(), |nonce, joined| {
+                format!("write --confirm=\"{nonce}\" {joined}")
+            })
+            .await
+        {
+            Ok(s) => s,
+            Err(blocked) => return blocked,
+        };
+
         // Content can be positional[1], named "content", or stdin. Read it as
         // raw bytes so a `Value::Bytes` (e.g. from `$(producer)`) is written
         // verbatim instead of stringified to the `[binary: N bytes]` marker —
@@ -82,9 +100,10 @@ impl Tool for Write {
             }
         };
 
-        let resolved = ctx.resolve_path(&path);
-
-        match ctx.backend.write(Path::new(&resolved), &content, WriteMode::Overwrite).await {
+        // CAS against the gate snapshot: a concurrent change between the gate
+        // and this write is a loud conflict, not a silent clobber.
+        let expected = snapshots.get(&resolved).map(|v| v.as_slice());
+        match ctx.overwrite_checked(Path::new(&resolved), &content, expected).await {
             Ok(()) => ExecResult::with_output(OutputData::text(format!("Wrote {} bytes to {}", content.len(), path))),
             Err(e) => ExecResult::failure(1, format!("write: {}: {}", path, e)),
         }

@@ -55,13 +55,20 @@ breaking entries are marked **BREAKING**.
   the batch and every error is reported. The GNU glued backup suffix (`-i.bak`) is
   **not yet supported** — kaish's lexer splits `-i.bak` at the dot; the trash snapshot
   under `set -o trash` already keeps a recoverable prior copy.
-- **`tee`, `patch`, and `sed -i` honor `set -o latch` / `set -o trash` on a truncating
-  overwrite**, like `rm` gates a delete. Overwriting an existing file under `trash`
-  first copies its prior content to trash (recoverable, via the new
-  `TrashBackend::trash_bytes`), leaving the file in place for the new content; under
-  `latch` it needs `--confirm=<nonce>` (exit 2 until confirmed, one nonce scoping all
-  files a command touches). A new file, `tee -a` append, or `patch --dry-run` never
-  gates. Both gates are off by default, so default behavior is unchanged.
+- **The write-model gate (`set -o latch` / `set -o trash`) covers every truncating
+  overwrite** — `tee`, `patch`, `sed -i`, **and now `write`, `cp`, `mv`, and `dd of=`**
+  (these four previously bypassed it) — like `rm` gates a delete. Overwriting an
+  existing file under `trash` first copies its prior content to trash (recoverable,
+  via the new `TrashBackend::trash_bytes`), leaving the file in place for the new
+  content; under `latch` it needs `--confirm=<nonce>` (exit 2 until confirmed, one
+  nonce scoping all files a command touches; `dd` uses its own `confirm=<nonce>`
+  key=value idiom). A new file, an append (`tee -a`), `patch --dry-run`, or a copy/move
+  *into* a directory never gates. The byte-oriented writers (`tee`/`write`/`dd`/`cp`)
+  now compare-and-swap against the gate's snapshot, so a concurrent change between the
+  gate and the write is a loud conflict rather than a silent clobber (`mv`'s same-mount
+  rename is already atomic). A prior file too large to snapshot (over the trash
+  max-size) falls through to `latch`/proceed, matching `rm`. Both gates are off by
+  default, so default behavior is unchanged.
 - **Validator advisory `W006` steers `test` to `[[ … ]]`.** Using a bare `test` as a
   command now surfaces a one-time stderr note (`use [[ … ]] …`) and still runs. A
   path-qualified form (`/usr/bin/test`, `./test`) is left alone — it's an explicit

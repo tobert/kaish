@@ -177,13 +177,31 @@ pub(crate) enum MutationAction {
     Latch,
 }
 
+/// Prior content the gate snapshotted, keyed by resolved path, for callers that
+/// compare-and-swap their overwrite against it (see `overwrite_checked`). Only
+/// gated existing targets that were trash-snapshotted appear; a new file, an
+/// append, an excluded/ungated path, or a latch-only target is absent — the
+/// caller writes those without a CAS expectation.
+pub(crate) type GateSnapshots = std::collections::HashMap<PathBuf, Vec<u8>>;
+
+/// Real paths the trash gate skips: scratch (`/tmp`) and the in-memory VFS
+/// (`/v`) mounts, where snapshotting prior content to trash is pointless.
+/// Shared by `rm`'s delete gate (`decide_rm_action`) and the overwrite gate
+/// (`decide_mutation_action`) so the exclusion list can't drift between them.
+/// `Path::starts_with` is component-aware, so `/tmp_file` does not match `/tmp`.
+pub(crate) fn is_trash_excluded(real_path: Option<&Path>) -> bool {
+    matches!(real_path, Some(rp) if rp.starts_with("/tmp") || rp.starts_with("/v"))
+}
+
 /// Decide how to gate a truncating overwrite, mirroring `rm`'s trash/latch
 /// priority. Pure so the decision table is unit-testable in isolation.
 ///
 /// - A non-existent target or an append has nothing to lose → `Proceed`.
 /// - A real path under `/tmp` or `/v` is excluded (matches `rm`) → `Proceed`.
-/// - Otherwise trash wins over latch (trash IS the safety net): `TrashFirst`
-///   when trash is on, else `Latch` when latch is on, else `Proceed`.
+/// - Trash wins over latch (trash IS the safety net): `TrashFirst` when trash
+///   is on **and** the prior content fits under `trash_max_size` (a file too
+///   big to snapshot can't be backed up, so it falls through, exactly like
+///   `rm`); else `Latch` when latch is on; else `Proceed`.
 ///
 /// An overlay/in-memory target has `real_path == None`, so it is *not* excluded
 /// and stays gated — the protection is about agent-operation safety, not just
@@ -194,22 +212,52 @@ pub(crate) fn decide_mutation_action(
     real_path: Option<&Path>,
     target_exists: bool,
     is_append: bool,
+    file_size: u64,
+    trash_max_size: u64,
 ) -> MutationAction {
     if !target_exists || is_append {
         return MutationAction::Proceed;
     }
-    if let Some(rp) = real_path {
-        if rp.starts_with("/tmp") || rp.starts_with("/v") {
-            return MutationAction::Proceed;
-        }
+    if is_trash_excluded(real_path) {
+        return MutationAction::Proceed;
     }
-    if trash_enabled {
+    if trash_enabled && file_size <= trash_max_size {
         return MutationAction::TrashFirst;
     }
     if latch_enabled {
         return MutationAction::Latch;
     }
     MutationAction::Proceed
+}
+
+/// Overwrite `resolved` with `content`, optionally compare-and-swapping against
+/// `expected` first. When `expected` is `Some`, the current bytes are re-read
+/// and must equal it (the write-model gate's snapshot), else a concurrent
+/// change is a loud conflict — never a silent clobber. Binary-safe (raw bytes,
+/// unlike the `String`-based `PatchOp` CAS). Shared by the byte-oriented gated
+/// builtins via `ExecContext::overwrite_checked` (`tee`/`write`/`dd`) and
+/// directly by `cp`'s free copy path. Not OS-atomic — a crash mid-write can
+/// still truncate (the atomic write-temp-then-rename primitive is a tracked
+/// write-model residual).
+pub(crate) async fn cas_overwrite(
+    backend: &dyn KernelBackend,
+    resolved: &Path,
+    content: &[u8],
+    expected: Option<&[u8]>,
+) -> Result<(), crate::backend::BackendError> {
+    if let Some(exp) = expected {
+        let current = backend.read(resolved, None).await.unwrap_or_default();
+        if current != exp {
+            return Err(crate::backend::BackendError::InvalidOperation(
+                "file changed since the write-model gate checked it (concurrent write); \
+                 aborting overwrite"
+                    .to_string(),
+            ));
+        }
+    }
+    backend
+        .write(resolved, content, crate::backend::WriteMode::Overwrite)
+        .await
 }
 
 impl ExecContext {
@@ -707,10 +755,13 @@ impl ExecContext {
     /// `--confirm=<nonce>`: the first call returns an exit-2 latch result with
     /// one nonce scoping every latched path.
     ///
-    /// `Ok(())` means every snapshot is done and the caller may write all
-    /// targets. `Err(result)` is what the caller must return verbatim (the
-    /// latch prompt, an invalid nonce, or a trash failure — never fall through
-    /// to a destructive overwrite on error).
+    /// `Ok(snapshots)` means every snapshot is done and the caller may write
+    /// all targets; `snapshots` maps each trash-snapshotted target's resolved
+    /// path to its prior bytes, so a byte-oriented caller can pass them as the
+    /// `expected` to `overwrite_checked` for a binary-safe compare-and-swap.
+    /// `Err(result)` is what the caller must return verbatim (the latch prompt,
+    /// an invalid nonce, or a trash failure — never fall through to a
+    /// destructive overwrite on error).
     ///
     /// `confirm_hint` builds the re-run command shown in the latch prompt, given
     /// the nonce and the space-joined latched paths. Most callers want
@@ -724,13 +775,14 @@ impl ExecContext {
         targets: &[(String, bool)],
         confirm: Option<&str>,
         confirm_hint: impl FnOnce(&str, &str) -> String,
-    ) -> Result<(), ExecResult> {
+    ) -> Result<GateSnapshots, ExecResult> {
         let trash_enabled = self.scope.trash_enabled();
         let latch_enabled = self.scope.latch_enabled();
         // Fast path: both gates off, nothing to do.
         if !trash_enabled && !latch_enabled {
-            return Ok(());
+            return Ok(GateSnapshots::new());
         }
+        let trash_max_size = self.scope.trash_max_size();
 
         struct Decided {
             display: String,
@@ -751,12 +803,25 @@ impl ExecContext {
             // snapshot reads bytes through the backend, not the real path.
             let real = self.backend.resolve_real_path(Path::new(&resolved));
             let exists = self.backend.exists(Path::new(&resolved)).await;
+            // Prior size decides trash eligibility (a file too big to snapshot
+            // can't be backed up). Only stat an existing target.
+            let size = if exists {
+                self.backend
+                    .stat(Path::new(&resolved))
+                    .await
+                    .map(|e| e.size)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
             let action = decide_mutation_action(
                 trash_enabled,
                 latch_enabled,
                 real.as_deref(),
                 exists,
                 *is_append,
+                size,
+                trash_max_size,
             );
             decided.push(Decided { display: display.clone(), resolved, action });
         }
@@ -783,19 +848,24 @@ impl ExecContext {
             }
         }
 
-        // Snapshot prior content for every trash-first target before any write.
+        // Snapshot prior content for every trash-first target before any write,
+        // keeping the bytes so a byte-oriented caller can CAS against them.
+        let mut snapshots = GateSnapshots::new();
         for d in &decided {
             if matches!(d.action, MutationAction::TrashFirst) {
-                if let Err(e) = self.snapshot_for_overwrite(&d.display, &d.resolved).await {
-                    return Err(ExecResult::failure(1, format!("{command}: {e}")));
+                match self.snapshot_for_overwrite(&d.display, &d.resolved).await {
+                    Ok(bytes) => {
+                        snapshots.insert(d.resolved.clone(), bytes);
+                    }
+                    Err(e) => return Err(ExecResult::failure(1, format!("{command}: {e}"))),
                 }
             }
         }
-        Ok(())
+        Ok(snapshots)
     }
 
     /// Copy the prior content of `resolved` into the trash before it's
-    /// overwritten.
+    /// overwritten, returning those bytes for the caller's compare-and-swap.
     ///
     /// We **copy** (not move): the builtin overwrites the file in place next,
     /// and read-modify-write callers (`patch`, `sed -i`) still need to read it —
@@ -804,7 +874,11 @@ impl ExecContext {
     /// through the backend so a real, overlay, or in-memory file is handled the
     /// same way. A missing trash backend or a trash failure is an error — never
     /// a silent fall-through to a destructive overwrite.
-    async fn snapshot_for_overwrite(&self, display: &str, resolved: &Path) -> Result<(), String> {
+    async fn snapshot_for_overwrite(
+        &self,
+        display: &str,
+        resolved: &Path,
+    ) -> Result<Vec<u8>, String> {
         let trash = self
             .trash_backend
             .as_ref()
@@ -817,7 +891,28 @@ impl ExecContext {
         trash
             .trash_bytes(Path::new(display), &bytes)
             .await
-            .map_err(|e| format!("{display}: trash failed: {e}"))
+            .map_err(|e| format!("{display}: trash failed: {e}"))?;
+        Ok(bytes)
+    }
+
+    /// Overwrite `resolved` with `content`. When `expected` is `Some`, this is a
+    /// binary-safe compare-and-swap: the current bytes are re-read and must
+    /// equal `expected` (the gate's snapshot), else it errors — a concurrent
+    /// change since the gate is a loud conflict, never a silent clobber. Unlike
+    /// the `String`-based `PatchOp::Replace` CAS used by `patch`/`sed -i`, this
+    /// operates on raw bytes, so binary overwrites (`tee`, `write`, `dd`, `cp`,
+    /// `mv`) keep the same protection. It is *not* OS-atomic — a crash mid-write
+    /// can still truncate; the atomic write-temp-then-rename primitive remains a
+    /// tracked write-model residual.
+    pub(crate) async fn overwrite_checked(
+        &self,
+        resolved: &Path,
+        content: &[u8],
+        expected: Option<&[u8]>,
+    ) -> Result<(), String> {
+        cas_overwrite(&*self.backend, resolved, content, expected)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Expand a glob pattern to matching file paths.
@@ -1013,7 +1108,9 @@ mod tests {
         exists: bool,
         append: bool,
     ) -> MutationAction {
-        decide_mutation_action(trash, latch, real.map(Path::new), exists, append)
+        // Default to a small file well under the cap; the size-cap behavior
+        // has its own dedicated test below.
+        decide_mutation_action(trash, latch, real.map(Path::new), exists, append, 1, 10_000_000)
     }
 
     #[test]
@@ -1052,5 +1149,26 @@ mod tests {
         // No real path (overlay/in-memory) is NOT excluded — still trash-first.
         assert_eq!(decide(true, true, None, true, false), MutationAction::TrashFirst);
         assert_eq!(decide(false, true, None, true, false), MutationAction::Latch);
+    }
+
+    #[test]
+    fn file_too_big_to_trash_falls_through_like_rm() {
+        // Prior content larger than the cap can't be snapshotted, so trash is
+        // skipped: latch gates if on, else the overwrite proceeds unbacked.
+        let big = 100u64;
+        let cap = 10u64;
+        assert_eq!(
+            decide_mutation_action(true, true, Some(Path::new("/work/f")), true, false, big, cap),
+            MutationAction::Latch
+        );
+        assert_eq!(
+            decide_mutation_action(true, false, Some(Path::new("/work/f")), true, false, big, cap),
+            MutationAction::Proceed
+        );
+        // Exactly at the cap still trashes (inclusive bound, matches rm).
+        assert_eq!(
+            decide_mutation_action(true, false, Some(Path::new("/work/f")), true, false, cap, cap),
+            MutationAction::TrashFirst
+        );
     }
 }

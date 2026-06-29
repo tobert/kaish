@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::BackendError;
 use crate::interpreter::ExecResult;
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{is_trash_excluded, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// clap-derived argv layer for rm.
 #[derive(Parser, Debug)]
@@ -76,13 +76,9 @@ fn decide_rm_action(
 
     if trash_enabled {
         if let Some(rp) = real_path {
-            // Skip trash for excluded paths (/tmp, /v/*)
-            // Use Path::starts_with (component-aware) not str starts_with,
-            // otherwise "/tmp_file.txt" would incorrectly match "/tmp".
-            let excluded = rp.starts_with("/tmp")
-                || rp.starts_with("/v");
-
-            if !excluded {
+            // Skip trash for excluded paths (/tmp, /v/*). Shared with the
+            // overwrite gate via `is_trash_excluded` so the list can't drift.
+            if !is_trash_excluded(Some(rp)) {
                 // Directories always go to trash — stat size is unreliable
                 // and trash::delete handles them atomically.
                 if is_dir {

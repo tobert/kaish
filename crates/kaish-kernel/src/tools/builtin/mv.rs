@@ -16,6 +16,10 @@ pub struct Mv;
 #[command(name = "mv", about = "Move (rename) files and directories")]
 struct MvArgs {
     /// Do not overwrite existing files (-n)
+    /// Confirmation nonce for a latch-gated overwrite.
+    #[arg(long = "confirm")]
+    confirm: Option<String>,
+
     #[arg(short = 'n', long = "no-clobber", visible_alias = "no_clobber")]
     no_clobber: bool,
 
@@ -80,6 +84,32 @@ impl Tool for Mv {
                     1,
                     format!("mv: target '{}' is not a directory", dest),
                 );
+            }
+        }
+
+        // Gate a direct file clobber (`mv SRC EXISTING_FILE`) through latch +
+        // trash. The gate snapshots the prior destination content to trash (the
+        // recovery copy) and handles the latch prompt; the move itself replaces
+        // it (an atomic same-mount `rename`, or unlink+write cross-mount), so no
+        // CAS is threaded. Moving *into* a directory or a recursive merge isn't
+        // a single-file truncation and stays ungated (documented residual).
+        if sources.len() == 1 {
+            let dst_is_existing_file = ctx
+                .backend
+                .stat(Path::new(&dst_path))
+                .await
+                .map(|info| !info.is_dir())
+                .unwrap_or(false);
+            if dst_is_existing_file {
+                let src_display = crate::interpreter::value_to_string(&sources[0]);
+                if let Err(blocked) = ctx
+                    .gate_overwrites("mv", &[(dest.clone(), false)], parsed.confirm.as_deref(), |nonce, joined| {
+                        format!("mv --confirm=\"{nonce}\" {src_display} {joined}")
+                    })
+                    .await
+                {
+                    return blocked;
+                }
             }
         }
 
