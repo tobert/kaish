@@ -51,8 +51,9 @@ pub mod glob {
 /// Recursive file walking infrastructure (re-exported from kaish-glob).
 pub mod walker {
     pub use kaish_glob::{
-        EntryTypes, FileWalker, FilterResult, GlobPath, IgnoreFilter, IncludeExclude,
-        PathSegment, PatternError, WalkOptions, WalkerDirEntry, WalkerError, WalkerFs,
+        build_file_types, list_file_types, EntryTypes, FileTypeError, FileWalker, FilterResult,
+        GlobPath, IgnoreFilter, IncludeExclude, PathSegment, PatternError, WalkOptions,
+        WalkerDirEntry, WalkerError, WalkerFs,
     };
     pub use crate::backend_walker_fs::BackendWalkerFs;
 }

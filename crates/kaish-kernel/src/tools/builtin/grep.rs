@@ -16,9 +16,12 @@ use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::grep_engine::{AccumulatorSink, ContextKind, SearchEvent};
+use crate::tools::builtin::read_repeatable_strings;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
-use crate::walker::{FileWalker, GlobPath, IncludeExclude, WalkOptions};
+use crate::walker::{
+    build_file_types, list_file_types, FileWalker, GlobPath, IncludeExclude, WalkOptions,
+};
 
 /// Grep tool: search for patterns in text.
 pub struct Grep;
@@ -110,6 +113,29 @@ struct GrepArgs {
     #[arg(long = "binary")]
     binary: Option<String>,
 
+    /// Filter the recursive walk to files of the given type(s), e.g.
+    /// `--ftype rust`. Repeatable. `--ftype` is the kaish-wide file-type
+    /// filter (see `--ftype-list`).
+    #[arg(long = "ftype")]
+    ftype: Vec<String>,
+
+    /// Exclude files of the given type(s) from the recursive walk. Repeatable.
+    #[arg(long = "ftype-not")]
+    ftype_not: Vec<String>,
+
+    /// List known file types (TYPE → globs) and exit. No pattern needed.
+    #[arg(long = "ftype-list")]
+    ftype_list: bool,
+
+    /// Include hidden files and directories (dotfiles) in the recursive walk.
+    /// Off by default; applies to `-r` only.
+    #[arg(long = "hidden")]
+    hidden: bool,
+
+    /// Stop after NUM matching lines per file (GNU `--max-count`).
+    #[arg(long = "max-count")]
+    max_count: Option<String>,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -172,6 +198,32 @@ impl Tool for Grep {
             Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
         };
         parsed.global.apply(ctx);
+
+        // `--ftype-list` is a pure info query: emit the TYPE→globs table and
+        // exit, no pattern required.
+        if parsed.ftype_list {
+            let rows: Vec<OutputNode> = list_file_types()
+                .into_iter()
+                .map(|(name, globs)| OutputNode::new(&name).with_cells(vec![globs.join(", ")]))
+                .collect();
+            let table = OutputData::table(vec!["TYPE".to_string(), "GLOBS".to_string()], rows);
+            return ExecResult::with_output(table);
+        }
+
+        // Build the file-type filter from `--ftype`/`--ftype-not`. Repeatable
+        // value flags arrive as `Json(Array)` (or a bare `String` for one) —
+        // read them off the raw args like sed's `-e`, since `to_argv()` can't
+        // round-trip a repeatable array back through the clap re-parse. An
+        // unknown type name is loud (exit 2), never a silent empty match. The
+        // filter only takes effect on the `-r` walk below, but we validate the
+        // names here regardless so a typo is caught on any invocation.
+        let ftype_select = read_repeatable_strings(&args, "ftype");
+        let ftype_negate = read_repeatable_strings(&args, "ftype-not");
+        let file_types = match build_file_types(&ftype_select, &ftype_negate) {
+            Ok(t) => t,
+            Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
+        };
+        let include_hidden = parsed.hidden;
 
         let pattern = match args.get_string("pattern", 0) {
             Some(p) => p,
@@ -260,6 +312,14 @@ impl Tool for Grep {
             Err(e) => return ExecResult::failure(1, format!("grep: invalid pattern: {}", e)),
         };
 
+        // `--max-count N`: stop after N matching lines per file (GNU semantics).
+        // `--max-count 0` matches nothing. A non-numeric value is a loud usage
+        // error, reusing the same parser as the context flags.
+        let max_count = match parse_context("--max-count", &parsed.max_count) {
+            Ok(c) => c,
+            Err(e) => return ExecResult::failure(2, e),
+        };
+
         let grep_opts = GrepOptions {
             show_line_numbers: line_number,
             invert,
@@ -270,6 +330,7 @@ impl Tool for Grep {
             multiline,
             encoding: encoding.clone(),
             binary_detection,
+            max_count,
         };
 
         // Handle recursive search
@@ -299,8 +360,9 @@ impl Tool for Grep {
                 max_depth: None,
                 entry_types: crate::walker::EntryTypes::files_only(),
                 respect_gitignore: ctx.ignore_config.auto_gitignore(),
-                include_hidden: false,
+                include_hidden,
                 filter,
+                types: file_types.clone(),
                 ..WalkOptions::default()
             };
 
@@ -365,7 +427,7 @@ impl Tool for Grep {
             if let (Some(pipe_stdin), Some(pipe_stdout)) =
                 (ctx.pipe_stdin.take(), ctx.pipe_stdout.take())
             {
-                return self.stream_grep(ctx, pipe_stdin, pipe_stdout, &regex, invert, line_number).await;
+                return self.stream_grep(ctx, pipe_stdin, pipe_stdout, &regex, invert, line_number, max_count).await;
             }
         }
 
@@ -383,8 +445,14 @@ impl Tool for Grep {
                 "none" | "text" | "without-match" => None,
                 _ => Some(b'\x00'),
             };
-            let mut scanner =
-                GrepLineScanner::new(&regex, invert, line_number, quit_byte, Some(path.clone()));
+            let mut scanner = GrepLineScanner::new(
+                &regex,
+                invert,
+                line_number,
+                quit_byte,
+                Some(path.clone()),
+                max_count,
+            );
             let scan_result = ctx
                 .read_file_chunked(
                     Path::new(&resolved),
@@ -392,9 +460,9 @@ impl Tool for Grep {
                     |chunk| {
                         scanner.push(chunk);
                         // Once the scanner has decided the file is binary (bad
-                        // UTF-8) or hit the quit byte, the rest of the file is
-                        // irrelevant — stop reading it.
-                        if scanner.saw_invalid_utf8 || scanner.stopped_early {
+                        // UTF-8), hit the quit byte, or reached --max-count, the
+                        // rest of the file is irrelevant — stop reading it.
+                        if scanner.saw_invalid_utf8 || scanner.stopped_early || scanner.hit_limit {
                             std::ops::ControlFlow::Break(())
                         } else {
                             std::ops::ControlFlow::Continue(())
@@ -529,6 +597,7 @@ impl Tool for Grep {
 
 impl Grep {
     /// Stream grep: read lines from pipe_stdin, write matching lines to pipe_stdout.
+    #[allow(clippy::too_many_arguments)]
     async fn stream_grep(
         &self,
         _ctx: &mut ExecContext,
@@ -537,6 +606,7 @@ impl Grep {
         regex: &regex::Regex,
         invert: bool,
         show_line_numbers: bool,
+        max_count: Option<usize>,
     ) -> ExecResult {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -554,6 +624,13 @@ impl Grep {
                     let matches = regex.is_match(line_buf.trim_end_matches('\n'));
                     let should_output = if invert { !matches } else { matches };
                     if should_output {
+                        // --max-count: stop before emitting the (N+1)th line.
+                        // `Some(0)` breaks before the first, matching nothing.
+                        if let Some(max) = max_count
+                            && match_count >= max
+                        {
+                            break;
+                        }
                         match_count += 1;
                         let output = if show_line_numbers {
                             format!("{}:{}", line_num, line_buf)
@@ -747,6 +824,13 @@ struct GrepLineScanner<'r> {
     /// Set to `true` when the `quit_byte` is encountered.  Scanning stops but
     /// the matched output collected so far is still returned (no error).
     stopped_early: bool,
+    /// `--max-count`: stop after this many emitted lines. `None` = no limit;
+    /// `Some(0)` emits nothing.
+    max_count: Option<usize>,
+    /// Set when `max_count` is reached. Like `stopped_early` it halts the chunk
+    /// reader, but — unlike a quit byte — it does *not* trigger the whole-buffer
+    /// re-read fallback (the cap is already honored by the scanner).
+    hit_limit: bool,
 }
 
 impl<'r> GrepLineScanner<'r> {
@@ -756,6 +840,7 @@ impl<'r> GrepLineScanner<'r> {
         show_line_numbers: bool,
         quit_byte: Option<u8>,
         path: Option<String>,
+        max_count: Option<usize>,
     ) -> Self {
         Self {
             regex,
@@ -772,6 +857,8 @@ impl<'r> GrepLineScanner<'r> {
             match_count: 0,
             saw_invalid_utf8: false,
             stopped_early: false,
+            max_count,
+            hit_limit: false,
         }
     }
 
@@ -779,7 +866,7 @@ impl<'r> GrepLineScanner<'r> {
     /// - Sets `saw_invalid_utf8 = true` on a genuinely bad UTF-8 byte (exit 2).
     /// - Sets `stopped_early = true` on a `quit_byte` (stop silently, no error).
     fn push(&mut self, chunk: &[u8]) {
-        if self.saw_invalid_utf8 || self.stopped_early {
+        if self.saw_invalid_utf8 || self.stopped_early || self.hit_limit {
             return;
         }
         // Honour BinaryDetection::quit(byte): stop at the first occurrence of
@@ -861,8 +948,14 @@ impl<'r> GrepLineScanner<'r> {
 
     /// Flush the remaining carry as the final (unterminated) line.
     /// Sets `saw_invalid_utf8` if the remaining bytes are genuinely invalid UTF-8.
+    ///
+    /// `hit_limit` short-circuits like `stopped_early`: once `--max-count` is
+    /// reached the reader stops mid-file, so the leftover carry may be a UTF-8
+    /// multibyte sequence we *artificially* truncated at a chunk boundary.
+    /// Validating it would raise a spurious "binary data" exit-2 and clobber a
+    /// correct capped result — so don't.
     fn finish(&mut self) {
-        if self.saw_invalid_utf8 || self.stopped_early || self.carry.is_empty() {
+        if self.saw_invalid_utf8 || self.stopped_early || self.hit_limit || self.carry.is_empty() {
             return;
         }
         match std::str::from_utf8(&self.carry) {
@@ -885,9 +978,22 @@ impl<'r> GrepLineScanner<'r> {
     }
 
     fn match_line(&mut self, line: &str, byte_offset: u64) {
+        if self.hit_limit {
+            return;
+        }
         let matches = self.regex.is_match(line);
         let should_output = if self.invert { !matches } else { matches };
         if !should_output {
+            return;
+        }
+
+        // --max-count: don't emit beyond the cap. `Some(0)` stops before the
+        // first match. Flagging `hit_limit` halts the chunk reader after this
+        // chunk (without the quit-byte whole-buffer fallback).
+        if let Some(max) = self.max_count
+            && self.match_count >= max
+        {
+            self.hit_limit = true;
             return;
         }
 
@@ -963,6 +1069,9 @@ struct GrepOptions {
     /// auto-detect via BOM sniffing.
     encoding: Option<String>,
     binary_detection: BinaryDetection,
+    /// Stop after this many matching lines (GNU `--max-count`). `None` = no
+    /// limit; `Some(0)` matches nothing.
+    max_count: Option<usize>,
 }
 
 /// Search bytes via grep-searcher and return the rendered output bundle.
@@ -1044,6 +1153,17 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
     let mut emitted_any = false;
 
     for event in events {
+        // Honor --max-count: once N matching lines are emitted, stop. Trailing
+        // after-context of the Nth match still flows (a new match or a group
+        // break ends emission), matching GNU `grep -m N -A k`.
+        if let Some(max) = opts.max_count
+            && match_count >= max
+        {
+            match event {
+                SearchEvent::Context(c) if matches!(c.kind, ContextKind::After) => {}
+                _ => break,
+            }
+        }
         match event {
             SearchEvent::Match(m) => {
                 let line_num = m.line_number.unwrap_or(0);
@@ -1792,6 +1912,7 @@ mod tests {
             multiline: false,
             encoding: None,
             binary_detection: BinaryDetection::quit(b'\x00'),
+            max_count: None,
         };
         grep_lines_structured(content, &matcher, &opts, path).unwrap()
     }
@@ -1806,7 +1927,7 @@ mod tests {
     ) -> (RenderResult, bool) {
         let regex = regex::RegexBuilder::new(pattern).build().unwrap();
         let mut scanner =
-            GrepLineScanner::new(&regex, false, line_numbers, Some(b'\x00'), path.map(str::to_string));
+            GrepLineScanner::new(&regex, false, line_numbers, Some(b'\x00'), path.map(str::to_string), None);
         for chunk in content.chunks(chunk_size.max(1)) {
             scanner.push(chunk);
         }
@@ -1818,7 +1939,7 @@ mod tests {
     /// Convenience wrapper used by the binary/quit tests.
     fn scanner_grep(content: &[u8], pattern: &str, invert: bool, line_numbers: bool, chunk_size: usize) -> (String, usize, bool) {
         let regex = regex::RegexBuilder::new(pattern).build().unwrap();
-        let mut scanner = GrepLineScanner::new(&regex, invert, line_numbers, Some(b'\x00'), None);
+        let mut scanner = GrepLineScanner::new(&regex, invert, line_numbers, Some(b'\x00'), None, None);
         for chunk in content.chunks(chunk_size) {
             scanner.push(chunk);
         }
@@ -2057,7 +2178,7 @@ mod tests {
         // Use read_file_chunked directly with a small chunk to force multiple reads.
         let regex = regex::Regex::new("line").unwrap();
         let mut scanner =
-            GrepLineScanner::new(&regex, false, false, Some(b'\x00'), Some("/big.txt".to_string()));
+            GrepLineScanner::new(&regex, false, false, Some(b'\x00'), Some("/big.txt".to_string()), None);
         ctx.read_file_chunked(Path::new("/big.txt"), 256, |c| {
             scanner.push(c);
             std::ops::ControlFlow::Continue(())
@@ -2083,5 +2204,29 @@ mod tests {
         let render = scanner.into_render_result();
         // All 40 lines match "line".
         assert_eq!(render.match_count, 40, "expected 40 matches");
+    }
+
+    /// Regression (DeepSeek review, 2026-06-28): when `--max-count` is hit and
+    /// the reader stops mid-file at a chunk boundary that splits a UTF-8
+    /// multibyte sequence, the artificially truncated carry must NOT be reported
+    /// as binary data. Before the `finish()` `hit_limit` guard, the leftover
+    /// `\xC3` (lead byte of `é`) was validated and raised a spurious exit-2 over
+    /// a correct 2-match result.
+    #[test]
+    fn max_count_does_not_flag_truncated_multibyte_carry() {
+        let regex = regex::Regex::new("m").unwrap();
+        let mut scanner = GrepLineScanner::new(&regex, false, false, Some(b'\x00'), None, Some(2));
+        // 3 matching lines (cap is 2) then a lone UTF-8 lead byte with no
+        // continuation — in production the reader stops here because the cap was
+        // hit, so the continuation byte is never fed.
+        scanner.push(b"m\nm\nm\n\xC3");
+        assert!(scanner.hit_limit, "cap of 2 must be reached");
+        scanner.finish();
+        assert!(
+            !scanner.saw_invalid_utf8,
+            "a truncated-at-cap carry must not be flagged as binary",
+        );
+        let render = scanner.into_render_result();
+        assert_eq!(render.match_count, 2, "exactly the capped number of matches");
     }
 }

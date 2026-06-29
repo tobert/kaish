@@ -10,6 +10,25 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`grep --ftype <NAME>` / `--ftype-not <NAME>`** — filter the recursive (`-r`)
+  walk to (or away from) a named file type, e.g. `grep -r needle . --ftype rust`
+  (searches `*.rs`). Both are repeatable. `--ftype` is the kaish-wide file-type
+  filter (distinct from file/dir *entry-kind*). An unknown type name is a loud
+  exit-2 error, never a silent empty match.
+- **`grep --ftype-list`** — print the known file types and their globs as a
+  TYPE→globs table (works with `--json`); no pattern required.
+- **`grep --hidden`** — include dotfiles/dot-directories in the recursive walk
+  (off by default, bash no-dotglob semantics).
+- **`grep --max-count <N>`** — stop after N matching lines per file (GNU
+  semantics; `--max-count 0` matches nothing). Streaming single-file and piped
+  searches stop reading once the cap is hit, so it bounds work on large inputs.
+- **`glob --ftype <NAME>` / `--ftype-not <NAME>` / `--ftype-list`** — the same
+  file-type filtering on `glob`, sharing grep's type registry. `--ftype` (rg-style
+  file type, by extension) is distinct from glob's existing `-t`/`--type` (entry
+  *kind*: file/dir); the two compose. A file-type filter narrows files only —
+  directories pass it untouched. Unknown type → loud exit 2.
+
 ### Fixed
 - **`sed -e <number>` is a loud error, not a silent drop.** A non-string `-e`
   expression (e.g. `sed -e 5`) now exits 2 with a usage error instead of being

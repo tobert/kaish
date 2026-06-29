@@ -6,8 +6,11 @@ use clap::{CommandFactory, Parser};
 use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
+use crate::tools::builtin::read_repeatable_strings;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
-use crate::walker::{EntryTypes, FileWalker, GlobPath, IncludeExclude, WalkOptions};
+use crate::walker::{
+    build_file_types, list_file_types, EntryTypes, FileWalker, GlobPath, IncludeExclude, WalkOptions,
+};
 
 /// Glob tool: expand glob patterns to matching file paths.
 pub struct Glob;
@@ -31,6 +34,20 @@ struct GlobArgs {
     /// Entry type: f=files, d=dirs, a=all.
     #[arg(id = "type", short = 't', long = "type")]
     type_: Option<String>,
+
+    /// Filter to files of the given type(s), e.g. `--ftype rust`. Repeatable.
+    /// File-type (rg-style, by extension) — distinct from `-t`/`--type`, which
+    /// is *entry kind* (file/dir). See `--ftype-list`.
+    #[arg(long = "ftype")]
+    ftype: Vec<String>,
+
+    /// Exclude files of the given type(s). Repeatable.
+    #[arg(long = "ftype-not")]
+    ftype_not: Vec<String>,
+
+    /// List known file types (TYPE → globs) and exit. No pattern needed.
+    #[arg(long = "ftype-list")]
+    ftype_list: bool,
 
     /// Null-separated output.
     #[arg(short = '0', long = "null")]
@@ -89,6 +106,26 @@ impl Tool for Glob {
             Err(e) => return ExecResult::failure(2, format!("glob: {e}")),
         };
         parsed.global.apply(ctx);
+
+        // `--ftype-list`: emit the TYPE→globs table and exit, no pattern needed.
+        if parsed.ftype_list {
+            let rows: Vec<OutputNode> = list_file_types()
+                .into_iter()
+                .map(|(name, globs)| OutputNode::new(&name).with_cells(vec![globs.join(", ")]))
+                .collect();
+            let table = OutputData::table(vec!["TYPE".to_string(), "GLOBS".to_string()], rows);
+            return ExecResult::with_output(table);
+        }
+
+        // Build the rg-style file-type filter from `--ftype`/`--ftype-not`.
+        // Repeatable value flags arrive as `Json(Array)`; read them off the raw
+        // args (shared with grep). An unknown type name is loud (exit 2).
+        let ftype_select = read_repeatable_strings(&args, "ftype");
+        let ftype_negate = read_repeatable_strings(&args, "ftype-not");
+        let file_types = match build_file_types(&ftype_select, &ftype_negate) {
+            Ok(t) => t,
+            Err(e) => return ExecResult::failure(2, format!("glob: {e}")),
+        };
 
         // Get the pattern
         let pattern = match args.get_string("pattern", 0) {
@@ -185,6 +222,7 @@ impl Tool for Glob {
             respect_gitignore: if no_ignore { false } else { ctx.ignore_config.auto_gitignore() },
             include_hidden,
             filter,
+            types: file_types.clone(),
             ..WalkOptions::default()
         };
 

@@ -35,6 +35,12 @@ The REPL calls these if defined. All are optional.
 
 The `kaish-` prefix on builtins signals "this is about the shell itself, not a general utility." Use it for tools that expose kernel state, inspect the runtime, or control kaish-specific features.
 
+### Shared flag conventions
+
+When a flag means the same thing across builtins, it gets one name everywhere — so an agent that learns it once is never wrong on another tool:
+
+- **`--ftype <NAME>` / `--ftype-not <NAME>` / `--ftype-list`** — rg-style *file-type* filtering (by extension/name, e.g. `--ftype rust` → `*.rs`), on every search builtin (`grep`, `glob`). Deliberately distinct from `-t`/`--type`, which on `find`/`glob` is *entry kind* (file/dir/symlink, the POSIX/fd convention) — two different axes, two names. A file-type filter narrows files only; directories pass it untouched.
+
 ## Style Rules
 
 - Full words, no abbreviations: `kaish_post_command` not `kaish_postcmd`
