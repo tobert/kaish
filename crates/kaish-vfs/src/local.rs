@@ -199,6 +199,49 @@ impl LocalFs {
     fn extract_permissions(_meta: &std::fs::Metadata) -> Option<u32> {
         None
     }
+
+    /// Build a [`DirEntry`] for one directory member named by `path`, *without*
+    /// following symlinks — or `Ok(None)` if that member has vanished since the
+    /// enclosing `read_dir` snapshot was taken.
+    ///
+    /// [`list`](LocalFs::list) stats each entry in a step separate from the `read_dir`
+    /// that yielded it, so on a *live* directory an entry can be unlinked in that window
+    /// (a concurrent writer, a build churning `target/`, an editor swapping a temp file).
+    /// A removed entry is not a listing failure: report it gone so the caller skips it —
+    /// the way `ls(1)` tolerates a file deleted mid-scan — rather than letting one
+    /// `ENOENT` from a single sibling sink the whole listing. Any *other* stat error
+    /// (e.g. `EACCES`) is genuine and still propagates. A *dangling* symlink is reported,
+    /// not skipped: `symlink_metadata` stats the link itself, which still exists.
+    async fn dir_entry_no_follow(path: &Path) -> io::Result<Option<DirEntry>> {
+        let metadata = match fs::symlink_metadata(path).await {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let file_type = metadata.file_type();
+
+        let (kind, symlink_target) = if file_type.is_symlink() {
+            // The link's own target, best-effort — a dangling link still lists.
+            (DirEntryKind::Symlink, fs::read_link(path).await.ok())
+        } else if file_type.is_dir() {
+            (DirEntryKind::Directory, None)
+        } else {
+            // Special files (sockets, pipes, devices) → File. See stat().
+            (DirEntryKind::File, None)
+        };
+
+        Ok(Some(DirEntry {
+            name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            kind,
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
+            permissions: Self::extract_permissions(&metadata),
+            symlink_target,
+        }))
+    }
 }
 
 #[async_trait]
@@ -280,29 +323,12 @@ impl Filesystem for LocalFs {
         let mut dir = fs::read_dir(&full_path).await?;
 
         while let Some(entry) = dir.next_entry().await? {
-            // Use symlink_metadata to detect symlinks without following them
-            let metadata = fs::symlink_metadata(entry.path()).await?;
-            let file_type = metadata.file_type();
-
-            let (kind, symlink_target) = if file_type.is_symlink() {
-                // Read the symlink target
-                let target = fs::read_link(entry.path()).await.ok();
-                (DirEntryKind::Symlink, target)
-            } else if file_type.is_dir() {
-                (DirEntryKind::Directory, None)
-            } else {
-                // Special files (sockets, pipes, devices) → File. See stat() comment.
-                (DirEntryKind::File, None)
-            };
-
-            entries.push(DirEntry {
-                name: entry.file_name().to_string_lossy().into_owned(),
-                kind,
-                size: metadata.len(),
-                modified: metadata.modified().ok(),
-                permissions: Self::extract_permissions(&metadata),
-                symlink_target,
-            });
+            // Stat each entry separately from the `read_dir` above, so an entry unlinked
+            // in that window is skipped (`Ok(None)`), not fatal — one vanished sibling
+            // must not sink the whole listing. See `dir_entry_no_follow`.
+            if let Some(de) = Self::dir_entry_no_follow(&entry.path()).await? {
+                entries.push(de);
+            }
         }
 
         entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -603,6 +629,61 @@ mod tests {
         assert!(names.contains(&&"a.txt".to_string()));
         assert!(names.contains(&&"b.txt".to_string()));
         assert!(names.contains(&&"subdir".to_string()));
+
+        cleanup(&dir).await;
+    }
+
+    // A directory entry can disappear between the `read_dir` snapshot and the per-entry
+    // `symlink_metadata` `list` does on a *live* directory. The helper that does that stat
+    // must report a vanished entry as gone (skippable), not as a hard error — otherwise one
+    // unlinked sibling sinks the whole listing (the bug this fixes).
+    #[tokio::test]
+    async fn dir_entry_no_follow_reports_a_vanished_entry_as_gone() {
+        let (_fs, dir) = setup().await;
+        // A path under the (real) test dir that does not exist — exactly what a stat sees
+        // when the entry was unlinked after `read_dir` yielded it.
+        let gone = dir.join("already-unlinked");
+        let got = LocalFs::dir_entry_no_follow(&gone).await.unwrap();
+        assert!(
+            got.is_none(),
+            "a missing entry must be reported as gone (Ok(None)), not an error — got {got:?}"
+        );
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn dir_entry_no_follow_builds_a_real_files_entry() {
+        let (fs, dir) = setup().await;
+        fs.write(Path::new("hi.txt"), b"hello").await.unwrap();
+
+        let entry = LocalFs::dir_entry_no_follow(&dir.join("hi.txt"))
+            .await
+            .unwrap()
+            .expect("a present file must produce an entry");
+        assert_eq!(entry.name, "hi.txt");
+        assert_eq!(entry.kind, DirEntryKind::File);
+        assert_eq!(entry.size, 5);
+
+        cleanup(&dir).await;
+    }
+
+    // The skip is precise: it drops only entries whose stat says *gone*. A **dangling**
+    // symlink is not gone — `symlink_metadata` stats the link itself, which still exists —
+    // so it must stay in the listing (as a Symlink), proving we don't over-skip.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_keeps_a_dangling_symlink() {
+        let (fs, dir) = setup().await;
+        fs.write(Path::new("real.txt"), b"r").await.unwrap();
+        std::os::unix::fs::symlink("nowhere", dir.join("dangling")).unwrap();
+
+        let entries = fs.list(Path::new("")).await.unwrap();
+        let dangling = entries
+            .iter()
+            .find(|e| e.name == "dangling")
+            .expect("a dangling symlink must still be listed, not skipped as gone");
+        assert_eq!(dangling.kind, DirEntryKind::Symlink);
+        assert!(entries.iter().any(|e| e.name == "real.txt"));
 
         cleanup(&dir).await;
     }

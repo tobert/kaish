@@ -30,6 +30,13 @@ breaking entries are marked **BREAKING**.
   directories pass it untouched. Unknown type → loud exit 2.
 
 ### Fixed
+- **Listing a live directory no longer fails when one entry vanishes mid-scan.**
+  `LocalFs::list` (`ls`, and any walk over a real directory) stats each entry in a
+  step separate from the `read_dir` that yielded it, so a sibling unlinked in that
+  window (a concurrent writer, a build churning `target/`, an editor's temp file)
+  made the whole listing fail with `ENOENT` (`ls: .: not found`). A vanished entry
+  is now skipped, the way `ls(1)` tolerates a file removed mid-scan; a *dangling*
+  symlink still lists (its link stat succeeds), and other stat errors still surface.
 - **`--json` no longer drops the structured payload of an error result.** A
   non-zero exit that carries both a diagnostic message and structured `.data`
   — notably the latch confirmation nonce from `rm`/`tee`/`patch`/`sed -i` — kept
