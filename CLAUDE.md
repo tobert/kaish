@@ -80,15 +80,16 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
 
 ### Version Control
 
-- **Work on a branch, open a PR.** Don't commit changes directly to `main`.
-  Branch first (`git switch -c <type>/<short-desc>`), push, and open a PR with
-  `gh pr create` so changes are reviewable before they land. **This includes
-  releases** — the `/release` skill bumps the version on a `release/vX.Y.Z`
-  branch and merges it via PR like any other change. Only the `git tag` and the
-  `cargo publish` run from `main`, after that bump PR has merged.
-- **Have the PR reviewed before merging** — `/code-review` on the diff, or another
-  agent/model. A few tokens on review goes a long way (this is what we ask outside
-  contributors to do too; see README "Contributing").
+- **`main` is protected — every change lands via PR.** Branch first
+  (`git switch -c <type>/<short-desc>`), push, and open a PR with `gh pr create`.
+  Nothing is committed directly to `main`. **This includes releases** — the
+  `/release` skill bumps the version on a `release/vX.Y.Z` branch and merges it
+  via PR like any other change; only the `git tag` and `cargo publish` (neither a
+  branch commit) run from `main`, after the bump PR has merged.
+- **Have the PR reviewed before merging** — prefer kaibo (`consult`) for the
+  review; `/code-review` on the diff or another agent/model also works. A few
+  tokens on review goes a long way (this is what we ask outside contributors to do
+  too; see README "Contributing").
 - **Always add files by name**
 - Before committing, both must be clean:
   - `cargo test --all`

@@ -86,19 +86,20 @@ Before releasing, get a second opinion on changes since the last release tag.
 
 1. Find the previous release tag: `git tag --sort=-v:refname | head -1`
 2. Get the diff summary: `git diff <prev-tag>..HEAD --stat`
-3. Review the changes using a frontier model:
-   - If `consult_gemini_pro` is available (gpal MCP server), use it
-   - Otherwise, use a Task subagent with `model: opus` for the review
-   - Provide: `git log <prev-tag>..HEAD --oneline` and `git diff <prev-tag>..HEAD`
-   - Ask for: breaking changes, API concerns, missing tests, documentation gaps
+3. Review the changes with **kaibo** (`consult`, `cast=deepseek` — our default
+   review cast). Point it at the repo and the release surface in prose; let it
+   read the current code itself rather than pasting a diff. Ask for: breaking
+   changes, API concerns, missing tests, documentation gaps. (If kaibo is
+   unavailable, fall back to a Task subagent with `model: opus`.)
 4. Report the review summary to the user
 5. Ask the user to confirm proceeding with the release
 
 ## Phase 5: Version Bump (on a release branch)
 
-**The version bump goes through a PR like every other change** — it is no longer
-committed directly to `main`. Only the tag and the publish (Phases 7–8) run from
-`main`, after the bump PR has merged.
+**`main` is protected, so the version bump goes through a PR like every other
+change** — it cannot be pushed to `main` directly. Only the tag and the publish
+(Phases 7–8) run from `main` (neither is a branch commit), after the bump PR has
+merged.
 
 Create the release branch off the current (clean, up-to-date) `main`:
 
