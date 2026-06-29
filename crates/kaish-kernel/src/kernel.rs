@@ -1384,6 +1384,136 @@ impl Kernel {
         self.run_inner(input, ExecuteOptions::default(), None, None).await
     }
 
+    /// Argv-native peer of [`Self::execute`] — run one command whose arguments
+    /// are **already tokenized**.
+    ///
+    /// `execute(&str)` is string-native: it lexes and parses its input. A caller
+    /// that already holds OS/structured argv (a busybox-style multicall binary, a
+    /// structured embedder like kaijutsu) would otherwise have to re-quote argv
+    /// into a string just to have the lexer split it apart again — a round-trip
+    /// that is lossy for typed values, since `to_argv()` stringifies
+    /// [`Value::Bytes`]/[`Value::Json`]. `execute_argv` skips it.
+    ///
+    /// **Tokens are literal.** No glob expansion, no `$VAR` interpolation, no
+    /// command substitution, no word splitting — the "single-quoted word"
+    /// semantics taken to its end. `execute_argv("echo", &[Value::String("*.txt"
+    /// .into())])` emits `*.txt`; it does not glob. (One shared-binder expansion
+    /// does still apply, for consistency with the string door: a leading `~` is
+    /// expanded against the session `HOME` — kaish expands `~` uniformly, so the
+    /// two doors agree. Pass a pre-resolved path if you need it byte-literal.) A
+    /// non-string `Value`
+    /// (`Bytes`/`Json`/`Int`) lands directly in `ToolArgs.positional`, so typed
+    /// data survives without a `to_argv()` round-trip. (Caveat: the two-layer
+    /// clap arg model means a builtin that re-parses its own `to_argv()` still
+    /// sees a stringified value; the typed-passthrough win fully lands only for
+    /// builtins that read `args.positional` directly — the documented pattern.)
+    ///
+    /// This is a *peer*, not a subset: a command string can carry pipelines,
+    /// `&&`/`||`, control flow and `$()` that have no argv encoding, so the two
+    /// doors converge **late** (at the shared dispatch chain) rather than one
+    /// wrapping the other. From argv classification onward `execute_argv` reuses
+    /// the exact path a `Stmt::Command` takes — command resolution (aliases, user
+    /// tools, `.kai` scripts, externals, backend tools), arg binding, the `--json`
+    /// transform, and the confirmation latch — so a latched `rm` still emits a
+    /// nonce and an `ls --json` still applies output formatting. The kernel's
+    /// pre-execution *syntax* validator does not run: argv has no shell syntax to
+    /// validate (a tool's own `validate()`/clap parse still runs at dispatch).
+    ///
+    /// Concurrent callers serialize on the same execute lock as [`Self::execute`],
+    /// and the kernel's configured `request_timeout` applies (a hung builtin or
+    /// external is interrupted at the deadline with exit code 124, the same as the
+    /// string door). There is no per-call options surface yet — a future
+    /// `execute_argv_with_options` would carry per-call timeout/cancel/vars/cwd.
+    #[tracing::instrument(level = "info", skip(self, argv), fields(cmd = name, argc = argv.len()))]
+    pub async fn execute_argv(&self, name: &str, argv: &[Value]) -> Result<ExecResult> {
+        let _guard = self.acquire_execute_lock().await;
+        // Fresh cancel surface for this call: `execute_pipeline` reads
+        // `self.cancel_token`, so a stale cancelled token from a prior call must be
+        // replaced first. The returned clone is the token the watchdog cancels on
+        // an elapsed deadline (it shares state with what `execute_pipeline` reads),
+        // cascading SIGTERM/SIGKILL to any external child.
+        let cancel = self.reset_cancel();
+
+        // Honor the kernel-configured request timeout for parity with `execute`.
+        let timeout = self.request_timeout;
+        if timeout == Some(Duration::ZERO) {
+            return Ok(ExecResult::failure(124, "timeout: timed out after 0s".to_string()));
+        }
+
+        let pipeline = crate::ast::Pipeline {
+            commands: vec![crate::ast::Command {
+                name: name.to_string(),
+                args: argv_to_args(argv),
+                redirects: Vec::new(),
+            }],
+            background: false,
+        };
+        let result = self
+            .run_under_watchdog(timeout, &cancel, self.execute_pipeline(&pipeline))
+            .await?;
+        self.update_last_result(&result).await;
+        Ok(result)
+    }
+
+    /// Run `work` under the movable-deadline watchdog for `timeout`, shared by the
+    /// string door ([`Self::execute_with_options`]) and the argv door
+    /// ([`Self::execute_argv`]).
+    ///
+    /// Mirrors the watchdog into `exec_ctx` (so a builtin can suspend the script
+    /// clock via `ctx.patient`), and when a timeout is set, spawns the watchdog
+    /// racing `cancel` — on an elapsed deadline `cancel` fires (cascading
+    /// SIGTERM/SIGKILL to external children via `wait_or_kill`) and the result's
+    /// code becomes 124. With `timeout == None`, runs `work` directly. Clears the
+    /// watchdog handle from `exec_ctx` on the way out (a patient hold against a
+    /// stale handle would silently suspend nothing). Callers must short-circuit a
+    /// `Some(Duration::ZERO)` timeout (return 124 without spawning) before calling.
+    async fn run_under_watchdog<F>(
+        &self,
+        timeout: Option<Duration>,
+        cancel: &tokio_util::sync::CancellationToken,
+        work: F,
+    ) -> Result<ExecResult>
+    where
+        F: std::future::Future<Output = Result<ExecResult>>,
+    {
+        // Assigned unconditionally (clearing any stale handle); None without a timeout.
+        let watchdog = timeout.map(|d| Arc::new(crate::watchdog::Watchdog::new(d)));
+        {
+            let mut ec = self.exec_ctx.write().await;
+            ec.watchdog = watchdog.clone();
+        }
+
+        let result = if let Some(d) = timeout {
+            #[allow(clippy::expect_used)]
+            let watchdog = watchdog.clone().expect("watchdog constructed when timeout is set");
+            let elapsed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let timer = tokio::spawn(watchdog.run(elapsed.clone(), cancel.clone()));
+            let r = work.await;
+            timer.abort();
+            match r {
+                Ok(mut res) => {
+                    if elapsed.load(std::sync::atomic::Ordering::SeqCst) {
+                        res.code = 124;
+                        if res.err.is_empty() {
+                            res.err = format!("timeout: timed out after {:?}", d);
+                        }
+                    }
+                    Ok(res)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            work.await
+        };
+
+        // The timer task is gone (fired or aborted); drop the stale handle.
+        {
+            let mut ec = self.exec_ctx.write().await;
+            ec.watchdog = None;
+        }
+        result
+    }
+
     /// Execute with per-call options. The primary entry point for embedders
     /// that don't need per-statement output streaming.
     ///
@@ -1722,47 +1852,20 @@ impl Kernel {
             *cur = effective_cancel.clone();
         }
 
-        // The movable-deadline watchdog for this call (None without a timeout),
-        // mirrored into exec_ctx — like the cancel token — so builtins can
-        // suspend the script clock via `ctx.patient`. Assigned unconditionally
-        // (clearing any stale handle) and reset to None in the restore block.
-        let watchdog = timeout.map(|d| Arc::new(crate::watchdog::Watchdog::new(d)));
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ec.watchdog = watchdog.clone();
-        }
-
-        // Run inner with optional timeout. The watchdog task cancels our token
-        // on elapsed; the cascade fires SIGTERM/SIGKILL on any external
-        // children via the wait_or_kill discipline in try_execute_external.
+        // Run the script under the movable-deadline watchdog (shared with the
+        // argv door). The watchdog task cancels `effective_cancel` on an elapsed
+        // deadline; the cascade fires SIGTERM/SIGKILL on any external children via
+        // the wait_or_kill discipline in try_execute_external. `Some(ZERO)` was
+        // already handled by the early return above.
         let mut noop_cb: Box<dyn FnMut(&ExecResult) + Send> = Box::new(|_| {});
         let cb_ref: &mut (dyn FnMut(&ExecResult) + Send) = match on_output {
             Some(cb) => cb,
             None => &mut *noop_cb,
         };
 
-        let result = if let Some(d) = timeout {
-            #[allow(clippy::expect_used)]
-            let watchdog = watchdog.clone().expect("watchdog constructed when timeout is set");
-            let elapsed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let timer = tokio::spawn(watchdog.run(elapsed.clone(), effective_cancel.clone()));
-            let r = self.execute_streaming_inner(input, cb_ref).await;
-            timer.abort();
-            match r {
-                Ok(mut res) => {
-                    if elapsed.load(std::sync::atomic::Ordering::SeqCst) {
-                        res.code = 124;
-                        if res.err.is_empty() {
-                            res.err = format!("timeout: timed out after {:?}", d);
-                        }
-                    }
-                    Ok(res)
-                }
-                Err(e) => Err(e),
-            }
-        } else {
-            self.execute_streaming_inner(input, cb_ref).await
-        };
+        let result = self
+            .run_under_watchdog(timeout, &effective_cancel, self.execute_streaming_inner(input, cb_ref))
+            .await;
 
         // Restore self.cancel_token to a fresh, uncancelled token so the
         // embedder's view of `Kernel::cancel()` stays predictable on the
@@ -1772,14 +1875,6 @@ impl Kernel {
             #[allow(clippy::expect_used)]
             let mut cur = self.cancel_token.lock().expect("cancel_token poisoned");
             *cur = tokio_util::sync::CancellationToken::new();
-        }
-
-        // Drop the watchdog handle from exec_ctx — its timer task is gone
-        // (fired or aborted above); a patient hold acquired against a stale
-        // handle would silently suspend nothing.
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ec.watchdog = None;
         }
 
         // Tear down the embedder-token race watcher (if any). Leaving it
@@ -5206,6 +5301,96 @@ fn apply_tilde_expansion(value: Value, home: Option<&str>) -> Value {
     }
 }
 
+/// Classify an already-tokenized argv (`&[Value]`) into AST [`Arg`]s, mirroring
+/// how the lexer tokenizes the equivalent minimally-quoted command string —
+/// the seam that lets [`Kernel::execute_argv`] reuse the string door's binder
+/// (`build_args_async`) verbatim instead of carrying a parallel one that could
+/// drift. Tokens are literal: every string becomes an `Expr::Literal`, never an
+/// `Expr::GlobPattern` or `VarRef`, so no glob/`$VAR`/`$()`/split can occur.
+///
+/// Classification matches the lexer's word classes:
+/// - `--` → [`Arg::DoubleDash`] (subsequent flags are demoted to positionals by
+///   the binder's `past_double_dash` arms, exactly as for the string door).
+/// - `--name=value` → [`Arg::Named`]; `--name` → [`Arg::LongFlag`].
+/// - `-x…` where the first char after `-` is an ASCII letter → [`Arg::ShortFlag`]
+///   (the lexer's flag char class begins `[a-zA-Z]`; `-1`/`-9` lex as numbers, so
+///   they fall through to a positional, not a flag).
+/// - `key=value` with an identifier LHS → [`Arg::WordAssign`] (the binder either
+///   binds it to a preceding value-flag — `awk -v x=1` — or stringifies it to a
+///   `key=value` positional, per the command's word-assign allowlist).
+/// - everything else → a literal [`Arg::Positional`].
+///
+/// A **non-string** `Value` (`Bytes`/`Json`/`Int`/`Bool`) is always a literal
+/// positional — it can never be a flag — and rides through as-is. That is the
+/// typed passthrough the string-native door cannot offer.
+pub(crate) fn argv_to_args(argv: &[Value]) -> Vec<Arg> {
+    argv.iter().map(classify_argv_token).collect()
+}
+
+fn classify_argv_token(token: &Value) -> Arg {
+    let Value::String(s) = token else {
+        return Arg::Positional(Expr::Literal(token.clone()));
+    };
+
+    if s == "--" {
+        return Arg::DoubleDash;
+    }
+
+    // Long flag: the lexer requires `--[a-zA-Z]…`. `---`, `--=v`, `--1` are NOT
+    // long-flag words (the string door tokenizes them differently and often
+    // errors), so they fall through to a literal positional rather than a
+    // silently-misbound `LongFlag("-")` / empty-key `Named{ key: "" }`.
+    if let Some(rest) = s.strip_prefix("--") {
+        if rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            return match rest.split_once('=') {
+                Some((key, val)) => Arg::Named {
+                    key: key.to_string(),
+                    value: Expr::Literal(Value::String(val.to_string())),
+                },
+                None => Arg::LongFlag(rest.to_string()),
+            };
+        }
+    } else if let Some(rest) = s.strip_prefix('-') {
+        // Short flag: the lexer's flag char class is `[a-zA-Z][a-zA-Z0-9-]*`. A
+        // token carrying any other char — notably `=` (`-k=v` is a parse error in
+        // the string door) — or a leading digit (`-1` lexes as a number) is not a
+        // short-flag word, so it falls through to a literal positional instead of
+        // a `ShortFlag("k=v")` the binder would mangle into a stray `=` flag.
+        if is_short_flag_body(rest) {
+            return Arg::ShortFlag(rest.to_string());
+        }
+    }
+
+    if let Some((key, val)) = s.split_once('=') {
+        if is_shell_identifier(key) {
+            return Arg::WordAssign {
+                key: key.to_string(),
+                value: Expr::Literal(Value::String(val.to_string())),
+            };
+        }
+    }
+
+    Arg::Positional(Expr::Literal(Value::String(s.clone())))
+}
+
+/// A short-flag word: a leading ASCII letter and no `=`. `-la`, `-A1`, `-a:`
+/// qualify (the lexer's flag token absorbs `:`/`.` and friends); `-1` (a number)
+/// and `-k=v` (`=` is the assignment operator — a parse error in the string door)
+/// do not, so they fall through to a literal positional.
+fn is_short_flag_body(s: &str) -> bool {
+    s.starts_with(|c: char| c.is_ascii_alphabetic()) && !s.contains('=')
+}
+
+/// Bash-style assignment-LHS identifier: `[A-Za-z_][A-Za-z0-9_]*`.
+fn is_shell_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Accumulate one occurrence of a repeatable value flag (e.g. sed `-e`) under
 /// `named[canonical]` as a flat `Value::Json(Array(...))`, in invocation order.
 /// Never overwrites — that's the whole point of `repeatable`: a repeated flag
@@ -5323,6 +5508,177 @@ pub(crate) async fn kill_with_grace(
         t.signal_pg(Signal::SIGKILL);
     }
     child.wait().await
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod argv_classify_tests {
+    use super::*;
+
+    /// A normalized, comparable view of one `Arg` representing its *logical
+    /// argument* (what the command observably receives), not its exact AST shape:
+    ///
+    /// - Value-bearing arms compare by *stringified* value, so the parser's
+    ///   number coercion (`-1`→`Int(-1)`) vs the classifier's literal
+    ///   (`String("-1")`) count as the same argument.
+    /// - `WordAssign{k,v}` collapses to the *same* form as a `Positional("k=v")`.
+    ///   For every command except the `export`/`alias` allowlist, a bareword
+    ///   `key=value` is stringified straight back to a `"key=value"` positional
+    ///   (bash: `cat foo=bar` opens a file named `foo=bar`). So the two doors
+    ///   converge observably even when they disagree on the AST tag — e.g. the
+    ///   lexer colon-merges `:A` into one `Ident` and parses `:A=0` as a
+    ///   `WordAssign`, where the classifier (bash-correctly) makes a positional.
+    ///   The genuine `WordAssign` *detection* on a real identifier LHS is pinned
+    ///   separately by `classifies_each_word_class`.
+    ///
+    /// Returns `None` for shapes we deliberately don't compare:
+    /// - a parsed glob/interp `Expr`, which argv-native semantics never produce;
+    /// - a parsed literal the lexer **number-coerced** (`Int`/`Float`). `00`/`-1`
+    ///   lex to `Int`, dropping the literal text, where the classifier keeps the
+    ///   string. That divergence is *intentional* — `execute_argv` preserves a
+    ///   literal numeric string (pass `Value::Int` for a number), the string door
+    ///   can only guess — so the property skips it rather than demanding the
+    ///   classifier replicate a lossy coercion. Numeric edges are pinned exactly
+    ///   by `classifies_each_word_class`.
+    fn canonical(arg: &Arg) -> Option<(&'static str, String, String)> {
+        // Only a *string*-valued literal is comparable; a coerced number is not.
+        let lit = |e: &Expr| match e {
+            Expr::Literal(Value::String(s)) => Some(s.clone()),
+            _ => None,
+        };
+        Some(match arg {
+            Arg::DoubleDash => ("dash", String::new(), String::new()),
+            Arg::ShortFlag(s) => ("short", s.clone(), String::new()),
+            Arg::LongFlag(s) => ("long", s.clone(), String::new()),
+            Arg::Positional(e) => ("pos", String::new(), lit(e)?),
+            Arg::Named { key, value } => ("named", key.clone(), lit(value)?),
+            Arg::WordAssign { key, value } => ("pos", String::new(), format!("{key}={}", lit(value)?)),
+        })
+    }
+
+    /// Classify a single string token the way `execute_argv` would.
+    fn classify(token: &str) -> Arg {
+        classify_argv_token(&Value::String(token.to_string()))
+    }
+
+    #[test]
+    fn classifies_each_word_class() {
+        assert_eq!(classify("--"), Arg::DoubleDash);
+        assert_eq!(classify("-l"), Arg::ShortFlag("l".into()));
+        assert_eq!(classify("-la"), Arg::ShortFlag("la".into()));
+        assert_eq!(classify("--force"), Arg::LongFlag("force".into()));
+        assert_eq!(
+            classify("--key=value"),
+            Arg::Named { key: "key".into(), value: Expr::Literal(Value::String("value".into())) }
+        );
+        assert_eq!(
+            classify("NAME=val"),
+            Arg::WordAssign { key: "NAME".into(), value: Expr::Literal(Value::String("val".into())) }
+        );
+        // Digits after the first flag char are ordinary (kept verbatim).
+        assert_eq!(classify("-A1"), Arg::ShortFlag("A1".into()));
+        assert_eq!(classify("--type2"), Arg::LongFlag("type2".into()));
+        // Leading-digit dash is a number to the lexer, not a flag → positional.
+        assert_eq!(classify("-1"), Arg::Positional(Expr::Literal(Value::String("-1".into()))));
+        // Numeric strings keep their literal text — `execute_argv` does NOT
+        // coerce (the string door's lexer would: `00`→`Int(0)`→"0"). A caller
+        // who wants a number passes `Value::Int`; a string stays the string.
+        assert_eq!(classify("00"), Arg::Positional(Expr::Literal(Value::String("00".into()))));
+        assert_eq!(classify("1.50"), Arg::Positional(Expr::Literal(Value::String("1.50".into()))));
+        // A lone dash (stdin convention) is a positional, not a flag.
+        assert_eq!(classify("-"), Arg::Positional(Expr::Literal(Value::String("-".into()))));
+        // Non-identifier LHS is not an assignment.
+        assert_eq!(classify("1=2"), Arg::Positional(Expr::Literal(Value::String("1=2".into()))));
+        assert_eq!(classify("plain"), Arg::Positional(Expr::Literal(Value::String("plain".into()))));
+    }
+
+    #[test]
+    fn typed_values_pass_through_as_literal_positionals() {
+        // The whole point of the `&[Value]` signature: a non-string value is a
+        // literal positional carrying the *exact* value, never stringified and
+        // never flag-interpreted.
+        let bytes = Value::Bytes(vec![0u8, 159, 146, 150]); // invalid UTF-8 on purpose
+        assert_eq!(
+            classify_argv_token(&bytes),
+            Arg::Positional(Expr::Literal(bytes.clone()))
+        );
+        let json = Value::Json(serde_json::json!({"a": 1, "b": [2, 3]}));
+        assert_eq!(
+            classify_argv_token(&json),
+            Arg::Positional(Expr::Literal(json.clone()))
+        );
+        // An integer token that *looks* like a flag is still a positional value
+        // (only strings are inspected for a leading dash).
+        assert_eq!(
+            classify_argv_token(&Value::Int(-9)),
+            Arg::Positional(Expr::Literal(Value::Int(-9)))
+        );
+    }
+
+    #[test]
+    fn double_dash_only_matches_exactly() {
+        // `--` is the marker; `--x` is a long flag. `---` is not a flag word
+        // (the lexer splits it `--` + `-`); as a single argv token it's literal.
+        assert_eq!(classify("--"), Arg::DoubleDash);
+        assert_eq!(classify("--x"), Arg::LongFlag("x".into()));
+        assert_eq!(classify("---"), Arg::Positional(Expr::Literal(Value::String("---".into()))));
+    }
+
+    #[test]
+    fn malformed_flag_words_fall_back_to_literal_positionals() {
+        // A token that isn't a well-formed flag word must NOT be silently misbound
+        // into the arg binder (house rule: loud/visible over silent-wrong). Each
+        // of these is a parse error or different tokenization in the string door,
+        // so the argv door keeps them as literal positionals.
+        let pos = |t: &str| Arg::Positional(Expr::Literal(Value::String(t.into())));
+        // `=` is not in the short-flag char class (`-k=v` parse-errors in the
+        // string door); don't emit `ShortFlag("k=v")` for the binder to mangle.
+        assert_eq!(classify("-k=v"), pos("-k=v"));
+        assert_eq!(classify("-="), pos("-="));
+        // Empty long-flag key.
+        assert_eq!(classify("--=v"), pos("--=v"));
+        // `--` followed by a non-letter is not a long flag.
+        assert_eq!(classify("--1"), pos("--1"));
+        // A bare dash and a number-dash are positionals (covered above too).
+        assert_eq!(classify("-"), pos("-"));
+        assert_eq!(classify("-9"), pos("-9"));
+    }
+
+    proptest::proptest! {
+        /// The core correctness claim: the classifier mirrors the lexer/parser
+        /// on metacharacter-free tokens. For any such single token, the `Arg`
+        /// the classifier produces matches the one the real parser produces for
+        /// the equivalent one-word command — so `execute_argv` reusing the
+        /// string door's binder is sound. (First proptest in the workspace.)
+        #[test]
+        fn classifier_matches_parser_on_clean_tokens(
+            // No digits: this property tests the *classification* boundary
+            // (dash → flag, `--` → marker, `=` → assignment, colon-merge → one
+            // positional), not numeric coercion. The lexer coerces digit runs to
+            // `Int`/`Float` and drops the literal text (even inside a colon-merged
+            // word: `00:` → `0:`); the classifier intentionally preserves the raw
+            // string. Those numeric edges are pinned exactly by the unit tests.
+            token in "[a-zA-Z_=./@:+-]{1,8}"
+        ) {
+            let parsed = match parse(&format!("cmd {token}")) {
+                Ok(p) => p,
+                Err(_) => return Ok(()), // parser rejects (e.g. empty `a=`) — not our concern
+            };
+            let [Stmt::Command(cmd)] = parsed.statements.as_slice() else {
+                return Ok(());
+            };
+            // Only compare when the token lexed as exactly one argument.
+            let [arg] = cmd.args.as_slice() else { return Ok(()); };
+
+            let (Some(theirs), Some(ours)) = (canonical(arg), canonical(&classify(&token))) else {
+                return Ok(()); // a non-literal parsed Expr we don't model — skip
+            };
+            proptest::prop_assert_eq!(
+                ours, theirs,
+                "classifier diverged from parser on token {:?}", token
+            );
+        }
+    }
 }
 
 #[cfg(all(test, feature = "subprocess"))]

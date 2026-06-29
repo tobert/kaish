@@ -96,36 +96,17 @@ Still open:
   a malformed `$()` inside a `${VAR:-default}` *default word* still falls back to
   literal (two infallible Expr-returning call sites; rare edge).
 
-### `execute_argv` — argv-native kernel entry point (+ multicall binary) (Amy, 2026-06-23)
-Embeddable surface is string-native (`execute(&str)` → lex/parse). A structured
-embedder (kaijutsu) or a busybox-style `kaish-multicall` binary arrives with argv
-*already tokenized*, and today must re-quote it back into a string for the lexer —
-lossy for typed `Value`s (`to_argv()` stringifies `Bytes`/`Json`). Add
-`execute_argv(&self, name, &[Value]) -> ExecResult` as a **peer** of `execute`,
-joining the dispatch chain at `ToolArgs` (new helper `build_args_from_argv`
-mirroring `build_args_async` minus `Expr` eval; reuses validation/`--json`/latch/
-dispatch unchanged). argv tokens are literal — no glob/`$VAR`/split. Test plan:
-proptest binder-equivalence vs `build_args_async` (first proptest use — greenlit),
-a differential harness over the single-command corpus (argv door ≡ string door),
-`Bytes`/`Json` round-trip pins, latch/`--json` smoke. Wrinkle: the two-layer clap
-model (`to_argv()` re-parse) caps typed passthrough to `args.positional`-reading
-builtins. Full writeup: [multicall.md](multicall.md).
-
-### Port useful `rg`-only features into `grep` + `glob` (Amy, 2026-06-17) — DESIGNED
-`rg` was removed (80%-rule); the still-useful filtering re-homes on kaish's two
-*modern* search builtins. **Design + punch-list: [search-features-port.md](search-features-port.md)**
-(transient — delete on ship). Driver: kaibo's hot path (`grep -t rust`, `-m N`
-early-stop). Engine is already done — `WalkOptions.types` is live but dormant
-(walker.rs:286); this is surface wiring.
-
-Resolved scope (2026-06-28): **grep + glob only, find untouched** (stays POSIX).
-**`--ftype` is the kaish-wide file-type-filter standard** (not rg `-t`) — both get
-`--ftype`/`--ftype-not`/`--ftype-list`; **all new flags long-only, no shorts**
-(sidesteps GNU grep `-T`/`-m` muscle memory). grep also gets `--hidden` + GNU-semantics
-`--max-count`; glob keeps its fd-style `-t`=entry-kind. **`--no-ignore` DEFERRED on grep**
-("don't ship a flag that lies" — the `Enforced`-scope override semantics aren't designed
-yet); glob's existing one untouched pending an audit. Shared `kaish-glob::build_file_types`
-helper so the two can't drift. Highest-leverage *kaibo*-aligned item on the board.
+### `kaish-multicall` binary (deferred from the `execute_argv` work)
+`execute_argv` — the argv-native peer of `execute(&str)` — **landed** (see
+devlog); the load-bearing half is done. The cheap second half is still open: a
+busybox-style `kaish-multicall` binary that dispatches by `argv[0]`
+(`ln -s kaish-multicall ~/bin/ln` → kaish's `ln`). It's a third *frontend*, ~80
+lines, no kernel changes — a second `[[bin]]` in `kaish-repl` first, promoted to
+its own crate only if it grows. Now that `execute_argv` exists it can be
+argv-native from day one (no quoting-reconstruct interim). Build it when a
+consumer wants it. Full writeup: [multicall.md](multicall.md). Open design
+question recorded there: whether to also expose a `&[String]` convenience door
+over the `&[Value]` primitive (trivial `.map(Value::String)` wrapper).
 
 ### OverlayFs residuals
 (Core landed — see devlog.) Open:
@@ -281,6 +262,17 @@ The six-field `ExecContext` ↔ kernel-state sync appears near every fork call s
   hard parse error; turn it into a "quote the redirect target" hint.
 - **Argv**: the glued-positional "quote the whole word" check covers pre-`--`
   positionals only; post-`--` and flag-adjacent-to-positional glue aren't flagged.
+
+### `build_args_async` WordAssign arm ignores `past_double_dash` (P4)
+Surfaced in the `execute_argv` review (Gemini Pro, 2026-06-29). `DoubleDash` sets
+`past_double_dash`, which demotes a following `ShortFlag`/`LongFlag` to a
+positional — but the `WordAssign` arm doesn't check it, so `export -- A=1` still
+binds `A=1` as a named assignment instead of a literal positional. Pre-existing in
+the **shared** binder (hits the string door too, not an `execute_argv` regression),
+and only observable on the `export`/`alias` word-assign allowlist (every other
+command already stringifies `WordAssign` to a `"key=value"` positional). Fix: have
+the `WordAssign` arm degrade to a stringified positional when `past_double_dash`.
+(`kernel.rs::build_args_async`)
 
 ### v0.8.4 review residuals (Gemini Pro, 2026-06-14)
 - **`diff -C 3 -C 4` miscounts arity** (P4-trivial — `context_steals_positional`
@@ -448,7 +440,7 @@ Low-frequency, record-then-defer:
 matches real FS paths; not a regression). If kaish ever matches user patterns
 against user-supplied path *strings*, add a call counter.
 
-### `--no-ignore` for the search builtins (deferred from search-features-port)
+### `--no-ignore` for the search builtins (deferred from the rg-features port)
 The rg-features port (grep `--ftype`/`--hidden`/`--max-count`, glob `--ftype`)
 landed without `--no-ignore` on grep — the honest semantics of a per-call
 ignore-bypass under an embedder's `Enforced` scope (kaibo's preset) aren't
@@ -461,8 +453,8 @@ silently escaping `Enforced`) as part of the same design. Note: ignore is
 context-control, not a security boundary (the VFS mount is) — so this is about
 predictability, not a sandbox hole.
 
-### `find --no-ignore` escape under `Enforced` ignore scope (deferred from search-features-port)
-`find` stays POSIX in the rg-features port (see search-features-port.md). But under
+### `find --no-ignore` escape under `Enforced` ignore scope (deferred from the rg-features port)
+`find` stays POSIX in the rg-features port (grep + glob got `--ftype`, find didn't). But under
 `IgnoreScope::Enforced` (kaibo/agent preset) `find` *does* respect the ignore config,
 diverging from POSIX find (which ignores `.gitignore` entirely). An agent stuck in
 Enforced may want a per-call `find --no-ignore` to recover traditional find behavior.

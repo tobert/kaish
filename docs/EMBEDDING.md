@@ -295,6 +295,63 @@ Fields:
   kaish's execution span parents onto your trace, and baggage merges back
   out through `ExecResult.baggage`.
 
+## Argv-Native Execution: `execute_argv`
+
+`Kernel::execute(&str)` is string-native — it lexes and parses its input. If your
+embedder already holds **tokenized** arguments (a structured tool call, a
+multicall-style frontend), re-quoting them into a string just to have the lexer
+split them apart again is wasteful and **lossy**: `to_argv()` stringifies typed
+values, so a `Value::Bytes` blob or a `Value::Json` record can't survive the
+round-trip. `execute_argv` is the peer door that skips it:
+
+```rust
+use kaish_kernel::ast::Value;
+
+// Run one command whose arguments are already tokenized.
+let result = kernel.execute_argv("grep", &[
+    Value::String("--ftype".into()),
+    Value::String("rust".into()),
+    Value::String("needle".into()),
+    Value::String("src".into()),
+]).await?;
+
+// Typed values pass straight into ToolArgs.positional — no stringification.
+let result = kernel.execute_argv("my-tool", &[Value::Bytes(blob)]).await?;
+```
+
+Semantics:
+
+- **Tokens are literal.** No glob expansion, no `$VAR` interpolation, no command
+  substitution, no word splitting — the "single-quoted word" rule taken to its
+  end. `execute_argv("echo", &[Value::String("*.txt".into())])` emits `*.txt`.
+  And no **number coercion**: a `Value::String("00")` stays `"00"` (the string
+  door's lexer would coerce the bare word `00` to an integer and print `0`). Pass
+  a `Value::Int`/`Value::Float` when you mean a number — the type is yours to
+  choose, which is the point of the typed door. **Exception:** a leading `~` is
+  expanded against the session `HOME`, matching the string door (kaish expands
+  `~` uniformly, even in quotes — so the doors agree); pass a pre-resolved path
+  if you need it byte-literal.
+- **One simple command only.** Pipelines, `&&`/`||`, control flow, and `$()` have
+  no argv encoding — use `execute(&str)` for those. The two are *peers*: argv is
+  not a subset that drops expressiveness, it's a different door that converges with
+  the string door at the shared dispatch chain.
+- **Same tail as the string door.** Command resolution (aliases, user tools,
+  `.kai` scripts, externals, backend tools), `--json`, and the confirmation latch
+  all apply, so a latched `rm` still returns exit 2 with a nonce in
+  `ExecResult.data` (see [Destructive-op rails](#destructive-op-rails-reading-the-latch-nonce)).
+  The kernel's pre-execution *syntax* validator does not run — argv carries no
+  shell syntax — but a tool's own `validate()`/clap parse still does.
+- **Typed-passthrough caveat.** Because builtins re-parse their own `to_argv()`
+  internally (the two-layer clap model), the un-stringified-value win fully lands
+  only for tools that read `args.positional` directly (the documented pattern),
+  not those that trust their clap struct after a `to_argv()` round-trip.
+
+Concurrent callers serialize on the same execute lock as `execute`, and the
+kernel's configured `request_timeout` applies (a hung builtin or external is
+interrupted at the deadline with exit code 124). There is no per-call options
+surface yet — if you need per-call timeout/cancel/vars/cwd, use the string door
+(`execute_with_options`) until an `execute_argv_with_options` lands.
+
 ## Custom Tools
 
 Register custom builtins using the `configure_tools` callback on

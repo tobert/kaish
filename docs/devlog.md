@@ -9,6 +9,78 @@ Newest themes first within each area; dates are when the work landed.
 
 ---
 
+## `execute_argv` — argv-native kernel entry point (landed 2026-06-29)
+
+`execute(&str)` is *string-native*: it lexes and parses its input. A caller that
+already holds tokenized argv — a structured embedder (kaijutsu), a future
+busybox-style multicall binary — had to re-quote argv into a string just so the
+lexer could split it apart again, a round-trip that's *lossy* for typed values
+(`to_argv()` stringifies `Bytes`/`Json`). `Kernel::execute_argv(name, &[Value])`
+is the peer door that skips it. Full design: [multicall.md](multicall.md).
+
+**The implementation deviates from the design doc's letter, deliberately.** The
+doc proposed a new `build_args_from_argv` that builds `ToolArgs` directly,
+"mirroring `build_args_async` minus the `Expr` eval." Writing a *second* binder is
+exactly the drift hazard the validation-builder unification (2026-06-23) was about.
+Instead the only new logic is `argv_to_args(&[Value]) -> Vec<Arg>`: a classifier
+that maps each token to the AST `Arg` the lexer would produce for the equivalent
+minimally-quoted word (`--` → `DoubleDash`, `-x…` with an alpha lead → `ShortFlag`,
+`--k=v` → `Named`, identifier `k=v` → `WordAssign`, else literal `Positional`; a
+**non-string** `Value` is always a literal positional — the typed-passthrough win).
+`execute_argv` then runs the resulting `Command` through `execute_pipeline`,
+*reusing the entire string-door dispatch chain verbatim* — command resolution,
+arg binding, `--json`, the latch. Two binders can't drift because there's still
+only one. Typed values survive because `Expr::Literal(Value)` carries the value
+and evaluates by identity (it never becomes a `GlobPattern`/`VarRef`, so no
+glob/`$VAR`/split can occur).
+
+**Semantics:** tokens are literal — the "single-quoted word" rule taken to its end.
+`execute_argv("echo", &["*.txt"])` emits `*.txt`. The kernel's pre-execution
+*syntax* validator doesn't run (argv has no shell syntax; a tool's own
+`validate()`/clap parse still does, at dispatch).
+
+**Tests** (the design's four surfaces): an in-crate classifier suite incl. the
+workspace's **first proptest** — `classifier_matches_parser_on_clean_tokens`
+asserts `argv_to_args` agrees with the *real parser* on metachar-free tokens. It
+earned its keep immediately, shrinking to `:A=0`: the lexer colon-merges `:A` into
+one `Ident` and parses it as a `WordAssign`, where the classifier (bash-correctly)
+makes a positional. They converge observably anyway — a `WordAssign` for any
+non-`export`/`alias` command stringifies straight back to a `"key=value"`
+positional — so the property compares *logical arguments*, not AST tags, and the
+case is pinned as a regression seed. Plus kernel-routed `execute_argv_tests.rs`:
+argv door ≡ string door over a corpus, literal-not-globbed, no `$VAR` interp,
+typed `Int`/`Json` passthrough, `--json` transform, exit-127, and a full latch
+round-trip (gate → `--confirm=<nonce>`) all through the argv door.
+
+**Deferred:** the `kaish-multicall` binary (the cheap frontend half) and the
+`&[String]` convenience door — both in issues.md.
+
+## rg-features port — `--ftype` filtering on grep + glob (landed 2026-06-27, #38)
+
+`rg` was dropped under the 80% rule, but its still-useful filtering re-homed onto
+kaish's two *modern* search builtins. Driver: kaibo's hot path (type-scoped greps,
+early-stop on match caps). The walker engine was already done — `WalkOptions.types`
+had been live but dormant — so this was surface wiring plus a shared registry.
+
+Landed scope (the design lived in the transient `search-features-port.md`, deleted
+on ship):
+- **grep + glob only; `find` stays POSIX** (no `--ftype` on find — it keeps
+  traditional behavior; the `--no-ignore` recovery question for both search builtins
+  and for find-under-`Enforced` is the live deferral, now in issues.md P3).
+- **`--ftype` is the kaish-wide file-type-filter standard**, deliberately *not* rg's
+  `-t`. Both grep and glob get `--ftype` / `--ftype-not` / `--ftype-list`, sharing
+  one `kaish-glob::build_file_types` registry so they can't drift. An unknown type
+  name is a loud exit-2, never a silent empty match.
+- **All new flags are long-only, no shorts** — sidesteps GNU-grep `-T`/`-m` muscle
+  memory landing on different semantics.
+- grep also got **`--hidden`** (include dotfiles, bash no-dotglob default off) and
+  GNU-semantics **`--max-count <N>`** (per-file cap, streaming early-stop so it
+  bounds work on large/piped inputs; a truncated-at-cap UTF-8 carry is no longer
+  misflagged as binary). glob keeps its fd-style `-t`/`--type` (entry *kind*:
+  file/dir), which composes with the new extension-based `--ftype`.
+
+DeepSeek-reviewed (via kaibo) on the branch.
+
 ## Correctness one-offs — grep -c exit, `$()` trim, jq /0 (landed 2026-06-24)
 
 Three small independent silent/surprise fixes (`correctness_oneoffs_tests.rs`):
