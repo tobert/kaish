@@ -9,6 +9,32 @@ Newest themes first within each area; dates are when the work landed.
 
 ---
 
+## rg-features port — `--ftype` filtering on grep + glob (landed 2026-06-27, #38)
+
+`rg` was dropped under the 80% rule, but its still-useful filtering re-homed onto
+kaish's two *modern* search builtins. Driver: kaibo's hot path (type-scoped greps,
+early-stop on match caps). The walker engine was already done — `WalkOptions.types`
+had been live but dormant — so this was surface wiring plus a shared registry.
+
+Landed scope (the design lived in the transient `search-features-port.md`, deleted
+on ship):
+- **grep + glob only; `find` stays POSIX** (no `--ftype` on find — it keeps
+  traditional behavior; the `--no-ignore` recovery question for both search builtins
+  and for find-under-`Enforced` is the live deferral, now in issues.md P3).
+- **`--ftype` is the kaish-wide file-type-filter standard**, deliberately *not* rg's
+  `-t`. Both grep and glob get `--ftype` / `--ftype-not` / `--ftype-list`, sharing
+  one `kaish-glob::build_file_types` registry so they can't drift. An unknown type
+  name is a loud exit-2, never a silent empty match.
+- **All new flags are long-only, no shorts** — sidesteps GNU-grep `-T`/`-m` muscle
+  memory landing on different semantics.
+- grep also got **`--hidden`** (include dotfiles, bash no-dotglob default off) and
+  GNU-semantics **`--max-count <N>`** (per-file cap, streaming early-stop so it
+  bounds work on large/piped inputs; a truncated-at-cap UTF-8 carry is no longer
+  misflagged as binary). glob keeps its fd-style `-t`/`--type` (entry *kind*:
+  file/dir), which composes with the new extension-based `--ftype`.
+
+DeepSeek-reviewed (via kaibo) on the branch.
+
 ## Correctness one-offs — grep -c exit, `$()` trim, jq /0 (landed 2026-06-24)
 
 Three small independent silent/surprise fixes (`correctness_oneoffs_tests.rs`):

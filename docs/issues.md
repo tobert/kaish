@@ -111,22 +111,6 @@ a differential harness over the single-command corpus (argv door ≡ string door
 model (`to_argv()` re-parse) caps typed passthrough to `args.positional`-reading
 builtins. Full writeup: [multicall.md](multicall.md).
 
-### Port useful `rg`-only features into `grep` + `glob` (Amy, 2026-06-17) — DESIGNED
-`rg` was removed (80%-rule); the still-useful filtering re-homes on kaish's two
-*modern* search builtins. **Design + punch-list: [search-features-port.md](search-features-port.md)**
-(transient — delete on ship). Driver: kaibo's hot path (`grep -t rust`, `-m N`
-early-stop). Engine is already done — `WalkOptions.types` is live but dormant
-(walker.rs:286); this is surface wiring.
-
-Resolved scope (2026-06-28): **grep + glob only, find untouched** (stays POSIX).
-**`--ftype` is the kaish-wide file-type-filter standard** (not rg `-t`) — both get
-`--ftype`/`--ftype-not`/`--ftype-list`; **all new flags long-only, no shorts**
-(sidesteps GNU grep `-T`/`-m` muscle memory). grep also gets `--hidden` + GNU-semantics
-`--max-count`; glob keeps its fd-style `-t`=entry-kind. **`--no-ignore` DEFERRED on grep**
-("don't ship a flag that lies" — the `Enforced`-scope override semantics aren't designed
-yet); glob's existing one untouched pending an audit. Shared `kaish-glob::build_file_types`
-helper so the two can't drift. Highest-leverage *kaibo*-aligned item on the board.
-
 ### OverlayFs residuals
 (Core landed — see devlog.) Open:
 - **External commands under overlay** fail with exit 127 (real_path=None guard);
@@ -432,7 +416,7 @@ Low-frequency, record-then-defer:
 matches real FS paths; not a regression). If kaish ever matches user patterns
 against user-supplied path *strings*, add a call counter.
 
-### `--no-ignore` for the search builtins (deferred from search-features-port)
+### `--no-ignore` for the search builtins (deferred from the rg-features port)
 The rg-features port (grep `--ftype`/`--hidden`/`--max-count`, glob `--ftype`)
 landed without `--no-ignore` on grep — the honest semantics of a per-call
 ignore-bypass under an embedder's `Enforced` scope (kaibo's preset) aren't
@@ -445,8 +429,8 @@ silently escaping `Enforced`) as part of the same design. Note: ignore is
 context-control, not a security boundary (the VFS mount is) — so this is about
 predictability, not a sandbox hole.
 
-### `find --no-ignore` escape under `Enforced` ignore scope (deferred from search-features-port)
-`find` stays POSIX in the rg-features port (see search-features-port.md). But under
+### `find --no-ignore` escape under `Enforced` ignore scope (deferred from the rg-features port)
+`find` stays POSIX in the rg-features port (grep + glob got `--ftype`, find didn't). But under
 `IgnoreScope::Enforced` (kaibo/agent preset) `find` *does* respect the ignore config,
 diverging from POSIX find (which ignores `.gitignore` entirely). An agent stuck in
 Enforced may want a per-call `find --no-ignore` to recover traditional find behavior.
