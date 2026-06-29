@@ -263,6 +263,17 @@ The six-field `ExecContext` ↔ kernel-state sync appears near every fork call s
 - **Argv**: the glued-positional "quote the whole word" check covers pre-`--`
   positionals only; post-`--` and flag-adjacent-to-positional glue aren't flagged.
 
+### `build_args_async` WordAssign arm ignores `past_double_dash` (P4)
+Surfaced in the `execute_argv` review (Gemini Pro, 2026-06-29). `DoubleDash` sets
+`past_double_dash`, which demotes a following `ShortFlag`/`LongFlag` to a
+positional — but the `WordAssign` arm doesn't check it, so `export -- A=1` still
+binds `A=1` as a named assignment instead of a literal positional. Pre-existing in
+the **shared** binder (hits the string door too, not an `execute_argv` regression),
+and only observable on the `export`/`alias` word-assign allowlist (every other
+command already stringifies `WordAssign` to a `"key=value"` positional). Fix: have
+the `WordAssign` arm degrade to a stringified positional when `past_double_dash`.
+(`kernel.rs::build_args_async`)
+
 ### v0.8.4 review residuals (Gemini Pro, 2026-06-14)
 - **`diff -C 3 -C 4` miscounts arity** (P4-trivial — `context_steals_positional`
   subtracts 1 for a deduped `-C`). Redundant usage; the execute-time clap backstop

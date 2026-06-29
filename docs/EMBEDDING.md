@@ -327,7 +327,10 @@ Semantics:
   And no **number coercion**: a `Value::String("00")` stays `"00"` (the string
   door's lexer would coerce the bare word `00` to an integer and print `0`). Pass
   a `Value::Int`/`Value::Float` when you mean a number — the type is yours to
-  choose, which is the point of the typed door.
+  choose, which is the point of the typed door. **Exception:** a leading `~` is
+  expanded against the session `HOME`, matching the string door (kaish expands
+  `~` uniformly, even in quotes — so the doors agree); pass a pre-resolved path
+  if you need it byte-literal.
 - **One simple command only.** Pipelines, `&&`/`||`, control flow, and `$()` have
   no argv encoding — use `execute(&str)` for those. The two are *peers*: argv is
   not a subset that drops expressiveness, it's a different door that converges with

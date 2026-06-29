@@ -1397,7 +1397,11 @@ impl Kernel {
     /// **Tokens are literal.** No glob expansion, no `$VAR` interpolation, no
     /// command substitution, no word splitting — the "single-quoted word"
     /// semantics taken to its end. `execute_argv("echo", &[Value::String("*.txt"
-    /// .into())])` emits `*.txt`; it does not glob. A non-string `Value`
+    /// .into())])` emits `*.txt`; it does not glob. (One shared-binder expansion
+    /// does still apply, for consistency with the string door: a leading `~` is
+    /// expanded against the session `HOME` — kaish expands `~` uniformly, so the
+    /// two doors agree. Pass a pre-resolved path if you need it byte-literal.) A
+    /// non-string `Value`
     /// (`Bytes`/`Json`/`Int`) lands directly in `ToolArgs.positional`, so typed
     /// data survives without a `to_argv()` round-trip. (Caveat: the two-layer
     /// clap arg model means a builtin that re-parses its own `to_argv()` still
@@ -5294,20 +5298,27 @@ fn classify_argv_token(token: &Value) -> Arg {
         return Arg::DoubleDash;
     }
 
+    // Long flag: the lexer requires `--[a-zA-Z]…`. `---`, `--=v`, `--1` are NOT
+    // long-flag words (the string door tokenizes them differently and often
+    // errors), so they fall through to a literal positional rather than a
+    // silently-misbound `LongFlag("-")` / empty-key `Named{ key: "" }`.
     if let Some(rest) = s.strip_prefix("--") {
-        return match rest.split_once('=') {
-            Some((key, val)) => Arg::Named {
-                key: key.to_string(),
-                value: Expr::Literal(Value::String(val.to_string())),
-            },
-            None => Arg::LongFlag(rest.to_string()),
-        };
-    }
-
-    // Short flag: `-` then an ASCII letter. A leading digit (`-1`, `-9`) is a
-    // number to the lexer, not a flag — leave it for the positional fallback.
-    if let Some(rest) = s.strip_prefix('-') {
-        if rest.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        if rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            return match rest.split_once('=') {
+                Some((key, val)) => Arg::Named {
+                    key: key.to_string(),
+                    value: Expr::Literal(Value::String(val.to_string())),
+                },
+                None => Arg::LongFlag(rest.to_string()),
+            };
+        }
+    } else if let Some(rest) = s.strip_prefix('-') {
+        // Short flag: the lexer's flag char class is `[a-zA-Z][a-zA-Z0-9-]*`. A
+        // token carrying any other char — notably `=` (`-k=v` is a parse error in
+        // the string door) — or a leading digit (`-1` lexes as a number) is not a
+        // short-flag word, so it falls through to a literal positional instead of
+        // a `ShortFlag("k=v")` the binder would mangle into a stray `=` flag.
+        if is_short_flag_body(rest) {
             return Arg::ShortFlag(rest.to_string());
         }
     }
@@ -5322,6 +5333,14 @@ fn classify_argv_token(token: &Value) -> Arg {
     }
 
     Arg::Positional(Expr::Literal(Value::String(s.clone())))
+}
+
+/// A short-flag word: a leading ASCII letter and no `=`. `-la`, `-A1`, `-a:`
+/// qualify (the lexer's flag token absorbs `:`/`.` and friends); `-1` (a number)
+/// and `-k=v` (`=` is the assignment operator — a parse error in the string door)
+/// do not, so they fall through to a literal positional.
+fn is_short_flag_body(s: &str) -> bool {
+    s.starts_with(|c: char| c.is_ascii_alphabetic()) && !s.contains('=')
 }
 
 /// Bash-style assignment-LHS identifier: `[A-Za-z_][A-Za-z0-9_]*`.
@@ -5560,10 +5579,31 @@ mod argv_classify_tests {
 
     #[test]
     fn double_dash_only_matches_exactly() {
-        // `--` is the marker; `--x` is a long flag, `---` is not the marker.
+        // `--` is the marker; `--x` is a long flag. `---` is not a flag word
+        // (the lexer splits it `--` + `-`); as a single argv token it's literal.
         assert_eq!(classify("--"), Arg::DoubleDash);
         assert_eq!(classify("--x"), Arg::LongFlag("x".into()));
-        assert_eq!(classify("---"), Arg::LongFlag("-".into()));
+        assert_eq!(classify("---"), Arg::Positional(Expr::Literal(Value::String("---".into()))));
+    }
+
+    #[test]
+    fn malformed_flag_words_fall_back_to_literal_positionals() {
+        // A token that isn't a well-formed flag word must NOT be silently misbound
+        // into the arg binder (house rule: loud/visible over silent-wrong). Each
+        // of these is a parse error or different tokenization in the string door,
+        // so the argv door keeps them as literal positionals.
+        let pos = |t: &str| Arg::Positional(Expr::Literal(Value::String(t.into())));
+        // `=` is not in the short-flag char class (`-k=v` parse-errors in the
+        // string door); don't emit `ShortFlag("k=v")` for the binder to mangle.
+        assert_eq!(classify("-k=v"), pos("-k=v"));
+        assert_eq!(classify("-="), pos("-="));
+        // Empty long-flag key.
+        assert_eq!(classify("--=v"), pos("--=v"));
+        // `--` followed by a non-letter is not a long flag.
+        assert_eq!(classify("--1"), pos("--1"));
+        // A bare dash and a number-dash are positionals (covered above too).
+        assert_eq!(classify("-"), pos("-"));
+        assert_eq!(classify("-9"), pos("-9"));
     }
 
     proptest::proptest! {

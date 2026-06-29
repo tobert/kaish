@@ -70,6 +70,9 @@ async fn argv_door_matches_string_door() {
         // One word containing a space: argv passes it intact; the string form
         // needs quoting to mean the same thing. Both are one positional.
         ("echo", vec![s("a b c")], "echo 'a b c'"),
+        // A bareword `key=value` to a non-allowlist command stringifies back to a
+        // `"key=value"` positional (bash: `cat foo=bar`), identical on both doors.
+        ("echo", vec![s("A=1")], "echo A=1"),
         ("true", vec![], "true"),
         ("false", vec![], "false"),
     ];
@@ -116,6 +119,21 @@ async fn argv_tokens_do_not_interpolate_variables() {
     let (out, code) = observe(&kernel.execute_argv("echo", &[s("$HOME_LIKE")]).await.unwrap());
     assert_eq!(code, 0);
     assert_eq!(out, "$HOME_LIKE", "argv token must not interpolate");
+}
+
+#[tokio::test]
+async fn tilde_expands_consistently_with_the_string_door() {
+    // A leading `~` is expanded against the session HOME by the *shared* binder,
+    // so the argv door and the string door agree (kaish expands `~` uniformly,
+    // unlike bash's quoting rules — see EMBEDDING.md). This pins consistency, not
+    // a claim that argv tokens are byte-for-byte literal w.r.t. `~`.
+    let kernel = kernel_at(tempdir().path());
+    kernel.execute("HOME=/home/agent").await.unwrap();
+
+    let via_argv = observe(&kernel.execute_argv("echo", &[s("~/work")]).await.unwrap());
+    let via_string = observe(&kernel.execute("echo ~/work").await.unwrap());
+    assert_eq!(via_argv, via_string);
+    assert_eq!(via_argv.0, "/home/agent/work", "tilde should expand via the shared binder");
 }
 
 #[tokio::test]
