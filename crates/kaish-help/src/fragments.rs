@@ -424,7 +424,8 @@ Env vars: `KAISH_LATCH=1`, `KAISH_TRASH=1` enable at startup.
 Confirmed paths must be subset of authorized paths. Exit code 2 = needs confirmation.
 Applies to `rm` and to truncating overwrites (`tee`, `patch`, `sed -i`) —
 confirm those with `--confirm=<nonce>`. `tee -a` append, new files, and
-`patch --dry-run` don't gate.
+`patch --dry-run` don't gate. The prompt prints to stderr (stdout stays empty);
+under `--json` the nonce is in the result's `data` field.
 
 **Trash:** Files <= 10MB and directories always trash. `/tmp`, `/v/*` excluded.
 A truncating overwrite under `trash` snapshots the file's prior content first

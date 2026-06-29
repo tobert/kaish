@@ -129,9 +129,32 @@ let config = KernelConfig::agent();
 ```
 
 Other builders: `.with_latch(bool)` / `.with_trash(bool)` (destructive-op
-rails), `.with_vfs_budget(bytes)` / `.without_vfs_budget()` (cap in-memory
-VFS growth), `.with_skip_validation(bool)`, `.with_initial_vars(map)`
+rails — see below), `.with_vfs_budget(bytes)` / `.without_vfs_budget()` (cap
+in-memory VFS growth), `.with_skip_validation(bool)`, `.with_initial_vars(map)`
 (below).
+
+#### Destructive-op rails: reading the latch nonce
+
+With `.with_latch(true)`, a destructive op (`rm`, and the overwrite gate behind
+`tee` / `patch` / `sed -i`) does not run on first call — it returns an
+`ExecResult` with **exit code 2** and a confirmation nonce. The re-run is the
+same argv plus `--confirm=<nonce>`. The output contract:
+
+- **stderr** (`ExecResult.err`) carries the human-readable prompt;
+- **stdout** is empty (nothing happened, so there is no success output);
+- **`ExecResult.data`** carries the nonce as structured JSON — read it here
+  rather than parsing the stderr text:
+
+  ```json
+  { "nonce": "a3f7b2c1", "command": "rm",
+    "paths": ["important.dat"], "hint": "...", "ttl": 60 }
+  ```
+
+Nonces are scoped to `(command, paths)`, expire after 60s, and are not consumed
+on use (idempotent retries). To confirm a nonce issued in one `execute()` call
+from a *later* call, share the store with
+`KernelConfig::with_nonce_store()` — the default `NonceStore` is fresh per
+kernel. See [LANGUAGE.md](LANGUAGE.md) for the full latch/trash semantics.
 
 ### Custom Backend (`Kernel::with_backend`)
 

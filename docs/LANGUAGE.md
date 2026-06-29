@@ -457,6 +457,20 @@ To confirm, run: rm --confirm="a3f7b2c1" important.dat
 Nonce expires in 60 seconds.
 ```
 
+**Latch output contract.** The prompt above is written to **stderr** (the
+`ExecResult.err` channel); **stdout is empty** — nothing was deleted, so there is
+no success output. The nonce is also attached as structured data, so a program
+driving the shell reads it off `--json` (`ExecResult.data`) rather than scraping
+the stderr text:
+
+```json
+{ "nonce": "a3f7b2c1", "command": "rm",
+  "paths": ["important.dat"], "hint": "...", "ttl": 60 }
+```
+
+The same contract holds for the overwrite gate (`tee`, `patch`, `sed -i`): exit 2,
+human prompt on stderr, nonce on `.data`.
+
 The `kaish-trash` builtin manages trashed files: `list`, `restore`, `empty`, `config`.
 
 When output is truncated by the limit, the result exits **3** with `did_spill: true` and `original_code` set. The spill file path is in the output. To read it in full:
