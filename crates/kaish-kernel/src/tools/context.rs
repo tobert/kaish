@@ -737,13 +737,21 @@ impl ExecContext {
         let mut result = ExecResult::failure(2, format!(
             "{command}: confirmation required ({reason}){authorized}\nTo confirm, run: {hint}\nNonce expires in {ttl} seconds."
         ));
-        result.data = Some(Value::Json(serde_json::json!({
-            "nonce": nonce,
-            "command": command,
-            "paths": paths,
-            "hint": hint,
-            "ttl": ttl,
-        })));
+        // The struct is the single source of truth for the payload shape; the
+        // typed accessor `ExecResult::latch_request` deserializes exactly this.
+        let request = crate::interpreter::LatchRequest {
+            nonce,
+            command: command.to_string(),
+            paths: paths.iter().map(|p| (*p).to_string()).collect(),
+            hint,
+            ttl,
+        };
+        // Infallible: every field is String/Vec<String>/u64 (see NonceStore for
+        // the same allow on a genuinely-unreachable error).
+        #[allow(clippy::expect_used)]
+        let payload = serde_json::to_value(&request)
+            .expect("LatchRequest serializes infallibly (String/Vec<String>/u64)");
+        result.data = Some(Value::Json(payload));
         result
     }
 

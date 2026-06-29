@@ -226,10 +226,16 @@ async fn latch_round_trips_through_argv_door() {
         "file must survive the latch gate"
     );
 
-    let nonce = match gated.data.as_ref().expect("latch result carries .data") {
-        Value::Json(j) => j["nonce"].as_str().expect("nonce string in .data").to_string(),
-        other => panic!("expected Value::Json latch data, got {other:?}"),
-    };
+    // Read the latch through the typed accessor — this exercises the real
+    // kernel→rm→latch_result production path and closes the producer/consumer
+    // loop, so a drift between the payload keys and `LatchRequest` fails here.
+    let req = gated
+        .latch_request()
+        .expect("a gated rm result decodes to a LatchRequest");
+    assert_eq!(req.command, "rm");
+    assert_eq!(req.paths, vec!["precious.txt".to_string()]);
+    assert_eq!(req.ttl, 60);
+    let nonce = req.nonce;
 
     // Confirm through the argv door: `rm --confirm=<nonce> precious.txt`.
     let confirmed = kernel
