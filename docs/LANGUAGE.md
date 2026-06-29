@@ -480,8 +480,12 @@ the stderr text. Where it lands depends on the output format:
               "hint": "...", "ttl": 60 } }
   ```
 
-The same contract holds for the overwrite gate (`tee`, `patch`, `sed -i`): exit 2,
-human prompt on the `err` channel, nonce on `.data` (nested under `--json`).
+The same contract holds for the truncating-overwrite gate (`tee`, `patch`,
+`sed -i`, `write`, `cp`, `mv`, `dd of=`): exit 2, human prompt on the `err`
+channel, nonce on `.data` (nested under `--json`). `dd` confirms with its
+`confirm=<nonce>` key=value idiom rather than `--confirm=`; copying or moving
+*into* a directory (and recursive `cp -r`/`mv` of a tree) gates the named
+destination, not each child file.
 
 The `kaish-trash` builtin manages trashed files: `list`, `restore`, `empty`, `config`.
 

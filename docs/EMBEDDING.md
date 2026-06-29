@@ -135,10 +135,13 @@ in-memory VFS growth), `.with_skip_validation(bool)`, `.with_initial_vars(map)`
 
 #### Destructive-op rails: reading the latch nonce
 
-With `.with_latch(true)`, a destructive op (`rm`, and the overwrite gate behind
-`tee` / `patch` / `sed -i`) does not run on first call — it returns an
-`ExecResult` with **exit code 2** and a confirmation nonce. The re-run is the
-same argv plus `--confirm=<nonce>`. The output contract:
+With `.with_latch(true)`, a destructive op (`rm`'s delete, and the truncating
+overwrite behind `tee` / `patch` / `sed -i` / `write` / `cp` / `mv` / `dd of=`)
+does not run on first call — it returns an `ExecResult` with **exit code 2** and a
+confirmation nonce. The re-run is the same argv plus `--confirm=<nonce>` (`dd` uses
+its `confirm=<nonce>` key=value idiom). Copying or moving *into* a directory, and
+recursive `cp -r`/`mv` of a tree, gate only the named destination, not per-child
+overwrites. The output contract:
 
 - **`ExecResult.err`** (which a frontend routes to stderr) carries the
   human-readable prompt;

@@ -691,3 +691,207 @@ async fn sed_in_place_without_operands_is_a_loud_error() {
     assert_eq!(r.code, 1, "no file operands must error: {}", r.err);
     assert!(r.err.contains("requires file operands"), "err: {}", r.err);
 }
+
+// ============================================================================
+// Write-model gate: write / dd / cp / mv overwrites honor latch + trash too
+// (the same gate as tee/patch/sed -i). These builtins previously bypassed it.
+// ============================================================================
+
+#[tokio::test]
+async fn write_overwrite_under_trash_snapshots_prior_bytes() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("doc.txt"), "old").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o trash").await;
+    let r = run(&kernel, "write doc.txt \"new\"").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+
+    let snaps = mock.snapshots();
+    assert_eq!(snaps.len(), 1, "one snapshot for the overwrite: {snaps:?}");
+    assert_eq!(snaps[0].1, b"old", "the snapshot captured the prior content");
+    assert_eq!(std::fs::read_to_string(dir.path().join("doc.txt")).unwrap(), "new");
+}
+
+#[tokio::test]
+async fn write_overwrite_under_latch_requires_confirm() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("doc.txt"), "keep").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o latch").await;
+    let r = run(&kernel, "write doc.txt \"new\"").await;
+    assert_eq!(r.code, 2, "latch gates write: {}", r.err);
+    assert!(r.err.contains("--confirm="));
+    assert_eq!(std::fs::read_to_string(dir.path().join("doc.txt")).unwrap(), "keep");
+
+    let nonce = latch_data_str(&r, "nonce");
+    let r2 = run(&kernel, &format!("write --confirm=\"{nonce}\" doc.txt \"new\"")).await;
+    assert_eq!(r2.code, 0, "confirmed write succeeds: {}", r2.err);
+    assert_eq!(std::fs::read_to_string(dir.path().join("doc.txt")).unwrap(), "new");
+}
+
+#[tokio::test]
+async fn write_new_file_does_not_gate() {
+    let dir = tempdir();
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+    run(&kernel, "set -o latch").await;
+    let r = run(&kernel, "write fresh.txt \"hi\"").await;
+    assert_eq!(r.code, 0, "a new file has nothing to lose, no gate: {}", r.err);
+    assert_eq!(std::fs::read_to_string(dir.path().join("fresh.txt")).unwrap(), "hi");
+}
+
+#[tokio::test]
+async fn overwrite_too_big_for_trash_falls_through_to_latch() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("big.txt"), "0123456789").expect("write"); // 10 bytes
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "kaish-trash config max-size 2").await; // 2-byte cap
+    run(&kernel, "set -o trash").await;
+    run(&kernel, "set -o latch").await;
+    // 10 bytes > the 2-byte cap: can't snapshot, so trash is skipped and latch
+    // gates instead — mirroring rm's too-big-to-trash fall-through (#3).
+    let r = run(&kernel, "write big.txt \"new\"").await;
+    assert_eq!(r.code, 2, "a file too big to trash should latch: {}", r.err);
+    assert!(mock.snapshots().is_empty(), "no snapshot when over the cap");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("big.txt")).unwrap(),
+        "0123456789",
+        "the file is untouched until confirmed"
+    );
+}
+
+#[tokio::test]
+async fn cp_overwrite_under_latch_requires_confirm() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("src.txt"), "fresh").expect("write");
+    std::fs::write(dir.path().join("dst.txt"), "old").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o latch").await;
+    let r = run(&kernel, "cp src.txt dst.txt").await;
+    assert_eq!(r.code, 2, "cp onto an existing file gates: {}", r.err);
+    assert!(r.err.contains("--confirm="));
+    assert_eq!(std::fs::read_to_string(dir.path().join("dst.txt")).unwrap(), "old");
+
+    let nonce = latch_data_str(&r, "nonce");
+    let r2 = run(&kernel, &format!("cp --confirm=\"{nonce}\" src.txt dst.txt")).await;
+    assert_eq!(r2.code, 0, "confirmed cp succeeds: {}", r2.err);
+    assert_eq!(std::fs::read_to_string(dir.path().join("dst.txt")).unwrap(), "fresh");
+}
+
+#[tokio::test]
+async fn cp_overwrite_under_trash_snapshots_prior_bytes() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("src.txt"), "fresh").expect("write");
+    std::fs::write(dir.path().join("dst.txt"), "old").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o trash").await;
+    let r = run(&kernel, "cp src.txt dst.txt").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+    let snaps = mock.snapshots();
+    assert_eq!(snaps.len(), 1, "snapshot of the prior destination: {snaps:?}");
+    assert_eq!(snaps[0].1, b"old");
+    assert_eq!(std::fs::read_to_string(dir.path().join("dst.txt")).unwrap(), "fresh");
+}
+
+#[tokio::test]
+async fn cp_into_existing_directory_does_not_gate_the_dir() {
+    // `cp SRC DIR` targets DIR/SRC (a new file here), never truncates DIR
+    // itself — the named directory must not be gated or snapshotted.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("src.txt"), "data").expect("write");
+    std::fs::create_dir(dir.path().join("d")).expect("mkdir");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o latch").await;
+    let r = run(&kernel, "cp src.txt d").await;
+    assert_eq!(r.code, 0, "cp into a directory must not gate the dir: {}", r.err);
+    assert_eq!(std::fs::read_to_string(dir.path().join("d/src.txt")).unwrap(), "data");
+}
+
+#[tokio::test]
+async fn mv_overwrite_under_latch_requires_confirm() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("src.txt"), "fresh").expect("write");
+    std::fs::write(dir.path().join("dst.txt"), "old").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o latch").await;
+    let r = run(&kernel, "mv src.txt dst.txt").await;
+    assert_eq!(r.code, 2, "mv onto an existing file gates: {}", r.err);
+    assert!(r.err.contains("--confirm="));
+    assert_eq!(std::fs::read_to_string(dir.path().join("dst.txt")).unwrap(), "old");
+    assert!(dir.path().join("src.txt").exists(), "src must survive a gated mv");
+
+    let nonce = latch_data_str(&r, "nonce");
+    let r2 = run(&kernel, &format!("mv --confirm=\"{nonce}\" src.txt dst.txt")).await;
+    assert_eq!(r2.code, 0, "confirmed mv succeeds: {}", r2.err);
+    assert_eq!(std::fs::read_to_string(dir.path().join("dst.txt")).unwrap(), "fresh");
+    assert!(!dir.path().join("src.txt").exists(), "src removed after the move");
+}
+
+#[tokio::test]
+async fn mv_overwrite_under_trash_snapshots_prior_bytes() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("src.txt"), "fresh").expect("write");
+    std::fs::write(dir.path().join("dst.txt"), "old").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o trash").await;
+    let r = run(&kernel, "mv src.txt dst.txt").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+    let snaps = mock.snapshots();
+    assert_eq!(snaps.len(), 1, "snapshot of the prior destination: {snaps:?}");
+    assert_eq!(snaps[0].1, b"old");
+    assert_eq!(std::fs::read_to_string(dir.path().join("dst.txt")).unwrap(), "fresh");
+}
+
+#[tokio::test]
+async fn dd_of_overwrite_under_latch_requires_confirm() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("in.bin"), "fresh").expect("write");
+    std::fs::write(dir.path().join("out.bin"), "old").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o latch").await;
+    let r = run(&kernel, "dd if=in.bin of=out.bin").await;
+    assert_eq!(r.code, 2, "dd of= onto an existing file gates: {}", r.err);
+    assert!(r.err.contains("confirm="));
+    assert_eq!(std::fs::read_to_string(dir.path().join("out.bin")).unwrap(), "old");
+
+    // dd's latch hint uses its key=value idiom: `dd ... confirm="<nonce>"`.
+    let nonce = latch_data_str(&r, "nonce");
+    let r2 = run(&kernel, &format!("dd if=in.bin of=out.bin confirm=\"{nonce}\"")).await;
+    assert_eq!(r2.code, 0, "confirmed dd succeeds: {}", r2.err);
+    assert_eq!(std::fs::read_to_string(dir.path().join("out.bin")).unwrap(), "fresh");
+}
+
+#[tokio::test]
+async fn dd_of_overwrite_under_trash_snapshots_prior_bytes() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("in.bin"), "fresh").expect("write");
+    std::fs::write(dir.path().join("out.bin"), "old").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o trash").await;
+    let r = run(&kernel, "dd if=in.bin of=out.bin").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+    let snaps = mock.snapshots();
+    assert_eq!(snaps.len(), 1, "snapshot of the prior of= file: {snaps:?}");
+    assert_eq!(snaps[0].1, b"old");
+    assert_eq!(std::fs::read_to_string(dir.path().join("out.bin")).unwrap(), "fresh");
+}

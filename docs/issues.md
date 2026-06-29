@@ -186,37 +186,47 @@ Still open (deferred — bigger than a builtin fix, each its own focused PR):
     (`eval.rs`, non-kernel embedders only) still doesn't expand — it has no `HOME`
     source on the trait; left as-is until an embedder needs the sync `[[ ]]` path.
 
-### Write-model gate — DONE; two residuals
-**`tee` + `patch` + `sed -i` all gated** (`feat/mutation-write-gate` →
-`feat/patch-write-gate` → `feat/sed-in-place`): pure `decide_mutation_action →
-{TrashFirst, Latch, Proceed}` + `ExecContext::gate_overwrites`/
-`snapshot_for_overwrite` (copies prior content via `TrashBackend::trash_bytes`,
-leaving the file in place) + family-wide `--confirm=<nonce>`, one nonce per command.
-`sed -i` edits one-or-more files in place (no operands → loud error). Latch+trash
-stay ON in overlay mode; `tee -a` append / new file / `patch --dry-run` don't gate.
+### Write-model gate — DONE (full family); residuals
+**Gated: `rm` (delete) + `tee`/`patch`/`sed -i`/`write`/`cp`/`mv`/`dd of=` (truncating
+overwrite)** (`feat/complete-write-model-gate` finished the last four, which had
+bypassed the gate entirely). Pure `decide_mutation_action → {TrashFirst, Latch,
+Proceed}` — now **size-aware** (a prior file over `trash_max_size` can't be snapshotted
+so it falls through to latch/proceed, like `rm`) — plus `ExecContext::gate_overwrites`
+(snapshots prior content via `TrashBackend::trash_bytes` **and returns those bytes**) and
+the binary-safe `cas_overwrite`/`overwrite_checked` (re-read + compare prior bytes; no
+`String` `PatchOp`) used by the byte-oriented writers. `rm` and the overwrite gate share
+`is_trash_excluded` (the `/tmp`,`/v` list) so it can't drift. Family-wide
+`--confirm=<nonce>`, one nonce per command (`dd` uses its `confirm=<nonce>` key=value
+idiom). New file / append (`tee -a`) / `patch --dry-run` / copy-or-move *into* a
+directory don't gate. Latch+trash stay ON in overlay mode.
 
 Residuals:
+- **cp/mv recursive & into-directory overwrites are ungated.** The gate covers the
+  *named* destination when it already exists as a file (the direct `cp/mv SRC FILE`
+  clobber). A recursive `cp -r`/`mv` merging into an existing directory (per-child
+  writes in `copy_dir_recursive`/`move_dir_recursive`) and a `SRC DIR/` that overwrites
+  `DIR/SRC` are NOT gated — neither truncates the named target. The real fix is up-front
+  enumeration of every clobbered child so one nonce can scope them; deferred.
+- **`mv` overwrite has no CAS** (gate-snapshot + latch only). The same-mount path is an
+  atomic `rename` (no read→write window to guard) and the cross-mount path is
+  unlink+write; the trash snapshot is the recovery. Fine as-is — recorded for symmetry.
 - **`sed -i.bak` backup suffix.** Not supported: kaish's lexer splits `-i.bak` at
   the dot (dot-prefixed barewords), and the kernel value-flag binder consumes the
   *next* token greedily, so GNU's glued-optional-suffix isn't modelable post-lexing.
   The trash snapshot already gives a recoverable copy, so this is convenience, not
   safety. Needs lexer/binder work (or a bespoke pre-clap argv pass à la `set.rs`).
-- **Atomicity (whole family).** `tee`/`patch`/`sed -i` overwrite via
-  `backend.write(Overwrite)` (`patch`/`sed -i` use a CAS `Replace`), not write-temp-
-  then-atomic-rename, so a crash mid-write can truncate. The fix surfaces an atomic-
-  replace capability question on the `Filesystem` trait — do it once for the whole
-  family, not per-builtin.
-- **TOCTOU window B — snapshot/CAS double-read (P3).** Gated `patch`/`sed -i` read
-  the file twice: `gate_overwrites → snapshot_for_overwrite` reads state A and copies
-  it to trash, then the builtin re-reads state B for its transform and binds the CAS
-  `expected` to **B**. The read#2→write window is CAS-protected (a change there fails
-  loud), but a concurrent change A→B in the snapshot→read#2 gap leaves the trash
-  holding the *stale* A while B→C is written — recovery is one version behind, and CAS
-  doesn't catch it because `expected` is the later read. **Fixable cheaply:** have
-  `gate_overwrites` return the snapshotted bytes per TrashFirst target and let the
-  builtin transform *those* and set `expected` to *those* — one read, snapshot ==
-  expected, only the CAS-guarded read→write window remains. Contained API change to
-  the three callers.
+- **Atomicity (whole family).** Overwrites use `backend.write(Overwrite)` (`patch`/`sed
+  -i` a CAS `Replace`; the byte writers `cas_overwrite`), not write-temp-then-atomic-
+  rename, so a crash mid-write can truncate. `cas_overwrite` detects a *concurrent
+  change* but is **not** crash-atomic. The fix surfaces an atomic-replace capability
+  question on the `Filesystem` trait — do it once for the whole family, not per-builtin.
+- **TOCTOU window B — snapshot/CAS double-read (P3).** `gate_overwrites` now returns the
+  snapshotted bytes and the byte-oriented writers (`tee`/`write`/`dd`/`cp`) CAS against
+  *those* (one read), so window B is closed for them. `patch`/`sed -i` still read twice
+  (their transform re-reads and binds `expected` to the later read), so a concurrent
+  change A→B in the snapshot→read#2 gap leaves the trash holding the *stale* A while
+  B→C is written — recovery one version behind, CAS doesn't catch it. Migrating
+  `patch`/`sed -i` to transform the *returned* snapshot bytes (now available) closes it.
 - **TOCTOU window A — existence-check race (P3).** `decide_mutation_action` keys on
   `exists` at gate time; a path absent then returns `Proceed` (no snapshot, no latch).
   If it's created before the builtin's `write`, it's clobbered ungated. Inherent with

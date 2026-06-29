@@ -75,14 +75,15 @@ impl Tool for Tee {
             .iter()
             .map(|v| (crate::interpreter::value_to_string(v), append))
             .collect();
-        if let Err(blocked) = ctx
+        let snapshots = match ctx
             .gate_overwrites("tee", &targets, parsed.confirm.as_deref(), |nonce, joined| {
                 format!("tee --confirm=\"{nonce}\" {joined}")
             })
             .await
         {
-            return blocked;
-        }
+            Ok(s) => s,
+            Err(blocked) => return blocked,
+        };
 
         // Read raw bytes so binary passes through tee intact (to files and to
         // the next stage).
@@ -98,13 +99,20 @@ impl Tool for Tee {
             let path = Path::new(&resolved);
 
             // Overwrite writes the borrowed input directly (no clone); append
-            // needs a read-modify-write since the VFS lacks an append mode.
+            // needs a read-modify-write since the VFS lacks an append mode. A
+            // truncating overwrite of a gated target goes through a CAS against
+            // the gate's snapshot, so a concurrent change between the gate and
+            // this write is a loud conflict, not a silent clobber.
             let write_result = if append {
                 let mut combined = ctx.backend.read(path, None).await.unwrap_or_default();
                 combined.extend_from_slice(&input);
-                ctx.backend.write(path, &combined, WriteMode::Overwrite).await
+                ctx.backend
+                    .write(path, &combined, WriteMode::Overwrite)
+                    .await
+                    .map_err(|e| e.to_string())
             } else {
-                ctx.backend.write(path, &input, WriteMode::Overwrite).await
+                let expected = snapshots.get(&resolved).map(|v| v.as_slice());
+                ctx.overwrite_checked(path, &input, expected).await
             };
 
             if let Err(e) = write_result {
@@ -226,5 +234,70 @@ mod tests {
 
         let result = Tee.execute(ToolArgs::new(), &mut ctx).await;
         assert!(!result.ok());
+    }
+
+    // ── CAS overwrite (the primitive tee routes its truncating writes through) ──
+
+    #[tokio::test]
+    async fn overwrite_checked_rejects_concurrent_change() {
+        let ctx = make_ctx().await; // /existing.txt = "original content\n"
+        let path = Path::new("/existing.txt");
+        let snapshot = b"original content\n".to_vec();
+
+        // A concurrent writer changes the file after the gate snapshotted it.
+        ctx.backend
+            .write(path, b"changed elsewhere\n", WriteMode::Overwrite)
+            .await
+            .unwrap();
+
+        // CAS against the now-stale snapshot must refuse to clobber.
+        let result = ctx.overwrite_checked(path, b"my content\n", Some(&snapshot)).await;
+        assert!(result.is_err(), "expected a conflict, got {result:?}");
+
+        // The concurrent writer's content survives untouched.
+        let now = ctx.backend.read(path, None).await.unwrap();
+        assert_eq!(now, b"changed elsewhere\n");
+    }
+
+    #[tokio::test]
+    async fn overwrite_checked_writes_when_snapshot_matches() {
+        let ctx = make_ctx().await;
+        let path = Path::new("/existing.txt");
+        let snapshot = b"original content\n".to_vec();
+
+        ctx.overwrite_checked(path, b"new content\n", Some(&snapshot))
+            .await
+            .unwrap();
+        assert_eq!(
+            ctx.backend.read(path, None).await.unwrap(),
+            b"new content\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn overwrite_checked_skips_cas_without_expectation() {
+        let ctx = make_ctx().await;
+        let path = Path::new("/existing.txt");
+
+        // No snapshot (gate off / new file): a plain overwrite, no CAS.
+        ctx.overwrite_checked(path, b"forced\n", None).await.unwrap();
+        assert_eq!(ctx.backend.read(path, None).await.unwrap(), b"forced\n");
+    }
+
+    #[tokio::test]
+    async fn overwrite_checked_errors_when_reread_fails_even_for_empty_snapshot() {
+        let ctx = make_ctx().await;
+        // Snapshot an EMPTY file, then have it vanish (concurrent delete).
+        let path = Path::new("/empty.txt");
+        ctx.backend.write(path, b"", WriteMode::Overwrite).await.unwrap();
+        let empty_snapshot: Vec<u8> = Vec::new();
+        ctx.backend.remove(path, false).await.unwrap();
+
+        // A failed re-read must surface loudly — not be swallowed to `[]` and
+        // false-match the empty snapshot, which would silently (re)write.
+        let result = ctx
+            .overwrite_checked(path, b"new\n", Some(&empty_snapshot))
+            .await;
+        assert!(result.is_err(), "vanished target must error, got {result:?}");
     }
 }
