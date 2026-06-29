@@ -140,15 +140,22 @@ With `.with_latch(true)`, a destructive op (`rm`, and the overwrite gate behind
 `ExecResult` with **exit code 2** and a confirmation nonce. The re-run is the
 same argv plus `--confirm=<nonce>`. The output contract:
 
-- **stderr** (`ExecResult.err`) carries the human-readable prompt;
+- **`ExecResult.err`** (which a frontend routes to stderr) carries the
+  human-readable prompt;
 - **stdout** is empty (nothing happened, so there is no success output);
 - **`ExecResult.data`** carries the nonce as structured JSON — read it here
-  rather than parsing the stderr text:
+  rather than parsing the `err` text:
 
   ```json
   { "nonce": "a3f7b2c1", "command": "rm",
     "paths": ["important.dat"], "hint": "...", "ttl": 60 }
   ```
+
+  If you executed with `--json` (`OutputFormat::Json`), this is a non-zero exit
+  with a diagnostic, so the result is wrapped in the standard JSON error envelope
+  and the nonce payload is nested one level down, under `data`:
+  `{ "error": "...", "code": 2, "data": { "nonce": ... } }`. Reading
+  `ExecResult.data` from the struct without `--json` gives you the bare payload.
 
 Nonces are scoped to `(command, paths)`, expire after 60s, and are not consumed
 on use (idempotent retries). To confirm a nonce issued in one `execute()` call

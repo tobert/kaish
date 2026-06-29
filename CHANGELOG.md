@@ -11,6 +11,11 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Fixed
+- **`--json` no longer drops the structured payload of an error result.** A
+  non-zero exit that carries both a diagnostic message and structured `.data`
+  — notably the latch confirmation nonce from `rm`/`tee`/`patch`/`sed -i` — kept
+  only `{error, code}` under `--json`, silently clobbering the nonce. The error
+  envelope now nests the payload under `data`: `{error, code, data: {nonce, …}}`.
 - **`sed -e <number>` is a loud error, not a silent drop.** A non-string `-e`
   expression (e.g. `sed -e 5`) now exits 2 with a usage error instead of being
   ignored — silently dropping it once let the *filename* be parsed as the program.

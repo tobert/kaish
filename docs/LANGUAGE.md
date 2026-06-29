@@ -457,19 +457,31 @@ To confirm, run: rm --confirm="a3f7b2c1" important.dat
 Nonce expires in 60 seconds.
 ```
 
-**Latch output contract.** The prompt above is written to **stderr** (the
-`ExecResult.err` channel); **stdout is empty** — nothing was deleted, so there is
-no success output. The nonce is also attached as structured data, so a program
-driving the shell reads it off `--json` (`ExecResult.data`) rather than scraping
-the stderr text:
+**Latch output contract.** The prompt above is written to the result's **`err`
+channel** (what a frontend renders to stderr); **stdout is empty** — nothing was
+deleted, so there is no success output. The nonce is also attached as structured
+data, so a program driving the shell reads it from the result rather than scraping
+the stderr text. Where it lands depends on the output format:
 
-```json
-{ "nonce": "a3f7b2c1", "command": "rm",
-  "paths": ["important.dat"], "hint": "...", "ttl": 60 }
-```
+- **No `--json`** — `ExecResult.data` is the bare nonce payload:
+
+  ```json
+  { "nonce": "a3f7b2c1", "command": "rm",
+    "paths": ["important.dat"], "hint": "...", "ttl": 60 }
+  ```
+
+- **`--json`** — the result is a non-zero exit with a diagnostic, so it's wrapped
+  in the standard JSON error envelope; the nonce payload is nested under `data`:
+
+  ```json
+  { "error": "rm: confirmation required (latch enabled)…",
+    "code": 2,
+    "data": { "nonce": "a3f7b2c1", "command": "rm", "paths": ["important.dat"],
+              "hint": "...", "ttl": 60 } }
+  ```
 
 The same contract holds for the overwrite gate (`tee`, `patch`, `sed -i`): exit 2,
-human prompt on stderr, nonce on `.data`.
+human prompt on the `err` channel, nonce on `.data` (nested under `--json`).
 
 The `kaish-trash` builtin manages trashed files: `list`, `restore`, `empty`, `config`.
 

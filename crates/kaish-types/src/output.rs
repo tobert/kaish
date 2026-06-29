@@ -560,14 +560,23 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
         if !result.ok() && !result.err.is_empty() {
             match format {
                 OutputFormat::Json => {
-                    let obj = serde_json::json!({
+                    let mut obj = serde_json::json!({
                         "error": result.err,
                         "code": result.code,
                     });
-                    result.data = Some(crate::result::json_to_value(obj.clone()));
-                    result.set_out(
-                        serde_json::to_string(&obj).unwrap_or_else(|_| "null".to_string()),
-                    );
+                    // A tool that attached structured data to an error result —
+                    // notably the latch nonce payload {nonce, command, paths,
+                    // hint, ttl} from `ToolCtx::latch_result` — must keep it
+                    // reachable under --json. Nest it under `data` so the error
+                    // envelope holds the diagnostic *and* the structured truth
+                    // instead of clobbering one with the other.
+                    if let Some(data) = &result.data {
+                        obj["data"] = crate::result::value_to_json(data);
+                    }
+                    let out =
+                        serde_json::to_string(&obj).unwrap_or_else(|_| "null".to_string());
+                    result.set_out(out);
+                    result.data = Some(crate::result::json_to_value(obj));
                 }
             }
         }
@@ -818,6 +827,35 @@ mod tests {
         );
         // .data mirrors the JSON object.
         assert!(matches!(formatted.data, Some(crate::value::Value::Json(_))));
+    }
+
+    #[test]
+    fn apply_output_format_preserves_structured_data_on_error() {
+        // A latch result is a failure (exit 2, empty stdout, populated err) that
+        // ALSO carries a structured nonce payload on .data. Under --json the
+        // error-envelope path must not clobber that payload — the nonce stays
+        // reachable, nested under `data`, alongside the error/code envelope.
+        let mut result = ExecResult::failure(2, "rm: confirmation required (latch enabled)");
+        result.data = Some(crate::value::Value::Json(serde_json::json!({
+            "nonce": "a3f7b2c1",
+            "command": "rm",
+            "paths": ["important.dat"],
+            "hint": "rm --confirm=\"a3f7b2c1\" important.dat",
+            "ttl": 60,
+        })));
+
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let out = formatted.text_out().into_owned();
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(parsed["error"], "rm: confirmation required (latch enabled)");
+        assert_eq!(parsed["code"], 2);
+        assert_eq!(parsed["data"]["nonce"], "a3f7b2c1");
+        assert_eq!(parsed["data"]["ttl"], 60);
+        // .data mirrors the serialized envelope (nonce reachable from the struct too).
+        match &formatted.data {
+            Some(crate::value::Value::Json(v)) => assert_eq!(v["data"]["nonce"], "a3f7b2c1"),
+            other => panic!("expected nested JSON data, got {other:?}"),
+        }
     }
 
     #[test]
