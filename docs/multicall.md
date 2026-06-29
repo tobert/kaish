@@ -1,6 +1,18 @@
 # Multicall Binary + `execute_argv` — Design Doc
 
-Status: **Design only — nothing landed (2026-06-23).** Two ideas, one cheap, one
+Status: **`execute_argv` landed 2026-06-29; multicall binary still deferred.**
+The load-bearing half — `Kernel::execute_argv(name, &[Value])` — shipped (see
+[devlog.md](devlog.md) and [EMBEDDING.md](EMBEDDING.md)). The implementation
+deviates from the §"Proposed API" sketch below in one deliberate way: instead of a
+parallel `build_args_from_argv` that builds `ToolArgs` (a second binder that could
+drift), the only new code is an `argv_to_args(&[Value]) -> Vec<Arg>` classifier
+that reuses the existing string-door binder (`build_args_async`) and dispatch chain
+verbatim. The test plan below was realized; the proptest equivalence (§① / ②) is
+asserted as classifier-vs-parser agreement rather than against `build_args_async`
+directly, which the reuse makes redundant. The remainder of this doc is preserved
+as the original rationale.
+
+Two ideas, one cheap, one
 load-bearing. (1) A busybox-style `kaish-multicall` binary that dispatches by
 `argv[0]`: `ln -s kaish-multicall ~/bin/ln` makes `ln` run kaish's `ln` builtin
 and exit. ~80 lines, no kernel changes — a third *frontend* alongside the REPL

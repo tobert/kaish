@@ -96,20 +96,17 @@ Still open:
   a malformed `$()` inside a `${VAR:-default}` *default word* still falls back to
   literal (two infallible Expr-returning call sites; rare edge).
 
-### `execute_argv` — argv-native kernel entry point (+ multicall binary) (Amy, 2026-06-23)
-Embeddable surface is string-native (`execute(&str)` → lex/parse). A structured
-embedder (kaijutsu) or a busybox-style `kaish-multicall` binary arrives with argv
-*already tokenized*, and today must re-quote it back into a string for the lexer —
-lossy for typed `Value`s (`to_argv()` stringifies `Bytes`/`Json`). Add
-`execute_argv(&self, name, &[Value]) -> ExecResult` as a **peer** of `execute`,
-joining the dispatch chain at `ToolArgs` (new helper `build_args_from_argv`
-mirroring `build_args_async` minus `Expr` eval; reuses validation/`--json`/latch/
-dispatch unchanged). argv tokens are literal — no glob/`$VAR`/split. Test plan:
-proptest binder-equivalence vs `build_args_async` (first proptest use — greenlit),
-a differential harness over the single-command corpus (argv door ≡ string door),
-`Bytes`/`Json` round-trip pins, latch/`--json` smoke. Wrinkle: the two-layer clap
-model (`to_argv()` re-parse) caps typed passthrough to `args.positional`-reading
-builtins. Full writeup: [multicall.md](multicall.md).
+### `kaish-multicall` binary (deferred from the `execute_argv` work)
+`execute_argv` — the argv-native peer of `execute(&str)` — **landed** (see
+devlog); the load-bearing half is done. The cheap second half is still open: a
+busybox-style `kaish-multicall` binary that dispatches by `argv[0]`
+(`ln -s kaish-multicall ~/bin/ln` → kaish's `ln`). It's a third *frontend*, ~80
+lines, no kernel changes — a second `[[bin]]` in `kaish-repl` first, promoted to
+its own crate only if it grows. Now that `execute_argv` exists it can be
+argv-native from day one (no quoting-reconstruct interim). Build it when a
+consumer wants it. Full writeup: [multicall.md](multicall.md). Open design
+question recorded there: whether to also expose a `&[String]` convenience door
+over the `&[Value]` primitive (trivial `.map(Value::String)` wrapper).
 
 ### OverlayFs residuals
 (Core landed — see devlog.) Open:

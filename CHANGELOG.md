@@ -28,6 +28,13 @@ breaking entries are marked **BREAKING**.
   file type, by extension) is distinct from glob's existing `-t`/`--type` (entry
   *kind*: file/dir); the two compose. A file-type filter narrows files only —
   directories pass it untouched. Unknown type → loud exit 2.
+- **`Kernel::execute_argv(name, &[Value])`** (embedder API) — argv-native peer of
+  `execute(&str)` for callers that already hold tokenized arguments. Runs one
+  command with **literal** tokens (no glob/`$VAR`/command-substitution/splitting)
+  and passes typed `Value`s (`Bytes`/`Json`) straight through as positionals
+  without the lossy `to_argv()` stringification a re-quoted string would force. It
+  reuses the full dispatch chain (`--json`, the confirmation latch, command
+  resolution), so behavior matches the string door for single commands.
 
 ### Fixed
 - **`--json` no longer drops the structured payload of an error result.** A

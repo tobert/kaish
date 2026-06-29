@@ -1384,6 +1384,59 @@ impl Kernel {
         self.run_inner(input, ExecuteOptions::default(), None, None).await
     }
 
+    /// Argv-native peer of [`Self::execute`] — run one command whose arguments
+    /// are **already tokenized**.
+    ///
+    /// `execute(&str)` is string-native: it lexes and parses its input. A caller
+    /// that already holds OS/structured argv (a busybox-style multicall binary, a
+    /// structured embedder like kaijutsu) would otherwise have to re-quote argv
+    /// into a string just to have the lexer split it apart again — a round-trip
+    /// that is lossy for typed values, since `to_argv()` stringifies
+    /// [`Value::Bytes`]/[`Value::Json`]. `execute_argv` skips it.
+    ///
+    /// **Tokens are literal.** No glob expansion, no `$VAR` interpolation, no
+    /// command substitution, no word splitting — the "single-quoted word"
+    /// semantics taken to its end. `execute_argv("echo", &[Value::String("*.txt"
+    /// .into())])` emits `*.txt`; it does not glob. A non-string `Value`
+    /// (`Bytes`/`Json`/`Int`) lands directly in `ToolArgs.positional`, so typed
+    /// data survives without a `to_argv()` round-trip. (Caveat: the two-layer
+    /// clap arg model means a builtin that re-parses its own `to_argv()` still
+    /// sees a stringified value; the typed-passthrough win fully lands only for
+    /// builtins that read `args.positional` directly — the documented pattern.)
+    ///
+    /// This is a *peer*, not a subset: a command string can carry pipelines,
+    /// `&&`/`||`, control flow and `$()` that have no argv encoding, so the two
+    /// doors converge **late** (at the shared dispatch chain) rather than one
+    /// wrapping the other. From argv classification onward `execute_argv` reuses
+    /// the exact path a `Stmt::Command` takes — command resolution (aliases, user
+    /// tools, `.kai` scripts, externals, backend tools), arg binding, the `--json`
+    /// transform, and the confirmation latch — so a latched `rm` still emits a
+    /// nonce and an `ls --json` still applies output formatting. The kernel's
+    /// pre-execution *syntax* validator does not run: argv has no shell syntax to
+    /// validate (a tool's own `validate()`/clap parse still runs at dispatch).
+    ///
+    /// Concurrent callers serialize on the same execute lock as [`Self::execute`].
+    #[tracing::instrument(level = "info", skip(self, argv), fields(cmd = name, argc = argv.len()))]
+    pub async fn execute_argv(&self, name: &str, argv: &[Value]) -> Result<ExecResult> {
+        let _guard = self.acquire_execute_lock().await;
+        // Fresh cancel surface for this call, matching `execute_streaming_inner`:
+        // `execute_pipeline` reads `self.cancel_token`, so a stale cancelled token
+        // from a prior call must be replaced before we dispatch.
+        let _cancel = self.reset_cancel();
+
+        let pipeline = crate::ast::Pipeline {
+            commands: vec![crate::ast::Command {
+                name: name.to_string(),
+                args: argv_to_args(argv),
+                redirects: Vec::new(),
+            }],
+            background: false,
+        };
+        let result = self.execute_pipeline(&pipeline).await?;
+        self.update_last_result(&result).await;
+        Ok(result)
+    }
+
     /// Execute with per-call options. The primary entry point for embedders
     /// that don't need per-statement output streaming.
     ///
@@ -5206,6 +5259,81 @@ fn apply_tilde_expansion(value: Value, home: Option<&str>) -> Value {
     }
 }
 
+/// Classify an already-tokenized argv (`&[Value]`) into AST [`Arg`]s, mirroring
+/// how the lexer tokenizes the equivalent minimally-quoted command string —
+/// the seam that lets [`Kernel::execute_argv`] reuse the string door's binder
+/// (`build_args_async`) verbatim instead of carrying a parallel one that could
+/// drift. Tokens are literal: every string becomes an `Expr::Literal`, never an
+/// `Expr::GlobPattern` or `VarRef`, so no glob/`$VAR`/`$()`/split can occur.
+///
+/// Classification matches the lexer's word classes:
+/// - `--` → [`Arg::DoubleDash`] (subsequent flags are demoted to positionals by
+///   the binder's `past_double_dash` arms, exactly as for the string door).
+/// - `--name=value` → [`Arg::Named`]; `--name` → [`Arg::LongFlag`].
+/// - `-x…` where the first char after `-` is an ASCII letter → [`Arg::ShortFlag`]
+///   (the lexer's flag char class begins `[a-zA-Z]`; `-1`/`-9` lex as numbers, so
+///   they fall through to a positional, not a flag).
+/// - `key=value` with an identifier LHS → [`Arg::WordAssign`] (the binder either
+///   binds it to a preceding value-flag — `awk -v x=1` — or stringifies it to a
+///   `key=value` positional, per the command's word-assign allowlist).
+/// - everything else → a literal [`Arg::Positional`].
+///
+/// A **non-string** `Value` (`Bytes`/`Json`/`Int`/`Bool`) is always a literal
+/// positional — it can never be a flag — and rides through as-is. That is the
+/// typed passthrough the string-native door cannot offer.
+pub(crate) fn argv_to_args(argv: &[Value]) -> Vec<Arg> {
+    argv.iter().map(classify_argv_token).collect()
+}
+
+fn classify_argv_token(token: &Value) -> Arg {
+    let Value::String(s) = token else {
+        return Arg::Positional(Expr::Literal(token.clone()));
+    };
+
+    if s == "--" {
+        return Arg::DoubleDash;
+    }
+
+    if let Some(rest) = s.strip_prefix("--") {
+        return match rest.split_once('=') {
+            Some((key, val)) => Arg::Named {
+                key: key.to_string(),
+                value: Expr::Literal(Value::String(val.to_string())),
+            },
+            None => Arg::LongFlag(rest.to_string()),
+        };
+    }
+
+    // Short flag: `-` then an ASCII letter. A leading digit (`-1`, `-9`) is a
+    // number to the lexer, not a flag — leave it for the positional fallback.
+    if let Some(rest) = s.strip_prefix('-') {
+        if rest.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            return Arg::ShortFlag(rest.to_string());
+        }
+    }
+
+    if let Some((key, val)) = s.split_once('=') {
+        if is_shell_identifier(key) {
+            return Arg::WordAssign {
+                key: key.to_string(),
+                value: Expr::Literal(Value::String(val.to_string())),
+            };
+        }
+    }
+
+    Arg::Positional(Expr::Literal(Value::String(s.clone())))
+}
+
+/// Bash-style assignment-LHS identifier: `[A-Za-z_][A-Za-z0-9_]*`.
+fn is_shell_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Accumulate one occurrence of a repeatable value flag (e.g. sed `-e`) under
 /// `named[canonical]` as a flat `Value::Json(Array(...))`, in invocation order.
 /// Never overwrites — that's the whole point of `repeatable`: a repeated flag
@@ -5323,6 +5451,134 @@ pub(crate) async fn kill_with_grace(
         t.signal_pg(Signal::SIGKILL);
     }
     child.wait().await
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod argv_classify_tests {
+    use super::*;
+
+    /// A normalized, comparable view of one `Arg` representing its *logical
+    /// argument* (what the command observably receives), not its exact AST shape:
+    ///
+    /// - Value-bearing arms compare by *stringified* value, so the parser's
+    ///   number coercion (`-1`→`Int(-1)`) vs the classifier's literal
+    ///   (`String("-1")`) count as the same argument.
+    /// - `WordAssign{k,v}` collapses to the *same* form as a `Positional("k=v")`.
+    ///   For every command except the `export`/`alias` allowlist, a bareword
+    ///   `key=value` is stringified straight back to a `"key=value"` positional
+    ///   (bash: `cat foo=bar` opens a file named `foo=bar`). So the two doors
+    ///   converge observably even when they disagree on the AST tag — e.g. the
+    ///   lexer colon-merges `:A` into one `Ident` and parses `:A=0` as a
+    ///   `WordAssign`, where the classifier (bash-correctly) makes a positional.
+    ///   The genuine `WordAssign` *detection* on a real identifier LHS is pinned
+    ///   separately by `classifies_each_word_class`.
+    ///
+    /// Returns `None` for shapes we deliberately don't compare (e.g. a parsed
+    /// glob/interp `Expr`, which argv-native semantics never produce).
+    fn canonical(arg: &Arg) -> Option<(&'static str, String, String)> {
+        let lit = |e: &Expr| match e {
+            Expr::Literal(v) => Some(crate::interpreter::value_to_string(v)),
+            _ => None,
+        };
+        Some(match arg {
+            Arg::DoubleDash => ("dash", String::new(), String::new()),
+            Arg::ShortFlag(s) => ("short", s.clone(), String::new()),
+            Arg::LongFlag(s) => ("long", s.clone(), String::new()),
+            Arg::Positional(e) => ("pos", String::new(), lit(e)?),
+            Arg::Named { key, value } => ("named", key.clone(), lit(value)?),
+            Arg::WordAssign { key, value } => ("pos", String::new(), format!("{key}={}", lit(value)?)),
+        })
+    }
+
+    /// Classify a single string token the way `execute_argv` would.
+    fn classify(token: &str) -> Arg {
+        classify_argv_token(&Value::String(token.to_string()))
+    }
+
+    #[test]
+    fn classifies_each_word_class() {
+        assert_eq!(classify("--"), Arg::DoubleDash);
+        assert_eq!(classify("-l"), Arg::ShortFlag("l".into()));
+        assert_eq!(classify("-la"), Arg::ShortFlag("la".into()));
+        assert_eq!(classify("--force"), Arg::LongFlag("force".into()));
+        assert_eq!(
+            classify("--key=value"),
+            Arg::Named { key: "key".into(), value: Expr::Literal(Value::String("value".into())) }
+        );
+        assert_eq!(
+            classify("NAME=val"),
+            Arg::WordAssign { key: "NAME".into(), value: Expr::Literal(Value::String("val".into())) }
+        );
+        // Leading-digit dash is a number to the lexer, not a flag → positional.
+        assert_eq!(classify("-1"), Arg::Positional(Expr::Literal(Value::String("-1".into()))));
+        // A lone dash (stdin convention) is a positional, not a flag.
+        assert_eq!(classify("-"), Arg::Positional(Expr::Literal(Value::String("-".into()))));
+        // Non-identifier LHS is not an assignment.
+        assert_eq!(classify("1=2"), Arg::Positional(Expr::Literal(Value::String("1=2".into()))));
+        assert_eq!(classify("plain"), Arg::Positional(Expr::Literal(Value::String("plain".into()))));
+    }
+
+    #[test]
+    fn typed_values_pass_through_as_literal_positionals() {
+        // The whole point of the `&[Value]` signature: a non-string value is a
+        // literal positional carrying the *exact* value, never stringified and
+        // never flag-interpreted.
+        let bytes = Value::Bytes(vec![0u8, 159, 146, 150]); // invalid UTF-8 on purpose
+        assert_eq!(
+            classify_argv_token(&bytes),
+            Arg::Positional(Expr::Literal(bytes.clone()))
+        );
+        let json = Value::Json(serde_json::json!({"a": 1, "b": [2, 3]}));
+        assert_eq!(
+            classify_argv_token(&json),
+            Arg::Positional(Expr::Literal(json.clone()))
+        );
+        // An integer token that *looks* like a flag is still a positional value
+        // (only strings are inspected for a leading dash).
+        assert_eq!(
+            classify_argv_token(&Value::Int(-9)),
+            Arg::Positional(Expr::Literal(Value::Int(-9)))
+        );
+    }
+
+    #[test]
+    fn double_dash_only_matches_exactly() {
+        // `--` is the marker; `--x` is a long flag, `---` is not the marker.
+        assert_eq!(classify("--"), Arg::DoubleDash);
+        assert_eq!(classify("--x"), Arg::LongFlag("x".into()));
+        assert_eq!(classify("---"), Arg::LongFlag("-".into()));
+    }
+
+    proptest::proptest! {
+        /// The core correctness claim: the classifier mirrors the lexer/parser
+        /// on metacharacter-free tokens. For any such single token, the `Arg`
+        /// the classifier produces matches the one the real parser produces for
+        /// the equivalent one-word command — so `execute_argv` reusing the
+        /// string door's binder is sound. (First proptest in the workspace.)
+        #[test]
+        fn classifier_matches_parser_on_clean_tokens(
+            token in "[a-zA-Z0-9_=./@:+-]{1,8}"
+        ) {
+            let parsed = match parse(&format!("cmd {token}")) {
+                Ok(p) => p,
+                Err(_) => return Ok(()), // parser rejects (e.g. empty `a=`) — not our concern
+            };
+            let [Stmt::Command(cmd)] = parsed.statements.as_slice() else {
+                return Ok(());
+            };
+            // Only compare when the token lexed as exactly one argument.
+            let [arg] = cmd.args.as_slice() else { return Ok(()); };
+
+            let (Some(theirs), Some(ours)) = (canonical(arg), canonical(&classify(&token))) else {
+                return Ok(()); // a non-literal parsed Expr we don't model — skip
+            };
+            proptest::prop_assert_eq!(
+                ours, theirs,
+                "classifier diverged from parser on token {:?}", token
+            );
+        }
+    }
 }
 
 #[cfg(all(test, feature = "subprocess"))]
