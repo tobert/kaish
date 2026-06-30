@@ -2939,14 +2939,20 @@ impl Kernel {
         let schema = tool.schema();
         let tool_args = self.build_args_async(args, Some(&schema)).await?;
 
-        // --help / -h: show help unless the tool's schema claims that flag
+        // --help / -h: show the generic whole-tool help, unless either the tool's
+        // root schema claims that flag OR the tool owns its output. Owned-output
+        // tools re-parse their own argv and route their own `--help` — including
+        // leaf/subcommand help — through their internal (clap) parser, so the root
+        // schema can't express "this leaf claims help" and intercepting here would
+        // render top-level help and return before `execute()` ever sees the
+        // request (#51). Pass it through and let the tool render its own help.
         let schema_claims = |flag: &str| -> bool {
             let bare = flag.trim_start_matches('-');
             schema.params.iter().any(|p| p.matches_flag(flag) || p.matches_flag(bare))
         };
-        let wants_help =
-            (tool_args.flags.contains("help") && !schema_claims("help"))
-            || (tool_args.flags.contains("h") && !schema_claims("-h"));
+        let wants_help = !schema.owns_output
+            && ((tool_args.flags.contains("help") && !schema_claims("help"))
+                || (tool_args.flags.contains("h") && !schema_claims("-h")));
         if wants_help {
             let help_topic = crate::help::HelpTopic::Tool(name.to_string());
             let ctx = self.exec_ctx.read().await;

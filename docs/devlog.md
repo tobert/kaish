@@ -14,6 +14,31 @@ before it ships.
 
 ---
 
+## `--help` passthrough for owned-output tools (#51, 2026-06-30)
+
+The kernel intercepts `--help`/`-h` in `dispatch_command` and renders the generic
+whole-tool help before the tool runs — fine for ordinary builtins, wrong for a
+tool that owns its output and re-parses its own argv (`with_owned_output()`,
+typically a `schema_tree_from_clap` subcommand tree). For those, a leaf request
+like `tool subcmd --help` never reached the tool, so its *subcommand* help could
+never render; the user got top-level help that read like a missing-verb fallback.
+The interception keyed only on the *root* schema's params, so a subcommand-aware
+tool had no way to say "this leaf claims help."
+
+Fix is the issue's preferred option 1: when `schema.owns_output` is set, don't
+intercept — pass `--help` through to `execute()`. These tools already handle
+their own argv and output rendering, and their internal clap parser renders
+better leaf help than `HelpTopic::Tool` would. One condition (`!schema.owns_output`)
+on the existing `wants_help`; plain tools are untouched. This also retires the
+downstream workaround (kaijutsu's `kj` advertising a synthetic root `help` param
+just to dodge the interception). Found while building the `kj` subcommand tree in
+kaijutsu; the inconsistency was that bare `help` (a positional) reached the tool
+while `--help` (a flag) didn't, purely as an artifact of where interception sat.
+
+Own PR, off main — kept separate from the `classify_command` work (#50): different
+concern, different changelog group (`Fixed` vs `Added`), and #50 was already
+review-clean.
+
 ## Interpreter stack-depth analysis → first GitHub Issues (2026-06-30)
 
 A question — "what pushes up the interpreter's need for stack space over time?" —

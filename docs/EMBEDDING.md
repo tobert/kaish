@@ -417,7 +417,10 @@ Notes:
   stdin, and cancellation without depending on kernel internals.
 - If your tool renders its own output (including handling `--json`
   itself), mark the schema `.with_owned_output()` — the kernel then passes
-  `--json` through instead of re-rendering your `ExecResult`.
+  `--json` through instead of re-rendering your `ExecResult`. It also passes
+  `--help`/`-h` through: an owned-output tool re-parses its own argv, so the
+  kernel's generic whole-tool help router stands aside and lets the tool render
+  its own help (including leaf/subcommand help its internal parser knows about).
 
 ### Patient tools: suspending the script timeout
 

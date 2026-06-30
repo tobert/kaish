@@ -18,6 +18,14 @@ breaking entries are marked **BREAKING**.
   `--confirm=<nonce>`, instead of string-matching the error or digging `.data`
   by key. Returns `None` for plain (non-latch) exit-2 results.
 
+### Fixed
+- **`--help`/`-h` now passes through to `with_owned_output()` tools** — the
+  kernel's generic help router no longer intercepts it for tools that re-parse
+  their own argv, so a leaf request like `tool subcmd --help` reaches the tool
+  and renders its subcommand help instead of the top-level whole-tool help. This
+  also retires the per-tool workaround of advertising a synthetic root `help`
+  param. Plain tools are unaffected.
+
 ## [0.10.0] - 2026-06-29
 
 ### Added
