@@ -141,7 +141,11 @@ Tests live in `crates/kaish-kernel/tests/`. Snapshots in `crates/kaish-kernel/te
   `docs/composable-help.md`.
 - `docs/issues.md` — open work only (P1–P4). `docs/devlog.md` — a durable narrative
   from the agent's perspective; write your story there. Keep history out of
-  `issues.md` so it stays cheap to read for actual open work.
+  `issues.md` so it stays cheap to read for actual open work. **Write the devlog
+  entry late — just before signoff or opening a PR**, so it carries with the PR
+  and reflects the work as actually landed. Don't write it early or mid-flight:
+  the decisions aren't settled yet, and an entry written ahead of the change it
+  describes goes stale before it ships.
 
 **Keep in sync:** When adding builtins or changing syntax, update the relevant help files.
 The builtin list in `help builtins` is generated dynamically from tool schemas.
