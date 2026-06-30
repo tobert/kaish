@@ -45,6 +45,16 @@ deliberately mirrors the **interpreter's** real special-forms
 `External`, not be told it's internal. The validator↔runtime mismatch is now
 filed as a P3 (the validator probably shouldn't suppress those warnings).
 
+A deepseek review (kaibo) caught the one real under-reporting hole: execution
+expands **aliases** before the registry/PATH lookup, so `alias cat=/bin/evil`
+would have classified as `Builtin` while running external — the dangerous
+direction for a consent gate, and there was no public alias API for the embedder
+to compensate. `classify_command` now expands aliases internally, mirroring
+`execute_command_depth`'s bounded recursion (special-forms re-checked each step),
+so it reports `External` there too. `/v/bin/cat` and `.kai`/backend tools still
+over-report as `External` (the safe direction — over-gate, never leak a `PATH`
+escape). Added a `${VAR}` → `Dynamic` guard for the string-API surface.
+
 Deferred, same reasoning as the `kaish-edit` crate: the `PreflightReport`, the AST
 walk, and the consent loop are embedder policy (kaijutsu owns them), and a
 `Kernel::preflight(src)` convenience waits for a second consumer. Docs: a

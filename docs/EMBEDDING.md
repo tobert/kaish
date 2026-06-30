@@ -500,12 +500,13 @@ for stmt in &program.statements {
 safe default for an unrecognized kind is to gate it. `escapes_kernel()` captures
 the two buckets a consent gate scrutinizes without spelling out the variants.
 
-`classify_command` mirrors the interpreter's real resolution order, so a name
-like `readonly` (no kaish builtin; resolves to an external binary) reports
-`External`, not a false "internal". The safe direction of any imprecision is
-`External`/`Dynamic` — it never under-reports a `PATH` escape as internal. The
-classifier does not expand aliases; pass the post-alias name if your embedder
-resolves one. The consent UX and the block-the-script loop are embedder policy —
+`classify_command` mirrors the interpreter's real resolution order — including
+**alias expansion** — so a name like `readonly` (no kaish builtin; resolves to an
+external binary) reports `External`, and an `alias cat=/bin/something` makes `cat`
+report `External` too, the same thing it would actually run. The safe direction of
+any residual imprecision is `External`/`Dynamic` — it never under-reports a `PATH`
+escape as internal (`/v/bin/cat` and `.kai`/backend tools over-report as
+`External`). The consent UX and the block-the-script loop are embedder policy —
 the kernel supplies only the classification.
 
 ## Path Composition with XDG Primitives

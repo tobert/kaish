@@ -541,8 +541,13 @@ impl<'a> Validator<'a> {
 }
 
 /// Check if a command name is static (not a variable expansion).
+///
+/// The parser only ever produces a literal `Command.name`, so for the AST-walk
+/// path this is always true; the `${…}` / `$(…)` guards matter for the
+/// string-accepting `Kernel::classify_command` API, where a dynamic name
+/// classifies as [`CommandKind::Dynamic`] rather than a misleading `External`.
 pub(crate) fn is_static_command_name(name: &str) -> bool {
-    !name.starts_with('$') && !name.contains("$(")
+    !name.starts_with('$') && !name.contains("$(") && !name.contains("${")
 }
 
 /// Interpreter special-forms — handled directly in `execute_command_depth`,

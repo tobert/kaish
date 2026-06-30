@@ -5039,18 +5039,58 @@ impl Kernel {
     ///
     /// The classification mirrors the interpreter's real resolution order
     /// (`execute_command_depth`): special-forms (`true`/`false`/`source`/`.`)
-    /// first, then user functions (which shadow builtins), then builtins, then a
-    /// `PATH` lookup. A name that is a variable or command-substitution expansion
-    /// (`$cmd`, `$(pick)`) classifies as [`CommandKind::Dynamic`] because it can't
+    /// short-circuit first, then **aliases are expanded** (bounded recursion,
+    /// re-checking special-forms each step, exactly as execution does), then user
+    /// functions (which shadow builtins), then builtins, then a `PATH` lookup. A
+    /// name that is a variable or command-substitution expansion (`$cmd`,
+    /// `$(pick)`, `${x}`) classifies as [`CommandKind::Dynamic`] because it can't
     /// be resolved statically.
     ///
-    /// Note: this does not expand aliases — pass the post-alias name if the
-    /// embedder has resolved one. The safe direction of any imprecision is
-    /// `External`/`Dynamic`, never a false "internal".
+    /// Aliases are resolved against the kernel's current alias table, so an
+    /// `alias cat=/bin/something` makes `cat` classify as `External` — the same
+    /// thing it would actually run. The safe direction of any residual imprecision
+    /// is `External`/`Dynamic`, never a false "internal": the `/v/bin/` prefix and
+    /// `.kai`/backend-tool resolution are reported `External` even though some of
+    /// those resolve in-process, so a consent gate over-gates rather than letting
+    /// a `PATH` escape slip through.
     pub async fn classify_command(&self, name: &str) -> CommandKind {
-        let is_user_tool = self.user_tools.read().await.contains_key(name);
-        let is_builtin = self.tools.contains(name);
-        crate::validator::classify_command_name(name, is_builtin, is_user_tool)
+        // Resolve the command head the way `execute_command_depth` does: a
+        // special-form short-circuits before any alias lookup, otherwise expand
+        // aliases (bounded, recursive) and re-check from the top. A dynamic name
+        // can't be resolved at all.
+        let mut name = name.to_string();
+        let mut alias_depth = 0u8;
+        loop {
+            if !crate::validator::is_static_command_name(&name) {
+                return CommandKind::Dynamic;
+            }
+            if crate::validator::is_runtime_special_form(&name) {
+                return CommandKind::Special;
+            }
+            if alias_depth >= 10 {
+                break;
+            }
+            let alias_value = {
+                let ctx = self.exec_ctx.read().await;
+                ctx.aliases.get(&name).cloned()
+            };
+            // Expand to the alias's head command. An empty alias value (no head)
+            // is ignored by execution, so resolution continues with this name.
+            match alias_value
+                .as_deref()
+                .and_then(|v| v.split_whitespace().next())
+            {
+                Some(head) => {
+                    name = head.to_string();
+                    alias_depth += 1;
+                }
+                None => break,
+            }
+        }
+
+        let is_user_tool = self.user_tools.read().await.contains_key(&name);
+        let is_builtin = self.tools.contains(&name);
+        crate::validator::classify_command_name(&name, is_builtin, is_user_tool)
     }
 
     // --- Jobs ---
@@ -8287,5 +8327,44 @@ AFTER="yes"'"#)
             .await
             .expect("function definition failed");
         assert_eq!(kernel.classify_command("cat").await, CommandKind::UserTool);
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_alias_to_external_is_external() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        // An alias whose head is an external binary must NOT report as the
+        // builtin it shadows — execution expands the alias, so a consent gate
+        // would otherwise be told an external command is internal.
+        kernel
+            .execute("alias cat='/usr/bin/whatever'")
+            .await
+            .expect("alias failed");
+        assert_eq!(kernel.classify_command("cat").await, CommandKind::External);
+        assert!(kernel.classify_command("cat").await.escapes_kernel());
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_alias_to_builtin() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        kernel.execute("alias g=grep").await.expect("alias failed");
+        assert_eq!(kernel.classify_command("g").await, CommandKind::Builtin);
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_alias_to_special_form() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        kernel.execute("alias t=true").await.expect("alias failed");
+        assert_eq!(kernel.classify_command("t").await, CommandKind::Special);
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_braced_var_is_dynamic() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        // The string API can be handed a `${VAR}` head; it must not be mistaken
+        // for an external named literally "${VAR}".
+        assert_eq!(
+            kernel.classify_command("${CMD}").await,
+            CommandKind::Dynamic
+        );
     }
 }
