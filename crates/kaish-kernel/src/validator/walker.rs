@@ -553,24 +553,47 @@ pub(crate) fn is_static_command_name(name: &str) -> bool {
 /// Interpreter special-forms — the command names `execute_command_depth`
 /// short-circuits before any alias/registry/`PATH` lookup.
 ///
-/// **Single source of truth:** the executor's special-form `match` arms must
-/// cover exactly these names. A drift-guard test
-/// (`classify_special_forms_match_executor`) asserts each name here actually
-/// short-circuits at runtime and that `execute_command_depth` has no special
-/// arm this list omits, so the two can't silently diverge.
-pub(crate) const RUNTIME_SPECIAL_FORMS: &[&str] = &["true", "false", "source", "."];
-
-/// Whether `name` is an interpreter special-form (see [`RUNTIME_SPECIAL_FORMS`]).
+/// **Single source of truth, compile-enforced.** `from_name` is the only place a
+/// name becomes "special", and the executor matches this enum *exhaustively*, so
+/// adding a form is a compile error until both the name mapping here and the
+/// execution behavior in `execute_command_depth` are updated — the two cannot
+/// silently diverge, and there's no `unreachable!` to panic at runtime.
+/// `classify_command` reports every special form as `CommandKind::Special` via
+/// [`is_runtime_special_form`].
 ///
-/// This is deliberately **narrower** than `is_special_command` below: that set
-/// is a validator warning heuristic (it suppresses "command not found" for names
-/// like `readonly`/`:` that the validator chooses not to flag), whereas this
-/// reflects what the interpreter *actually* short-circuits. Keeping them
+/// This set is deliberately **narrower** than `is_special_command` below: that
+/// set is a validator warning heuristic (it suppresses "command not found" for
+/// names like `readonly`/`:` that the validator chooses not to flag), whereas
+/// this reflects what the interpreter *actually* short-circuits. Keeping them
 /// separate avoids `classify_command` mislabelling a name as internal when it
 /// would in fact escape to `PATH` (e.g. `readonly` resolves to an external
 /// command at runtime). See `Kernel::classify_command`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpecialForm {
+    /// `true` — always succeeds (exit 0).
+    True,
+    /// `false` — always fails (exit 1).
+    False,
+    /// `source` / `.` — execute a script in the current shell.
+    Source,
+}
+
+impl SpecialForm {
+    /// The single mapping from a command name to a special-form, or `None` if the
+    /// name is resolved normally (alias/registry/`PATH`).
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "true" => Some(Self::True),
+            "false" => Some(Self::False),
+            "source" | "." => Some(Self::Source),
+            _ => None,
+        }
+    }
+}
+
+/// Whether `name` is an interpreter special-form (see [`SpecialForm`]).
 pub(crate) fn is_runtime_special_form(name: &str) -> bool {
-    RUNTIME_SPECIAL_FORMS.contains(&name)
+    SpecialForm::from_name(name).is_some()
 }
 
 /// Classify a command name the way the interpreter resolves it, given whether

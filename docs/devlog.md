@@ -57,16 +57,21 @@ escape). Added a `${VAR}` → `Dynamic` guard for the string-API surface.
 
 **Staying in sync with the executor.** The classifier duplicates the
 interpreter's resolution rules, which is the same silent-divergence risk the
-feature exists to kill — just moved inside the kernel. Two guards keep it honest:
-(1) *membership* never drifts because classify reads the live registry and
-user-tool tables, not a copy; (2) the *special-form set* is now one
-`RUNTIME_SPECIAL_FORMS` const that **gates** `execute_command_depth` itself (an
-outer `if` over the const wrapping the per-form `match`, with `unreachable!` on a
-const member lacking behavior), so the executor structurally cannot short-circuit
-a name the classifier doesn't also call `Special`. A `classify_command_matches_executor`
-drift test then pins the remaining duplicated rules (precedence, alias expansion)
-by classifying *and* observing the real resolution for each kind. Add a
-resolution step to the executor without teaching classify, and that test fails.
+feature exists to kill — just moved inside the kernel. Three guards keep it
+honest: (1) *membership* never drifts because classify reads the live registry
+and user-tool tables, not a copy; (2) the *special-form set* is a single
+`SpecialForm` enum whose `from_name` is the only place a name becomes "special" —
+classify reports it via `is_runtime_special_form`, and `execute_command_depth`
+matches the enum **exhaustively**, so adding a form is a *compile error* until
+both the name mapping and the behavior are updated (the first cut used a const +
+`unreachable!`, but a deepseek round-2 review flagged that as a runtime panic the
+drift test didn't actually exercise — the enum makes it compile-enforced and
+drops the panic); (3) a `classify_command_matches_executor` drift test pins the
+rules that *can't* be compile-enforced (user-vs-builtin precedence, alias
+expansion) by classifying *and* observing the real resolution for each kind, and
+now executes every special form (incl. `source`/`.`), not just `true`/`false`.
+Add a resolution step to the executor without teaching classify, and either it
+won't compile or that test fails.
 
 Deferred, same reasoning as the `kaish-edit` crate: the `PreflightReport`, the AST
 walk, and the consent loop are embedder policy (kaijutsu owns them), and a

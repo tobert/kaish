@@ -2828,21 +2828,18 @@ impl Kernel {
 
     #[tracing::instrument(level = "info", skip(self, args, alias_depth), fields(command = %name), err)]
     async fn execute_command_depth(&self, name: &str, args: &[Arg], alias_depth: u8) -> Result<ExecResult> {
-        // Special built-ins. The *gate* is `RUNTIME_SPECIAL_FORMS` (the single
-        // source of truth shared with `classify_command`, via
-        // `is_runtime_special_form`); the inner match is per-form behavior. This
-        // makes it structurally impossible to short-circuit a name the classifier
-        // doesn't also treat as `Special` — adding a form means adding it to the
-        // const, which the drift-guard test then forces to have behavior here.
-        if crate::validator::is_runtime_special_form(name) {
-            match name {
-                "true" => return Ok(ExecResult::success("")),
-                "false" => return Ok(ExecResult::failure(1, "")),
-                "source" | "." => return self.execute_source(args).await,
-                other => unreachable!(
-                    "RUNTIME_SPECIAL_FORMS member {other:?} has no execution behavior"
-                ),
-            }
+        // Special built-ins. `SpecialForm::from_name` is the single source of
+        // truth (shared with `classify_command` via `is_runtime_special_form`),
+        // and this match on the enum is *exhaustive* — adding a special-form is a
+        // compile error until both the name mapping and the behavior here are
+        // updated. A name that is not a special-form falls through to alias /
+        // `/v/bin/` / user-tool / builtin / `PATH` resolution unchanged.
+        if let Some(form) = crate::validator::SpecialForm::from_name(name) {
+            return match form {
+                crate::validator::SpecialForm::True => Ok(ExecResult::success("")),
+                crate::validator::SpecialForm::False => Ok(ExecResult::failure(1, "")),
+                crate::validator::SpecialForm::Source => self.execute_source(args).await,
+            };
         }
 
         // Alias expansion (with recursion limit)
@@ -8389,24 +8386,35 @@ AFTER="yes"'"#)
     async fn classify_command_matches_executor() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
-        // (1) Special-forms. The shared `RUNTIME_SPECIAL_FORMS` const gates both
-        // the classifier and the executor's short-circuit, so a member added to
-        // one side is added to both. Running every member here also trips the
-        // executor's `unreachable!` if a const member ever lacks behavior — and
-        // because the executor *gates* on the const, it cannot short-circuit a
-        // name the const omits (so the reverse direction is structural, not
-        // testable: there is nothing to test).
-        for &name in crate::validator::RUNTIME_SPECIAL_FORMS {
+        // (1) Special-forms. `SpecialForm::from_name` is the single source of
+        // truth: classify reports Special via it, and the executor matches the
+        // enum exhaustively, so const↔behavior parity is compile-enforced (a new
+        // form won't build until both sides handle it). This test pins the other
+        // half — that each form classifies Special AND actually short-circuits at
+        // runtime rather than escaping to `PATH`. Every form is executed (not just
+        // `true`/`false`): an external miss in this PATH-less kernel would be exit
+        // 127, so a non-127 result that matches the form's own behavior proves the
+        // short-circuit fired.
+        for name in ["true", "false", "source", "."] {
             assert_eq!(
                 kernel.classify_command(name).await,
                 CommandKind::Special,
-                "{name} is in RUNTIME_SPECIAL_FORMS but didn't classify Special",
+                "{name} should classify Special",
             );
         }
-        // `true`/`false` short-circuit to fixed exit codes; an external miss in
-        // this PATH-less kernel would be 127, so these pin the short-circuit.
         assert_eq!(kernel.execute("true").await.expect("run true").code, 0);
         assert_eq!(kernel.execute("false").await.expect("run false").code, 1);
+        // `source`/`.` short-circuit to execute_source, which (no filename) fails
+        // with its own message — exit 1, never the 127 of an unresolved external.
+        for name in ["source", "."] {
+            let r = kernel.execute(name).await.expect("run source form");
+            assert_ne!(r.code, 127, "{name} fell through to PATH instead of source");
+            assert!(
+                r.err.contains("source: missing filename"),
+                "{name} did not route to execute_source: {:?}",
+                r.err,
+            );
+        }
 
         // (2) Builtin: classify Builtin AND the executor runs the builtin.
         assert_eq!(kernel.classify_command("echo").await, CommandKind::Builtin);
