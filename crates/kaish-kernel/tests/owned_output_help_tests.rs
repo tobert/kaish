@@ -43,6 +43,38 @@ impl Tool for OwnedTool {
     }
 }
 
+/// An owned-output tool with a real subcommand *tree* — the exact shape from
+/// #51 (`kj context create --help`). `with_owned_output()` marks the whole tree,
+/// so a leaf help request must still reach `execute()` rather than being
+/// intercepted at the root.
+struct OwnedTree;
+
+#[async_trait]
+impl Tool for OwnedTree {
+    fn name(&self) -> &str {
+        "ownedtree"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new("ownedtree", "owned-output subcommand tree")
+            .subcommand(
+                ToolSchema::new("context", "context commands")
+                    .subcommand(ToolSchema::new("create", "create a context")),
+            )
+            .with_owned_output()
+    }
+
+    async fn execute(&self, args: ToolArgs, _ctx: &mut dyn ToolCtx) -> ExecResult {
+        // The kernel gate is what's under test: an owned-output tool with a
+        // subcommand tree must still see `--help` at execute() so its own parser
+        // can render the *leaf* help the root schema can't describe.
+        if args.flags.contains("help") || args.flags.contains("h") {
+            return ExecResult::success("OWNEDTREE-HELP-RENDERED");
+        }
+        ExecResult::success("OWNEDTREE-RAN")
+    }
+}
+
 /// A plain tool (does NOT own output). The kernel's generic `--help` router
 /// should still intercept, so its `execute()` sentinel must never appear.
 struct PlainTool;
@@ -68,6 +100,7 @@ fn kernel_with_tools() -> Arc<Kernel> {
     let backend: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(vfs)));
     Kernel::with_backend(backend, KernelConfig::isolated(), |_| {}, |tools| {
         tools.register(OwnedTool);
+        tools.register(OwnedTree);
         tools.register(PlainTool);
     })
     .expect("with_backend kernel")
@@ -103,16 +136,40 @@ async fn owned_output_tool_runs_without_help() {
     assert_eq!(result.text_out().trim(), "OWNED-RAN");
 }
 
+/// The #51 shape: a leaf help request on an owned-output subcommand tree
+/// (`ownedtree context create --help`) must reach `execute()`, not stop at the
+/// root and render top-level help.
+#[tokio::test]
+async fn owned_output_subcommand_tree_receives_leaf_help() {
+    let kernel = kernel_with_tools();
+    let result = kernel
+        .execute("ownedtree context create --help")
+        .await
+        .expect("execute");
+    assert_eq!(
+        result.text_out().trim(),
+        "OWNEDTREE-HELP-RENDERED",
+        "leaf --help didn't reach the owned-output subcommand tree",
+    );
+}
+
 /// Regression guard: a plain tool's `--help` is STILL intercepted by the kernel
-/// router, so `execute()` (and its sentinel) is never reached.
+/// router — `execute()` (and its sentinel) is never reached, and the generic
+/// whole-tool help actually renders (not just "something other than the
+/// sentinel"). Asserting the rendered content keeps this from passing for the
+/// wrong reason if the help system ever breaks.
 #[tokio::test]
 async fn plain_tool_help_is_still_intercepted() {
     let kernel = kernel_with_tools();
     let result = kernel.execute("plain --help").await.expect("execute");
-    assert_ne!(
-        result.text_out().trim(),
-        "PLAIN-RAN",
+    let text = result.text_out();
+    assert!(
+        !text.contains("PLAIN-RAN"),
         "plain tool's --help should be intercepted by the kernel, not run execute()",
+    );
+    assert!(
+        text.contains("plain — plain test tool"),
+        "expected the generic whole-tool help to render; got {text:?}",
     );
 }
 

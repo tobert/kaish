@@ -421,6 +421,10 @@ Notes:
   `--help`/`-h` through: an owned-output tool re-parses its own argv, so the
   kernel's generic whole-tool help router stands aside and lets the tool render
   its own help (including leaf/subcommand help its internal parser knows about).
+  This makes `--help`/`-h` handling **your** responsibility — unlike `--json`,
+  there is no post-execute safety net. If you re-parse with clap this is
+  automatic (clap emits help on `--help`); a hand-rolled parser must handle it
+  explicitly, or `--help` will fall into your default action.
 
 ### Patient tools: suspending the script timeout
 
