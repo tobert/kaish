@@ -550,8 +550,17 @@ pub(crate) fn is_static_command_name(name: &str) -> bool {
     !name.starts_with('$') && !name.contains("$(") && !name.contains("${")
 }
 
-/// Interpreter special-forms — handled directly in `execute_command_depth`,
-/// never resolved through the tool registry or `PATH`.
+/// Interpreter special-forms — the command names `execute_command_depth`
+/// short-circuits before any alias/registry/`PATH` lookup.
+///
+/// **Single source of truth:** the executor's special-form `match` arms must
+/// cover exactly these names. A drift-guard test
+/// (`classify_special_forms_match_executor`) asserts each name here actually
+/// short-circuits at runtime and that `execute_command_depth` has no special
+/// arm this list omits, so the two can't silently diverge.
+pub(crate) const RUNTIME_SPECIAL_FORMS: &[&str] = &["true", "false", "source", "."];
+
+/// Whether `name` is an interpreter special-form (see [`RUNTIME_SPECIAL_FORMS`]).
 ///
 /// This is deliberately **narrower** than `is_special_command` below: that set
 /// is a validator warning heuristic (it suppresses "command not found" for names
@@ -561,7 +570,7 @@ pub(crate) fn is_static_command_name(name: &str) -> bool {
 /// would in fact escape to `PATH` (e.g. `readonly` resolves to an external
 /// command at runtime). See `Kernel::classify_command`.
 pub(crate) fn is_runtime_special_form(name: &str) -> bool {
-    matches!(name, "true" | "false" | "source" | ".")
+    RUNTIME_SPECIAL_FORMS.contains(&name)
 }
 
 /// Classify a command name the way the interpreter resolves it, given whether

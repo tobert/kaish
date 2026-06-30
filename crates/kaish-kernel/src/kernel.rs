@@ -2828,12 +2828,21 @@ impl Kernel {
 
     #[tracing::instrument(level = "info", skip(self, args, alias_depth), fields(command = %name), err)]
     async fn execute_command_depth(&self, name: &str, args: &[Arg], alias_depth: u8) -> Result<ExecResult> {
-        // Special built-ins
-        match name {
-            "true" => return Ok(ExecResult::success("")),
-            "false" => return Ok(ExecResult::failure(1, "")),
-            "source" | "." => return self.execute_source(args).await,
-            _ => {}
+        // Special built-ins. The *gate* is `RUNTIME_SPECIAL_FORMS` (the single
+        // source of truth shared with `classify_command`, via
+        // `is_runtime_special_form`); the inner match is per-form behavior. This
+        // makes it structurally impossible to short-circuit a name the classifier
+        // doesn't also treat as `Special` — adding a form means adding it to the
+        // const, which the drift-guard test then forces to have behavior here.
+        if crate::validator::is_runtime_special_form(name) {
+            match name {
+                "true" => return Ok(ExecResult::success("")),
+                "false" => return Ok(ExecResult::failure(1, "")),
+                "source" | "." => return self.execute_source(args).await,
+                other => unreachable!(
+                    "RUNTIME_SPECIAL_FORMS member {other:?} has no execution behavior"
+                ),
+            }
         }
 
         // Alias expansion (with recursion limit)
@@ -8365,6 +8374,70 @@ AFTER="yes"'"#)
         assert_eq!(
             kernel.classify_command("${CMD}").await,
             CommandKind::Dynamic
+        );
+    }
+
+    /// Drift guard: `classify_command` must agree with what the executor
+    /// (`execute_command_depth`) actually resolves. The classifier duplicates the
+    /// interpreter's resolution rules (special-form set, user-tools-before-builtins
+    /// precedence, alias expansion); without this test those copies could diverge
+    /// silently — the exact failure class `classify_command` exists to prevent,
+    /// just moved inside the kernel. Each case asserts the classification AND
+    /// observes the real resolution, so a future change to one side without the
+    /// other fails here.
+    #[tokio::test]
+    async fn classify_command_matches_executor() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // (1) Special-forms. The shared `RUNTIME_SPECIAL_FORMS` const gates both
+        // the classifier and the executor's short-circuit, so a member added to
+        // one side is added to both. Running every member here also trips the
+        // executor's `unreachable!` if a const member ever lacks behavior — and
+        // because the executor *gates* on the const, it cannot short-circuit a
+        // name the const omits (so the reverse direction is structural, not
+        // testable: there is nothing to test).
+        for &name in crate::validator::RUNTIME_SPECIAL_FORMS {
+            assert_eq!(
+                kernel.classify_command(name).await,
+                CommandKind::Special,
+                "{name} is in RUNTIME_SPECIAL_FORMS but didn't classify Special",
+            );
+        }
+        // `true`/`false` short-circuit to fixed exit codes; an external miss in
+        // this PATH-less kernel would be 127, so these pin the short-circuit.
+        assert_eq!(kernel.execute("true").await.expect("run true").code, 0);
+        assert_eq!(kernel.execute("false").await.expect("run false").code, 1);
+
+        // (2) Builtin: classify Builtin AND the executor runs the builtin.
+        assert_eq!(kernel.classify_command("echo").await, CommandKind::Builtin);
+        let r = kernel.execute("echo hi").await.expect("run echo");
+        assert!(r.ok() && r.text_out().trim() == "hi", "echo builtin didn't run");
+
+        // (3) User function shadows a builtin: classify UserTool AND the executor
+        // runs the function body, not the `cat` builtin.
+        kernel
+            .execute(r#"cat() { echo SHADOWED }"#)
+            .await
+            .expect("define cat()");
+        assert_eq!(kernel.classify_command("cat").await, CommandKind::UserTool);
+        let r = kernel.execute("cat").await.expect("run shadowed cat");
+        assert_eq!(
+            r.text_out().trim(),
+            "SHADOWED",
+            "executor ran the builtin instead of the shadowing function",
+        );
+
+        // (4) Alias whose head is external: classify External AND the executor
+        // resolves through the alias to a missing external (not a builtin).
+        kernel
+            .execute("alias x='/nonexistent/binary'")
+            .await
+            .expect("define alias x");
+        assert_eq!(kernel.classify_command("x").await, CommandKind::External);
+        let r = kernel.execute("x").await.expect("run alias x");
+        assert!(
+            !r.ok(),
+            "alias to a missing external should fail, not resolve internally",
         );
     }
 }
