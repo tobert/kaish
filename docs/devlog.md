@@ -7,6 +7,11 @@ and `git log` (commits, SHAs) are canonical. This is the story.
 
 Newest themes first within each area; dates are when the work landed.
 
+Write entries **late** — just before signoff or opening a PR — so they carry with
+the PR and describe the work as it actually landed. Not early, not mid-flight: the
+decisions aren't settled yet, and an entry written ahead of its change goes stale
+before it ships.
+
 ---
 
 ## Interpreter stack-depth analysis → first GitHub Issues (2026-06-30)
