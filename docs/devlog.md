@@ -14,6 +14,42 @@ before it ships.
 
 ---
 
+## `classify_command`: a supported command classifier for embedder preflight (2026-06-30)
+
+Follow-on to the typed latch accessor (#45). kaijutsu wants to gate kaish's
+destructive/external operations for consent — walk a script, find the command
+nodes that escape to `PATH`, and block until they're approved. It can already do
+most of that with the public surface (`parser::parse`, the `ast`, `tool_schemas`,
+`has_function`). The one thing it *can't* do without forking kaish's truth is
+classify a command name the way the interpreter resolves it — the two rules that
+decide that (`is_static_command_name`, the special-form set) were private helpers
+in the validator. If kaijutsu hardcodes copies, the day kaish refines name
+resolution its consent gate silently disagrees with what kaish actually runs.
+That's the silent-divergence failure class, and here it's security-relevant.
+
+So we added `Kernel::classify_command(name) -> CommandKind` (`Builtin` /
+`UserTool` / `Special` / `Dynamic` / `External`, plus `escapes_kernel()` for the
+two buckets a gate scrutinizes). `CommandKind` lives in `kaish-types` (pure data,
+`#[non_exhaustive]` so a future variant doesn't break embedders — and the safe
+default for an unknown kind is to gate it). The classification core is one shared
+`classify_command_name` in `validator/walker.rs`; the kernel computes the two
+booleans and delegates, so there's a single source of truth.
+
+The sharp bit was discovered empirically: the validator's `is_special_command`
+set (`true`/`false`/`:`/`readonly`/`local`) is **not** what the interpreter
+actually short-circuits. At runtime `readonly` resolves to an *external* command
+(exit 127), `:` is a parse error, `local` is parser-level. The validator uses that
+broad set only to suppress a "command not found" warning. `classify_command`
+deliberately mirrors the **interpreter's** real special-forms
+(`true`/`false`/`source`/`.`) instead — a consent gate must see `readonly` as
+`External`, not be told it's internal. The validator↔runtime mismatch is now
+filed as a P3 (the validator probably shouldn't suppress those warnings).
+
+Deferred, same reasoning as the `kaish-edit` crate: the `PreflightReport`, the AST
+walk, and the consent loop are embedder policy (kaijutsu owns them), and a
+`Kernel::preflight(src)` convenience waits for a second consumer. Docs: a
+"Preflighting a script for external commands" recipe in EMBEDDING.md.
+
 ## Interpreter stack-depth analysis → first GitHub Issues (2026-06-30)
 
 A question — "what pushes up the interpreter's need for stack space over time?" —

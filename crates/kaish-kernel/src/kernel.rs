@@ -47,7 +47,7 @@ static KERNEL_COUNTER: AtomicU64 = AtomicU64::new(1);
 use async_trait::async_trait;
 
 use crate::ast::{Arg, Command, Expr, FileTestOp, Stmt, StringPart, TestExpr, ToolDef, Value, BinaryOp};
-pub use kaish_types::ExecuteOptions;
+pub use kaish_types::{CommandKind, ExecuteOptions};
 use crate::backend::{BackendError, KernelBackend};
 use kaish_glob::glob_match;
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
@@ -5028,6 +5028,31 @@ impl Kernel {
         self.tools.schemas()
     }
 
+    /// Classify how the kernel will resolve a command name.
+    ///
+    /// This is the supported, single source of truth for command resolution that
+    /// embedders should call instead of re-deriving the rules. Walk a parsed
+    /// script (`kaish_kernel::parser::parse` → `Stmt::Command` nodes) and call
+    /// this per command name to bucket each into builtin / user-function /
+    /// special-form / dynamic / external — for example a consent gate that blocks
+    /// a script until external commands are approved.
+    ///
+    /// The classification mirrors the interpreter's real resolution order
+    /// (`execute_command_depth`): special-forms (`true`/`false`/`source`/`.`)
+    /// first, then user functions (which shadow builtins), then builtins, then a
+    /// `PATH` lookup. A name that is a variable or command-substitution expansion
+    /// (`$cmd`, `$(pick)`) classifies as [`CommandKind::Dynamic`] because it can't
+    /// be resolved statically.
+    ///
+    /// Note: this does not expand aliases — pass the post-alias name if the
+    /// embedder has resolved one. The safe direction of any imprecision is
+    /// `External`/`Dynamic`, never a false "internal".
+    pub async fn classify_command(&self, name: &str) -> CommandKind {
+        let is_user_tool = self.user_tools.read().await.contains_key(name);
+        let is_builtin = self.tools.contains(name);
+        crate::validator::classify_command_name(name, is_builtin, is_user_tool)
+    }
+
     // --- Jobs ---
 
     /// Get job manager.
@@ -8193,5 +8218,74 @@ AFTER="yes"'"#)
             result.err
         );
         assert_eq!(result.text_out().trim(), "subproc");
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_builtin() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        assert_eq!(kernel.classify_command("cat").await, CommandKind::Builtin);
+        assert_eq!(kernel.classify_command("grep").await, CommandKind::Builtin);
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_special_forms() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        for name in ["true", "false", "source", "."] {
+            assert_eq!(
+                kernel.classify_command(name).await,
+                CommandKind::Special,
+                "{name} should be a special-form",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_dynamic() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        assert_eq!(kernel.classify_command("$cmd").await, CommandKind::Dynamic);
+        assert_eq!(
+            kernel.classify_command("$(pick)").await,
+            CommandKind::Dynamic
+        );
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_external() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        // Not a builtin, user function, or special-form → escapes to PATH.
+        assert_eq!(
+            kernel.classify_command("definitely_not_a_kaish_builtin").await,
+            CommandKind::External
+        );
+        // `readonly` is *not* a kaish special-form despite the validator's
+        // warning heuristic — at runtime it resolves to an external command, so
+        // a consent gate must see it as External (regression guard against the
+        // validator/runtime divergence).
+        assert_eq!(
+            kernel.classify_command("readonly").await,
+            CommandKind::External
+        );
+        assert!(kernel.classify_command("readonly").await.escapes_kernel());
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_user_tool_shadows_builtin() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        kernel
+            .execute(r#"greet() { echo "hi" }"#)
+            .await
+            .expect("function definition failed");
+        assert_eq!(
+            kernel.classify_command("greet").await,
+            CommandKind::UserTool
+        );
+
+        // A user function named after a builtin classifies as UserTool, matching
+        // the interpreter's user-tools-first resolution.
+        kernel
+            .execute(r#"cat() { echo "shadowed" }"#)
+            .await
+            .expect("function definition failed");
+        assert_eq!(kernel.classify_command("cat").await, CommandKind::UserTool);
     }
 }
