@@ -9,6 +9,12 @@ Path note: the 0.8.0 crate split moved some cited files — `vfs/local.rs` →
 Priorities: **P1** high-leverage features/diagnostics · **P2** focused refactors
 & real bugs · **P3** scheduler and infra · **P4** eventually.
 
+> **Some work now lives on GitHub Issues** — an experiment as we get ready to
+> announce kaibo. Don't double-track these here. Interpreter stack/memory work:
+> [#46](https://github.com/tobert/kaish/issues/46) (recursion depth guard),
+> [#47](https://github.com/tobert/kaish/issues/47) (explicit worker-thread stack
+> size), [#48](https://github.com/tobert/kaish/issues/48) (allocation/memory pass).
+
 ---
 
 ## P1 — High-leverage features and diagnostics

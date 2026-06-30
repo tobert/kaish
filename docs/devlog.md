@@ -9,6 +9,44 @@ Newest themes first within each area; dates are when the work landed.
 
 ---
 
+## Interpreter stack-depth analysis → first GitHub Issues (2026-06-30)
+
+A question — "what pushes up the interpreter's need for stack space over time?" —
+turned into a map of the async statement engine and three filed issues. The shape
+of the answer is worth keeping: stack cost here is **call-chain depth × fat async
+frames**, not data.
+
+- The real statement engine is the async kernel in `kernel.rs` (not the sync
+  `Evaluator` in `interpreter/eval.rs`, which only does arithmetic/test
+  sub-eval). Its core is a set of mutually-recursive `Box::pin`-returning
+  functions — `execute_stmt_flow`, `eval_expr_async`, `eval_string_part(s)_async`,
+  `eval_test_async`. Rust async recursion *requires* boxing, and each boxed level
+  keeps every live local across every `.await`, so frames are heavy.
+- The deepest cycle is command substitution: `Expr::CommandSubst(Vec<Stmt>)`
+  re-enters `execute_block_capturing` → `execute_stmt_flow`, stacking two boxed
+  futures per `$( … )` nesting level. Recursive shell functions
+  (`execute_user_tool`) and `.kai`→`.kai` sourcing (`try_execute_script`) deepen
+  the *same* thread stack the same way. None of these is depth-guarded — only
+  alias re-entry (`<10`) and the lexer (`MAX_PAREN_DEPTH = 256`) are.
+- Per command, the dispatch chain (`execute_pipeline` → runner → `dispatch_command`
+  → `execute_command_depth`) carries a ~30-field `ExecContext` that's copied twice
+  in `dispatch_command`, plus `#[tracing::instrument]` future bloat on the hot
+  frames.
+- Runtimes are plain `Runtime::new()` (no custom stack). The foreground root future
+  runs on the `block_on` thread; forked work (pipeline stages, scatter, background)
+  hops to tokio worker threads with the default ~2 MB stack — so the same script
+  has less headroom inside a pipe than in the foreground.
+
+Filed as [#46](https://github.com/tobert/kaish/issues/46) (depth guard — a loud
+error beats a silent `SIGSEGV`), [#47](https://github.com/tobert/kaish/issues/47)
+(explicit, uniform worker-thread stack size), and
+[#48](https://github.com/tobert/kaish/issues/48) (a profile-first memory/allocation
+pass — suspected low cost with occasional peaks, not urgent). These are the first
+issues we've put on GitHub instead of [issues.md](issues.md): an experiment ahead of
+announcing kaibo, where outside agents and people will want a public tracker.
+`devlog.md` stays in-repo and ships with the code — these repos also teach how a
+project gets sculpted.
+
 ## `execute_argv` — argv-native kernel entry point (landed 2026-06-29)
 
 `execute(&str)` is *string-native*: it lexes and parses its input. A caller that
