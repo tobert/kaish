@@ -154,6 +154,23 @@ overwrites. The output contract:
     "paths": ["important.dat"], "hint": "...", "ttl": 60 }
   ```
 
+  From Rust, prefer the typed accessor over reaching into `.data` by key:
+
+  ```rust
+  // Returns Some(LatchRequest { nonce, command, paths, hint, ttl }) only for a
+  // latch gate (exit 2 + nonce payload); None for a plain usage error.
+  if let Some(req) = result.latch_request() {
+      // apply preapproval policy / model review over (req.command, req.paths) …
+      // approve → re-run the same argv with `--confirm=<req.nonce>`.
+  }
+  ```
+
+  This is the seam to hook embedder-side policy: check a preapproval allowlist or
+  ask a model to review the resolved `(command, paths)` before re-running. The
+  kernel owns the *mechanism* (issuing/validating the path- and command-scoped
+  nonce); the embedder owns the *judgment*. Call it on the raw result, before any
+  `--json` formatting.
+
   If you executed with `--json` (`OutputFormat::Json`), this is a non-zero exit
   with a diagnostic, so the result is wrapped in the standard JSON error envelope
   and the nonce payload is nested one level down, under `data`:

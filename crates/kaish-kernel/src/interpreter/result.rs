@@ -5,4 +5,6 @@
 
 pub use kaish_types::bytes::hex_dump;
 pub use kaish_types::output::{apply_output_format, EntryType, OutputData, OutputFormat, OutputNode};
-pub use kaish_types::result::{json_to_value, value_to_json, ExecResult, OutputPayload};
+pub use kaish_types::result::{
+    json_to_value, value_to_json, ExecResult, LatchRequest, OutputPayload,
+};
