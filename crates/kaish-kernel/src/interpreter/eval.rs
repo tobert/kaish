@@ -397,9 +397,15 @@ impl<'a, E: Executor> Evaluator<'a, E> {
 
     /// Evaluate a variable reference.
     fn eval_var_ref(&mut self, path: &VarPath) -> EvalResult<Value> {
-        self.scope
-            .resolve_path(path)
-            .ok_or_else(|| EvalError::InvalidPath(format_path(path)))
+        match self.scope.resolve_path(path) {
+            Ok(v) => Ok(v),
+            // Undefined root keeps the existing path-shaped error.
+            Err(super::scope::PathError::UndefinedRoot(_)) => {
+                Err(EvalError::InvalidPath(format_path(path)))
+            }
+            // A loud path error carries its own actionable message.
+            Err(super::scope::PathError::Invalid(msg)) => Err(EvalError::InvalidPath(msg)),
+        }
     }
 
     /// Evaluate a positional parameter ($0-$9).
@@ -426,10 +432,7 @@ impl<'a, E: Executor> Evaluator<'a, E> {
     /// Evaluate variable string length (${#VAR}).
     fn eval_var_length(&self, name: &str) -> EvalResult<Value> {
         match self.scope.get(name) {
-            Some(value) => {
-                let s = value_to_string(value);
-                Ok(Value::Int(s.len() as i64))
-            }
+            Some(value) => Ok(Value::Int(value_length(value))),
             None => Ok(Value::Int(0)), // Unset variable has length 0
         }
     }
@@ -461,9 +464,14 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             match part {
                 StringPart::Literal(s) => result.push_str(s),
                 StringPart::Var(path) => {
-                    // Unset variables expand to empty string (bash-compatible)
-                    if let Some(value) = self.scope.resolve_path(path) {
-                        result.push_str(&value_to_string(&value));
+                    match self.scope.resolve_path(path) {
+                        Ok(value) => result.push_str(&value_to_string(&value)),
+                        // Unset variables expand to empty string (bash-compatible).
+                        Err(super::scope::PathError::UndefinedRoot(_)) => {}
+                        // A loud path error is surfaced, never swallowed to empty.
+                        Err(super::scope::PathError::Invalid(msg)) => {
+                            return Err(EvalError::InvalidPath(msg))
+                        }
                     }
                 }
                 StringPart::VarWithDefault { name, default } => {
@@ -570,6 +578,18 @@ pub fn value_to_exit_code(value: &Value) -> anyhow::Result<i64> {
         Value::Null | Value::Json(_) | Value::Bytes(_) => {
             anyhow::bail!("numeric argument required (got {:?})", value)
         }
+    }
+}
+
+/// Length of a value for `${#…}`: element count for a list, key count for a
+/// record, and the byte length of the string form for any scalar (unchanged
+/// for non-collections). The single source of truth for the three `${#…}`
+/// evaluation sites (sync + the two async ones).
+pub fn value_length(value: &Value) -> i64 {
+    match value {
+        Value::Json(serde_json::Value::Array(a)) => a.len() as i64,
+        Value::Json(serde_json::Value::Object(o)) => o.len() as i64,
+        other => value_to_string(other).len() as i64,
     }
 }
 
@@ -713,6 +733,14 @@ fn format_path(path: &VarPath) -> String {
                     result.push('.');
                 }
                 result.push_str(name);
+            }
+            VarSegment::Index(idx) => result.push_str(&format!("[{idx}]")),
+            VarSegment::Key(k) => result.push_str(&format!("[{k}]")),
+            VarSegment::Dynamic(v) => result.push_str(&format!("[${v}]")),
+            VarSegment::Slice(a, b) => {
+                let s = a.map(|n| n.to_string()).unwrap_or_default();
+                let e = b.map(|n| n.to_string()).unwrap_or_default();
+                result.push_str(&format!("[{s}:{e}]"));
             }
         }
     }

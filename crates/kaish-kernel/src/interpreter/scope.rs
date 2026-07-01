@@ -8,9 +8,136 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use kaish_types::json_to_value_no_envelope;
+
 use crate::ast::{Value, VarPath, VarSegment};
 
+use super::eval::value_to_string;
 use super::result::ExecResult;
+
+/// Why a variable path failed to resolve.
+///
+/// The distinction is load-bearing: an undefined *root* is soft (expression
+/// position surfaces an error, string interpolation expands to empty, matching
+/// bash), while any deeper path failure is **loud** — subscripting a scalar, an
+/// out-of-bounds index, a missing record key, a dotted (non-bracket) segment,
+/// or a bad slice. A loud error is surfaced everywhere, including inside
+/// strings; it is NEVER silently swallowed to an empty expansion.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PathError {
+    /// The root variable is not in scope.
+    UndefinedRoot(String),
+    /// A loud path error, message ready to display.
+    Invalid(String),
+}
+
+/// A human-readable type name for a value, for path error messages.
+fn type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Int(_) => "an integer",
+        Value::Float(_) => "a float",
+        Value::String(_) => "a string",
+        Value::Json(serde_json::Value::Array(_)) => "a list",
+        Value::Json(serde_json::Value::Object(_)) => "a record",
+        Value::Json(_) => "a scalar",
+        Value::Bytes(_) => "binary data",
+    }
+}
+
+/// A dynamic subscript value usable as a list index: an integer, or a string
+/// that parses as one (`k=1; ${xs[$k]}`).
+fn value_as_index(value: &Value) -> Option<i64> {
+    match value {
+        Value::Int(i) => Some(*i),
+        Value::String(s) => s.parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+/// Index into a list. Negative indices count from the end; out of bounds is a
+/// loud error, and an integer subscript on a record is an error (keys are
+/// strings — the design's "integers index lists" rule).
+fn index_into(json: &serde_json::Value, i: i64, root: &str) -> Result<Value, PathError> {
+    let arr = match json {
+        serde_json::Value::Array(a) => a,
+        serde_json::Value::Object(_) => {
+            return Err(PathError::Invalid(format!(
+                "${{{root}[{i}]}}: integer index on a record — record keys are strings, use ${{{root}[\"{i}\"]}}"
+            )))
+        }
+        _ => {
+            return Err(PathError::Invalid(format!(
+                "${{{root}[{i}]}}: not a collection"
+            )))
+        }
+    };
+    let len = arr.len() as i64;
+    let idx = if i < 0 { len + i } else { i };
+    if idx < 0 || idx >= len {
+        return Err(PathError::Invalid(format!(
+            "${{{root}[{i}]}}: index out of bounds (list length {len})"
+        )));
+    }
+    Ok(json_to_value_no_envelope(arr[idx as usize].clone()))
+}
+
+/// Look up a record key. A missing key is a loud error (use `[[ k in $r ]]` to
+/// test presence); a bareword/string key on a list is an error.
+fn key_into(json: &serde_json::Value, key: &str, root: &str) -> Result<Value, PathError> {
+    match json {
+        serde_json::Value::Object(map) => match map.get(key) {
+            Some(v) => Ok(json_to_value_no_envelope(v.clone())),
+            None => Err(PathError::Invalid(format!(
+                "${{{root}[{key}]}}: no such key"
+            ))),
+        },
+        serde_json::Value::Array(_) => Err(PathError::Invalid(format!(
+            "${{{root}[{key}]}}: string key on a list — use an integer index"
+        ))),
+        _ => Err(PathError::Invalid(format!(
+            "${{{root}[{key}]}}: not a collection"
+        ))),
+    }
+}
+
+/// Slice a list, end-exclusive. Bounds clamp; negatives count from the end; an
+/// inverted or empty range yields an empty list. Slicing a record is an error.
+/// The result stays a list (`Value::Json`), never unwrapped.
+fn slice_into(
+    json: &serde_json::Value,
+    start: Option<i64>,
+    end: Option<i64>,
+    root: &str,
+) -> Result<Value, PathError> {
+    let arr = match json {
+        serde_json::Value::Array(a) => a,
+        serde_json::Value::Object(_) => {
+            return Err(PathError::Invalid(format!(
+                "${{{root}[..]}}: cannot slice a record"
+            )))
+        }
+        _ => {
+            return Err(PathError::Invalid(format!(
+                "${{{root}[..]}}: not a collection"
+            )))
+        }
+    };
+    let len = arr.len() as i64;
+    let norm = |b: i64| -> i64 {
+        let b = if b < 0 { len + b } else { b };
+        b.clamp(0, len)
+    };
+    let s = start.map(norm).unwrap_or(0);
+    let e = end.map(norm).unwrap_or(len);
+    let slice = if s >= e {
+        Vec::new()
+    } else {
+        arr[s as usize..e as usize].to_vec()
+    };
+    Ok(Value::Json(serde_json::Value::Array(slice)))
+}
 
 /// Variable scope with nested frames and last-result tracking.
 ///
@@ -348,43 +475,106 @@ impl Scope {
         names
     }
 
-    /// Resolve a variable path like `${VAR}` or `${VAR.field}`.
+    /// Resolve a variable path: `${VAR}`, `${xs[0]}`, `${r[key]}`, `${a[b][c]}`.
     ///
-    /// Returns None if the path cannot be resolved.
-    /// `$?` resolves to the previous command's exit code as an int;
-    /// field access on `$?` is rejected by the validator before reaching here.
-    pub fn resolve_path(&self, path: &VarPath) -> Option<Value> {
-        if path.segments.is_empty() {
-            return None;
-        }
+    /// The first segment is the root name; the rest are bracket subscripts,
+    /// walked left to right into the root's `Value::Json`. A subscript landing
+    /// on a JSON scalar unwraps to a native `Value` (envelope-free); a subscript
+    /// landing on a collection stays `Value::Json`. `$?` resolves to the
+    /// previous command's exit code (bare only).
+    ///
+    /// Errors distinguish an undefined root (soft) from a loud path error (see
+    /// [`PathError`]).
+    pub fn resolve_path(&self, path: &VarPath) -> Result<Value, PathError> {
+        let Some(VarSegment::Field(root_name)) = path.segments.first() else {
+            // Empty path, or a first segment the parser never emits as root.
+            return Err(PathError::UndefinedRoot(String::new()));
+        };
 
-        // Get the root variable name
-        let VarSegment::Field(root_name) = &path.segments[0];
-
-        // Special case: $? (last result)
+        // Special case: $? (last result) — bare only.
         if root_name == "?" {
-            return self.resolve_result_path(&path.segments[1..]);
+            if path.segments.len() == 1 {
+                return Ok(Value::Int(self.last_result.code));
+            }
+            return Err(PathError::Invalid(
+                "$? is the POSIX exit code, not a collection — use `kaish-last` for structured data"
+                    .to_string(),
+            ));
         }
 
-        // For regular variables, only simple access is supported
-        if path.segments.len() > 1 {
-            return None; // No nested field access for regular variables
-        }
+        let root = self
+            .get(root_name)
+            .cloned()
+            .ok_or_else(|| PathError::UndefinedRoot(root_name.clone()))?;
 
-        self.get(root_name).cloned()
+        // Walk the subscripts (none for a bare `${VAR}`).
+        let mut current = root;
+        for seg in &path.segments[1..] {
+            current = self.apply_segment(&current, seg, root_name)?;
+        }
+        Ok(current)
     }
 
-    /// Resolve path segments on the last result ($?).
-    ///
-    /// `$?` alone returns the exit code as an integer (POSIX-shaped).
-    /// Field access on `$?` was removed — the validator rejects it with
-    /// a pointer to `kaish-last`, which exposes the previous command's
-    /// structured data (or stdout) as text.
-    fn resolve_result_path(&self, segments: &[VarSegment]) -> Option<Value> {
-        if segments.is_empty() {
-            return Some(Value::Int(self.last_result.code));
+    /// Apply one subscript to a value during path traversal.
+    fn apply_segment(
+        &self,
+        value: &Value,
+        seg: &VarSegment,
+        root: &str,
+    ) -> Result<Value, PathError> {
+        // A non-root `Field` is a dotted `.field` access. Brackets-only: this is
+        // always a loud error regardless of the value's type, with the fix in
+        // the message.
+        if let VarSegment::Field(name) = seg {
+            // Generic (not a full-path reconstruction, which would drop earlier
+            // subscripts and mislead on nested dotted access): brackets-only.
+            return Err(PathError::Invalid(format!(
+                "${{{root}…}}: kaish uses bracket access, not dots — write the key as a subscript: [{name}]"
+            )));
         }
-        None
+
+        // Everything else needs a collection.
+        let json = match value {
+            Value::Json(j) => j,
+            other => {
+                return Err(PathError::Invalid(format!(
+                    "${{{root}…}}: cannot subscript {} — it is not a collection",
+                    type_name(other)
+                )))
+            }
+        };
+
+        match seg {
+            VarSegment::Index(i) => index_into(json, *i, root),
+            VarSegment::Key(k) => key_into(json, k, root),
+            VarSegment::Slice(start, end) => slice_into(json, *start, *end, root),
+            VarSegment::Dynamic(var) => {
+                // The variable's value is the subscript; the container type
+                // decides whether it's an index or a key.
+                let key_val = self.get(var).ok_or_else(|| {
+                    PathError::Invalid(format!("${{{root}[${var}]}}: ${var} is not set"))
+                })?;
+                match json {
+                    serde_json::Value::Array(_) => {
+                        let idx = value_as_index(key_val).ok_or_else(|| {
+                            PathError::Invalid(format!(
+                                "${{{root}[${var}]}}: a list index must be an integer, got \"{}\"",
+                                value_to_string(key_val)
+                            ))
+                        })?;
+                        index_into(json, idx, root)
+                    }
+                    serde_json::Value::Object(_) => {
+                        key_into(json, &value_to_string(key_val), root)
+                    }
+                    _ => Err(PathError::Invalid(format!(
+                        "${{{root}[${var}]}}: not a collection"
+                    ))),
+                }
+            }
+            // Field handled above.
+            VarSegment::Field(_) => unreachable!("dotted segment handled above"),
+        }
     }
 
     /// Check if a variable exists in any frame.
@@ -477,7 +667,7 @@ mod tests {
         let path = VarPath::simple("NAME");
         assert_eq!(
             scope.resolve_path(&path),
-            Some(Value::String("Alice".into()))
+            Ok(Value::String("Alice".into()))
         );
     }
 
@@ -489,14 +679,14 @@ mod tests {
         let path = VarPath {
             segments: vec![VarSegment::Field("?".into())],
         };
-        assert_eq!(scope.resolve_path(&path), Some(Value::Int(127)));
+        assert_eq!(scope.resolve_path(&path), Ok(Value::Int(127)));
     }
 
     #[test]
     fn resolve_last_result_field_access_is_rejected() {
         // Field access on $? was removed — use `kaish-last` for structured data.
-        // The resolver returns None; the validator catches it earlier with a
-        // specific error code so users see actionable diagnostics.
+        // The resolver now returns a loud error; the validator also catches it
+        // earlier with a specific error code for actionable diagnostics.
         let mut scope = Scope::new();
         scope.set_last_result(ExecResult::success_with_data(
             "1",
@@ -509,22 +699,38 @@ mod tests {
                 VarSegment::Field("data".into()),
             ],
         };
-        assert_eq!(scope.resolve_path(&path), None);
+        assert!(matches!(
+            scope.resolve_path(&path),
+            Err(PathError::Invalid(_))
+        ));
     }
 
     #[test]
-    fn resolve_invalid_path_returns_none() {
+    fn resolve_dotted_access_on_scalar_is_a_loud_error() {
         let mut scope = Scope::new();
         scope.set("X", Value::Int(42));
 
-        // Cannot do field access on an int
+        // Dotted access `${X.invalid}` — brackets-only, so it's a loud error.
         let path = VarPath {
             segments: vec![
                 VarSegment::Field("X".into()),
                 VarSegment::Field("invalid".into()),
             ],
         };
-        assert_eq!(scope.resolve_path(&path), None);
+        assert!(matches!(
+            scope.resolve_path(&path),
+            Err(PathError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_undefined_root_is_soft() {
+        let scope = Scope::new();
+        let path = VarPath::simple("NOPE");
+        assert!(matches!(
+            scope.resolve_path(&path),
+            Err(PathError::UndefinedRoot(_))
+        ));
     }
 
     #[test]

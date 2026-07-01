@@ -413,6 +413,14 @@ pub fn format_varpath(path: &VarPath) -> String {
         .iter()
         .map(|seg| match seg {
             VarSegment::Field(name) => name.clone(),
+            VarSegment::Index(i) => format!("[{i}]"),
+            VarSegment::Key(k) => format!("[{k}]"),
+            VarSegment::Dynamic(v) => format!("[${v}]"),
+            VarSegment::Slice(a, b) => format!(
+                "[{}:{}]",
+                a.map(|n| n.to_string()).unwrap_or_default(),
+                b.map(|n| n.to_string()).unwrap_or_default()
+            ),
         })
         .collect::<Vec<_>>()
         .join(".")

@@ -313,6 +313,27 @@ dominating at ~5.4K). Do this before the collections fragments land — they're 
 feature that will test it. See [arrays-and-hashes.md](arrays-and-hashes.md)
 "Help & teaching delivery".
 
+**Collection read-access follow-ups (2026-07-01, from the read-access deepseek
+review; verified locally):**
+- **P3 — reduced sync arg path coalesces a loud path error to skip.** The four
+  primary eval sites surface `PathError::Invalid` loudly (verified: `echo`,
+  assignment, `$(( ))`, and `"${…}"` interpolation all error on a bad subscript),
+  but the reduced *sync* pipeline path (`eval_simple_expr` /
+  `eval_string_parts_sync`, `pipeline.rs:943/950/1051`) coalesces any resolution
+  failure to None/skip — so a bad subscript inside a scatter/gather worker's arg
+  could silently drop the arg instead of erroring. Narrow (the common paths are
+  loud) and consistent with the pre-existing undefined-var behavior there, but a
+  silent-fallback to close: give those sync helpers an error channel (or route
+  them through the async resolver) when the scatter/gather arg path is next
+  touched.
+- **P4 — a `]` inside a quoted subscript key is mishandled.** The lexer's bracket
+  collector (`lexer.rs` `parse_var_ref`) scans to the first `]` with no quote
+  awareness, so `${r["weird]key"]}` doesn't resolve the intended key. It does NOT
+  silently corrupt (it errors — "failed to evaluate assignment"), but the error
+  is cryptic. Fix: make the bracket collector quote-aware, or emit a clear
+  "quote-bearing key with `]`" diagnostic. (Same root cause bounds the empty
+  subscript `${r[]}` → `Key("")` oddity — reject in the validator if we care.)
+
 **Envelope-free must hold through downstream `.data` consumers (2026-07-01, from
 the json-bridge deepseek review):** `fromjson` converts external JSON with
 `json_to_value_no_envelope` (envelope-free at ingress), but two consumers still

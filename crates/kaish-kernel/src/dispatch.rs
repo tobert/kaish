@@ -197,7 +197,7 @@ impl BackendDispatcher {
                     Expr::Literal(Value::String(s)) => Some(s.clone()),
                     Expr::Literal(Value::Int(i)) => Some(i.to_string()),
                     Expr::Literal(Value::Float(f)) => Some(f.to_string()),
-                    Expr::VarRef(path) => ctx.scope.resolve_path(path).map(|v| crate::interpreter::value_to_string(&v)),
+                    Expr::VarRef(path) => ctx.scope.resolve_path(path).ok().map(|v| crate::interpreter::value_to_string(&v)),
                     _ => None,
                 },
                 Arg::ShortFlag(f) => Some(format!("-{f}")),

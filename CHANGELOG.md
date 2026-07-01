@@ -17,6 +17,18 @@ breaking entries are marked **BREAKING**.
   builtin may return someday.
 
 ### Added
+- **Native collection read access** — `${xs[0]}`, `${r[key]}`, `${r[$k]}`,
+  `${r["weird-key"]}`, `${xs[-1]}` (negative index), `${xs[0:2]}` (end-exclusive
+  slice → a list), and chained `${a[b][c]}`, over any `Value::Json` (e.g. from
+  `fromjson` or `$()`). Brackets only — a bareword subscript is a literal key, a
+  `$var` is dynamic, integers index lists; a subscript that lands on a JSON
+  scalar unwraps to a native value (so `[[ ${cfg[healthy]} == false ]]` and
+  `$(( ${cfg[port]} + 1 ))` are typed). `${#…}` now returns element count for a
+  list and key count for a record (string length unchanged). Every bad access is
+  a loud error, never a silent empty: dotted access (`${r.key}` → use `[key]`),
+  out-of-bounds index, missing record key, a string key on a list, an integer
+  index on a record, and subscripting a scalar. Literal construction
+  (`xs=[a b c]`) and record iteration are not in this slice.
 - **`fromjson` / `tojson` builtins** — the JSON ingress/egress bridge for the
   value model. `fromjson` parses exactly one JSON document (from an argument or
   stdin) into a structured value in `.data`; empty input or trailing garbage is

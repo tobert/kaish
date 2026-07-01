@@ -383,11 +383,12 @@ pub enum TestCmpOp {
 // Value lives in kaish-types.
 pub use kaish_types::Value;
 
-/// Variable reference path: `${VAR}` or `${VAR.field}`.
+/// Variable reference path: `${VAR}`, `${VAR[0]}`, `${r[key]}`, `${a[b][c]}`.
 ///
-/// `$?` resolves to the previous command's exit code as an int. Field access
-/// on `$?` is rejected by the validator (use `kaish-last` for structured data).
-/// Array indexing is not supported — use `jq` for JSON processing.
+/// The first segment is always the root variable name (`Field`); the rest are
+/// bracket subscripts. `$?` resolves to the previous command's exit code as an
+/// int (bare only — `${?.field}` is rejected). Access is brackets-only: a
+/// dotted `${VAR.field}` resolves to a loud error suggesting `${VAR[field]}`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VarPath {
     pub segments: Vec<VarSegment>,
@@ -403,11 +404,24 @@ impl VarPath {
 }
 
 /// A segment in a variable path.
+///
+/// The first segment of a path is the root name, carried as `Field`. Every
+/// later segment is a bracket subscript. A `Field` in a non-root position
+/// represents a dotted `.field` access, which — kaish being brackets-only —
+/// resolves to a loud error with the bracket form in the message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VarSegment {
-    /// Field access: `.field` or initial name
-    /// Only supported for special variables like `$?`
+    /// The root variable name, or (illegally, past the root) a dotted `.field`.
     Field(String),
+    /// Integer subscript `[0]` / `[-1]` — indexes a list (negative from the end).
+    Index(i64),
+    /// Literal key `[bareword]` or `["quoted key"]` — keys a record.
+    Key(String),
+    /// Dynamic subscript `[$var]` — the named variable's value is the key
+    /// (record) or index (list) at resolution time. Holds the variable name.
+    Dynamic(String),
+    /// Slice `[a:b]` — end-exclusive, yields a list. Either bound may be omitted.
+    Slice(Option<i64>, Option<i64>),
 }
 
 /// Part of an interpolated string.

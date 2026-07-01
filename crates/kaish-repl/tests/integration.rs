@@ -489,8 +489,8 @@ fn error_invalid_path() {
         echo ${X.field}
     "#);
     let joined = outputs.join("\n");
-    // Should error on field access of int
-    assert!(joined.contains("ERROR") || joined.contains("undefined"));
+    // Dotted access is brackets-only — a loud error suggesting the bracket form.
+    assert!(joined.contains("bracket"), "got: {joined}");
 }
 
 #[test]
@@ -500,8 +500,8 @@ fn error_invalid_field_access() {
         echo ${NUM.field}
     "#);
     let joined = outputs.join("\n");
-    // Should error on field access of non-object
-    assert!(joined.contains("ERROR") || joined.contains("undefined"));
+    // Dotted access is brackets-only — a loud error suggesting the bracket form.
+    assert!(joined.contains("bracket"), "got: {joined}");
 }
 
 // ============================================================================
