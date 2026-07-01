@@ -612,10 +612,16 @@ Points decided or flagged during the 2026-07-01 review:
   the brackets). The implementation PR must do the final truth-up ("planned" → shipped)
   and add the new loud-error rows: dotted access, `[`-leading glob assignment, multi-word
   literal values, dotted assignment LHS.
-- **Budget guardrail — decide before fragment writing.** Nothing caps composed-help size
-  today: no test, no stated ceiling (composable-help.md offers `Depth` as the only lever).
-  Collections is exactly the feature that will test this. Tracked in issues.md: add a
-  size assertion on `agent_onboarding()` output before growing it.
+- **Onboarding becomes importance-ranked tiers (Amy, 2026-07-01).** The always-on block
+  should lead with the most important ~200–300 characters, then successive ~200–300-char
+  ranks in descending importance — the client model gets the critical rules immediately,
+  even skimmed or truncated. Everything below the ranked tiers moves to an easy-to-find,
+  loadable resource (help topics / MCP prompts) that the block's tail points at. This
+  reshapes the budget question: fragments gain an importance rank, recipes compose by
+  rank, and the size guardrail caps the ranked tier stack rather than one undifferentiated
+  blob. Nothing caps composed-help size today (no test, no stated ceiling; `Depth` is the
+  only lever) — tracked in issues.md under Composable help; collections is exactly the
+  feature that will test it.
 - **Validate the shipped artifact, and keep validating.** The pre-sign-off panel re-test
   (Teaching note #8) should use the *composed help output* as its cheat sheet — write the
   fragments first, compose `agent_onboarding()` plus the collections syntax section, and

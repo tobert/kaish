@@ -300,13 +300,18 @@ depth. Worth dedicated kernel-routed suites.
 those repos). **Phase 5:** i18n scaffolding + first `ja` fragments. Full design:
 [composable-help.md](composable-help.md).
 
-**Instruction-budget guardrail (2026-07-01, from the arrays-and-hashes review):**
-nothing caps composed-help size — no test, no stated ceiling; `Depth` is the only
-lever. An embedder's composed `agent_onboarding()` block is already ~9–10.5K chars
-(builtin index dominates at ~5.4K). Before the collections fragments land (they're
-the feature that will test this), pick a ceiling and enforce it with a size
-assertion on `agent_onboarding()` output in kaish-help's tests. See
-[arrays-and-hashes.md](arrays-and-hashes.md) "Help & teaching delivery".
+**Importance-ranked onboarding tiers (2026-07-01, from the arrays-and-hashes
+review):** restructure `agent_onboarding()` composition into ~200–300-char ranks in
+descending importance — the first rank carries the most critical rules so the client
+model gets them immediately even under skimming/truncation; successive ranks follow;
+everything else moves to an easy-to-find, loadable resource (help topics / MCP
+prompts) pointed at from the block's tail. Mechanically: fragments gain an importance
+rank, recipes compose by rank, and a size assertion in kaish-help's tests caps the
+ranked tier stack (today nothing caps composed size — no test, no ceiling; `Depth` is
+the only lever, and the block is already ~9–10.5K chars with the builtin index
+dominating at ~5.4K). Do this before the collections fragments land — they're the
+feature that will test it. See [arrays-and-hashes.md](arrays-and-hashes.md)
+"Help & teaching delivery".
 
 ### Split `kernel.rs::execute_stmt_flow`
 `kernel.rs:1463`–~1913 is a 16-arm async match (kernel.rs is ~6,838 lines); each
