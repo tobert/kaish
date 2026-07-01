@@ -14,6 +14,62 @@ before it ships.
 
 ---
 
+## Arrays & hashes design revision: the brackets are ours (2026-07-01)
+
+The 2026-06-05 collections proposal came back for review a month later and left
+substantially changed — not because the method was wrong (the weak-model stress
+tests held up), but because grounding it against the current code surfaced two
+facts that flipped decisions, and a design conversation with Amy pushed one
+principle — consistency over convenience — further than the original draft dared.
+
+Three Sonnet exploration passes re-grounded every file:line claim (several had
+drifted; two issues.md citations pointed at entries that no longer exist). Two
+discoveries did real work. First: `for x in a b c` word lists already parse, so
+the proposal's bare-builtin for-head (`for k in keys $r`) wouldn't have filled a
+grammar hole — it would have changed the meaning of valid syntax, with the
+quasi-reserved word set growing every time a builtin ships. Replaced by
+`for k in $record` iterating keys: Python's exact prior, zero grammar cost.
+Second: the lexer's `Ident` regex admits `.`, so `user.email=x` parses *today* as
+a flat, unreadable variable — dotted path-writes would have silently diverged
+from that. That discovery sealed Amy's instinct to drop dotted access entirely:
+**brackets only** (`${user[name]}`, `${r[$k]}`, `${r["weird key"]}`), bareword
+subscripts are literal keys, jq keeps the dot-shaped language so the two surfaces
+never blur. The doc keeps the superseded evidence annotated rather than erased —
+the record of *why* is part of the method.
+
+The review also filled gaps the original never addressed: scalar unwrap at the
+access boundary (so `[[ ${cfg[healthy]} == false ]]` is a typed comparison, not a
+stringify accident), structural equality collection↔collection with a loud error
+for collection↔scalar, and a full lvalue ruleset — bracket paths, no
+autovivification, in-bounds index set, POSIX-name LHS tightening. A fresh lexer
+collision fell out of writing the implementation notes: glued `[]`/`[dog]`/`[1]`
+merge into GlobWords today (`x=[dog]` is currently a *glob assignment*), so a
+`[`-leading token at value position is now ALWAYS a list literal — a small
+breaking change Amy ratified with "we own the []". limits.md's "kaish will never
+have `[]` array syntax" line got the falsehood treatment the same session.
+
+Cross-model review, house style (no diff, whole files): a gemini-pro batch with
+the lexer and parser attached found what the doc's impl notes underestimated —
+kaish's pre-parser token-fusion passes are hostile to the new literals.
+`merge_colon_adjacent` eats unspaced record colons (`{port:8080}`), the
+double-quote regex can't survive quoted keys inside interpolated strings, and the
+shared expression parser must bifurcate into value/argv grammars or `ls [dog]`
+grows a JSON argument. Every lexer claim was verified locally before folding.
+Gemini also pushed back on `push` being top-level-only — the nested-append
+workaround (`a[b]=[...${a[b]} new]`) was hostile enough that Amy reversed it:
+push takes bracket paths under the lvalue rules. Unspaced colons: accepted.
+Quoted keys in strings: loud error suggesting assign-first. A deepseek second
+pass on the post-fold doc was still in flight when this PR opened.
+
+Two forward commitments landed in the doc. `fromjson`/`tojson` (jq-named, pure
+data, envelope-FREE conversion — `json_to_value`'s bytes-envelope sniffing must
+never run on external JSON) get prototyped *before* the grammar: they exercise
+the whole value-model plumbing without touching the parser. And the help system
+grows importance-ranked ~200–300-char onboarding tiers (Amy's design), with
+`help collections` as a fragment query rather than a file, and the panel re-test
+gated on testing the *composed* help artifact — the thing we ship, not an ad-hoc
+cheat sheet. Collections grammar work does not start until that re-test passes.
+
 ## `classify_command`: a supported command classifier for embedder preflight (2026-06-30)
 
 Follow-on to the typed latch accessor (#45). kaijutsu wants to gate kaish's
