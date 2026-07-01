@@ -14,30 +14,69 @@ before it ships.
 
 ---
 
-## `--help` passthrough for owned-output tools (#51, 2026-06-30)
+## `classify_command`: a supported command classifier for embedder preflight (2026-06-30)
 
-The kernel intercepts `--help`/`-h` in `dispatch_command` and renders the generic
-whole-tool help before the tool runs — fine for ordinary builtins, wrong for a
-tool that owns its output and re-parses its own argv (`with_owned_output()`,
-typically a `schema_tree_from_clap` subcommand tree). For those, a leaf request
-like `tool subcmd --help` never reached the tool, so its *subcommand* help could
-never render; the user got top-level help that read like a missing-verb fallback.
-The interception keyed only on the *root* schema's params, so a subcommand-aware
-tool had no way to say "this leaf claims help."
+Follow-on to the typed latch accessor (#45). kaijutsu wants to gate kaish's
+destructive/external operations for consent — walk a script, find the command
+nodes that escape to `PATH`, and block until they're approved. It can already do
+most of that with the public surface (`parser::parse`, the `ast`, `tool_schemas`,
+`has_function`). The one thing it *can't* do without forking kaish's truth is
+classify a command name the way the interpreter resolves it — the two rules that
+decide that (`is_static_command_name`, the special-form set) were private helpers
+in the validator. If kaijutsu hardcodes copies, the day kaish refines name
+resolution its consent gate silently disagrees with what kaish actually runs.
+That's the silent-divergence failure class, and here it's security-relevant.
 
-Fix is the issue's preferred option 1: when `schema.owns_output` is set, don't
-intercept — pass `--help` through to `execute()`. These tools already handle
-their own argv and output rendering, and their internal clap parser renders
-better leaf help than `HelpTopic::Tool` would. One condition (`!schema.owns_output`)
-on the existing `wants_help`; plain tools are untouched. This also retires the
-downstream workaround (kaijutsu's `kj` advertising a synthetic root `help` param
-just to dodge the interception). Found while building the `kj` subcommand tree in
-kaijutsu; the inconsistency was that bare `help` (a positional) reached the tool
-while `--help` (a flag) didn't, purely as an artifact of where interception sat.
+So we added `Kernel::classify_command(name) -> CommandKind` (`Builtin` /
+`UserTool` / `Special` / `Dynamic` / `External`, plus `escapes_kernel()` for the
+two buckets a gate scrutinizes). `CommandKind` lives in `kaish-types` (pure data,
+`#[non_exhaustive]` so a future variant doesn't break embedders — and the safe
+default for an unknown kind is to gate it). The classification core is one shared
+`classify_command_name` in `validator/walker.rs`; the kernel computes the two
+booleans and delegates, so there's a single source of truth.
 
-Own PR, off main — kept separate from the `classify_command` work (#50): different
-concern, different changelog group (`Fixed` vs `Added`), and #50 was already
-review-clean.
+The sharp bit was discovered empirically: the validator's `is_special_command`
+set (`true`/`false`/`:`/`readonly`/`local`) is **not** what the interpreter
+actually short-circuits. At runtime `readonly` resolves to an *external* command
+(exit 127), `:` is a parse error, `local` is parser-level. The validator uses that
+broad set only to suppress a "command not found" warning. `classify_command`
+deliberately mirrors the **interpreter's** real special-forms
+(`true`/`false`/`source`/`.`) instead — a consent gate must see `readonly` as
+`External`, not be told it's internal. The validator↔runtime mismatch is now
+filed as a P3 (the validator probably shouldn't suppress those warnings).
+
+A deepseek review (kaibo) caught the one real under-reporting hole: execution
+expands **aliases** before the registry/PATH lookup, so `alias cat=/bin/evil`
+would have classified as `Builtin` while running external — the dangerous
+direction for a consent gate, and there was no public alias API for the embedder
+to compensate. `classify_command` now expands aliases internally, mirroring
+`execute_command_depth`'s bounded recursion (special-forms re-checked each step),
+so it reports `External` there too. `/v/bin/cat` and `.kai`/backend tools still
+over-report as `External` (the safe direction — over-gate, never leak a `PATH`
+escape). Added a `${VAR}` → `Dynamic` guard for the string-API surface.
+
+**Staying in sync with the executor.** The classifier duplicates the
+interpreter's resolution rules, which is the same silent-divergence risk the
+feature exists to kill — just moved inside the kernel. Three guards keep it
+honest: (1) *membership* never drifts because classify reads the live registry
+and user-tool tables, not a copy; (2) the *special-form set* is a single
+`SpecialForm` enum whose `from_name` is the only place a name becomes "special" —
+classify reports it via `is_runtime_special_form`, and `execute_command_depth`
+matches the enum **exhaustively**, so adding a form is a *compile error* until
+both the name mapping and the behavior are updated (the first cut used a const +
+`unreachable!`, but a deepseek round-2 review flagged that as a runtime panic the
+drift test didn't actually exercise — the enum makes it compile-enforced and
+drops the panic); (3) a `classify_command_matches_executor` drift test pins the
+rules that *can't* be compile-enforced (user-vs-builtin precedence, alias
+expansion) by classifying *and* observing the real resolution for each kind, and
+now executes every special form (incl. `source`/`.`), not just `true`/`false`.
+Add a resolution step to the executor without teaching classify, and either it
+won't compile or that test fails.
+
+Deferred, same reasoning as the `kaish-edit` crate: the `PreflightReport`, the AST
+walk, and the consent loop are embedder policy (kaijutsu owns them), and a
+`Kernel::preflight(src)` convenience waits for a second consumer. Docs: a
+"Preflighting a script for external commands" recipe in EMBEDDING.md.
 
 ## Interpreter stack-depth analysis → first GitHub Issues (2026-06-30)
 

@@ -6,6 +6,7 @@
 
 pub mod backend;
 pub mod bytes;
+pub mod command;
 pub mod dir_entry;
 pub mod job;
 pub mod kernel;
@@ -17,6 +18,7 @@ pub mod value;
 // Flat re-exports for convenience
 pub use backend::*;
 pub use bytes::{bytes_to_envelope, envelope_to_bytes, hex_dump};
+pub use command::*;
 pub use dir_entry::*;
 pub use job::*;
 pub use kernel::*;

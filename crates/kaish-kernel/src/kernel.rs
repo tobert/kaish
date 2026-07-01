@@ -47,7 +47,7 @@ static KERNEL_COUNTER: AtomicU64 = AtomicU64::new(1);
 use async_trait::async_trait;
 
 use crate::ast::{Arg, Command, Expr, FileTestOp, Stmt, StringPart, TestExpr, ToolDef, Value, BinaryOp};
-pub use kaish_types::ExecuteOptions;
+pub use kaish_types::{CommandKind, ExecuteOptions};
 use crate::backend::{BackendError, KernelBackend};
 use kaish_glob::glob_match;
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
@@ -2828,12 +2828,18 @@ impl Kernel {
 
     #[tracing::instrument(level = "info", skip(self, args, alias_depth), fields(command = %name), err)]
     async fn execute_command_depth(&self, name: &str, args: &[Arg], alias_depth: u8) -> Result<ExecResult> {
-        // Special built-ins
-        match name {
-            "true" => return Ok(ExecResult::success("")),
-            "false" => return Ok(ExecResult::failure(1, "")),
-            "source" | "." => return self.execute_source(args).await,
-            _ => {}
+        // Special built-ins. `SpecialForm::from_name` is the single source of
+        // truth (shared with `classify_command` via `is_runtime_special_form`),
+        // and this match on the enum is *exhaustive* — adding a special-form is a
+        // compile error until both the name mapping and the behavior here are
+        // updated. A name that is not a special-form falls through to alias /
+        // `/v/bin/` / user-tool / builtin / `PATH` resolution unchanged.
+        if let Some(form) = crate::validator::SpecialForm::from_name(name) {
+            return match form {
+                crate::validator::SpecialForm::True => Ok(ExecResult::success("")),
+                crate::validator::SpecialForm::False => Ok(ExecResult::failure(1, "")),
+                crate::validator::SpecialForm::Source => self.execute_source(args).await,
+            };
         }
 
         // Alias expansion (with recursion limit)
@@ -5032,6 +5038,71 @@ impl Kernel {
     /// Get available tool schemas.
     pub fn tool_schemas(&self) -> Vec<crate::tools::ToolSchema> {
         self.tools.schemas()
+    }
+
+    /// Classify how the kernel will resolve a command name.
+    ///
+    /// This is the supported, single source of truth for command resolution that
+    /// embedders should call instead of re-deriving the rules. Walk a parsed
+    /// script (`kaish_kernel::parser::parse` → `Stmt::Command` nodes) and call
+    /// this per command name to bucket each into builtin / user-function /
+    /// special-form / dynamic / external — for example a consent gate that blocks
+    /// a script until external commands are approved.
+    ///
+    /// The classification mirrors the interpreter's real resolution order
+    /// (`execute_command_depth`): special-forms (`true`/`false`/`source`/`.`)
+    /// short-circuit first, then **aliases are expanded** (bounded recursion,
+    /// re-checking special-forms each step, exactly as execution does), then user
+    /// functions (which shadow builtins), then builtins, then a `PATH` lookup. A
+    /// name that is a variable or command-substitution expansion (`$cmd`,
+    /// `$(pick)`, `${x}`) classifies as [`CommandKind::Dynamic`] because it can't
+    /// be resolved statically.
+    ///
+    /// Aliases are resolved against the kernel's current alias table, so an
+    /// `alias cat=/bin/something` makes `cat` classify as `External` — the same
+    /// thing it would actually run. The safe direction of any residual imprecision
+    /// is `External`/`Dynamic`, never a false "internal": the `/v/bin/` prefix and
+    /// `.kai`/backend-tool resolution are reported `External` even though some of
+    /// those resolve in-process, so a consent gate over-gates rather than letting
+    /// a `PATH` escape slip through.
+    pub async fn classify_command(&self, name: &str) -> CommandKind {
+        // Resolve the command head the way `execute_command_depth` does: a
+        // special-form short-circuits before any alias lookup, otherwise expand
+        // aliases (bounded, recursive) and re-check from the top. A dynamic name
+        // can't be resolved at all.
+        let mut name = name.to_string();
+        let mut alias_depth = 0u8;
+        loop {
+            if !crate::validator::is_static_command_name(&name) {
+                return CommandKind::Dynamic;
+            }
+            if crate::validator::is_runtime_special_form(&name) {
+                return CommandKind::Special;
+            }
+            if alias_depth >= 10 {
+                break;
+            }
+            let alias_value = {
+                let ctx = self.exec_ctx.read().await;
+                ctx.aliases.get(&name).cloned()
+            };
+            // Expand to the alias's head command. An empty alias value (no head)
+            // is ignored by execution, so resolution continues with this name.
+            match alias_value
+                .as_deref()
+                .and_then(|v| v.split_whitespace().next())
+            {
+                Some(head) => {
+                    name = head.to_string();
+                    alias_depth += 1;
+                }
+                None => break,
+            }
+        }
+
+        let is_user_tool = self.user_tools.read().await.contains_key(&name);
+        let is_builtin = self.tools.contains(&name);
+        crate::validator::classify_command_name(&name, is_builtin, is_user_tool)
     }
 
     // --- Jobs ---
@@ -8199,5 +8270,188 @@ AFTER="yes"'"#)
             result.err
         );
         assert_eq!(result.text_out().trim(), "subproc");
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_builtin() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        assert_eq!(kernel.classify_command("cat").await, CommandKind::Builtin);
+        assert_eq!(kernel.classify_command("grep").await, CommandKind::Builtin);
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_special_forms() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        for name in ["true", "false", "source", "."] {
+            assert_eq!(
+                kernel.classify_command(name).await,
+                CommandKind::Special,
+                "{name} should be a special-form",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_dynamic() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        assert_eq!(kernel.classify_command("$cmd").await, CommandKind::Dynamic);
+        assert_eq!(
+            kernel.classify_command("$(pick)").await,
+            CommandKind::Dynamic
+        );
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_external() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        // Not a builtin, user function, or special-form → escapes to PATH.
+        assert_eq!(
+            kernel.classify_command("definitely_not_a_kaish_builtin").await,
+            CommandKind::External
+        );
+        // `readonly` is *not* a kaish special-form despite the validator's
+        // warning heuristic — at runtime it resolves to an external command, so
+        // a consent gate must see it as External (regression guard against the
+        // validator/runtime divergence).
+        assert_eq!(
+            kernel.classify_command("readonly").await,
+            CommandKind::External
+        );
+        assert!(kernel.classify_command("readonly").await.escapes_kernel());
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_user_tool_shadows_builtin() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        kernel
+            .execute(r#"greet() { echo "hi" }"#)
+            .await
+            .expect("function definition failed");
+        assert_eq!(
+            kernel.classify_command("greet").await,
+            CommandKind::UserTool
+        );
+
+        // A user function named after a builtin classifies as UserTool, matching
+        // the interpreter's user-tools-first resolution.
+        kernel
+            .execute(r#"cat() { echo "shadowed" }"#)
+            .await
+            .expect("function definition failed");
+        assert_eq!(kernel.classify_command("cat").await, CommandKind::UserTool);
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_alias_to_external_is_external() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        // An alias whose head is an external binary must NOT report as the
+        // builtin it shadows — execution expands the alias, so a consent gate
+        // would otherwise be told an external command is internal.
+        kernel
+            .execute("alias cat='/usr/bin/whatever'")
+            .await
+            .expect("alias failed");
+        assert_eq!(kernel.classify_command("cat").await, CommandKind::External);
+        assert!(kernel.classify_command("cat").await.escapes_kernel());
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_alias_to_builtin() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        kernel.execute("alias g=grep").await.expect("alias failed");
+        assert_eq!(kernel.classify_command("g").await, CommandKind::Builtin);
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_alias_to_special_form() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        kernel.execute("alias t=true").await.expect("alias failed");
+        assert_eq!(kernel.classify_command("t").await, CommandKind::Special);
+    }
+
+    #[tokio::test]
+    async fn test_classify_command_braced_var_is_dynamic() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        // The string API can be handed a `${VAR}` head; it must not be mistaken
+        // for an external named literally "${VAR}".
+        assert_eq!(
+            kernel.classify_command("${CMD}").await,
+            CommandKind::Dynamic
+        );
+    }
+
+    /// Drift guard: `classify_command` must agree with what the executor
+    /// (`execute_command_depth`) actually resolves. The classifier duplicates the
+    /// interpreter's resolution rules (special-form set, user-tools-before-builtins
+    /// precedence, alias expansion); without this test those copies could diverge
+    /// silently — the exact failure class `classify_command` exists to prevent,
+    /// just moved inside the kernel. Each case asserts the classification AND
+    /// observes the real resolution, so a future change to one side without the
+    /// other fails here.
+    #[tokio::test]
+    async fn classify_command_matches_executor() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // (1) Special-forms. `SpecialForm::from_name` is the single source of
+        // truth: classify reports Special via it, and the executor matches the
+        // enum exhaustively, so const↔behavior parity is compile-enforced (a new
+        // form won't build until both sides handle it). This test pins the other
+        // half — that each form classifies Special AND actually short-circuits at
+        // runtime rather than escaping to `PATH`. Every form is executed (not just
+        // `true`/`false`): an external miss in this PATH-less kernel would be exit
+        // 127, so a non-127 result that matches the form's own behavior proves the
+        // short-circuit fired.
+        for name in ["true", "false", "source", "."] {
+            assert_eq!(
+                kernel.classify_command(name).await,
+                CommandKind::Special,
+                "{name} should classify Special",
+            );
+        }
+        assert_eq!(kernel.execute("true").await.expect("run true").code, 0);
+        assert_eq!(kernel.execute("false").await.expect("run false").code, 1);
+        // `source`/`.` short-circuit to execute_source, which (no filename) fails
+        // with its own message — exit 1, never the 127 of an unresolved external.
+        for name in ["source", "."] {
+            let r = kernel.execute(name).await.expect("run source form");
+            assert_ne!(r.code, 127, "{name} fell through to PATH instead of source");
+            assert!(
+                r.err.contains("source: missing filename"),
+                "{name} did not route to execute_source: {:?}",
+                r.err,
+            );
+        }
+
+        // (2) Builtin: classify Builtin AND the executor runs the builtin.
+        assert_eq!(kernel.classify_command("echo").await, CommandKind::Builtin);
+        let r = kernel.execute("echo hi").await.expect("run echo");
+        assert!(r.ok() && r.text_out().trim() == "hi", "echo builtin didn't run");
+
+        // (3) User function shadows a builtin: classify UserTool AND the executor
+        // runs the function body, not the `cat` builtin.
+        kernel
+            .execute(r#"cat() { echo SHADOWED }"#)
+            .await
+            .expect("define cat()");
+        assert_eq!(kernel.classify_command("cat").await, CommandKind::UserTool);
+        let r = kernel.execute("cat").await.expect("run shadowed cat");
+        assert_eq!(
+            r.text_out().trim(),
+            "SHADOWED",
+            "executor ran the builtin instead of the shadowing function",
+        );
+
+        // (4) Alias whose head is external: classify External AND the executor
+        // resolves through the alias to a missing external (not a builtin).
+        kernel
+            .execute("alias x='/nonexistent/binary'")
+            .await
+            .expect("define alias x");
+        assert_eq!(kernel.classify_command("x").await, CommandKind::External);
+        let r = kernel.execute("x").await.expect("run alias x");
+        assert!(
+            !r.ok(),
+            "alias to a missing external should fail, not resolve internally",
+        );
     }
 }

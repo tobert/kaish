@@ -17,6 +17,13 @@ breaking entries are marked **BREAKING**.
   apply preapproval policy or a model review before re-running with
   `--confirm=<nonce>`, instead of string-matching the error or digging `.data`
   by key. Returns `None` for plain (non-latch) exit-2 results.
+- **`Kernel::classify_command(name) -> CommandKind` (kaish-types)** — supported,
+  single-source-of-truth command classifier for embedders preflighting a script
+  (e.g. a consent gate that walks the public AST and blocks until external
+  commands are approved). Buckets a name into `Builtin` / `UserTool` / `Special`
+  / `Dynamic` / `External`, mirroring the interpreter's real resolution order so
+  the embedder never forks kaish's rules. `CommandKind::escapes_kernel()` flags
+  the `External`/`Dynamic` cases a gate must scrutinize.
 
 ### Fixed
 - **`--help`/`-h` now passes through to `with_owned_output()` tools** — the

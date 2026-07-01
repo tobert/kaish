@@ -478,6 +478,44 @@ processes). Two gates:
   lookups return "command not found" and `exec`/`spawn` error.
   `KernelConfig::isolated()` sets this by default.
 
+### Preflighting a script for external commands
+
+To gate a script for consent (e.g. block until external commands are approved),
+classify each command node *before* executing. Walk the parsed AST and ask the
+kernel how it will resolve each name — don't re-derive the rules, or your gate
+silently disagrees with what kaish actually runs the day resolution changes:
+
+```rust
+use kaish_kernel::{parser, ast::Stmt, CommandKind};
+
+let program = parser::parse(src)              // public parser + AST
+    .map_err(|_errors| /* surface parse errors */ ())?;
+for stmt in &program.statements {
+    if let Stmt::Command(cmd) = stmt {        // walk however your policy needs
+        let kind = kernel.classify_command(&cmd.name).await;
+        if kind.escapes_kernel() {
+            // External or Dynamic — escapes to PATH (or can't be resolved
+            // statically). Gate it.
+        }
+        // Builtin / UserTool / Special run in-process under the VFS and
+        // capability model.
+    }
+}
+```
+
+`CommandKind` is `#[non_exhaustive]`, so a `match` needs a wildcard arm — and the
+safe default for an unrecognized kind is to gate it. `escapes_kernel()` captures
+the two buckets a consent gate scrutinizes without spelling out the variants.
+
+`classify_command` mirrors the interpreter's real resolution order — including
+**alias expansion** — so a name like `readonly` (no kaish builtin; resolves to an
+external binary) reports `External`, and an `alias cat=/bin/something` makes `cat`
+report `External` too, the same thing it would actually run. The safe direction of
+any residual imprecision is `External`/`Dynamic` — it never under-reports a `PATH`
+escape as internal (`/v/bin/cat` and `.kai`/backend tools over-report as
+`External`). The consent UX and the block-the-script loop are embedder policy —
+the kernel supplies only the classification.
+
 ## Path Composition with XDG Primitives
 
 kaish exports XDG base directory primitives so embedders can compose their
@@ -588,8 +626,8 @@ match on those, not on `completed`.
 The `kaish_kernel` crate root re-exports the embedding surface:
 
 - **Core**: `Kernel`, `KernelConfig`, `VfsMountMode`, `ExecuteOptions`,
-  `KernelBackend`, `LocalBackend`, `Tool`, `ToolRegistry`, `ExecContext`,
-  `OutputLimitConfig`
+  `CommandKind`, `KernelBackend`, `LocalBackend`, `Tool`, `ToolRegistry`,
+  `ExecContext`, `OutputLimitConfig`
 - **Jobs**: `BoundedStream`, `StreamStats`, `drain_to_stream`,
   `DEFAULT_STREAM_MAX_SIZE`, `JobFs`
 - **Paths**: `home_dir`, `xdg_data_home`, `xdg_config_home`,

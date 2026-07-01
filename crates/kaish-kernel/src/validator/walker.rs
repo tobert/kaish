@@ -10,6 +10,7 @@ use crate::kernel::{bind_glued_short_value, push_repeatable_value};
 use crate::scheduler::{is_bool_type, schema_param_lookup};
 use crate::validator::issue::Span;
 use crate::tools::{ToolArgs, ToolRegistry, ToolSchema};
+use kaish_types::CommandKind;
 
 use super::issue::{IssueCode, ValidationIssue};
 use super::scope_tracker::ScopeTracker;
@@ -540,8 +541,84 @@ impl<'a> Validator<'a> {
 }
 
 /// Check if a command name is static (not a variable expansion).
-fn is_static_command_name(name: &str) -> bool {
-    !name.starts_with('$') && !name.contains("$(")
+///
+/// The parser only ever produces a literal `Command.name`, so for the AST-walk
+/// path this is always true; the `${…}` / `$(…)` guards matter for the
+/// string-accepting `Kernel::classify_command` API, where a dynamic name
+/// classifies as [`CommandKind::Dynamic`] rather than a misleading `External`.
+pub(crate) fn is_static_command_name(name: &str) -> bool {
+    !name.starts_with('$') && !name.contains("$(") && !name.contains("${")
+}
+
+/// Interpreter special-forms — the command names `execute_command_depth`
+/// short-circuits before any alias/registry/`PATH` lookup.
+///
+/// **Single source of truth, compile-enforced.** `from_name` is the only place a
+/// name becomes "special", and the executor matches this enum *exhaustively*, so
+/// adding a form is a compile error until both the name mapping here and the
+/// execution behavior in `execute_command_depth` are updated — the two cannot
+/// silently diverge, and there's no `unreachable!` to panic at runtime.
+/// `classify_command` reports every special form as `CommandKind::Special` via
+/// [`is_runtime_special_form`].
+///
+/// This set is deliberately **narrower** than `is_special_command` below: that
+/// set is a validator warning heuristic (it suppresses "command not found" for
+/// names like `readonly`/`:` that the validator chooses not to flag), whereas
+/// this reflects what the interpreter *actually* short-circuits. Keeping them
+/// separate avoids `classify_command` mislabelling a name as internal when it
+/// would in fact escape to `PATH` (e.g. `readonly` resolves to an external
+/// command at runtime). See `Kernel::classify_command`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpecialForm {
+    /// `true` — always succeeds (exit 0).
+    True,
+    /// `false` — always fails (exit 1).
+    False,
+    /// `source` / `.` — execute a script in the current shell.
+    Source,
+}
+
+impl SpecialForm {
+    /// The single mapping from a command name to a special-form, or `None` if the
+    /// name is resolved normally (alias/registry/`PATH`).
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "true" => Some(Self::True),
+            "false" => Some(Self::False),
+            "source" | "." => Some(Self::Source),
+            _ => None,
+        }
+    }
+}
+
+/// Whether `name` is an interpreter special-form (see [`SpecialForm`]).
+pub(crate) fn is_runtime_special_form(name: &str) -> bool {
+    SpecialForm::from_name(name).is_some()
+}
+
+/// Classify a command name the way the interpreter resolves it, given whether
+/// the registry and user-tool table contain it. Shared by the validator's
+/// triage and `Kernel::classify_command` so the two never diverge.
+pub(crate) fn classify_command_name(
+    name: &str,
+    is_builtin: bool,
+    is_user_tool: bool,
+) -> CommandKind {
+    if !is_static_command_name(name) {
+        return CommandKind::Dynamic;
+    }
+    if is_runtime_special_form(name) {
+        return CommandKind::Special;
+    }
+    // User functions are checked before builtins in `execute_command_depth`, so
+    // a user function shadows a builtin of the same name.
+    if is_user_tool {
+        return CommandKind::UserTool;
+    }
+    if is_builtin {
+        return CommandKind::Builtin;
+    }
+    CommandKind::External
 }
 
 /// Check if a command is a special built-in that we don't validate.
