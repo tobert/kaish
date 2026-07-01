@@ -133,15 +133,70 @@ fn find_default_separator_in_content(content: &str) -> Option<usize> {
 
 /// Parse a raw `${...}` string into a VarPath.
 ///
-/// Handles paths like `${VAR}` and `${VAR.field}`. Array indexing is not supported.
-fn parse_varpath(raw: &str) -> VarPath {
-    let segments_strs = lexer::parse_var_ref(raw).unwrap_or_default();
-    let segments = segments_strs
+/// The first segment is the root variable name; each `[...]` segment the lexer
+/// produced becomes the corresponding subscript (`Index`/`Key`/`Dynamic`/
+/// `Slice`). A dotted segment (`${a.b}`) is kept as a non-root `Field` so
+/// resolution can emit the brackets-only error — the lexer already split it out.
+pub(crate) fn parse_varpath(raw: &str) -> VarPath {
+    let segment_strs = lexer::parse_var_ref(raw).unwrap_or_default();
+    let segments = segment_strs
         .into_iter()
-        .filter(|s| !s.starts_with('['))  // Skip index segments
-        .map(VarSegment::Field)
+        .enumerate()
+        .map(|(i, s)| {
+            if i == 0 {
+                // The root name (or the special `?`).
+                VarSegment::Field(s)
+            } else if let Some(inner) = s.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                parse_subscript(inner)
+            } else {
+                // A dotted `.field` — carried through as a Field so resolution
+                // produces the "use ${name[field]}" error (brackets only).
+                VarSegment::Field(s)
+            }
+        })
         .collect();
     VarPath { segments }
+}
+
+/// Parse the interior of a `[...]` subscript into a `VarSegment`.
+///
+/// Classification is syntactic (the container's runtime type decides list-vs-
+/// record at resolution): `$var` → dynamic; a quoted string → literal key;
+/// `int:int` (either side optional) → slice; a bare integer → index; anything
+/// else → a literal bareword key.
+fn parse_subscript(inner: &str) -> VarSegment {
+    // Dynamic: `[$var]`.
+    if let Some(var) = inner.strip_prefix('$') {
+        return VarSegment::Dynamic(var.to_string());
+    }
+    // Quoted key: `["weird key"]` or `['weird key']`.
+    if inner.len() >= 2
+        && ((inner.starts_with('"') && inner.ends_with('"'))
+            || (inner.starts_with('\'') && inner.ends_with('\'')))
+    {
+        return VarSegment::Key(inner[1..inner.len() - 1].to_string());
+    }
+    // Slice: `a:b` where each side is empty or a valid integer. A colon that
+    // isn't a numeric slice falls through to a bareword key (`["a:b"]` covers
+    // colon-bearing keys explicitly).
+    if let Some((lhs, rhs)) = inner.split_once(':') {
+        let bound = |s: &str| -> Option<Option<i64>> {
+            if s.is_empty() {
+                Some(None)
+            } else {
+                s.parse::<i64>().ok().map(Some)
+            }
+        };
+        if let (Some(start), Some(end)) = (bound(lhs), bound(rhs)) {
+            return VarSegment::Slice(start, end);
+        }
+    }
+    // Integer index: `[0]`, `[-1]`.
+    if let Ok(i) = inner.parse::<i64>() {
+        return VarSegment::Index(i);
+    }
+    // Bareword literal key: `[name]`, `[content-type]`.
+    VarSegment::Key(inner.to_string())
 }
 
 /// Drop `Stmt::Empty` (bare newlines/semicolons) from a parsed `$()` body so an
@@ -2870,7 +2925,9 @@ mod tests {
             Stmt::Command(cmd) => match &cmd.args[0] {
                 Arg::Positional(Expr::VarRef(path)) => {
                     assert_eq!(path.segments.len(), 1);
-                    let VarSegment::Field(name) = &path.segments[0];
+                    let VarSegment::Field(name) = &path.segments[0] else {
+                        panic!("expected root field, got {:?}", path.segments[0]);
+                    };
                     assert_eq!(name, "MESSAGE");
                 }
                 other => panic!("expected varref, got {:?}", other),
@@ -2885,9 +2942,16 @@ mod tests {
         match &result.statements[0] {
             Stmt::Command(cmd) => match &cmd.args[0] {
                 Arg::Positional(Expr::VarRef(path)) => {
+                    // A dotted `${RESULT.data}` keeps both as Field — the root
+                    // and a dotted segment (resolution turns the latter into the
+                    // brackets-only error).
                     assert_eq!(path.segments.len(), 2);
-                    let VarSegment::Field(a) = &path.segments[0];
-                    let VarSegment::Field(b) = &path.segments[1];
+                    let VarSegment::Field(a) = &path.segments[0] else {
+                        panic!("expected field, got {:?}", path.segments[0]);
+                    };
+                    let VarSegment::Field(b) = &path.segments[1] else {
+                        panic!("expected field, got {:?}", path.segments[1]);
+                    };
                     assert_eq!(a, "RESULT");
                     assert_eq!(b, "data");
                 }
@@ -2898,16 +2962,19 @@ mod tests {
     }
 
     #[test]
-    fn value_varref_index_ignored() {
-        // Index segments are no longer supported - they're filtered out by parse_varpath
+    fn value_varref_index_parsed() {
+        // Bracket subscripts are now parsed into typed segments (native
+        // collection access), not filtered out.
         let result = parse("echo ${ITEMS[0]}").unwrap();
         match &result.statements[0] {
             Stmt::Command(cmd) => match &cmd.args[0] {
                 Arg::Positional(Expr::VarRef(path)) => {
-                    // Index segment [0] is skipped, only ITEMS remains
-                    assert_eq!(path.segments.len(), 1);
-                    let VarSegment::Field(name) = &path.segments[0];
+                    assert_eq!(path.segments.len(), 2);
+                    let VarSegment::Field(name) = &path.segments[0] else {
+                        panic!("expected root field, got {:?}", path.segments[0]);
+                    };
                     assert_eq!(name, "ITEMS");
+                    assert_eq!(path.segments[1], VarSegment::Index(0));
                 }
                 other => panic!("expected varref, got {:?}", other),
             },
@@ -3097,7 +3164,9 @@ mod tests {
                     match &parts[1] {
                         StringPart::Var(path) => {
                             assert_eq!(path.segments.len(), 1);
-                            let VarSegment::Field(name) = &path.segments[0];
+                            let VarSegment::Field(name) = &path.segments[0] else {
+                                panic!("expected root field, got {:?}", path.segments[0]);
+                            };
                             assert_eq!(name, "NAME");
                         }
                         other => panic!("expected var, got {:?}", other),

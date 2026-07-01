@@ -14,6 +14,55 @@ before it ships.
 
 ---
 
+## Native collection read access: the bracket path resolver (2026-07-01)
+
+Step 2 of the collections effort — reading into a value with `${xs[0]}`,
+`${r[key]}`, `${r[$k]}`, `${r["weird-key"]}`, `${xs[-1]}`, `${xs[0:2]}`, chained
+`${a[b][c]}`, and `${#…}` list/record length. Deliberately *before* the
+literal-grammar gate: it only consumes `${…}` segments the lexer already splits,
+so no value/argv bifurcation and no glob-merge change — the read side was
+"half-built" and this finishes it.
+
+A reconnaissance pass (Explore agent) charted the machinery and surfaced the
+shape of the work: the lexer already hands out `["VAR","[0]","[k]"]`, but
+`parse_varpath` was *filtering every bracket segment out* (so `${x[0]}` silently
+returned the whole value — a latent silent bug the red test baseline caught
+immediately), and `resolve_path` rejected anything multi-segment. The clean
+insight that shaped the design: dynamic keys are just `$var`, resolved through
+`scope.get`, and `resolve_path` is a `Scope` method — so the **entire traversal,
+dynamic keys included, lives in `resolve_path`**, and all four var-ref eval sites
+(sync + async, expression + string) get collection access for free with no
+evaluator plumbing.
+
+The load-bearing decision was the error channel. `resolve_path` went from
+`Option<Value>` to `Result<Value, PathError>` with a two-variant split that the
+whole no-silent-fallback directive rides on: `UndefinedRoot` is **soft** (an
+error in expression position, empty inside a string — bash-compatible, preserving
+every existing `"${UNSET}"` → empty), while `Invalid` (subscript on a scalar,
+out-of-bounds, missing key, dotted access, string-key-on-list, integer-index-on-
+record) is **loud everywhere, including inside double-quoted strings** — never
+swallowed to empty. That distinction is exactly why the four primary eval sites
+each match both arms explicitly; the three reduced *sync* pipeline sites keep
+their pre-existing best-effort coalescing (a known narrow gap, filed P3).
+
+Access unwraps at the boundary through `json_to_value_no_envelope` (the same
+envelope-free law `fromjson` uses — an envelope-shaped sub-object stays a record,
+never becomes bytes), so `[[ ${cfg[healthy]} == false ]]` is a typed bool compare
+and `$(( ${cfg[port]} + 1 ))` just works — the latter needed teaching the
+arithmetic mini-parser's `${…}` branch to collect bracket runs and reuse
+`parse_varpath` + `resolve_path` rather than choking at the first `[`.
+
+Brackets-only is enforced by making a dotted `${u.name}` a loud error suggesting
+the bracket form (the lexer still splits `.field`, so a non-root `Field` segment
+*is* the dotted case). Semantic calls, all consistent with the loud-errors ethos:
+missing key errors (not bash's silent empty — `[[ k in $r ]]` is the presence
+test), integer index on a record errors ("integers index lists"), a dynamic
+string key works as a list index if it parses as one. Deepseek review confirmed
+the core (envelope-free at every level, panic-free bounds math, correct arithmetic
+bracket balancing) and turned up only the two low-priority follow-ups now in
+issues.md. Twenty-four kernel-routed tests, built on `fromjson` to construct the
+values the literal grammar can't yet.
+
 ## JSON bridge: fromjson / tojson land ahead of the grammar (2026-07-01)
 
 First implementation step of the collections effort, and deliberately the one

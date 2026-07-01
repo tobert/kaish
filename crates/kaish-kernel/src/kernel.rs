@@ -51,7 +51,7 @@ pub use kaish_types::{CommandKind, ExecuteOptions};
 use crate::backend::{BackendError, KernelBackend};
 use kaish_glob::glob_match;
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
-use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value, value_to_bool, value_to_string, ControlFlow, ExecResult, Scope};
+use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value, value_to_bool, value_length, value_to_string, ControlFlow, ExecResult, PathError, Scope};
 use crate::parser::parse;
 use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_stream, BoundedStream, JobManager, PipelineRunner, StderrReceiver};
 #[cfg(feature = "subprocess")]
@@ -2807,12 +2807,25 @@ impl Kernel {
             Expr::Literal(Value::Bool(b)) => b.to_string(),
             Expr::Literal(Value::Null) => "null".to_string(),
             Expr::VarRef(path) => {
-                let name = path.segments.iter()
-                    .map(|seg| match seg {
-                        crate::ast::VarSegment::Field(f) => f.clone(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(".");
+                let mut name = String::new();
+                for (i, seg) in path.segments.iter().enumerate() {
+                    match seg {
+                        crate::ast::VarSegment::Field(f) => {
+                            if i > 0 {
+                                name.push('.');
+                            }
+                            name.push_str(f);
+                        }
+                        crate::ast::VarSegment::Index(idx) => name.push_str(&format!("[{idx}]")),
+                        crate::ast::VarSegment::Key(k) => name.push_str(&format!("[{k}]")),
+                        crate::ast::VarSegment::Dynamic(v) => name.push_str(&format!("[${v}]")),
+                        crate::ast::VarSegment::Slice(a, b) => name.push_str(&format!(
+                            "[{}:{}]",
+                            a.map(|n| n.to_string()).unwrap_or_default(),
+                            b.map(|n| n.to_string()).unwrap_or_default()
+                        )),
+                    }
+                }
                 format!("${{{}}}", name)
             }
             Expr::Interpolated(_) => "\"...\"".to_string(),
@@ -3638,8 +3651,13 @@ impl Kernel {
             Expr::Literal(value) => Ok(value.clone()),
             Expr::VarRef(path) => {
                 let scope = self.scope.read().await;
-                scope.resolve_path(path)
-                    .ok_or_else(|| anyhow::anyhow!("undefined variable"))
+                match scope.resolve_path(path) {
+                    Ok(v) => Ok(v),
+                    Err(PathError::UndefinedRoot(_)) => {
+                        Err(anyhow::anyhow!("undefined variable"))
+                    }
+                    Err(PathError::Invalid(msg)) => Err(anyhow::anyhow!(msg)),
+                }
             }
             Expr::Interpolated(parts) => {
                 let mut result = String::new();
@@ -3761,7 +3779,7 @@ impl Kernel {
             Expr::VarLength(name) => {
                 let scope = self.scope.read().await;
                 match scope.get(name) {
-                    Some(value) => Ok(Value::Int(value_to_string(value).len() as i64)),
+                    Some(value) => Ok(Value::Int(value_length(value))),
                     None => Ok(Value::Int(0)),
                 }
             }
@@ -3895,8 +3913,10 @@ impl Kernel {
                 StringPart::Var(path) => {
                     let scope = self.scope.read().await;
                     match scope.resolve_path(path) {
-                        Some(value) => Ok(value_to_string(&value)),
-                        None => Ok(String::new()), // Unset vars expand to empty
+                        Ok(value) => Ok(value_to_string(&value)),
+                        // Unset vars expand to empty; loud path errors surface.
+                        Err(PathError::UndefinedRoot(_)) => Ok(String::new()),
+                        Err(PathError::Invalid(msg)) => Err(anyhow::anyhow!(msg)),
                     }
                 }
                 StringPart::VarWithDefault { name, default } => {
@@ -3917,7 +3937,7 @@ impl Kernel {
             StringPart::VarLength(name) => {
                 let scope = self.scope.read().await;
                 match scope.get(name) {
-                    Some(value) => Ok(value_to_string(value).len().to_string()),
+                    Some(value) => Ok(value_length(value).to_string()),
                     None => Ok("0".to_string()),
                 }
             }

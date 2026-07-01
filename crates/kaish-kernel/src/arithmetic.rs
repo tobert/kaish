@@ -269,6 +269,10 @@ impl<'a> ArithParser<'a> {
                     }
 
                     let name = self.parse_identifier()?;
+                    // Collection subscript path: `${p[port]}`, `${a[b][0]}`.
+                    if self.peek() == Some('[') {
+                        return self.eval_braced_path(&name);
+                    }
                     if self.peek() != Some('}') {
                         bail!("expected '}}' after variable name in arithmetic");
                     }
@@ -335,20 +339,67 @@ impl<'a> ArithParser<'a> {
         }
 
         // Regular variable lookup
-        match self.scope.get(name) {
-            Some(Value::Int(n)) => Ok(*n),
-            Some(Value::String(s)) => {
+        match self.scope.get(name).cloned() {
+            Some(value) => self.value_to_arith(&value, name),
+            None => Ok(0), // Unset variables default to 0 in arithmetic
+        }
+    }
+
+    /// Resolve a subscripted variable path (`${p[port]}`) and coerce to an
+    /// integer. Reuses the real path resolver, so scalar unwrap and the loud
+    /// path errors are identical to `${p[port]}` outside arithmetic.
+    fn eval_braced_path(&mut self, root: &str) -> Result<i64> {
+        let mut brackets = String::new();
+        while self.peek() == Some('[') {
+            brackets.push('[');
+            self.advance(); // consume '['
+            let mut depth = 1;
+            while depth > 0 {
+                match self.advance() {
+                    Some('[') => {
+                        depth += 1;
+                        brackets.push('[');
+                    }
+                    Some(']') => {
+                        depth -= 1;
+                        brackets.push(']');
+                    }
+                    Some(c) => brackets.push(c),
+                    None => bail!("unterminated subscript in arithmetic"),
+                }
+            }
+        }
+        if self.peek() != Some('}') {
+            bail!("expected '}}' after subscripted variable in arithmetic");
+        }
+        self.advance(); // consume '}'
+
+        let raw = format!("${{{root}{brackets}}}");
+        let path = crate::parser::parse_varpath(&raw);
+        let value = self.scope.resolve_path(&path).map_err(|e| match e {
+            crate::interpreter::PathError::UndefinedRoot(_) => {
+                anyhow::anyhow!("undefined variable in arithmetic: {root}")
+            }
+            crate::interpreter::PathError::Invalid(msg) => anyhow::anyhow!(msg),
+        })?;
+        self.value_to_arith(&value, root)
+    }
+
+    /// Coerce a resolved value to an integer for arithmetic.
+    fn value_to_arith(&self, value: &Value, name: &str) -> Result<i64> {
+        match value {
+            Value::Int(n) => Ok(*n),
+            Value::String(s) => {
                 // Try to parse string as integer
                 s.parse().with_context(|| format!(
                     "variable '{}' has non-numeric value: {:?}", name, s
                 ))
             }
-            Some(Value::Float(f)) => Ok(*f as i64),
-            Some(Value::Bool(b)) => Ok(if *b { 1 } else { 0 }),
-            Some(Value::Null) => Ok(0), // Unset variables default to 0 in arithmetic
-            Some(Value::Json(_)) => anyhow::bail!("variable '{}' is JSON, not a number", name),
-            Some(Value::Bytes(_)) => anyhow::bail!("variable '{}' is binary data, not a number", name),
-            None => Ok(0), // Unset variables default to 0 in arithmetic
+            Value::Float(f) => Ok(*f as i64),
+            Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
+            Value::Null => Ok(0), // null coerces to 0 in arithmetic
+            Value::Json(_) => anyhow::bail!("variable '{}' is JSON, not a number", name),
+            Value::Bytes(_) => anyhow::bail!("variable '{}' is binary data, not a number", name),
         }
     }
 }

@@ -937,14 +937,17 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
 pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> {
     match expr {
         Expr::Literal(value) => Some(eval_literal(value, ctx)),
-        Expr::VarRef(path) => ctx.scope.resolve_path(path),
+        // This reduced sync path coalesces any resolution failure to None
+        // (undefined or a loud path error alike); the async kernel paths carry
+        // the loud collection-access errors.
+        Expr::VarRef(path) => ctx.scope.resolve_path(path).ok(),
         Expr::Interpolated(parts) => {
             let mut result = String::new();
             for part in parts {
                 match part {
                     crate::ast::StringPart::Literal(s) => result.push_str(s),
                     crate::ast::StringPart::Var(path) => {
-                        if let Some(value) = ctx.scope.resolve_path(path) {
+                        if let Ok(value) = ctx.scope.resolve_path(path) {
                             result.push_str(&value_to_string(&value));
                         }
                     }
@@ -1045,7 +1048,7 @@ fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -
         match part {
             crate::ast::StringPart::Literal(s) => result.push_str(s),
             crate::ast::StringPart::Var(path) => {
-                if let Some(value) = ctx.scope.resolve_path(path) {
+                if let Ok(value) = ctx.scope.resolve_path(path) {
                     result.push_str(&value_to_string(&value));
                 }
             }
