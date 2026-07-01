@@ -45,7 +45,7 @@ fruits=[apple banana cherry]
 nums=[1 2 3]
 empty=[]
 
-# RECORDS — string-keyed maps
+# RECORDS — string-keyed maps; colons may be spaced or unspaced ({port:8080} ≡ {port: 8080})
 user={name: amy, role: maintainer, age: 40}
 nested={tags: [a b c], meta: {active: true}}
 
@@ -311,9 +311,12 @@ for the record.
   `fruits` must NOT spawn a new `fruit` list). The validator tracks variable names in scope
   (`walker.rs:92-97`, `scope_tracker.rs:81`), so undefined-target is catchable as an E-code
   **ahead of runtime**; a target that exists but isn't a list is a **runtime** error. Both crash —
-  no silent corruption. **First cut: `push` targets a top-level name only.** A bracketed path
-  target (`push services[web][tags] x`) is a loud error — at argv position `name[...]` collides
-  with glob-pattern lexing, and no worked example has needed it; revisit with real use cases.
+  no silent corruption. **`push` accepts the same bracket paths as lvalues**
+  (`push services[web][tags] item`) — *revised 2026-07-01 after review pushback*: top-level-only
+  forced the hostile spread-assignment workaround for nested appends
+  (`a[b]=[...${a[b]} new]`) and contradicted one-append-idiom. The path resolves under the
+  lvalue rules (root bound — E-code; intermediates must exist; leaf must be a list — runtime
+  error; never silent-create); parsing rides the same lexer rework that stops fusing `[`-runs.
 
 - **Length is `${#…}`, not a `len` builtin.** `${#xs}` returns element count for a list and key
   count for a record — the existing `${#NAME}` param-expansion (LANGUAGE.md) extended to
@@ -495,19 +498,19 @@ paths relative to `crates/kaish-kernel/src`).
   ident/colon runs (for `host:8080`-style words), so `{port:8080}` — which JSON-prior models
   WILL write — lexes as `LBrace Ident("port:8080") RBrace` and the record parser never sees a
   `Colon`. Same pass needs checking for glued slices (`${xs[0:2]}` — `0:2` inside `${…}` rides
-  `parse_var_ref`, so likely safe, but verify). Fix: exempt colon-fusion inside open
-  bracket/brace literal context, or split fused idents at the record parser (brittle — prefer
-  the lexer exemption). Doc examples use spaced `key: value`; the grammar must accept unspaced
-  too or error loudly with the fix — never mis-lex.
+  `parse_var_ref`, so likely safe, but verify). **Decided 2026-07-01: ACCEPT unspaced** —
+  `{port:8080}` ≡ `{port: 8080}`, via a colon-fusion exemption inside open literal context
+  (not ident-splitting at the parser — brittle). Erroring on the single most common JSON
+  spelling would burn a verify round on nearly every script for no safety gain; there is no
+  ambiguity to protect.
 
 - **Quoted keys inside interpolated strings break the string lexer** *(confirmed:
   `lexer.rs:489` — the double-quote regex stops at the first unescaped `"`)*:
-  `echo "${r["weird key"]}"` shatters the token stream today. Two options: (a) rewrite the
-  string lexer to balance `${…}` interiors (invasive), or (b) first cut: **quoted keys are
-  not allowed inside a double-quoted string** — loud error with the assign-first fix
-  (`k="weird key"; echo "${r[$k]}"`). Lean (b), upgrade to (a) if the panel shows models
-  reaching for the nested form. Verify whether bare `${r["weird key"]}` *outside* strings
-  survives `lex_varref` too.
+  `echo "${r["weird key"]}"` shatters the token stream today. **Decided 2026-07-01: quoted
+  keys are not allowed inside a double-quoted string** — a loud error that suggests
+  assign-first (`k="weird key"; echo "${r[$k]}"`). Rewriting the string lexer to balance
+  `${…}` interiors stays available later if the panel shows models reaching for the nested
+  form. Verify whether bare `${r["weird key"]}` *outside* strings survives `lex_varref` too.
 - **`[[ ]]` interplay**: `[[` is deliberately **not** a distinct token — it's two consecutive
   `Token::LBracket`, chosen *specifically* "to avoid conflicts with nested array syntax"
   (`parser.rs:1913-1920`). Forward-compatible with list literals by design. There is no POSIX
@@ -599,7 +602,9 @@ taught a specific way** — get the examples wrong and even capable models fail.
    that *stated* the rule still produced unwrapped paths; an example that *showed* the braced form
    was copied. Every doc string embedding a path must use `"${r[$k]}"` / `"${user[name]}"` (NOT
    `$($r[$k])` — `$()` is execution only). Show bare `"$user.name"` (expands `$user`, leaves
-   `.name` literal) as the WRONG form so models learn the contrast.
+   `.name` literal) as the WRONG form so models learn the contrast. Quoted keys can't appear
+   inside a double-quoted string (loud error) — show the assign-first idiom
+   (`k="weird key"; echo "${r[$k]}"`) wherever a weird key meets interpolation.
 
 5. **Show both `push` and the `...` spread — their absence defaults to bare splat.** With neither
    shown, every model appended via `xs=[$xs new]`, which under our resolved rule *nests* — a
@@ -725,8 +730,8 @@ Points decided or flagged during the 2026-07-01 review:
 - Deletion ergonomics (`unset user[email]`) — noted above, designed later.
 - **Argv spread** (`cmd ...$xs` splatting a list into command arguments) — models will try it
   once `...` is taught; explicitly excluded for now, revisit with use cases.
-- **Slice lvalues** (`xs[0:2]=…`) and **`push` to a bracketed path** — loud errors, see lvalue
-  rules.
+- **Slice lvalues** (`xs[0:2]=…`) — loud error, see lvalue rules. (`push` to a bracketed
+  path IS in scope — see the push decision.)
 - Pair iteration (`for k v in $record`) — iterate keys, access values.
 - A shape/type predicate (`typeof` or `[[ -list / -record ]]`) — the missing guard for the
   record-vs-list `for` trap (Teaching note #12); design if it bites in practice.
