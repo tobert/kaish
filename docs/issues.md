@@ -300,6 +300,14 @@ depth. Worth dedicated kernel-routed suites.
 those repos). **Phase 5:** i18n scaffolding + first `ja` fragments. Full design:
 [composable-help.md](composable-help.md).
 
+**Instruction-budget guardrail (2026-07-01, from the arrays-and-hashes review):**
+nothing caps composed-help size — no test, no stated ceiling; `Depth` is the only
+lever. An embedder's composed `agent_onboarding()` block is already ~9–10.5K chars
+(builtin index dominates at ~5.4K). Before the collections fragments land (they're
+the feature that will test this), pick a ceiling and enforce it with a size
+assertion on `agent_onboarding()` output in kaish-help's tests. See
+[arrays-and-hashes.md](arrays-and-hashes.md) "Help & teaching delivery".
+
 ### Split `kernel.rs::execute_stmt_flow`
 `kernel.rs:1463`–~1913 is a 16-arm async match (kernel.rs is ~6,838 lines); each
 arm reaches into `scope`/`exec_ctx`/`user_tools` RwLocks, and `For`/`While`/`Case`

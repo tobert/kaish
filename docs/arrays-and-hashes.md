@@ -1,9 +1,12 @@
 # Arrays & Hashes — Design Doc
 
 Status: **proposal / design exploration** (not yet implemented)
-Author: design notes from a 2026-06-05 session
-Related: [LANGUAGE.md](LANGUAGE.md), [issues.md](issues.md), `arch_data_iteration.md`,
-`arch_for_newline_split.md`, `arch_no_json_sniffing.md` (auto-memory)
+Author: design notes from a 2026-06-05 session.
+**Revised 2026-07-01** — brackets-only access, record iteration, comparison/unwrap semantics,
+full lvalue rules; implementation notes re-grounded against HEAD `f92070e`. Superseded
+decisions are kept below with annotations, since the evidence record is part of the method.
+Related: [LANGUAGE.md](LANGUAGE.md), [issues.md](issues.md),
+[designing-syntax-with-llms.md](designing-syntax-with-llms.md)
 
 ## Motivation
 
@@ -15,6 +18,9 @@ element/field access, length, membership, and append.
 The goal is to expose the collections kaish can already represent, with ergonomics that are
 **predictable for AI agents** — the primary audience. That last constraint is not hand-wavy: we
 ran an LLM stress test (below) and let it drive several decisions.
+
+A longer-range hope: if native collections cover the common JSON tasks, `jq` may be able to
+leave the core builtin set entirely (see Open decisions).
 
 ## Design principle: one value model, not two namespaces
 
@@ -49,52 +55,65 @@ services={
   api:    {port: 9000, replicas: 2, healthy: false},
 }
 
-# ACCESS — 0-indexed. Bare $xs is the WHOLE value; brace ANY path/index with ${…}.
-${fruits[0]}          # apple
-${user.name}          # amy
-${nested.tags[1]}     # b
-${nested.meta.active} # true
-$fruits               # whole list — ONE value (no word splitting)
-${fruits[-1]}         # cherry        (negative index)
-${fruits[0:2]}        # [apple banana] (slice: end-exclusive)
-${user.$k}            # dynamic key
-${services.web.port}  # 8080 — chained dot (web is a record)
-${nested.tags[0]}     # a    — chained dot + bracket (tags is a list)
+# ACCESS — brackets only, 0-indexed. Bare $xs is the WHOLE value (no word
+# splitting); ANY access is a bracketed subscript inside ${…}.
+${fruits[0]}             # apple
+${user[name]}            # amy — a bareword subscript is a LITERAL key
+${nested[tags][1]}       # b — chained subscripts
+${nested[meta][active]}  # true
+$fruits                  # whole list — ONE value
+${fruits[-1]}            # cherry         (negative index)
+${fruits[0:2]}           # [apple banana] (slice: end-exclusive; yields a list)
+${user[$k]}              # dynamic key — a variable is always $-marked
+${r["content-type"]}     # quoted key for anything that isn't a bareword
+${services[web][port]}   # 8080
 
-# Same form inside strings — no special string rule (this is WHY we brace).
-# Bare "$user.name" would expand $user only and leave ".name" literal; always brace.
-echo "${user.name} lives here"    # amy lives here
+# THE ONE SUBSCRIPT RULE: in collection contexts a bareword is a literal key;
+# variables are always $-marked. Same rule as record literals ({name: amy} —
+# name is literal). Integers index lists; barewords/strings key records.
+#
+# There is NO dot access. ${user.name} is a loud error with the fix in the
+# message ("use ${user[name]}"). Native access is bracket-shaped; jq keeps the
+# dot-shaped path language for external JSON — the two don't blur.
+
+# Same form inside strings — no special string rule.
+echo "${user[name]} lives here"    # amy lives here
 
 # Scalars stay scalars — no auto-coercion to a collection. $PATH is a string;
 # ${PATH[0]} is an error. Want a list? split it explicitly:
 parts=$(split $PATH :)
 
-# RECORD field set (insert/update) — by path; no spaces (assignment rule)
-user.email=amy@example.com
+# ASSIGNMENT — the same bracket paths work as lvalues; no spaces around `=`.
+user[email]=amy@example.com    # record key: insert or update
+fruits[0]=kiwi                 # list index: in-place update (must be in bounds)
+services[web][port]=9090       # nested path
 tally={}
-tally.total=${#services}           # length is ${#…}, not a builtin
+tally[total]=${#services}      # length is ${#…}, not a builtin
+# No autovivification: every intermediate must already exist with the right
+# shape. The ONLY thing a path-set may create is the final record key.
+# Out-of-bounds list index is an error — push is how lists grow.
 
-# OPS — keys/values are builtins; length is the param-expansion ${#…} (lists AND records).
+# OPS — keys/values are builtins; length is the param-expansion ${#…}.
 echo ${#fruits}      # 3   (element count)
 echo ${#user}        # 3   (key count — record)
-keys $user           # [name role age]      (builtin; capture with $())
-values $user         # [amy maintainer 40]  (builtin; capture with $())
-push fruits date       # in-place append; takes the variable NAME (like read/unset), not $fruits
-new=[...$fruits date]  # build a NEW list with an extra element (spread; there is no `append` builtin)
+keys $user           # [name role age]      (insertion order; capture with $())
+values $user         # [amy maintainer 40]  (same order as keys)
+push fruits date       # in-place append; takes the variable NAME (like read/unset)
+new=[...$fruits date]  # build a NEW list with an extra element (spread)
 
-# MEMBERSHIP — an operator inside [[ ]], NOT a command. Always shown inside a full
-# test, never as a standalone [[ ]] line (see Teaching notes #1).
+# MEMBERSHIP — an operator inside [[ ]], NOT a command. Always shown inside a
+# full test, never as a standalone [[ ]] line (see Teaching notes #1).
 if [[ banana in $fruits ]]; then echo "have banana"; fi   # element in list
 if [[ name in $user ]]; then echo "has name"; fi          # key in record
 if [[ tmp not in $services ]]; then echo "no tmp"; fi     # absent
 if [[ apple in $fruits && web in $services ]]; then echo both; fi
 
-# ITERATION — for head accepts a bare builtin (no $()).
-# Blocks are kaish's standard sh-style do/done & then/fi — NOT curly braces.
+# ITERATION — a list iterates its ELEMENTS; a record iterates its KEYS (like
+# Python's `for k in dict`). Blocks are kaish's standard do/done & then/fi.
 for f in $fruits; do echo $f; done
-for k in keys $user; do echo "$k = ${user.$k}"; done
-for v in values $user; do echo $v; done
-for p in ${nested.tags}; do echo $p; done   # iterate a nested list (path → braced)
+for k in $user; do echo "$k = ${user[$k]}"; done
+for v in $(values $user); do echo $v; done   # a builtin as a value needs $()
+for p in ${nested[tags]}; do echo $p; done   # iterate a nested list
 ```
 
 ## Worked example
@@ -111,18 +130,18 @@ services={
 
 to_restart=[]
 
-for name in keys $services; do
-  cfg=${services.$name}
-  echo "$name: port=${cfg.port} replicas=${cfg.replicas}"
+for name in $services; do            # record → its keys
+  cfg=${services[$name]}
+  echo "$name: port=${cfg[port]} replicas=${cfg[replicas]}"
 
-  if [[ ${cfg.healthy} == false ]]; then
-    push to_restart $name          # in-place append, no reassignment, no discard trap
+  if [[ ${cfg[healthy]} == false ]]; then   # typed bool compare (see unwrap rule)
+    push to_restart $name            # in-place append, no discard trap
   fi
 done
 
 echo "restart count: ${#to_restart}"
 for svc in $to_restart; do
-  echo "restarting $svc on port ${services.$svc.port}"
+  echo "restarting $svc on port ${services[$svc][port]}"
 done
 ```
 
@@ -146,18 +165,20 @@ deliberately "fast & loose" small models. Findings:
 2. **0-indexing is fine.** No off-by-one reversion to 1-indexed habits, even from fast models.
    (zsh/fish 1-indexing is a known porting-bug source; JSON/our lineage says 0.)
 
-3. **`for k in keys $r` (bare builtin in the for-head) is a GO.** Every model used it correctly
-   and naturally — plain *and* nested (`for p in ${services.$s}` inside `for s in keys $services`).
-   The head position is special enough that nobody got confused, and it's what shell hands type.
-   Requiring `$(keys $r)` there is technically consistent with `for v in $(cmd)`, but models
-   dropped the `$()` anyway; relaxing the head position costs nothing and removes the most
-   common error.
+3. **`for k in keys $r` (bare builtin in the for-head) is a GO.** *(evidence retained; decision
+   **SUPERSEDED 2026-07-01** — see "Record iteration" under Resolved decisions. The for-head
+   already accepts a bare word list — `for x in a b c` is valid kaish today — so a bare-builtin
+   head would silently change the meaning of currently-valid syntax, and the set of quasi-reserved
+   words would grow with every future builtin. `for k in $record` iterating keys keeps the tested
+   ergonomics under a stronger Python prior with zero grammar cost.)* Original finding: every
+   model used the bare form correctly and naturally, plain and nested; requiring `$(keys $r)` in
+   the head was the most common error.
 
 4. **Membership is `[[ key in $r ]]`, NOT `if has`.** This is the clearest result. A `has`
    *command* was unstable: fast models either wrapped it (`if $(has …)`) or garbled the args
    (`if has keys $inventory "bananas"`). Re-spelled as a `[[ ]]` operator, **both fast/loose
    models got all seven membership tasks correct** — key presence, `not in`, list elements,
-   nested-list (`[[ 443 in ${servers.web} ]]`), membership in a loop, and compound `&&`. `in`
+   nested-list (`[[ 443 in ${servers[web]} ]]`), membership in a loop, and compound `&&`. `in`
    slots into the existing test-operator mental model (`==`, `-f`) reinforced by Python's `in`
    and `for x in`. It composes; a bare command does not.
 
@@ -165,9 +186,9 @@ deliberately "fast & loose" small models. Findings:
    The single most error-prone construct in testing was *nested* capture: `len $(keys $r)`. Fast
    models collapsed it (`echo len keys $inventory`). Two fixes: (a) length is the existing
    param-expansion `${#xs}` extended to collections (list → element count, record → key count),
-   not a `len` builtin — one length form, consistent with `${#NAME}` already in LANGUAGE.md, and
-   the lexer change is a single spot (`kernel.rs:2802`); (b) `keys $r`/`values $r` accept records
-   directly so you never nest. The error mode goes with it.
+   not a `len` builtin — one length form, consistent with `${#NAME}` already in LANGUAGE.md;
+   (b) `keys $r`/`values $r` accept records directly so you never nest. The error mode goes
+   with it.
 
 6. **`append` returns a new list — and discard is a trap.** Under reduced scaffolding, a capable
    model wrote `append $colors purple` and threw the result away, then reported the *old*
@@ -185,10 +206,89 @@ deliberately "fast & loose" small models. Findings:
 
 ## Resolved decisions
 
-Decided during this design session; rationale kept for the record.
+Decided during the design sessions (2026-06-05 and the 2026-07-01 revision); rationale kept
+for the record.
 
-- **Assignment spacing — no spaces, everywhere** (`fruits=[...]`, `tally.total=$(...)`,
-  `user.email=amy@example.com`). Three reasons converge:
+- **Access form — brackets only, inside `${…}`.** *(Revised 2026-07-01; supersedes the earlier
+  "universal `${…}` with dotted paths" decision.)* Bare `$xs` is the WHOLE value; every access
+  is a bracketed subscript: `${xs[0]}`, `${r[key]}`, `${r["weird-key"]}`, `${r[$k]}`,
+  `${xs[-1]}`, `${xs[0:2]}`, `${a[b][0]}`. There is **no dot access**. Subscript rule: a
+  bareword is a **literal key** (bash associative-array prior; same as record-literal keys),
+  a `$var` is dynamic, quotes cover non-bareword keys, integers index lists. Why brackets only:
+  1. **Lists are brackets in every language anyway** — dots would be a records-only second form
+     that exists to save two characters on identifier-shaped keys. One form, no dot-vs-bracket
+     question, consistency over convenience.
+  2. **Non-identifier keys are first-class** (`${r["content-type"]}`,
+     `${r["app.kubernetes.io/name"]}`) instead of falling off a cliff into jq.
+  3. **It dissolves `${user.$k}`** — the oddest spelling in the earlier draft — into
+     `${user[$k]}`, which is the straight Python/JS prior.
+  4. **Clean division from jq**: native access is bracket-shaped, jq stays dot-shaped. With dots
+     in both, models produce half-remembered hybrids; with brackets the surfaces don't blur.
+  5. **It kills a real hazard**: the lexer's `Ident` regex admits `.` (`lexer.rs:596`), so
+     `user.email=x` *parses today* as a flat variable literally named `user.email` — which is
+     then unreadable (`${user.email}` rejects multi-segment paths). If dots meant paths, two
+     adjacent spellings would silently diverge (flat write vs path write). Brackets-only makes
+     every dotted LHS a loud error instead (see lvalue rules).
+  Costs, accepted honestly: deep paths are noisier than dotted (`${services[web][port]}`), and
+  dot-leakage from jq/JS priors will happen — it's a targeted parse error with the fix in the
+  message, converging in one verify round, never a silent misread. One asymmetry to document
+  side by side: arithmetic `$((x + 1))` evaluates bare names as variables (separate mini-parser,
+  `arithmetic.rs:285`, inherited from bash) while bracket subscripts treat barewords as literal
+  keys. Assignment *lvalues* use the same bracket paths, bare (no `${…}`) — `${…}` is for
+  reading. **Untested surface — panel re-test required before sign-off** (Teaching note #8).
+
+- **Record iteration — `for k in $record` iterates its keys.** *(Added 2026-07-01; supersedes
+  the bare-builtin for-head, evidence #3.)* A list iterates elements (already true today —
+  `kernel.rs:2130` iterates `Value::Json(Array)` element-wise); a record iterates **keys**, in
+  insertion order — Python's exact `for k in dict` prior. Why not the bare-builtin head:
+  `for x in a b c` is *valid kaish today* (word list, `parser.rs:1219`), so `for k in keys $user`
+  already parses as a two-item list — the relaxed head wouldn't fill a grammar hole, it would
+  change the meaning of valid syntax based on whether word one names a builtin, and the set of
+  quasi-reserved words would grow with every future builtin. That fights "predictable" forever.
+  No compat break: a record in a for-head today iterates as a single opaque item, which nothing
+  sane relies on. `keys`/`values` stay ordinary builtins used via `$()` like any builtin
+  (`ks=$(keys $r)`). **Validator advisory** (soft W-code): a bareword `keys`/`values` directly in
+  a for-head (`for k in keys $user`) is legal word-list syntax that now silently iterates the
+  word "keys" plus the record's keys — nudge with the fix (`for k in $user` or `$(keys $user)`).
+
+- **Access unwraps JSON scalars at the boundary.** *(Added 2026-07-01.)* A subscript access that
+  lands on a JSON scalar yields the native `Value`: `Json(Bool)`→`Bool`, `Json(Number)`→`Int`
+  (integral) or `Float`, `Json(String)`→`String`, `Json(Null)`→`Null`. Only collections stay
+  `Value::Json`. Consequences: `[[ ${cfg[healthy]} == false ]]` is a **typed** bool comparison
+  (today `Json(Bool)` vs `Bool` falls through to `values_equal`'s stringify-both-sides fallback,
+  `eval.rs:747` — correct by accident; make it correct by design), and `$(( ${cfg[port]} + 1 ))`
+  just works. One model, no "JSON-flavored scalars" second species.
+
+- **Comparison semantics for collections.** *(Added 2026-07-01.)* `==`/`!=` between two
+  collections is **structural JSON equality** (records order-insensitive — `serde_json::Map`
+  equality; lists order-sensitive). A collection compared to a scalar is a **loud error** with a
+  hint ("use `in` for membership; jq for structural queries") — `[[ $list == banana ]]` being
+  silently false is exactly the trap `in` exists to close. Ordering operators (`<`, `-lt`, …) on
+  collections are errors.
+
+- **Assignment lvalues — bracket paths, loud errors, no autovivification.** *(Added
+  2026-07-01.)* `name[seg][seg…]=value` writes into a collection in place:
+  - The **final segment** may insert a new record key (`user[email]=x` on a record without
+    `email`) or update an existing list index. Everything above it must already exist with the
+    right shape — **no autovivification** (the Perl trap): `a[b][c]=x` with no `b` is an error;
+    init with `a={}` / `a[b]={}` first.
+  - **List index set is in-bounds update only**; out-of-bounds is an error — `push` is the grow
+    tool. Negative indices work (read symmetry). **No slice lvalues.**
+  - **Undefined root, scalar root, or wrong-shaped intermediate → error** (undefined root is a
+    validator E-code, same rule as `push`; shape errors are runtime — the validator tracks
+    names, not types).
+  - **Path lvalues are illegal in env-prefix position** (`user[email]=x cmd`) — structured
+    values can't cross the process boundary anyway (see export decision).
+  - **Assignment LHS names tighten to POSIX names** (`[A-Za-z_][A-Za-z0-9_]*`). Today the
+    shared `Ident` token admits `.`/`@`/`-` (needed for command names like `some-tool`), so
+    `user.email=x` and `my-var=5` parse as flat assignments; enforce the restriction in the
+    assignment/env-prefix parser or validator — NOT by changing the `Ident` regex — with the
+    error suggesting brackets (`user[email]=x`). Breaking in the letter, not in practice: a
+    flat dotted variable is unreadable today (only observable as a child env var via the
+    prefix form).
+
+- **Assignment spacing — no spaces, everywhere** (`fruits=[...]`, `tally[total]=$(...)`,
+  `user[email]=amy@example.com`). Three reasons converge:
   (1) **consistency** — kaish scalar assignment is already no-space (`NAME="value"`); a split
   grammar (no-space scalar / spaced collection) would surprise and would break the habit on
   scalars;
@@ -197,7 +297,7 @@ Decided during this design session; rationale kept for the record.
   (`x = 5` runs command `x`; `x= 5` runs `5` with `x=''`);
   (3) **model priors** — models' trained default *is* no-space shell assignment, so this is the
   more robust choice, not a concession (the experiment's spaced form worked, but cut against
-  their grain). Path-set lvalues (`user.email=`, `tally.total=`) follow the same no-space rule.
+  their grain).
 
 - **Append — `push` (in-place); spelling frozen, pure `append` dropped.** `push name value`
   mutates the named list in place. Because it must write back to the caller's variable, it takes
@@ -209,34 +309,38 @@ Decided during this design session; rationale kept for the record.
   competing spellings.
   **`push` to an undefined target is an error, never a silent create** (a typo `push fruit x` for
   `fruits` must NOT spawn a new `fruit` list). The validator tracks variable names in scope
-  (`walker.rs:458`), so undefined-target is catchable as an E-code **ahead of runtime**; a target
-  that exists but isn't a list is a **runtime** error (the validator tracks names, not types).
-  Both crash — no silent corruption.
+  (`walker.rs:92-97`, `scope_tracker.rs:81`), so undefined-target is catchable as an E-code
+  **ahead of runtime**; a target that exists but isn't a list is a **runtime** error. Both crash —
+  no silent corruption. **First cut: `push` targets a top-level name only.** A bracketed path
+  target (`push services[web][tags] x`) is a loud error — at argv position `name[...]` collides
+  with glob-pattern lexing, and no worked example has needed it; revisit with real use cases.
 
 - **Length is `${#…}`, not a `len` builtin.** `${#xs}` returns element count for a list and key
   count for a record — the existing `${#NAME}` param-expansion (LANGUAGE.md) extended to
-  collections. One length form, no nested `len $(keys $r)` trap, lexer change is a single spot
-  (`kernel.rs:2802`). `keys $r` / `values $r` stay builtins (no clean param-expansion form, and
-  they tested well). Bare `$xs` whole-value, `${#xs}` for its size.
+  collections. One length form, no nested `len $(keys $r)` trap. Strings keep today's behavior.
+  *(Correction 2026-07-01: this is no longer "one spot" — there are now **three** duplicated
+  call sites: `kernel.rs:3761` (`Expr::VarLength`), `kernel.rs:3917` (in-string), and
+  `eval.rs:427` (sync path). Consolidate before extending.)*
 
 - **String path interpolation is `${path}`; no auto-interpolation.** Inside a string, brace the
-  path to bound it — `"${user.name}"`, `"${user.tags[0]}"`, `"${user.$k}"` — exactly the
-  `$VAR` vs `${VAR}` rule already in LANGUAGE.md. Bare `"$user.name"` expands `$user` only and
-  leaves `.name` as literal text; this is the *current* lexer behavior (`parser.rs:627` stops
-  `$VAR` at `.`), not a new rule. `$()` is **not** overloaded for access — it stays
+  subscripted path to bound it — `"${user[name]}"`, `"${user[tags][0]}"`, `"${user[$k]}"` —
+  exactly the `$VAR` vs `${VAR}` rule already in LANGUAGE.md. Bare `"$user.name"` expands `$user`
+  only and leaves `.name` as literal text; this is *current* lexer behavior (`parser.rs:653`
+  stops `$VAR` at `.`), not a new rule. `$()` is **not** overloaded for access — it stays
   command-substitution only (this also kills the "models wrap everything in `$()`" risk Gemini
-  flagged). `${...}` already parses dotted segments (`lexer.rs:2033`), so this rides existing
-  machinery.
+  flagged). The `${…}` interior already splits dotted and bracketed segments
+  (`lexer.rs:2178`), so this rides existing machinery.
 
 - **Value semantics — copy-on-assign.** `b=$a` copies the value; lists/records are never shared
   references. Reference aliasing would be catastrophic for kaish specifically: `Kernel::fork` +
   scatter/gather + background jobs would leak mutable state across workers. Copy matches JSON
-  intuitions and shell's value model.
+  intuitions and shell's value model. (Path-set is clone-root → mutate → write back; there is no
+  in-place mutation of stored `Value`s anywhere today, and that stays true observationally.)
 
-- **Scalars never auto-coerce to collections.** `$PATH` is a string; `${PATH[0]}` / `$PATH.foo`
-  on a scalar is an error, not a magic split. To treat a string as a list, split it explicitly
-  (`parts=$(split $PATH :)`). Consistent with kaish's no-word-splitting stance: structure is
-  always explicit.
+- **Scalars never auto-coerce to collections.** `$PATH` is a string; `${PATH[0]}` on a scalar is
+  an error, not a magic split. To treat a string as a list, split it explicitly
+  (`parts=$(split $PATH :)` — the `split` builtin already exists). Consistent with kaish's
+  no-word-splitting stance: structure is always explicit.
 
 - **Membership `in` is collection-only.** `[[ e in $list ]]` (element) and `[[ k in $record ]]`
   (key). A **string** RHS is an error — for substring tests use existing shell syntax (`=~`,
@@ -244,32 +348,28 @@ Decided during this design session; rationale kept for the record.
   on the sh muscle-memory path avoids overloading `in` and conflicting with `=~`.
 
 - **`export` of a structured value is an error.** You cannot put a list/record in an OS env var;
-  kaish will **not** silently JSON-serialize it (today `value_to_string` does — `kernel.rs:3504`;
-  flip it to error). If you want JSON in the environment, serialize explicitly first. Surfacing
-  this boundary loudly is the point — the structured data model is otherwise invisible at the
-  process edge.
+  kaish will **not** silently JSON-serialize it. Today it does, at spawn time
+  (`kernel.rs:4561` and its synced test-only twin `dispatch.rs:231`; `export.rs:164` also
+  quote-stringifies for display) — flip to error at both spawn sites. If you want JSON in the
+  environment, serialize explicitly first. Surfacing this boundary loudly is the point — the
+  structured data model is otherwise invisible at the process edge.
 
 - **Commas optional in BOTH lists and records.** `[1 2 3]` ≡ `[1, 2, 3]`; `{a: 1, b: 2}` ≡
   `{a: 1 b: 2}`. Records were shown comma-separated and lists space-separated, which would make
   models hallucinate commas in lists (Gemini's catch); allowing optional commas in both removes
   the inconsistency, matches JSON/model priors, and is easier for static tools to validate.
-  (Brushes the bare-comma lexer oddity in issues.md inside `[ ]` context — verify before
-  implementing.)
+  *(The "bare-comma lexer oddity" this section previously cited is not in issues.md — the entry
+  no longer exists. `Token::Comma` is a plain token (`lexer.rs:356`); no known oddity remains.)*
+
+- **Strict quoting inside literals.** *(Resolved 2026-07-01; was open.)* A literal element or
+  record value is exactly **one word or one quoted string**: `["green apple" banana]`,
+  `{msg: "hello world"}`. Multi-word bareword values are a parse error (`{msg: hello world}` —
+  error, with the quoted fix in the message), never silently split or joined. Same for keys:
+  bareword or quoted string. The verify pass converges models on this in one round.
 
 - **Collections are heterogeneous.** It's JSON underneath (`Value::Json`): `[1 two true]` and
   mixed-type records are legal. `x=[]` is an empty list of no fixed element type; `push x 1`
   then `push x two` is fine.
-
-- **Access form — universal `${…}`.** Bare `$xs` is the WHOLE value; ANY path/index access is
-  braced: `${xs[0]}`, `${r.key}`, `${r.$k}`, `${xs[-1]}`, `${xs[0:2]}`, `${a.b[0]}`. Chosen over
-  bare postfix access (`$xs[0]`/`$user.name`) for four reasons: (1) one form in *and* out of
-  strings — no separate string-interpolation rule; (2) bash-consistent — `${arr[0]}` is how bash
-  indexes, and bare `$arr[0]` isn't valid bash anyway; (3) it rides the `${…}` segment infra that
-  already exists (`lexer.rs:2033`, MODERATE) instead of needing a new bare-postfix grammar (HARD);
-  (4) dissolves the dot-vs-bracket question. Assignment *lvalues* stay bare (`user.email=…`,
-  `tally.total=…`) — `${…}` is for reading. NOTE: this reverses the bare access models produced
-  unprompted in testing, so re-stress-test that requiring `${roles.bob}` doesn't fight the
-  JS/Python bare-`r.key` prior before sign-off (Teaching note #8).
 
 - **List-splat in a literal — nest by default, explicit `...` spread.** A bare variable inside
   `[ ]` is ONE element (it nests — consistent with "a value is one value", keeps lists nestable,
@@ -284,69 +384,115 @@ Decided during this design session; rationale kept for the record.
   priors make the choice essentially free for taught models. **Validator hint can be SOFT**
   (low-priority nudge, not a hard error — nesting is legal data): models only default to
   bare-`$xs`-as-splat when `...` is *not* shown, so the hint mainly backstops untaught/human use.
-  Token note: confirm `...` / `..` don't clash with the range-parsing oddity logged in issues.md
-  before implementing.
+  *(Token note, corrected 2026-07-01: the "range-parsing oddity" previously cited in issues.md
+  does not exist there. The lexer has no `..`/`...` handling at all — `...` is a new token,
+  meaningful only inside `[ ]` value context.)*
 
 ## Open decisions
 
 Not yet resolved; flagging them so we decide deliberately.
 
-- **jq vs native — discover after implementation.** With native traversal, `${user.name}` competes
-  with `jq -r '.name'`. Deliberately NOT deciding now: the hypothesis is that a lot of jq for
-  *simple* cases disappears once native is easy, but jq has heavy model training and stays the
-  tool for raw external JSON. Re-evaluate with the feature in hand; then write the heuristic.
-
-- **Quoting inside literals — lean strict.** Elements with spaces / specials
-  (`["green apple" banana]`, `["[weird]" x]`) need explicit quotes. Lean toward strict rules and
-  let the verify pass nudge models to correctness incrementally (even a lite model converges).
-  Exact rules TBD.
+- **jq vs native — and whether jq can leave the core.** With native traversal, `${user[name]}`
+  competes with `jq -r '.name'` for simple cases. The division is at least clean now: native is
+  bracket-shaped and operates on values already in the shell; jq is dot-shaped and owns complex
+  queries. The longer-range possibility (2026-07-01): if native collections + `for`/`if`/`push`
+  cover the common tasks (the worked example *is* `map`+`select`), **jq may drop out of the core
+  builtin set** into an external plugin/embedder tool. Hard prerequisite: without jq, kaish
+  needs a JSON **ingress/egress** path — today jq is the only bridge from external JSON *text*
+  (curl output, config files) into `Value::Json` and back. That means small parse/serialize
+  builtins (working names `fromjson`/`tojson`, jq-consistent priors) designed alongside or soon
+  after the first cut. Deliberately not deciding now: re-evaluate with the feature in hand,
+  measure how much jq usage remains, then write the heuristic — and only then consider the
+  plugin split (jq is heavily model-trained; removal must not strand agents).
 
 - **shellcheck posture.** Arrays/records are a kaish *extension* beyond the `sh` subset that
   passes `shellcheck --enable=all`. Scripts using them are no longer plain-sh-clean by
   construction. Confirm acceptable (it is — explicit extensions, like floats and booleans). See
   issues.md P4 for the broader framing fix.
 
-- **Record field deletion / list removal.** Not designed yet. Lean `unset user.email` (reuses the
-  existing shell concept) over inventing `remove`. Out of scope for the first cut.
+- **Record field deletion / list removal.** Not designed yet. Lean `unset user[email]` (reuses
+  the existing shell concept, same bracket-path lvalue) over inventing `remove`. Out of scope
+  for the first cut.
 
 ## Implementation notes (sketch)
 
-Grounded in a 2026-06-05 lexer/parser/validator read (file:line refs are from that pass; verify
-before relying on them).
+Re-grounded 2026-07-01 against HEAD `f92070e` (all file:line refs current as of that pass;
+paths relative to `crates/kaish-kernel/src`).
 
-- **Lexer/parser collisions to watch:**
-  - `[ ... ]` list literal vs `[[ ... ]]` test vs POSIX `[` test command. The `[[` token is
-    already distinct; a single `[` at value position (RHS of assignment / argument) must lex as a
-    list literal, not the test command.
-  - `{ ... }` record literal vs command block / brace group. Disambiguate by context: a `{` at
-    *value* position (after `=`, in an argument, inside a literal) is a record; a `{` at
-    *statement* position is a block.
-  - **Path access already half-exists**: `${VAR}` interiors are split on `.`/`[` into
-    `VarPath`/`VarSegment` segments (`lexer.rs:2033`), but index segments are filtered out
-    (`parser.rs:108`) and `VarSegment` has only `Field` (`ast/types.rs:399`); `resolve_path`
-    handles single-segment only (`interpreter/scope.rs:354`). To get `${user.tags[0]}`: add
-    `VarSegment::Index`, stop filtering, implement nested traversal. (Whether bare `$VAR.foo`
-    *outside* strings also gets postfix access is the open access-form decision.)
-- **String interpolation** already stops `$VAR` at `.` (`parser.rs:627`), so no-auto-interpolation
-  is current behavior; `${path}` is the interpolation form (rides the same `${}` segment infra).
-- **`${#…}` length** is one spot (`kernel.rs:2802`, currently `value_to_string(value).len()`):
-  type-dispatch on `Value::Json` (array len / object key count). Drop the `len` builtin.
-- **`[[ in ]]` evaluation** routes through the existing async test path (`eval_test_async` in
-  `kernel.rs`, see auto-memory `[[ ]] File Test Evaluation`) so it is VFS/backend-aware. Add
-  `in` / `not in` as comparison operators that inspect the RHS `Value::Json` shape (array →
-  element membership; object → key membership; **string RHS → error**). The RHS must accept a
-  list/record **literal**, not just a `$var` — Haiku produced `[[ $a not in [dog] ]]`.
-- **`for` head** already consumes a value/`.data`; extend the head grammar to accept a bare
-  builtin invocation (`keys $r`) in addition to `$VAR` and `$(...)`. NOTE the collision Gemini
-  flagged: a literal first word matching a builtin name (`for x in keys`) becomes quasi-reserved
-  in the head — document the rule (known-builtin → call; else word list; quote to force literal).
-- **`keys`/`values`** dispatch on `Value::Json` shape (record → key list / value list).
-- **`push` validation**: validator tracks bound names but not types (`walker.rs:458`,
-  `scope_tracker.rs`). Register `push`'s first arg as a var-target; undefined target → E-code
-  (pre-runtime); defined-but-not-a-list → runtime error. Never silently create.
-- **`export` of a structured value → error**: enforce at `kernel.rs:3504` (and test path
-  `dispatch.rs:220`) before `value_to_string` serializes `Value::Json`. Today it silently
-  JSON-stringifies (`eval.rs:514`); flip to error.
+- **Glob-merge is the big lexer collision — including one the first draft missed.**
+  Space-separated literals are safe: the glob-run merger only fuses **span-adjacent** tokens
+  (`merge_glob_adjacent`, `lexer.rs:1895-1958`), so `[a b c]` never merges. But *glued*
+  bracket runs with a matched pair DO merge into a single `Token::GlobWord`: **`[]`, `[dog]`,
+  `[1]` — i.e. empty and single-element list literals — currently lex as glob words**, and
+  `x=[dog]` parses *today* as an assignment of a glob expansion (`primary_expr`'s glob branch).
+  Proposed rule: at **value position** (assignment RHS, literal element, `in`-RHS), a
+  `[`-leading token sequence is ALWAYS a list literal — never a glob. Assigning a `[`-leading
+  glob becomes a loud parse error pointing at `$(glob '[0-9]*.log')`. This is a small breaking
+  change to a dark corner (bare `[`-leading glob *assignment*); command-argument globs
+  (`ls [dog]*`, `foo[0-9]`) are untouched. Same care applies to lvalues: `fruits[0]=kiwi` lexes
+  today as `GlobWord("fruits[0]") Eq Ident` — a hard parse error (`GlobWord` is illegal at
+  statement start) — so the lvalue grammar needs the merger suppressed (or the GlobWord
+  re-interpreted) when the run is immediately followed by `=`.
+- **`[[ ]]` interplay**: `[[` is deliberately **not** a distinct token — it's two consecutive
+  `Token::LBracket`, chosen *specifically* "to avoid conflicts with nested array syntax"
+  (`parser.rs:1913-1920`). Forward-compatible with list literals by design. There is no POSIX
+  `[` test command in kaish at all (`command_parser`'s name choice, `parser.rs:1417-1425`), so
+  that collision from the first draft is moot. Watch the glued single-element case inside tests
+  (`[[ $a in [dog] ]]` — `[dog]` merges to a GlobWord; the `in`-RHS grammar must handle it per
+  the value-position rule above).
+- **`{ … }` record literal vs existing braces**: `{` is currently only consumed by function
+  bodies (`parser.rs:1063-1111`) and glob brace-expansion `{a,b,c}` (comma-separated, no colon,
+  `parser.rs:1290-1344`, shared with case patterns). A `{` at **value** position is free space
+  for record literals; statement-position `{` and glob/case `{a,b}` are untouched.
+- **Path access machinery is half-built on the read side**: the `${…}` interior already splits
+  dotted AND bracketed segments (`parse_var_ref`, `lexer.rs:2178-2231` — `${VAR[0][k]}` →
+  `["VAR","[0]","[k]"]`), but the parser filters index segments out (`parse_varpath`,
+  `parser.rs:141`), `VarSegment` has only `Field` (`ast/types.rs:407-411`), and `resolve_path`
+  rejects multi-segment for everything but `$?` (`scope.rs:356-375`). Work: add
+  `VarSegment::Index`/`Key`/`Dynamic` (int / literal / `$var`), stop filtering, implement nested
+  traversal + **scalar unwrap at the boundary**, slices, negative indices. Brackets-only means
+  dotted segments in `${…}` become the targeted error path (with the bracket fix in the
+  message), not a resolution path.
+- **Lvalues** touch five layers, but share the segment types and traversal skeleton with the
+  read side: (1) lexer — the glob-merge suppression before `=` above; (2) AST — `Assignment`
+  grows from `name: String` to an lvalue (root + segments); (3) parser — an `lvalue_parser`
+  wired into `assignment_parser` (`parser.rs:1028-1058`) and `env_prefix_assign`
+  (`parser.rs:952-970`, which must *reject* path lvalues); (4) interpreter — clone root, navigate
+  via `as_object_mut`/`as_array_mut`, set leaf, `scope.set_global` writeback
+  (`Stmt::Assignment` eval is `kernel.rs:2053-2069`; there is no in-place mutation precedent —
+  assignment is whole-value replace, keep it that way); (5) validator — bind/check the **root**
+  name, not the composite string (`validate_assignment`, `walker.rs:92-97`). Estimated cost:
+  roughly a third on top of the read-side traversal work, which is needed regardless.
+- **POSIX-name tightening for assignment LHS** happens in the assignment/env-prefix parser or
+  validator — NOT the lexer: the `Ident` regex (`lexer.rs:596`, `[a-zA-Z_][a-zA-Z0-9_.@-]*`) is
+  shared with command names (`some-tool`) and must keep accepting those.
+- **`${#…}` length**: three duplicated sites (`kernel.rs:3761`, `kernel.rs:3917`,
+  `eval.rs:427`), all `value_to_string(value).len()`. Consolidate to one helper, then
+  type-dispatch on `Value::Json` (array len / object key count).
+- **`[[ in ]]`** routes through the existing async test path (`eval_test_async`,
+  `kernel.rs:3821-3886`) so it is VFS/backend-aware. `TestExpr` (`ast/types.rs:304-318`) gains
+  `In`/`NotIn`; RHS shape-dispatches on `Value::Json` (array → element membership; object → key
+  membership; string RHS → error). The RHS must accept a list/record **literal**, not just a
+  `$var` — Haiku produced `[[ $a not in [dog] ]]` (mind the glued-GlobWord case).
+- **Typed comparison**: `values_equal` (`eval.rs:747-763`) currently drops `Json(Bool)` vs
+  `Bool` to the stringify fallback. With boundary unwrap most cases become native-typed;
+  add the structural-equality arm for collection/collection and the loud error for
+  collection/scalar.
+- **`for` over records**: the for-loop already iterates `Value::Json(Array)` element-wise
+  (`kernel.rs:2130-2212`); add an `Object` arm yielding keys (insertion order). Add the soft
+  W-code for bareword `keys`/`values` in a for-head.
+- **`keys`/`values`** dispatch on `Value::Json` shape (record → key list / value list, insertion
+  order — guaranteed pairwise-aligned). Key order is already deterministic: workspace
+  `serde_json` has `preserve_order` on (root `Cargo.toml:42`), matching jq.
+- **`push` validation**: no builtin registers a var-target in the validator today (`read`/`unset`
+  don't either — `bind` is only called for assignments, for-vars, and function params). New
+  pattern following `ScopeTracker::bind` (`scope_tracker.rs:81`): register `push`'s first arg as
+  a var-target; undefined target → E-code; defined-but-not-a-list → runtime error.
+- **`export` structured error**: guard before `cmd.env(...)` at both spawn sites
+  (`kernel.rs:4561`, test-only twin `dispatch.rs:231` — the hermetic two-spawn-site rule) and in
+  `export.rs:164` display formatting.
+- **`...` spread**: new lexer token; no existing `..`/`...` handling to collide with. Scope it
+  to `[ ]` value context only.
 
 ## Teaching notes for the final docs & instructions
 
@@ -364,19 +510,20 @@ taught a specific way** — get the examples wrong and even capable models fail.
 
 2. **Demonstrate every access form explicitly — especially list indexing.** Example-only teaching
    that omitted indexing caused a model to invent `$(colors.1)` (dropped the `$`, added spurious
-   `$()`). Docs must show, side by side, the braced forms: `${xs[0]}`, `${xs[-1]}`, `${xs[0:2]}`,
-   `${r.k}`, `${r.$key}`, `${r.a.b}`, `${r.a[0]}`. Models reproduce exactly what's shown and guess
-   (wrongly) at what isn't.
+   `$()`). Docs must show, side by side, the bracket forms: `${xs[0]}`, `${xs[-1]}`,
+   `${xs[0:2]}`, `${r[k]}`, `${r[$key]}`, `${r["weird key"]}`, `${r[a][b]}`, `${r[a][0]}`.
+   Models reproduce exactly what's shown and guess (wrongly) at what isn't. Show `${user.name}`
+   as the WRONG form (with its error) so the dot-leakage prior gets a taught contrast.
 
 3. **Contrast expansion vs builtin-capture, with both shown.** Models overgeneralize the `$()`
    capture rule. Put them next to each other: access and length are *expansions* (NO `$()`) —
-   `${xs[0]}`, `${r.k}`, `${#xs}`; a *builtin* used as a value NEEDS `$()` — `$(keys $r)`,
+   `${xs[0]}`, `${r[k]}`, `${#xs}`; a *builtin* used as a value NEEDS `$()` — `$(keys $r)`,
    `$(values $r)`. And `$()` is command-substitution ONLY — never wrap an access path in it.
 
 4. **String-interpolated paths use `${path}` braces — SHOWN, not merely stated.** A rules sheet
    that *stated* the rule still produced unwrapped paths; an example that *showed* the braced form
-   was copied. Every doc string embedding a path must use `${r.$k}` / `${user.name}` (NOT
-   `$($r.$k)` — `$()` is execution only). Show bare `"$user.name"` (expands `$user`, leaves
+   was copied. Every doc string embedding a path must use `"${r[$k]}"` / `"${user[name]}"` (NOT
+   `$($r[$k])` — `$()` is execution only). Show bare `"$user.name"` (expands `$user`, leaves
    `.name` literal) as the WRONG form so models learn the contrast.
 
 5. **Show both `push` and the `...` spread — their absence defaults to bare splat.** With neither
@@ -394,18 +541,17 @@ taught a specific way** — get the examples wrong and even capable models fail.
 
 7. **Re-test with REAL kaish syntax only.** The first experiment round used curly-brace blocks
    kaish does not have. All future model tests must use sh-style `do/done` / `then/fi`, no-space
-   assignment, and `push` for append — otherwise we're validating a language we don't
-   ship. Confirmed-good under real blocks so far: bare for-head, nested loops, `[[ in ]]`
-   (when shown inside `if…then`), `push`, no-space assignment, `!=` vs `in` distinction,
-   `...` spread vs bare-nest, and nested indexing `${grid[1][0]}`.
+   assignment, and `push` for append — otherwise we're validating a language we don't ship.
 
-8. **Pre-sign-off re-test — DONE 2026-06-05 (Haiku subagent; rules + example-driven), all passed.**
-   Confirmed under the FINAL braced syntax: `${xs[0]}` / `${r.key}` / `${r.$k}` /
-   `${servers.web[0]}` / `${users.alice.city}` access (the form we reversed from bare — **no**
-   reliability loss, Haiku produced braced access flawlessly), `${#xs}` length, `${nums[0:2]}`
-   slicing, `${path}` string interpolation, `r.key=value` field set, optional commas in lists
-   (incl. mixed with spread: `[0, ...$nums, 3]`), `push` in a loop, and nest-vs-spread. 12/12
-   rules, 7/7 example-driven. Only residual is the `!=` nit (note 11).
+8. **Pre-sign-off re-test — REQUIRED AGAIN (the 2026-06-05 pass is superseded).** The earlier
+   Haiku re-test validated the *dotted* braced syntax (`${r.key}`, `${r.$k}`, `${users.alice.city}`)
+   and the bare-builtin for-head — both since replaced. Re-run the panel (include the weak tail,
+   not just Haiku) against the FINAL surface: bracket access incl. `${r[$k]}` dynamic keys and
+   bareword-literal keys, deep chains `${services[web][port]}`, `${grid[1][0]}`, slices,
+   `for k in $record` iteration, bracket lvalues (`user[email]=x`, `fruits[0]=kiwi`), plus a
+   **dot-leakage negative task** (does the model reach for `${user.name}`? does the error copy
+   converge it in one round?) and a literal-vs-variable subscript task (`${user[name]}` vs
+   `${user[$name]}`). Results not yet gathered — do not sign off without them.
 
 9. **Update the "sh subset / shellcheck" framing in the same PR** (see issues.md P4). The docs
    that introduce collections are the natural place to restate "inspired by sh/bash, informed by
@@ -414,17 +560,84 @@ taught a specific way** — get the examples wrong and even capable models fail.
 10. **Spaced-assignment error needs positive reinforcement.** Models context-switch to JSON/Python
     spacing and will write `x = [a, b]`. The SC1068-style validator error must show BOTH the
     problem AND the fix — e.g. *"kaish assignment takes no spaces around `=`; write `x=[a, b]`"* —
-    so the verify pass corrects the model in one round instead of just rejecting.
+    so the verify pass corrects the model in one round instead of just rejecting. The same
+    pattern applies to every new loud error in this design: dotted access (`use ${user[name]}`),
+    dotted LHS (`use user[email]=`), multi-word literal values (`quote it: {msg: "hello world"}`),
+    out-of-bounds set (`push grows lists`), collection-vs-scalar compare (`use in`).
 
 11. **Show `!=` for scalar inequality.** Given no `!=` example, Haiku expressed "not equal to dog"
     as `[[ $a not in [dog] ]]` — a list-literal membership test. Semantically correct but
     roundabout; docs should show `[[ $x != val ]]` so models don't route every inequality through
     `not in`. This also means the `in` RHS must accept a list/record **literal**, not just a
-    `$var` (see impl notes).
+    `$var` (see impl notes, incl. the glued-`[dog]` GlobWord case).
+
+## Help & teaching delivery
+
+Where the teaching copy actually lands (mapped 2026-07-01 against `crates/kaish-help`; see
+[composable-help.md](composable-help.md) for the system). The fragment taxonomy already
+matches the teaching notes — `Rule`/`Example`/`Contrast` variants and `Summary`/`Reference`
+depths are exactly "state it tersely / show it in a full structure / show the wrong form
+with its error" — and the quote-to-join pass (`d324bb7`) is the proven playbook:
+Foundations Rule+Contrast → extend `syntax_section`s → regen `syntax.md` (drift-tested) →
+hand-write LANGUAGE.md → sweep limits.md/README.
+
+Three layers, matched to three budgets:
+
+1. **Always-on** (MCP instructions / tool descriptions — `Recipe::agent_onboarding()` /
+   `tool_description()`). The composed instruction block an embedder ships is already
+   ~9–10.5K chars, dominated by the builtin index (~5.4K). Collections gets at most 2–3
+   terse Foundations Rules here (the literal forms; "access is always `${name[...]}` —
+   never dots"; `push` vs spread) plus one Reference-depth Contrast (`${user.name}` →
+   error, with fix). The dense teaching from the notes above must NOT land in this layer.
+2. **Reference** (`help syntax` / generated `syntax.md`). A new
+   `syntax_section("collections", …)` carries the canonical tested example set (literals,
+   every access form side by side, lvalues, `push`/spread, a worked record loop).
+   Membership (`in`/`not in`) extends the **existing Test Expressions section** — models
+   look for test operators there, and it already shows operators inside full
+   `if [[ … ]]` structures (Teaching note #1 for free). Record iteration extends
+   Control Flow / Command Substitution.
+3. **Deep** (LANGUAGE.md). Hand-written section, per the standing don't-generate decision.
+
+Points decided or flagged during the 2026-07-01 review:
+
+- **`help collections` becomes a fragment query, not a file.** Models will type it.
+  Rather than a hand-written `content/en/collections.md` (a dual representation that will
+  drift), extend `HelpTopic` so a topic can render a *selection* of fragments —
+  `help collections` composes the collections-keyed fragments, single-sourced with
+  `syntax.md`. This sets the pattern for future subsystem-sized syntax features.
+- **limits.md truth-up.** limits.md stated "kaish will never have `[]` array syntax" —
+  reworded 2026-07-01 (same branch as this revision): `[ ]` is *reserved by kaish* —
+  `[[ ]]` today, native list literals per this design. The `[` command stays banned
+  forever (a `test` builtin might someday return; `[` will not, nor external `[` — we own
+  the brackets). The implementation PR must do the final truth-up ("planned" → shipped)
+  and add the new loud-error rows: dotted access, `[`-leading glob assignment, multi-word
+  literal values, dotted assignment LHS.
+- **Budget guardrail — decide before fragment writing.** Nothing caps composed-help size
+  today: no test, no stated ceiling (composable-help.md offers `Depth` as the only lever).
+  Collections is exactly the feature that will test this. Tracked in issues.md: add a
+  size assertion on `agent_onboarding()` output before growing it.
+- **Validate the shipped artifact, and keep validating.** The pre-sign-off panel re-test
+  (Teaching note #8) should use the *composed help output* as its cheat sheet — write the
+  fragments first, compose `agent_onboarding()` plus the collections syntax section, and
+  hand that to the panel. Every prior round tested ad-hoc cheat sheets; testing the real
+  delivery artifact validates the syntax and the teaching copy in one pass, and the
+  fragment text arrives pre-validated. Beyond the one-shot gate, we want **recurring
+  cross-agent studies** — multiple model families and sizes, doc variants measured
+  against task success — to hone the help copy for impact: the
+  [designing-syntax-with-llms](designing-syntax-with-llms.md) method extended from syntax
+  decisions to the documentation itself. That's a sizable side quest; scope it as its own
+  effort, not a rider on the implementation PR.
 
 ## Out of scope (first cut)
 
 - Set/map algebra (union, intersection, merge).
-- Comprehensions / map / filter as syntax (use `for` + jq).
+- Comprehensions / map / filter as syntax (use `for` + `push`; the worked example is the idiom).
 - Typed schemas on records.
-- Deletion ergonomics (`unset`/`remove`) — noted above, designed later.
+- Deletion ergonomics (`unset user[email]`) — noted above, designed later.
+- **Argv spread** (`cmd ...$xs` splatting a list into command arguments) — models will try it
+  once `...` is taught; explicitly excluded for now, revisit with use cases.
+- **Slice lvalues** (`xs[0:2]=…`) and **`push` to a bracketed path** — loud errors, see lvalue
+  rules.
+- Pair iteration (`for k v in $record`) — iterate keys, access values.
+- JSON ingress/egress builtins (`fromjson`/`tojson`) — designed with or right after the first
+  cut; hard prerequisite for the jq-out-of-core possibility (see Open decisions).
