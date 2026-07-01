@@ -414,6 +414,40 @@ Not yet resolved; flagging them so we decide deliberately.
   the existing shell concept, same bracket-path lvalue) over inventing `remove`. Out of scope
   for the first cut.
 
+### fromjson / tojson (sketch, 2026-07-01 — prototype early)
+
+The JSON ingress/egress pair, named after jq's own functions (strong model prior). Both are
+pure data transforms — no OS, no VFS — so they belong in every capability build, including
+read-only embedders. Amy's call: prototype these EARLY, ahead of the collections grammar —
+they exercise the whole value-model plumbing (structured `$()`, `.data`, assignment) without
+touching the lexer/parser, de-risk the boundary semantics and error copy before the big PR,
+and give the export-error decision its "serialize explicitly first" story from day one.
+
+```sh
+cfg=$(curl -s api/config | fromjson)     # stdin, or one positional string arg
+v=$(fromjson "$text")
+export CFG_JSON=$(tojson $cfg)           # the export-error escape hatch
+tojson --pretty $cfg | tee config.json
+```
+
+- **`fromjson`**: whole input is exactly ONE JSON document; empty input or trailing garbage
+  is a loud error with line:col (never a silent null). Result lands in `.data` through the
+  **same unwrap law as access** (scalars → native `Value`, collections stay `Json`) — which
+  `json_to_value` (kaish-types `result.rs`) already implements. One conversion law, two doors.
+  Predictability pitch vs today's `$(... | jq .)`: jq's `.data` array-wraps multi-value
+  output; `fromjson` is one-doc-one-value. NDJSON (`--lines` → list) is a later flag, not
+  first cut.
+- **HAZARD — bytes-envelope sniffing**: `json_to_value` auto-decodes objects matching the
+  base64 bytes-envelope shape into `Value::Bytes`. External JSON that happens to match the
+  envelope must NOT silently become bytes — `fromjson` needs the envelope-free conversion
+  path. (Access traversal should use the envelope-free path too.)
+- **`tojson`**: one `Value` positional (read off `args.positional` per the Value-typed rule,
+  not the clap sink); no stdin (stdin is already text). Compact by default, `--pretty` for
+  files/humans. Scalars serialize per JSON (`tojson hello` → `"hello"`). `Value::Bytes` is a
+  loud error first cut ("bytes are not JSON — use base64").
+- **Roundtrip law, test-pinned**: `fromjson "$(tojson $x)"` ≡ `$x` structurally — and with
+  `preserve_order` on, exactly (key order survives).
+
 ## Implementation notes (sketch)
 
 Re-grounded 2026-07-01 against HEAD `f92070e` (all file:line refs current as of that pass;
@@ -645,5 +679,6 @@ Points decided or flagged during the 2026-07-01 review:
 - **Slice lvalues** (`xs[0:2]=…`) and **`push` to a bracketed path** — loud errors, see lvalue
   rules.
 - Pair iteration (`for k v in $record`) — iterate keys, access values.
-- JSON ingress/egress builtins (`fromjson`/`tojson`) — designed with or right after the first
-  cut; hard prerequisite for the jq-out-of-core possibility (see Open decisions).
+- JSON ingress/egress builtins (`fromjson`/`tojson`) — sketched above and **prototyped
+  early, ahead of the collections grammar** (they need no parser work); hard prerequisite
+  for the jq-out-of-core possibility (see Open decisions).
