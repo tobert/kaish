@@ -10,6 +10,12 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Changed
+- **`help limits` no longer claims `[]` array syntax will never exist** — the
+  brackets are reserved by kaish (`[[ ]]` today, native list literals per the
+  arrays-and-hashes design). The `[` command stays banned permanently; a `test`
+  builtin may return someday.
+
 ### Added
 - **`ExecResult::latch_request()` + `LatchRequest` (kaish-types)** — typed
   embedder seam for the confirmation latch: decodes a latched result (exit 2 +
