@@ -313,6 +313,22 @@ dominating at ~5.4K). Do this before the collections fragments land — they're 
 feature that will test it. See [arrays-and-hashes.md](arrays-and-hashes.md)
 "Help & teaching delivery".
 
+**Envelope-free must hold through downstream `.data` consumers (2026-07-01, from
+the json-bridge deepseek review):** `fromjson` converts external JSON with
+`json_to_value_no_envelope` (envelope-free at ingress), but two consumers still
+re-sniff the byte-envelope on `Value::Json` sub-values via the sniffing
+`json_to_value`: the `for` loop's array-element spread (`kernel.rs:2177`) and
+`jq`'s single-value output (`jq_native.rs:689`). So `for i in $(fromjson
+'[{"_type":"bytes",…}]')` silently decodes an envelope-shaped array element to
+`Value::Bytes` — the exact silent conversion the guarantee forbids, just one hop
+downstream. Pre-existing (these sites predate the bridge and were written for
+internal round-tripping, where re-decoding is correct). **Fold into step-2
+read-side traversal**, which is all about envelope-free access: switch these to
+`json_to_value_no_envelope` (verify no internal builtin relies on a `.data` array
+element round-tripping to bytes — `dd` emits `out_bytes`, not `.data` arrays, so
+it looks safe) and add the `for i in $(fromjson '[envelope]')` + `fromjson | jq
+'.'` regression tests the bridge PR deliberately left out of scope.
+
 ### Split `kernel.rs::execute_stmt_flow`
 `kernel.rs:1463`–~1913 is a 16-arm async match (kernel.rs is ~6,838 lines); each
 arm reaches into `scope`/`exec_ctx`/`user_tools` RwLocks, and `For`/`While`/`Case`

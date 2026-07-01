@@ -17,6 +17,18 @@ breaking entries are marked **BREAKING**.
   builtin may return someday.
 
 ### Added
+- **`fromjson` / `tojson` builtins** — the JSON ingress/egress bridge for the
+  value model. `fromjson` parses exactly one JSON document (from an argument or
+  stdin) into a structured value in `.data`; empty input or trailing garbage is
+  a loud line:column error, never a silent `null`, and an object shaped like the
+  internal base64 byte-envelope stays a plain record (never silently decoded to
+  bytes). `tojson` serializes one value to JSON text (compact, or `--pretty`) —
+  the "serialize explicitly first" escape hatch for `export CFG_JSON=$(tojson
+  $cfg)`; binary values are refused loudly. Both are pure data (present in every
+  capability build). `fromjson "$(tojson $x)"` round-trips `$x` structurally.
+- **`json_to_value_no_envelope` (kaish-types)** — envelope-free JSON→`Value`
+  conversion for external JSON, so byte-envelope-shaped objects are never
+  silently decoded to `Value::Bytes`.
 - **`ExecResult::latch_request()` + `LatchRequest` (kaish-types)** — typed
   embedder seam for the confirmation latch: decodes a latched result (exit 2 +
   nonce payload) into `{nonce, command, paths, hint, ttl}` so an embedder can

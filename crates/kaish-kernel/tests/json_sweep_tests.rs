@@ -108,6 +108,7 @@ const CASES: &[Case] = &[
     Case { name: "false", setup: &[], cmd: "false --json", expect: Expect::FailsClean(1) },
     Case { name: "file", setup: &[], cmd: "file tmp/data.json --json", expect: Expect::Array },
     Case { name: "find", setup: &[], cmd: "find src -name '*.rs' --json", expect: Expect::Array },
+    Case { name: "fromjson", setup: &[], cmd: r#"fromjson '{"a":1}' --json"#, expect: Expect::Object },
     // scatter/gather own their output (`owns_output`): `--json` passes
     // through untouched and `--format json` is the structured form.
     Case { name: "gather", setup: &[], cmd: "seq 1 2 | scatter --as N | echo $N | gather --format json", expect: Expect::Array },
@@ -167,6 +168,7 @@ const CASES: &[Case] = &[
     Case { name: "tail", setup: &[], cmd: "tail -n 1 tmp/app.log --json", expect: Expect::Array },
     Case { name: "tee", setup: &[], cmd: "echo hi | tee out.txt --json", expect: Expect::String },
     Case { name: "timeout", setup: &[], cmd: "timeout 5 echo hi --json", expect: Expect::String },
+    Case { name: "tojson", setup: &[], cmd: "tojson hello --json", expect: Expect::String },
     Case { name: "tokens", setup: &[], cmd: "echo hello | tokens --json", expect: Expect::Array },
     Case { name: "touch", setup: &[], cmd: "touch new.txt --json", expect: Expect::Empty },
     Case { name: "tr", setup: &[], cmd: "printf 'abc' | tr a x --json", expect: Expect::String },

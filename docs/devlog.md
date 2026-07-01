@@ -14,6 +14,39 @@ before it ships.
 
 ---
 
+## JSON bridge: fromjson / tojson land ahead of the grammar (2026-07-01)
+
+First implementation step of the collections effort, and deliberately the one
+that touches no lexer or parser. `fromjson`/`tojson` are the value model's text
+boundary — the pair the arrays-and-hashes doc sketched as "prototype early." They
+exercise the whole value-model plumbing (structured `$()`, `.data`, typed
+positionals, assignment capture) end to end, so building them first de-risks the
+boundary semantics and pins the error copy before the big grammar PR.
+
+Two integration points were verified against HEAD before writing a line, because
+they decide whether the pair is useful *before* native access exists: (1)
+command-substitution already prefers a result's `.data` (`kernel.rs:3716`), so
+`cfg=$(… | fromjson)` captures the structured `Value`; (2) a variable holding a
+`Value::Json` expands straight into `args.positional` as that typed value
+(`kernel.rs:3285`), so `tojson $cfg` reads a real value off the positional, not a
+stringified copy. Both held — the pair works today, with access arriving later.
+
+The load-bearing decision is **envelope-free conversion**. The internal
+`json_to_value` auto-decodes any object matching the base64 byte-envelope shape
+into `Value::Bytes` — correct for internal round-tripping, a silent-corruption
+trap for *external* JSON that happens to match. Added
+`json_to_value_no_envelope` (kaish-types) and routed `fromjson` through it; the
+hazard is pinned by a test that feeds an envelope-shaped document through
+`fromjson | tojson` and asserts it re-serializes as a record, not as refused
+binary. `fromjson` is one-doc-one-value (serde's trailing-garbage rejection does
+the work; empty input is a separate loud error), and its parse errors carry
+serde's line:column. `tojson` is text-out-only — setting `.data` would make
+`$(tojson $x)` round-trip straight back to a value and defeat the export escape
+hatch — and refuses `Value::Bytes` loudly rather than emit an envelope. The
+roundtrip law (`fromjson "$(tojson $x)"` ≡ `$x`) is test-pinned. Both are pure
+data: registered unconditionally, verified under `--no-default-features`, and
+tested through `KernelConfig::isolated()` (no localfs).
+
 ## Arrays & hashes design revision: the brackets are ours (2026-07-01)
 
 The 2026-06-05 collections proposal came back for review a month later and left

@@ -506,6 +506,35 @@ pub fn json_to_value(json: serde_json::Value) -> Value {
     }
 }
 
+/// Convert serde_json::Value to our AST Value **without** bytes-envelope sniffing.
+///
+/// External JSON (from `fromjson`, or native access traversal) must never
+/// silently become a `Value::Bytes` just because an object happens to match the
+/// base64 envelope shape (`{"_type":"bytes",…}`). That auto-decode is a feature
+/// of *internal* round-tripping only — it would be a silent, surprising
+/// conversion on untrusted input. Otherwise this is the same unwrap law as
+/// [`json_to_value`]: JSON scalars unwrap to native `Value` variants, and only
+/// objects/arrays stay `Value::Json`.
+pub fn json_to_value_no_envelope(json: serde_json::Value) -> Value {
+    match json {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Bool(b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                Value::Float(f)
+            } else {
+                Value::String(n.to_string())
+            }
+        }
+        serde_json::Value::String(s) => Value::String(s),
+        // Objects and arrays stay structured — an envelope-shaped object is a
+        // plain record here, not decoded to bytes.
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => Value::Json(json),
+    }
+}
+
 /// Convert our AST Value to serde_json::Value for serialization.
 pub fn value_to_json(value: &Value) -> serde_json::Value {
     match value {
@@ -722,6 +751,35 @@ mod tests {
         // A plain object is NOT mistaken for bytes.
         let obj = serde_json::json!({"name": "amy"});
         assert!(matches!(json_to_value(obj), Value::Json(_)));
+    }
+
+    #[test]
+    fn no_envelope_never_decodes_bytes() {
+        // The envelope-free path is what external JSON (fromjson, access) uses:
+        // an object matching the byte-envelope shape stays a plain record, it is
+        // NOT silently decoded to Value::Bytes.
+        let envelope = crate::bytes::bytes_to_envelope(&[1u8, 2, 3]);
+        // The sniffing path DOES decode it (internal round-trip).
+        assert!(matches!(json_to_value(envelope.clone()), Value::Bytes(_)));
+        // The envelope-free path leaves it structured.
+        assert!(matches!(
+            json_to_value_no_envelope(envelope),
+            Value::Json(serde_json::Value::Object(_))
+        ));
+    }
+
+    #[test]
+    fn no_envelope_shares_unwrap_law_for_scalars() {
+        // Scalars unwrap identically to json_to_value; only the object arm differs.
+        assert_eq!(json_to_value_no_envelope(serde_json::json!(42)), Value::Int(42));
+        assert_eq!(json_to_value_no_envelope(serde_json::json!(1.5)), Value::Float(1.5));
+        assert_eq!(json_to_value_no_envelope(serde_json::json!(true)), Value::Bool(true));
+        assert_eq!(json_to_value_no_envelope(serde_json::json!("hi")), Value::String("hi".into()));
+        assert_eq!(json_to_value_no_envelope(serde_json::json!(null)), Value::Null);
+        assert!(matches!(
+            json_to_value_no_envelope(serde_json::json!([1, 2])),
+            Value::Json(serde_json::Value::Array(_))
+        ));
     }
 
     #[test]
