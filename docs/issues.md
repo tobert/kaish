@@ -116,6 +116,30 @@ of the argv (mirrors Claude Code "auto" mode). Mechanism in the kernel, judgment
 in the embedder — same split as the write-model latch. Until then, the airtight
 config is `subprocess` off (read-only / no-spawn build). (P2)
 
+### Script preflight: `classify_command` landed; report + `preflight()` deferred
+`Kernel::classify_command(name) -> CommandKind` **landed** (mirrors the
+interpreter's resolution order; the two private validator predicates are promoted
+behind it via the shared `classify_command_name` in `validator/walker.rs`). That
+gives an embedder (kaijutsu's consent gate) the kernel half: walk the public AST,
+classify each command node, gate `External`/`Dynamic`. Two follow-ups stay
+deferred until a second consumer wants them — same reasoning as the deferred
+`kaish-edit` crate:
+- **`PreflightReport` + the AST walk + the consent loop are embedder policy**, not
+  kernel work. kaijutsu owns them. (advice, not an issue)
+- **`Kernel::preflight(src) -> Report` convenience** — a kernel-side walk that
+  bundles classification per command node. Defer until a 2nd embedder wants the
+  shared version. (P3)
+- **Validator/runtime special-form divergence (found building this).** The
+  validator's `is_special_command` set (`true`/`false`/`:`/`readonly`/`local`)
+  suppresses the "command not found" warning for names that don't actually resolve
+  in-process: `readonly` runs as an *external* command (exit 127 at runtime), `:`
+  is a parse error, `local` is parser-level. `classify_command` deliberately uses
+  the **narrower** runtime set (`true`/`false`/`source`/`.`) so a consent gate
+  isn't lied to. The validator's warning heuristic is now the odd one out — it
+  should probably warn on `readonly`/`:` (they aren't kaish commands), or route
+  through `classify_command_name`. Low urgency (warning-only), but it's a real
+  validator↔runtime mismatch. (P3)
+
 ### `kaish-multicall` binary (deferred from the `execute_argv` work)
 `execute_argv` — the argv-native peer of `execute(&str)` — **landed** (see
 devlog); the load-bearing half is done. The cheap second half is still open: a

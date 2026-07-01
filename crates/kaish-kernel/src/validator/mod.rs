@@ -31,3 +31,6 @@ mod walker;
 pub use issue::{IssueCode, Severity, Span, ValidationIssue};
 pub use scope_tracker::ScopeTracker;
 pub use walker::{build_tool_args_for_validation, Validator};
+pub(crate) use walker::{
+    classify_command_name, is_runtime_special_form, is_static_command_name, SpecialForm,
+};
