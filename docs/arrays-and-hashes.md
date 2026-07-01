@@ -467,6 +467,47 @@ paths relative to `crates/kaish-kernel/src`).
   today as `GlobWord("fruits[0]") Eq Ident` — a hard parse error (`GlobWord` is illegal at
   statement start) — so the lvalue grammar needs the merger suppressed (or the GlobWord
   re-interpreted) when the run is immediately followed by `=`.
+  *Mechanism (2026-07-01 review, gemini):* the merge pass is context-free and runs before the
+  parser, so "reinterpret at value position" can't be done purely in the parser against fused
+  tokens — the workable fix is to **stop fusing `[`-leading runs in the lexer** (remove
+  brackets from the mergeable set or intercept them in the pass) and let the *argv* grammar
+  assemble glob patterns from primitive bracket tokens. Whitespace-sensitivity is otherwise a
+  trap: `[a]` would parse differently from `[a b]`.
+
+- **The value/argv grammar split is the load-bearing wall** *(2026-07-01 review, gemini —
+  confirmed against parser.rs)*: `primary_expr_parser` currently serves BOTH assignment RHS
+  and command arguments, so naively adding literals there would make `ls [dog]` pass a JSON
+  array and `cmd {a,b}` a parse error. The grammar must bifurcate: a **value expression**
+  grammar (collections included) for assignment RHS, literal interiors, `in`-RHS, and `push`
+  arguments; an **argv** grammar (unchanged: globs, brace-expansion words, `find`'s `{}`
+  placeholder) for command arguments. Collections never appear raw in argv — argv splat stays
+  out of scope — and `{a,b}`/`{}` at argv position are untouched, which also kills the
+  "backtrack a failed record literal to a string" idea (a silent fallback; against directives).
+
+- **Newlines inside literals**: kaish statements are newline-terminated, and the expression
+  grammar does not consume `Token::Newline` — so the multi-line record in the worked example
+  would today terminate the assignment at the first line break. The list/record literal
+  parsers must consume newlines (and the optional commas) between elements while a literal is
+  open. Statement termination resumes at the closing bracket/brace.
+
+- **Unspaced record colons collide with `merge_colon_adjacent`** *(confirmed:
+  `lexer.rs:1717`, composed unconditionally at `lexer.rs:2093`)*: the pass fuses span-adjacent
+  ident/colon runs (for `host:8080`-style words), so `{port:8080}` — which JSON-prior models
+  WILL write — lexes as `LBrace Ident("port:8080") RBrace` and the record parser never sees a
+  `Colon`. Same pass needs checking for glued slices (`${xs[0:2]}` — `0:2` inside `${…}` rides
+  `parse_var_ref`, so likely safe, but verify). Fix: exempt colon-fusion inside open
+  bracket/brace literal context, or split fused idents at the record parser (brittle — prefer
+  the lexer exemption). Doc examples use spaced `key: value`; the grammar must accept unspaced
+  too or error loudly with the fix — never mis-lex.
+
+- **Quoted keys inside interpolated strings break the string lexer** *(confirmed:
+  `lexer.rs:489` — the double-quote regex stops at the first unescaped `"`)*:
+  `echo "${r["weird key"]}"` shatters the token stream today. Two options: (a) rewrite the
+  string lexer to balance `${…}` interiors (invasive), or (b) first cut: **quoted keys are
+  not allowed inside a double-quoted string** — loud error with the assign-first fix
+  (`k="weird key"; echo "${r[$k]}"`). Lean (b), upgrade to (a) if the panel shows models
+  reaching for the nested form. Verify whether bare `${r["weird key"]}` *outside* strings
+  survives `lex_varref` too.
 - **`[[ ]]` interplay**: `[[` is deliberately **not** a distinct token — it's two consecutive
   `Token::LBracket`, chosen *specifically* "to avoid conflicts with nested array syntax"
   (`parser.rs:1913-1920`). Forward-compatible with list literals by design. There is no POSIX
@@ -605,6 +646,14 @@ taught a specific way** — get the examples wrong and even capable models fail.
     `not in`. This also means the `in` RHS must accept a list/record **literal**, not just a
     `$var` (see impl notes, incl. the glued-`[dog]` GlobWord case).
 
+12. **The record-vs-list `for` polymorphism has a real-world trap** *(2026-07-01 review,
+    gemini)*: an API that usually returns a list of objects but occasionally returns a single
+    object makes `for x in $data` silently iterate the object's KEYS instead of one object —
+    a type cascade, not an error. The decision stands (the Python prior carries it, and Python
+    has the identical trap), but the docs must show the guard idiom where data shape isn't
+    trusted, and a shape predicate (`typeof`-style) is noted in Out of scope as the missing
+    tool if this bites in practice.
+
 ## Help & teaching delivery
 
 Where the teaching copy actually lands (mapped 2026-07-01 against `crates/kaish-help`; see
@@ -679,6 +728,8 @@ Points decided or flagged during the 2026-07-01 review:
 - **Slice lvalues** (`xs[0:2]=…`) and **`push` to a bracketed path** — loud errors, see lvalue
   rules.
 - Pair iteration (`for k v in $record`) — iterate keys, access values.
+- A shape/type predicate (`typeof` or `[[ -list / -record ]]`) — the missing guard for the
+  record-vs-list `for` trap (Teaching note #12); design if it bites in practice.
 - JSON ingress/egress builtins (`fromjson`/`tojson`) — sketched above and **prototyped
   early, ahead of the collections grammar** (they need no parser work); hard prerequisite
   for the jq-out-of-core possibility (see Open decisions).
