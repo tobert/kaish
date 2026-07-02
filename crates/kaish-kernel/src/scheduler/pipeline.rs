@@ -951,28 +951,23 @@ pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> 
                             result.push_str(&value_to_string(&value));
                         }
                     }
-                    crate::ast::StringPart::VarWithDefault { name, default } => {
-                        match ctx.scope.get(name) {
-                            Some(value) => {
-                                let s = value_to_string(value);
-                                if s.is_empty() {
-                                    result.push_str(&eval_string_parts_sync(default, ctx));
-                                } else {
-                                    result.push_str(&s);
-                                }
-                            }
-                            None => result.push_str(&eval_string_parts_sync(default, ctx)),
+                    crate::ast::StringPart::VarWithDefault { path, default } => {
+                        // Reduced-sync path has no error channel, so a shape error
+                        // coalesces (skipped) here — the known reduced-sync gap
+                        // (issues.md P3). Absence still yields the default.
+                        match crate::interpreter::resolve_default(&ctx.scope, path) {
+                            Ok(Some(value)) => result.push_str(&value_to_string(&value)),
+                            Ok(None) => result.push_str(&eval_string_parts_sync(default, ctx)),
+                            Err(_) => {}
                         }
                     }
-                    crate::ast::StringPart::VarLength(name) => {
-                        let len = match ctx.scope.get(name) {
-                            // Element/key count for collections, byte count for
-                            // binary — the same helper the async/interp paths use
-                            // (not the string byte-length of a rendered value).
-                            Some(value) => crate::interpreter::value_length(value) as usize,
-                            None => 0,
-                        };
-                        result.push_str(&len.to_string());
+                    crate::ast::StringPart::VarLength(path) => {
+                        // Element/key count for collections, byte count for binary;
+                        // unset root → 0. A shape/absence error coalesces to nothing
+                        // (reduced-sync gap, P3).
+                        if let Ok(len) = crate::interpreter::resolve_length(&ctx.scope, path) {
+                            result.push_str(&len.to_string());
+                        }
                     }
                     crate::ast::StringPart::Positional(n) => {
                         if let Some(s) = ctx.scope.get_positional(*n) {
@@ -1055,27 +1050,20 @@ fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -
                     result.push_str(&value_to_string(&value));
                 }
             }
-            crate::ast::StringPart::VarWithDefault { name, default } => {
-                match ctx.scope.get(name) {
-                    Some(value) => {
-                        let s = value_to_string(value);
-                        if s.is_empty() {
-                            result.push_str(&eval_string_parts_sync(default, ctx));
-                        } else {
-                            result.push_str(&s);
-                        }
-                    }
-                    None => result.push_str(&eval_string_parts_sync(default, ctx)),
+            crate::ast::StringPart::VarWithDefault { path, default } => {
+                // Reduced-sync path: a shape error coalesces (issues.md P3);
+                // absence still yields the default.
+                match crate::interpreter::resolve_default(&ctx.scope, path) {
+                    Ok(Some(value)) => result.push_str(&value_to_string(&value)),
+                    Ok(None) => result.push_str(&eval_string_parts_sync(default, ctx)),
+                    Err(_) => {}
                 }
             }
-            crate::ast::StringPart::VarLength(name) => {
-                let len = match ctx.scope.get(name) {
-                    // Element/key count for collections, byte count for binary —
-                    // the same helper the async/interp paths use.
-                    Some(value) => crate::interpreter::value_length(value) as usize,
-                    None => 0,
-                };
-                result.push_str(&len.to_string());
+            crate::ast::StringPart::VarLength(path) => {
+                // Unset root → 0; shape/absence coalesces to nothing (P3).
+                if let Ok(len) = crate::interpreter::resolve_length(&ctx.scope, path) {
+                    result.push_str(&len.to_string());
+                }
             }
             crate::ast::StringPart::Positional(n) => {
                 if let Some(s) = ctx.scope.get_positional(*n) {

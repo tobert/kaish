@@ -257,6 +257,20 @@ async fn integer_index_on_a_record_is_a_loud_error() {
 }
 
 #[tokio::test]
+async fn nested_error_names_the_full_path() {
+    // A failure deep in a path names the real path (`${s[web][9]}`), not just the
+    // root and failing segment — the walker accumulates the prefix.
+    let k = setup().await;
+    let (_, code, err) = run(
+        &k,
+        r#"s=$(fromjson '{"web":[80,443]}'); echo ${s[web][9]}"#,
+    )
+    .await;
+    assert_ne!(code, 0, "out-of-bounds must be an error");
+    assert!(err.contains("s[web][9]"), "should name the full path: {err}");
+}
+
+#[tokio::test]
 async fn nested_dynamic_key_through_a_path() {
     // `${services[$k][port]}` — a dynamic key mid-path, then a literal key.
     let k = setup().await;
@@ -338,33 +352,92 @@ async fn negative_slice_end_is_not_mistaken_for_a_default() {
     assert_eq!(out, r#"["a","b"]"#);
 }
 
+// ── Path-aware ${#path} and ${path:-default} (decision A) ──────────────────
+// The subscripted forms are wired through the shared resolver now (they used to
+// be a loud "bind first" placeholder). `:-` defaults on ABSENCE (unset root,
+// missing key, out-of-bounds, null, empty string) but never on a falsy-but-
+// present value; a SHAPE error stays loud even with `:-`.
+
 #[tokio::test]
-async fn default_on_a_subscripted_path_is_a_loud_error_not_the_default() {
-    // `${cfg[port]:-8080}` must not silently return 8080 while a real value
-    // exists — length/default on a path isn't wired yet, so it's loud with a
-    // "bind first" hint (never silent-wrong-output).
+async fn default_on_a_subscripted_path_returns_the_present_value() {
+    // `${cfg[port]:-8080}` with a real value returns it, not the default.
     let k = setup().await;
-    let (_, code, err) = run(
+    let (out, code, err) = run(
         &k,
         r#"cfg=$(fromjson '{"port":9000}'); echo ${cfg[port]:-8080}"#,
     )
     .await;
-    assert_ne!(code, 0, "default-on-path must be loud, not silently the default");
-    assert!(err.contains("bind it first"), "should hint at binding first: {err}");
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "9000");
 }
 
 #[tokio::test]
-async fn length_of_a_subscripted_path_is_a_loud_error_not_zero() {
-    // `${#u[tags]}` must not silently print 0 (bare-name lookup miss) — loud with
-    // a "bind first" hint until nested length lands.
+async fn default_on_a_missing_key_yields_the_default() {
+    // A missing key is absence — the default fires (decision A).
     let k = setup().await;
-    let (_, code, err) = run(
+    let (out, code, err) = run(
         &k,
-        r#"u=$(fromjson '{"tags":["a","b"]}'); echo "${#u[tags]}""#,
+        r#"cfg=$(fromjson '{"port":9000}'); echo ${cfg[host]:-localhost}"#,
     )
     .await;
-    assert_ne!(code, 0, "length-of-path must be loud, not silent 0");
-    assert!(err.contains("bind it first"), "should hint at binding first: {err}");
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "localhost");
+}
+
+#[tokio::test]
+async fn default_on_an_out_of_bounds_index_yields_the_default() {
+    let k = setup().await;
+    let (out, code, err) =
+        run(&k, r#"xs=$(fromjson '["a","b"]'); echo ${xs[9]:-none}"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "none");
+}
+
+#[tokio::test]
+async fn default_does_not_suppress_a_shape_error() {
+    // An integer index on a record is misuse, not absence — loud even with `:-`.
+    let k = setup().await;
+    let (_, code, err) =
+        run(&k, r#"cfg=$(fromjson '{"port":9000}'); echo ${cfg[0]:-x}"#).await;
+    assert_ne!(code, 0, "a shape error must stay loud despite `:-`");
+    assert!(err.contains("record keys are strings"), "got: {err}");
+}
+
+#[tokio::test]
+async fn bare_default_fires_on_null_but_not_on_false_or_zero() {
+    // Decision A at the value level: null/empty default; false/0 are present.
+    let k = setup().await;
+    let (out_null, _, _) = run(&k, r#"x=$(fromjson 'null'); echo ${x:-fallback}"#).await;
+    assert_eq!(out_null, "fallback", "null defaults");
+    let (out_false, _, _) = run(&k, r#"x=$(fromjson 'false'); echo ${x:-fallback}"#).await;
+    assert_eq!(out_false, "false", "false is present, not absent");
+    let (out_zero, _, _) = run(&k, r#"x=$(fromjson '0'); echo ${x:-fallback}"#).await;
+    assert_eq!(out_zero, "0", "zero is present, not absent");
+}
+
+#[tokio::test]
+async fn length_of_a_subscripted_path_is_the_element_count() {
+    // `${#u[tags]}` resolves the path and counts — expression position exercises
+    // the widened lexer regex; the string form the interpolation path.
+    let k = setup().await;
+    let (bare, code, err) =
+        run(&k, r#"u=$(fromjson '{"tags":["a","b","c"]}'); echo ${#u[tags]}"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(bare, "3");
+
+    let (in_string, code2, err2) =
+        run(&k, r#"u=$(fromjson '{"tags":["a","b"]}'); echo "count=${#u[tags]}""#).await;
+    assert_eq!(code2, 0, "err: {err2}");
+    assert_eq!(in_string, "count=2");
+}
+
+#[tokio::test]
+async fn length_of_a_missing_key_is_a_loud_error() {
+    // Length has no default operator, so absence is loud (like bare `${u[nope]}`).
+    let k = setup().await;
+    let (_, code, _) =
+        run(&k, r#"u=$(fromjson '{"tags":["a"]}'); echo ${#u[nope]}"#).await;
+    assert_ne!(code, 0, "length of a missing key must be loud");
 }
 
 #[tokio::test]

@@ -81,6 +81,7 @@ ${xs[-1]}           # negative index counts from the end
 ${xs[0:2]}          # slice — end-exclusive, yields a list
 ${u[tags][0]}       # nested path
 ${#xs}   ${#u}      # length: list element count / record key count
+${#u[tags]}         # length of a nested value (path-aware)
 ```
 
 A subscript that lands on a JSON **scalar** unwraps to a native value, so
@@ -90,7 +91,26 @@ comparisons and arithmetic are typed (not stringly):
 c=$(fromjson '{"port":8080,"healthy":false}')
 echo $(( ${c[port]} + 1 ))                       # 8081  (integer arithmetic)
 [[ ${c[healthy]} == false ]] && echo "down"      # typed bool
+xs=$(fromjson '[10,20,30]'); i=1; echo $(( xs[i] ))   # bare subscript reads VARIABLE i → 20
 ```
+
+Inside `$(( … ))` a bare subscript is a numeric expression, so `xs[i]` reads the
+**variable** `i` — the opposite of the interpolation form `${xs[i]}`, where a
+bareword is a literal key. Write `${xs[$i]}` for a variable key in interpolation.
+
+**Default with `:-`.** `${path:-default}` yields the default on **absence** — an
+unset root, a missing key, an out-of-bounds index — and on an **empty** value
+(JSON `null` or empty string), but never on a present-but-falsy value:
+
+```sh
+cfg=$(fromjson '{"port":9000}')
+echo ${cfg[port]:-8080}       # 9000  (present)
+echo ${cfg[host]:-localhost}  # localhost  (missing key → default)
+echo ${cfg[flag]:-on}         # if flag is false/0/[]/{} you get that value, not "on"
+```
+
+A **shape** error (integer index on a record, string key on a list, subscripting
+a scalar, dotted access) stays loud even with `:-` — misuse is not absence.
 
 Every bad access is a **loud error**, never a silent empty — dotted access
 (`${u.name}` → use `[name]`), a missing record key, an out-of-bounds index, a

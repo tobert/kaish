@@ -13,7 +13,7 @@
 //! - Assignment within expressions (confusing)
 
 use crate::interpreter::Scope;
-use crate::ast::Value;
+use crate::ast::{Value, VarPath, VarSegment};
 use anyhow::{bail, Context, Result};
 
 /// Evaluate an arithmetic expression string.
@@ -289,6 +289,10 @@ impl<'a> ArithParser<'a> {
             Some(c) if c.is_ascii_alphabetic() || c == '_' => {
                 // Bare variable name (bash allows this in $(( )))
                 let var_name = self.parse_identifier()?;
+                if self.peek() == Some('[') {
+                    // Bare subscript path `xs[i]` — decision B.
+                    return self.eval_bare_subscript_path(&var_name);
+                }
                 self.get_var_value(&var_name)
             }
             Some(c) => bail!("unexpected character in arithmetic expression: {:?}", c),
@@ -380,7 +384,40 @@ impl<'a> ArithParser<'a> {
             crate::interpreter::PathError::UndefinedRoot(_) => {
                 anyhow::anyhow!("undefined variable in arithmetic: {root}")
             }
-            crate::interpreter::PathError::Invalid(msg) => anyhow::anyhow!(msg),
+            crate::interpreter::PathError::Absence(msg)
+            | crate::interpreter::PathError::Shape(msg) => anyhow::anyhow!(msg),
+        })?;
+        self.value_to_arith(&value, root)
+    }
+
+    /// Resolve a BARE subscripted path in arithmetic (`xs[i]`, `xs[0]`,
+    /// `xs[i+1]`, `xs[-1]`) and coerce to an integer.
+    ///
+    /// Decision B: inside `$(( … ))` a bracket's contents are a numeric
+    /// expression, so a bareword subscript is the VARIABLE `i` (evaluated here),
+    /// NOT the literal key — the exact opposite of the interpolation form
+    /// `${xs[i]}`, which stays a literal key via `eval_braced_path`. Each
+    /// subscript is evaluated as a nested arithmetic expression to an integer
+    /// index; chained subscripts (`grid[i][j]`) walk left to right.
+    fn eval_bare_subscript_path(&mut self, root: &str) -> Result<i64> {
+        let mut segments = vec![VarSegment::Field(root.to_string())];
+        while self.peek() == Some('[') {
+            self.advance(); // consume '['
+            let index = self.parse_comparison()?; // the inner is a numeric expr
+            self.skip_whitespace();
+            if self.peek() != Some(']') {
+                bail!("expected ']' to close subscript in arithmetic");
+            }
+            self.advance(); // consume ']'
+            segments.push(VarSegment::Index(index));
+        }
+        let path = VarPath { segments };
+        let value = self.scope.resolve_path(&path).map_err(|e| match e {
+            crate::interpreter::PathError::UndefinedRoot(_) => {
+                anyhow::anyhow!("undefined variable in arithmetic: {root}")
+            }
+            crate::interpreter::PathError::Absence(msg)
+            | crate::interpreter::PathError::Shape(msg) => anyhow::anyhow!(msg),
         })?;
         self.value_to_arith(&value, root)
     }
@@ -424,6 +461,64 @@ mod tests {
         assert_eq!(eval("42"), 42);
         assert_eq!(eval("0"), 0);
         assert_eq!(eval("12345"), 12345);
+    }
+
+    // ── Decision B: a bare subscript in arithmetic is a numeric expression ──
+    // `$(( xs[i] ))` reads variable `i` (the opposite of `${xs[i]}`, a literal
+    // key). Each bracket's inner is evaluated arithmetically to an index.
+
+    fn eval_with_scope(expr: &str, setup: impl FnOnce(&mut Scope)) -> Result<i64> {
+        let mut scope = Scope::new();
+        setup(&mut scope);
+        eval_arithmetic(expr, &scope)
+    }
+
+    #[test]
+    fn bare_subscript_index_is_a_variable() {
+        // xs = [10, 20, 30]; i = 1  →  xs[i] == 20
+        let r = eval_with_scope("xs[i]", |s| {
+            s.set("xs", Value::Json(serde_json::json!([10, 20, 30])));
+            s.set("i", Value::Int(1));
+        })
+        .expect("bare xs[i] should resolve via variable i");
+        assert_eq!(r, 20);
+    }
+
+    #[test]
+    fn bare_subscript_literal_index() {
+        let r = eval_with_scope("xs[0] + 1", |s| {
+            s.set("xs", Value::Json(serde_json::json!([10, 20, 30])));
+        })
+        .expect("xs[0] + 1");
+        assert_eq!(r, 11);
+    }
+
+    #[test]
+    fn bare_subscript_inner_is_an_expression() {
+        // xs[i + 1] with i = 0  →  xs[1] == 20
+        let r = eval_with_scope("xs[i + 1]", |s| {
+            s.set("xs", Value::Json(serde_json::json!([10, 20, 30])));
+            s.set("i", Value::Int(0));
+        })
+        .expect("xs[i + 1]");
+        assert_eq!(r, 20);
+    }
+
+    #[test]
+    fn bare_subscript_negative_index() {
+        let r = eval_with_scope("xs[-1]", |s| {
+            s.set("xs", Value::Json(serde_json::json!([10, 20, 30])));
+        })
+        .expect("xs[-1]");
+        assert_eq!(r, 30);
+    }
+
+    #[test]
+    fn bare_subscript_out_of_bounds_is_loud() {
+        let r = eval_with_scope("xs[9]", |s| {
+            s.set("xs", Value::Json(serde_json::json!([10, 20])));
+        });
+        assert!(r.is_err(), "out-of-bounds index must be a loud error");
     }
 
     #[test]

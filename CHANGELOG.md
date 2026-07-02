@@ -82,6 +82,21 @@ breaking entries are marked **BREAKING**.
   defined-but-wrong-shaped value is `false`; a bare unset `$var` is an
   undefined-variable error (like `-z`/`-n`), so a typo isn't silently false.
   `typeof` is pure data, present in every capability build.
+- **Path-aware `${#…}` length and `${…:-default}`** — both now accept a
+  subscripted path: `${#u[tags]}` is the element/key count of the nested value,
+  and `${cfg[port]:-8080}` defaults on the resolved path. The default follows
+  decision A — it fires on **absence** (unset root, missing key, out-of-bounds
+  index) and on an empty value (JSON `null` or empty string), but never on a
+  falsy-but-present value (`false`, `0`, `[]`, `{}`); a **shape** error (integer
+  index on a record, string key on a list, subscripting a scalar, dotted access)
+  stays loud even with `:-`. These were a loud "bind it first" placeholder
+  before.
+- **Bare subscripts in arithmetic — `$(( xs[i] ))`** — inside `$(( … ))` a
+  bracket's contents are a numeric expression, so a bareword subscript is the
+  **variable** `i` (the opposite of the interpolation form `${xs[i]}`, a literal
+  key). `xs[0]`, `xs[i]`, `xs[i + 1]`, `xs[-1]`, and chained `grid[i][j]` all
+  work; an out-of-bounds index is loud. Previously a bare subscript was dropped
+  and failed as "variable is JSON, not a number".
 - **`json_to_value_no_envelope` (kaish-types)** — envelope-free JSON→`Value`
   conversion for external JSON, so byte-envelope-shaped objects are never
   silently decoded to `Value::Bytes`.
@@ -115,10 +130,14 @@ breaking entries are marked **BREAKING**.
     instead of the element/key count (`${#xs}` on a 3-element list gave `7`);
     `${#…}` on binary now counts bytes.
   - A negative slice *end* (`${xs[0:-1]}`) was misread as a `:-default` and
-    mangled to `1]`; the `:-` scanners are now subscript-aware. Length or default
-    on a *subscripted* path (`${#u[tags]}`, `${cfg[port]:-8080}`) — which silently
-    returned `0` / the default — is now a loud "bind it first" error pending full
-    path-aware support.
+    mangled to `1]`; the `:-` scanners are now subscript-aware. (Length and
+    default on a *subscripted* path — `${#u[tags]}`, `${cfg[port]:-8080}` — were
+    briefly a loud "bind it first" error; they are now fully path-aware, see
+    Added.)
+- **`${x:-default}` no longer treats JSON `null` as present** — a variable
+  holding `null` stringified to the non-empty `"null"`, so `${x:-fallback}`
+  returned `null` instead of the default. `:-` now fires on `null` and empty
+  string (decision A), while `false`/`0`/`[]`/`{}` stay present values.
 - **`--help`/`-h` now passes through to `with_owned_output()` tools** — the
   kernel's generic help router no longer intercepts it for tools that re-parse
   their own argv, so a leaf request like `tool subcmd --help` reaches the tool

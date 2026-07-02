@@ -521,8 +521,11 @@ pub enum Token {
     #[token("$$")]
     CurrentPid,
 
-    /// Variable string length: `${#VAR}`
-    #[regex(r"\$\{#[a-zA-Z_][a-zA-Z0-9_]*\}", lex_var_length)]
+    /// Variable string length: `${#VAR}` or a subscripted path `${#u[tags]}`.
+    /// The trailing `(\[[^\]]*\])*` admits chained bracket subscripts so a
+    /// length-of-path lexes in expression position, not just inside strings; the
+    /// parser turns the captured inner into a `VarPath`.
+    #[regex(r"\$\{#[a-zA-Z_][a-zA-Z0-9_]*(\[[^\]]*\])*\}", lex_var_length)]
     VarLength(String),
 
     /// Here-doc content: synthesized by preprocessing, not directly lexed.
@@ -3003,6 +3006,16 @@ mod tests {
         assert_eq!(lex("${#X}"), vec![Token::VarLength("X".to_string())]);
         assert_eq!(lex("${#NAME}"), vec![Token::VarLength("NAME".to_string())]);
         assert_eq!(lex("${#foo_bar}"), vec![Token::VarLength("foo_bar".to_string())]);
+    }
+
+    #[test]
+    fn var_length_with_subscript() {
+        // The widened regex admits `[...]` subscripts so a length-of-path lexes
+        // in expression position; the parser turns the inner into a VarPath.
+        assert_eq!(lex("${#u[tags]}"), vec![Token::VarLength("u[tags]".to_string())]);
+        assert_eq!(lex("${#a[0]}"), vec![Token::VarLength("a[0]".to_string())]);
+        assert_eq!(lex("${#a[b][c]}"), vec![Token::VarLength("a[b][c]".to_string())]);
+        assert_eq!(lex("${#r[$k]}"), vec![Token::VarLength("r[$k]".to_string())]);
     }
 
     #[test]

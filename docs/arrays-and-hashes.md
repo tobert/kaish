@@ -680,11 +680,19 @@ paths relative to `crates/kaish-kernel/src`).
   `cmd.env(...)` at both spawn sites (`kernel.rs::try_execute_external`, test-only twin
   `dispatch.rs::try_external` — the hermetic two-spawn-site rule). `export.rs` declaration-time
   display was deliberately left as-is (the process edge is the boundary that matters).
-### #6 — the shared per-hop resolver (design settled 2026-07-02)
+### #6 — the shared per-hop resolver (design settled 2026-07-02; read-side SHIPPED 2026-07-02)
 
 *The single most important thing before the literal/lvalue grammar. This is a read-side refactor
 that also unblocks the deferred `${#path}` / `${path:-default}` forms and arithmetic subscripts;
 lvalue **writes** are the phase after, but the resolver is shaped so they slot in.*
+
+**SHIPPED (read side, branch `feat/collections-resolver`):** `resolve_step` + the `Cow` borrow
+walk (kills the O(n²) root clone), the `PathError` → `UndefinedRoot`/`Absence`/`Shape` split,
+path-aware `${#path}` / `${path:-default}` with decision-A semantics (`VarLength`/`VarWithDefault`
+now carry a `VarPath`; the lexer `VarLength` regex widened for bracket subscripts), arithmetic
+decision B (`$(( xs[i] ))` reads variable `i`), and full-path-prefix error messages. The two
+`subscripted_*_error` "bind first" placeholders are deleted. **NOT shipped:** lvalue writes
+(`a[b]=x` grammar + `walk_write` + validator root-binding) — the next phase, sharing `resolve_step`.
 
 **The problem.** Today `Scope::apply_segment` (`scope.rs:519`) fuses three jobs per hop — classify
 a segment against the container (index-vs-key, negative-index normalization, every loud message),
@@ -733,6 +741,40 @@ guarantees read and write can't diverge.
 `Scope` read-guard, unwrapping to owned only at the leaf (this is what removes the O(n²) clone). The
 borrow must complete within the `RwLock` guard's lifetime — validate that borrow shape before
 building out.
+
+**Grounding pass 2026-07-02 (against HEAD; design-pass with the code open).** Three findings that
+sharpen the plan:
+- **The borrow risk mostly dissolves.** `resolve_path(&self, &VarPath) -> Result<Value, PathError>`
+  takes `&self` and returns **owned** `Value`, and every caller already holds the guard
+  (`let scope = self.scope.read().await; scope.resolve_path(&path)` — `scope: RwLock<Scope>`,
+  `kernel.rs:665`). So `walk_read`'s `&serde_json::Value` borrow lives **entirely inside the method
+  body**, well within the guard; no lifetime threads out to any caller and the public signature is
+  unchanged. The actual O(n²) is today's `self.get(root_name).cloned()` (`scope.rs:507`) cloning the
+  *whole root* on every `${u[$k]}`; deleting that `.cloned()` (walk the borrowed root, clone only the
+  leaf) is the fix.
+- **Arithmetic decision B is a correctness bug, not a refinement.** `arithmetic.rs:352-379`
+  hand-collects the bracket text, rebuilds `${root[...]}` as a string, and reparses through the
+  *shared* `parse_subscript` — so `$(( xs[i] ))` today resolves `i` as a **literal key**, not variable
+  `i`. Fix per B: arithmetic builds the `VarPath` directly, emitting `VarSegment::Dynamic("i")` for a
+  bareword subscript (interpolation keeps emitting `Key("i")`), so `resolve_step` stays context-free.
+- **The read/write seam, made minimal.** `resolve_step` owns everything **identical** across read and
+  write — index-vs-key classification, negative-index math, and `Index` bounds (out-of-bounds →
+  `Absence`; a write index-set is also in-bounds-only, so bounds are genuinely shared). The **only**
+  thing the walk decides is *missing-`Key` policy*: `walk_read` → `Absence`; the future `walk_write`
+  leaf → insert. That is the smallest split that keeps `${a[-1]}` read and `a[-1]=x` write from
+  drifting. `resolve_step` does **not** check `Key` existence (that's walk policy).
+
+**`PathError` reclassification — every current `Invalid` site.** Today `UndefinedRoot | Invalid`
+(`scope.rs:27`); the split assigns each site:
+- **UndefinedRoot** — root not in scope; **unset dynamic key** `${r[$k]}` when `$k` itself is unset
+  (`scope.rs:554` — the *variable* is missing, so `${r[$k]:-d}` defaults).
+- **Absence** — out-of-bounds index (`scope.rs:79`); missing record key `no such key` (`scope.rs:92`).
+- **Shape** — dotted `.field` (`scope.rs:531`); subscript-a-scalar (`scope.rs:540`);
+  integer-index-on-record (`scope.rs:66`); string-key-on-list (`scope.rs:96`); slice-a-record
+  (`scope.rs:117`); dynamic-index-not-integer (`scope.rs:560`); `$?` subscripted (`scope.rs:499`).
+
+`${path:-default}` catches **UndefinedRoot + Absence** → default; **Shape always stays loud**; plus
+the post-resolution `null`/empty-string → default check (decision A — *not* on `false`/`0`/`[]`/`{}`).
 - **`...` spread**: new lexer token; no existing `..`/`...` handling to collide with. Scope it
   to `[ ]` value context only.
 

@@ -34,8 +34,8 @@ fn parse_var_expr(raw: &str) -> Expr {
     // Check for default value syntax: ${VAR:-default}
     // Need to find :- that's not inside a nested ${...}
     if let Some(colon_idx) = find_default_separator(raw) {
-        // Extract variable name (between ${ and :-)
-        let name = raw[2..colon_idx].to_string();
+        // Extract the variable path (between ${ and :-) — may carry subscripts.
+        let path = parse_varpath(&format!("${{{}}}", &raw[2..colon_idx]));
         // Extract default value (between :- and }) and recursively parse it,
         // after stripping shell quoting from the word (quotes are syntax).
         let default_str = &raw[colon_idx + 2..raw.len() - 1];
@@ -45,7 +45,7 @@ fn parse_var_expr(raw: &str) -> Expr {
         let default_word = unquote_default_word(default_str);
         let default = parse_interpolated_string(&default_word)
             .unwrap_or_else(|_| vec![StringPart::Literal(default_word.clone())]);
-        return Expr::VarWithDefault { name, default };
+        return Expr::VarWithDefault { path, default };
     }
 
     // Regular variable path
@@ -442,7 +442,7 @@ fn parse_interpolated_string_spanned(s: &str, base_offset: usize) -> Vec<Spanned
                     }
                 }
                 let part = if let Some(name) = var_content.strip_prefix('#') {
-                    StringPart::VarLength(name.to_string())
+                    StringPart::VarLength(parse_varpath(&format!("${{{name}}}")))
                 } else if var_content.starts_with("__ARITH:") && var_content.ends_with("__") {
                     let expr = var_content
                         .strip_prefix("__ARITH:")
@@ -450,7 +450,7 @@ fn parse_interpolated_string_spanned(s: &str, base_offset: usize) -> Vec<Spanned
                         .unwrap_or("");
                     StringPart::Arithmetic(expr.to_string())
                 } else if let Some(colon_idx) = find_default_separator_in_content(&var_content) {
-                    let name = var_content[..colon_idx].to_string();
+                    let path = parse_varpath(&format!("${{{}}}", &var_content[..colon_idx]));
                     let default_str = &var_content[colon_idx + 2..];
                     // Default value spans recursively kept relative to the
                     // outer body — the inner parts get their own offsets via
@@ -459,7 +459,7 @@ fn parse_interpolated_string_spanned(s: &str, base_offset: usize) -> Vec<Spanned
                     let default_word = unquote_default_word(default_str);
                     let default = parse_interpolated_string(&default_word)
                         .unwrap_or_else(|_| vec![StringPart::Literal(default_word.clone())]);
-                    StringPart::VarWithDefault { name, default }
+                    StringPart::VarWithDefault { path, default }
                 } else {
                     StringPart::Var(parse_varpath(&format!("${{{}}}", var_content)))
                 };
@@ -675,8 +675,8 @@ fn parse_interpolated_string(s: &str) -> Result<Vec<StringPart>, String> {
 
                 // Parse the content for special syntax
                 let part = if let Some(name) = var_content.strip_prefix('#') {
-                    // Variable length: ${#VAR}
-                    StringPart::VarLength(name.to_string())
+                    // Variable length: ${#VAR} / ${#path[sub]}
+                    StringPart::VarLength(parse_varpath(&format!("${{{name}}}")))
                 } else if var_content.starts_with("__ARITH:") && var_content.ends_with("__") {
                     // Arithmetic expression: ${__ARITH:expr__}
                     let expr = var_content
@@ -686,10 +686,10 @@ fn parse_interpolated_string(s: &str) -> Result<Vec<StringPart>, String> {
                     StringPart::Arithmetic(expr.to_string())
                 } else if let Some(colon_idx) = find_default_separator_in_content(&var_content) {
                     // Variable with default: ${VAR:-default} - recursively parse the default
-                    let name = var_content[..colon_idx].to_string();
+                    let path = parse_varpath(&format!("${{{}}}", &var_content[..colon_idx]));
                     let default_str = &var_content[colon_idx + 2..];
                     let default = parse_interpolated_string(&unquote_default_word(default_str))?;
-                    StringPart::VarWithDefault { name, default }
+                    StringPart::VarWithDefault { path, default }
                 } else {
                     // Regular variable: ${VAR} or ${VAR.field}
                     StringPart::Var(parse_varpath(&format!("${{{}}}", var_content)))
@@ -2109,7 +2109,7 @@ where
         Token::Positional(n) => Expr::Positional(n),
         Token::AllArgs => Expr::AllArgs,
         Token::ArgCount => Expr::ArgCount,
-        Token::VarLength(name) => Expr::VarLength(name),
+        Token::VarLength(name) => Expr::VarLength(parse_varpath(&format!("${{{name}}}"))),
         Token::LastExitCode => Expr::LastExitCode,
         Token::CurrentPid => Expr::CurrentPid,
     };

@@ -51,7 +51,7 @@ pub use kaish_types::{CommandKind, ExecuteOptions};
 use crate::backend::{BackendError, KernelBackend};
 use kaish_glob::glob_match;
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
-use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value_no_envelope, value_to_bool, value_length, value_to_string, ControlFlow, ExecResult, PathError, Scope};
+use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value_no_envelope, value_to_bool, value_to_string, ControlFlow, ExecResult, PathError, Scope};
 use crate::parser::parse;
 use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_stream, BoundedStream, JobManager, PipelineRunner, StderrReceiver};
 #[cfg(feature = "subprocess")]
@@ -3660,7 +3660,9 @@ impl Kernel {
                     Err(PathError::UndefinedRoot(_)) => {
                         Err(anyhow::anyhow!("undefined variable"))
                     }
-                    Err(PathError::Invalid(msg)) => Err(anyhow::anyhow!(msg)),
+                    Err(PathError::Absence(msg)) | Err(PathError::Shape(msg)) => {
+                        Err(anyhow::anyhow!(msg))
+                    }
                 }
             }
             Expr::Interpolated(parts) => {
@@ -3780,32 +3782,23 @@ impl Kernel {
                 let scope = self.scope.read().await;
                 Ok(Value::Int(scope.arg_count() as i64))
             }
-            Expr::VarLength(name) => {
-                if crate::interpreter::name_is_subscripted(name) {
-                    return Err(anyhow::anyhow!("{}", crate::interpreter::subscripted_length_error(name)));
-                }
+            Expr::VarLength(path) => {
                 let scope = self.scope.read().await;
-                match scope.get(name) {
-                    Some(value) => Ok(Value::Int(value_length(value))),
-                    None => Ok(Value::Int(0)),
-                }
+                crate::interpreter::resolve_length(&scope, path)
+                    .map(Value::Int)
+                    .map_err(|msg| anyhow::anyhow!(msg))
             }
-            Expr::VarWithDefault { name, default } => {
-                if crate::interpreter::name_is_subscripted(name) {
-                    return Err(anyhow::anyhow!("{}", crate::interpreter::subscripted_default_error(name)));
-                }
-                let scope = self.scope.read().await;
-                let use_default = match scope.get(name) {
-                    Some(value) => value_to_string(value).is_empty(),
-                    None => true,
-                };
-                drop(scope); // Release the lock before recursive evaluation
-                if use_default {
-                    // Evaluate the default parts (supports nested expansions)
-                    self.eval_string_parts_async(default).await.map(Value::String)
-                } else {
+            Expr::VarWithDefault { path, default } => {
+                // Resolve inside a scoped guard so the lock is released before the
+                // recursive default evaluation.
+                let resolved = {
                     let scope = self.scope.read().await;
-                    scope.get(name).cloned().ok_or_else(|| anyhow::anyhow!("variable '{}' not found", name))
+                    crate::interpreter::resolve_default(&scope, path)
+                        .map_err(|msg| anyhow::anyhow!(msg))?
+                };
+                match resolved {
+                    Some(value) => Ok(value),
+                    None => self.eval_string_parts_async(default).await.map(Value::String),
                 }
             }
             Expr::Arithmetic(expr_str) => {
@@ -3964,36 +3957,27 @@ impl Kernel {
                         Ok(value) => Ok(value_to_string(&value)),
                         // Unset vars expand to empty; loud path errors surface.
                         Err(PathError::UndefinedRoot(_)) => Ok(String::new()),
-                        Err(PathError::Invalid(msg)) => Err(anyhow::anyhow!(msg)),
+                        Err(PathError::Absence(msg)) | Err(PathError::Shape(msg)) => {
+                            Err(anyhow::anyhow!(msg))
+                        }
                     }
                 }
-                StringPart::VarWithDefault { name, default } => {
-                    if crate::interpreter::name_is_subscripted(name) {
-                        return Err(anyhow::anyhow!("{}", crate::interpreter::subscripted_default_error(name)));
-                    }
-                    let scope = self.scope.read().await;
-                    let use_default = match scope.get(name) {
-                        Some(value) => value_to_string(value).is_empty(),
-                        None => true,
-                    };
-                    drop(scope); // Release lock before recursive evaluation
-                    if use_default {
-                        // Evaluate the default parts (supports nested expansions)
-                        self.eval_string_parts_async(default).await
-                    } else {
+                StringPart::VarWithDefault { path, default } => {
+                    let resolved = {
                         let scope = self.scope.read().await;
-                        Ok(value_to_string(scope.get(name).ok_or_else(|| anyhow::anyhow!("variable '{}' not found", name))?))
+                        crate::interpreter::resolve_default(&scope, path)
+                            .map_err(|msg| anyhow::anyhow!(msg))?
+                    };
+                    match resolved {
+                        Some(value) => Ok(value_to_string(&value)),
+                        None => self.eval_string_parts_async(default).await,
                     }
                 }
-            StringPart::VarLength(name) => {
-                if crate::interpreter::name_is_subscripted(name) {
-                    return Err(anyhow::anyhow!("{}", crate::interpreter::subscripted_length_error(name)));
-                }
+            StringPart::VarLength(path) => {
                 let scope = self.scope.read().await;
-                match scope.get(name) {
-                    Some(value) => Ok(value_length(value).to_string()),
-                    None => Ok("0".to_string()),
-                }
+                crate::interpreter::resolve_length(&scope, path)
+                    .map(|n| n.to_string())
+                    .map_err(|msg| anyhow::anyhow!(msg))
             }
             StringPart::Positional(n) => {
                 let scope = self.scope.read().await;

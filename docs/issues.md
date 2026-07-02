@@ -447,6 +447,17 @@ pipeline, control, …}` with `execute_stmt_flow` reduced to dispatch-arm-per-mo
 The six-field `ExecContext` ↔ kernel-state sync appears near every fork call site
 (`kernel.rs:~4100-4140` and duplicates). One helper, one truth.
 
+### Focused session: clean up & streamline the parser
+`parser.rs` has accreted a lot of special-casing and the lexer/parser boundary is
+doing more than it should (context-free glob/colon merge passes the parser then has
+to fight against, hand-rolled bracket collection in `arithmetic.rs`, the
+value-vs-argv grammar split still pending for collection literals). Worth a dedicated
+pass to consolidate: unify the subscript/path machinery, push the value/argv
+bifurcation through cleanly, and thin the merge-pass workarounds. Surfaced while
+grounding the #6 resolver work (2026-07-02) — the resolver refactor is the read-side
+half; the parser is where the *write*-side literal/lvalue grammar will land, so
+streamlining it first de-risks that phase. (P2)
+
 ### No unquoted token-pasting — residual polish
 (Decision recorded in devlog — keep the quoting requirement.) Live residuals (P4):
 - **Redirect target** (`parser.rs`, `redirect_parser`): `> /tmp/$(echo x).txt` is a
