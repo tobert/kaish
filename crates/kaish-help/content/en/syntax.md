@@ -2,7 +2,7 @@
 
 ## Variables
 
-```bash
+```sh
 NAME="value"              # assignment (no spaces around =)
 local NAME="value"        # local scope
 COUNT=42                  # integer
@@ -12,7 +12,7 @@ ENABLED=true              # boolean (only true/false)
 
 ## Expansion
 
-```bash
+```sh
 $VAR                      # simple
 ${VAR}                    # braced
 ${VAR:-default}           # default if unset/empty
@@ -30,7 +30,7 @@ processes, where the host PID is meaningless to the script.
 
 ## Collections (lists & records)
 
-```bash
+```sh
 # Values are structured JSON (list or record); fromjson/tojson bridge text.
 u=$(fromjson '{"name":"amy","tags":["rust","shell"]}')
 xs=$(fromjson '[10,20,30]')
@@ -73,7 +73,7 @@ tojson $u                 # serialize back to JSON text (--pretty to indent)
 
 ## Paths
 
-```bash
+```sh
 /usr/bin/foo              # absolute
 ../parent/file            # relative with ..
 ./script.sh               # dot-slash (explicit relative)
@@ -84,7 +84,7 @@ cd -                      # previous directory
 
 ## Quoting
 
-```bash
+```sh
 "hello $NAME"             # double quotes — interpolation
 "literal \$X"             # escape $ to prevent expansion
 'hello $NAME'             # single quotes — literal, no interpolation
@@ -104,7 +104,7 @@ cmd > $dir/out.txt        # error — quote "$dir/out.txt"
 
 ## Pipes & Redirects
 
-```bash
+```sh
 cmd1 | cmd2 | cmd3        # pipe stdout
 cmd > file                # write stdout
 cmd >> file               # append
@@ -135,14 +135,14 @@ kaish variables directly into the filter.
 
 ## Operators
 
-```bash
+```sh
 cmd1 && cmd2              # cmd2 if cmd1 succeeds
 cmd1 || cmd2              # cmd2 if cmd1 fails
 ```
 
 ## Test Expressions
 
-```bash
+```sh
 # File: -f (file) -d (dir) -e (exists) -r (readable) -w (writable) -x (executable)
 # String: -z (empty) -n (non-empty) == != =~ (regex) !~ (not regex)
 # Numeric: -gt -lt -ge -le
@@ -158,7 +158,7 @@ cmd1 || cmd2              # cmd2 if cmd1 fails
 
 ## Control Flow
 
-```bash
+```sh
 if [[ -f file ]]; then echo "found"; elif [[ -d dir ]]; then echo "dir"; else echo "none"; fi
 
 for item in "one" "two"; do echo $item; done
@@ -179,7 +179,7 @@ break; continue; return [N]; exit [N]
 
 ## Command Substitution
 
-```bash
+```sh
 NOW=$(date)
 
 # In for-loops, $(cmd) splits on newlines (only):
@@ -210,7 +210,7 @@ DATA=$(kaish-last)                # capture for later use
 
 ## Arithmetic
 
-```bash
+```sh
 X=$((5 + 3))              # 8
 Y=$((X * 2))              # 16
 # Operators: + - * / % > < >= <= == !=
@@ -219,7 +219,7 @@ Y=$((X * 2))              # 16
 
 ## Functions
 
-```bash
+```sh
 greet() { echo "Hello, $1!"; }
 function greet { echo "Hello, $1!"; }
 greet "Amy"
@@ -227,7 +227,7 @@ greet "Amy"
 
 ## Glob Expansion
 
-```bash
+```sh
 ls *.txt                  # expands to matching .txt files
 cat src/*.rs              # path-prefixed globs work
 for f in *.json; do       # iterates over matches
@@ -241,7 +241,7 @@ Zero matches is an error (exit code 1). The `glob` builtin still works for `--ex
 
 ## Shell Options
 
-```bash
+```sh
 set -e                    # exit on first error
 set -o latch              # require nonce confirmation to delete/overwrite (exit code 2)
 set -o trash              # move rm'd / overwritten files to Trash
@@ -274,7 +274,7 @@ nonces persist naturally. Embedders control this via
 
 ## Error Handling
 
-```bash
+```sh
 set -e                    # exit on first error
 cmd || { echo "failed"; exit 1; }
 source utils.kai          # load script (shared scope)
@@ -282,7 +282,7 @@ source utils.kai          # load script (shared scope)
 
 ## Aliases & Background Jobs
 
-```bash
+```sh
 alias ll='ls -la'         # define (first word only, not in pipelines)
 unalias ll                # remove
 

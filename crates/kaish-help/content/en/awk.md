@@ -8,7 +8,7 @@ unsupported construct errors with a hint, it never silently does nothing.
 
 ## Quick start
 
-```bash
+```sh
 awk '{print $2}' file.txt                 # 2nd whitespace field of each line
 awk -F: '{print $1}' /etc/passwd          # field separator ':'  (also -F, -F'\t')
 awk 'NR==1 {print}' file.txt              # first line only  (NR = record number)
@@ -24,7 +24,7 @@ run before/after all input.
 
 ## Fields, records, separators
 
-```bash
+```sh
 $0            # whole record;  $1..$NF  fields;  $(NF-1) computed index
 NF NR         # field count / record number     FILENAME  input name
 -F:           # set FS on the command line (-F, -F: -F';' -F'\t' all work)
@@ -39,7 +39,7 @@ multi-char FS is an ERE regex. Range patterns work: `/start/,/stop/`.
 
 These DO populate / mutate (a common awk pitfall elsewhere — here they work):
 
-```bash
+```sh
 n = split($0, a, ",")      # fills a[1]..a[n], returns n
 sub(/foo/, "bar")          # first match in $0; returns 1/0; & = matched text
 gsub(/o/, "0")             # every match; returns count; \& for a literal &
@@ -56,7 +56,7 @@ character classes, `*+?`, `{m,n}`, anchors, and alternation.
 
 ## Control flow, arrays, output
 
-```bash
+```sh
 if (c) {...} else {...}     while (c) {...}     for (i=0;i<n;i++) {...}
 for (k in arr) {...}        delete arr[k]       "x" in arr
 next                        # skip to next record

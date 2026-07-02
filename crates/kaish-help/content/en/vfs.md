@@ -37,7 +37,7 @@ Each background job gets a directory:
 /v/jobs/{id}/command   original command string
 ```
 
-```bash
+```sh
 cargo build &
 cat /v/jobs/1/status       # running
 cat /v/jobs/1/stdout       # build output so far
@@ -48,7 +48,7 @@ jobs --cleanup             # remove completed jobs
 
 `/tmp` is the only path outside `$HOME` accessible in sandboxed mode. Use it for data exchange with external commands.
 
-```bash
+```sh
 write /tmp/data.json '{"key": "value"}'
 jq '.key' /tmp/data.json
 ```
@@ -58,7 +58,7 @@ jq '.key' /tmp/data.json
 In sandboxed and memory-only modes the host's `/dev` is unreachable, so kaish
 provides software-backed devices:
 
-```bash
+```sh
 cmd > /dev/null                          # discard output (writes are dropped)
 cat /dev/null                            # empty
 head -c 32 /dev/zero                     # exactly 32 zero bytes

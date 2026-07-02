@@ -14,7 +14,7 @@ input | scatter [--as VAR] [--limit N] [--timeout DUR] | command | gather [--fir
 
 ## Example
 
-```bash
+```sh
 # Fan out to 4 workers, compute squares, collect first 5 as JSON
 seq 1 20 | scatter --as N --limit 4 | echo "{\"id\": $N, \"square\": $((N * N))}" | gather --first 5 --format json
 

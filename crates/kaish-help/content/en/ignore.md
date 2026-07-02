@@ -22,7 +22,7 @@ When defaults are on, these are always filtered: `.git`, `node_modules`, `target
 
 ## kaish-ignore Builtin
 
-```bash
+```sh
 kaish-ignore                          # show current config
 kaish-ignore add .dockerignore        # add ignore file
 kaish-ignore remove .gitignore        # remove from list
@@ -36,7 +36,7 @@ kaish-ignore scope advisory|enforced  # change scope
 
 Add to `~/.kaishrc` for filtering in interactive mode:
 
-```bash
+```sh
 kaish-ignore add .gitignore
 kaish-ignore defaults on
 kaish-ignore auto on

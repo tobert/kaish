@@ -232,7 +232,7 @@ pub const FRAGMENTS: &[Fragment] = &[
     syntax_section(
         "variables",
         "Variables",
-        r#"```bash
+        r#"```sh
 NAME="value"              # assignment (no spaces around =)
 local NAME="value"        # local scope
 COUNT=42                  # integer
@@ -243,7 +243,7 @@ ENABLED=true              # boolean (only true/false)
     syntax_section(
         "expansion",
         "Expansion",
-        r#"```bash
+        r#"```sh
 $VAR                      # simple
 ${VAR}                    # braced
 ${VAR:-default}           # default if unset/empty
@@ -262,7 +262,7 @@ processes, where the host PID is meaningless to the script."#,
     syntax_section(
         "collections",
         "Collections (lists & records)",
-        r#"```bash
+        r#"```sh
 # Values are structured JSON (list or record); fromjson/tojson bridge text.
 u=$(fromjson '{"name":"amy","tags":["rust","shell"]}')
 xs=$(fromjson '[10,20,30]')
@@ -306,7 +306,7 @@ tojson $u                 # serialize back to JSON text (--pretty to indent)
     syntax_section(
         "paths",
         "Paths",
-        r#"```bash
+        r#"```sh
 /usr/bin/foo              # absolute
 ../parent/file            # relative with ..
 ./script.sh               # dot-slash (explicit relative)
@@ -318,7 +318,7 @@ cd -                      # previous directory
     syntax_section(
         "quoting",
         "Quoting",
-        r#"```bash
+        r#"```sh
 "hello $NAME"             # double quotes — interpolation
 "literal \$X"             # escape $ to prevent expansion
 'hello $NAME'             # single quotes — literal, no interpolation
@@ -339,7 +339,7 @@ cmd > $dir/out.txt        # error — quote "$dir/out.txt"
     syntax_section(
         "pipes-redirects",
         "Pipes & Redirects",
-        r#"```bash
+        r#"```sh
 cmd1 | cmd2 | cmd3        # pipe stdout
 cmd > file                # write stdout
 cmd >> file               # append
@@ -371,7 +371,7 @@ kaish variables directly into the filter."#,
     syntax_section(
         "operators",
         "Operators",
-        r#"```bash
+        r#"```sh
 cmd1 && cmd2              # cmd2 if cmd1 succeeds
 cmd1 || cmd2              # cmd2 if cmd1 fails
 ```"#,
@@ -379,7 +379,7 @@ cmd1 || cmd2              # cmd2 if cmd1 fails
     syntax_section(
         "test-expressions",
         "Test Expressions",
-        r#"```bash
+        r#"```sh
 # File: -f (file) -d (dir) -e (exists) -r (readable) -w (writable) -x (executable)
 # String: -z (empty) -n (non-empty) == != =~ (regex) !~ (not regex)
 # Numeric: -gt -lt -ge -le
@@ -396,7 +396,7 @@ cmd1 || cmd2              # cmd2 if cmd1 fails
     syntax_section(
         "control-flow",
         "Control Flow",
-        r#"```bash
+        r#"```sh
 if [[ -f file ]]; then echo "found"; elif [[ -d dir ]]; then echo "dir"; else echo "none"; fi
 
 for item in "one" "two"; do echo $item; done
@@ -418,7 +418,7 @@ break; continue; return [N]; exit [N]
     syntax_section(
         "command-substitution",
         "Command Substitution",
-        r#"```bash
+        r#"```sh
 NOW=$(date)
 
 # In for-loops, $(cmd) splits on newlines (only):
@@ -450,7 +450,7 @@ DATA=$(kaish-last)                # capture for later use
     syntax_section(
         "arithmetic",
         "Arithmetic",
-        r#"```bash
+        r#"```sh
 X=$((5 + 3))              # 8
 Y=$((X * 2))              # 16
 # Operators: + - * / % > < >= <= == !=
@@ -460,7 +460,7 @@ Y=$((X * 2))              # 16
     syntax_section(
         "functions",
         "Functions",
-        r#"```bash
+        r#"```sh
 greet() { echo "Hello, $1!"; }
 function greet { echo "Hello, $1!"; }
 greet "Amy"
@@ -469,7 +469,7 @@ greet "Amy"
     syntax_section(
         "glob-expansion",
         "Glob Expansion",
-        r#"```bash
+        r#"```sh
 ls *.txt                  # expands to matching .txt files
 cat src/*.rs              # path-prefixed globs work
 for f in *.json; do       # iterates over matches
@@ -484,7 +484,7 @@ Zero matches is an error (exit code 1). The `glob` builtin still works for `--ex
     syntax_section(
         "shell-options",
         "Shell Options",
-        r#"```bash
+        r#"```sh
 set -e                    # exit on first error
 set -o latch              # require nonce confirmation to delete/overwrite (exit code 2)
 set -o trash              # move rm'd / overwritten files to Trash
@@ -518,7 +518,7 @@ nonces persist naturally. Embedders control this via
     syntax_section(
         "error-handling",
         "Error Handling",
-        r#"```bash
+        r#"```sh
 set -e                    # exit on first error
 cmd || { echo "failed"; exit 1; }
 source utils.kai          # load script (shared scope)
@@ -527,7 +527,7 @@ source utils.kai          # load script (shared scope)
     syntax_section(
         "aliases-background-jobs",
         "Aliases & Background Jobs",
-        r#"```bash
+        r#"```sh
 alias ll='ls -la'         # define (first word only, not in pipelines)
 unalias ll                # remove
 

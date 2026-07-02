@@ -20,7 +20,7 @@ help <tool>     Detailed tool help (e.g., help grep)
 
 Builtins return structured data. Use `--json` for machine-readable output:
 
-```bash
+```sh
 ls --json                # JSON array of file nodes
 kaish-vars --json        # JSON array of {NAME, VALUE} objects
 ps --json                # JSON array of process info
@@ -28,7 +28,7 @@ ps --json                # JSON array of process info
 
 ## Quick Examples
 
-```bash
+```sh
 # Familiar syntax — globs, pipes, control flow all work
 ls *.txt | wc -l
 for f in src/*.rs; do grep "TODO" "$f"; done

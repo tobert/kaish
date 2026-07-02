@@ -22,7 +22,7 @@ The REPL starts with no limit but `set -o output-limit` works at any time. To ma
 
 Spill always exits **3**. The spill file path is shown in the output. To read it without hitting the limit again:
 
-```bash
+```sh
 set +o output-limit
 cat /run/user/1000/kaish/spill/spill-1234567890.123-4567.txt
 set -o output-limit=8K
@@ -38,7 +38,7 @@ Location: `$XDG_RUNTIME_DIR/kaish/spill/` (typically `/run/user/$UID/kaish/spill
 
 ## kaish-output-limit Builtin
 
-```bash
+```sh
 kaish-output-limit                    # show current config
 kaish-output-limit set 64K            # set limit (K/M suffixes or raw bytes)
 kaish-output-limit on                 # enable with default 8K limit

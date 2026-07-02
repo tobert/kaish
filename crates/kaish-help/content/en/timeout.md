@@ -28,7 +28,7 @@ inner command's exit code unchanged.
 
 ## Examples
 
-```bash
+```sh
 timeout 5 sleep 10                  # exits 124 after ~5s; sleep is killed
 timeout 500ms curl example.com      # bounds a network call
 timeout 2m cargo build              # bounds a long build
