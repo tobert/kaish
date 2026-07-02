@@ -439,7 +439,7 @@ async fn key_not_in_record_is_false() {
 }
 
 #[tokio::test]
-async fn not_in_negates_list_membership() {
+async fn not_in_true_when_record_key_absent() {
     let k = setup().await;
     let (out, code, err) = run(
         &k,
@@ -448,6 +448,19 @@ async fn not_in_negates_list_membership() {
     .await;
     assert_eq!(code, 0, "err: {err}");
     assert_eq!(out, "no tmp");
+}
+
+#[tokio::test]
+async fn not_in_with_command_subst_rhs() {
+    // Symmetry with `command_subst_rhs_*`: `not in` over a typed `$()` list.
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"if [[ 99 not in $(fromjson '[10,20,30]') ]]; then echo "absent"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "absent");
 }
 
 #[tokio::test]

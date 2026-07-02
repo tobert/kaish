@@ -651,10 +651,10 @@ paths relative to `crates/kaish-kernel/src`).
   work is *nested* length (`${#u[tags]}`): the `VarLength(String)` node carries a bare name, so it
   can't reach a subscript — it's a loud "bind first" error until the node carries a `VarPath` (do
   it with the resolver extraction below).
-- **`[[ in ]]`** routes through the existing async test path (`eval_test_async`,
-  `kernel.rs:3821-3886`) so it is VFS/backend-aware. `TestExpr` (`ast/types.rs:304-318`) gains
-  `In`/`NotIn`; RHS shape-dispatches on `Value::Json` (array → element membership; object → key
-  membership; string RHS → error). The RHS must accept a list/record **literal**, not just a
+- **`[[ in ]]`** — LANDED 2026-07-02. Routes through the async test path (`eval_test_async` in
+  `kernel.rs`) so it is VFS/backend-aware; `TestExpr` gained `In`/`NotIn`; RHS shape-dispatches on
+  `Value::Json` (array → element membership; object → key membership; string RHS → loud error).
+  Remaining: the RHS accepts a list/record **literal**, not just a
   `$var` — Haiku produced `[[ $a not in [dog] ]]` (mind the glued-GlobWord case).
 - **Typed comparison**: DONE 2026-07-02 — `values_equal` (`eval.rs`) now returns
   `EvalResult<bool>`, has the structural-equality arm for collection/collection (via
