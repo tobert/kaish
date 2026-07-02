@@ -11,6 +11,11 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Changed
+- **Enumeration guidance points at `keys`/`values`** — the `for x in $VAR` error
+  (E012) now leads with `for x in $(values $coll)` / `for k in $(keys $coll)` as
+  the way to iterate a collection, and the help gains a Collections syntax section
+  plus a stronger onboarding line, so agents reach for the `$()` idiom instead of
+  a bare-variable for-head (which stays an error — no implicit word splitting).
 - **Agent onboarding composes in importance order** — the always-on instruction
   block an embedder ships (`Recipe::agent_onboarding`) now renders its Foundations
   fragments by an explicit importance rank (most-critical rules first), so the

@@ -28,6 +28,33 @@ forks/subshells inherit the parent's value. This is an intentional
 divergence from bash — kaish runs embedded inside long-lived host
 processes, where the host PID is meaningless to the script.
 
+## Collections (lists & records)
+
+```bash
+# Values are structured JSON (list or record); fromjson/tojson bridge text.
+u=$(fromjson '{"name":"amy","tags":["rust","shell"]}')
+xs=$(fromjson '[10,20,30]')
+
+# READ ACCESS — brackets only, never dots. Bad access is a loud error.
+${u[name]}                # record key (bareword = literal key)
+${u[$k]}                  # dynamic key ($var)
+${xs[0]}   ${xs[-1]}      # list index; negative counts from the end
+${xs[0:2]}                # slice (end-exclusive) → a list
+${u[tags][0]}             # nested path
+${#xs}   ${#u}            # length: list elements / record keys
+
+# ENUMERATE — always via $(...). A bare `for x in $xs` is an ERROR (E012):
+# there is no word splitting, so wrap the collection in keys/values.
+for x in $(values $xs); do echo $x; done       # list elements / record values
+for k in $(keys $u);   do echo "${u[$k]}"; done # record keys / list indices
+
+# MEMBERSHIP — RHS must be a collection (see Test Expressions):
+[[ rust in $(values ${u[tags]}) ]]              # element present?
+[[ name in $u ]]                                # record has key?
+
+tojson $u                 # serialize back to JSON text (--pretty to indent)
+```
+
 ## Paths
 
 ```bash
