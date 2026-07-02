@@ -10,9 +10,11 @@
 //! Bodies are inline `&'static str` for now; when i18n lands they move to
 //! per-locale files keyed by (concept, key, variant).
 
-use crate::compose::{Audience, Concept, Depth, Fragment, Variant, DEFAULT_LOCALE};
+use crate::compose::{Audience, Concept, Depth, Fragment, Variant, DEFAULT_LOCALE, UNRANKED};
 
-/// Shorthand for an inline English fragment (no section heading).
+/// Shorthand for an inline English fragment (no section heading). Unranked by
+/// default; the always-on onboarding spine attaches an importance rank with
+/// [`Fragment::ranked`].
 const fn en(
     concept: Concept,
     key: &'static str,
@@ -28,6 +30,7 @@ const fn en(
         depth,
         locale: DEFAULT_LOCALE,
         audience,
+        rank: UNRANKED,
         title: None,
         body,
     }
@@ -44,6 +47,7 @@ const fn syntax_section(key: &'static str, title: &'static str, body: &'static s
         depth: Depth::Reference,
         locale: DEFAULT_LOCALE,
         audience: None,
+        rank: UNRANKED,
         title: Some(title),
         body,
     }
@@ -80,7 +84,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         "**No word splitting.** `$VAR` is always a single value — a variable holding \
          spaces stays one argument. Use `split` when you actually want to split on \
          whitespace, a delimiter, or a regex.",
-    ),
+    )
+    .ranked(0),
     en(
         Concept::Foundations,
         "no-word-splitting",
@@ -100,7 +105,8 @@ pub const FRAGMENTS: &[Fragment] = &[
          unless quoted — kaish never pastes adjacent unquoted tokens. To build one \
          word from text plus interpolation, wrap the whole thing in double quotes: \
          `\"$dir/file.txt\"`, `\"out-$(date +%s).log\"`.",
-    ),
+    )
+    .ranked(1),
     en(
         Concept::Foundations,
         "quote-to-join",
@@ -120,7 +126,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         None,
         "**Structured output.** Every builtin can emit machine-readable data with \
          `--json` (`ls --json`, `ps --json`, `kaish-vars --json`).",
-    ),
+    )
+    .ranked(5),
     en(
         Concept::Foundations,
         "structured-output",
@@ -137,7 +144,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         None,
         "**Newline-split substitution.** `for x in $(cmd)` splits on newlines only — \
          one iteration per line; whitespace within a line never splits.",
-    ),
+    )
+    .ranked(3),
     en(
         Concept::Foundations,
         "structured-substitution",
@@ -146,7 +154,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         None,
         "`$(cmd)` carries structured data: `for i in $(seq 1 5)` iterates five values, \
          not split text.",
-    ),
+    )
+    .ranked(2),
     en(
         Concept::Foundations,
         "glob-strict",
@@ -155,7 +164,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         None,
         "**Strict globs.** `*.txt` expands to matching files; zero matches is an \
          error, not a silent pass-through.",
-    ),
+    )
+    .ranked(4),
     en(
         Concept::Foundations,
         "pre-validation",
@@ -164,7 +174,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         None,
         "**Pre-validation.** kaish validates the whole command before running it — \
          syntax errors are caught up front, so a command never half-runs.",
-    ),
+    )
+    .ranked(6),
     en(
         Concept::Foundations,
         "crash-not-corrupt",
@@ -173,7 +184,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         None,
         "**Fail loud, not silent.** kaish prefers to error over corrupting data; \
          destructive operations can require a confirmation nonce via `set -o latch`.",
-    ),
+    )
+    .ranked(7),
     en(
         Concept::Foundations,
         "json-orchestration",
@@ -182,7 +194,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         Some(Audience::Agent),
         "When orchestrating tools, prefer `--json` piped through `jq` — consuming \
          structured data beats scraping text output.",
-    ),
+    )
+    .ranked(8),
     en(
         Concept::Foundations,
         "overlay-mode",
@@ -200,7 +213,8 @@ pub const FRAGMENTS: &[Fragment] = &[
          transaction. `kaish-vfs commit` MUST run in the same call as the writes — if \
          you commit in a later call the transaction from the write call was already \
          discarded.",
-    ),
+    )
+    .ranked(9),
     // ---- Syntax reference (single source for content/en/syntax.md) -----------
     syntax_section(
         "variables",

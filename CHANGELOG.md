@@ -11,6 +11,16 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Changed
+- **Agent onboarding composes in importance order** — the always-on instruction
+  block an embedder ships (`Recipe::agent_onboarding`) now renders its Foundations
+  fragments by an explicit importance rank (most-critical rules first), so the
+  client model meets the load-bearing rules even when it skims or truncates. A
+  size-budget test keeps the always-on spine lean.
+- **BREAKING:** `kaish-help`'s `Fragment` gains a public `rank: u8` field (`0` =
+  most important; `UNRANKED` default preserves registry order) plus a
+  `Fragment::ranked()` builder. Constructing a `Fragment` literal directly now
+  requires the field (a compile error, not silent) — the `en()`/`syntax_section()`
+  builders set it for you, so registry authors are unaffected.
 - **`help limits` no longer claims `[]` array syntax will never exist** — the
   brackets are reserved by kaish (`[[ ]]` today, native list literals per the
   arrays-and-hashes design). The `[` command stays banned permanently; a `test`

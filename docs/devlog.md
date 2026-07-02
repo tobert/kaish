@@ -14,6 +14,37 @@ before it ships.
 
 ---
 
+## Importance-ranked onboarding tiers (2026-07-01)
+
+Step 3 of the collections effort splits in two: the tier *mechanism* (pure infra,
+this entry) and the collections *fragments* (which describe not-yet-built syntax,
+so they wait on a ship-vs-panel scoping call). The mechanism landed first because
+issues.md wanted it "before the collections fragments land — they're the feature
+that will test it."
+
+The always-on instruction block an embedder ships was an undifferentiated blob in
+registry order; nothing capped its size and nothing guaranteed the load-bearing
+rules came first. Now `Fragment` carries an importance `rank` (0 = most important;
+`UNRANKED` default keeps registry order), and `select_for_concept` stable-sorts by
+it — a deliberate no-op for any all-`UNRANKED` concept, so `syntax.md`
+(`render_syntax_reference`, which doesn't even go through that path) and the REPL
+welcome stay byte-identical. The ~10 Foundations Summary fragments got explicit
+ranks 0..9, ordered by what an agent needs to write *correct* kaish first
+(no-word-splitting, quote-to-join, then substitution/iteration, then capability
+and safety guarantees, with the verbose overlay-mode trailing). A char-budget test
+now keeps the spine lean.
+
+Two implementation notes worth keeping: `const fn ranked(self, rank) -> Fragment {
+Fragment { rank, ..self } }` relies on functional record update in const context
+(stable since Rust 1.83; MSRV is 1.85), which let the rank attach in the static
+registry without a builder-signature change touching every call site — only the
+ranked fragments changed. And the sort key must stay `rank` alone: adding `key`
+would alphabetize equal-rank fragments and reorder the Model concept the REPL
+welcome depends on. Deepseek review confirmed the no-op-for-unranked claim and
+flagged one latent case (Reference-depth Foundations would separate a Contrast
+from its Rule — inert today, filed P4) and the public-field break (loud compile
+error, marked BREAKING).
+
 ## Native collection read access: the bracket path resolver (2026-07-01)
 
 Step 2 of the collections effort — reading into a value with `${xs[0]}`,

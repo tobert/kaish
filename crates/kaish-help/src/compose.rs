@@ -96,6 +96,11 @@ pub enum Depth {
 /// Default (and canonical-complete) content locale.
 pub const DEFAULT_LOCALE: &str = "en";
 
+/// The importance rank of an unranked fragment: sorts last, so a fragment with
+/// no explicit rank keeps its registry position relative to other unranked
+/// fragments. Only the always-on onboarding spine assigns explicit ranks.
+pub const UNRANKED: u8 = u8::MAX;
+
 /// A unit of content, addressed by (concept, key, variant, locale).
 pub struct Fragment {
     /// Concept this fragment belongs to.
@@ -110,12 +115,28 @@ pub struct Fragment {
     pub locale: &'static str,
     /// `None` = shared (default); `Some(_)` = audience-specific divergence.
     pub audience: Option<Audience>,
+    /// Importance rank for the always-on onboarding block: `0` is the most
+    /// important, and composition renders fragments **in ascending rank** so the
+    /// client model meets the critical rules first even under skimming or
+    /// truncation. Fragments at [`UNRANKED`] (the default) keep registry order.
+    /// The rank is a property of the `(concept, key, variant)` slot, so it is
+    /// locale-agnostic — a translation of a fragment inherits the same rank.
+    pub rank: u8,
     /// Optional section heading for reference rendering (e.g. `"Quoting"`).
     /// `None` for inline fragments (the Foundations spine renders under its
     /// concept header instead). Used by [`render_syntax_reference`].
     pub title: Option<&'static str>,
     /// Markdown body.
     pub body: &'static str,
+}
+
+impl Fragment {
+    /// Attach an importance `rank` (0 = most important) to a fragment, for the
+    /// always-on onboarding block. `const` so it composes in the static registry:
+    /// `en(...).ranked(2)`.
+    pub const fn ranked(self, rank: u8) -> Fragment {
+        Fragment { rank, ..self }
+    }
 }
 
 /// What to compose. Build one directly, or use a [`Recipe`].
@@ -209,10 +230,16 @@ fn select_for_concept<'f>(concept: Concept, selector: &Selector) -> Vec<&'f Frag
         }
     }
 
-    order
+    let mut result: Vec<&Fragment> = order
         .iter()
         .filter_map(|slot| chosen.get(slot).copied())
-        .collect()
+        .collect();
+    // Render in importance order: ascending rank, ties preserving registry
+    // position (a stable sort). Unranked fragments (`UNRANKED`) sort last and so
+    // keep their registry order among themselves — a no-op for any concept whose
+    // fragments are all unranked (Syntax, Model), which keeps `syntax.md` stable.
+    result.sort_by_key(|f| f.rank);
+    result
 }
 
 /// Compose canonical kaish guidance into a single markdown document.
@@ -425,13 +452,40 @@ mod tests {
     }
 
     #[test]
-    fn fragments_render_in_registry_order_not_alphabetical() {
+    fn onboarding_renders_in_importance_rank_order() {
         let out = compose(&Recipe::agent_onboarding(), &no_content());
         let nws = out.find("No word splitting").expect("has no-word-splitting");
         let fail = out.find("Fail loud").expect("has crash-not-corrupt");
         assert!(
             nws < fail,
-            "registry order should lead with no-word-splitting, not alphabetical:\n{out}"
+            "the most-important rule (no-word-splitting, rank 0) must lead:\n{out}"
+        );
+        // Rank overrides registry position: structured-substitution (rank 2)
+        // appears *before* structured-output (rank 5) even though the registry
+        // lists structured-output first — proof the rank sort is doing work.
+        let subst = out.find("carries structured data").expect("has structured-substitution");
+        let output = out.find("Structured output").expect("has structured-output");
+        assert!(
+            subst < output,
+            "rank must reorder ahead of registry position:\n{out}"
+        );
+    }
+
+    /// The always-on onboarding block (the fragment spine, without the
+    /// embedder-supplied builtin index) has a budget: it is composed in
+    /// importance order and must stay lean so the critical rules survive
+    /// skimming/truncation. Bumping this ceiling should be a deliberate choice —
+    /// prefer moving verbose, low-rank content into a `help` topic and pointing
+    /// at it from the tail.
+    #[test]
+    fn onboarding_spine_stays_within_budget() {
+        const BUDGET: usize = 3500;
+        let out = compose(&Recipe::agent_onboarding(), &no_content());
+        assert!(
+            out.len() <= BUDGET,
+            "always-on onboarding spine is {} chars (budget {BUDGET}) — trim or defer \
+             low-rank content to a help topic:\n{out}",
+            out.len()
         );
     }
 

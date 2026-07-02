@@ -300,6 +300,17 @@ depth. Worth dedicated kernel-routed suites.
 those repos). **Phase 5:** i18n scaffolding + first `ja` fragments. Full design:
 [composable-help.md](composable-help.md).
 
+**P4 — rank the Reference/Contrast fragments before a Reference-depth Foundations
+consumer ships (2026-07-01, from the tier-mechanism review).** `select_for_concept`
+stable-sorts by `rank`, and `UNRANKED` (the default on Contrast/Example/Reference
+fragments) sorts last. No shipping recipe renders Foundations at Reference depth,
+so this is inert today — but if a `help foundations`-style topic ever composes
+Foundations at Reference depth, an UNRANKED Contrast would render *after* the
+ranked Rules instead of beside its Rule sibling. The sort key can't include
+`key`/`variant` (that would reorder the REPL's Model concept, which relies on
+registry order for equal ranks), so the fix is to give each Contrast/Reference
+fragment the same rank as its Rule counterpart when such a consumer is built.
+
 **Importance-ranked onboarding tiers (2026-07-01, from the arrays-and-hashes
 review):** restructure `agent_onboarding()` composition into ~200–300-char ranks in
 descending importance — the first rank carries the most critical rules so the client
