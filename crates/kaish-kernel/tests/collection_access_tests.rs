@@ -678,3 +678,225 @@ async fn membership_bool_element() {
     assert_eq!(code, 0, "err: {err}");
     assert_eq!(out, "yes");
 }
+
+// ── Shape guard: `typeof` / `[[ -list ]]` / `[[ -record ]]` ────────────────
+// See docs/arrays-and-hashes.md, decision F: the antidote to the
+// keys-on-list footgun and the API-shape-variance trap (Teaching note #12).
+
+#[tokio::test]
+async fn typeof_on_a_list() {
+    let k = setup().await;
+    let (out, code, err) = run(&k, r#"x=$(fromjson '[1,2,3]'); typeof $x"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "list");
+}
+
+#[tokio::test]
+async fn typeof_on_a_record() {
+    let k = setup().await;
+    let (out, code, err) = run(&k, r#"x=$(fromjson '{"a":1}'); typeof $x"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "record");
+}
+
+#[tokio::test]
+async fn typeof_on_a_string() {
+    let k = setup().await;
+    let (out, code, err) = run(&k, "x=hello; typeof $x").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "string");
+}
+
+#[tokio::test]
+async fn typeof_on_a_number() {
+    // No int/float split — both are "number" (jq/JSON have one numeric type).
+    let k = setup().await;
+    let (out_int, code_int, err_int) = run(&k, "x=5; typeof $x").await;
+    assert_eq!(code_int, 0, "err: {err_int}");
+    assert_eq!(out_int, "number");
+
+    let (out_float, code_float, err_float) = run(&k, "x=3.14; typeof $x").await;
+    assert_eq!(code_float, 0, "err: {err_float}");
+    assert_eq!(out_float, "number");
+}
+
+#[tokio::test]
+async fn typeof_on_a_bool() {
+    let k = setup().await;
+    let (out, code, err) = run(&k, "x=true; typeof $x").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "bool");
+}
+
+#[tokio::test]
+async fn typeof_on_null() {
+    let k = setup().await;
+    let (out, code, err) = run(&k, r#"x=$(fromjson 'null'); typeof $x"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "null");
+}
+
+#[tokio::test]
+async fn typeof_on_bytes() {
+    // xxd -r produces a raw Value::Bytes with no VFS/subprocess involved —
+    // safe under the isolated (NoLocal) kernel config.
+    let k = setup().await;
+    let (out, code, err) = run(&k, "x=$(echo ff | xxd -r -p); typeof $x").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "bytes");
+}
+
+#[tokio::test]
+async fn typeof_no_argument_is_a_loud_error() {
+    let k = setup().await;
+    let (_, code, err) = run(&k, "typeof").await;
+    assert_ne!(code, 0, "typeof with no argument must be an error");
+    assert!(err.contains("no argument"), "got: {err}");
+}
+
+#[tokio::test]
+async fn typeof_in_a_case_statement() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"x=$(fromjson '[1,2,3]'); case $(typeof $x) in
+  list) echo "it's a list" ;;
+  record) echo "it's a record" ;;
+  *) echo "other" ;;
+esac"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "it's a list");
+}
+
+#[tokio::test]
+async fn typeof_json_output() {
+    let k = setup().await;
+    let r = k
+        .execute(r#"x=$(fromjson '[1,2,3]'); typeof $x --json"#)
+        .await
+        .expect("kernel execute");
+    assert_eq!(r.code, 0, "err: {}", r.err);
+    // --json wraps the plain type name as a JSON string, not double-encoded.
+    assert_eq!(r.text_out().trim(), "\"list\"");
+}
+
+#[tokio::test]
+async fn list_test_operator_true_on_a_list() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"x=$(fromjson '[1,2,3]'); if [[ -list $x ]]; then echo T; else echo F; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "T");
+}
+
+#[tokio::test]
+async fn list_test_operator_false_on_a_record() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"x=$(fromjson '{"a":1}'); if [[ -list $x ]]; then echo T; else echo F; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "F");
+}
+
+#[tokio::test]
+async fn record_test_operator_true_on_a_record() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"x=$(fromjson '{"a":1}'); if [[ -record $x ]]; then echo T; else echo F; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "T");
+}
+
+#[tokio::test]
+async fn record_test_operator_false_on_a_list() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"x=$(fromjson '[1,2,3]'); if [[ -record $x ]]; then echo T; else echo F; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "F");
+}
+
+#[tokio::test]
+async fn list_test_operator_false_on_a_scalar() {
+    let k = setup().await;
+    let (out, code, err) = run(&k, "x=hello; if [[ -list $x ]]; then echo T; else echo F; fi").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "F");
+}
+
+#[tokio::test]
+async fn record_test_operator_false_on_a_scalar() {
+    let k = setup().await;
+    let (out, code, err) =
+        run(&k, "x=hello; if [[ -record $x ]]; then echo T; else echo F; fi").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "F");
+}
+
+#[tokio::test]
+async fn list_test_operator_false_on_unset_variable_no_error() {
+    // Shape guard never errors on type — false, same as `-f` on a
+    // nonexistent path. Deliberately diverges from `-z`/`-n`, which DO error
+    // on a bare unset `$var` (kaish's general strict-unset-variable rule) —
+    // the shape guard exists precisely so a caller can probe an unknown
+    // shape without pre-checking `-n`/`-z` first.
+    let k = setup().await;
+    let (out, code, err) =
+        run(&k, "if [[ -list $unset ]]; then echo T; else echo F; fi").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "F");
+}
+
+#[tokio::test]
+async fn record_test_operator_false_on_unset_variable_no_error() {
+    let k = setup().await;
+    let (out, code, err) =
+        run(&k, "if [[ -record $unset ]]; then echo T; else echo F; fi").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "F");
+}
+
+#[tokio::test]
+async fn shape_guard_idiom_end_to_end() {
+    // The documented guard idiom: check the shape before committing to
+    // `keys`/`values`/a `for` loop — the antidote to an API call that
+    // sometimes returns a list and sometimes returns a single record.
+    let k = setup().await;
+    let script = r#"
+data=$(fromjson '{"a":1,"b":2}')
+if [[ -record $data ]]; then
+  for k in $(keys $data); do echo "key:$k"; done
+elif [[ -list $data ]]; then
+  for x in $(values $data); do echo "val:$x"; done
+fi
+"#;
+    let (out, code, err) = run(&k, script).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "key:a\nkey:b");
+
+    let script_list = r#"
+data=$(fromjson '["x","y"]')
+if [[ -record $data ]]; then
+  for k in $(keys $data); do echo "key:$k"; done
+elif [[ -list $data ]]; then
+  for x in $(values $data); do echo "val:$x"; done
+fi
+"#;
+    let (out_list, code_list, err_list) = run(&k, script_list).await;
+    assert_eq!(code_list, 0, "err: {err_list}");
+    assert_eq!(out_list, "val:x\nval:y");
+}

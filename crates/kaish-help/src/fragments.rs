@@ -300,6 +300,14 @@ done
 [[ name in $u ]]                                   # record has key?
 [[ 1 in $(keys $xs) ]]                             # index in bounds?
 
+# SHAPE GUARD — an API sometimes returns a list, sometimes a record; check
+# before committing to keys/values/for. typeof + [[ -list ]] / [[ -record ]]:
+if [[ -record $data ]]; then
+  for k in $(keys $data); do echo $k; done
+elif [[ -list $data ]]; then
+  for x in $(values $data); do echo $x; done
+fi
+
 tojson $u                 # serialize back to JSON text (--pretty to indent)
 ```"#,
     ),
@@ -382,6 +390,9 @@ cmd1 || cmd2              # cmd2 if cmd1 fails
         r#"```sh
 # File: -f (file) -d (dir) -e (exists) -r (readable) -w (writable) -x (executable)
 # String: -z (empty) -n (non-empty) == != =~ (regex) !~ (not regex)
+# Shape guard: -list -record — the value's shape, not a path stat; never
+#   errors on an unset variable or the wrong shape (false, like -f on a
+#   missing path). Pairs with the typeof builtin.
 # Numeric: -gt -lt -ge -le
 # Logic: && || !
 # Membership: in (list→element, record→key) / not in — RHS must be a collection
@@ -391,6 +402,8 @@ cmd1 || cmd2              # cmd2 if cmd1 fails
 [[ $s =~ "\.rs$" ]]
 [[ banana in $fruits ]]
 [[ tmp not in $services ]]
+[[ -list $x ]]
+[[ -record $x ]]
 ```"#,
     ),
     syntax_section(

@@ -137,6 +137,31 @@ Element equality uses the same rule as `==` (a numeric bareword matches a JSON
 number). Comparing a whole collection to a scalar with `==`/`!=` is a loud error
 — test membership with `in`, or compare structures with `jq`.
 
+### Shape guards — `typeof` / `[[ -list ]]` / `[[ -record ]]`
+
+An API call sometimes returns a list, sometimes a single record — the shape
+guard is the antidote: check the shape *before* committing to `keys`/`values`
+or a `for` loop over it.
+
+```sh
+typeof $x            # "list" | "record" | "string" | "number" | "bool" | "null" | "bytes"
+t=$(typeof $x)        # capture the type name
+[[ -list $x ]]        # true iff $x is a list
+[[ -record $x ]]      # true iff $x is a record
+
+# The guard idiom:
+if [[ -record $data ]]; then
+  for k in $(keys $data); do echo "$k = ${data[$k]}"; done
+elif [[ -list $data ]]; then
+  for x in $(values $data); do echo $x; done
+fi
+```
+
+`typeof` never splits int/float — both are `number`, matching jq/JSON's single
+numeric type. `[[ -list ]]` / `[[ -record ]]` evaluate the operand's *value*
+(like `-z`/`-n`), not a path stat (unlike `-f`/`-d`), and never error on an
+unset variable or the wrong shape — false, same as `-f` on a nonexistent path.
+
 ### Crossing the boundary
 
 A collection **displays** as compact JSON (`echo $xs` → `[10,20,30]`), but it
@@ -293,6 +318,12 @@ mkdir /tmp/work && cd /tmp/work && echo "ready"
 # String tests
 [[ -z $VAR ]]                   # empty
 [[ -n $VAR ]]                   # non-empty
+
+# Shape guards — see "Collections" → "Shape guards" above
+[[ -list $x ]]                  # is a native list
+[[ -record $x ]]                # is a native record
+# Value-typed like -z/-n (not a path stat like -f/-d); never errors on an
+# unset variable or the wrong shape — false, same as -f on a missing path.
 
 # Comparisons
 [[ $X == "value" ]]             # equality

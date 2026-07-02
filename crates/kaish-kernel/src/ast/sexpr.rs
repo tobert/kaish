@@ -328,6 +328,8 @@ pub fn format_test_expr(test: &TestExpr) -> String {
             let op_str = match op {
                 StringTestOp::IsEmpty => "-z",
                 StringTestOp::IsNonEmpty => "-n",
+                StringTestOp::IsList => "-list",
+                StringTestOp::IsRecord => "-record",
             };
             format!("(string {} {})", op_str, format_expr(value))
         }

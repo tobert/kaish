@@ -468,6 +468,16 @@ fn parser_test_string_nonempty() {
 }
 
 #[test]
+fn parser_test_shape_guard_list() {
+    parse_and_snapshot("test_shape_guard_list", "[[ -list $x ]]");
+}
+
+#[test]
+fn parser_test_shape_guard_record() {
+    parse_and_snapshot("test_shape_guard_record", "[[ -record $x ]]");
+}
+
+#[test]
 fn parser_test_comparison_eq() {
     parse_and_snapshot("test_comparison_eq", r#"[[ $X == "value" ]]"#);
 }

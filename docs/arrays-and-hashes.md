@@ -447,11 +447,13 @@ for the record.
     `=~`, `!~`, `-eq`/`-gt`/`-lt`/…, and ordering `<`/`>`. Decided as a matrix so no operator falls
     to a stringify path one at a time. (`==`/`!=` already loud; membership `in` is the *only* op
     that takes a collection RHS.)
-  - **(F) Ship a shape guard in the near term:** `typeof $x` (→ `list`/`record`/`string`/`number`/
-    `bool`/`null`/`bytes`) and/or `[[ -list $x ]]` / `[[ -record $x ]]`. It's the antidote to the
-    keys-on-list footgun and the API-shape-variance trap (Teaching note #12) — and "if it bites" is
-    too late, because the guard idiom won't exist to teach. Promote from "Out of scope" into the
-    first post-#6 cut.
+  - **(F) Ship a shape guard.** *(Resolved — shipped.)* `typeof $x` (→
+    `list`/`record`/`string`/`number`/`bool`/`null`/`bytes`) and `[[ -list $x ]]` /
+    `[[ -record $x ]]`. The antidote to the keys-on-list footgun and the
+    API-shape-variance trap (Teaching note #12). `typeof` is a pure-data builtin
+    (`.data` + text out); the two test operators evaluate the operand's value
+    (like `-z`/`-n`, not a path stat like `-f`/`-d`) and never error on an unset
+    variable or the wrong shape — false, same as `-f` on a nonexistent path.
 
 - **Commas optional in BOTH lists and records.** `[1 2 3]` ≡ `[1, 2, 3]`; `{a: 1, b: 2}` ≡
   `{a: 1 b: 2}`. Records were shown comma-separated and lists space-separated, which would make
@@ -792,9 +794,9 @@ taught a specific way** — get the examples wrong and even capable models fail.
     to the shipped idiom: `for x in $(values $data)` on a record yields the record's *field
     values* instead of iterating the one object. Still a silent type cascade, not an error. So
     the mitigation stands and is now more load-bearing: the docs must show a shape guard where
-    data shape isn't trusted, and a shape predicate (`typeof` / `[[ -list ]]` / `[[ -record ]]`)
-    should be promoted from "Out of scope if it bites" into the first cut — API-shape variance is
-    core agent work, and by the time it bites the guard idiom won't exist to teach.
+    data shape isn't trusted. *(Resolved — the shape predicate shipped: `typeof` /
+    `[[ -list ]]` / `[[ -record ]]`, decision F above. Docs cover the guard idiom in
+    `docs/LANGUAGE.md` "Shape guards" and the composable-help collections fragment.)*
 
 ## Help & teaching delivery
 
@@ -870,8 +872,6 @@ Points decided or flagged during the 2026-07-01 review:
 - **Slice lvalues** (`xs[0:2]=…`) — loud error, see lvalue rules. (`push` to a bracketed
   path IS in scope — see the push decision.)
 - Pair iteration (`for k v in $record`) — iterate keys, access values.
-- A shape/type predicate (`typeof` or `[[ -list / -record ]]`) — the missing guard for the
-  record-vs-list `for` trap (Teaching note #12); design if it bites in practice.
 - JSON ingress/egress builtins (`fromjson`/`tojson`) — sketched above and **prototyped
   early, ahead of the collections grammar** (they need no parser work); hard prerequisite
   for the jq-out-of-core possibility (see Open decisions).
