@@ -380,7 +380,8 @@ impl<'a> ArithParser<'a> {
             crate::interpreter::PathError::UndefinedRoot(_) => {
                 anyhow::anyhow!("undefined variable in arithmetic: {root}")
             }
-            crate::interpreter::PathError::Invalid(msg) => anyhow::anyhow!(msg),
+            crate::interpreter::PathError::Absence(msg)
+            | crate::interpreter::PathError::Shape(msg) => anyhow::anyhow!(msg),
         })?;
         self.value_to_arith(&value, root)
     }

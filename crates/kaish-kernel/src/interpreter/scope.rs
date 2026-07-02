@@ -18,18 +18,31 @@ use super::result::ExecResult;
 
 /// Why a variable path failed to resolve.
 ///
-/// The distinction is load-bearing: an undefined *root* is soft (expression
-/// position surfaces an error, string interpolation expands to empty, matching
-/// bash), while any deeper path failure is **loud** — subscripting a scalar, an
-/// out-of-bounds index, a missing record key, a dotted (non-bracket) segment,
-/// or a bad slice. A loud error is surfaced everywhere, including inside
-/// strings; it is NEVER silently swallowed to an empty expansion.
+/// The three-way split is load-bearing for `${path:-default}` (decision A): the
+/// default fires on **absence** but never on a **shape** error — a wrong-typed
+/// access is a bug, not a missing value. All three are loud for a bare access;
+/// they diverge only when `:-` is present (see the default handling), where
+/// `UndefinedRoot`/`Absence` yield the default and `Shape` still shouts.
+///
+/// - `UndefinedRoot` — the root variable (or an unset dynamic `$k` subscript) is
+///   not in scope. Soft in string interpolation (expands to empty, matching
+///   bash), loud in expression position.
+/// - `Absence` — the path is well-shaped but the target isn't there: a missing
+///   record key or an out-of-bounds list index.
+/// - `Shape` — the access is wrong for the value: a string key on a list, an
+///   integer index on a record, subscripting a scalar, a dotted (non-bracket)
+///   segment, or slicing a record. Never suppressed by `:-`.
+///
+/// A loud error is surfaced everywhere, including inside strings; it is NEVER
+/// silently swallowed to an empty expansion.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PathError {
-    /// The root variable is not in scope.
+    /// The root variable is not in scope (or an unset dynamic `$k` subscript).
     UndefinedRoot(String),
-    /// A loud path error, message ready to display.
-    Invalid(String),
+    /// A missing key or out-of-bounds index — absence, not misuse.
+    Absence(String),
+    /// A wrong-for-the-shape access. Message ready to display.
+    Shape(String),
 }
 
 /// A human-readable type name for a value, for path error messages.
@@ -82,7 +95,7 @@ fn classify_index(json: &serde_json::Value, i: i64, root: &str) -> Result<Step, 
     let arr = match json {
         serde_json::Value::Array(a) => a,
         serde_json::Value::Object(_) => {
-            return Err(PathError::Invalid(format!(
+            return Err(PathError::Shape(format!(
                 "${{{root}[{i}]}}: integer index on a record — record keys are strings, use ${{{root}[\"{i}\"]}}"
             )))
         }
@@ -91,7 +104,7 @@ fn classify_index(json: &serde_json::Value, i: i64, root: &str) -> Result<Step, 
     let len = arr.len() as i64;
     let idx = if i < 0 { len + i } else { i };
     if idx < 0 || idx >= len {
-        return Err(PathError::Invalid(format!(
+        return Err(PathError::Absence(format!(
             "${{{root}[{i}]}}: index out of bounds (list length {len})"
         )));
     }
@@ -104,7 +117,7 @@ fn classify_index(json: &serde_json::Value, i: i64, root: &str) -> Result<Step, 
 fn classify_key(json: &serde_json::Value, key: &str, root: &str) -> Result<Step, PathError> {
     match json {
         serde_json::Value::Object(_) => Ok(Step::Key(key.to_string())),
-        serde_json::Value::Array(_) => Err(PathError::Invalid(format!(
+        serde_json::Value::Array(_) => Err(PathError::Shape(format!(
             "${{{root}[{key}]}}: string key on a list — use an integer index"
         ))),
         _ => unreachable!("resolve_step guards non-collection containers"),
@@ -123,7 +136,7 @@ fn classify_slice(
     let arr = match json {
         serde_json::Value::Array(a) => a,
         serde_json::Value::Object(_) => {
-            return Err(PathError::Invalid(format!(
+            return Err(PathError::Shape(format!(
                 "${{{root}[..]}}: cannot slice a record"
             )))
         }
@@ -148,7 +161,7 @@ fn classify_slice(
 /// bracket fix in the message. Shared by the root pre-check and `resolve_step`
 /// so a dotted segment reports identically at any hop.
 fn dotted_access_error(root: &str, field: &str) -> PathError {
-    PathError::Invalid(format!(
+    PathError::Shape(format!(
         "${{{root}…}}: kaish uses bracket access, not dots — write the key as a subscript: [{field}]"
     ))
 }
@@ -176,7 +189,7 @@ fn resolve_step(
         container,
         serde_json::Value::Array(_) | serde_json::Value::Object(_)
     ) {
-        return Err(PathError::Invalid(format!(
+        return Err(PathError::Shape(format!(
             "${{{root}…}}: cannot subscript {} — it is not a collection",
             type_name(&json_to_value_no_envelope(container.clone()))
         )));
@@ -188,14 +201,15 @@ fn resolve_step(
         VarSegment::Slice(start, end) => classify_slice(container, *start, *end, root),
         VarSegment::Dynamic(var) => {
             // The variable's value is the subscript; the container type decides
-            // whether it's an index or a key.
+            // whether it's an index or a key. An unset `$k` is UndefinedRoot,
+            // not Absence — the *variable* is missing, so `${r[$k]:-d}` defaults.
             let key_val = scope.get(var).ok_or_else(|| {
-                PathError::Invalid(format!("${{{root}[${var}]}}: ${var} is not set"))
+                PathError::UndefinedRoot(format!("${{{root}[${var}]}}: ${var} is not set"))
             })?;
             match container {
                 serde_json::Value::Array(_) => {
                     let idx = value_as_index(key_val).ok_or_else(|| {
-                        PathError::Invalid(format!(
+                        PathError::Shape(format!(
                             "${{{root}[${var}]}}: a list index must be an integer, got \"{}\"",
                             value_to_string(key_val)
                         ))
@@ -244,11 +258,11 @@ fn descend<'a>(
         Step::Key(k) => match current {
             Cow::Borrowed(j) => match j.as_object().and_then(|m| m.get(&k)) {
                 Some(child) => Ok(Cow::Borrowed(child)),
-                None => Err(PathError::Invalid(format!("${{{root}[{k}]}}: no such key"))),
+                None => Err(PathError::Absence(format!("${{{root}[{k}]}}: no such key"))),
             },
             Cow::Owned(j) => match j.as_object().and_then(|m| m.get(&k)) {
                 Some(child) => Ok(Cow::Owned(child.clone())),
-                None => Err(PathError::Invalid(format!("${{{root}[{k}]}}: no such key"))),
+                None => Err(PathError::Absence(format!("${{{root}[{k}]}}: no such key"))),
             },
         },
     }
@@ -617,7 +631,7 @@ impl Scope {
             if path.segments.len() == 1 {
                 return Ok(Value::Int(self.last_result.code));
             }
-            return Err(PathError::Invalid(
+            return Err(PathError::Shape(
                 "$? is the POSIX exit code, not a collection — use `kaish-last` for structured data"
                     .to_string(),
             ));
@@ -648,7 +662,7 @@ impl Scope {
         let root_json = match root {
             Value::Json(j) => j,
             other => {
-                return Err(PathError::Invalid(format!(
+                return Err(PathError::Shape(format!(
                     "${{{root_name}…}}: cannot subscript {} — it is not a collection",
                     type_name(other)
                 )))
@@ -789,7 +803,7 @@ mod tests {
         };
         assert!(matches!(
             scope.resolve_path(&path),
-            Err(PathError::Invalid(_))
+            Err(PathError::Shape(_))
         ));
     }
 
@@ -807,7 +821,7 @@ mod tests {
         };
         assert!(matches!(
             scope.resolve_path(&path),
-            Err(PathError::Invalid(_))
+            Err(PathError::Shape(_))
         ));
     }
 
@@ -819,6 +833,72 @@ mod tests {
             scope.resolve_path(&path),
             Err(PathError::UndefinedRoot(_))
         ));
+    }
+
+    // ── PathError classification (Absence vs Shape) ─────────────────────────
+    // Pins the three-way split: `${path:-default}` (a later commit) leans on
+    // Absence-vs-Shape, so a misclassification here is a real semantic bug, not
+    // cosmetics. All three stay loud for a bare access.
+
+    /// Build `${root[seg]}` with one bracket subscript.
+    fn subscripted(scope: &mut Scope, root: &str, value: serde_json::Value, seg: VarSegment) -> Result<Value, PathError> {
+        scope.set(root, Value::Json(value));
+        let path = VarPath {
+            segments: vec![VarSegment::Field(root.into()), seg],
+        };
+        scope.resolve_path(&path)
+    }
+
+    #[test]
+    fn out_of_bounds_index_is_absence() {
+        let mut scope = Scope::new();
+        let r = subscripted(&mut scope, "xs", serde_json::json!([1, 2]), VarSegment::Index(9));
+        assert!(matches!(r, Err(PathError::Absence(_))), "got: {r:?}");
+    }
+
+    #[test]
+    fn missing_record_key_is_absence() {
+        let mut scope = Scope::new();
+        let r = subscripted(&mut scope, "u", serde_json::json!({"name": "amy"}), VarSegment::Key("nope".into()));
+        assert!(matches!(r, Err(PathError::Absence(_))), "got: {r:?}");
+    }
+
+    #[test]
+    fn string_key_on_a_list_is_shape() {
+        let mut scope = Scope::new();
+        let r = subscripted(&mut scope, "xs", serde_json::json!([1, 2]), VarSegment::Key("web".into()));
+        assert!(matches!(r, Err(PathError::Shape(_))), "got: {r:?}");
+    }
+
+    #[test]
+    fn integer_index_on_a_record_is_shape() {
+        let mut scope = Scope::new();
+        let r = subscripted(&mut scope, "u", serde_json::json!({"name": "amy"}), VarSegment::Index(0));
+        assert!(matches!(r, Err(PathError::Shape(_))), "got: {r:?}");
+    }
+
+    #[test]
+    fn subscripting_a_scalar_is_shape() {
+        let mut scope = Scope::new();
+        scope.set("s", Value::String("hello".into()));
+        let path = VarPath {
+            segments: vec![VarSegment::Field("s".into()), VarSegment::Index(0)],
+        };
+        assert!(matches!(scope.resolve_path(&path), Err(PathError::Shape(_))));
+    }
+
+    #[test]
+    fn unset_dynamic_key_is_undefined_root_not_absence() {
+        // `${r[$k]}` with `$k` unset: the *variable* is missing, so it's
+        // UndefinedRoot-class (which `:-` treats as absence), not a Shape error.
+        let mut scope = Scope::new();
+        let r = subscripted(
+            &mut scope,
+            "r",
+            serde_json::json!({"name": "amy"}),
+            VarSegment::Dynamic("k".into()),
+        );
+        assert!(matches!(r, Err(PathError::UndefinedRoot(_))), "got: {r:?}");
     }
 
     #[test]

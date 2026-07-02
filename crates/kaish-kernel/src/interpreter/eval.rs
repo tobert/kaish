@@ -433,8 +433,10 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             Err(super::scope::PathError::UndefinedRoot(_)) => {
                 Err(EvalError::InvalidPath(format_path(path)))
             }
-            // A loud path error carries its own actionable message.
-            Err(super::scope::PathError::Invalid(msg)) => Err(EvalError::InvalidPath(msg)),
+            // A loud path error (absence or shape) carries its own actionable
+            // message.
+            Err(super::scope::PathError::Absence(msg))
+            | Err(super::scope::PathError::Shape(msg)) => Err(EvalError::InvalidPath(msg)),
         }
     }
 
@@ -504,8 +506,10 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                         Ok(value) => result.push_str(&value_to_string(&value)),
                         // Unset variables expand to empty string (bash-compatible).
                         Err(super::scope::PathError::UndefinedRoot(_)) => {}
-                        // A loud path error is surfaced, never swallowed to empty.
-                        Err(super::scope::PathError::Invalid(msg)) => {
+                        // A loud path error (absence or shape) is surfaced, never
+                        // swallowed to empty.
+                        Err(super::scope::PathError::Absence(msg))
+                        | Err(super::scope::PathError::Shape(msg)) => {
                             return Err(EvalError::InvalidPath(msg))
                         }
                     }

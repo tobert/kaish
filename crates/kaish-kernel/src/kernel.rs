@@ -3660,7 +3660,9 @@ impl Kernel {
                     Err(PathError::UndefinedRoot(_)) => {
                         Err(anyhow::anyhow!("undefined variable"))
                     }
-                    Err(PathError::Invalid(msg)) => Err(anyhow::anyhow!(msg)),
+                    Err(PathError::Absence(msg)) | Err(PathError::Shape(msg)) => {
+                        Err(anyhow::anyhow!(msg))
+                    }
                 }
             }
             Expr::Interpolated(parts) => {
@@ -3964,7 +3966,9 @@ impl Kernel {
                         Ok(value) => Ok(value_to_string(&value)),
                         // Unset vars expand to empty; loud path errors surface.
                         Err(PathError::UndefinedRoot(_)) => Ok(String::new()),
-                        Err(PathError::Invalid(msg)) => Err(anyhow::anyhow!(msg)),
+                        Err(PathError::Absence(msg)) | Err(PathError::Shape(msg)) => {
+                            Err(anyhow::anyhow!(msg))
+                        }
                     }
                 }
                 StringPart::VarWithDefault { name, default } => {
