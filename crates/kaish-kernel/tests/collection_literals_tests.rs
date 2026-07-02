@@ -309,14 +309,15 @@ async fn foo_bracket_glob_argv_unaffected() {
     assert!(err.contains("no matches: foo[0-9]"), "got: {err}");
 }
 
-// ── case-head `in` is a statement head, NOT membership (regression) ──────────
+// ── Reused tokens: `=` and `in` open value position by `[[ ]]` test depth ────
 //
-// `case EXPR in PATTERN)` reuses `Token::In`, but the FIRST case pattern is an
-// argv-shaped glob (char-class) pattern, not a value-position literal. If the
-// value-context suppression treats the case-head `in` like membership `in`, it
-// suppresses the first pattern's glob fusion, forcing it down `case_parser`'s
-// primitive `[ … ]` char-class branch (which doesn't accept a DASHNUM like
-// `0-9`) → a parse error. Guard the first-pattern char-class here.
+// The value-context suppression discriminates by `[[ ]]` test depth (not by
+// per-keyword heuristics): `Token::In` opens value position iff inside `[[ ]]`
+// (membership, not a for/case head); `Token::Eq` opens it iff OUTSIDE (an
+// assignment, not a `[[ ]]` comparison). These regressions all came from
+// getting one of those two token-role splits wrong — a suppressed glob run
+// gets forced down a primitive-bracket grammar branch (case char-class or a
+// comparison RHS) that doesn't accept it, → a parse error.
 
 #[tokio::test]
 async fn case_first_pattern_digit_char_class() {
@@ -365,4 +366,40 @@ async fn for_head_glob_still_a_glob_after_case_fix() {
     let result = k.execute("for f in [0-9]*.nomatch; do echo $f; done").await;
     let err = result.expect_err("for-head glob with zero matches must error").to_string();
     assert!(err.contains("no matches: [0-9]*.nomatch"), "got: {err}");
+}
+
+#[tokio::test]
+async fn single_eq_comparison_with_bracket_glob_rhs_parses() {
+    let k = setup().await;
+    // `[[ $x = [0-9]* ]]` — a single-`=` comparison inside `[[ ]]`. `Token::Eq`
+    // at test_depth > 0 is a comparison, NOT an assignment, so the `[0-9]*`
+    // RHS must stay a fused glob (comparison RHS parses on primary_expr, which
+    // has no list-literal arm). Regression: it parse-errored ("found '['").
+    // kaish `=`/`==` are string equality (not glob match), so 5 != "[0-9]*".
+    let (out, code, err) =
+        run(&k, "x=5; if [[ $x = [0-9]* ]]; then echo m; else echo n; fi").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "n");
+}
+
+#[tokio::test]
+async fn double_eq_comparison_with_bracket_glob_rhs_parses() {
+    let k = setup().await;
+    // `==` (`Token::EqEq`) never opens value position — this always parsed, but
+    // pin it alongside the single-`=` case so the pair is guarded together.
+    let (out, code, err) =
+        run(&k, "x=5; if [[ $x == [0-9]* ]]; then echo m; else echo n; fi").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "n");
+}
+
+#[tokio::test]
+async fn inner_in_word_inside_cmd_subst_does_not_pollute_for_head() {
+    let k = setup().await;
+    // Risk-B guard: a bareword `in` inside `$(echo in)` sits at test_depth 0
+    // (not membership), so it must not leak value position onto the following
+    // `z`. The for-head iterates the two words `in` and `z`.
+    let (out, code, err) = run(&k, "for x in $(echo in) z; do echo $x; done").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out.lines().collect::<Vec<_>>(), vec!["in", "z"]);
 }
