@@ -68,6 +68,17 @@ pub const FRAGMENTS: &[Fragment] = &[
     ),
     en(
         Concept::Model,
+        "data-model",
+        Variant::Rule,
+        Depth::Summary,
+        None,
+        "Values can be structured JSON — a list or a record — not only strings. \
+         Access is brackets-only (`${r[key]}`, `${xs[0]}`, never dots); iterate with \
+         `$(values $c)` (elements/values) or `$(keys $c)` (indices/keys); `fromjson` / \
+         `tojson` bridge JSON text in and out. See `help syntax` → Collections.",
+    ),
+    en(
+        Concept::Model,
         "welcome",
         Variant::Rule,
         Depth::Summary,
@@ -264,14 +275,30 @@ ${xs[0:2]}                # slice (end-exclusive) → a list
 ${u[tags][0]}             # nested path
 ${#xs}   ${#u}            # length: list elements / record keys
 
-# ENUMERATE — always via $(...). A bare `for x in $xs` is an ERROR (E012):
-# there is no word splitting, so wrap the collection in keys/values.
-for x in $(values $xs); do echo $x; done       # list elements / record values
-for k in $(keys $u);   do echo "${u[$k]}"; done # record keys / list indices
+# ENUMERATE — always wrap the collection in $(keys ...) or $(values ...).
+# A bare `for x in $xs` is an ERROR (E012): there is no word splitting.
+# keys → indices (list) / keys (record).  values → elements (list) / values (record).
+
+for x in $(values $xs); do echo $x; done          # each list element: 10 20 30
+for i in $(keys $xs);   do echo $i; done          # each list index:   0 1 2
+for k in $(keys $u);    do echo $k; done          # each record key:   name tags
+for v in $(values $u);  do echo $v; done          # each record value
+
+# key + value together — index the record by the loop key:
+for k in $(keys $u); do echo "$k = ${u[$k]}"; done
+
+# nested — a subscript access is still a VarRef, so it needs $() too:
+for t in $(values ${u[tags]}); do echo $t; done   # rust shell
+
+# filter while iterating — test each element, act on the matches:
+for x in $(values $xs); do
+  if [[ $x -gt 15 ]]; then echo "big: $x"; fi      # big: 20  big: 30
+done
 
 # MEMBERSHIP — RHS must be a collection (see Test Expressions):
-[[ rust in $(values ${u[tags]}) ]]              # element present?
-[[ name in $u ]]                                # record has key?
+[[ rust in $(values ${u[tags]}) ]]                 # element present?
+[[ name in $u ]]                                   # record has key?
+[[ 1 in $(keys $xs) ]]                             # index in bounds?
 
 tojson $u                 # serialize back to JSON text (--pretty to indent)
 ```"#,
@@ -374,6 +401,8 @@ if [[ -f file ]]; then echo "found"; elif [[ -d dir ]]; then echo "dir"; else ec
 
 for item in "one" "two"; do echo $item; done
 for f in *.txt; do cat "$f"; done
+for x in $(values $list); do echo $x; done            # a collection's elements/values
+for k in $(keys $rec); do echo "$k=${rec[$k]}"; done  # a record's keys (bare $rec is E012)
 
 while [[ $N -gt 0 ]]; do N=$((N - 1)); done
 
