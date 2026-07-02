@@ -403,3 +403,46 @@ async fn inner_in_word_inside_cmd_subst_does_not_pollute_for_head() {
     assert_eq!(code, 0, "err: {err}");
     assert_eq!(out.lines().collect::<Vec<_>>(), vec!["in", "z"]);
 }
+
+#[tokio::test]
+async fn bracket_char_class_containing_rbracket_in_test_parses() {
+    let k = setup().await;
+    // COMMON case pin: a `]`-containing glob char-class (`[]]` matches a literal
+    // `]`) inside a `[[ ]]` test. The lexer sees `[ ] ]` before glob fusion, so
+    // the inner `]` at bracket_depth==0 internally desyncs `test_depth` — but
+    // nothing gets suppressed and the parser matches its own brackets, so this
+    // common form parses+runs identically to bash (`==` is string equality here,
+    // so "y" != "]" → nm). This must never break. The EXOTIC combination that
+    // this desync DOES break loudly is pinned below.
+    let (out, code, err) =
+        run(&k, "x=y; if [[ $x == []] ]]; then echo m; else echo nm; fi").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "nm");
+}
+
+// KNOWN LIMITATION (low severity, LOUD — never silent corruption; see
+// docs/issues.md "compute_value_context: `[[`/`]]` detection vs `]`-containing
+// glob char-classes"). A `]`-char-class glob (`[]]`) followed by a *later*
+// single-`=` bracket-glob comparison inside the SAME `[[ ]]` test desyncs the
+// forward pass's `test_depth`, so the second comparison's RHS is mis-suppressed
+// and hits `primary_expr_parser` (no list-literal arm) → a loud PARSE ERROR,
+// never a wrong result. Exotic construct; the common `]`-char-class case above
+// is unaffected. Pinned `#[ignore]` so the current behavior is documented and a
+// future fix that makes it pass is visible (remove the ignore + flip to a
+// success assertion). Robust fix if it ever matters: a context-aware test-region
+// pass or matching char-classes as units before glob-fusion (see issues.md).
+#[tokio::test]
+#[ignore = "known limitation: `]`-char-class + later single-`=` bracket-glob in one [[ ]] errors loud; see docs/issues.md"]
+async fn rbracket_char_class_plus_later_eq_comparison_currently_errors() {
+    let k = setup().await;
+    let result = k
+        .execute("a=y; b=5; if [[ $a == []] && $b = [0-9] ]]; then echo m; else echo nm; fi")
+        .await;
+    // CURRENT behavior: a loud parse error (documented, not desired). When the
+    // durable fix lands, this becomes `Ok` with output "nm" — flip the assert
+    // and drop the `#[ignore]`.
+    assert!(
+        result.is_err(),
+        "if this now parses, the test_depth/char-class desync was fixed — update the pin"
+    );
+}

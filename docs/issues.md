@@ -791,6 +791,38 @@ Revisit when the first external tool bundle wants unit tests.
 
 ## P4 — Eventually
 
+### `compute_value_context`: `[[`/`]]` detection vs `]`-containing glob char-classes
+Surfaced in the collection-literals cross-model review (gemini-pro, 2026-07-02).
+The value-position suppression (`lexer.rs::compute_value_context`) discriminates
+assignment `=` from `[[ ]]` comparison `=` (and membership `in` from a for/case
+head `in`) by tracking `[[ ]]` **test depth** in a forward pass over raw tokens.
+`[[`/`]]` are deduced from *adjacent single brackets* (`LBracket LBracket` /
+`RBracket RBracket`) **before glob-fusion**, which is inherently fragile: a glob
+char-class that itself contains `]` (`[]]` matches a literal `]`, lexed as
+`[ ] ]`) has an inner `]` at `bracket_depth==0` that can prematurely decrement
+`test_depth`.
+- **Trigger:** a `]`-char-class glob AND a *later* single-`=` bracket-glob
+  comparison inside the SAME `[[ ]]` — e.g. `[[ $a == []] && $b = [0-9] ]]`.
+  The desynced `test_depth` reads the later `=` as an assignment, suppresses the
+  `[0-9]` glob, and the comparison RHS (parsed on `primary_expr_parser`, no
+  list-literal arm) hits primitive brackets.
+- **Failure mode: LOUD.** A parse error ("found '['"), never a wrong result —
+  per the "crash beats corrupt" directive this is acceptable to ship. Confirmed:
+  the *common* case `[[ $x == []] ]]` (a `]`-char-class alone in a test) parses
+  and runs identically to bash — the internal desync suppresses nothing and the
+  parser matches its own brackets.
+- **Why low priority:** exotic construct (a `]`-char-class next to a single-`=`
+  bracket-glob comparison in one test); every common form is unaffected. Pinned
+  by `collection_literals_tests.rs::bracket_char_class_containing_rbracket_in_test_parses`
+  (common case works) plus an `#[ignore]`'d
+  `rbracket_char_class_plus_later_eq_comparison_currently_errors` documenting the
+  exotic failure so a future fix is visible.
+- **Robust fix if it ever matters:** deducing `[[`/`]]` from adjacent single
+  brackets before glob-fusion can't be made reliable. The durable options are a
+  context-aware test-region pass, or reworking the pipeline so glob char-classes
+  are matched as single units before `compute_value_context` runs (so a `]`
+  inside a class is never mistaken for a test delimiter).
+
 ### Pre-release sweep — minor / edge (2026-06-23, verified)
 - **Backticks inside double-quotes and heredoc bodies are silently literal** — bare
   backticks are a loud lexer error, but quoted/heredoc ones slip through
