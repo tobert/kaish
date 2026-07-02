@@ -364,6 +364,12 @@ pub fn format_test_expr(test: &TestExpr) -> String {
         TestExpr::Not { expr } => {
             format!("(not {})", format_test_expr(expr))
         }
+        TestExpr::In { left, right } => {
+            format!("(in {} {})", format_expr(left), format_expr(right))
+        }
+        TestExpr::NotIn { left, right } => {
+            format!("(not-in {} {})", format_expr(left), format_expr(right))
+        }
     }
 }
 

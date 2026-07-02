@@ -393,6 +393,10 @@ impl<'a> Validator<'a> {
                 self.validate_test(right);
             }
             TestExpr::Not { expr } => self.validate_test(expr),
+            TestExpr::In { left, right } | TestExpr::NotIn { left, right } => {
+                self.validate_expr(left);
+                self.validate_expr(right);
+            }
         }
     }
 

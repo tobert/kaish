@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(test (and (in (string "apple") (varref fruits)) (in (string "web") (varref services))))

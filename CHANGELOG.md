@@ -39,6 +39,13 @@ breaking entries are marked **BREAKING**.
   out-of-bounds index, missing record key, a string key on a list, an integer
   index on a record, and subscripting a scalar. Literal construction
   (`xs=[a b c]`) and record iteration are not in this slice.
+- **Collection membership — `[[ e in $coll ]]` / `[[ e not in $coll ]]`** — a
+  list tests element membership with typed equality (`[[ 443 in ${servers[web]}
+  ]]` matches the JSON number 443, not just the string "443"); a record tests
+  key membership. Composes with `&&`/`||`/`!` and works inside a `for` loop like
+  any other `[[ ]]` test. A scalar/string RHS is a loud error (never silently
+  false/true) — use `=~`, glob (`[[ $s == *sub* ]]`), or `case` for substring
+  tests instead.
 - **`fromjson` / `tojson` builtins** — the JSON ingress/egress bridge for the
   value model. `fromjson` parses exactly one JSON document (from an argument or
   stdin) into a structured value in `.data`; empty input or trailing garbage is

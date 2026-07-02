@@ -577,6 +577,29 @@ fn parser_test_complex_compound() {
     parse_and_snapshot("test_complex_compound", r#"[[ ! -z "$X" && $Y == "value" || -f /tmp/flag ]]"#);
 }
 
+// ── Collection membership: `in` / `not in` ─────────────────────────────────
+// See docs/arrays-and-hashes.md — "Membership `in` is collection-only".
+
+#[test]
+fn parser_test_in() {
+    parse_and_snapshot("test_in", "[[ x in $c ]]");
+}
+
+#[test]
+fn parser_test_not_in() {
+    parse_and_snapshot("test_not_in", "[[ x not in $c ]]");
+}
+
+#[test]
+fn parser_test_in_nested_path() {
+    parse_and_snapshot("test_in_nested_path", "[[ 443 in ${servers[web]} ]]");
+}
+
+#[test]
+fn parser_test_in_compound_and() {
+    parse_and_snapshot("test_in_compound_and", "[[ apple in $fruits && web in $services ]]");
+}
+
 // =============================================================================
 // STATEMENT CHAINING
 // =============================================================================
