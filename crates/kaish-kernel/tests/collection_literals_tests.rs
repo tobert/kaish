@@ -308,3 +308,61 @@ async fn foo_bracket_glob_argv_unaffected() {
     assert_ne!(code, 0, "glob with zero matches must be a loud non-zero exit");
     assert!(err.contains("no matches: foo[0-9]"), "got: {err}");
 }
+
+// ── case-head `in` is a statement head, NOT membership (regression) ──────────
+//
+// `case EXPR in PATTERN)` reuses `Token::In`, but the FIRST case pattern is an
+// argv-shaped glob (char-class) pattern, not a value-position literal. If the
+// value-context suppression treats the case-head `in` like membership `in`, it
+// suppresses the first pattern's glob fusion, forcing it down `case_parser`'s
+// primitive `[ … ]` char-class branch (which doesn't accept a DASHNUM like
+// `0-9`) → a parse error. Guard the first-pattern char-class here.
+
+#[tokio::test]
+async fn case_first_pattern_digit_char_class() {
+    let k = setup().await;
+    let (out, code, err) =
+        run(&k, "case 5 in [0-9]*) echo digit ;; *) echo other ;; esac").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "digit");
+}
+
+#[tokio::test]
+async fn case_first_pattern_negated_char_class() {
+    let k = setup().await;
+    let (out, code, err) =
+        run(&k, "case dog in [!0-9]*) echo nd ;; *) echo x ;; esac").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "nd");
+}
+
+#[tokio::test]
+async fn case_first_pattern_alpha_range() {
+    let k = setup().await;
+    // Already worked (no DASHNUM), but pin it against future suppression drift.
+    let (out, code, err) =
+        run(&k, "case dog in [a-z]*) echo lc ;; *) echo x ;; esac").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "lc");
+}
+
+#[tokio::test]
+async fn membership_rhs_literal_still_parses_after_case_fix() {
+    let k = setup().await;
+    // The statement-head-`in` exclusion must NOT swallow a real membership
+    // `in`: `[[ x in [a b] ]]` still gets the RHS list literal.
+    let (out, code, err) = run(&k, r#"if [[ a in [a b] ]]; then echo hit; fi"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "hit");
+}
+
+#[tokio::test]
+async fn for_head_glob_still_a_glob_after_case_fix() {
+    let k = setup().await;
+    // The general statement-head exclusion still covers `for … in` — a glued
+    // char-class glob in a for-head stays a glob (strict-no-match error in the
+    // fs-less isolated kernel), never a list literal.
+    let result = k.execute("for f in [0-9]*.nomatch; do echo $f; done").await;
+    let err = result.expect_err("for-head glob with zero matches must error").to_string();
+    assert!(err.contains("no matches: [0-9]*.nomatch"), "got: {err}");
+}

@@ -35,18 +35,26 @@ glob-merge/colon-merge passes skip fusion *only* where that flag is set. Value
 position starts right after `Token::Eq` (assignment) or a genuine membership
 `Token::In`; everything else is untouched.
 
-Two collisions the design doc's sketch didn't fully anticipate, found by
-actually running the lexer against the invariant-guard cases rather than
-reasoning from the token grammar alone:
+Three collisions the design doc's sketch didn't fully anticipate — two found
+by running the lexer against the invariant-guard cases, the third by an
+empirical smoke test on the built binary during review:
 
-- **`for x in ...` reuses the exact same `Token::In`** as `[[ e in $coll ]]`
-  membership — there's no separate token. Naively suppressing after any `In`
-  would have silently turned `for x in [a]` into a suppressed (unfused)
-  bracket run instead of the `GlobWord` the for-loop body expects. Fixed with
-  a lookback: the `for`-loop shape is always exactly three tokens (`For Ident
-  In` — `ident_parser` matches one bare `Ident`), so that specific shape is
-  excluded from triggering value position, and every *other* `In` is
-  membership.
+- **Statement-head `in` (`for … in`, `case … in`) reuses the exact same
+  `Token::In`** as `[[ e in $coll ]]` membership — there's no separate token.
+  Naively suppressing after any `In` turns `for x in [a]` (and `case 5 in
+  [0-9]*)`) into a suppressed/unfused bracket run instead of the `GlobWord`
+  the loop body / `case_parser`'s char-class branch expects. The first cut
+  used a fixed three-token lookback (`For Ident In`), which correctly covered
+  `for` but MISSED `case` — its head is variable-length (`case EXPR in`, EXPR
+  can be a VarRef/string/`$()`), so `case 5 in [0-9]*)` regressed to a parse
+  error ("found DASHNUM(0-9)" — the char-class branch doesn't accept `0-9`).
+  Replaced the `for`-only lookback with a general **pending-statement-head**
+  counter: `For`/`Case` arm it, the first `In` while armed consumes it and is
+  treated as non-membership. Every `for`/`case` head has a mandatory `in`
+  right after the loop var / scrutinee (and `echo for`/`echo case` are already
+  parse errors, so a `For`/`Case` token is always a real head), which keeps
+  the counter balanced; a membership `in` inside `[[ ]]` is never preceded by
+  an unconsumed head, so it still opens value position for its RHS.
 - **A pure `Star`/`Question` glob at value position must NOT suppress.**
   The first pass suppressed *any* run that opened right after `Eq`, which
   broke the existing `X=*.txt` → literal-string-`"*.txt"` invariant (caught by

@@ -1727,12 +1727,22 @@ fn mergeable_text(token: &Token) -> Option<String> {
 /// colon-fusion note right after it).
 ///
 /// A run is "at value position" when it opens immediately after `Token::Eq`
-/// (assignment) or a genuine membership `Token::In` — NOT the `for`-loop
-/// keyword, which reuses the exact same token (`for x in *.txt` must keep
-/// fusing argv globs after `in`). The `for`-loop shape is always precisely
-/// three tokens (`For Ident In` — `ident_parser` matches exactly one
-/// `Ident`), so it's excluded by lookback without needing parser-level
-/// context in the lexer.
+/// (assignment) or a genuine membership `Token::In` — NOT a *statement-head*
+/// `in`, which reuses the exact same token. Both `for VAR in ITEMS` and
+/// `case EXPR in PATTERN)` take an `in` that introduces argv-shaped words
+/// (globs, brace expansion, char-class patterns), so their `in` must NOT open
+/// value position (`for x in *.txt` keeps fusing argv globs;
+/// `case 5 in [0-9]*)` keeps its char-class pattern as a `GlobWord`).
+///
+/// `for` has a fixed three-token head (`For Ident In`), but `case` has a
+/// variable-length head (`case EXPR in`, where EXPR can be a VarRef, string,
+/// etc.), so a fixed lookback can't cover it. Instead we carry a *pending
+/// statement-head* flag: seeing `Token::For`/`Token::Case` arms it, and the
+/// FIRST `Token::In` while armed is that head's `in` (the `in` always comes
+/// right after the loop var / scrutinee) — treated as non-membership and the
+/// flag is consumed. A membership `in` inside `[[ ]]` is never preceded by an
+/// unconsumed `for`/`case` head, so it still correctly opens value position
+/// for its RHS.
 ///
 /// Depth is a simple counter, not a real stack — deeply-nested *glued*
 /// literals (e.g. `x=[[a] [b]]`) are a documented deferral (see
@@ -1754,14 +1764,18 @@ fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
     let mut bracket_depth: usize = 0;
     let mut brace_depth: usize = 0;
     let mut expect_value = false;
+    // Armed by a `for`/`case` keyword; consumed by that head's `in` so it
+    // doesn't open value position. (`case` heads can nest — a `case` inside a
+    // branch — but each head's `in` consumes exactly one arming, so a counter
+    // is more robust than a bool if branches interleave.)
+    let mut pending_stmt_head_ins: usize = 0;
 
     for i in 0..tokens.len() {
         let tok = &tokens[i].token;
 
-        let is_for_loop_in = matches!(tok, Token::In)
-            && i >= 2
-            && matches!(tokens[i - 1].token, Token::Ident(_))
-            && matches!(tokens[i - 2].token, Token::For);
+        // A statement-head `in` (the first `in` after a `for`/`case` keyword)
+        // is NOT a membership `in` — it introduces argv words, not a literal.
+        let is_stmt_head_in = matches!(tok, Token::In) && pending_stmt_head_ins > 0;
 
         let currently_value = expect_value || bracket_depth > 0 || brace_depth > 0;
         ctx[i] = ValueContext {
@@ -1770,6 +1784,8 @@ fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
         };
 
         match tok {
+            Token::For | Token::Case => pending_stmt_head_ins += 1,
+            Token::In if pending_stmt_head_ins > 0 => pending_stmt_head_ins -= 1,
             Token::LBracket if currently_value => bracket_depth += 1,
             Token::RBracket if bracket_depth > 0 => bracket_depth -= 1,
             Token::LBrace if currently_value => brace_depth += 1,
@@ -1777,7 +1793,7 @@ fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
             _ => {}
         }
 
-        expect_value = matches!(tok, Token::Eq) || (matches!(tok, Token::In) && !is_for_loop_in);
+        expect_value = matches!(tok, Token::Eq) || (matches!(tok, Token::In) && !is_stmt_head_in);
     }
 
     ctx
