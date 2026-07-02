@@ -755,6 +755,18 @@ Revisit when the first external tool bundle wants unit tests.
 
 ## P4 — Eventually
 
+### `docs/LANGUAGE.md` has no Collections section
+Native collection read access (`${xs[0]}`, `${r[key]}`, slices, `${#…}`),
+`fromjson`/`tojson`, and now `keys`/`values` all landed without a corresponding
+`docs/LANGUAGE.md` section — the file has zero mentions of any of them (checked
+2026-07-02 while adding `keys`/`values`). `help syntax`/`syntax.md` and
+`docs/arrays-and-hashes.md` cover the design and composable-help fragments, but
+LANGUAGE.md (the hand-written "deep" layer per the composable-help doc's Help &
+teaching delivery section) hasn't been swept since collections started landing.
+Worth a dedicated pass once the collections literal grammar (`xs=[a b c]`,
+`{k: v}`) lands too, so it's one coherent "Collections" section rather than
+three incremental patches.
+
 ### Pre-release sweep — minor / edge (2026-06-23, verified)
 - **Backticks inside double-quotes and heredoc bodies are silently literal** — bare
   backticks are a loud lexer error, but quoted/heredoc ones slip through
