@@ -76,6 +76,7 @@ fn format_token(token: &Token) -> String {
         Token::Comma => "COMMA".to_string(),
         Token::Dot => "DOT".to_string(),
         Token::DotDot => "DOTDOT".to_string(),
+        Token::DotDotDot => "DOTDOTDOT".to_string(),
         Token::Tilde => "TILDE".to_string(),
         Token::TildePath(s) => format!("TILDEPATH({})", s),
         Token::RelativePath(s) => format!("RELPATH({})", s),

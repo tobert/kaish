@@ -10,24 +10,6 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
-### Added
-- **`grep`, `sed`, and `awk` accept the GNU BRE backslash-metas** (`\|`, `\+`,
-  `\?`, `\(`, `\)`, `\{`, `\}`) as a superset of their ERE regex, so
-  agent-idiomatic `grep 'foo\|bar'`, `sed 's/cat\|dog/X/'`, and
-  `awk '/a\|b/'` now alternate (and `sed 's/\(a\)\(b\)/\2\1/'` groups) instead
-  of silently matching a literal `|`/`(` and returning nothing (issue #60).
-  Pass `-E` (`grep`) or `-E`/`-r` (`sed`) for strict ERE, where those escapes
-  match the literal character — the escape hatch for a literal `|`/`+`; `awk`
-  has no such flag and always rewrites. Bare ERE (`foo|bar`) and `-F` are
-  unchanged. Narrow trade-off: in the default dialect a backslash before one of
-  these metas is the operator, never a literal — match the character itself with
-  a bracket class (`[+]`, `[|]`). A stray `\)`/`\{` that no longer parses fails
-  loudly, with a hint naming the dialect, the bracket-class spelling, and
-  (grep/sed) the strict-ERE flag. awk field splitting stays gawk-compatible:
-  `-F '\|'`, `FS="\\|"`, and `split(s, a, "\\|")` split on a literal pipe (the
-  rewrite runs before the single-char-FS-is-literal rule, matching gawk's
-  demotion of `\|` to plain `|`).
-
 ### Changed
 - **BREAKING:** **`sed` no longer rejects BRE idioms with a hint** — `\|`,
   `\(…\)`, and `\{N,M\}` used to be a loud `E006` error; they now behave as
@@ -55,6 +37,18 @@ breaking entries are marked **BREAKING**.
   builtin may return someday.
 
 ### Added
+- **Native collection literals** — `xs=[a b c]` (list), `{port: 8080}` /
+  `{port:8080}` (record, colon may be spaced or unspaced), `xs=[]` / `xs=[dog]`
+  (empty and single-element lists), multi-line records with a trailing comma,
+  nesting (`{tags: [a b], meta: {active: true}}`), and spread
+  (`new=[...$xs date]`, `[...$a ...$b]` — flattens a list operand's elements; a
+  bare `$var` inside `[ ]` nests as ONE element instead). Literals are
+  value-position only (assignment RHS, the `in`/`not in` RHS operand, and
+  nested literal interiors) — never argv (`ls [dog]` stays a glob) or a
+  `for`-head item (`for x in [a]` stays a word list). A `[`-leading glob at
+  value position (`logs=[0-9]*.log`) is now a loud parse error instead of
+  silently reinterpreting the glob; a multi-word bareword record value
+  (`{msg: hello world}`) is a loud parse error too — quote it.
 - **Native collection read access** — `${xs[0]}`, `${r[key]}`, `${r[$k]}`,
   `${r["weird-key"]}`, `${xs[-1]}` (negative index), `${xs[0:2]}` (end-exclusive
   slice → a list), and chained `${a[b][c]}`, over any `Value::Json` (e.g. from
@@ -136,6 +130,22 @@ breaking entries are marked **BREAKING**.
   / `Dynamic` / `External`, mirroring the interpreter's real resolution order so
   the embedder never forks kaish's rules. `CommandKind::escapes_kernel()` flags
   the `External`/`Dynamic` cases a gate must scrutinize.
+- **`grep`, `sed`, and `awk` accept the GNU BRE backslash-metas** (`\|`, `\+`,
+  `\?`, `\(`, `\)`, `\{`, `\}`) as a superset of their ERE regex, so
+  agent-idiomatic `grep 'foo\|bar'`, `sed 's/cat\|dog/X/'`, and
+  `awk '/a\|b/'` now alternate (and `sed 's/\(a\)\(b\)/\2\1/'` groups) instead
+  of silently matching a literal `|`/`(` and returning nothing (issue #60).
+  Pass `-E` (`grep`) or `-E`/`-r` (`sed`) for strict ERE, where those escapes
+  match the literal character — the escape hatch for a literal `|`/`+`; `awk`
+  has no such flag and always rewrites. Bare ERE (`foo|bar`) and `-F` are
+  unchanged. Narrow trade-off: in the default dialect a backslash before one of
+  these metas is the operator, never a literal — match the character itself with
+  a bracket class (`[+]`, `[|]`). A stray `\)`/`\{` that no longer parses fails
+  loudly, with a hint naming the dialect, the bracket-class spelling, and
+  (grep/sed) the strict-ERE flag. awk field splitting stays gawk-compatible:
+  `-F '\|'`, `FS="\\|"`, and `split(s, a, "\\|")` split on a literal pipe (the
+  rewrite runs before the single-char-FS-is-literal rule, matching gawk's
+  demotion of `\|` to plain `|`).
 
 ### Fixed
 - **Collection read-access silent-corruption traps** (found by the collections

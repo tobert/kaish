@@ -1,6 +1,9 @@
 # Arrays & Hashes — Design Doc
 
-Status: **proposal / design exploration** (not yet implemented)
+Status: read access, `keys`/`values`, membership, shape guards, the shared
+per-hop path resolver, and **list/record literals + spread** are SHIPPED (see
+`docs/LANGUAGE.md` Collections section). `push` and bracket-path **assignment**
+(`a[b]=x`) remain design-only — the rest of this document.
 Author: design notes from a 2026-06-05 session.
 **Revised 2026-07-01** — brackets-only access, record iteration, comparison/unwrap semantics,
 full lvalue rules; implementation notes re-grounded against HEAD `f92070e`. Superseded
@@ -559,6 +562,27 @@ tojson --pretty $cfg | tee config.json
 
 Re-grounded 2026-07-01 against HEAD `f92070e` (all file:line refs current as of that pass;
 paths relative to `crates/kaish-kernel/src`).
+
+**SHIPPED 2026-07-02** (branch `feat/collections-literals`, on top of the value/argv
+grammar seam PR): list/record literals + spread. The mechanism landed is **context-aware
+lexer suppression**, not "stop fusing `[`-runs entirely" as the first sketch below
+proposed — `lexer::compute_value_context` walks the raw token stream once, marking a
+per-token `ValueContext` (inside/opening a value-position `[`/`{`, and specifically
+inside a value-position `{` for the colon exemption), and `merge_glob_adjacent` /
+`merge_colon_adjacent` skip fusion only when that flag is set. This keeps argv-position
+globs (`ls [dog]`, `foo[0-9]`) and scalar assignments (`x=foo:bar`) byte-for-byte
+unchanged — lower blast radius than a global lexer rule. Two points the sketch didn't
+anticipate: (1) `for x in ...` reuses the exact same `Token::In` as membership `in`, so
+the "value position starts after `Eq`/`In`" rule needed a lookback exclusion for the
+fixed three-token `for`-loop shape (`For Ident In`) to keep `for x in [a]` fusing as a
+glob; (2) the bracket-pair suppression only fires for runs that actually contain an
+`LBracket`/`RBracket` pair, so a pure `Star`/`Question` glob at value position
+(`X=*.txt`) is untouched and still evaluates to a literal string, exactly as before
+literals existed. Deferred, as flagged below: deeply-nested *glued* literals
+(`x=[[a] [b]]`) — spaced nesting (`[ [a] [b] ]`) was never glued and is unaffected; see
+`docs/issues.md` P3. The multi-word bareword record-value error
+(`{msg: hello world}`) is a loud parse error but with chumsky's generic message, not
+the hand-crafted "quote it" wording sketched in Teaching note #10 — also P3.
 
 - **Glob-merge is the big lexer collision — including one the first draft missed.**
   Space-separated literals are safe: the glob-run merger only fuses **span-adjacent** tokens

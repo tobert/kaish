@@ -12,7 +12,10 @@ use std::fmt;
 use kaish_types::json_to_value_no_envelope;
 
 use crate::arithmetic;
-use crate::ast::{BinaryOp, Expr, FileTestOp, Stmt, StringPart, StringTestOp, TestCmpOp, TestExpr, Value, VarPath};
+use crate::ast::{
+    spread_non_list_message, BinaryOp, Expr, FileTestOp, ListElem, RecordEntry, RecordKey, Stmt,
+    StringPart, StringTestOp, TestCmpOp, TestExpr, Value, VarPath,
+};
 use crate::vfs::DirEntry;
 use std::path::Path;
 
@@ -252,7 +255,48 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             Expr::LastExitCode => self.eval_last_exit_code(),
             Expr::CurrentPid => self.eval_current_pid(),
             Expr::GlobPattern(s) => Ok(Value::String(s.clone())),
+            Expr::ListLiteral(elems) => self.eval_list_literal(elems),
+            Expr::RecordLiteral(entries) => self.eval_record_literal(entries),
         }
+    }
+
+    /// Evaluate a list literal (`[a b c]`, `[...$xs date]`) to `Value::Json(Array)`.
+    /// A `Spread` element must itself evaluate to a list — a scalar/record spread
+    /// is a loud `EvalError::Unsupported`, never silently coerced or dropped.
+    fn eval_list_literal(&mut self, elems: &[ListElem]) -> EvalResult<Value> {
+        let mut out = Vec::with_capacity(elems.len());
+        for elem in elems {
+            match elem {
+                ListElem::Item(e) => {
+                    let value = self.eval(e)?;
+                    out.push(kaish_types::value_to_json(&value));
+                }
+                ListElem::Spread(e) => {
+                    let value = self.eval(e)?;
+                    match value {
+                        Value::Json(serde_json::Value::Array(items)) => out.extend(items),
+                        other => return Err(EvalError::Unsupported(spread_non_list_message(&other))),
+                    }
+                }
+            }
+        }
+        Ok(Value::Json(serde_json::Value::Array(out)))
+    }
+
+    /// Evaluate a record literal (`{name: amy}`, `{port:8080}`) to
+    /// `Value::Json(Object)`. Insertion order is preserved (workspace
+    /// `serde_json` has the `preserve_order` feature on); a duplicate key
+    /// keeps the last value written, matching plain map-insert semantics.
+    fn eval_record_literal(&mut self, entries: &[RecordEntry]) -> EvalResult<Value> {
+        let mut map = serde_json::Map::new();
+        for entry in entries {
+            let key = match &entry.key {
+                RecordKey::Bare(s) | RecordKey::Quoted(s) => s.clone(),
+            };
+            let value = self.eval(&entry.value)?;
+            map.insert(key, kaish_types::value_to_json(&value));
+        }
+        Ok(Value::Json(serde_json::Value::Object(map)))
     }
 
     /// Evaluate last exit code ($?).

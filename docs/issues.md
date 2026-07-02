@@ -486,6 +486,26 @@ the `WordAssign` arm degrade to a stringified positional when `past_double_dash`
 
 ## P3 — Scheduler and infra
 
+### Collection literals: deeply-nested *glued* brackets, and generic multi-word-value error text
+Two scoped deferrals from the collection-literals grammar landing (2026-07-02,
+`feat/collections-literals`, see `docs/arrays-and-hashes.md` "Implementation
+notes" for the shipped mechanism):
+- **Deeply-nested glued list literals** like `x=[[a] [b]]` aren't unfused by the
+  lexer's value-position suppression today — only a flat/glued-single/empty
+  bracket run (`[dog]`, `[]`, `[1]`) is exempted from `GlobWord` fusion.
+  Spaced nesting (`[ [a] [b] ]`) was never glued in the first place and works
+  fine. Fix would extend `lexer::compute_value_context`'s depth tracking to
+  also unfuse an inner glued bracket run once already inside an open value
+  literal (the counter is there; the glob-merge run-detection loop would need
+  to stop treating the WHOLE glued span as one run when depth re-enters 0 mid-run).
+- **Unquoted multi-word record value** (`{msg: hello world}`) is already a loud
+  parse error (never silently split/joined — the invariant that matters), but
+  the message is chumsky's generic "expected `:`/`}`, found identifier" rather
+  than the hand-crafted "quote it: `{msg: \"hello world\"}`" wording sketched
+  in the design doc's Teaching note #10. Fix: a `try_map` guard in
+  `record_literal_parser` (`parser.rs`) that peeks for a stray bareword not
+  followed by `:` and raises a custom `Rich::custom` message.
+
 ### `"$(cmd)"` interpolation drops a `.data`-only collection to empty string (silent data LOSS)
 Found alongside the collections boundary-ops work (2026-07-02, `feat/collections-boundary-ops`).
 Quoted command-substitution interpolation reads a command's `.out` via
@@ -784,18 +804,6 @@ Revisit when the first external tool bundle wants unit tests.
 ---
 
 ## P4 — Eventually
-
-### `docs/LANGUAGE.md` has no Collections section
-Native collection read access (`${xs[0]}`, `${r[key]}`, slices, `${#…}`),
-`fromjson`/`tojson`, and now `keys`/`values` all landed without a corresponding
-`docs/LANGUAGE.md` section — the file has zero mentions of any of them (checked
-2026-07-02 while adding `keys`/`values`). `help syntax`/`syntax.md` and
-`docs/arrays-and-hashes.md` cover the design and composable-help fragments, but
-LANGUAGE.md (the hand-written "deep" layer per the composable-help doc's Help &
-teaching delivery section) hasn't been swept since collections started landing.
-Worth a dedicated pass once the collections literal grammar (`xs=[a b c]`,
-`{k: v}`) lands too, so it's one coherent "Collections" section rather than
-three incremental patches.
 
 ### Pre-release sweep — minor / edge (2026-06-23, verified)
 - **Backticks inside double-quotes and heredoc bodies are silently literal** — bare

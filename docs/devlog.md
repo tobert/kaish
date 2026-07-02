@@ -43,6 +43,67 @@ now fails compile with an error describing a pattern the author never wrote
 spelling + the strict-ERE flag where one exists) whenever the rewrite actually
 changed the pattern.
 
+## Collection literals + spread land (2026-07-02)
+
+`xs=[a b c]`, `{port: 8080}`/`{port:8080}`, multi-line records with a trailing
+comma, nesting, and `[...$xs date]` spread — the construction half of the
+collections effort, on top of the read-side resolver and the value/argv
+grammar seam (both already landed). Value model unchanged: a literal just
+evaluates to `Value::Json(Array|Object)`, so every existing access/`keys`/
+`values`/membership/shape-guard/`${#…}` mechanism works on a literal for free.
+
+The load-bearing decision was **context-aware lexer suppression over a global
+rule**. The obvious fix — stop the glob-merge pass from ever fusing a
+`[`-leading run — was rejected up front: kaish's argv glob path (`ls [dog]`,
+`foo[0-9]`) and scalar assignment (`x=foo:bar`) both lean on the *existing*
+fusion behavior, so a global change would either break those or need a second,
+parallel "argv assembles from primitives" grammar that doesn't exist. Instead
+`lexer::compute_value_context` walks the token stream once and marks a
+per-token flag — inside/opening a value-position `[`/`{` literal — and the
+glob-merge/colon-merge passes skip fusion *only* where that flag is set. Value
+position starts right after `Token::Eq` (assignment) or a genuine membership
+`Token::In`; everything else is untouched.
+
+Two collisions the design doc's sketch didn't fully anticipate, found by
+actually running the lexer against the invariant-guard cases rather than
+reasoning from the token grammar alone:
+
+- **`for x in ...` reuses the exact same `Token::In`** as `[[ e in $coll ]]`
+  membership — there's no separate token. Naively suppressing after any `In`
+  would have silently turned `for x in [a]` into a suppressed (unfused)
+  bracket run instead of the `GlobWord` the for-loop body expects. Fixed with
+  a lookback: the `for`-loop shape is always exactly three tokens (`For Ident
+  In` — `ident_parser` matches one bare `Ident`), so that specific shape is
+  excluded from triggering value position, and every *other* `In` is
+  membership.
+- **A pure `Star`/`Question` glob at value position must NOT suppress.**
+  The first pass suppressed *any* run that opened right after `Eq`, which
+  broke the existing `X=*.txt` → literal-string-`"*.txt"` invariant (caught by
+  the pre-existing `kernel::tests::test_glob_in_assignment_is_literal`, not a
+  new test — the full suite is the safety net here). Narrowed to: suppress
+  only when the run actually contains an `LBracket`/`RBracket` pair — a glob
+  with no brackets at value position is unaffected and keeps evaluating to a
+  literal string exactly as before literals existed.
+
+The colon-fusion exemption for `{port:8080}` needed the same care in the other
+direction: it must NOT fire for a plain scalar assignment like `x=foo:bar`
+(which must keep fusing into one `Ident`), so the suppression flag there is
+narrower than the bracket one — specifically "inside an open value-position
+`{`", not just "at value position".
+
+AST: `Expr::ListLiteral(Vec<ListElem>)` / `Expr::RecordLiteral(Vec<RecordEntry>)`,
+`ListElem::{Item,Spread}`, `RecordKey::{Bare,Quoted}`. Eval landed twice (async
+`kernel.rs::eval_expr_async` for real execution, sync `interpreter/eval.rs`
+`Evaluator::eval` for the reduced sync path) with a shared `spread_non_list_message`
+helper so the two paths can't diverge on wording for a non-list spread — the
+same dual-eval-site pattern as `${#…}` length and `${…:-default}` before it.
+
+Deferred (`docs/issues.md` P3): deeply-nested *glued* list literals
+(`x=[[a] [b]]` — spaced nesting works fine, only the glued form isn't
+unfused), and the multi-word-bareword-record-value error
+(`{msg: hello world}`) is loud but carries chumsky's generic message instead
+of the hand-crafted "quote it" wording the design doc sketched.
+
 ## Importance-ranked onboarding tiers (2026-07-01)
 
 Step 3 of the collections effort splits in two: the tier *mechanism* (pure infra,
