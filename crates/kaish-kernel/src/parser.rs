@@ -1039,7 +1039,7 @@ where
         // prefixed-command form wins when a command follows.
         let env_prefix_assign = ident_parser()
             .then_ignore(just(Token::Eq))
-            .then(expr_parser())
+            .then(value_expr_parser())
             .map(|(name, value)| Assignment { name, value, local: false });
         let env_scoped = env_prefix_assign
             .repeated()
@@ -1116,7 +1116,7 @@ where
     let local_assignment = just(Token::Local)
         .ignore_then(ident_parser())
         .then_ignore(just(Token::Eq))
-        .then(expr_parser())
+        .then(value_expr_parser())
         .map(|(name, value)| Assignment {
             name,
             value,
@@ -1127,7 +1127,7 @@ where
     // The lexer produces IDENT EQ EXPR, so we parse it here
     let bash_assignment = ident_parser()
         .then_ignore(just(Token::Eq))
-        .then(expr_parser())
+        .then(value_expr_parser())
         .map(|(name, value)| Assignment {
             name,
             value,
@@ -1966,7 +1966,7 @@ where
     let not_in = primary_expr_parser()
         .then_ignore(select! { Token::Ident(s) if s == "not" => () })
         .then_ignore(just(Token::In))
-        .then(primary_expr_parser())
+        .then(value_primary_parser())
         .map(|(left, right)| TestExpr::NotIn {
             left: Box::new(left),
             right: Box::new(right),
@@ -1974,7 +1974,7 @@ where
 
     let in_ = primary_expr_parser()
         .then_ignore(just(Token::In))
-        .then(primary_expr_parser())
+        .then(value_primary_parser())
         .map(|(left, right)| TestExpr::In {
             left: Box::new(left),
             right: Box::new(right),
@@ -2087,12 +2087,41 @@ where
 }
 
 /// Expression parser - supports && and || binary operators.
+///
+/// Used by `for`-head items (among others), which must stay `$()`-only
+/// (bare `$VAR` splice is rejected upstream by validator E012 — see
+/// docs/LANGUAGE.md) and must NOT gain collection literals later. Do not
+/// reroute this to the value seam.
 fn expr_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
     // For now, just primary expressions. Can extend for && / || later if needed.
+    primary_expr_parser()
+}
+
+/// Value-position expression parser (assignment RHS: bash-style, `local`,
+/// and env-prefix). Currently identical to `expr_parser`; the seam where
+/// collection literals (lists/records) will be added so they appear on
+/// assignment RHS but never in argv or `for`-head items.
+fn value_expr_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    primary_expr_parser()
+}
+
+/// Value-position primary parser (`in`/`not in` RHS operand only — the
+/// collection being tested for membership; the left needle stays on
+/// `primary_expr_parser`). Currently identical to `primary_expr_parser`;
+/// the seam where list/record literal arms get added later.
+fn value_primary_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
     primary_expr_parser()
 }
 
