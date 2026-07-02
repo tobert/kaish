@@ -136,10 +136,13 @@ breaking entries are marked **BREAKING**.
     Added.)
 - **A bare collection reaching an external command's argv or a redirect
   target silently JSON-serialized** (e.g. `curl -d $cfg` or `echo x > $cfg`);
-  both process-boundary sinks now refuse it with a `$(tojson $x)` hint, closing
-  the last two silent-stringify seams alongside the OS-env-export guard above.
-  A quoted `"$cfg"` is unaffected — string interpolation already renders
-  compact JSON before either sink sees it.
+  every process-boundary sink now refuses it with a `$(tojson $x)` hint. This
+  covers the generic external-argv/redirect paths **and** the three subprocess
+  builtins that build argv/env themselves (`spawn`, `exec`, `env`) — including
+  `spawn`'s nested-collection argv elements and `env <cmd>`'s child-environment
+  export (which previously bypassed the OS-env-export guard). A quoted `"$cfg"`
+  is unaffected — string interpolation renders compact JSON before either sink
+  sees it.
 - **Scalar-only `[[ ]]` test operators silently stringified a collection
   operand** — `-z`/`-n`, `=~`/`!~`, ordering (`<`/`>`/`<=`/`>=`), and numeric
   (`-eq`/`-ne`/`-gt`/`-lt`/`-ge`/`-le`) now refuse a list/record operand with a

@@ -156,6 +156,108 @@ async fn interpolated_collection_is_a_string_arg() {
     assert_eq!(result.text_out(), "[[1,2]]");
 }
 
+// ── Decision D completeness: the three subprocess builtins with their own
+// argv/env stringify paths (spawn/exec/env) bypass `build_args_flat`, so each
+// carries the same boundary guard at its own edge. Linux-gated + absolute
+// command paths (`/bin/echo`, `/bin/true`) so the spawn is unconditional. ──
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn spawn_nested_collection_argv_element_is_a_loud_error() {
+    // spawn's argv is legitimately a list of strings, so the top-level list
+    // passes — but a *nested* collection element can't be a process argument.
+    // Previously `extract_string_array` silently JSON-stringified it.
+    let kernel = repl_kernel();
+    let result = kernel
+        .execute(r#"xs=$(fromjson '["ok",[1,2]]'); spawn --command /bin/echo --argv $xs"#)
+        .await;
+    let msg = match result {
+        Ok(r) => {
+            assert_ne!(r.code, 0, "a nested collection argv element must fail: {r:?}");
+            r.err
+        }
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(msg.contains("tojson"), "should hint at serializing with tojson: {msg}");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn spawn_record_as_whole_argv_is_a_loud_error() {
+    // A record used as the whole argv is not a list of strings — previously a
+    // silent empty argv (data loss), now loud.
+    let kernel = repl_kernel();
+    let result = kernel
+        .execute(r#"r=$(fromjson '{"a":1}'); spawn --command /bin/echo --argv $r"#)
+        .await;
+    let ok = match result {
+        Ok(r) => r.code != 0,
+        Err(_) => true,
+    };
+    assert!(ok, "a record as the whole argv must be a loud error, not a silent empty argv");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn exec_bare_collection_argv_is_a_loud_error() {
+    // exec consumes typed Values from `args.positional`, not `build_args_flat`,
+    // so its own edge carries the guard. The guard fires BEFORE `execvp`, so
+    // the test process is never actually replaced.
+    let kernel = repl_kernel();
+    let result = kernel
+        .execute(r#"xs=$(fromjson '[1,2]'); exec /bin/echo $xs"#)
+        .await;
+    let msg = match result {
+        Ok(r) => {
+            assert_ne!(r.code, 0, "a bare collection exec argv element must fail: {r:?}");
+            r.err
+        }
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(msg.contains("tojson"), "should hint at serializing with tojson: {msg}");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn env_bare_collection_argv_is_a_loud_error() {
+    // env also builds argv from typed positionals with its own private
+    // `value_to_string`; a bare collection argv element is now loud.
+    let kernel = repl_kernel();
+    let result = kernel
+        .execute(r#"xs=$(fromjson '[1,2]'); env /bin/echo $xs"#)
+        .await;
+    let msg = match result {
+        Ok(r) => {
+            assert_ne!(r.code, 0, "a bare collection env argv element must fail: {r:?}");
+            r.err
+        }
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(msg.contains("tojson"), "should hint at serializing with tojson: {msg}");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn env_command_exporting_a_collection_var_is_a_loud_error() {
+    // `env <command>` spawns via its OWN path (`execute_with_env`), which
+    // populates the child env directly — bypassing `try_execute_external`'s
+    // export guard. It now runs the same `structured_export_error` check, so an
+    // exported collection variable is refused rather than silently serialized.
+    let kernel = repl_kernel();
+    let result = kernel
+        .execute(r#"export CFG=$(fromjson '{"port":8080}'); env /bin/true"#)
+        .await;
+    let msg = match result {
+        Ok(r) => {
+            assert_ne!(r.code, 0, "exporting a record through `env cmd` must fail: {r:?}");
+            r.err
+        }
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(msg.contains("tojson"), "should hint at serializing with tojson: {msg}");
+    assert!(msg.contains("CFG"), "should name the offending variable: {msg}");
+}
+
 #[tokio::test]
 async fn external_command_not_found() {
     let kernel = repl_kernel();
