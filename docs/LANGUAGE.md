@@ -4,7 +4,7 @@ Complete reference for kaish syntax and semantics.
 
 ## Variables & Data Types
 
-```bash
+```sh
 # Assignment - bash style (no spaces around =)
 NAME="value"
 local NAME="value"              # local scope
@@ -33,7 +33,7 @@ One or more assignments placed *before* a command scope those variables to that
 command only — they reach the command (its arguments and, for external commands,
 its subprocess environment) and are **removed afterward**, matching bash:
 
-```bash
+```sh
 RUST_LOG=debug cargo run        # RUST_LOG set for cargo only
 A=1 B=2 ./script                # both scoped to ./script
 echo "$RUST_LOG"                # empty — the prefix did not persist
@@ -47,7 +47,7 @@ expands the args first and prints empty.)
 
 ## Parameter Expansion
 
-```bash
+```sh
 NAME=${NAME:-"default"}         # use "default" if NAME unset or empty
 echo ${#NAME}                   # string length
 
@@ -59,9 +59,98 @@ echo $#                         # arg count
 echo $?                         # exit code of last command (0-255)
 ```
 
+## Collections (Lists & Records)
+
+Values can be structured JSON — a **list** or a **record** — not only strings.
+`fromjson` / `tojson` bridge JSON text in and out; `$(cmd)` that emits structured
+data (`jq`, `keys`, `values`, `seq`, …) yields a typed value directly.
+
+```sh
+u=$(fromjson '{"name":"amy","tags":["rust","shell"]}')
+xs=$(fromjson '[10,20,30]')
+```
+
+### Read access — brackets only, never dots
+
+```sh
+${u[name]}          # record key — a bareword is a LITERAL key
+${u[$k]}            # dynamic key — $var is evaluated
+${u["a key"]}       # quoted key (spaces / punctuation)
+${xs[0]}            # list index (0-based)
+${xs[-1]}           # negative index counts from the end
+${xs[0:2]}          # slice — end-exclusive, yields a list
+${u[tags][0]}       # nested path
+${#xs}   ${#u}      # length: list element count / record key count
+```
+
+A subscript that lands on a JSON **scalar** unwraps to a native value, so
+comparisons and arithmetic are typed (not stringly):
+
+```sh
+c=$(fromjson '{"port":8080,"healthy":false}')
+echo $(( ${c[port]} + 1 ))                       # 8081  (integer arithmetic)
+[[ ${c[healthy]} == false ]] && echo "down"      # typed bool
+```
+
+Every bad access is a **loud error**, never a silent empty — dotted access
+(`${u.name}` → use `[name]`), a missing record key, an out-of-bounds index, a
+string key on a list, an integer index on a record, and subscripting a scalar.
+
+### keys / values — iterate any collection
+
+`keys` and `values` turn a collection into a list you iterate with `$(...)`.
+They work on **both** shapes (the jq model):
+
+```sh
+keys $u             # record → its keys:    ["name","tags"]
+values $u           # record → its values
+keys $xs            # list   → its indices:  [0,1,2]
+values $xs          # list   → its elements: [10,20,30]
+```
+
+### Iteration is `$()`-only
+
+There is no word splitting, so a bare `$var`/`${...}` in a for-head is an error
+(**E012**) — including a subscript access, which is still a variable reference.
+Wrap the collection in `keys`/`values`:
+
+```sh
+for x in $(values $xs); do echo $x; done              # each element: 10 20 30
+for i in $(keys $xs);   do echo $i; done              # each index:   0 1 2
+for k in $(keys $u);    do echo "$k = ${u[$k]}"; done # key + value
+for t in $(values ${u[tags]}); do echo $t; done       # nested list
+```
+
+### Membership — `in` / `not in`
+
+The right-hand side must be a collection (a string RHS is a loud error — use
+`=~` / globs / `case` for substrings):
+
+```sh
+[[ rust in $(values ${u[tags]}) ]]   # element present in a list?
+[[ name in $u ]]                     # record has key?
+[[ 1 in $(keys $xs) ]]               # index in bounds?
+[[ tmp not in $u ]]                  # absent?
+```
+
+Element equality uses the same rule as `==` (a numeric bareword matches a JSON
+number). Comparing a whole collection to a scalar with `==`/`!=` is a loud error
+— test membership with `in`, or compare structures with `jq`.
+
+### Crossing the boundary
+
+A collection **displays** as compact JSON (`echo $xs` → `[10,20,30]`), but it
+cannot silently cross into an OS environment variable: `export CFG=$cfg` where
+`$cfg` is a list/record is a loud error — serialize it first with
+`export CFG=$(tojson $cfg)`.
+
+> Construction — list/record **literals** (`xs=[a b c]`, `{k: v}`), `push`, and
+> bracket-path **assignment** (`a[b]=x`) — is designed but not yet implemented;
+> today collections enter the shell via `fromjson` / `$(...)`.
+
 ## Quoting
 
-```bash
+```sh
 # Double quotes - interpolation works
 echo "hello $NAME"
 echo "line\nbreak"              # escapes: \n \t \\ \"
@@ -77,7 +166,7 @@ kaish never concatenates adjacent *unquoted* tokens into one word. `$VAR`,
 `$(cmd)`, and globs are each their own word; to build a single word from text
 plus interpolation, **quote the whole thing**:
 
-```bash
+```sh
 # Correct — one word each:
 "$dir/file.txt"                # path
 "out-$(date +%s).log"          # filename: text + command substitution
@@ -100,7 +189,7 @@ interpolated words" habit is exactly what `shellcheck --enable=all` enforces
 
 ## Arguments
 
-```bash
+```sh
 # Positional
 echo "hello" "world"
 
@@ -123,7 +212,7 @@ alias greet='echo hello'
 
 ## Pipes & Redirects
 
-```bash
+```sh
 tool-a | tool-b | tool-c        # pipe stdout → stdin
 tool > file                     # redirect stdout
 tool >> file                    # append stdout
@@ -168,7 +257,7 @@ kaish's jq speaks real jq's CLI: `--arg NAME VALUE` binds a string and
 `--argjson NAME VALUE` binds a JSON value. Use `-n` / `--null-input`
 when you only want the bindings (no stdin).
 
-```bash
+```sh
 # Stash JSON, pick a field — no subshell, no <<<
 R='{"name":"amy","id":1}'
 jq -n --argjson r "$R" -r '$r.name'
@@ -182,7 +271,7 @@ Both flags are repeatable. `--argjson` errors loudly on malformed JSON
 
 ## Statement Chaining
 
-```bash
+```sh
 cmd1 && cmd2                    # run cmd2 only if cmd1 succeeds
 cmd1 || cmd2                    # run cmd2 only if cmd1 fails
 mkdir /tmp/work && cd /tmp/work && echo "ready"
@@ -192,7 +281,7 @@ mkdir /tmp/work && cd /tmp/work && echo "ready"
 
 ## Test Expressions
 
-```bash
+```sh
 # File tests
 [[ -f /path/file ]]             # is file
 [[ -d /path/dir ]]              # is directory
@@ -240,7 +329,7 @@ deliberate: `[[ ]]` is real grammar the validator checks before runtime, whereas
 
 ## Control Flow
 
-```bash
+```sh
 # Conditional
 if CONDITION; then
     ...
@@ -280,7 +369,7 @@ exit 1                          # exit with code
 
 ## Command Substitution
 
-```bash
+```sh
 NOW=$(date)
 echo "Current time: $NOW"
 
@@ -293,7 +382,7 @@ all work. Output accumulates across the statements (no separator inserted, like
 `;`), and the body's side effects (`cd`, assignments) stay contained — only the
 captured stdout escapes.
 
-```bash
+```sh
 HEAD=$(cd "$repo" && git rev-parse HEAD)   # && chain
 BOTH=$(printf a; printf b)                 # ; sequence  → "ab"
 VER=$(                                      # multi-line + comment
@@ -312,7 +401,7 @@ Unlike traditional shells, kaish does **not** perform implicit *word* splitting 
 1. **Structured data wins.** Builtins that emit list-shaped output (`seq`, `find`, `glob`, `jq`, `cut`, …) carry an internal JSON array on the previous result; for-loops iterate over the array elements directly. (Pipe the data out with `kaish-last` if you need it on stdout.)
 2. **Otherwise, split on newlines.** When `$(cmd)` returns a plain string with `\n` in it, the for-loop iterates per line. Whitespace within a line is never split.
 
-```bash
+```sh
 # seq returns a JSON array — iterates over numbers
 for i in $(seq 1 5); do
     echo "Number: $i"
@@ -353,7 +442,7 @@ done
 
 The newline-split rule only fires in for-loop iteration position. Assignment, argv, and string interpolation always keep `$(cmd)` whole:
 
-```bash
+```sh
 RESULT=$(printf 'a\nb')                 # RESULT is "a\nb" (one string)
 echo "captured: $(printf 'x\ny')"       # one echo, newline preserved inline
 other_cmd $(printf 'a\nb')              # one argv slot, not two
@@ -365,7 +454,7 @@ other_cmd $(printf 'a\nb')              # one argv slot, not two
 
 The `split` builtin provides explicit string splitting:
 
-```bash
+```sh
 # Default: split on whitespace (like Python str.split())
 for word in $(split "hello world foo"); do
     echo $word
@@ -391,7 +480,7 @@ done
 
 If you're porting scripts that rely on word splitting:
 
-```bash
+```sh
 # Old: bareword splitting of a whitespace-separated variable
 for i in $ITEMS; do echo $i; done                # bash: splits on IFS
 # New: explicit split — kaish flags the bareword version (E012)
@@ -407,7 +496,7 @@ for line in $(cat file); do echo $line; done
 
 Arithmetic expansion is **integer-only**. Floats exist as a data type (for JSON interop) but `$(( ))` operates on integers.
 
-```bash
+```sh
 # Arithmetic expansion with $((expression))
 X=$((5 + 3))                    # X = 8
 Y=$((X * 2))                    # Y = 16
@@ -442,7 +531,7 @@ echo $((A > B))                 # 1
 
 ## Shell Options
 
-```bash
+```sh
 set -e                          # exit on first error
 set -o latch                    # require nonce confirmation for destructive rm
 set -o trash                    # move rm'd files to freedesktop.org Trash
@@ -458,7 +547,7 @@ Options compose orthogonally: with both enabled, small files go to Trash
 Environment variables `KAISH_LATCH=1` and `KAISH_TRASH=1` enable at kernel startup.
 
 When latch is enabled, `rm` returns **exit code 2** with a nonce:
-```bash
+```sh
 $ rm important.dat
 rm: confirmation required (latch enabled)
 Authorized: important.dat
@@ -500,7 +589,7 @@ The `kaish-trash` builtin manages trashed files: `list`, `restore`, `empty`, `co
 
 When output is truncated by the limit, the result exits **3** with `did_spill: true` and `original_code` set. The spill file path is in the output. To read it in full:
 
-```bash
+```sh
 set +o output-limit
 cat /run/user/1000/kaish/spill/spill-xyz.txt
 set -o output-limit=8K
@@ -521,7 +610,7 @@ Frontends control persistence:
 
 Bare glob patterns in argument positions are expanded to matching files before the command runs:
 
-```bash
+```sh
 ls *.txt                        # expands to all .txt files in cwd
 cat src/*.rs                    # expands to .rs files in src/
 for f in *.json; do             # iterates over matching files
@@ -535,7 +624,7 @@ If a glob matches zero files, the command fails with exit code 1 rather than pas
 
 The `glob` builtin still works for advanced options like `--exclude` and recursive `**` patterns:
 
-```bash
+```sh
 glob "**/*.rs" --exclude="*_test.rs"
 ```
 
@@ -546,7 +635,7 @@ with `.`: a leading dot is matched **only** by a pattern segment that explicitly
 begins with a literal `.`. Bare wildcards never match a leading dot, and `**`
 does not descend into hidden directories.
 
-```bash
+```sh
 ls *                # visible entries only — .env, .github are skipped
 ls .*               # the dotfiles: .env, .gitignore, …
 cat .github/*       # reaches into a named dot dir (but `*` still skips .secret inside)
@@ -560,7 +649,7 @@ hidden entries by default.
 
 ## Error Handling
 
-```bash
+```sh
 set -e                          # exit on first error
 
 some-command || {
@@ -574,7 +663,7 @@ source utils.kai                # load utilities
 
 ## Background Jobs
 
-```bash
+```sh
 slow-task &                     # run in background
 jobs                            # list jobs
 wait                            # wait for all
@@ -591,7 +680,7 @@ at the moment the job is spawned. This provides two key benefits:
 
 Shell-style functions using positional parameters:
 
-```bash
+```sh
 # POSIX-style: name() { body }
 greet() {
     echo "Hello, $1!"
@@ -613,7 +702,7 @@ Functions execute in **shared scope** (sh-compatible) — they can read and modi
 
 Scripts with `.kai` extension can be called by name when in a `PATH` directory:
 
-```bash
+```sh
 # Create a script
 write "/scripts/fetch.kai" 'echo "Fetching $1..."'
 
@@ -630,7 +719,7 @@ Scripts execute in **isolated scope** (like a subshell) — they cannot access o
 
 When a command is not a builtin or user-defined tool, kaish searches `PATH` for an executable:
 
-```bash
+```sh
 # External commands work transparently
 cargo build --release
 git status
@@ -688,7 +777,7 @@ The kernel does not pass through the host process's OS environment — even
 `KernelConfig::initial_vars` on the embedder side) is the *only* way variables
 reach external commands.
 
-```bash
+```sh
 FOO="hello"                         # local to kaish
 printenv FOO                        # → exit 1; child env has no FOO
 
@@ -715,7 +804,7 @@ Embedders that want isolated execution simply leave `initial_vars` empty — see
 
 Fan-out parallelism:
 
-```bash
+```sh
 # 散 (scatter) - fan out to parallel workers
 # 集 (gather) - collect results back
 cat items.txt | scatter --as ITEM --limit 8 | process $ITEM | gather > results.json
@@ -787,7 +876,7 @@ kaish carries binary as a first-class typed value (`Value::Bytes`) that flows
 through pipes intact. A bytes value **coerces to text only if it is valid UTF-8**;
 otherwise an operation that requires text fails loudly rather than corrupting data.
 
-```bash
+```sh
 # Produce bytes and copy them with explicit block sizing
 dd if=/dev/urandom of=key.bin bs=16 count=1     # 16 random bytes to a file
 dd if=/dev/zero of=/dev/null bs=1k count=10     # discard a measured stream

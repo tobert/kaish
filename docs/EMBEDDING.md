@@ -607,7 +607,7 @@ job state:
 │   └── ...
 ```
 
-```bash
+```sh
 # In kaish scripts
 sleep 10 &              # Starts job 1
 jobs                    # Shows: [1] running  /v/jobs/1/

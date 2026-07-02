@@ -13,7 +13,7 @@ and parse the output of a traditional shell.
 
 ## Install
 
-```bash
+```sh
 cargo install kaish
 ```
 
@@ -40,7 +40,7 @@ Skills transfer from bash. Footguns (hopefully) don't.
 
 ## Quick Tour
 
-```bash
+```sh
 #!/usr/bin/env kaish
 
 # Familiar bash-style syntax
@@ -127,7 +127,7 @@ everywhere, a `jq` that always uses the same filter syntax, an `awk` that never 
 |----------|-------|
 | **Text** | awk, base64, cut, diff, grep, head, sed, sort, split, tac, tail, tr, uniq, wc, xxd |
 | **Files** | basename, cat, cd, checksum, cmp, cp, dd, dirname, file, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, readlink, realpath, rm, stat, tee, touch, tree, write |
-| **JSON** | jq |
+| **JSON** | fromjson, jq, keys, tojson, values |
 | **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, printf, ps, read, seq, set, sleep, spawn, timeout, tokens, uname, unalias, unset, wait, which |
 | **Parallel** | scatter, gather |
 | **Meta** | assert, false, true |
@@ -145,7 +145,7 @@ The REPL loads an init file on startup (first match wins):
 
 Use it for aliases, exports, and a custom prompt:
 
-```bash
+```sh
 # ~/.config/kaish/init.kai
 alias ll='ls -la'
 alias gs='git status'
@@ -204,7 +204,7 @@ The kernel is embeddable — no external dependencies, no subprocess spawning fo
 
 Interactive shell with readline support, history, and tab completion.
 
-```bash
+```sh
 $ kaish
 kaish> for f in *.rs; do wc -l "$f"; done
   142 main.rs
@@ -279,7 +279,7 @@ Embedders typically run a fresh kernel per request (variables, functions, aliase
 AI agents need to compose operations — filter outputs, transform data, iterate over results.
 A single tool call per operation is atomic and chatty; kaish lets agents combine them in one script:
 
-```bash
+```sh
 # Filter and transform in one script
 ls src/ | grep "\.rs$" | head -n 5
 
@@ -302,7 +302,7 @@ so k-ai-sh seems fun.
 
 ## Building from Source
 
-```bash
+```sh
 git clone https://github.com/tobert/kaish
 cd kaish
 cargo build --release
