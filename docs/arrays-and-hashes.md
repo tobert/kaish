@@ -132,7 +132,7 @@ services={
 
 to_restart=[]
 
-for name in $services; do            # record → its keys
+for name in $(keys $services); do    # record → its keys ($()-only; bare $var is E012)
   cfg=${services[$name]}
   echo "$name: port=${cfg[port]} replicas=${cfg[replicas]}"
 
@@ -142,7 +142,7 @@ for name in $services; do            # record → its keys
 done
 
 echo "restart count: ${#to_restart}"
-for svc in $to_restart; do
+for svc in $(values $to_restart); do
   echo "restarting $svc on port ${services[$svc][port]}"
 done
 ```
@@ -168,13 +168,16 @@ deliberately "fast & loose" small models. Findings:
    (zsh/fish 1-indexing is a known porting-bug source; JSON/our lineage says 0.)
 
 3. **`for k in keys $r` (bare builtin in the for-head) is a GO.** *(evidence retained; decision
-   **SUPERSEDED 2026-07-01** — see "Record iteration" under Resolved decisions. The for-head
-   already accepts a bare word list — `for x in a b c` is valid kaish today — so a bare-builtin
-   head would silently change the meaning of currently-valid syntax, and the set of quasi-reserved
-   words would grow with every future builtin. `for k in $record` iterating keys keeps the tested
-   ergonomics under a stronger Python prior with zero grammar cost.)* Original finding: every
-   model used the bare form correctly and naturally, plain and nested; requiring `$(keys $r)` in
-   the head was the most common error.
+   **SUPERSEDED TWICE** — first 2026-07-01 (bare `for k in $record` iterates keys), then again
+   **2026-07-02** (`$()`-only iteration; see "Collection iteration" under Resolved decisions). Net
+   rule: NO bare for-head at all — `for k in $(keys $r)` / `for x in $(values $c)`. A bare-builtin
+   head would silently change the meaning of currently-valid word-list syntax; a bare `$var` head
+   collides with E012.)* Original finding: every model used the bare form correctly and naturally,
+   plain and nested; **requiring `$(keys $r)` in the head was the most common error** — the very
+   form now mandated, so the note-#8 panel re-test must measure convergence on `$(values $xs)`
+   specifically, and the E012 error copy leads with it. (Reversal is additive/safe: relaxing to
+   allow bare collection iteration later breaks zero scripts; the string case becomes a loud
+   *runtime* error — kept as the designed v2 relaxation, see Open decisions.)
 
 4. **Membership is `[[ key in $r ]]`, NOT `if has`.** This is the clearest result. A `has`
    *command* was unstable: fast models either wrapped it (`if $(has …)`) or garbled the args
@@ -260,9 +263,11 @@ for the record.
   A non-collection argument (scalar / bytes / unset) is a loud error. This also composes with
   membership: `[[ 1 in $(keys $xs) ]]` is an in-bounds check, because `$(keys $xs)` yields a real
   typed list.
-  - *(Possible future soft W-code, not required now: a bareword `for k in keys $user` — no `$()` —
-    is valid word-list syntax that iterates the literal word "keys" plus `$user`; a validator
-    advisory could nudge toward `$(keys $user)`. Lower priority; the `$()` idiom is the taught one.)*
+  - *(No extra validator rule needed for the bare-builtin head `for k in keys $user`: that head
+    contains a bare `$user` (a VarRef), so E012 already fires on it and its copy now leads with
+    `for k in $(keys $user)`. The only bareword head that slips through is one with no `$var` at
+    all — `for w in keys values` — which is a plain word list iterating the literal words "keys"
+    and "values", an obvious nonsense the model won't write; not worth a rule.)*
 
 - **Access unwraps JSON scalars at the boundary.** *(Added 2026-07-01.)* A subscript access that
   lands on a JSON scalar yields the native `Value`: `Json(Bool)`→`Bool`, `Json(Number)`→`Int`
@@ -471,7 +476,12 @@ Not yet resolved; flagging them so we decide deliberately.
   the existing shell concept, same bracket-path lvalue) over inventing `remove`. Out of scope
   for the first cut.
 
-### fromjson / tojson (sketch, 2026-07-01 — prototype early)
+### fromjson / tojson (SHIPPED 2026-06 — this section is now historical design record)
+
+> `fromjson`/`tojson` landed as builtins (present in every capability build); the sketch below
+> is retained as design rationale. The export-error hint `export CFG=$(tojson $CFG)` points at a
+> real, shipped builtin.
+
 
 The JSON ingress/egress pair, named after jq's own functions (strong model prior). Both are
 pure data transforms — no OS, no VFS — so they belong in every capability build, including
@@ -633,7 +643,7 @@ paths relative to `crates/kaish-kernel/src`).
   design with Amy first.)* Today `Scope::apply_segment` fuses three jobs — classify a segment
   against the container (index-vs-key, negative-index normalization, every loud message), walk one
   hop, and unwrap the child via `json_to_value_no_envelope` (cloning each subtree, so
-  `for k in $u; ${u[$k]}` is O(n²)). The lvalue navigator needs `&mut` serde-tree navigation and
+  `for k in $(keys $u); do … ${u[$k]}` is O(n²)). The lvalue navigator needs `&mut` serde-tree navigation and
   can't reuse that walker, so building it separately duplicates the classification logic under
   `&mut` — and read/write then drift on exactly the semantics that must never drift (`${a[-1]}`
   read vs `a[-1]=x` write). Proposed split: **Bind** `(VarPath, &Scope) → Result<Vec<ConcreteStep>,
@@ -710,10 +720,15 @@ taught a specific way** — get the examples wrong and even capable models fail.
    and the bare-builtin for-head — both since replaced. Re-run the panel (include the weak tail,
    not just Haiku) against the FINAL surface: bracket access incl. `${r[$k]}` dynamic keys and
    bareword-literal keys, deep chains `${services[web][port]}`, `${grid[1][0]}`, slices,
-   `for k in $record` iteration, bracket lvalues (`user[email]=x`, `fruits[0]=kiwi`), plus a
+   **`$()`-only iteration `for x in $(values $c)` / `for k in $(keys $c)`** (NOT bare
+   `for k in $record` — superseded), bracket lvalues (`user[email]=x`, `fruits[0]=kiwi`), plus a
    **dot-leakage negative task** (does the model reach for `${user.name}`? does the error copy
    converge it in one round?) and a literal-vs-variable subscript task (`${user[name]}` vs
-   `${user[$name]}`). Results not yet gathered — do not sign off without them.
+   `${user[$name]}`). **Watch one number above all: convergence on `$(values $xs)` in the
+   for-head** — the 2026-06-05 panel's single most common error was *requiring `$(keys $r)` in the
+   head*, which the `$()`-only decision now mandates; if models need more than one verify round to
+   accept it routinely, execute the v2 relaxation (bare collection iterates; bare string is a loud
+   runtime error) early. Results not yet gathered — do not sign off without them.
 
 9. **Update the "sh subset / shellcheck" framing in the same PR** (see issues.md P4). The docs
    that introduce collections are the natural place to restate "inspired by sh/bash, informed by
@@ -733,13 +748,16 @@ taught a specific way** — get the examples wrong and even capable models fail.
     `not in`. This also means the `in` RHS must accept a list/record **literal**, not just a
     `$var` (see impl notes, incl. the glued-`[dog]` GlobWord case).
 
-12. **The record-vs-list `for` polymorphism has a real-world trap** *(2026-07-01 review,
-    gemini)*: an API that usually returns a list of objects but occasionally returns a single
-    object makes `for x in $data` silently iterate the object's KEYS instead of one object —
-    a type cascade, not an error. The decision stands (the Python prior carries it, and Python
-    has the identical trap), but the docs must show the guard idiom where data shape isn't
-    trusted, and a shape predicate (`typeof`-style) is noted in Out of scope as the missing
-    tool if this bites in practice.
+12. **Shape-variance trap — relocated, not gone** *(2026-07-01 gemini review; revised 2026-07-02
+    after the $()-only iteration decision)*: the original trap was `for x in $data` silently
+    iterating a record's KEYS when an API returned an object instead of the expected list. Bare
+    `for x in $data` is now an E012 error, so that exact form is dead — **but the trap relocates**
+    to the shipped idiom: `for x in $(values $data)` on a record yields the record's *field
+    values* instead of iterating the one object. Still a silent type cascade, not an error. So
+    the mitigation stands and is now more load-bearing: the docs must show a shape guard where
+    data shape isn't trusted, and a shape predicate (`typeof` / `[[ -list ]]` / `[[ -record ]]`)
+    should be promoted from "Out of scope if it bites" into the first cut — API-shape variance is
+    core agent work, and by the time it bites the guard idiom won't exist to teach.
 
 ## Help & teaching delivery
 
