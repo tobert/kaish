@@ -521,8 +521,11 @@ pub enum Token {
     #[token("$$")]
     CurrentPid,
 
-    /// Variable string length: `${#VAR}`
-    #[regex(r"\$\{#[a-zA-Z_][a-zA-Z0-9_]*\}", lex_var_length)]
+    /// Variable string length: `${#VAR}` or a subscripted path `${#u[tags]}`.
+    /// The trailing `(\[[^\]]*\])*` admits chained bracket subscripts so a
+    /// length-of-path lexes in expression position, not just inside strings; the
+    /// parser turns the captured inner into a `VarPath`.
+    #[regex(r"\$\{#[a-zA-Z_][a-zA-Z0-9_]*(\[[^\]]*\])*\}", lex_var_length)]
     VarLength(String),
 
     /// Here-doc content: synthesized by preprocessing, not directly lexed.

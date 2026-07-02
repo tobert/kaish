@@ -297,10 +297,10 @@ pub fn format_expr(expr: &Expr) -> String {
         Expr::Positional(n) => format!("(positional {})", n),
         Expr::AllArgs => "(all-args)".to_string(),
         Expr::ArgCount => "(arg-count)".to_string(),
-        Expr::VarLength(name) => format!("(var-length {})", name),
-        Expr::VarWithDefault { name, default } => {
+        Expr::VarLength(path) => format!("(var-length {})", format_varpath(path)),
+        Expr::VarWithDefault { path, default } => {
             let default_parts: Vec<String> = default.iter().map(format_string_part).collect();
-            format!("(var-default {} ({}))", name, default_parts.join(" "))
+            format!("(var-default {} ({}))", format_varpath(path), default_parts.join(" "))
         }
         Expr::Arithmetic(expr_str) => format!("(arithmetic \"{}\")", expr_str),
         Expr::Command(cmd) => format_command(cmd),
@@ -380,11 +380,11 @@ fn format_string_part(part: &StringPart) -> String {
     match part {
         StringPart::Literal(s) => format!("\"{}\"", escape_for_display(s)),
         StringPart::Var(path) => format!("(varref {})", format_varpath(path)),
-        StringPart::VarWithDefault { name, default } => {
+        StringPart::VarWithDefault { path, default } => {
             let default_parts: Vec<String> = default.iter().map(format_string_part).collect();
-            format!("(vardefault {} ({}))", name, default_parts.join(" "))
+            format!("(vardefault {} ({}))", format_varpath(path), default_parts.join(" "))
         }
-        StringPart::VarLength(name) => format!("(varlength {})", name),
+        StringPart::VarLength(path) => format!("(varlength {})", format_varpath(path)),
         StringPart::Positional(n) => format!("(positional {})", n),
         StringPart::AllArgs => "(allargs)".to_string(),
         StringPart::ArgCount => "(argcount)".to_string(),

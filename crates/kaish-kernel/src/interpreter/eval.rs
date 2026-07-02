@@ -245,8 +245,8 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             Expr::Positional(n) => self.eval_positional(*n),
             Expr::AllArgs => self.eval_all_args(),
             Expr::ArgCount => self.eval_arg_count(),
-            Expr::VarLength(name) => self.eval_var_length(name),
-            Expr::VarWithDefault { name, default } => self.eval_var_with_default(name, default),
+            Expr::VarLength(path) => self.eval_var_length(path),
+            Expr::VarWithDefault { path, default } => self.eval_var_with_default(path, default),
             Expr::Arithmetic(expr_str) => self.eval_arithmetic(expr_str),
             Expr::Command(cmd) => self.eval_command(cmd),
             Expr::LastExitCode => self.eval_last_exit_code(),
@@ -461,37 +461,20 @@ impl<'a, E: Executor> Evaluator<'a, E> {
         Ok(Value::Int(self.scope.arg_count() as i64))
     }
 
-    /// Evaluate variable string length (${#VAR}).
-    fn eval_var_length(&self, name: &str) -> EvalResult<Value> {
-        if name_is_subscripted(name) {
-            return Err(subscripted_length_error(name));
-        }
-        match self.scope.get(name) {
-            Some(value) => Ok(Value::Int(value_length(value))),
-            None => Ok(Value::Int(0)), // Unset variable has length 0
-        }
+    /// Evaluate variable string length (`${#VAR}` / `${#path[sub]}`).
+    fn eval_var_length(&self, path: &VarPath) -> EvalResult<Value> {
+        resolve_length(self.scope, path)
+            .map(Value::Int)
+            .map_err(EvalError::InvalidPath)
     }
 
-    /// Evaluate variable with default (${VAR:-default}).
-    /// Returns the variable value if set and non-empty, otherwise evaluates the default parts.
-    fn eval_var_with_default(&mut self, name: &str, default: &[StringPart]) -> EvalResult<Value> {
-        if name_is_subscripted(name) {
-            return Err(subscripted_default_error(name));
-        }
-        match self.scope.get(name) {
-            Some(value) => {
-                let s = value_to_string(value);
-                if s.is_empty() {
-                    // Variable is set but empty, evaluate the default parts
-                    self.eval_interpolated(default)
-                } else {
-                    Ok(value.clone())
-                }
-            }
-            None => {
-                // Variable is unset, evaluate the default parts
-                self.eval_interpolated(default)
-            }
+    /// Evaluate a variable/path with a default (`${VAR:-default}`).
+    /// Yields the value if present and non-empty; on absence or emptiness
+    /// evaluates the default parts; a shape error stays loud (decision A).
+    fn eval_var_with_default(&mut self, path: &VarPath, default: &[StringPart]) -> EvalResult<Value> {
+        match resolve_default(self.scope, path).map_err(EvalError::InvalidPath)? {
+            Some(value) => Ok(value),
+            None => self.eval_interpolated(default),
         }
     }
 
@@ -514,12 +497,12 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                         }
                     }
                 }
-                StringPart::VarWithDefault { name, default } => {
-                    let value = self.eval_var_with_default(name, default)?;
+                StringPart::VarWithDefault { path, default } => {
+                    let value = self.eval_var_with_default(path, default)?;
                     result.push_str(&value_to_string(&value));
                 }
-                StringPart::VarLength(name) => {
-                    let value = self.eval_var_length(name)?;
+                StringPart::VarLength(path) => {
+                    let value = self.eval_var_length(path)?;
                     result.push_str(&value_to_string(&value));
                 }
                 StringPart::Positional(n) => {
@@ -635,29 +618,47 @@ pub fn value_length(value: &Value) -> i64 {
     }
 }
 
-/// A name inside `${#name}` or `${name:-default}` that carries a `[...]`
-/// subscript. Length-of-path and default-on-path aren't wired through the path
-/// resolver yet (they land with the collections lvalue/resolver work), so these
-/// forms take a bare-name lookup that misses the subscript. Detect it and fail
-/// loudly with a "bind first" hint instead of returning the silent wrong answer
-/// (`0` for length, always-default for defaults) they produced before.
-pub fn name_is_subscripted(name: &str) -> bool {
-    name.contains('[')
+/// Decision A: `${path:-default}` yields the default on *absence or emptiness*,
+/// never on falsy values. Fires for a JSON `null` and an empty string; NOT for
+/// `false`, `0`, an empty list `[]`, or an empty record `{}` — those are present
+/// values, and Python-style truthiness leaking into a shell would be a
+/// silent-wrong factory. (Unset roots and missing keys are absence too, but
+/// they surface as `PathError` before a value exists — see [`resolve_default`].)
+pub fn value_defaults_on_emptiness(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Json(serde_json::Value::Null) => true,
+        Value::String(s) => s.is_empty(),
+        _ => false,
+    }
 }
 
-/// Loud error for `${#path}` on a subscripted name (see [`name_is_subscripted`]).
-pub fn subscripted_length_error(name: &str) -> EvalError {
-    let root = name.split('[').next().unwrap_or(name);
-    EvalError::Unsupported(format!(
-        "${{#{name}}}: length of a subscripted path isn't supported yet — bind it first: `x=${{{name}}}; ${{#x}}` (root `{root}` alone works: `${{#{root}}}`)"
-    ))
+/// `${#path}` length semantics over the shared path resolver. An unset *root* is
+/// length 0 (bash parity for `${#unset}`); a missing key, out-of-bounds index,
+/// or shape error is loud (consistent with bare `${u[nope]}` being loud). The
+/// resolver borrows the tree — no whole-root clone.
+pub fn resolve_length(scope: &Scope, path: &VarPath) -> Result<i64, String> {
+    match scope.resolve_path(path) {
+        Ok(value) => Ok(value_length(&value)),
+        Err(super::scope::PathError::UndefinedRoot(_)) => Ok(0),
+        Err(super::scope::PathError::Absence(msg)) | Err(super::scope::PathError::Shape(msg)) => {
+            Err(msg)
+        }
+    }
 }
 
-/// Loud error for `${path:-default}` on a subscripted name (see [`name_is_subscripted`]).
-pub fn subscripted_default_error(name: &str) -> EvalError {
-    EvalError::Unsupported(format!(
-        "${{{name}:-…}}: a default on a subscripted path isn't supported yet — bind it first: `x=${{{name}}}; ${{x:-…}}`"
-    ))
+/// `${path:-default}` decision over the shared path resolver (decision A):
+/// `Ok(Some(v))` use the value, `Ok(None)` use the default (absence or
+/// emptiness), `Err(msg)` a loud shape error the default does NOT suppress. An
+/// unset root, a missing key, and an out-of-bounds index all fold into the
+/// default; only a wrong-shaped access shouts.
+pub fn resolve_default(scope: &Scope, path: &VarPath) -> Result<Option<Value>, String> {
+    match scope.resolve_path(path) {
+        Ok(value) if value_defaults_on_emptiness(&value) => Ok(None),
+        Ok(value) => Ok(Some(value)),
+        Err(super::scope::PathError::UndefinedRoot(_))
+        | Err(super::scope::PathError::Absence(_)) => Ok(None),
+        Err(super::scope::PathError::Shape(msg)) => Err(msg),
+    }
 }
 
 /// Reject exporting a structured value into an OS env var. A list/record can't
@@ -1557,7 +1558,7 @@ mod tests {
         let mut scope = Scope::new();
         scope.set("NAME", Value::String("hello".into()));
 
-        let expr = Expr::VarLength("NAME".into());
+        let expr = Expr::VarLength(VarPath::simple("NAME"));
         let result = eval_expr(&expr, &mut scope).unwrap();
         assert_eq!(result, Value::Int(5));
     }
@@ -1567,7 +1568,7 @@ mod tests {
         let mut scope = Scope::new();
         scope.set("EMPTY", Value::String("".into()));
 
-        let expr = Expr::VarLength("EMPTY".into());
+        let expr = Expr::VarLength(VarPath::simple("EMPTY"));
         let result = eval_expr(&expr, &mut scope).unwrap();
         assert_eq!(result, Value::Int(0));
     }
@@ -1577,7 +1578,7 @@ mod tests {
         let mut scope = Scope::new();
 
         // Unset variable has length 0
-        let expr = Expr::VarLength("MISSING".into());
+        let expr = Expr::VarLength(VarPath::simple("MISSING"));
         let result = eval_expr(&expr, &mut scope).unwrap();
         assert_eq!(result, Value::Int(0));
     }
@@ -1588,7 +1589,7 @@ mod tests {
         scope.set("NUM", Value::Int(12345));
 
         // Length of the string representation
-        let expr = Expr::VarLength("NUM".into());
+        let expr = Expr::VarLength(VarPath::simple("NUM"));
         let result = eval_expr(&expr, &mut scope).unwrap();
         assert_eq!(result, Value::Int(5)); // "12345" has length 5
     }
@@ -1600,7 +1601,7 @@ mod tests {
 
         // Variable is set, return its value
         let expr = Expr::VarWithDefault {
-            name: "NAME".into(),
+            path: VarPath::simple("NAME"),
             default: vec![StringPart::Literal("default".into())],
         };
         let result = eval_expr(&expr, &mut scope).unwrap();
@@ -1613,7 +1614,7 @@ mod tests {
 
         // Variable is unset, return default
         let expr = Expr::VarWithDefault {
-            name: "MISSING".into(),
+            path: VarPath::simple("MISSING"),
             default: vec![StringPart::Literal("fallback".into())],
         };
         let result = eval_expr(&expr, &mut scope).unwrap();
@@ -1627,7 +1628,7 @@ mod tests {
 
         // Variable is set but empty, return default
         let expr = Expr::VarWithDefault {
-            name: "EMPTY".into(),
+            path: VarPath::simple("EMPTY"),
             default: vec![StringPart::Literal("not empty".into())],
         };
         let result = eval_expr(&expr, &mut scope).unwrap();
@@ -1641,7 +1642,7 @@ mod tests {
 
         // Variable is set to a non-string value, return the value
         let expr = Expr::VarWithDefault {
-            name: "NUM".into(),
+            path: VarPath::simple("NUM"),
             default: vec![StringPart::Literal("default".into())],
         };
         let result = eval_expr(&expr, &mut scope).unwrap();
@@ -1741,22 +1742,64 @@ mod tests {
     }
 
     #[test]
-    fn subscripted_name_guards_fire() {
-        assert!(name_is_subscripted("u[tags]"));
-        assert!(!name_is_subscripted("plain"));
-        // The sync eval path surfaces the loud "bind first" error (not silent 0).
+    fn defaults_on_emptiness_matches_decision_a() {
+        // Default fires on absence/emptiness (null, empty string) — NEVER on a
+        // falsy-but-present value (false, 0, [], {}).
+        assert!(value_defaults_on_emptiness(&Value::Null));
+        assert!(value_defaults_on_emptiness(&Value::Json(serde_json::Value::Null)));
+        assert!(value_defaults_on_emptiness(&Value::String(String::new())));
+        assert!(!value_defaults_on_emptiness(&Value::Bool(false)));
+        assert!(!value_defaults_on_emptiness(&Value::Int(0)));
+        assert!(!value_defaults_on_emptiness(&Value::Json(serde_json::json!([]))));
+        assert!(!value_defaults_on_emptiness(&Value::Json(serde_json::json!({}))));
+        assert!(!value_defaults_on_emptiness(&Value::String("x".into())));
+    }
+
+    #[test]
+    fn subscripted_length_and_default_resolve_the_path() {
+        // Path-aware length and default via the shared resolver — the old
+        // placeholder "bind first" errors are gone; the forms now work.
         let mut scope = Scope::new();
-        let err = eval_expr(&Expr::VarLength("u[tags]".into()), &mut scope).unwrap_err();
-        assert!(matches!(err, EvalError::Unsupported(_)), "got: {err}");
-        // And the default-on-path form too.
-        let err = eval_expr(
+        scope.set("u", Value::Json(serde_json::json!({"tags": ["a", "b"]})));
+        let len = eval_expr(
+            &Expr::VarLength(crate::parser::parse_varpath("${u[tags]}")),
+            &mut scope,
+        )
+        .unwrap();
+        assert_eq!(len, Value::Int(2));
+
+        scope.set("cfg", Value::Json(serde_json::json!({"port": 9000})));
+        // A present value wins over the default.
+        let val = eval_expr(
             &Expr::VarWithDefault {
-                name: "cfg[port]".into(),
+                path: crate::parser::parse_varpath("${cfg[port]}"),
                 default: vec![StringPart::Literal("8080".into())],
             },
             &mut scope,
         )
+        .unwrap();
+        assert_eq!(value_to_string(&val), "9000");
+
+        // A missing key falls to the default (absence — decision A).
+        let missing = eval_expr(
+            &Expr::VarWithDefault {
+                path: crate::parser::parse_varpath("${cfg[nope]}"),
+                default: vec![StringPart::Literal("8080".into())],
+            },
+            &mut scope,
+        )
+        .unwrap();
+        assert_eq!(value_to_string(&missing), "8080");
+
+        // A shape error stays loud even with `:-` (an integer index on a record).
+        let err = eval_expr(
+            &Expr::VarWithDefault {
+                path: crate::parser::parse_varpath("${cfg[0]}"),
+                default: vec![StringPart::Literal("x".into())],
+            },
+            &mut scope,
+        )
         .unwrap_err();
-        assert!(matches!(err, EvalError::Unsupported(_)), "got: {err}");
+        assert!(matches!(err, EvalError::InvalidPath(_)), "got: {err}");
     }
 }

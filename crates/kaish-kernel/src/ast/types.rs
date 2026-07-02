@@ -283,11 +283,13 @@ pub enum Expr {
     AllArgs,
     /// Argument count: `$#`
     ArgCount,
-    /// Variable string length: `${#VAR}`
-    VarLength(String),
-    /// Variable with default: `${VAR:-default}` - use default if VAR is unset or empty
-    /// The default can contain nested variable expansions and command substitutions
-    VarWithDefault { name: String, default: Vec<StringPart> },
+    /// Variable string length: `${#VAR}` or `${#path[sub]}`
+    VarLength(VarPath),
+    /// Variable with default: `${VAR:-default}` / `${path[sub]:-default}` — use
+    /// default if the path is absent (unset root, missing key, out-of-bounds) or
+    /// empty. The default can contain nested variable expansions and command
+    /// substitutions.
+    VarWithDefault { path: VarPath, default: Vec<StringPart> },
     /// Arithmetic expansion: `$((expr))` - evaluates to integer
     Arithmetic(String),
     /// Command as condition: `if grep -q pattern file; then` - exit code determines truthiness
@@ -446,10 +448,11 @@ pub enum StringPart {
     Literal(String),
     /// Variable interpolation: `${VAR}` or `$VAR`
     Var(VarPath),
-    /// Variable with default: `${VAR:-default}` where default can contain nested expansions
-    VarWithDefault { name: String, default: Vec<StringPart> },
-    /// Variable string length: `${#VAR}`
-    VarLength(String),
+    /// Variable with default: `${VAR:-default}` / `${path[sub]:-default}` where
+    /// default can contain nested expansions
+    VarWithDefault { path: VarPath, default: Vec<StringPart> },
+    /// Variable string length: `${#VAR}` or `${#path[sub]}`
+    VarLength(VarPath),
     /// Positional parameter: `$0`, `$1`, ..., `$9`
     Positional(usize),
     /// All arguments: `$@`

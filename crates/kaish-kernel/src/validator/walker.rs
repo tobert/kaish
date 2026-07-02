@@ -428,10 +428,13 @@ impl<'a> Validator<'a> {
             }
             Expr::Test(test) => self.validate_test(test),
             Expr::Positional(_) | Expr::AllArgs | Expr::ArgCount => {}
-            Expr::VarLength(name) => self.check_var_defined(name),
-            Expr::VarWithDefault { name, .. } => {
-                // Don't warn - default handles undefined case
-                let _ = name;
+            Expr::VarLength(path) => {
+                if let Some(VarSegment::Field(root)) = path.segments.first() {
+                    self.check_var_defined(root);
+                }
+            }
+            Expr::VarWithDefault { .. } => {
+                // Don't warn — the default handles the undefined/absent case.
             }
             Expr::Arithmetic(_) => {
                 // Arithmetic parsing is done at runtime
@@ -488,7 +491,11 @@ impl<'a> Validator<'a> {
                     self.validate_string_part(p);
                 }
             }
-            StringPart::VarLength(name) => self.check_var_defined(name),
+            StringPart::VarLength(path) => {
+                if let Some(VarSegment::Field(root)) = path.segments.first() {
+                    self.check_var_defined(root);
+                }
+            }
             StringPart::Positional(_) | StringPart::AllArgs | StringPart::ArgCount => {}
             StringPart::Arithmetic(_) => {} // Arithmetic expressions are validated at eval time
             StringPart::CommandSubst(stmts) => {
