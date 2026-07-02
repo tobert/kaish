@@ -159,8 +159,11 @@ fi
 
 `typeof` never splits int/float — both are `number`, matching jq/JSON's single
 numeric type. `[[ -list ]]` / `[[ -record ]]` evaluate the operand's *value*
-(like `-z`/`-n`), not a path stat (unlike `-f`/`-d`), and never error on an
-unset variable or the wrong shape — false, same as `-f` on a nonexistent path.
+(like `-z`/`-n`), not a path stat (unlike `-f`/`-d`). A defined-but-wrong-shaped
+value is false; a bare unset `$var` is an undefined-variable error (like
+`-z`/`-n`), so a typo doesn't read as a silent false. Use them bare
+(`[[ -list $data ]]`) — a quoted `"$data"` would test the collection's JSON
+*string*, not its value.
 
 ### Crossing the boundary
 
@@ -322,8 +325,8 @@ mkdir /tmp/work && cd /tmp/work && echo "ready"
 # Shape guards — see "Collections" → "Shape guards" above
 [[ -list $x ]]                  # is a native list
 [[ -record $x ]]                # is a native record
-# Value-typed like -z/-n (not a path stat like -f/-d); never errors on an
-# unset variable or the wrong shape — false, same as -f on a missing path.
+# Value-typed like -z/-n (not a path stat like -f/-d). Wrong shape → false;
+# a bare unset $var errors (like -z), so a typo isn't silently false.
 
 # Comparisons
 [[ $X == "value" ]]             # equality

@@ -390,9 +390,9 @@ cmd1 || cmd2              # cmd2 if cmd1 fails
         r#"```sh
 # File: -f (file) -d (dir) -e (exists) -r (readable) -w (writable) -x (executable)
 # String: -z (empty) -n (non-empty) == != =~ (regex) !~ (not regex)
-# Shape guard: -list -record — the value's shape, not a path stat; never
-#   errors on an unset variable or the wrong shape (false, like -f on a
-#   missing path). Pairs with the typeof builtin.
+# Shape guard: -list -record — the value's shape, not a path stat. A
+#   defined-but-wrong-shaped value is false; a bare unset $var errors (like
+#   -z), so a typo isn't silently false. Pairs with the typeof builtin.
 # Numeric: -gt -lt -ge -le
 # Logic: && || !
 # Membership: in (list→element, record→key) / not in — RHS must be a collection

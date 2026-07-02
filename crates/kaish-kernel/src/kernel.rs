@@ -3883,16 +3883,13 @@ impl Kernel {
                             | crate::ast::StringTestOp::IsRecord => unreachable!(),
                         })
                     }
-                    // Shape guard: never errors on an unset variable or a
-                    // wrong-shaped value — false, same as `-f` on a
-                    // nonexistent path. Must not diverge from the sync path
-                    // in interpreter/eval.rs.
+                    // Shape guard: propagates eval errors like -z/-n (a bare
+                    // `$unset` is an undefined-variable error, not a silent
+                    // false). A defined-but-wrong-shaped value is false. Must
+                    // not diverge from the sync path in interpreter/eval.rs.
                     crate::ast::StringTestOp::IsList | crate::ast::StringTestOp::IsRecord => {
-                        Ok(self
-                            .eval_expr_async(value)
-                            .await
-                            .map(|val| op.matches_shape(&val))
-                            .unwrap_or(false))
+                        let val = self.eval_expr_async(value).await?;
+                        Ok(op.matches_shape(&val))
                     }
                 },
                 TestExpr::Comparison { left, op, right } => {

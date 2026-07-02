@@ -848,26 +848,21 @@ async fn record_test_operator_false_on_a_scalar() {
 }
 
 #[tokio::test]
-async fn list_test_operator_false_on_unset_variable_no_error() {
-    // Shape guard never errors on type — false, same as `-f` on a
-    // nonexistent path. Deliberately diverges from `-z`/`-n`, which DO error
-    // on a bare unset `$var` (kaish's general strict-unset-variable rule) —
-    // the shape guard exists precisely so a caller can probe an unknown
-    // shape without pre-checking `-n`/`-z` first.
+async fn list_test_operator_on_unset_variable_is_a_loud_error() {
+    // A bare `$unset` is an undefined-variable error, consistent with every
+    // other bare-`$x` operator (`-z $unset` errors too) — a typo'd variable
+    // must not read as a silent `false`. A defined-but-wrong-shaped value is
+    // false; only *absence* is loud. The guard is used bare (`[[ -list $data ]]`).
     let k = setup().await;
-    let (out, code, err) =
-        run(&k, "if [[ -list $unset ]]; then echo T; else echo F; fi").await;
-    assert_eq!(code, 0, "err: {err}");
-    assert_eq!(out, "F");
+    let result = k.execute("if [[ -list $unset ]]; then echo T; fi").await;
+    assert!(result.is_err(), "-list on an unset variable must be a loud error");
 }
 
 #[tokio::test]
-async fn record_test_operator_false_on_unset_variable_no_error() {
+async fn record_test_operator_on_unset_variable_is_a_loud_error() {
     let k = setup().await;
-    let (out, code, err) =
-        run(&k, "if [[ -record $unset ]]; then echo T; else echo F; fi").await;
-    assert_eq!(code, 0, "err: {err}");
-    assert_eq!(out, "F");
+    let result = k.execute("if [[ -record $unset ]]; then echo T; fi").await;
+    assert!(result.is_err(), "-record on an unset variable must be a loud error");
 }
 
 #[tokio::test]

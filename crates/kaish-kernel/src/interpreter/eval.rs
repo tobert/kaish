@@ -320,15 +320,16 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                         StringTestOp::IsList | StringTestOp::IsRecord => unreachable!(),
                     }
                 }
-                // Shape guard: never errors on an unset variable or a
-                // wrong-shaped value — false, same as `-f` on a nonexistent
-                // path. Deliberately does NOT propagate `self.eval`'s error
-                // with `?` (unlike -z/-n above), so `[[ -list $unset ]]`
-                // reads as false rather than aborting the script.
-                StringTestOp::IsList | StringTestOp::IsRecord => self
-                    .eval(value)
-                    .map(|val| op.matches_shape(&val))
-                    .unwrap_or(false),
+                // Shape guard: inspect the operand's type. Propagates eval
+                // errors like -z/-n — a bare `$unset` is an undefined-variable
+                // error, not a silent `false` (catching a typo beats reading
+                // "not a list"). The guard is meant to be used bare
+                // (`[[ -list $data ]]`); a defined-but-wrong-shaped value is
+                // simply false.
+                StringTestOp::IsList | StringTestOp::IsRecord => {
+                    let val = self.eval(value)?;
+                    op.matches_shape(&val)
+                }
             },
             TestExpr::Comparison { left, op, right } => {
                 let left_val = self.eval(left)?;

@@ -78,10 +78,10 @@ breaking entries are marked **BREAKING**.
   work. `[[ -list $x ]]` / `[[ -record $x ]]` test the operand's *value*
   shape directly (like `-z`/`-n`, not a path stat like `-f`/`-d`) — the common
   guard idiom is `if [[ -record $data ]]; then ... elif [[ -list $data ]];
-  then ... fi` before committing to `keys`/`values`/a `for` loop. Both
-  operators deliberately never error on an unset variable or the wrong shape
-  (false, same as `-f` on a nonexistent path). `typeof` is pure data, present
-  in every capability build.
+  then ... fi` before committing to `keys`/`values`/a `for` loop. A
+  defined-but-wrong-shaped value is `false`; a bare unset `$var` is an
+  undefined-variable error (like `-z`/`-n`), so a typo isn't silently false.
+  `typeof` is pure data, present in every capability build.
 - **`json_to_value_no_envelope` (kaish-types)** — envelope-free JSON→`Value`
   conversion for external JSON, so byte-envelope-shaped objects are never
   silently decoded to `Value::Bytes`.
