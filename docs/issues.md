@@ -422,6 +422,15 @@ consensus. **The silent-corruption cluster (#1–#5) FIXED 2026-07-02**
   *instance* property but documented as a *slot* property — a locale translation
   forgetting `.ranked(n)` silently reorders that locale's onboarding (add a cross-locale
   rank-parity test) — refines the Reference/Contrast P4 above.
+- **OPEN — expression-position `${#u[tags]}` gives a poor message** (kaibo deepseek review of
+  #57, 2026-07-02; verified). *In-string* `"${#u[tags]}"` gets the nice "bind it first" guard,
+  but *expression-position* `echo ${#u[tags]}` never becomes a `VarLength` node: the lexer regex
+  `Token::VarLength` (`\$\{#[a-zA-Z_][a-zA-Z0-9_]*\}`, `lexer.rs`) excludes `[`, so it falls to
+  `VarRef` with root `#u` → loud, but the message is the bare "undefined variable" (also missing
+  the name, per the async-VarRef item above), not the length hint. **Loud, not silent — no
+  correctness bug.** Fix rides #6: when `VarLength`/`VarWithDefault` carry a `VarPath`, also widen
+  the lexer `VarLength` regex (or route `#`-prefixed `VarRef` through the length path) so the
+  subscripted form reaches the guard/resolver in expression position too.
 
 ### Split `kernel.rs::execute_stmt_flow`
 `kernel.rs:1463`–~1913 is a 16-arm async match (kernel.rs is ~6,838 lines); each
