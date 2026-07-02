@@ -175,6 +175,7 @@ const CASES: &[Case] = &[
     Case { name: "tr", setup: &[], cmd: "printf 'abc' | tr a x --json", expect: Expect::String },
     Case { name: "tree", setup: &[], cmd: "tree src --json", expect: Expect::Object },
     Case { name: "true", setup: &[], cmd: "true --json", expect: Expect::Empty },
+    Case { name: "typeof", setup: &["x=$(fromjson '[1,2,3]')"], cmd: "typeof $x --json", expect: Expect::String },
     Case { name: "unalias", setup: &["alias g=grep"], cmd: "unalias g --json", expect: Expect::Empty },
     Case { name: "uname", setup: &[], cmd: "uname --json", expect: Expect::String },
     Case { name: "uniq", setup: &[], cmd: r#"printf 'a\na\nb\n' | uniq --json"#, expect: Expect::String },

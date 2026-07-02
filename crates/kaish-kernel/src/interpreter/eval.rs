@@ -310,14 +310,26 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                     }),
                 }
             }
-            TestExpr::StringTest { op, value } => {
-                let val = self.eval(value)?;
-                let s = value_to_string(&val);
-                match op {
-                    StringTestOp::IsEmpty => s.is_empty(),
-                    StringTestOp::IsNonEmpty => !s.is_empty(),
+            TestExpr::StringTest { op, value } => match op {
+                StringTestOp::IsEmpty | StringTestOp::IsNonEmpty => {
+                    let val = self.eval(value)?;
+                    let s = value_to_string(&val);
+                    match op {
+                        StringTestOp::IsEmpty => s.is_empty(),
+                        StringTestOp::IsNonEmpty => !s.is_empty(),
+                        StringTestOp::IsList | StringTestOp::IsRecord => unreachable!(),
+                    }
                 }
-            }
+                // Shape guard: never errors on an unset variable or a
+                // wrong-shaped value — false, same as `-f` on a nonexistent
+                // path. Deliberately does NOT propagate `self.eval`'s error
+                // with `?` (unlike -z/-n above), so `[[ -list $unset ]]`
+                // reads as false rather than aborting the script.
+                StringTestOp::IsList | StringTestOp::IsRecord => self
+                    .eval(value)
+                    .map(|val| op.matches_shape(&val))
+                    .unwrap_or(false),
+            },
             TestExpr::Comparison { left, op, right } => {
                 let left_val = self.eval(left)?;
                 let right_val = self.eval(right)?;

@@ -89,6 +89,10 @@ mod touch;
 mod tr;
 mod tree;
 mod true_false;
+// Module named `type_of`, not `typeof` — `typeof` is a reserved (but unused)
+// Rust keyword, so `mod typeof;` doesn't compile. The tool name is still the
+// plain string "typeof" (see `Tool::name`).
+mod type_of;
 mod uname;
 mod uniq;
 mod unset;
@@ -213,6 +217,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(tree::Tree);
     registry.register(true_false::True);
     registry.register(true_false::False);
+    registry.register(type_of::TypeOf);
     registry.register(uname::Uname);
     registry.register(uniq::Uniq);
     registry.register(unset::Unset);
