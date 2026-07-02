@@ -3009,6 +3009,16 @@ mod tests {
     }
 
     #[test]
+    fn var_length_with_subscript() {
+        // The widened regex admits `[...]` subscripts so a length-of-path lexes
+        // in expression position; the parser turns the inner into a VarPath.
+        assert_eq!(lex("${#u[tags]}"), vec![Token::VarLength("u[tags]".to_string())]);
+        assert_eq!(lex("${#a[0]}"), vec![Token::VarLength("a[0]".to_string())]);
+        assert_eq!(lex("${#a[b][c]}"), vec![Token::VarLength("a[b][c]".to_string())]);
+        assert_eq!(lex("${#r[$k]}"), vec![Token::VarLength("r[$k]".to_string())]);
+    }
+
+    #[test]
     fn var_length_in_context() {
         assert_eq!(
             lex("echo ${#NAME}"),
