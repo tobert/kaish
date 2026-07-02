@@ -46,7 +46,10 @@ static KERNEL_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 use async_trait::async_trait;
 
-use crate::ast::{Arg, Command, Expr, FileTestOp, Stmt, StringPart, TestExpr, ToolDef, Value, BinaryOp};
+use crate::ast::{
+    spread_non_list_message, Arg, BinaryOp, Command, Expr, FileTestOp, ListElem, RecordKey, Stmt,
+    StringPart, TestExpr, ToolDef, Value,
+};
 pub use kaish_types::{CommandKind, ExecuteOptions};
 use crate::backend::{BackendError, KernelBackend};
 use kaish_glob::glob_match;
@@ -3821,6 +3824,43 @@ impl Kernel {
                 Ok(Value::Int(scope.pid() as i64))
             }
             Expr::GlobPattern(s) => Ok(Value::String(s.clone())),
+            Expr::ListLiteral(elems) => {
+                // Spread must itself be a list — a scalar/record spread is a
+                // loud error, never silently coerced or dropped (mirrors the
+                // sync `Evaluator::eval_list_literal`; wording shared via
+                // `spread_non_list_message` so the two paths can't diverge).
+                let mut out = Vec::with_capacity(elems.len());
+                for elem in elems {
+                    match elem {
+                        ListElem::Item(e) => {
+                            let value = self.eval_expr_async(e).await?;
+                            out.push(crate::interpreter::value_to_json(&value));
+                        }
+                        ListElem::Spread(e) => {
+                            let value = self.eval_expr_async(e).await?;
+                            match value {
+                                Value::Json(serde_json::Value::Array(items)) => out.extend(items),
+                                other => return Err(anyhow::anyhow!(spread_non_list_message(&other))),
+                            }
+                        }
+                    }
+                }
+                Ok(Value::Json(serde_json::Value::Array(out)))
+            }
+            Expr::RecordLiteral(entries) => {
+                // Insertion order preserved (workspace serde_json has
+                // `preserve_order`); a duplicate key keeps the last value
+                // written, matching plain map-insert semantics.
+                let mut map = serde_json::Map::new();
+                for entry in entries {
+                    let key = match &entry.key {
+                        RecordKey::Bare(s) | RecordKey::Quoted(s) => s.clone(),
+                    };
+                    let value = self.eval_expr_async(&entry.value).await?;
+                    map.insert(key, crate::interpreter::value_to_json(&value));
+                }
+                Ok(Value::Json(serde_json::Value::Object(map)))
+            }
         }
         })
     }

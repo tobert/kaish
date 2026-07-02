@@ -300,6 +300,67 @@ pub enum Expr {
     CurrentPid,
     /// Bare glob pattern: `*.txt`, `src/**/*.rs` — expanded during arg building
     GlobPattern(String),
+    /// List literal: `[a b c]`, `[]`, `[...$xs date]`. Value-position only
+    /// (assignment RHS, `in`/`not in` RHS, nested literal interiors) — never
+    /// argv or a `for`-head item. See `docs/arrays-and-hashes.md`.
+    ListLiteral(Vec<ListElem>),
+    /// Record literal: `{name: amy, role: maintainer}`, `{port:8080}` (colon
+    /// may be spaced or unspaced). Value-position only, same as `ListLiteral`.
+    RecordLiteral(Vec<RecordEntry>),
+}
+
+/// One element of a list literal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ListElem {
+    /// A plain element: `[a b c]` — each word nests as ONE element (no implicit
+    /// splitting of a variable's contents).
+    Item(Expr),
+    /// A spread element: `[...$xs date]` — flattens the referenced list's
+    /// elements into the new list at this position. Records have no spread
+    /// (out of scope, see `docs/arrays-and-hashes.md`).
+    Spread(Expr),
+}
+
+/// One `key: value` entry of a record literal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordEntry {
+    pub key: RecordKey,
+    pub value: Expr,
+}
+
+/// A record literal key: `{name: amy}` (bare) or `{"content-type": x}` (quoted,
+/// for anything that isn't a bareword). See `docs/arrays-and-hashes.md`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecordKey {
+    Bare(String),
+    Quoted(String),
+}
+
+/// Human-readable value-kind name for a spread (`[...expr]`) operand that
+/// turned out not to be a list. Shared between the sync (`interpreter/eval.rs`)
+/// and async (`kernel.rs::eval_expr_async`) literal evaluators so the two
+/// paths can't diverge on wording (same convention as `StringTestOp::matches_shape`).
+pub fn spread_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a bool",
+        Value::Int(_) => "an int",
+        Value::Float(_) => "a float",
+        Value::String(_) => "a string",
+        Value::Bytes(_) => "bytes",
+        Value::Json(serde_json::Value::Object(_)) => "a record",
+        Value::Json(serde_json::Value::Array(_)) => "a list",
+        Value::Json(_) => "a json scalar",
+    }
+}
+
+/// Full teaching message for a non-list spread: "`[...$scalar]`" — the operand
+/// must be a list; spread only flattens a list's elements into the new one.
+pub fn spread_non_list_message(value: &Value) -> String {
+    format!(
+        "cannot spread `...` — value is {}, not a list; spread only flattens a list's elements, e.g. `[...$xs date]`",
+        spread_value_kind(value)
+    )
 }
 
 /// Test expression for `[[ ... ]]` conditionals.
