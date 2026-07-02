@@ -350,8 +350,8 @@ pub enum StringTestOp {
     /// the antidote to the "API sometimes returns an object instead of a
     /// list" trap (see `docs/arrays-and-hashes.md`, decision F). Evaluates
     /// the operand's *value*, like `-z`/`-n`, not a path stat like `-f`/`-d`.
-    /// Never errors on an unset variable or wrong-shaped value — false,
-    /// same as `-f` on a nonexistent path.
+    /// A defined-but-wrong-shaped value is false; a bare unset `$var` is an
+    /// undefined-variable error (like `-z`/`-n`), so a typo isn't silently false.
     IsList,
     /// `-record` - value is a native record (`Value::Json(Object)`). See
     /// [`StringTestOp::IsList`].

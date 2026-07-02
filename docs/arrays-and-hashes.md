@@ -452,8 +452,9 @@ for the record.
     `[[ -record $x ]]`. The antidote to the keys-on-list footgun and the
     API-shape-variance trap (Teaching note #12). `typeof` is a pure-data builtin
     (`.data` + text out); the two test operators evaluate the operand's value
-    (like `-z`/`-n`, not a path stat like `-f`/`-d`) and never error on an unset
-    variable or the wrong shape — false, same as `-f` on a nonexistent path.
+    (like `-z`/`-n`, not a path stat like `-f`/`-d`). A defined-but-wrong-shaped
+    value is false; a bare unset `$var` is an undefined-variable error (like
+    `-z`/`-n`) so a typo isn't silently false. Use them bare.
 
 - **Commas optional in BOTH lists and records.** `[1 2 3]` ≡ `[1, 2, 3]`; `{a: 1, b: 2}` ≡
   `{a: 1 b: 2}`. Records were shown comma-separated and lists space-separated, which would make
