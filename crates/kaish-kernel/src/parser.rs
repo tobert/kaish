@@ -1880,6 +1880,8 @@ where
 /// Supports:
 /// - File tests: `[[ -f path ]]`, `[[ -d path ]]`, etc.
 /// - String tests: `[[ -z str ]]`, `[[ -n str ]]`
+/// - Shape-guard tests: `[[ -list x ]]`, `[[ -record x ]]` (see
+///   `docs/arrays-and-hashes.md`, decision F)
 /// - Comparisons: `[[ $X == "value" ]]`, `[[ $NUM -gt 5 ]]`
 /// - Compound: `[[ -f a && -d b ]]`, `[[ -z x || -n y ]]`, `[[ ! -f file ]]`
 ///
@@ -1899,10 +1901,14 @@ where
         Token::ShortFlag(s) if s == "x" => FileTestOp::Executable,
     };
 
-    // String test operators: -z, -n
+    // String test operators: -z, -n, plus the shape-guard operators -list /
+    // -record (value-typed tests, not path stats — same operand-evaluation
+    // path as -z/-n, unlike the file_test_op family above).
     let string_test_op = select! {
         Token::ShortFlag(s) if s == "z" => StringTestOp::IsEmpty,
         Token::ShortFlag(s) if s == "n" => StringTestOp::IsNonEmpty,
+        Token::ShortFlag(s) if s == "list" => StringTestOp::IsList,
+        Token::ShortFlag(s) if s == "record" => StringTestOp::IsRecord,
     };
 
     // Comparison operators: =, ==, !=, =~, !~, >, <, >=, <=, -gt, -lt, -ge, -le, -eq, -ne

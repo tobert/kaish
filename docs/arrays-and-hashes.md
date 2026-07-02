@@ -447,11 +447,14 @@ for the record.
     `=~`, `!~`, `-eq`/`-gt`/`-lt`/…, and ordering `<`/`>`. Decided as a matrix so no operator falls
     to a stringify path one at a time. (`==`/`!=` already loud; membership `in` is the *only* op
     that takes a collection RHS.)
-  - **(F) Ship a shape guard in the near term:** `typeof $x` (→ `list`/`record`/`string`/`number`/
-    `bool`/`null`/`bytes`) and/or `[[ -list $x ]]` / `[[ -record $x ]]`. It's the antidote to the
-    keys-on-list footgun and the API-shape-variance trap (Teaching note #12) — and "if it bites" is
-    too late, because the guard idiom won't exist to teach. Promote from "Out of scope" into the
-    first post-#6 cut.
+  - **(F) Ship a shape guard.** *(Resolved — shipped.)* `typeof $x` (→
+    `list`/`record`/`string`/`number`/`bool`/`null`/`bytes`) and `[[ -list $x ]]` /
+    `[[ -record $x ]]`. The antidote to the keys-on-list footgun and the
+    API-shape-variance trap (Teaching note #12). `typeof` is a pure-data builtin
+    (`.data` + text out); the two test operators evaluate the operand's value
+    (like `-z`/`-n`, not a path stat like `-f`/`-d`). A defined-but-wrong-shaped
+    value is false; a bare unset `$var` is an undefined-variable error (like
+    `-z`/`-n`) so a typo isn't silently false. Use them bare.
 
 - **Commas optional in BOTH lists and records.** `[1 2 3]` ≡ `[1, 2, 3]`; `{a: 1, b: 2}` ≡
   `{a: 1 b: 2}`. Records were shown comma-separated and lists space-separated, which would make
@@ -632,8 +635,10 @@ paths relative to `crates/kaish-kernel/src`).
   traversal + **scalar unwrap at the boundary**, slices, negative indices. Brackets-only means
   dotted segments in `${…}` become the targeted error path (with the bracket fix in the
   message), not a resolution path.
-- **Lvalues** touch five layers, but share the segment types and traversal skeleton with the
-  read side: (1) lexer — the glob-merge suppression before `=` above; (2) AST — `Assignment`
+- **Lvalues (the phase after #6)** touch five layers, but the navigation core is `walk_write` over
+  `&mut serde_json::Value` sharing #6's `resolve_step` verbatim (that sharing is the whole point of
+  #6 — read/write classification can't drift): (1) lexer — the glob-merge suppression before `=`
+  above; (2) AST — `Assignment`
   grows from `name: String` to an lvalue (root + segments); (3) parser — an `lvalue_parser`
   wired into `assignment_parser` (`parser.rs:1028-1058`) and `env_prefix_assign`
   (`parser.rs:952-970`, which must *reject* path lvalues); (4) interpreter — clone root, navigate
@@ -675,29 +680,59 @@ paths relative to `crates/kaish-kernel/src`).
   `cmd.env(...)` at both spawn sites (`kernel.rs::try_execute_external`, test-only twin
   `dispatch.rs::try_external` — the hermetic two-spawn-site rule). `export.rs` declaration-time
   display was deliberately left as-is (the process edge is the boundary that matters).
-- **Two-phase bind/walk resolver (the load-bearing extraction the write side needs).** *(Flagged
-  by the 2026-07-02 review as the single most important thing before the grammar; NOT yet done —
-  design with Amy first.)* Today `Scope::apply_segment` fuses three jobs — classify a segment
-  against the container (index-vs-key, negative-index normalization, every loud message), walk one
-  hop, and unwrap the child via `json_to_value_no_envelope` (cloning each subtree, so
-  `for k in $(keys $u); do … ${u[$k]}` is O(n²)). The lvalue navigator needs `&mut` serde-tree navigation and
-  can't reuse that walker, so building it separately duplicates the classification logic under
-  `&mut` — and read/write then drift on exactly the semantics that must never drift (`${a[-1]}`
-  read vs `a[-1]=x` write). Proposed split: **Bind** `(VarPath, &Scope) → Result<Vec<ConcreteStep>,
-  PathError>` (owns `value_as_index`, negative math, and every message; `arithmetic.rs` stops
-  hand-collecting brackets and calls this — fixing the quoted-key whitespace bug for free) + a
-  **Walk** over `&serde_json::Value` (unwrap at leaf only) with a later `&mut` twin sharing Bind
-  verbatim. Converting `VarLength`/`VarWithDefault` to carry a `VarPath` (root of the deferred
-  nested-length / default-on-path forms above) folds in here — and `Bind` is where the
-  **absence-vs-shape error classification** lives that `${path:-default}` needs. **Decided
-  (2026-07-02): `PathError` becomes three variants** — `UndefinedRoot` (unchanged, soft) ·
-  **`Absence`** (missing key, out-of-bounds index) · **`Shape`** (string key on a list, integer
-  index on a record, subscript-on-scalar). `${path:-default}` catches `UndefinedRoot` + `Absence`
-  and yields the default; `Shape` always stays loud (a wrong-type access is a bug, not an absence).
-  Empty-value → default is a *post*-resolution check (the path resolved fine, the value's just
-  empty — bash semantics), not a `PathError`. `Bind` returns the classified error. Deep-path error
-  messages should thread the traversed prefix (today `${services[web][prot]}` errors as the
-  fabricated flat `${services[prot]}`), which is free once Bind owns the path.
+### #6 — the shared per-hop resolver (design settled 2026-07-02)
+
+*The single most important thing before the literal/lvalue grammar. This is a read-side refactor
+that also unblocks the deferred `${#path}` / `${path:-default}` forms and arithmetic subscripts;
+lvalue **writes** are the phase after, but the resolver is shaped so they slot in.*
+
+**The problem.** Today `Scope::apply_segment` (`scope.rs:519`) fuses three jobs per hop — classify
+a segment against the container (index-vs-key, negative-index normalization, every loud message),
+walk one hop, and unwrap the child via `json_to_value_no_envelope(subtree.clone())` (the clone
+makes `for k in $(keys $u); do … ${u[$k]}` O(n²)). The lvalue navigator needs `&mut` serde-tree
+navigation and can't reuse that walker; built separately it would duplicate the classification
+logic under `&mut`, and read/write would drift on exactly the semantics that must never drift
+(`${a[-1]}` read vs `a[-1]=x` write).
+
+**The seam — a shared per-hop resolver, NOT a two-pass Bind→Walk.** The earlier "Bind
+`(VarPath,&Scope)→Vec<ConcreteStep>` then Walk" framing is wrong: classification is
+**container-dependent** — index-vs-key, negative-index normalization, and slice bounds all need the
+container *at that hop* (see the `Dynamic` arm at `scope.rs:551`, which inspects Array-vs-Object to
+decide index-vs-key). Only `$k`→value is Scope-only. So the shared unit is a **per-hop**
+`resolve_step(&container, segment, &scope) -> Result<Step, PathError>` where `Step` is a concrete
+`Index(usize)` / `Key(String)` / `Slice(range)` produced *after* seeing the container. Both a
+`walk_read(&serde_json::Value)` and (next phase) a `walk_write(&mut serde_json::Value)` call the
+same `resolve_step`; they differ **only** in `&` vs `&mut` descent and leaf handling. All the
+classification, negative math, and every error message live in `resolve_step`, once — which is what
+guarantees read and write can't diverge.
+
+**Decisions (all settled 2026-07-02):**
+- **Arithmetic bareword classification → parse-time.** `$(( xs[i] ))` reads variable `i`;
+  `${xs[i]}` is the literal key `"i"`. Resolved at PARSE time, per context: the arithmetic parser
+  emits a *variable* subscript segment, the interpolation parser a *key* segment, so `resolve_step`
+  stays context-free (no context flag threaded through). `arithmetic.rs` stops hand-collecting
+  brackets (also killing the quoted-key whitespace bug).
+- **`PathError` → three variants.** `UndefinedRoot` (soft in strings, loud in expr) · **`Absence`**
+  (missing key, out-of-bounds) · **`Shape`** (string-key-on-list, integer-index-on-record,
+  subscript-a-scalar, dotted-access). `${path:-default}` catches `UndefinedRoot` + `Absence` and
+  yields the default; `Shape` always stays loud (a wrong-type access is a bug, not absence).
+  Empty-string/`null` → default is a *post*-resolution check, not a `PathError`. **An unset dynamic
+  key** (`${r[$k]}` with `$k` itself unset) is `UndefinedRoot`-class — so `${r[$k]:-d}` defaults
+  when `$k` is unset (the *variable* is missing, not the key).
+- **`VarLength` / `VarWithDefault` → carry a `VarPath`.** AST change + the parser builds the path +
+  **widen the lexer `VarLength` regex** (`\$\{#[a-zA-Z_]\w*\}` → accept brackets) so `${#u[tags]}`
+  lexes in expression position, not just inside strings. This is what turns the current loud "bind
+  first" placeholders (`${#u[tags]}`, `${cfg[port]:-8080}`) into working path-aware forms.
+- **Scope of #6 = read side + deferred forms.** Lands: the shared `resolve_step` + `walk_read`, the
+  `VarPath` conversion, arithmetic subscripts, the `PathError` split, and full-path-prefix error
+  messages (`${services[web][prot]}` names the real path, free once the walker owns the path).
+  **Does NOT land lvalue writes** (`a[b]=x` grammar + `walk_write` + validator root-binding) — that
+  is the next phase, and `resolve_step` is designed to be its shared core.
+
+**Technical risk to prototype early:** `walk_read` returns a `&serde_json::Value` borrowed from the
+`Scope` read-guard, unwrapping to owned only at the leaf (this is what removes the O(n²) clone). The
+borrow must complete within the `RwLock` guard's lifetime — validate that borrow shape before
+building out.
 - **`...` spread**: new lexer token; no existing `..`/`...` handling to collide with. Scope it
   to `[ ]` value context only.
 
@@ -792,9 +827,9 @@ taught a specific way** — get the examples wrong and even capable models fail.
     to the shipped idiom: `for x in $(values $data)` on a record yields the record's *field
     values* instead of iterating the one object. Still a silent type cascade, not an error. So
     the mitigation stands and is now more load-bearing: the docs must show a shape guard where
-    data shape isn't trusted, and a shape predicate (`typeof` / `[[ -list ]]` / `[[ -record ]]`)
-    should be promoted from "Out of scope if it bites" into the first cut — API-shape variance is
-    core agent work, and by the time it bites the guard idiom won't exist to teach.
+    data shape isn't trusted. *(Resolved — the shape predicate shipped: `typeof` /
+    `[[ -list ]]` / `[[ -record ]]`, decision F above. Docs cover the guard idiom in
+    `docs/LANGUAGE.md` "Shape guards" and the composable-help collections fragment.)*
 
 ## Help & teaching delivery
 
@@ -870,8 +905,6 @@ Points decided or flagged during the 2026-07-01 review:
 - **Slice lvalues** (`xs[0:2]=…`) — loud error, see lvalue rules. (`push` to a bracketed
   path IS in scope — see the push decision.)
 - Pair iteration (`for k v in $record`) — iterate keys, access values.
-- A shape/type predicate (`typeof` or `[[ -list / -record ]]`) — the missing guard for the
-  record-vs-list `for` trap (Teaching note #12); design if it bites in practice.
 - JSON ingress/egress builtins (`fromjson`/`tojson`) — sketched above and **prototyped
   early, ahead of the collections grammar** (they need no parser work); hard prerequisite
   for the jq-out-of-core possibility (see Open decisions).

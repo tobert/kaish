@@ -310,14 +310,27 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                     }),
                 }
             }
-            TestExpr::StringTest { op, value } => {
-                let val = self.eval(value)?;
-                let s = value_to_string(&val);
-                match op {
-                    StringTestOp::IsEmpty => s.is_empty(),
-                    StringTestOp::IsNonEmpty => !s.is_empty(),
+            TestExpr::StringTest { op, value } => match op {
+                StringTestOp::IsEmpty | StringTestOp::IsNonEmpty => {
+                    let val = self.eval(value)?;
+                    let s = value_to_string(&val);
+                    match op {
+                        StringTestOp::IsEmpty => s.is_empty(),
+                        StringTestOp::IsNonEmpty => !s.is_empty(),
+                        StringTestOp::IsList | StringTestOp::IsRecord => unreachable!(),
+                    }
                 }
-            }
+                // Shape guard: inspect the operand's type. Propagates eval
+                // errors like -z/-n — a bare `$unset` is an undefined-variable
+                // error, not a silent `false` (catching a typo beats reading
+                // "not a list"). The guard is meant to be used bare
+                // (`[[ -list $data ]]`); a defined-but-wrong-shaped value is
+                // simply false.
+                StringTestOp::IsList | StringTestOp::IsRecord => {
+                    let val = self.eval(value)?;
+                    op.matches_shape(&val)
+                }
+            },
             TestExpr::Comparison { left, op, right } => {
                 let left_val = self.eval(left)?;
                 let right_val = self.eval(right)?;

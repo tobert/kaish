@@ -127,7 +127,7 @@ everywhere, a `jq` that always uses the same filter syntax, an `awk` that never 
 |----------|-------|
 | **Text** | awk, base64, cut, diff, grep, head, sed, sort, split, tac, tail, tr, uniq, wc, xxd |
 | **Files** | basename, cat, cd, checksum, cmp, cp, dd, dirname, file, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, readlink, realpath, rm, stat, tee, touch, tree, write |
-| **JSON** | fromjson, jq, keys, tojson, values |
+| **JSON** | fromjson, jq, keys, tojson, typeof, values |
 | **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, printf, ps, read, seq, set, sleep, spawn, timeout, tokens, uname, unalias, unset, wait, which |
 | **Parallel** | scatter, gather |
 | **Meta** | assert, false, true |

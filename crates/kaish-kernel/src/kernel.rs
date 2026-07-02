@@ -3872,14 +3872,26 @@ impl Kernel {
                         }),
                     })
                 }
-                TestExpr::StringTest { op, value } => {
-                    let val = self.eval_expr_async(value).await?;
-                    let s = value_to_string(&val);
-                    Ok(match op {
-                        crate::ast::StringTestOp::IsEmpty => s.is_empty(),
-                        crate::ast::StringTestOp::IsNonEmpty => !s.is_empty(),
-                    })
-                }
+                TestExpr::StringTest { op, value } => match op {
+                    crate::ast::StringTestOp::IsEmpty | crate::ast::StringTestOp::IsNonEmpty => {
+                        let val = self.eval_expr_async(value).await?;
+                        let s = value_to_string(&val);
+                        Ok(match op {
+                            crate::ast::StringTestOp::IsEmpty => s.is_empty(),
+                            crate::ast::StringTestOp::IsNonEmpty => !s.is_empty(),
+                            crate::ast::StringTestOp::IsList
+                            | crate::ast::StringTestOp::IsRecord => unreachable!(),
+                        })
+                    }
+                    // Shape guard: propagates eval errors like -z/-n (a bare
+                    // `$unset` is an undefined-variable error, not a silent
+                    // false). A defined-but-wrong-shaped value is false. Must
+                    // not diverge from the sync path in interpreter/eval.rs.
+                    crate::ast::StringTestOp::IsList | crate::ast::StringTestOp::IsRecord => {
+                        let val = self.eval_expr_async(value).await?;
+                        Ok(op.matches_shape(&val))
+                    }
+                },
                 TestExpr::Comparison { left, op, right } => {
                     // Evaluate operands async (handles $(cmd)), then compare sync
                     let left_val = self.eval_expr_async(left).await?;

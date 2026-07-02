@@ -346,6 +346,16 @@ pub enum StringTestOp {
     IsEmpty,
     /// `-n` - string is non-empty
     IsNonEmpty,
+    /// `-list` - value is a native list (`Value::Json(Array)`). Shape guard —
+    /// the antidote to the "API sometimes returns an object instead of a
+    /// list" trap (see `docs/arrays-and-hashes.md`, decision F). Evaluates
+    /// the operand's *value*, like `-z`/`-n`, not a path stat like `-f`/`-d`.
+    /// A defined-but-wrong-shaped value is false; a bare unset `$var` is an
+    /// undefined-variable error (like `-z`/`-n`), so a typo isn't silently false.
+    IsList,
+    /// `-record` - value is a native record (`Value::Json(Object)`). See
+    /// [`StringTestOp::IsList`].
+    IsRecord,
 }
 
 /// Comparison operators for `[[ ]]` tests.
@@ -512,7 +522,27 @@ impl fmt::Display for StringTestOp {
         match self {
             StringTestOp::IsEmpty => write!(f, "-z"),
             StringTestOp::IsNonEmpty => write!(f, "-n"),
+            StringTestOp::IsList => write!(f, "-list"),
+            StringTestOp::IsRecord => write!(f, "-record"),
         }
+    }
+}
+
+impl StringTestOp {
+    /// Does `value` match this shape-guard operator? Only meaningful for
+    /// [`StringTestOp::IsList`] / [`StringTestOp::IsRecord`] — returns `false`
+    /// for `IsEmpty`/`IsNonEmpty` (callers evaluate those separately via
+    /// string-empty checks, not this predicate).
+    ///
+    /// Shared by both the sync (`interpreter/eval.rs`) and async
+    /// (`kernel.rs::eval_test_async`) `[[ ]]` evaluators so the two paths
+    /// can't diverge on the shape rule.
+    pub fn matches_shape(self, value: &Value) -> bool {
+        matches!(
+            (self, value),
+            (StringTestOp::IsList, Value::Json(serde_json::Value::Array(_)))
+                | (StringTestOp::IsRecord, Value::Json(serde_json::Value::Object(_)))
+        )
     }
 }
 
