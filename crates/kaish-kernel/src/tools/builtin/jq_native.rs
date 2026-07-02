@@ -677,16 +677,19 @@ fn value_as_string(v: &serde_json::Value) -> Option<String> {
 ///   CommandSubst arm in the kernel hands a JSON array to the for-loop
 ///   regardless of the `-r` / `-c` rendering flags.
 fn build_exec_result(run: JqRun) -> ExecResult {
-    use crate::interpreter::json_to_value;
+    use crate::interpreter::json_to_value_no_envelope;
     let JqRun { text, mut values } = run;
     if values.is_empty() {
         return ExecResult::with_output(OutputData::text(text));
     }
     // Single-value output: keep `.data` as the underlying scalar/object so
     // `jq '.name'` continues to expose a non-array value via `kaish-last`.
+    // Envelope-free: jq operates on external JSON, so an envelope-shaped object
+    // stays a plain record and is never silently re-decoded to Value::Bytes
+    // (matches the 2+-value path below, which hands raw serde values through).
     if values.len() == 1 {
         if let Some(only) = values.pop() {
-            return ExecResult::success_with_data(text, json_to_value(only));
+            return ExecResult::success_with_data(text, json_to_value_no_envelope(only));
         }
     }
     ExecResult::success_with_data(text, Value::Json(serde_json::Value::Array(values)))

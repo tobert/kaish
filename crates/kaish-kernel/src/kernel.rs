@@ -51,7 +51,7 @@ pub use kaish_types::{CommandKind, ExecuteOptions};
 use crate::backend::{BackendError, KernelBackend};
 use kaish_glob::glob_match;
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
-use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value, value_to_bool, value_length, value_to_string, ControlFlow, ExecResult, PathError, Scope};
+use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value_no_envelope, value_to_bool, value_length, value_to_string, ControlFlow, ExecResult, PathError, Scope};
 use crate::parser::parse;
 use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_stream, BoundedStream, JobManager, PipelineRunner, StderrReceiver};
 #[cfg(feature = "subprocess")]
@@ -2174,7 +2174,11 @@ impl Kernel {
                         // when builtins emit .data — seq, jq, cut, find, …)
                         Value::Json(serde_json::Value::Array(arr)) => {
                             for elem in arr {
-                                items.push(json_to_value(elem));
+                                // Envelope-free: an element that happens to be
+                                // envelope-shaped (e.g. from `fromjson`) is
+                                // external data, not an internal bytes round-trip,
+                                // so it must NOT be re-decoded to Value::Bytes.
+                                items.push(json_to_value_no_envelope(elem));
                             }
                         }
                         // Strings from $(cmd): empty → 0 iterations,
@@ -3777,6 +3781,9 @@ impl Kernel {
                 Ok(Value::Int(scope.arg_count() as i64))
             }
             Expr::VarLength(name) => {
+                if crate::interpreter::name_is_subscripted(name) {
+                    return Err(anyhow::anyhow!("{}", crate::interpreter::subscripted_length_error(name)));
+                }
                 let scope = self.scope.read().await;
                 match scope.get(name) {
                     Some(value) => Ok(Value::Int(value_length(value))),
@@ -3784,6 +3791,9 @@ impl Kernel {
                 }
             }
             Expr::VarWithDefault { name, default } => {
+                if crate::interpreter::name_is_subscripted(name) {
+                    return Err(anyhow::anyhow!("{}", crate::interpreter::subscripted_default_error(name)));
+                }
                 let scope = self.scope.read().await;
                 let use_default = match scope.get(name) {
                     Some(value) => value_to_string(value).is_empty(),
@@ -3920,6 +3930,9 @@ impl Kernel {
                     }
                 }
                 StringPart::VarWithDefault { name, default } => {
+                    if crate::interpreter::name_is_subscripted(name) {
+                        return Err(anyhow::anyhow!("{}", crate::interpreter::subscripted_default_error(name)));
+                    }
                     let scope = self.scope.read().await;
                     let use_default = match scope.get(name) {
                         Some(value) => value_to_string(value).is_empty(),
@@ -3935,6 +3948,9 @@ impl Kernel {
                     }
                 }
             StringPart::VarLength(name) => {
+                if crate::interpreter::name_is_subscripted(name) {
+                    return Err(anyhow::anyhow!("{}", crate::interpreter::subscripted_length_error(name)));
+                }
                 let scope = self.scope.read().await;
                 match scope.get(name) {
                     Some(value) => Ok(value_length(value).to_string()),
@@ -4584,7 +4600,13 @@ impl Kernel {
         cmd.env_clear();
         {
             let scope = self.scope.read().await;
-            for (var_name, value) in scope.exported_vars() {
+            let exported = scope.exported_vars();
+            // A structured value can't cross the process boundary; refuse rather
+            // than silently JSON-serialize it into the child's environment.
+            if let Some(msg) = crate::interpreter::structured_export_error(&exported) {
+                return Err(anyhow::anyhow!(msg));
+            }
+            for (var_name, value) in exported {
                 cmd.env(var_name, value_to_string(&value));
             }
         }

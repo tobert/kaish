@@ -119,6 +119,10 @@ pub enum EvalError {
     ArithmeticError(String),
     /// Invalid regex pattern.
     RegexError(String),
+    /// A collection (list/record) was compared to a scalar with `==`/`!=`, or a
+    /// collection form (`${#…}`, `${…:-default}`) was used on a subscripted path
+    /// before that path support landed. Carries a full teaching message.
+    Unsupported(String),
 }
 
 impl fmt::Display for EvalError {
@@ -133,6 +137,7 @@ impl fmt::Display for EvalError {
             EvalError::NoExecutor => write!(f, "no executor available for command substitution"),
             EvalError::ArithmeticError(msg) => write!(f, "arithmetic error: {msg}"),
             EvalError::RegexError(msg) => write!(f, "regex error: {msg}"),
+            EvalError::Unsupported(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -316,8 +321,8 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                 let right_val = self.eval(right)?;
 
                 match op {
-                    TestCmpOp::Eq => values_equal(&left_val, &right_val),
-                    TestCmpOp::NotEq => !values_equal(&left_val, &right_val),
+                    TestCmpOp::Eq => values_equal(&left_val, &right_val)?,
+                    TestCmpOp::NotEq => !(values_equal(&left_val, &right_val)?),
                     TestCmpOp::Match => {
                         // Regex match — propagate compile errors loudly (no silent false).
                         match regex_match(&left_val, &right_val, false)? {
@@ -431,6 +436,9 @@ impl<'a, E: Executor> Evaluator<'a, E> {
 
     /// Evaluate variable string length (${#VAR}).
     fn eval_var_length(&self, name: &str) -> EvalResult<Value> {
+        if name_is_subscripted(name) {
+            return Err(subscripted_length_error(name));
+        }
         match self.scope.get(name) {
             Some(value) => Ok(Value::Int(value_length(value))),
             None => Ok(Value::Int(0)), // Unset variable has length 0
@@ -440,6 +448,9 @@ impl<'a, E: Executor> Evaluator<'a, E> {
     /// Evaluate variable with default (${VAR:-default}).
     /// Returns the variable value if set and non-empty, otherwise evaluates the default parts.
     fn eval_var_with_default(&mut self, name: &str, default: &[StringPart]) -> EvalResult<Value> {
+        if name_is_subscripted(name) {
+            return Err(subscripted_default_error(name));
+        }
         match self.scope.get(name) {
             Some(value) => {
                 let s = value_to_string(value);
@@ -589,8 +600,54 @@ pub fn value_length(value: &Value) -> i64 {
     match value {
         Value::Json(serde_json::Value::Array(a)) => a.len() as i64,
         Value::Json(serde_json::Value::Object(o)) => o.len() as i64,
+        // Binary length is the byte count, not the length of the text placeholder.
+        Value::Bytes(b) => b.len() as i64,
         other => value_to_string(other).len() as i64,
     }
+}
+
+/// A name inside `${#name}` or `${name:-default}` that carries a `[...]`
+/// subscript. Length-of-path and default-on-path aren't wired through the path
+/// resolver yet (they land with the collections lvalue/resolver work), so these
+/// forms take a bare-name lookup that misses the subscript. Detect it and fail
+/// loudly with a "bind first" hint instead of returning the silent wrong answer
+/// (`0` for length, always-default for defaults) they produced before.
+pub fn name_is_subscripted(name: &str) -> bool {
+    name.contains('[')
+}
+
+/// Loud error for `${#path}` on a subscripted name (see [`name_is_subscripted`]).
+pub fn subscripted_length_error(name: &str) -> EvalError {
+    let root = name.split('[').next().unwrap_or(name);
+    EvalError::Unsupported(format!(
+        "${{#{name}}}: length of a subscripted path isn't supported yet — bind it first: `x=${{{name}}}; ${{#x}}` (root `{root}` alone works: `${{#{root}}}`)"
+    ))
+}
+
+/// Loud error for `${path:-default}` on a subscripted name (see [`name_is_subscripted`]).
+pub fn subscripted_default_error(name: &str) -> EvalError {
+    EvalError::Unsupported(format!(
+        "${{{name}:-…}}: a default on a subscripted path isn't supported yet — bind it first: `x=${{{name}}}; ${{x:-…}}`"
+    ))
+}
+
+/// Reject exporting a structured value into an OS env var. A list/record can't
+/// cross the process boundary, and kaish will not silently JSON-serialize it into
+/// the child's environment. Returns a loud "serialize first" message naming the
+/// offending variable, or `None` if every exported value is a scalar. Both
+/// external-spawn sites (`kernel.rs`, `dispatch.rs`) call this before `cmd.env`.
+pub fn structured_export_error(vars: &[(String, Value)]) -> Option<String> {
+    for (name, value) in vars {
+        if let Value::Json(j) = value {
+            if matches!(j, serde_json::Value::Array(_) | serde_json::Value::Object(_)) {
+                let kind = if j.is_array() { "list" } else { "record" };
+                return Some(format!(
+                    "cannot export '{name}': it holds a {kind}, which can't be an OS environment variable — serialize it explicitly first, e.g. `export {name}=$(tojson ${name})`"
+                ));
+            }
+        }
+    }
+    None
 }
 
 pub fn value_to_string(value: &Value) -> String {
@@ -772,21 +829,35 @@ fn is_truthy(value: &Value) -> bool {
 /// `[[ "01" == 1 ]]` returned true via parse-as-int while `[[ "01" == "1" ]]`
 /// returned false. Users wanting numeric equality across stringified
 /// numbers should use `-eq`, which coerces via `numeric_compare`.
-fn values_equal(left: &Value, right: &Value) -> bool {
+fn values_equal(left: &Value, right: &Value) -> EvalResult<bool> {
     match (left, right) {
-        (Value::Null, Value::Null) => true,
-        (Value::Bool(a), Value::Bool(b)) => a == b,
-        (Value::Int(a), Value::Int(b)) => a == b,
-        (Value::Float(a), Value::Float(b)) => (a - b).abs() < f64::EPSILON,
+        (Value::Null, Value::Null) => Ok(true),
+        (Value::Bool(a), Value::Bool(b)) => Ok(a == b),
+        (Value::Int(a), Value::Int(b)) => Ok(a == b),
+        (Value::Float(a), Value::Float(b)) => Ok((a - b).abs() < f64::EPSILON),
         (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => {
-            (*a as f64 - b).abs() < f64::EPSILON
+            Ok((*a as f64 - b).abs() < f64::EPSILON)
         }
-        (Value::String(a), Value::String(b)) => a == b,
-        (Value::Json(a), Value::Json(b)) => a == b,
-        (Value::Bytes(a), Value::Bytes(b)) => a == b,
-        // Mixed types (most commonly String vs Int/Float from a quoted variable
+        (Value::String(a), Value::String(b)) => Ok(a == b),
+        (Value::Json(a), Value::Json(b)) => Ok(a == b),
+        (Value::Bytes(a), Value::Bytes(b)) => Ok(a == b),
+        // A collection (list/record) compared to a scalar is a loud error, never
+        // silently false: brackets-only access means `$list` here is the whole
+        // structure. Silent-false is exactly the trap `in` exists to close.
+        // (A JSON *scalar* is unwrapped at the value boundary, so it never reaches
+        // here as `Json`; only Array/Object do.)
+        (Value::Json(j), other) | (other, Value::Json(j))
+            if matches!(j, serde_json::Value::Array(_) | serde_json::Value::Object(_)) =>
+        {
+            let kind = if j.is_array() { "list" } else { "record" };
+            Err(EvalError::Unsupported(format!(
+                "cannot compare a {kind} to a {other_kind} with ==/!= — test membership with `[[ x in $coll ]]`, or compare structures with `jq`",
+                other_kind = type_name(other),
+            )))
+        }
+        // Mixed scalars (most commonly String vs Int/Float from a quoted variable
         // against a numeric literal): fall back to string equality.
-        _ => value_to_string(left) == value_to_string(right),
+        _ => Ok(value_to_string(left) == value_to_string(right)),
     }
 }
 
@@ -1527,5 +1598,88 @@ mod tests {
         let expr = Expr::Interpolated(parts);
         let result = eval_expr(&expr, &mut scope).unwrap();
         assert_eq!(result, Value::String("-hello-".into()));
+    }
+
+    // ── Overnight-review fixes (2026-07-02) ────────────────────────────────
+
+    #[test]
+    fn values_equal_scalars_still_work() {
+        assert_eq!(
+            values_equal(&Value::String("x".into()), &Value::String("x".into())),
+            Ok(true)
+        );
+        // Mixed scalar fallthrough (String vs Int) stays string-equality.
+        assert_eq!(
+            values_equal(&Value::String("42".into()), &Value::Int(42)),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn values_equal_collection_vs_scalar_is_loud() {
+        let list = Value::Json(serde_json::json!(["a", "b"]));
+        let record = Value::Json(serde_json::json!({"k": 1}));
+        assert!(
+            matches!(values_equal(&list, &Value::String("banana".into())), Err(EvalError::Unsupported(_))),
+            "list vs scalar must be a loud error, never silently false"
+        );
+        // Order-independent: scalar on the left too.
+        assert!(matches!(
+            values_equal(&Value::String("x".into()), &record),
+            Err(EvalError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn values_equal_collection_vs_collection_is_structural() {
+        // Two collections still compare structurally (records order-insensitive).
+        let a = Value::Json(serde_json::json!({"a": 1, "b": 2}));
+        let b = Value::Json(serde_json::json!({"b": 2, "a": 1}));
+        assert_eq!(values_equal(&a, &b), Ok(true));
+    }
+
+    #[test]
+    fn value_length_of_bytes_is_byte_count() {
+        assert_eq!(value_length(&Value::Bytes(vec![1, 2, 3])), 3);
+    }
+
+    #[test]
+    fn structured_export_error_flags_collections_passes_scalars() {
+        // Scalars are fine.
+        let scalars = vec![
+            ("A".to_string(), Value::String("x".into())),
+            ("B".to_string(), Value::Int(1)),
+        ];
+        assert!(structured_export_error(&scalars).is_none());
+        // A record is refused with a `tojson` hint.
+        let with_record = vec![(
+            "CFG".to_string(),
+            Value::Json(serde_json::json!({"port": 8080})),
+        )];
+        let msg = structured_export_error(&with_record).expect("record must be refused");
+        assert!(msg.contains("CFG") && msg.contains("tojson"), "got: {msg}");
+        // A list too.
+        let with_list = vec![("XS".to_string(), Value::Json(serde_json::json!([1, 2])))];
+        assert!(structured_export_error(&with_list).is_some());
+    }
+
+    #[test]
+    fn subscripted_name_guards_fire() {
+        assert!(name_is_subscripted("u[tags]"));
+        assert!(!name_is_subscripted("plain"));
+        // The sync eval path surfaces the loud "bind first" error (not silent 0).
+        let mut scope = Scope::new();
+        let err = eval_expr(&Expr::VarLength("u[tags]".into()), &mut scope).unwrap_err();
+        assert!(matches!(err, EvalError::Unsupported(_)), "got: {err}");
+        // And the default-on-path form too.
+        let err = eval_expr(
+            &Expr::VarWithDefault {
+                name: "cfg[port]".into(),
+                default: vec![StringPart::Literal("8080".into())],
+            },
+            &mut scope,
+        )
+        .unwrap_err();
+        assert!(matches!(err, EvalError::Unsupported(_)), "got: {err}");
     }
 }

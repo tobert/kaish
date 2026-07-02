@@ -286,3 +286,100 @@ async fn undefined_root_in_string_is_empty() {
     assert_eq!(code, 0, "err: {err}");
     assert_eq!(out, "x=y");
 }
+
+// ── Overnight-review fixes (2026-07-02): silent-collection traps ────────────
+
+// `[[ ]]` eval errors surface as `Err` from `kernel.execute()` — the same LOUD
+// contract the regex-match fix established (see regex_match_error_tests.rs), not a
+// silent false. So these assert on the Err, not an exit code.
+
+#[tokio::test]
+async fn collection_vs_scalar_equality_is_a_loud_error() {
+    // `[[ $list == banana ]]` must NOT be silently false — it's the trap `in`
+    // exists to close. See docs/arrays-and-hashes.md (comparison decision).
+    let k = setup().await;
+    let result = k
+        .execute(r#"x=$(fromjson '["a","b"]'); if [[ $x == banana ]]; then echo hit; fi"#)
+        .await;
+    assert!(result.is_err(), "comparing a list to a scalar must be a loud error");
+    let msg = format!("{:#}", result.unwrap_err());
+    assert!(msg.contains("membership") || msg.contains(" in "), "should hint at `in`: {msg}");
+}
+
+#[tokio::test]
+async fn whole_list_vs_scalar_inequality_is_a_loud_error() {
+    // `!=` must be loud too (it's `!(values_equal ?)`, so the error propagates).
+    let k = setup().await;
+    let result = k
+        .execute(r#"x=$(fromjson '["a","b"]'); if [[ $x != banana ]]; then echo hit; fi"#)
+        .await;
+    assert!(result.is_err(), "!= with a list and a scalar must be a loud error");
+    assert!(format!("{:#}", result.unwrap_err()).contains("list"), "should name the list type");
+}
+
+#[tokio::test]
+async fn whole_record_vs_scalar_is_a_loud_error() {
+    let k = setup().await;
+    // `$u` alone is the whole record; comparing it to a scalar must be loud.
+    let result = k
+        .execute(r#"u=$(fromjson '{"name":"amy"}'); if [[ $u == amy ]]; then echo hit; fi"#)
+        .await;
+    assert!(result.is_err(), "comparing a whole record to a scalar must be a loud error");
+    assert!(format!("{:#}", result.unwrap_err()).contains("record"), "should name the record type");
+}
+
+#[tokio::test]
+async fn negative_slice_end_is_not_mistaken_for_a_default() {
+    // `${xs[0:-1]}` — the `:-` is a slice bound, not a `:-default` separator.
+    let k = setup().await;
+    let (out, code, err) =
+        run(&k, r#"x=$(fromjson '["a","b","c"]'); echo ${x[0:-1]}"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, r#"["a","b"]"#);
+}
+
+#[tokio::test]
+async fn default_on_a_subscripted_path_is_a_loud_error_not_the_default() {
+    // `${cfg[port]:-8080}` must not silently return 8080 while a real value
+    // exists — length/default on a path isn't wired yet, so it's loud with a
+    // "bind first" hint (never silent-wrong-output).
+    let k = setup().await;
+    let (_, code, err) = run(
+        &k,
+        r#"cfg=$(fromjson '{"port":9000}'); echo ${cfg[port]:-8080}"#,
+    )
+    .await;
+    assert_ne!(code, 0, "default-on-path must be loud, not silently the default");
+    assert!(err.contains("bind it first"), "should hint at binding first: {err}");
+}
+
+#[tokio::test]
+async fn length_of_a_subscripted_path_is_a_loud_error_not_zero() {
+    // `${#u[tags]}` must not silently print 0 (bare-name lookup miss) — loud with
+    // a "bind first" hint until nested length lands.
+    let k = setup().await;
+    let (_, code, err) = run(
+        &k,
+        r#"u=$(fromjson '{"tags":["a","b"]}'); echo "${#u[tags]}""#,
+    )
+    .await;
+    assert_ne!(code, 0, "length-of-path must be loud, not silent 0");
+    assert!(err.contains("bind it first"), "should hint at binding first: {err}");
+}
+
+#[tokio::test]
+async fn for_loop_over_envelope_shaped_elements_stays_a_record() {
+    // A `fromjson` array element that happens to be envelope-shaped is external
+    // data — it must NOT be silently re-decoded to binary during iteration.
+    let k = setup().await;
+    // The `$(fromjson …)` CommandSubst form is the real iteration idiom (a bare
+    // `for x in $xs` is rejected by the validator, E012).
+    let (out, code, err) = run(
+        &k,
+        r#"for x in $(fromjson '[{"_type":"bytes","encoding":"base64","data":"AQID","len":3}]'); do echo ${x[_type]}; done"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    // Envelope-free: the element is still a record, so `[_type]` reads "bytes".
+    assert_eq!(out, "bytes");
+}

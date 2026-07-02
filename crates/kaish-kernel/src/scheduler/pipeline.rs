@@ -966,7 +966,10 @@ pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> 
                     }
                     crate::ast::StringPart::VarLength(name) => {
                         let len = match ctx.scope.get(name) {
-                            Some(value) => value_to_string(value).len(),
+                            // Element/key count for collections, byte count for
+                            // binary — the same helper the async/interp paths use
+                            // (not the string byte-length of a rendered value).
+                            Some(value) => crate::interpreter::value_length(value) as usize,
                             None => 0,
                         };
                         result.push_str(&len.to_string());
@@ -1067,7 +1070,9 @@ fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -
             }
             crate::ast::StringPart::VarLength(name) => {
                 let len = match ctx.scope.get(name) {
-                    Some(value) => value_to_string(value).len(),
+                    // Element/key count for collections, byte count for binary —
+                    // the same helper the async/interp paths use.
+                    Some(value) => crate::interpreter::value_length(value) as usize,
                     None => 0,
                 };
                 result.push_str(&len.to_string());

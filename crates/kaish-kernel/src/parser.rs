@@ -83,6 +83,7 @@ fn unquote_default_word(word: &str) -> String {
 fn find_default_separator(raw: &str) -> Option<usize> {
     let bytes = raw.as_bytes();
     let mut depth = 0;
+    let mut bracket_depth = 0;
     let mut i = 0;
 
     while i < bytes.len() {
@@ -96,8 +97,21 @@ fn find_default_separator(raw: &str) -> Option<usize> {
             i += 1;
             continue;
         }
-        // Only find :- at the top level (depth == 1 means we're inside the outer ${...})
-        if depth == 1 && i + 1 < bytes.len() && bytes[i] == b':' && bytes[i + 1] == b'-' {
+        // Track `[...]` so a `:-` inside a subscript (e.g. the negative slice end
+        // in `${xs[0:-1]}`) is NOT mistaken for a default separator.
+        if bytes[i] == b'[' {
+            bracket_depth += 1;
+        } else if bytes[i] == b']' && bracket_depth > 0 {
+            bracket_depth -= 1;
+        }
+        // Only find :- at the top level (depth == 1 means we're inside the outer
+        // ${...}) and outside any subscript.
+        if depth == 1
+            && bracket_depth == 0
+            && i + 1 < bytes.len()
+            && bytes[i] == b':'
+            && bytes[i + 1] == b'-'
+        {
             return Some(i);
         }
         i += 1;
@@ -109,6 +123,7 @@ fn find_default_separator(raw: &str) -> Option<usize> {
 fn find_default_separator_in_content(content: &str) -> Option<usize> {
     let bytes = content.as_bytes();
     let mut depth = 0;
+    let mut bracket_depth = 0;
     let mut i = 0;
 
     while i < bytes.len() {
@@ -122,8 +137,20 @@ fn find_default_separator_in_content(content: &str) -> Option<usize> {
             i += 1;
             continue;
         }
-        // Find :- at the top level (depth == 0)
-        if depth == 0 && i + 1 < bytes.len() && bytes[i] == b':' && bytes[i + 1] == b'-' {
+        // Track `[...]` so a `:-` inside a subscript (e.g. the negative slice end
+        // in `${xs[0:-1]}`) is NOT mistaken for a default separator.
+        if bytes[i] == b'[' {
+            bracket_depth += 1;
+        } else if bytes[i] == b']' && bracket_depth > 0 {
+            bracket_depth -= 1;
+        }
+        // Find :- at the top level (depth == 0) and outside any subscript.
+        if depth == 0
+            && bracket_depth == 0
+            && i + 1 < bytes.len()
+            && bytes[i] == b':'
+            && bytes[i + 1] == b'-'
+        {
             return Some(i);
         }
         i += 1;

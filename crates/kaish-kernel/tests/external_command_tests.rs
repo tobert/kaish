@@ -94,6 +94,29 @@ async fn external_resolution_is_hermetic_no_os_path_fallback() {
 }
 
 #[tokio::test]
+async fn exporting_a_structured_value_to_a_subprocess_is_a_loud_error() {
+    // A list/record can't cross the process boundary; the external spawn refuses
+    // rather than silently JSON-serializing it into the child's environment.
+    // `printenv` is a real external (see the hermetic test above), so this
+    // exercises the production spawn-site guard in try_execute_external.
+    let kernel = repl_kernel();
+    let result = kernel
+        .execute(r#"export CFG=$(fromjson '{"port":8080}'); printenv CFG"#)
+        .await;
+    // The guard surfaces as an Err from execute (or a failed ExecResult); either
+    // way it must be loud and hint at serializing with `tojson` first.
+    let msg = match result {
+        Ok(r) => {
+            assert_ne!(r.code, 0, "exporting a record to a subprocess must fail: {r:?}");
+            r.err
+        }
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(msg.contains("tojson"), "should hint at serializing with tojson: {msg}");
+    assert!(msg.contains("CFG"), "should name the offending variable: {msg}");
+}
+
+#[tokio::test]
 async fn external_command_not_found() {
     let kernel = repl_kernel();
     let result = kernel

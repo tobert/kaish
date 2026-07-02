@@ -66,6 +66,25 @@ breaking entries are marked **BREAKING**.
   the `External`/`Dynamic` cases a gate must scrutinize.
 
 ### Fixed
+- **Collection read-access silent-corruption traps** (found by the collections
+  milestone review) — five cases that returned a plausible wrong answer instead of
+  erroring, all now loud:
+  - Comparing a list/record to a scalar with `==`/`!=` (e.g. `[[ $list == x ]]`)
+    was silently `false`; it is now a loud error hinting at `in`/`jq` (a JSON
+    scalar still unwraps and compares typed).
+  - `export`ing a structured value to a subprocess silently JSON-serialized it
+    into the child's environment; it is now refused, pointing at `export
+    CFG=$(tojson $CFG)`.
+  - A `fromjson` array element shaped like the internal byte-envelope was silently
+    decoded to binary during `for`/`jq` iteration; it now stays a record.
+  - `${#…}` in the scatter/gather sync path returned the string byte-length
+    instead of the element/key count (`${#xs}` on a 3-element list gave `7`);
+    `${#…}` on binary now counts bytes.
+  - A negative slice *end* (`${xs[0:-1]}`) was misread as a `:-default` and
+    mangled to `1]`; the `:-` scanners are now subscript-aware. Length or default
+    on a *subscripted* path (`${#u[tags]}`, `${cfg[port]:-8080}`) — which silently
+    returned `0` / the default — is now a loud "bind it first" error pending full
+    path-aware support.
 - **`--help`/`-h` now passes through to `with_owned_output()` tools** — the
   kernel's generic help router no longer intercepts it for tools that re-parse
   their own argv, so a leaf request like `tool subcmd --help` reaches the tool

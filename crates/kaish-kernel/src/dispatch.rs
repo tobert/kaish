@@ -232,7 +232,14 @@ impl BackendDispatcher {
         // process's OS env. Frontends that want OS-env passthrough (REPL, MCP)
         // populate it via KernelConfig::initial_vars at construction.
         cmd.env_clear();
-        for (var_name, value) in ctx.scope.exported_vars() {
+        let exported = ctx.scope.exported_vars();
+        // A structured value can't cross the process boundary; refuse rather than
+        // silently JSON-serialize it into the child's environment. Kept in sync
+        // with the production spawn site in kernel.rs::try_execute_external.
+        if let Some(msg) = crate::interpreter::structured_export_error(&exported) {
+            return Some(ExecResult::failure(1, msg));
+        }
+        for (var_name, value) in exported {
             cmd.env(var_name, crate::interpreter::value_to_string(&value));
         }
 

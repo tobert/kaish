@@ -345,21 +345,83 @@ review; verified locally):**
   "quote-bearing key with `]`" diagnostic. (Same root cause bounds the empty
   subscript `${r[]}` → `Key("")` oddity — reject in the validator if we care.)
 
-**Envelope-free must hold through downstream `.data` consumers (2026-07-01, from
-the json-bridge deepseek review):** `fromjson` converts external JSON with
-`json_to_value_no_envelope` (envelope-free at ingress), but two consumers still
-re-sniff the byte-envelope on `Value::Json` sub-values via the sniffing
-`json_to_value`: the `for` loop's array-element spread (`kernel.rs:2177`) and
-`jq`'s single-value output (`jq_native.rs:689`). So `for i in $(fromjson
-'[{"_type":"bytes",…}]')` silently decodes an envelope-shaped array element to
-`Value::Bytes` — the exact silent conversion the guarantee forbids, just one hop
-downstream. Pre-existing (these sites predate the bridge and were written for
-internal round-tripping, where re-decoding is correct). **Fold into step-2
-read-side traversal**, which is all about envelope-free access: switch these to
-`json_to_value_no_envelope` (verify no internal builtin relies on a `.data` array
-element round-tripping to bytes — `dd` emits `out_bytes`, not `.data` arrays, so
-it looks safe) and add the `for i in $(fromjson '[envelope]')` + `fromjson | jq
-'.'` regression tests the bridge PR deliberately left out of scope.
+**~~Envelope-free must hold through downstream `.data` consumers~~ FIXED
+2026-07-02** (`fix/collections-silent-traps`). The `for`-loop array-element spread
+(`kernel.rs:2177`) and `jq`'s single-value output (`jq_native.rs:689`) both
+re-sniffed the byte-envelope via the sniffing `json_to_value`, so `for i in
+$(fromjson '[{"_type":"bytes",…}]')` silently decoded an envelope-shaped element
+to `Value::Bytes`. Both now use `json_to_value_no_envelope` (jq's 2+-value path
+already handed raw serde through, so this makes the single-value path match).
+Regression test: `collection_access_tests::for_loop_over_envelope_shaped_elements_stays_a_record`.
+The `fromjson | jq '.'` roundtrip case remains untested — add if it recurs.
+
+**Overnight milestone review — collections read-access (2026-07-02, gemini-pro +
+fable-5 batches; every finding verified against the local build).** Cross-model
+consensus. **The silent-corruption cluster (#1–#5) FIXED 2026-07-02**
+(`fix/collections-silent-traps`, failing-first tests each); the structural item
+(#6) and the small tail remain open.
+
+- **~~`${cfg[port]:-8080}` always returned the default; `${xs[0:-1]}` → `1]`~~ FIXED**
+  (fable A1). Both `:-` scanners (`find_default_separator`/`_in_content`, `parser.rs`)
+  are now bracket-aware, so a `:-` *inside* a subscript (negative slice end) is no
+  longer read as a default separator — `${xs[0:-1]}` slices correctly. A genuine `:-`
+  *after* a subscript (`${cfg[port]:-8080}`, name still carries `[port]`) now trips a
+  **loud "bind it first" error** instead of silently returning the default. (Full
+  path-aware default semantics defer to #6 — the `VarWithDefault.name`→`VarPath`
+  conversion.)
+- **~~`${#u[tags]}` silently `0`; `${#xs}` byte-length not element count in sync~~ FIXED**
+  (fable A2 + gemini #3). `scheduler/pipeline.rs`'s two reduced-sync sites now use
+  `value_length` (they were `value_to_string(value).len()` → `${#xs}` on `[1,2,3]`
+  gave `7`); `value_length` counts `Value::Bytes` by byte length. `${#u[tags]}` (a
+  subscripted name) is now a **loud "bind it first" error**, not silent `0` — full
+  nested length defers to #6.
+- **~~collection-vs-scalar `==`/`!=` silently `false`~~ FIXED** (gemini #1 / fable A4).
+  `values_equal` now returns `EvalResult<bool>` and yields `EvalError::Unsupported`
+  for the collection-vs-scalar case (surfaces as a loud `Err` from `execute`, same
+  contract as the `=~` regex fix). Pulled forward ahead of `in`/membership. `!=`
+  propagates the same error.
+- **~~`export` of a structured value silently JSON-serialized~~ FIXED** (gemini #2).
+  `structured_export_error` guards before `cmd.env(...)` at both spawn sites
+  (`kernel.rs::try_execute_external` + test-only twin `dispatch.rs::try_external`),
+  naming the var and pointing at `export CFG=$(tojson $CFG)`.
+- **~~for-loop / jq envelope re-sniff~~ FIXED** — see the "Envelope-free" entry above
+  (folded together; `kernel.rs:2177` + `jq_native.rs:689` now `_no_envelope`).
+
+- **OPEN, STRUCTURAL (awaiting Amy) — #6: extract a two-phase bind/walk resolver
+  before lvalues** (fable's "single most important thing before the grammar"). Full
+  design captured in [arrays-and-hashes.md](arrays-and-hashes.md) Implementation notes
+  ("Two-phase bind/walk resolver"). In short: `Scope::apply_segment` fuses classify +
+  walk + per-hop `clone()`+unwrap (O(n²) for `for k in $u; ${u[$k]}`); the write side
+  needs `&mut` serde navigation and can't reuse it, so building lvalues on it
+  duplicates the classification/message logic under `&mut` and read/write drift.
+  Split into **Bind** `(VarPath, &Scope) → Result<Vec<ConcreteStep>, PathError>` +
+  **Walk** over `&serde_json::Value`. Converting `VarLength`/`VarWithDefault` to carry
+  a `VarPath` (unblocks nested `${#path}` and default-on-path from #1/#2) folds in
+  here, as does arithmetic's hand-collected brackets (fixes fable A3) and
+  full-path-prefix error messages. **Do not start without a design pass with Amy.**
+- **DECIDED (2026-07-02) — `${path:-default}` semantics for #6:** `:-` is **lenient on
+  absence** (unset root, missing key, out-of-bounds, empty → the default) but **loud on
+  shape errors** (string key on a list, int index on a record, subscript-on-scalar).
+  Rationale: `:-` *is* the absence affordance; strictness stays available per-expression
+  via the `:-`-free bare form (`${r[k]}`, already loud); `[[ k in $r ]]`/`jq has()` cover
+  the boolean-branch case. No global `set -o strict` for now. Implementation dependency:
+  #6's `Bind` must split today's single `PathError::Invalid` into **absence** vs
+  **shape** so `:-` can catch only absence — full writeup in arrays-and-hashes.md
+  ("Length/default on a subscripted path" + the resolver Implementation note). `${#path}`
+  stays loud "bind first" until path-aware (no default-style leniency question there).
+- **OPEN — reduced sync path still coalesces** (unchanged, see the separate P3 entry
+  above): the subscripted-name loud guard lands in `eval.rs` (sync) + `kernel.rs`
+  (async), but `scheduler/pipeline.rs`'s `eval_string_parts_sync` has no error channel,
+  so a subscripted `${#u[tags]}` there is still silent-0. Rides the P3 error-channel
+  work when the scatter/gather arg path is next touched.
+- **OPEN — P3/P4 tail** (verified, non-blocking): `fromjson` on an already-typed value
+  stringifies-then-reparses and loses `Value::Bytes` (gemini #4 — short-circuit typed
+  values); async `VarRef` "undefined variable" omits the name (`kernel.rs:eval_expr_async`)
+  while the sync path includes it; missing-key errors could list available keys;
+  `${.a}`/`${a.}` empty dot segments resolve as `${a}` silently. Help-tier: rank is an
+  *instance* property but documented as a *slot* property — a locale translation
+  forgetting `.ranked(n)` silently reorders that locale's onboarding (add a cross-locale
+  rank-parity test) — refines the Reference/Contrast P4 above.
 
 ### Split `kernel.rs::execute_stmt_flow`
 `kernel.rs:1463`–~1913 is a 16-arm async match (kernel.rs is ~6,838 lines); each

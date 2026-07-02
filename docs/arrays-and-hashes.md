@@ -259,12 +259,17 @@ for the record.
   `eval.rs:747` — correct by accident; make it correct by design), and `$(( ${cfg[port]} + 1 ))`
   just works. One model, no "JSON-flavored scalars" second species.
 
-- **Comparison semantics for collections.** *(Added 2026-07-01.)* `==`/`!=` between two
-  collections is **structural JSON equality** (records order-insensitive — `serde_json::Map`
-  equality; lists order-sensitive). A collection compared to a scalar is a **loud error** with a
-  hint ("use `in` for membership; jq for structural queries") — `[[ $list == banana ]]` being
-  silently false is exactly the trap `in` exists to close. Ordering operators (`<`, `-lt`, …) on
-  collections are errors.
+- **Comparison semantics for collections.** *(Added 2026-07-01; collection-vs-scalar landed
+  2026-07-02.)* `==`/`!=` between two collections is **structural JSON equality** (records
+  order-insensitive — `serde_json::Map` equality; lists order-sensitive). A collection compared
+  to a scalar is a **loud error** with a hint ("use `in` for membership; jq for structural
+  queries") — `[[ $list == banana ]]` being silently false is exactly the trap `in` exists to
+  close. Ordering operators (`<`, `-lt`, …) on collections are errors. **Implemented**:
+  `values_equal` (`eval.rs`) now returns `EvalResult<bool>` and yields `EvalError::Unsupported`
+  for the collection-vs-scalar case; it surfaces as a loud `Err` from `kernel.execute()`, the
+  same LOUD contract as the `=~` regex-error fix (a JSON *scalar* is unwrapped at the value
+  boundary, so only Array/Object reach the guard). Pulled forward ahead of `in`/membership
+  because read-access already lets collections reach `[[ ]]`.
 
 - **Assignment lvalues — bracket paths, loud errors, no autovivification.** *(Added
   2026-07-01.)* `name[seg][seg…]=value` writes into a collection in place:
@@ -321,9 +326,42 @@ for the record.
 - **Length is `${#…}`, not a `len` builtin.** `${#xs}` returns element count for a list and key
   count for a record — the existing `${#NAME}` param-expansion (LANGUAGE.md) extended to
   collections. One length form, no nested `len $(keys $r)` trap. Strings keep today's behavior.
-  *(Correction 2026-07-01: this is no longer "one spot" — there are now **three** duplicated
-  call sites: `kernel.rs:3761` (`Expr::VarLength`), `kernel.rs:3917` (in-string), and
-  `eval.rs:427` (sync path). Consolidate before extending.)*
+  *(Correction 2026-07-01: this is no longer "one spot" — there are now duplicated call sites in
+  `kernel.rs` (`Expr::VarLength` + in-string), `eval.rs` (sync), and `scheduler/pipeline.rs`
+  (reduced sync). Consolidate before extending.)* **Partly landed 2026-07-02**: all sites now
+  route length through the shared `value_length` helper (the `scheduler/pipeline.rs` sync path
+  previously returned the *string* byte-length — `${#xs}` on `[1,2,3]` gave `7`, not `3`), and
+  `value_length` counts `Value::Bytes` by byte length rather than the placeholder-string length.
+
+- **Length/default on a *subscripted path* — loud placeholder now, path-aware with the resolver.**
+  *(Spec gap the 2026-07-02 review surfaced; resolved as "loud, not silent". Default semantics
+  decided 2026-07-02.)* `${#u[tags]}` and `${cfg[port]:-8080}` were never given semantics, and the
+  code fell into silent-wrong-output: `${#u[tags]}` printed `0` (bare-name lookup of the literal
+  `"u[tags]"`) and `${cfg[port]:-8080}` **always** returned the default (the `:-` scanner + a
+  literal `scope.get`). Root cause: the `VarLength(String)` / `VarWithDefault{name:String}` AST
+  nodes carry a bare name and never reach the path resolver. **Interim (landed 2026-07-02):** the
+  two `:-` scanners are now bracket-aware so a genuine slice like `${xs[0:-1]}` (negative end) is
+  no longer misread as a default; a subscripted name in either form is a **loud "bind it first"
+  error** (`x=${u[tags]}; ${#x}`), never the silent wrong answer — until the nodes carry a
+  `VarPath` and resolve through the shared read resolver (folds into the bind/walk extraction; see
+  Implementation notes).
+
+  **Decided — `${path:-default}` is lenient on *absence*, loud on *misuse*.** When path support
+  lands, `${cfg[port]:-8080}` returns the value if the key is present and non-empty, else the
+  default — for an **unset root, a missing key, an out-of-bounds index, or an empty value**. The
+  `:-` operator *is* the absence affordance (matching every model's bash prior — `${x:-d}` has
+  always handled absence), so erroring on a missing key would defeat its purpose. Strictness stays
+  available *per expression* by not writing `:-`: bare `${cfg[port]}` is loud-on-absence (already
+  shipped), so the call site picks assert-vs-default by whether it types `:-`. **But `:-` does not
+  suppress a *shape* error** — a string key on a list, an integer index on a record, or
+  subscripting a scalar is "you're accessing it wrong," not "it's absent," and stays loud. This
+  needs the resolver to classify its failure as **absence vs shape**: today `PathError` lumps
+  missing-key and shape errors into one `Invalid` variant, so splitting them is a #6 resolver job
+  (`Bind` tags the error class; `:-` catches only absence). Complementary tools, not substitutes:
+  `${r[k]}` asserts (loud), `${r[k]:-d}` defaults (lenient on absence), `[[ k in $r ]]` is the
+  boolean check for branching (native form coming with membership; `jq 'has("k")'` works today).
+  **No global `set -o strict` for now** — the `:-`-free form already is the strict form; a mode
+  that makes even `:-` shout on missing-key is a small future bolt-on if a real need appears.
 
 - **String path interpolation is `${path}`; no auto-interpolation.** Inside a string, brace the
   subscripted path to bound it — `"${user[name]}"`, `"${user[tags][0]}"`, `"${user[$k]}"` —
@@ -350,12 +388,15 @@ for the record.
   glob `[[ $s == *sub* ]]`, or `case`). We're already extending the language; keeping substring
   on the sh muscle-memory path avoids overloading `in` and conflicting with `=~`.
 
-- **`export` of a structured value is an error.** You cannot put a list/record in an OS env var;
-  kaish will **not** silently JSON-serialize it. Today it does, at spawn time
-  (`kernel.rs:4561` and its synced test-only twin `dispatch.rs:231`; `export.rs:164` also
-  quote-stringifies for display) — flip to error at both spawn sites. If you want JSON in the
+- **`export` of a structured value is an error.** *(Landed 2026-07-02.)* You cannot put a
+  list/record in an OS env var; kaish will **not** silently JSON-serialize it. Both external-spawn
+  sites (`kernel.rs::try_execute_external` and its synced test-only twin
+  `dispatch.rs::try_external`) now call `structured_export_error` before `cmd.env(...)` and refuse
+  loudly, naming the variable and pointing at `export CFG=$(tojson $CFG)`. If you want JSON in the
   environment, serialize explicitly first. Surfacing this boundary loudly is the point — the
-  structured data model is otherwise invisible at the process edge.
+  structured data model is otherwise invisible at the process edge. *(`export.rs` display
+  formatting of a structured value at declaration time is untouched — the boundary that matters is
+  the process edge, and that's where the guard sits.)*
 
 - **Commas optional in BOTH lists and records.** `[1 2 3]` ≡ `[1, 2, 3]`; `{a: 1, b: 2}` ≡
   `{a: 1 b: 2}`. Records were shown comma-separated and lists space-separated, which would make
@@ -544,18 +585,21 @@ paths relative to `crates/kaish-kernel/src`).
 - **POSIX-name tightening for assignment LHS** happens in the assignment/env-prefix parser or
   validator — NOT the lexer: the `Ident` regex (`lexer.rs:596`, `[a-zA-Z_][a-zA-Z0-9_.@-]*`) is
   shared with command names (`some-tool`) and must keep accepting those.
-- **`${#…}` length**: three duplicated sites (`kernel.rs:3761`, `kernel.rs:3917`,
-  `eval.rs:427`), all `value_to_string(value).len()`. Consolidate to one helper, then
-  type-dispatch on `Value::Json` (array len / object key count).
+- **`${#…}` length**: consolidated 2026-07-02 onto the shared `value_length` helper across all
+  four sites (`kernel.rs` `Expr::VarLength` + in-string, `eval.rs` sync, `scheduler/pipeline.rs`
+  reduced sync — the last of which was still `value_to_string(value).len()`). The remaining length
+  work is *nested* length (`${#u[tags]}`): the `VarLength(String)` node carries a bare name, so it
+  can't reach a subscript — it's a loud "bind first" error until the node carries a `VarPath` (do
+  it with the resolver extraction below).
 - **`[[ in ]]`** routes through the existing async test path (`eval_test_async`,
   `kernel.rs:3821-3886`) so it is VFS/backend-aware. `TestExpr` (`ast/types.rs:304-318`) gains
   `In`/`NotIn`; RHS shape-dispatches on `Value::Json` (array → element membership; object → key
   membership; string RHS → error). The RHS must accept a list/record **literal**, not just a
   `$var` — Haiku produced `[[ $a not in [dog] ]]` (mind the glued-GlobWord case).
-- **Typed comparison**: `values_equal` (`eval.rs:747-763`) currently drops `Json(Bool)` vs
-  `Bool` to the stringify fallback. With boundary unwrap most cases become native-typed;
-  add the structural-equality arm for collection/collection and the loud error for
-  collection/scalar.
+- **Typed comparison**: DONE 2026-07-02 — `values_equal` (`eval.rs`) now returns
+  `EvalResult<bool>`, has the structural-equality arm for collection/collection (via
+  `serde_json::Value` `PartialEq`, records order-insensitive under `preserve_order`), and the
+  loud `EvalError::Unsupported` for collection/scalar. Boundary unwrap keeps scalar cases native.
 - **`for` over records**: the for-loop already iterates `Value::Json(Array)` element-wise
   (`kernel.rs:2130-2212`); add an `Object` arm yielding keys (insertion order). Add the soft
   W-code for bareword `keys`/`values` in a for-head.
@@ -566,9 +610,30 @@ paths relative to `crates/kaish-kernel/src`).
   don't either — `bind` is only called for assignments, for-vars, and function params). New
   pattern following `ScopeTracker::bind` (`scope_tracker.rs:81`): register `push`'s first arg as
   a var-target; undefined target → E-code; defined-but-not-a-list → runtime error.
-- **`export` structured error**: guard before `cmd.env(...)` at both spawn sites
-  (`kernel.rs:4561`, test-only twin `dispatch.rs:231` — the hermetic two-spawn-site rule) and in
-  `export.rs:164` display formatting.
+- **`export` structured error**: DONE 2026-07-02 — `structured_export_error` guards before
+  `cmd.env(...)` at both spawn sites (`kernel.rs::try_execute_external`, test-only twin
+  `dispatch.rs::try_external` — the hermetic two-spawn-site rule). `export.rs` declaration-time
+  display was deliberately left as-is (the process edge is the boundary that matters).
+- **Two-phase bind/walk resolver (the load-bearing extraction the write side needs).** *(Flagged
+  by the 2026-07-02 review as the single most important thing before the grammar; NOT yet done —
+  design with Amy first.)* Today `Scope::apply_segment` fuses three jobs — classify a segment
+  against the container (index-vs-key, negative-index normalization, every loud message), walk one
+  hop, and unwrap the child via `json_to_value_no_envelope` (cloning each subtree, so
+  `for k in $u; ${u[$k]}` is O(n²)). The lvalue navigator needs `&mut` serde-tree navigation and
+  can't reuse that walker, so building it separately duplicates the classification logic under
+  `&mut` — and read/write then drift on exactly the semantics that must never drift (`${a[-1]}`
+  read vs `a[-1]=x` write). Proposed split: **Bind** `(VarPath, &Scope) → Result<Vec<ConcreteStep>,
+  PathError>` (owns `value_as_index`, negative math, and every message; `arithmetic.rs` stops
+  hand-collecting brackets and calls this — fixing the quoted-key whitespace bug for free) + a
+  **Walk** over `&serde_json::Value` (unwrap at leaf only) with a later `&mut` twin sharing Bind
+  verbatim. Converting `VarLength`/`VarWithDefault` to carry a `VarPath` (root of the deferred
+  nested-length / default-on-path forms above) folds in here — and `Bind` is where the
+  **absence-vs-shape error classification** lives that `${path:-default}` needs (`:-` catches the
+  absence class — unset root / missing key / out-of-bounds / empty — but not a shape error; see
+  the default-semantics decision above). That means splitting today's single `PathError::Invalid`
+  into an absence variant and a shape/type variant, which Bind returns. Deep-path error messages
+  should thread the traversed prefix (today `${services[web][prot]}` errors as the fabricated flat
+  `${services[prot]}`), which is free once Bind owns the path.
 - **`...` spread**: new lexer token; no existing `..`/`...` handling to collide with. Scope it
   to `[ ]` value context only.
 
