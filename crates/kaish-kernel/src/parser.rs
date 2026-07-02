@@ -1951,8 +1951,31 @@ where
             right: Box::new(right),
         });
 
+    // Collection membership: `e in $coll` / `e not in $coll` (element-in-list,
+    // key-in-record; see docs/arrays-and-hashes.md). There is no dedicated
+    // `not` token — it lexes as a plain identifier, so `not_in` is matched as
+    // the two-word sequence `Ident("not") In`. `not_in` must be tried before
+    // `in` in the choice below so `e not in c` doesn't get parsed as `e` `in`
+    // failing on the stray `not` bareword.
+    let not_in = primary_expr_parser()
+        .then_ignore(select! { Token::Ident(s) if s == "not" => () })
+        .then_ignore(just(Token::In))
+        .then(primary_expr_parser())
+        .map(|(left, right)| TestExpr::NotIn {
+            left: Box::new(left),
+            right: Box::new(right),
+        });
+
+    let in_ = primary_expr_parser()
+        .then_ignore(just(Token::In))
+        .then(primary_expr_parser())
+        .map(|(left, right)| TestExpr::In {
+            left: Box::new(left),
+            right: Box::new(right),
+        });
+
     // Primary test expression (atomic - no compound operators)
-    let primary_test = choice((file_test, string_test, comparison));
+    let primary_test = choice((file_test, string_test, not_in, in_, comparison));
 
     // Build compound expressions with proper precedence:
     // Grammar:

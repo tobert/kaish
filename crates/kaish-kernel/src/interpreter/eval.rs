@@ -9,6 +9,8 @@
 
 use std::fmt;
 
+use kaish_types::json_to_value_no_envelope;
+
 use crate::arithmetic;
 use crate::ast::{BinaryOp, Expr, FileTestOp, Stmt, StringPart, StringTestOp, TestCmpOp, TestExpr, Value, VarPath};
 use crate::vfs::DirEntry;
@@ -390,6 +392,16 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             TestExpr::Not { expr } => {
                 let result = self.eval_test(expr)?;
                 !value_to_bool(&result)
+            }
+            TestExpr::In { left, right } => {
+                let left_val = self.eval(left)?;
+                let right_val = self.eval(right)?;
+                eval_membership(&left_val, &right_val)?
+            }
+            TestExpr::NotIn { left, right } => {
+                let left_val = self.eval(left)?;
+                let right_val = self.eval(right)?;
+                !eval_membership(&left_val, &right_val)?
             }
         };
         Ok(Value::Bool(result))
@@ -858,6 +870,54 @@ fn values_equal(left: &Value, right: &Value) -> EvalResult<bool> {
         // Mixed scalars (most commonly String vs Int/Float from a quoted variable
         // against a numeric literal): fall back to string equality.
         _ => Ok(value_to_string(left) == value_to_string(right)),
+    }
+}
+
+/// Element-scan equality for `in`: unlike [`values_equal`] (which powers
+/// `==`/`!=` and errors loudly on a collection-vs-scalar comparison), a
+/// membership scan must never abort partway through a list just because one
+/// *element* happens to be a nested collection — that element is simply "not
+/// a match," the same as any other non-equal element. Two collections are
+/// equal only if they're structurally equal (`==` on the underlying JSON); a
+/// collection is never equal to a scalar. The loud error for `in` stays
+/// reserved for the whole RHS being a scalar (see [`eval_membership`]).
+fn element_matches(needle: &Value, element: &Value) -> bool {
+    match (needle, element) {
+        (Value::Json(a), Value::Json(b)) => a == b,
+        (Value::Json(_), _) | (_, Value::Json(_)) => false,
+        // Neither side is a collection here, so `values_equal` can't hit its
+        // collection-vs-scalar error arm — this can never actually error.
+        _ => values_equal(needle, element).unwrap_or(false),
+    }
+}
+
+/// Evaluate `[[ e in $coll ]]` membership: shape-dispatch on the RHS.
+///
+/// A list tests element membership (typed equality — reuses [`values_equal`]
+/// via [`element_matches`] so `443 in ${servers[web]}` matches a JSON number
+/// 443, not just the string "443"; a nested-collection element is just "not a
+/// match," never an abort). A record tests key membership (the LHS is
+/// stringified, since record keys are always strings). A scalar/string RHS is
+/// a loud error — substring tests use `=~`/glob/`case`, never `in` (see
+/// docs/arrays-and-hashes.md).
+fn eval_membership(needle: &Value, haystack: &Value) -> EvalResult<bool> {
+    match haystack {
+        Value::Json(serde_json::Value::Array(items)) => {
+            for item in items {
+                let element = json_to_value_no_envelope(item.clone());
+                if element_matches(needle, &element) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        Value::Json(serde_json::Value::Object(map)) => {
+            Ok(map.contains_key(&value_to_string(needle)))
+        }
+        other => Err(EvalError::Unsupported(format!(
+            "`in` requires a list or record on the right-hand side, got {} — substring tests use `=~`, glob (`[[ $s == *sub* ]]`), or `case`",
+            type_name(other),
+        ))),
     }
 }
 

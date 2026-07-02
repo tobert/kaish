@@ -215,6 +215,15 @@ mkdir /tmp/work && cd /tmp/work && echo "ready"
 [[ $filename =~ "\.rs$" ]]      # regex match (quotes allowed, unlike bash)
 [[ $input !~ "^[0-9]+$" ]]      # regex not match
 
+# Collection membership (list → element, record → key; typed equality, so
+# 443 in a list matches the JSON number, not just the string "443")
+[[ banana in $fruits ]]         # element in a list
+[[ name in $user ]]             # key in a record
+[[ tmp not in $services ]]      # negated membership
+[[ 443 in ${servers[web]} ]]    # nested path as the RHS
+# A scalar/string RHS is a loud error — use =~, glob ([[ $s == *sub* ]]), or
+# case for substring tests; `in` is collection-only.
+
 # Compound expressions (with short-circuit evaluation)
 [[ -f file && -d dir ]]         # logical AND
 [[ -z "$VAR" || -n "$DEFAULT" ]] # logical OR

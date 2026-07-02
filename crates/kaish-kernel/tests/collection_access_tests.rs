@@ -383,3 +383,242 @@ async fn for_loop_over_envelope_shaped_elements_stays_a_record() {
     // Envelope-free: the element is still a record, so `[_type]` reads "bytes".
     assert_eq!(out, "bytes");
 }
+
+// ── Membership: `[[ e in $coll ]]` / `[[ e not in $coll ]]` ────────────────
+// See docs/arrays-and-hashes.md — "Membership `in` is collection-only": a
+// list tests element membership (typed equality), a record tests key
+// membership, and a scalar/string RHS is a loud error (mirrors the
+// collection-vs-scalar `==`/`!=` traps above, same LOUD contract).
+
+#[tokio::test]
+async fn element_in_list_is_true() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"fruits=$(fromjson '["apple","banana","cherry"]'); if [[ banana in $fruits ]]; then echo "have banana"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "have banana");
+}
+
+#[tokio::test]
+async fn element_not_in_list_is_false() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"fruits=$(fromjson '["apple","banana","cherry"]'); if [[ mango in $fruits ]]; then echo "hit"; else echo "miss"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "miss");
+}
+
+#[tokio::test]
+async fn key_in_record_is_true() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"user=$(fromjson '{"name":"amy","role":"maintainer"}'); if [[ name in $user ]]; then echo "has name"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "has name");
+}
+
+#[tokio::test]
+async fn key_not_in_record_is_false() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"user=$(fromjson '{"name":"amy"}'); if [[ email in $user ]]; then echo "hit"; else echo "miss"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "miss");
+}
+
+#[tokio::test]
+async fn not_in_negates_list_membership() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"services=$(fromjson '{"web":{},"api":{}}'); if [[ tmp not in $services ]]; then echo "no tmp"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "no tmp");
+}
+
+#[tokio::test]
+async fn not_in_is_false_when_element_present() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"fruits=$(fromjson '["apple","banana"]'); if [[ banana not in $fruits ]]; then echo "hit"; else echo "miss"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "miss");
+}
+
+#[tokio::test]
+async fn membership_nested_list_numeric_element() {
+    // `[[ 443 in ${servers[web]} ]]` — the doc's headline membership example:
+    // typed equality means the JSON number 443 matches, not just the string
+    // "443".
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"servers=$(fromjson '{"web":[80,443,8080]}'); if [[ 443 in ${servers[web]} ]]; then echo "found"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "found");
+}
+
+#[tokio::test]
+async fn membership_inside_a_for_loop() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"xs=$(fromjson '[1,2,3]'); for v in $(fromjson '[1,2,3]'); do if [[ $v in $xs ]]; then echo $v; fi; done"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "1\n2\n3");
+}
+
+#[tokio::test]
+async fn membership_compound_and() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"fruits=$(fromjson '["apple","banana"]'); services=$(fromjson '{"web":{}}'); if [[ apple in $fruits && web in $services ]]; then echo both; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "both");
+}
+
+#[tokio::test]
+async fn string_rhs_is_a_loud_error_for_in() {
+    // A string/scalar RHS is never silently false — use =~/glob/case for
+    // substring tests.
+    let k = setup().await;
+    let result = k.execute(r#"if [[ x in "hello" ]]; then echo hit; fi"#).await;
+    assert!(result.is_err(), "`in` with a string RHS must be a loud error");
+    let msg = format!("{:#}", result.unwrap_err());
+    assert!(
+        msg.contains("list or record"),
+        "should name the required RHS shape: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn string_rhs_is_a_loud_error_for_not_in() {
+    // The negation must be loud too — never silently true.
+    let k = setup().await;
+    let result = k.execute(r#"if [[ x not in "hello" ]]; then echo hit; fi"#).await;
+    assert!(result.is_err(), "`not in` with a string RHS must be a loud error");
+    let msg = format!("{:#}", result.unwrap_err());
+    assert!(
+        msg.contains("list or record"),
+        "should name the required RHS shape: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn int_rhs_is_a_loud_error_for_in() {
+    // Non-string scalars must be loud too, not just strings.
+    let k = setup().await;
+    let result = k.execute(r#"n=5; if [[ 1 in $n ]]; then echo hit; fi"#).await;
+    assert!(result.is_err(), "`in` with an int RHS must be a loud error");
+}
+
+// ── RHS is a general expression, not just `$var`/`${path}` ────────────────
+// `in`/`not in` mirror `==`/`!=`: both operands route through the same
+// expression evaluator, so a `$(...)` RHS in expression position resolves to
+// its typed `.data` (structured `Value::Json`), not a stringified capture.
+
+#[tokio::test]
+async fn command_subst_rhs_element_present() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"if [[ 20 in $(fromjson '[10,20,30]') ]]; then echo "found"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "found");
+}
+
+#[tokio::test]
+async fn command_subst_rhs_element_absent() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"if [[ 99 in $(fromjson '[10,20,30]') ]]; then echo "hit"; else echo "miss"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "miss");
+}
+
+#[tokio::test]
+async fn command_subst_rhs_via_jq_pipeline() {
+    // A different builtin (jq, not fromjson) producing `.data` through a
+    // pipe — pins that `in`'s RHS isn't special-cased to one producer.
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"if [[ 20 in $(echo "[10,20,30]" | jq ".") ]]; then echo "found"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "found");
+}
+
+// ── Element scan never aborts on a nested-collection element ───────────────
+// `values_equal` (which powers `==`/`!=`) errors loudly on collection-vs-
+// scalar, but a membership *scan* must treat a nested-collection element as
+// simply "not a match" and keep going — the loud error is reserved for the
+// whole RHS being a scalar, not for what an individual element happens to be.
+
+#[tokio::test]
+async fn scan_skips_nested_object_element_without_erroring() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"xs=$(fromjson '[1,{"a":1},5]'); if [[ 5 in $xs ]]; then echo "found"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "found");
+}
+
+#[tokio::test]
+async fn scan_skips_nested_array_element_without_erroring() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"xs=$(fromjson '[1,[2,3],5]'); if [[ 5 in $xs ]]; then echo "found"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "found");
+}
+
+#[tokio::test]
+async fn scan_with_nested_element_and_no_match_is_clean_false() {
+    // Not just "doesn't crash when it eventually matches" — a miss over a
+    // mixed list must also resolve cleanly to false, not error.
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"xs=$(fromjson '[1,{"a":1},5]'); if [[ 9 in $xs ]]; then echo "hit"; else echo "miss"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "miss");
+}

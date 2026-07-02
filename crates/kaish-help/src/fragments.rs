@@ -327,10 +327,13 @@ cmd1 || cmd2              # cmd2 if cmd1 fails
 # String: -z (empty) -n (non-empty) == != =~ (regex) !~ (not regex)
 # Numeric: -gt -lt -ge -le
 # Logic: && || !
+# Membership: in (list→element, record→key) / not in — RHS must be a collection
 
 [[ -f config.json && -n $NAME ]]
 [[ $N -gt 5 ]]
 [[ $s =~ "\.rs$" ]]
+[[ banana in $fruits ]]
+[[ tmp not in $services ]]
 ```"#,
     ),
     syntax_section(

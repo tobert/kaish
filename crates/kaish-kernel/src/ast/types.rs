@@ -315,6 +315,11 @@ pub enum TestExpr {
     Or { left: Box<TestExpr>, right: Box<TestExpr> },
     /// Logical NOT: `[[ ! -f file ]]`
     Not { expr: Box<TestExpr> },
+    /// Collection membership: `[[ e in $list ]]` (element) / `[[ k in $record ]]`
+    /// (key). A scalar/string RHS is a loud error — see `docs/arrays-and-hashes.md`.
+    In { left: Box<Expr>, right: Box<Expr> },
+    /// Negated membership: `[[ e not in $coll ]]`.
+    NotIn { left: Box<Expr>, right: Box<Expr> },
 }
 
 /// File test operators for `[[ ]]`.

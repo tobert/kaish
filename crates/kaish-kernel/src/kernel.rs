@@ -3912,6 +3912,32 @@ impl Kernel {
                 TestExpr::Not { expr } => {
                     Ok(!self.eval_test_async(expr).await?)
                 }
+                TestExpr::In { left, right } => {
+                    let left_val = self.eval_expr_async(left).await?;
+                    let right_val = self.eval_expr_async(right).await?;
+                    let resolved = TestExpr::In {
+                        left: Box::new(Expr::Literal(left_val)),
+                        right: Box::new(Expr::Literal(right_val)),
+                    };
+                    let expr = Expr::Test(Box::new(resolved));
+                    let mut scope = self.scope.write().await;
+                    let value = eval_expr(&expr, &mut scope)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    Ok(value_to_bool(&value))
+                }
+                TestExpr::NotIn { left, right } => {
+                    let left_val = self.eval_expr_async(left).await?;
+                    let right_val = self.eval_expr_async(right).await?;
+                    let resolved = TestExpr::NotIn {
+                        left: Box::new(Expr::Literal(left_val)),
+                        right: Box::new(Expr::Literal(right_val)),
+                    };
+                    let expr = Expr::Test(Box::new(resolved));
+                    let mut scope = self.scope.write().await;
+                    let value = eval_expr(&expr, &mut scope)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    Ok(value_to_bool(&value))
+                }
             }
         })
     }
