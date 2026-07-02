@@ -1726,28 +1726,35 @@ fn mergeable_text(token: &Token) -> Option<String> {
 /// ("Implementation notes: Glob-merge is the big lexer collision" and the
 /// colon-fusion note right after it).
 ///
-/// A run is "at value position" when it opens immediately after `Token::Eq`
-/// (assignment) or a genuine membership `Token::In` — NOT a *statement-head*
-/// `in`, which reuses the exact same token. Both `for VAR in ITEMS` and
-/// `case EXPR in PATTERN)` take an `in` that introduces argv-shaped words
-/// (globs, brace expansion, char-class patterns), so their `in` must NOT open
-/// value position (`for x in *.txt` keeps fusing argv globs;
-/// `case 5 in [0-9]*)` keeps its char-class pattern as a `GlobWord`).
+/// A run is "at value position" when it opens immediately after a token that
+/// *grammatically* introduces a value — an **assignment** `=` or a
+/// **membership** `in`. The trap is that both of those tokens are reused for a
+/// non-value role: `Token::Eq` is also the `[[ ]]` comparison `=`
+/// (`[[ $x = [0-9]* ]]`), and `Token::In` is also the `for`/`case` statement
+/// head (`for f in *.txt`, `case 5 in [0-9]*)`). In every one of those
+/// non-value uses the following word is argv-shaped (a glob / char-class
+/// pattern) and must keep fusing, so getting this discrimination wrong breaks
+/// real syntax.
 ///
-/// `for` has a fixed three-token head (`For Ident In`), but `case` has a
-/// variable-length head (`case EXPR in`, where EXPR can be a VarRef, string,
-/// etc.), so a fixed lookback can't cover it. Instead we carry a *pending
-/// statement-head* flag: seeing `Token::For`/`Token::Case` arms it, and the
-/// FIRST `Token::In` while armed is that head's `in` (the `in` always comes
-/// right after the loop var / scrutinee) — treated as non-membership and the
-/// flag is consumed. A membership `in` inside `[[ ]]` is never preceded by an
-/// unconsumed `for`/`case` head, so it still correctly opens value position
-/// for its RHS.
+/// The discrimination is **grammar-exact by `[[ ]]` test depth**, which needs
+/// no per-keyword special-casing:
+/// - membership `in` occurs ONLY inside `[[ ]]`; a `for`/`case` head `in`
+///   occurs ONLY outside. So `Token::In` opens value position **iff
+///   `test_depth > 0`**.
+/// - an assignment `=` occurs outside `[[ ]]`; a comparison `=` occurs inside.
+///   So `Token::Eq` opens value position **iff `test_depth == 0`**.
 ///
-/// Depth is a simple counter, not a real stack — deeply-nested *glued*
-/// literals (e.g. `x=[[a] [b]]`) are a documented deferral (see
-/// docs/issues.md); spaced nesting (`[ [a] [b] ]`) was never glued in the
-/// first place and is unaffected.
+/// Tracking `test_depth` in the same forward pass also dissolves two `$()`
+/// leaks a hand-rolled keyword counter suffered: a bareword `in`/`for`/`case`
+/// inside `$(…)` sits at `test_depth == 0` and never opens value position (nor
+/// leaks any state past `RParen`), while a real sub-shell assignment
+/// `$(x=[a b])` is still `test_depth == 0` and correctly does. This replaces
+/// the earlier pending-`for`/`case` counter entirely.
+///
+/// `bracket_depth`/`brace_depth` are simple counters, not a real stack —
+/// deeply-nested *glued* literals (e.g. `x=[[a] [b]]`) are a documented
+/// deferral (see docs/issues.md); spaced nesting (`[ [a] [b] ]`) was never
+/// glued in the first place and is unaffected.
 #[derive(Clone, Copy, Default)]
 struct ValueContext {
     /// Inside (or opening) a value-position `[`/`{` literal — suppresses
@@ -1763,19 +1770,18 @@ fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
     let mut ctx = vec![ValueContext::default(); tokens.len()];
     let mut bracket_depth: usize = 0;
     let mut brace_depth: usize = 0;
+    // `[[ ]]` nesting depth. `[[` is two `Token::LBracket`, `]]` two
+    // `Token::RBracket` (kaish has no compound bracket token). This is what
+    // tells an assignment `=` from a comparison `=`, and a membership `in`
+    // from a `for`/`case` head `in`.
+    let mut test_depth: usize = 0;
     let mut expect_value = false;
-    // Armed by a `for`/`case` keyword; consumed by that head's `in` so it
-    // doesn't open value position. (`case` heads can nest — a `case` inside a
-    // branch — but each head's `in` consumes exactly one arming, so a counter
-    // is more robust than a bool if branches interleave.)
-    let mut pending_stmt_head_ins: usize = 0;
+    // Set after consuming the first `[`/`]` of a `[[`/`]]` pair so the paired
+    // bracket is skipped for depth accounting (it's a pure test delimiter).
+    let mut skip_paired_bracket = false;
 
     for i in 0..tokens.len() {
         let tok = &tokens[i].token;
-
-        // A statement-head `in` (the first `in` after a `for`/`case` keyword)
-        // is NOT a membership `in` — it introduces argv words, not a literal.
-        let is_stmt_head_in = matches!(tok, Token::In) && pending_stmt_head_ins > 0;
 
         let currently_value = expect_value || bracket_depth > 0 || brace_depth > 0;
         ctx[i] = ValueContext {
@@ -1783,17 +1789,56 @@ fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
             in_brace: brace_depth > 0,
         };
 
-        match tok {
-            Token::For | Token::Case => pending_stmt_head_ins += 1,
-            Token::In if pending_stmt_head_ins > 0 => pending_stmt_head_ins -= 1,
-            Token::LBracket if currently_value => bracket_depth += 1,
-            Token::RBracket if bracket_depth > 0 => bracket_depth -= 1,
-            Token::LBrace if currently_value => brace_depth += 1,
-            Token::RBrace if brace_depth > 0 => brace_depth -= 1,
-            _ => {}
+        if skip_paired_bracket {
+            // Second `[` of `[[` or second `]` of `]]`: already accounted for
+            // by its partner, no depth effect.
+            skip_paired_bracket = false;
+        } else {
+            match tok {
+                Token::LBracket => {
+                    let next_is_lbracket =
+                        matches!(tokens.get(i + 1).map(|t| &t.token), Some(Token::LBracket));
+                    if next_is_lbracket && !currently_value {
+                        // `[[` opens a test — NOT a value literal. The
+                        // `!currently_value` guard keeps a glued nested value
+                        // list (`x=[[a] [b]]`) as literal brackets, not a bogus
+                        // test.
+                        test_depth += 1;
+                        skip_paired_bracket = true;
+                    } else if currently_value {
+                        bracket_depth += 1;
+                    }
+                    // A lone `[` outside any value literal (argv `ls [dog]`,
+                    // a `[0-9]` char-class) neither opens a test nor a literal.
+                }
+                Token::RBracket => {
+                    let next_is_rbracket =
+                        matches!(tokens.get(i + 1).map(|t| &t.token), Some(Token::RBracket));
+                    if bracket_depth > 0 {
+                        // Close an open value-literal bracket first — in
+                        // `[[ x in [a b] ]]` the `[a b]`'s own `]` closes here
+                        // (bracket_depth 1→0) before the trailing `]]`.
+                        bracket_depth -= 1;
+                    } else if test_depth > 0 && next_is_rbracket {
+                        test_depth -= 1;
+                        skip_paired_bracket = true;
+                    }
+                }
+                Token::LBrace if currently_value => brace_depth += 1,
+                Token::RBrace if brace_depth > 0 => brace_depth -= 1,
+                _ => {}
+            }
         }
 
-        expect_value = matches!(tok, Token::Eq) || (matches!(tok, Token::In) && !is_stmt_head_in);
+        // Grammar-exact: assignment `=` (outside `[[ ]]`) and membership `in`
+        // (inside `[[ ]]`) open value position; comparison `=` and for/case
+        // head `in` do not. `Token::EqEq` (`==`) is a distinct token and never
+        // opens value position at all.
+        expect_value = match tok {
+            Token::Eq => test_depth == 0,
+            Token::In => test_depth > 0,
+            _ => false,
+        };
     }
 
     ctx

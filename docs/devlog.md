@@ -64,26 +64,37 @@ glob-merge/colon-merge passes skip fusion *only* where that flag is set. Value
 position starts right after `Token::Eq` (assignment) or a genuine membership
 `Token::In`; everything else is untouched.
 
-Three collisions the design doc's sketch didn't fully anticipate — two found
-by running the lexer against the invariant-guard cases, the third by an
-empirical smoke test on the built binary during review:
+The load-bearing subtlety is that the two tokens the suppression keys on are
+each **reused** for a non-value grammatical role, and getting the split wrong
+breaks real syntax. This took three iterations to get right (two intermediate
+heuristics landed and regressed before the grammar-exact rule) — the story is
+worth keeping because it's a clean case of "reason from the grammar, not the
+token":
 
-- **Statement-head `in` (`for … in`, `case … in`) reuses the exact same
-  `Token::In`** as `[[ e in $coll ]]` membership — there's no separate token.
-  Naively suppressing after any `In` turns `for x in [a]` (and `case 5 in
-  [0-9]*)`) into a suppressed/unfused bracket run instead of the `GlobWord`
-  the loop body / `case_parser`'s char-class branch expects. The first cut
-  used a fixed three-token lookback (`For Ident In`), which correctly covered
-  `for` but MISSED `case` — its head is variable-length (`case EXPR in`, EXPR
-  can be a VarRef/string/`$()`), so `case 5 in [0-9]*)` regressed to a parse
-  error ("found DASHNUM(0-9)" — the char-class branch doesn't accept `0-9`).
-  Replaced the `for`-only lookback with a general **pending-statement-head**
-  counter: `For`/`Case` arm it, the first `In` while armed consumes it and is
-  treated as non-membership. Every `for`/`case` head has a mandatory `in`
-  right after the loop var / scrutinee (and `echo for`/`echo case` are already
-  parse errors, so a `For`/`Case` token is always a real head), which keeps
-  the counter balanced; a membership `in` inside `[[ ]]` is never preceded by
-  an unconsumed head, so it still opens value position for its RHS.
+- **`Token::In` is both membership and a statement head; `Token::Eq` is both
+  assignment and `[[ ]]` comparison.** Membership `in` (`[[ e in $c ]]`) must
+  open value position for its RHS literal; a `for`/`case` head `in`
+  (`for f in *.txt`, `case 5 in [0-9]*)`) must NOT (the following word is an
+  argv glob / char-class pattern). Symmetrically, an assignment `=`
+  (`x=[a b]`) must open value position; a comparison `=` (`[[ $x = [0-9]* ]]`)
+  must NOT. The **grammar-exact discriminator is `[[ ]]` test depth**:
+  membership `in` occurs only *inside* `[[ ]]`, a head `in` only *outside*;
+  assignment `=` occurs *outside*, comparison `=` only *inside*. So
+  `compute_value_context` tracks `test_depth` in its forward pass and opens
+  value position on `Token::In` iff `test_depth > 0` and on `Token::Eq` iff
+  `test_depth == 0`. (`==` is a distinct `Token::EqEq` and never opens value.)
+  Two rejected intermediate heuristics that each shipped and regressed:
+  (1) a fixed three-token lookback `For Ident In` — covered `for` but missed
+  `case`'s variable-length head (`case EXPR in`), so `case 5 in [0-9]*)`
+  parse-errored; (2) a general pending-`for`/`case` counter — fixed the `in`
+  half but the `=` half was still wrong (`[[ $x = [0-9]* ]]` regressed), and a
+  bareword `for`/`case`/`in` inside `$(…)` could leak the counter/flag past
+  `RParen`. The `test_depth` rule subsumes all of it: no per-keyword casing, no
+  state to leak across `$()` (a bareword `in` inside `$(echo in)` is at
+  `test_depth 0` → never membership; a real sub-shell assignment `$(x=…)` is
+  also `test_depth 0` → still an assignment), and the `[[` detection is guarded
+  by `!currently_value` so a glued nested value list `x=[[a] [b]]` reads as
+  literal brackets, not a bogus test.
 - **A pure `Star`/`Question` glob at value position must NOT suppress.**
   The first pass suppressed *any* run that opened right after `Eq`, which
   broke the existing `X=*.txt` → literal-string-`"*.txt"` invariant (caught by
