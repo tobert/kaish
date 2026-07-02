@@ -61,7 +61,13 @@ pub(crate) fn describe_kind(value: &Value) -> &'static str {
         Value::String(_) => "a string",
         Value::Json(serde_json::Value::Array(_)) => "a list",
         Value::Json(serde_json::Value::Object(_)) => "a record",
-        Value::Json(_) => "a scalar",
+        // JSON scalars normally unwrap to native `Value`s at the access boundary,
+        // but name them precisely if one reaches here rather than lumping them
+        // all under "a scalar".
+        Value::Json(serde_json::Value::Null) => "null",
+        Value::Json(serde_json::Value::Bool(_)) => "a bool",
+        Value::Json(serde_json::Value::Number(_)) => "a number",
+        Value::Json(serde_json::Value::String(_)) => "a string",
         Value::Bytes(_) => "binary data",
     }
 }
