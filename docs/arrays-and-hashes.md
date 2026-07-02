@@ -416,6 +416,43 @@ for the record.
   formatting of a structured value at declaration time is untouched — the boundary that matters is
   the process edge, and that's where the guard sits.)*
 
+- **Semantics settled in the 2026-07-02 post-fable-review pass** *(feed #6 / follow-ups; recorded
+  so they aren't decided by accident inside the implementation):*
+  - **(A) `${path:-default}` triggers on absence + emptiness, not on falsy values.** The default
+    fires for: unset root, missing key, out-of-bounds index, JSON `null`, and an empty **string**
+    (bash `${x:-d}` parity). It does **not** fire for `false`, `0`, an empty list `[]`, or an empty
+    record `{}` — those are present values, and Python-style truthiness leaking into a shell would
+    be a silent-wrong factory. (`Absence`/`UndefinedRoot` PathError classes + a post-resolution
+    empty-string/null check; `Shape` never defaults — see the three-variant split.)
+  - **(B) Inside `$(( … ))`, a bareword subscript index is a VARIABLE, not a literal key.**
+    `$(( xs[i] + 1 ))` reads variable `i` (bash arithmetic prior; inside arithmetic everything is a
+    numeric expression). This is the one place the same spelling diverges by context: `${xs[i]}`
+    (interpolation) = literal key `"i"`; `$(( xs[i] ))` (arithmetic) = variable `i`. Both index by
+    `i` when written `${xs[$i]}` / `$(( xs[i] ))`. `Bind` takes a context flag; docs show the pair
+    side by side.
+  - **(C) `[[ e in $coll ]]` element equality = the same rule as `==`.** Implemented (not "by
+    accident"): `element_matches` (`eval.rs`) reuses `values_equal` for scalars (so `443` matches
+    JSON number 443, `1` matches index 1 via the numeric/string coercion), treats a nested
+    collection element as "not a match" (never an abort), and two collections structurally. Record
+    membership stringifies the needle (keys are strings). Pinned with tests.
+  - **(D) Collection at the boundary — display renders, the process edge refuses.** Display &
+    string interpolation (`echo $c`, `"x: $c"`) render **compact JSON** (pinned). A bare collection
+    **value** reaching an **external command's argv**, a **redirect target**, or an **env export**
+    is a **loud error** — require `$(tojson $c)`, so the serialization reads like what it does and
+    stays reversible (auto-expand could be added later but never retracted). Seam: `curl -d "$c"`
+    interpolates to a JSON *string* before argv, so it passes as a string; only the bare
+    `curl -d $c` (a live collection value) errors. Implement at external-arg resolution (a resolved
+    argv `Value::Json(Array|Object)` → error), mirroring the export guard.
+  - **(E) Scalar test operators on a collection operand are loud `Shape` errors** — `-z`, `-n`,
+    `=~`, `!~`, `-eq`/`-gt`/`-lt`/…, and ordering `<`/`>`. Decided as a matrix so no operator falls
+    to a stringify path one at a time. (`==`/`!=` already loud; membership `in` is the *only* op
+    that takes a collection RHS.)
+  - **(F) Ship a shape guard in the near term:** `typeof $x` (→ `list`/`record`/`string`/`number`/
+    `bool`/`null`/`bytes`) and/or `[[ -list $x ]]` / `[[ -record $x ]]`. It's the antidote to the
+    keys-on-list footgun and the API-shape-variance trap (Teaching note #12) — and "if it bites" is
+    too late, because the guard idiom won't exist to teach. Promote from "Out of scope" into the
+    first post-#6 cut.
+
 - **Commas optional in BOTH lists and records.** `[1 2 3]` ≡ `[1, 2, 3]`; `{a: 1, b: 2}` ≡
   `{a: 1 b: 2}`. Records were shown comma-separated and lists space-separated, which would make
   models hallucinate commas in lists (Gemini's catch); allowing optional commas in both removes

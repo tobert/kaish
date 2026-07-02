@@ -622,3 +622,46 @@ async fn scan_with_nested_element_and_no_match_is_clean_false() {
     assert_eq!(code, 0, "err: {err}");
     assert_eq!(out, "miss");
 }
+
+// ── Decision C (2026-07-02): pin `in` element equality == the `==` rule ──────
+
+#[tokio::test]
+async fn membership_index_in_bounds_via_keys() {
+    // The documented in-bounds idiom: `[[ i in $(keys $xs) ]]`. keys → integer
+    // indices; the bareword LHS coerces the same way `==` does.
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"xs=$(fromjson '[10,20,30]'); if [[ 1 in $(keys $xs) ]]; then echo "in"; fi; if [[ 9 in $(keys $xs) ]]; then echo "oob-hit"; else echo "oob-miss"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "in\noob-miss");
+}
+
+#[tokio::test]
+async fn membership_numeric_string_coercion_matches_like_eq() {
+    // A quoted numeric LHS matches a JSON number element — the same coercion
+    // `[[ "443" == 443 ]]` uses. Pins that `in` reuses `==`'s equality.
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"nums=$(fromjson '[80,443]'); if [[ "443" in $nums ]]; then echo "match"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "match");
+}
+
+#[tokio::test]
+async fn membership_bool_element() {
+    // Typed bool element membership (elements unwrap; typed compare).
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"flags=$(fromjson '[true,false]'); if [[ true in $flags ]]; then echo "yes"; fi"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "yes");
+}
