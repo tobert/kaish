@@ -387,18 +387,23 @@ consensus. **The silent-corruption cluster (#1–#5) FIXED 2026-07-02**
 - **~~for-loop / jq envelope re-sniff~~ FIXED** — see the "Envelope-free" entry above
   (folded together; `kernel.rs:2177` + `jq_native.rs:689` now `_no_envelope`).
 
-- **OPEN, STRUCTURAL (awaiting Amy) — #6: extract a two-phase bind/walk resolver
-  before lvalues** (fable's "single most important thing before the grammar"). Full
-  design captured in [arrays-and-hashes.md](arrays-and-hashes.md) Implementation notes
-  ("Two-phase bind/walk resolver"). In short: `Scope::apply_segment` fuses classify +
-  walk + per-hop `clone()`+unwrap (O(n²) for `for k in $u; ${u[$k]}`); the write side
-  needs `&mut` serde navigation and can't reuse it, so building lvalues on it
-  duplicates the classification/message logic under `&mut` and read/write drift.
-  Split into **Bind** `(VarPath, &Scope) → Result<Vec<ConcreteStep>, PathError>` +
-  **Walk** over `&serde_json::Value`. Converting `VarLength`/`VarWithDefault` to carry
-  a `VarPath` (unblocks nested `${#path}` and default-on-path from #1/#2) folds in
-  here, as does arithmetic's hand-collected brackets (fixes fable A3) and
-  full-path-prefix error messages. **Do not start without a design pass with Amy.**
+- **STRUCTURAL — #6: extract a two-phase bind/walk resolver before lvalues** (fable's
+  "single most important thing before the grammar"). Design pass with Amy in progress
+  (2026-07-02); full writeup in [arrays-and-hashes.md](arrays-and-hashes.md)
+  Implementation notes ("Two-phase bind/walk resolver"). In short: `Scope::apply_segment`
+  fuses classify + walk + per-hop `clone()`+unwrap (O(n²) for `for k in $(keys $u)` with
+  per-element `${u[$k]}`); the write side needs `&mut` serde navigation and can't reuse
+  it, so building lvalues on it duplicates the classification/message logic under `&mut`
+  and read/write drift. Split into **Bind** `(VarPath, &Scope) → Result<Vec<ConcreteStep>,
+  PathError>` + **Walk** over `&serde_json::Value`. Folds in: `VarLength`/`VarWithDefault`
+  → `VarPath` (unblocks nested `${#path}` / default-on-path from #1/#2, plus the lexer
+  `VarLength`-regex widening), arithmetic's hand-collected brackets (fixes fable A3), and
+  full-path-prefix error messages. **Design decisions settled 2026-07-02:** (a) `PathError`
+  becomes three variants — `UndefinedRoot` (soft) / `Absence` (missing key, OOB) / `Shape`
+  (wrong-type access); `${path:-default}` catches `UndefinedRoot`+`Absence`, `Shape` stays
+  loud. (b) The `for k in $record` / E012 question is **OUT of #6** — iteration is
+  `$()`-only, E012 unchanged, `keys`/`values` (landing separately) cover it. So #6 is now
+  purely the resolver extraction, no for-loop/validator work.
 - **DECIDED (2026-07-02) — `${path:-default}` semantics for #6:** `:-` is **lenient on
   absence** (unset root, missing key, out-of-bounds, empty → the default) but **loud on
   shape errors** (string key on a list, int index on a record, subscript-on-scalar).

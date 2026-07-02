@@ -108,12 +108,14 @@ if [[ name in $user ]]; then echo "has name"; fi          # key in record
 if [[ tmp not in $services ]]; then echo "no tmp"; fi     # absent
 if [[ apple in $fruits && web in $services ]]; then echo both; fi
 
-# ITERATION — a list iterates its ELEMENTS; a record iterates its KEYS (like
-# Python's `for k in dict`). Blocks are kaish's standard do/done & then/fi.
-for f in $fruits; do echo $f; done
-for k in $user; do echo "$k = ${user[$k]}"; done
-for v in $(values $user); do echo $v; done   # a builtin as a value needs $()
-for p in ${nested[tags]}; do echo $p; done   # iterate a nested list
+# ITERATION — always through a $() form. ANY bare `$var`/`${…}` in a for-head is
+# an error (E012, no implicit word splitting) — including a subscript access,
+# which is still a VarRef. keys/values work on ANY collection: a record → its
+# keys/values; a list → its indices/elements.
+for f in $(values $fruits); do echo $f; done              # list elements
+for k in $(keys $user); do echo "$k = ${user[$k]}"; done  # record keys
+for i in $(keys $fruits); do echo $i; done                # list indices [0,1,2,…]
+for p in $(values ${nested[tags]}); do echo $p; done      # nested list, still via $()
 ```
 
 ## Worked example
@@ -237,19 +239,30 @@ for the record.
   keys. Assignment *lvalues* use the same bracket paths, bare (no `${…}`) — `${…}` is for
   reading. **Untested surface — panel re-test required before sign-off** (Teaching note #8).
 
-- **Record iteration — `for k in $record` iterates its keys.** *(Added 2026-07-01; supersedes
-  the bare-builtin for-head, evidence #3.)* A list iterates elements (already true today —
-  `kernel.rs:2130` iterates `Value::Json(Array)` element-wise); a record iterates **keys**, in
-  insertion order — Python's exact `for k in dict` prior. Why not the bare-builtin head:
-  `for x in a b c` is *valid kaish today* (word list, `parser.rs:1219`), so `for k in keys $user`
-  already parses as a two-item list — the relaxed head wouldn't fill a grammar hole, it would
-  change the meaning of valid syntax based on whether word one names a builtin, and the set of
-  quasi-reserved words would grow with every future builtin. That fights "predictable" forever.
-  No compat break: a record in a for-head today iterates as a single opaque item, which nothing
-  sane relies on. `keys`/`values` stay ordinary builtins used via `$()` like any builtin
-  (`ks=$(keys $r)`). **Validator advisory** (soft W-code): a bareword `keys`/`values` directly in
-  a for-head (`for k in keys $user`) is legal word-list syntax that now silently iterates the
-  word "keys" plus the record's keys — nudge with the fix (`for k in $user` or `$(keys $user)`).
+- **Collection iteration is `$()`-only; a bare `$var` in a for-head stays E012.** *(REVISED
+  2026-07-02 — supersedes the "`for k in $record` iterates keys" decision of 2026-07-01.)* The
+  earlier plan let a bare record/list in the for-head iterate (keys / elements). It collided with
+  the validator's E012 (`ForLoopScalarVar`, `walker.rs:221`): E012 is a *static* hard error on any
+  bare `$var`/`${…}` in a for-head (it can't know the runtime type), and it exists to catch the
+  no-word-splitting mistake `for x in $stringvar`. Relaxing it for collections would either
+  reintroduce that footgun for strings or require a static type-guess. **Decision: don't relax
+  E012.** All collection iteration goes through a `$()` form, which E012 never touches (a
+  CommandSubst returns typed `.data`). This keeps E012's protection exactly where the mistake is,
+  makes every iteration unambiguous, and removes the whole for-head tangle from the resolver work
+  (#6). Note a subscript access `${nested[tags]}` is *also* a bare `VarRef` → also E012 → also
+  wrapped in `$()`.
+
+  **`keys`/`values` are the iteration workhorses, and work on ANY collection** *(list-argument
+  question resolved 2026-07-02)*: a **record** → its keys / its values (insertion order,
+  pairwise-aligned); a **list** → its **indices** `[0,1,…,n-1]` (`keys`) / its **elements**
+  (`values`) — the jq model. So: `for x in $(values $xs)` (list elements), `for i in $(keys $xs)`
+  (list indices), `for k in $(keys $r)` (record keys), `for v in $(values $r)` (record values).
+  A non-collection argument (scalar / bytes / unset) is a loud error. This also composes with
+  membership: `[[ 1 in $(keys $xs) ]]` is an in-bounds check, because `$(keys $xs)` yields a real
+  typed list.
+  - *(Possible future soft W-code, not required now: a bareword `for k in keys $user` — no `$()` —
+    is valid word-list syntax that iterates the literal word "keys" plus `$user`; a validator
+    advisory could nudge toward `$(keys $user)`. Lower priority; the `$()` idiom is the taught one.)*
 
 - **Access unwraps JSON scalars at the boundary.** *(Added 2026-07-01.)* A subscript access that
   lands on a JSON scalar yields the native `Value`: `Json(Bool)`→`Bool`, `Json(Number)`→`Int`
@@ -600,12 +613,13 @@ paths relative to `crates/kaish-kernel/src`).
   `EvalResult<bool>`, has the structural-equality arm for collection/collection (via
   `serde_json::Value` `PartialEq`, records order-insensitive under `preserve_order`), and the
   loud `EvalError::Unsupported` for collection/scalar. Boundary unwrap keeps scalar cases native.
-- **`for` over records**: the for-loop already iterates `Value::Json(Array)` element-wise
-  (`kernel.rs:2130-2212`); add an `Object` arm yielding keys (insertion order). Add the soft
-  W-code for bareword `keys`/`values` in a for-head.
-- **`keys`/`values`** dispatch on `Value::Json` shape (record → key list / value list, insertion
-  order — guaranteed pairwise-aligned). Key order is already deterministic: workspace
-  `serde_json` has `preserve_order` on (root `Cargo.toml:42`), matching jq.
+- **`for` over collections**: NO for-loop change — iteration is `$()`-only (see the revised
+  "Collection iteration" decision). The for-loop keeps iterating a CommandSubst's typed `.data`
+  array; a bare `$var`/`${…}` in a for-head stays E012. `keys`/`values` produce the iterable.
+- **`keys`/`values`** (landing 2026-07-02) dispatch on `Value::Json` shape: **record** → key list /
+  value list; **list** → index list `[0,1,…]` / element list — the jq model. Insertion order,
+  keys/values pairwise-aligned. Deterministic order: workspace `serde_json` has `preserve_order`
+  on (root `Cargo.toml:42`), matching jq. Non-collection arg → loud error.
 - **`push` validation**: no builtin registers a var-target in the validator today (`read`/`unset`
   don't either — `bind` is only called for assignments, for-vars, and function params). New
   pattern following `ScopeTracker::bind` (`scope_tracker.rs:81`): register `push`'s first arg as
@@ -628,12 +642,15 @@ paths relative to `crates/kaish-kernel/src`).
   **Walk** over `&serde_json::Value` (unwrap at leaf only) with a later `&mut` twin sharing Bind
   verbatim. Converting `VarLength`/`VarWithDefault` to carry a `VarPath` (root of the deferred
   nested-length / default-on-path forms above) folds in here — and `Bind` is where the
-  **absence-vs-shape error classification** lives that `${path:-default}` needs (`:-` catches the
-  absence class — unset root / missing key / out-of-bounds / empty — but not a shape error; see
-  the default-semantics decision above). That means splitting today's single `PathError::Invalid`
-  into an absence variant and a shape/type variant, which Bind returns. Deep-path error messages
-  should thread the traversed prefix (today `${services[web][prot]}` errors as the fabricated flat
-  `${services[prot]}`), which is free once Bind owns the path.
+  **absence-vs-shape error classification** lives that `${path:-default}` needs. **Decided
+  (2026-07-02): `PathError` becomes three variants** — `UndefinedRoot` (unchanged, soft) ·
+  **`Absence`** (missing key, out-of-bounds index) · **`Shape`** (string key on a list, integer
+  index on a record, subscript-on-scalar). `${path:-default}` catches `UndefinedRoot` + `Absence`
+  and yields the default; `Shape` always stays loud (a wrong-type access is a bug, not an absence).
+  Empty-value → default is a *post*-resolution check (the path resolved fine, the value's just
+  empty — bash semantics), not a `PathError`. `Bind` returns the classified error. Deep-path error
+  messages should thread the traversed prefix (today `${services[web][prot]}` errors as the
+  fabricated flat `${services[prot]}`), which is free once Bind owns the path.
 - **`...` spread**: new lexer token; no existing `..`/`...` handling to collide with. Scope it
   to `[ ]` value context only.
 
