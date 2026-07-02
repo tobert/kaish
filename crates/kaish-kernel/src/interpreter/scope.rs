@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use kaish_types::json_to_value_no_envelope;
+use kaish_types::{json_to_value_no_envelope, value_to_json};
 
 use crate::ast::{Value, VarPath, VarSegment};
 
@@ -282,6 +282,77 @@ fn descend<'a>(
                 None => Err(PathError::Absence(format!("${{{path}[{k}]}}: no such key"))),
             },
         },
+    }
+}
+
+/// Apply one classified step during a **write** walk's intermediate hops:
+/// descend mutably, requiring the child to already exist — no
+/// autovivification. Bounds/shape were already checked by `resolve_step`;
+/// this only adds the "must already exist" policy that only a write walk
+/// needs (a read's `descend` also requires existence for `Key`, but a write's
+/// *final* hop diverges — see `apply_leaf_write`). A `Slice` step can never
+/// be part of a valid lvalue path (mutating through a detached slice copy
+/// wouldn't write back), so it is always a loud `Shape` error here,
+/// intermediate or not.
+fn descend_mut<'a>(
+    current: &'a mut serde_json::Value,
+    step: Step,
+    path: &str,
+) -> Result<&'a mut serde_json::Value, PathError> {
+    match step {
+        Step::Slice(..) => Err(PathError::Shape(format!(
+            "${{{path}[..]}}: slice lvalues are not supported — index or key paths only"
+        ))),
+        Step::Index(i) => {
+            let Some(arr) = current.as_array_mut() else {
+                unreachable!("index classified against an array")
+            };
+            Ok(&mut arr[i])
+        }
+        Step::Key(k) => {
+            let Some(map) = current.as_object_mut() else {
+                unreachable!("key classified against an object")
+            };
+            match map.get_mut(&k) {
+                Some(child) => Ok(child),
+                None => Err(PathError::Absence(format!(
+                    "${{{path}[{k}]}}: no such key — no autovivification, create it first (e.g. `{path}[{k}]={{}}`)"
+                ))),
+            }
+        }
+    }
+}
+
+/// Apply the classified **final** step of a write walk: a record key inserts
+/// or updates (the one thing a path-set may create), a list index updates
+/// in-bounds (already validated by `resolve_step`'s `classify_index` — an
+/// out-of-bounds index is an `Absence` error before this is ever reached),
+/// and a slice is a loud `Shape` error (no slice lvalues — `push` grows
+/// lists).
+fn apply_leaf_write(
+    current: &mut serde_json::Value,
+    step: Step,
+    value: serde_json::Value,
+    path: &str,
+) -> Result<(), PathError> {
+    match step {
+        Step::Slice(..) => Err(PathError::Shape(format!(
+            "${{{path}[..]}}: slice lvalues are not supported — index or key paths only"
+        ))),
+        Step::Index(i) => {
+            let Some(arr) = current.as_array_mut() else {
+                unreachable!("index classified against an array")
+            };
+            arr[i] = value;
+            Ok(())
+        }
+        Step::Key(k) => {
+            let Some(map) = current.as_object_mut() else {
+                unreachable!("key classified against an object")
+            };
+            map.insert(k, value);
+            Ok(())
+        }
     }
 }
 
@@ -700,6 +771,90 @@ impl Scope {
         Ok(json_to_value_no_envelope(current.into_owned()))
     }
 
+    /// Write a value into a collection lvalue path: `xs[0]=9`,
+    /// `user[email]=amy@example.com`, `services[web][port]=9090`.
+    ///
+    /// Shares `resolve_step` with [`resolve_path`](Self::resolve_path) so
+    /// classification (bounds, shape) never drifts between read and write.
+    /// The walk itself diverges at the leaf: every intermediate hop requires
+    /// the child to already exist (`descend_mut` — **no autovivification**),
+    /// while the final hop may insert a new record key (`apply_leaf_write`) —
+    /// the ONLY thing a path-set may create. A list index write is in-bounds
+    /// update only (`resolve_step`'s `classify_index` already turns an
+    /// out-of-bounds index into a loud `Absence`); `push` is how lists grow.
+    /// A slice lvalue (`xs[0:2]=…`) is always a `Shape` error.
+    ///
+    /// The root must already be defined (`UndefinedRoot`) and be a collection
+    /// (`Shape` for a scalar root) — same rule as a read. On success the
+    /// mutated root replaces the old value via `set_global` (bracket-path
+    /// writes always update wherever the variable lives, regardless of
+    /// `local` — see `docs/arrays-and-hashes.md`, "Assignment lvalues").
+    pub fn walk_write(&mut self, path: &VarPath, value: Value) -> Result<(), PathError> {
+        let Some(VarSegment::Field(root_name)) = path.segments.first() else {
+            return Err(PathError::UndefinedRoot(String::new()));
+        };
+
+        let root = self
+            .get(root_name)
+            .ok_or_else(|| PathError::UndefinedRoot(root_name.clone()))?;
+
+        let mut root_json = match root {
+            Value::Json(j) => j.clone(),
+            other => {
+                return Err(PathError::Shape(format!(
+                    "${{{root_name}…}}: cannot subscript {} — it is not a collection",
+                    type_name(other)
+                )))
+            }
+        };
+
+        let subscripts = &path.segments[1..];
+        let Some((last, intermediates)) = subscripts.split_last() else {
+            // A bare name never reaches walk_write — the kernel routes a
+            // one-segment path through set/set_global. Guard defensively
+            // rather than silently no-op.
+            return Err(PathError::Shape(format!(
+                "{root_name}: assignment target has no subscript"
+            )));
+        };
+
+        let mut current = &mut root_json;
+        let mut prefix = root_name.clone();
+        for seg in intermediates {
+            let step = resolve_step(current, seg, self, &prefix)?;
+            current = descend_mut(current, step, &prefix)?;
+            prefix.push_str(&render_segment(seg));
+        }
+
+        let step = resolve_step(current, last, self, &prefix)?;
+        apply_leaf_write(current, step, value_to_json(&value), &prefix)?;
+
+        self.set_global(root_name.clone(), Value::Json(root_json));
+        Ok(())
+    }
+
+    /// Append value(s) to a top-level list variable, in place (`push xs val`).
+    ///
+    /// The target must already exist and be a list — an undefined or
+    /// non-list target is a loud error, never a silent create (see
+    /// `docs/arrays-and-hashes.md`, "Append — push"). Bracket-path push
+    /// (`push services[web][tags] item`) is deferred (see `docs/issues.md`);
+    /// this only handles a top-level bareword name.
+    pub fn walk_append(&mut self, name: &str, values: Vec<Value>) -> Result<(), String> {
+        let current = self
+            .get(name)
+            .ok_or_else(|| format!("push: {name} is not defined"))?;
+        if !matches!(current, Value::Json(serde_json::Value::Array(_))) {
+            return Err(format!("push: {name} is not a list ({})", type_name(current)));
+        }
+        let Value::Json(serde_json::Value::Array(mut arr)) = current.clone() else {
+            unreachable!("checked above")
+        };
+        arr.extend(values.iter().map(value_to_json));
+        self.set_global(name, Value::Json(serde_json::Value::Array(arr)));
+        Ok(())
+    }
+
     /// Check if a variable exists in any frame.
     pub fn contains(&self, name: &str) -> bool {
         self.get(name).is_some()
@@ -1047,5 +1202,149 @@ mod tests {
 
         let names = scope.exported_names();
         assert_eq!(names, vec!["A", "M", "Z"]);
+    }
+
+    // ── walk_write (lvalue assignment) ──────────────────────────────────────
+
+    /// Build `xs[seg]=value` and apply it.
+    fn write_at(
+        scope: &mut Scope,
+        root: &str,
+        segs: Vec<VarSegment>,
+    ) -> Result<(), PathError> {
+        let mut segments = vec![VarSegment::Field(root.into())];
+        segments.extend(segs);
+        scope.walk_write(&VarPath { segments }, Value::Int(0))
+    }
+
+    #[test]
+    fn walk_write_list_index_update() {
+        let mut scope = Scope::new();
+        scope.set("xs", Value::Json(serde_json::json!([1, 2, 3])));
+        let path = VarPath {
+            segments: vec![VarSegment::Field("xs".into()), VarSegment::Index(0)],
+        };
+        scope.walk_write(&path, Value::Int(9)).expect("write should succeed");
+        assert_eq!(scope.get("xs"), Some(&Value::Json(serde_json::json!([9, 2, 3]))));
+    }
+
+    #[test]
+    fn walk_write_negative_index() {
+        let mut scope = Scope::new();
+        scope.set("xs", Value::Json(serde_json::json!([1, 2, 3])));
+        let path = VarPath {
+            segments: vec![VarSegment::Field("xs".into()), VarSegment::Index(-1)],
+        };
+        scope.walk_write(&path, Value::Int(7)).expect("write should succeed");
+        assert_eq!(scope.get("xs"), Some(&Value::Json(serde_json::json!([1, 2, 7]))));
+    }
+
+    #[test]
+    fn walk_write_inserts_a_new_record_key() {
+        let mut scope = Scope::new();
+        scope.set("u", Value::Json(serde_json::json!({"port": 8080})));
+        let path = VarPath {
+            segments: vec![VarSegment::Field("u".into()), VarSegment::Key("host".into())],
+        };
+        scope
+            .walk_write(&path, Value::String("localhost".into()))
+            .expect("write should succeed");
+        assert_eq!(
+            scope.get("u"),
+            Some(&Value::Json(serde_json::json!({"port": 8080, "host": "localhost"})))
+        );
+    }
+
+    #[test]
+    fn walk_write_deep_path_updates_nested_key() {
+        let mut scope = Scope::new();
+        scope.set("s", Value::Json(serde_json::json!({"web": {"port": 8080}})));
+        let path = VarPath {
+            segments: vec![
+                VarSegment::Field("s".into()),
+                VarSegment::Key("web".into()),
+                VarSegment::Key("port".into()),
+            ],
+        };
+        scope.walk_write(&path, Value::Int(9000)).expect("write should succeed");
+        assert_eq!(
+            scope.get("s"),
+            Some(&Value::Json(serde_json::json!({"web": {"port": 9000}})))
+        );
+    }
+
+    #[test]
+    fn walk_write_out_of_bounds_index_is_absence() {
+        let mut scope = Scope::new();
+        scope.set("xs", Value::Json(serde_json::json!([1, 2, 3])));
+        let r = write_at(&mut scope, "xs", vec![VarSegment::Index(9)]);
+        assert!(matches!(r, Err(PathError::Absence(_))), "got: {r:?}");
+    }
+
+    #[test]
+    fn walk_write_missing_intermediate_is_absence_no_autoviv() {
+        let mut scope = Scope::new();
+        scope.set("s", Value::Json(serde_json::json!({"web": {"port": 8080}})));
+        let r = write_at(
+            &mut scope,
+            "s",
+            vec![VarSegment::Key("api".into()), VarSegment::Key("port".into())],
+        );
+        assert!(matches!(r, Err(PathError::Absence(_))), "got: {r:?}");
+        // The root is untouched — no partial autovivification.
+        assert_eq!(
+            scope.get("s"),
+            Some(&Value::Json(serde_json::json!({"web": {"port": 8080}})))
+        );
+    }
+
+    #[test]
+    fn walk_write_scalar_root_is_shape() {
+        let mut scope = Scope::new();
+        scope.set("y", Value::String("hi".into()));
+        let r = write_at(&mut scope, "y", vec![VarSegment::Index(0)]);
+        assert!(matches!(r, Err(PathError::Shape(_))), "got: {r:?}");
+    }
+
+    #[test]
+    fn walk_write_undefined_root_is_undefined_root() {
+        let mut scope = Scope::new();
+        let r = write_at(&mut scope, "z", vec![VarSegment::Index(0)]);
+        assert!(matches!(r, Err(PathError::UndefinedRoot(_))), "got: {r:?}");
+    }
+
+    #[test]
+    fn walk_write_slice_lvalue_is_shape() {
+        let mut scope = Scope::new();
+        scope.set("xs", Value::Json(serde_json::json!([1, 2, 3])));
+        let r = write_at(&mut scope, "xs", vec![VarSegment::Slice(Some(0), Some(2))]);
+        assert!(matches!(r, Err(PathError::Shape(_))), "got: {r:?}");
+    }
+
+    // ── walk_append (push) ──────────────────────────────────────────────────
+
+    #[test]
+    fn walk_append_extends_a_list_in_place() {
+        let mut scope = Scope::new();
+        scope.set("xs", Value::Json(serde_json::json!(["a", "b"])));
+        scope
+            .walk_append("xs", vec![Value::String("c".into())])
+            .expect("push should succeed");
+        assert_eq!(scope.get("xs"), Some(&Value::Json(serde_json::json!(["a", "b", "c"]))));
+    }
+
+    #[test]
+    fn walk_append_undefined_target_is_a_loud_error() {
+        let mut scope = Scope::new();
+        let r = scope.walk_append("nope", vec![Value::Int(1)]);
+        assert!(r.is_err(), "expected a loud error for an undefined target");
+    }
+
+    #[test]
+    fn walk_append_non_list_target_is_a_loud_error() {
+        let mut scope = Scope::new();
+        scope.set("y", Value::String("hi".into()));
+        let r = scope.walk_append("y", vec![Value::Int(1)]);
+        assert!(r.is_err(), "expected a loud error for a non-list target");
     }
 }

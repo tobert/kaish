@@ -309,6 +309,20 @@ elif [[ -list $data ]]; then
 fi
 
 tojson $u                 # serialize back to JSON text (--pretty to indent)
+
+# ASSIGNMENT — the same bracket paths write, in place, no spaces around `=`.
+# No autovivification — every intermediate must already exist with the right
+# shape; the ONLY thing a path-set may create is the final record key.
+xs[0]=9                   # in-bounds index update (negative index works too)
+u[host]=localhost         # record key: insert or update
+s[web][port]=9000         # deep path
+xs[9]=x                   # error — index out of bounds (push grows lists)
+s[api][port]=1            # error — no `api` key (no autoviv; init it first)
+user.email=x              # error — brackets only, use `user[email]=x`
+
+# push appends to a top-level LIST in place — takes the NAME (like read/unset)
+push xs date               # xs is now [...,"date"]
+push xs $rec               # values push as typed Values, not stringified text
 ```"#,
     ),
     syntax_section(

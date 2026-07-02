@@ -2058,12 +2058,26 @@ impl Kernel {
                 let value = self.eval_expr_async(&assign.value).await
                     .context("failed to evaluate assignment")?;
                 let mut scope = self.scope.write().await;
-                if assign.local {
-                    // local: set in innermost (current function) frame
-                    scope.set(&assign.name, value.clone());
+                if assign.path.segments.len() == 1 {
+                    // Plain `NAME=value` — no subscript, so `local` applies.
+                    if assign.local {
+                        // local: set in innermost (current function) frame
+                        scope.set(assign.name(), value.clone());
+                    } else {
+                        // non-local: update existing or create in root frame
+                        scope.set_global(assign.name(), value.clone());
+                    }
                 } else {
-                    // non-local: update existing or create in root frame
-                    scope.set_global(&assign.name, value.clone());
+                    // Subscripted lvalue (`xs[0]=v`, `user[email]=v`, …): always
+                    // mutates the existing root wherever it lives — `local` is
+                    // meaningless here (see docs/arrays-and-hashes.md, "Assignment
+                    // lvalues").
+                    scope.walk_write(&assign.path, value.clone()).map_err(|e| match e {
+                        PathError::UndefinedRoot(name) => anyhow::anyhow!(
+                            "{name}: undefined — create it first, e.g. `{name}={{}}` or `{name}=[]`"
+                        ),
+                        PathError::Absence(msg) | PathError::Shape(msg) => anyhow::anyhow!(msg),
+                    })?;
                 }
                 drop(scope);
 
@@ -2531,8 +2545,8 @@ impl Kernel {
                         Ok(value) => {
                             let mut scope = self.scope.write().await;
                             prior_export
-                                .push((assign.name.clone(), scope.is_exported(&assign.name)));
-                            scope.set_exported(&assign.name, value);
+                                .push((assign.name().to_string(), scope.is_exported(assign.name())));
+                            scope.set_exported(assign.name(), value);
                         }
                         Err(e) => {
                             setup_err = Some(e);

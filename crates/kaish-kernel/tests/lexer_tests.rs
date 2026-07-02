@@ -748,3 +748,45 @@ fn lexer_arithmetic_in_command_substitution(#[case] input: &str, #[case] expecte
 fn lexer_navigation_tokens(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
+
+// =============================================================================
+// Assignment lvalue subscripts: `fruits[0]=kiwi` must NOT fuse into a
+// `GlobWord` — the glob-merge pass suppresses fusion for a bracket run (no
+// `*`/`?`) immediately followed by `=`, distinct from the value-position
+// (RHS) suppression used by list/record literals. See
+// docs/arrays-and-hashes.md, "Assignment lvalues", and
+// `lexer::flush_glob_run`'s `followed_by_eq` parameter.
+// =============================================================================
+
+#[rstest]
+#[case::single_index("fruits[0]=kiwi", &["IDENT(fruits)", "LBRACK", "INT(0)", "RBRACK", "EQ", "IDENT(kiwi)"])]
+#[case::negative_index("xs[-1]=7", &["IDENT(xs)", "LBRACK", "INT(-1)", "RBRACK", "EQ", "INT(7)"])]
+#[case::bareword_key("user[email]=x", &["IDENT(user)", "LBRACK", "IDENT(email)", "RBRACK", "EQ", "IDENT(x)"])]
+#[case::chained_keys(
+    "s[web][port]=9000",
+    &["IDENT(s)", "LBRACK", "IDENT(web)", "RBRACK", "LBRACK", "IDENT(port)", "RBRACK", "EQ", "INT(9000)"]
+)]
+#[case::local_spaced(
+    "local xs[0] = 9",
+    &["LOCAL", "IDENT(xs)", "LBRACK", "INT(0)", "RBRACK", "EQ", "INT(9)"]
+)]
+fn lexer_assignment_lvalue_subscript_not_fused(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+/// A real glob pattern (has `*`) followed by `=` is NOT an lvalue and keeps
+/// fusing into a `GlobWord` — the `has_star_or_question` guard in
+/// `flush_glob_run` protects this.
+#[test]
+fn lexer_glob_pattern_before_eq_still_fuses() {
+    run_lexer_test("[[ $x = [0-9]*.txt ]]", &[
+        "LBRACK", "LBRACK", "SIMPLEVARREF(x)", "EQ", "GLOB([0-9]*.txt)", "RBRACK", "RBRACK",
+    ]);
+}
+
+/// A bracket run NOT followed by `=` (ordinary glob usage) is unaffected by
+/// the lvalue suppression and still fuses normally.
+#[test]
+fn lexer_bracket_char_class_without_eq_still_fuses() {
+    run_lexer_test("ls [dog]", &["IDENT(ls)", "GLOB([dog])"]);
+}

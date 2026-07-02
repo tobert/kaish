@@ -152,6 +152,8 @@ const CASES: &[Case] = &[
     },
     Case { name: "printf", setup: &[], cmd: "printf 'x' --json", expect: Expect::String },
     Case { name: "ps", setup: &[], cmd: "ps --json", expect: Expect::Array },
+    // push mutates in place and is silent on success, like unset.
+    Case { name: "push", setup: &["xs=[a b]"], cmd: "push xs c --json", expect: Expect::Empty },
     Case { name: "pwd", setup: &[], cmd: "pwd --json", expect: Expect::String },
     Case { name: "read", setup: &[], cmd: "echo hi | read X --json", expect: Expect::Empty },
     Case { name: "readlink", setup: &["ln -s tmp/data.json link.json"], cmd: "readlink link.json --json", expect: Expect::String },

@@ -66,6 +66,7 @@ mod mktemp;
 mod mv;
 mod output_limit;
 mod printf;
+mod push;
 mod pwd;
 mod read;
 mod readlink;
@@ -191,6 +192,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(output_limit::KaishOutputLimit);
     registry.register(patch::Patch);
     registry.register(printf::Printf);
+    registry.register(push::Push);
     #[cfg(all(target_os = "linux", feature = "host"))]
     registry.register(kaish_tools_host::Ps);
     registry.register(pwd::Pwd);

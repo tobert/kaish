@@ -75,13 +75,30 @@ impl Stmt {
     }
 }
 
-/// Variable assignment: `NAME=value` (bash-style) or `local NAME = value` (scoped)
+/// Variable assignment: `NAME=value` (bash-style), `local NAME = value` (scoped),
+/// or a bracket-path lvalue (`xs[0]=value`, `user[email]=value`,
+/// `services[web][port]=value`). The path's first segment is always the root
+/// `Field` name; a bare assignment is a one-segment path.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
-    pub name: String,
+    pub path: VarPath,
     pub value: Expr,
-    /// True if declared with `local` keyword (explicit local scope)
+    /// True if declared with `local` keyword (explicit local scope). Ignored
+    /// for a subscripted path — a bracket-path write always mutates the
+    /// existing root (see `docs/arrays-and-hashes.md`, "Assignment lvalues").
     pub local: bool,
+}
+
+impl Assignment {
+    /// The root variable name — the target of a bare assignment, or the root
+    /// of a subscripted lvalue path. The parser only ever builds an
+    /// `Assignment.path` starting with a `Field` segment, so this never fails.
+    pub fn name(&self) -> &str {
+        match self.path.segments.first() {
+            Some(VarSegment::Field(name)) => name,
+            _ => unreachable!("Assignment.path always starts with a root Field segment"),
+        }
+    }
 }
 
 /// A command invocation with arguments and redirections.
