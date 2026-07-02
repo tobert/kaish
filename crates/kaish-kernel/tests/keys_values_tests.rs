@@ -119,32 +119,83 @@ done
     assert_eq!(out, "web=8080\napi=9000");
 }
 
-// ── loud errors: non-record args, never silent list-index behavior ────────
+// ── lists: keys → indices, values → elements (jq semantics) ───────────────
 
 #[tokio::test]
-async fn keys_of_a_list_is_a_loud_error() {
+async fn keys_of_a_list_is_its_indices() {
     let k = setup().await;
-    let (_, code, err) = run(&k, r#"xs=$(fromjson '["a","b"]'); keys $xs"#).await;
-    assert_ne!(code, 0);
-    assert!(err.contains("expected a record"), "err: {err}");
-    assert!(err.contains("a list"), "err: {err}");
+    let (out, code, err) = run(&k, r#"xs=$(fromjson '["a","b","c"]'); keys $xs"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    // Indices are integers 0..N-1, not strings.
+    assert_eq!(out, "[0,1,2]");
 }
 
 #[tokio::test]
-async fn values_of_a_list_is_a_loud_error() {
+async fn keys_of_an_empty_list_is_an_empty_list() {
     let k = setup().await;
-    let (_, code, err) = run(&k, r#"xs=$(fromjson '["a","b"]'); values $xs"#).await;
-    assert_ne!(code, 0);
-    assert!(err.contains("expected a record"), "err: {err}");
-    assert!(err.contains("a list"), "err: {err}");
+    let (out, code, err) = run(&k, r#"xs=$(fromjson '[]'); keys $xs"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "[]");
 }
+
+#[tokio::test]
+async fn values_of_a_list_is_its_elements() {
+    let k = setup().await;
+    let (out, code, err) = run(&k, r#"xs=$(fromjson '["a","b","c"]'); values $xs"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, r#"["a","b","c"]"#);
+}
+
+#[tokio::test]
+async fn values_of_an_empty_list_is_an_empty_list() {
+    let k = setup().await;
+    let (out, code, err) = run(&k, r#"xs=$(fromjson '[]'); values $xs"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "[]");
+}
+
+#[tokio::test]
+async fn for_loop_over_keys_of_a_list_iterates_indices() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"
+xs=$(fromjson '["a","b","c"]')
+for i in $(keys $xs); do
+  echo "$i:${xs[$i]}"
+done
+"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "0:a\n1:b\n2:c");
+}
+
+#[tokio::test]
+async fn for_loop_over_values_of_a_list_iterates_elements() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"
+xs=$(fromjson '["a","b","c"]')
+for x in $(values $xs); do
+  echo $x
+done
+"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "a\nb\nc");
+}
+
+// ── loud errors: non-collection args only (scalar/bytes/missing) ──────────
 
 #[tokio::test]
 async fn keys_of_a_scalar_is_a_loud_error() {
     let k = setup().await;
     let (_, code, err) = run(&k, r#"keys hello"#).await;
     assert_ne!(code, 0);
-    assert!(err.contains("expected a record"), "err: {err}");
+    assert!(err.contains("expected a record or list"), "err: {err}");
     assert!(err.contains("a string"), "err: {err}");
 }
 
@@ -153,7 +204,7 @@ async fn values_of_a_scalar_is_a_loud_error() {
     let k = setup().await;
     let (_, code, err) = run(&k, r#"values 42"#).await;
     assert_ne!(code, 0);
-    assert!(err.contains("expected a record"), "err: {err}");
+    assert!(err.contains("expected a record or list"), "err: {err}");
     assert!(err.contains("a number"), "err: {err}");
 }
 

@@ -48,13 +48,16 @@ breaking entries are marked **BREAKING**.
   the "serialize explicitly first" escape hatch for `export CFG_JSON=$(tojson
   $cfg)`; binary values are refused loudly. Both are pure data (present in every
   capability build). `fromjson "$(tojson $x)"` round-trips `$x` structurally.
-- **`keys` / `values` builtins** — the native-collections OPS pair: `keys
-  $record` and `values $record` return a record's keys / values as a list, in
-  insertion order and pairwise-aligned (`for k in $(keys $r); do echo
-  "$k=${r[$k]}"; done`). Both accept a record directly (no nesting), land the
+- **`keys` / `values` builtins** — the native-collections OPS pair, jq
+  semantics over both records and lists: for a **record**, `keys` returns its
+  keys and `values` its values (insertion order, pairwise-aligned); for a
+  **list**, `keys` returns its indices as integers (`0..N-1`) and `values` its
+  elements. This makes `$(keys $c)` / `$(values $c)` the uniform iteration idiom
+  over any collection (`for i in $(keys $xs)`, `for x in $(values $xs)`, `for k
+  in $(keys $r)`). Both accept a collection directly (no nesting), land the
   result in `.data` for `$()` capture/iteration, and are pure data (present in
-  every capability build). A non-record argument (list, scalar, bytes, unset)
-  is a loud error naming the actual type, never silent list-index behavior.
+  every capability build). A non-collection argument (scalar, bytes, unset) is a
+  loud error naming the actual type.
 - **`json_to_value_no_envelope` (kaish-types)** — envelope-free JSON→`Value`
   conversion for external JSON, so byte-envelope-shaped objects are never
   silently decoded to `Value::Bytes`.
