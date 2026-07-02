@@ -2148,7 +2148,20 @@ fn flush_glob_run(
         .any(|t| matches!(t.token, Token::Star | Token::Question));
     let has_glob = has_star_or_question || has_bracket_pair;
 
-    let lvalue_suppress = followed_by_eq && has_bracket_pair && !has_star_or_question;
+    // An lvalue subscript run is a ROOT IDENTIFIER followed by brackets, so the
+    // run STARTS with an `Ident` (`arr[0]=` → run is `arr [ 0 ]`, glued, so
+    // `arr` is the first token OF the run — a lvalue root parses via
+    // `ident_parser()`, i.e. `Token::Ident`). A bare char-class comparison
+    // operand starts with `[` instead (`[[ [a] = b ]]` → the suppressible run
+    // is `[ a ]`, since the leading `[[` was flushed separately), so requiring
+    // an `Ident`-led run keeps `[[ [a] = b ]]` fusing-and-comparing as before
+    // while still catching every real lvalue.
+    let run_starts_with_ident = matches!(
+        run.first().map(|t| &t.token),
+        Some(Token::Ident(_))
+    );
+    let lvalue_suppress =
+        followed_by_eq && has_bracket_pair && !has_star_or_question && run_starts_with_ident;
     let suppress = (value_position_suppress && has_bracket_pair) || lvalue_suppress;
 
     if !suppress && run.len() >= 2 && has_glob {

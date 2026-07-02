@@ -70,6 +70,20 @@ async fn record_key_update_existing() {
 }
 
 #[tokio::test]
+async fn glued_nested_index_lvalue_writes() {
+    // `a[0][1]=9` — a chained-index lvalue (list of lists). The value comes
+    // from fromjson so this pins the lvalue write path, not glued nested
+    // literal construction.
+    let k = setup().await;
+    let out = ok(
+        &k,
+        r#"a=$(fromjson '[[1,2],[3,4]]'); a[0][1]=9; echo ${a[0][1]}"#,
+    )
+    .await;
+    assert_eq!(out, "9");
+}
+
+#[tokio::test]
 async fn deep_path_write() {
     let k = setup().await;
     let out = ok(
@@ -189,6 +203,29 @@ async fn push_undefined_target_is_loud() {
     let k = setup().await;
     let err = loud_err(&k, "push nope z").await;
     assert!(err.contains("not defined"), "got: {err}");
+}
+
+// ── Regression: the `=`-triggered lvalue lexer suppression must not fire on
+//    a BARE char-class comparison operand. `[[ [a] = b ]]` starts the
+//    suppressible run with `[`, not an Ident, so it stays a glob-vs-string
+//    comparison (parses and runs) — it is NOT a subscripted assignment. ──────
+
+#[tokio::test]
+async fn bare_char_class_comparison_operand_before_eq_is_not_an_lvalue() {
+    let k = setup().await;
+    // `[[ [a] = b ]]`: "[a]" (a fused GlobWord as a string literal) != "b",
+    // so the test is false → exit 1, but it must PARSE and RUN, not
+    // parse-error as a malformed lvalue.
+    let r = k.execute("[[ [a] = b ]]").await;
+    match r {
+        Ok(res) => assert_eq!(res.code, 1, "expected a clean false, got: {res:?}"),
+        Err(e) => panic!("must not parse-error as an lvalue: {e}"),
+    }
+
+    // And a matching form is true → exit 0, confirming it really ran as a
+    // string comparison of the literal "[a]".
+    let r2 = k.execute("[[ [a] = [a] ]]").await.expect("must run");
+    assert_eq!(r2.code, 0, "‘[a]’ == ‘[a]’ should be true: {r2:?}");
 }
 
 // ── Deferred: bracket-path push (documented, not silent) ──────────────────

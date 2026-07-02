@@ -790,3 +790,15 @@ fn lexer_glob_pattern_before_eq_still_fuses() {
 fn lexer_bracket_char_class_without_eq_still_fuses() {
     run_lexer_test("ls [dog]", &["IDENT(ls)", "GLOB([dog])"]);
 }
+
+/// A BARE char-class operand of a `[[ ]]` string comparison (`[[ [a] = b ]]`)
+/// starts with `[`, not an `Ident`, so the lvalue suppression must NOT fire —
+/// `[a]` keeps fusing to a `GlobWord` and `=` stays string equality against
+/// the literal "[a]". The lvalue trigger only fires on an `Ident`-led run
+/// (`arr[0]=`), where the root identifier is the first token of the run.
+#[test]
+fn lexer_bare_char_class_operand_before_eq_still_fuses() {
+    run_lexer_test("[[ [a] = b ]]", &[
+        "LBRACK", "LBRACK", "GLOB([a])", "EQ", "IDENT(b)", "RBRACK", "RBRACK",
+    ]);
+}
