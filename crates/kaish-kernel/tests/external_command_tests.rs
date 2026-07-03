@@ -501,6 +501,31 @@ async fn env_prefix_reaches_subprocess_then_does_not_leak() {
     );
 }
 
+// Linux-gated + absolute path so the external spawn is unconditionally taken.
+// The Decision-D export guard fires at spawn time, so it needs a real binary —
+// a nonexistent path errors on resolution before the guard is reached.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn env_prefix_collection_to_external_is_a_loud_error() {
+    // `X=[1 2] cmd` parses (env-prefix RHS is a value position), and the
+    // scoped collection is fine for BUILTINS (a kaish var, no boundary). But
+    // an external subprocess would need X serialized into its OS environment —
+    // that's the Decision-D boundary, and it must refuse with the tojson hint
+    // rather than silently JSON-stringifying into the child env.
+    // (2026-07-03 coverage review, gemini #3.)
+    let kernel = repl_kernel();
+    let result = kernel.execute("X=[1 2] /bin/true").await;
+    let msg = match result {
+        Ok(r) => {
+            assert_ne!(r.code, 0, "must not spawn with a collection env: {r:?}");
+            r.err
+        }
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(msg.contains("tojson"), "should hint at tojson: {msg}");
+    assert!(msg.contains("list"), "should name the shape: {msg}");
+}
+
 // ============================================================================
 // Interactive Stdin Inheritance Tests
 // ============================================================================
