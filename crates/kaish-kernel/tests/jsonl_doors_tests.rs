@@ -101,6 +101,21 @@ async fn fromjsonl_no_input_at_all_is_a_usage_error() {
     assert!(err.contains("no input"), "err: {err}");
 }
 
+#[tokio::test]
+async fn fromjsonl_accepts_crlf_line_endings() {
+    // Windows-flavored JSONL: each line's trailing \r is stripped before the
+    // per-line parse (split on \n, then strip one \r), so CRLF input
+    // round-trips identically to LF input.
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        "printf '{\"a\":1}\\r\\n{\"a\":2}\\r\\n' | fromjsonl | tojsonl",
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "{\"a\":1}\n{\"a\":2}");
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // tojsonl — list → JSONL text
 // ═══════════════════════════════════════════════════════════════════════
@@ -127,6 +142,45 @@ async fn tojsonl_empty_list_is_empty_output() {
     let (out, code, err) = run(&k, r#"xs=$(fromjson '[]'); tojsonl $xs"#).await;
     assert_eq!(code, 0, "err: {err}");
     assert_eq!(out, "");
+}
+
+#[tokio::test]
+async fn tojsonl_bytes_is_loud_never_an_envelope() {
+    // `/w==` decodes to a single 0xFF byte — invalid UTF-8, so base64 -d
+    // yields a Bytes value. tojsonl must refuse it loudly (same law as
+    // tojson): a silent base64 envelope here would masquerade as the data.
+    let k = setup().await;
+    let (out, code, err) = run(&k, "x=$(echo '/w==' | base64 -d); tojsonl $x").await;
+    assert_ne!(code, 0);
+    assert!(err.contains("binary"), "err: {err}");
+    assert!(err.contains("base64"), "err names the escape hatch: {err}");
+    assert!(!out.contains("_type"), "no envelope leaked to stdout: {out}");
+}
+
+#[tokio::test]
+async fn tojsonl_embedded_newline_stays_one_line() {
+    // The tool's central safety property: a string element containing a real
+    // newline must serialize as exactly ONE output line, with the newline
+    // escaped as \n inside the JSON string — otherwise the "one document per
+    // line" contract breaks and fromjsonl can't re-read its own output.
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"xs=$(fromjson '[{"msg":"line1\nline2"}]'); tojsonl $xs"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, r#"{"msg":"line1\nline2"}"#, "one line, \\n escaped");
+    assert_eq!(out.lines().count(), 1, "exactly one output line: {out:?}");
+
+    // And the safety property closes the loop: the output re-ingests.
+    let (out2, code, err) = run(
+        &k,
+        r#"xs=$(fromjson '[{"msg":"line1\nline2"}]'); tojsonl $xs | fromjsonl | tojsonl"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out2, out, "round-trips through fromjsonl unchanged");
 }
 
 #[tokio::test]

@@ -95,9 +95,11 @@ impl Tool for FromJsonl {
                 Ok(s) => s.to_string(),
                 Err(_) => return ExecResult::failure(1, "fromjsonl: input is binary, not text"),
             },
-            // An already-structured value: re-serialize its JSON text so
-            // fromjsonl is idempotent on values that are already typed (it
-            // becomes a single-line, one-element document stream).
+            // An already-structured value: re-serialize its compact JSON text,
+            // which then parses as a single-line, ONE-document stream — so
+            // `fromjsonl $v` yields `[$v]` (a one-element wrap), not `$v`
+            // back. Typed values that want to stay themselves don't need a
+            // door at all.
             Some(other) => kaish_types::value_to_json(other).to_string(),
             None => match ctx.read_stdin_to_text().await {
                 Ok(Some(s)) => s,
