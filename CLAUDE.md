@@ -90,11 +90,12 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
   review; `/code-review` on the diff or another agent/model also works. A few
   tokens on review goes a long way (this is what we ask outside contributors to do
   too; see README "Contributing").
-- **Merge with a merge commit that uses the PR title and body** — merge PRs with
-  `gh pr merge --merge`, not squash or rebase, and keep the merge commit's subject
-  and body as the PR title/body (so the decisions captured in the PR description
-  land in the history). The PR title/body carry the same decision-narrative the
-  commit messages do (see below).
+- **PRs land as merge commits that use the PR title and body** — the convention is
+  a merge commit (`gh pr merge --merge`), not squash or rebase, with the merge
+  commit's subject and body kept as the PR title/body so the decisions captured in
+  the PR description land in the history. Amy generally does the merging; write the
+  PR title/body to carry the same decision-narrative the commit messages do (see
+  below).
 - **Always add files by name**
 - Before committing, both must be clean:
   - `cargo test --all`
