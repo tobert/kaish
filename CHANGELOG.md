@@ -163,6 +163,14 @@ breaking entries are marked **BREAKING**.
   demotion of `\|` to plain `|`).
 
 ### Fixed
+- **A standalone `[[ ]]` test now writes `$?`** — `[[ 1 = 2 ]]; echo $?` printed
+  `0` (the previous command's status; the test never stored its result), so
+  `[[ -f x ]]; ok=$?` patterns silently read a stale status. A bare test
+  statement now sets `$?` and honors `set -e` like any command, matching bash;
+  `&&`/`||` operands and `if`/`while` conditions are unaffected.
+- **awk invalid FS/`split()` separator errors name the separator as written**
+  (not the internal ERE-rewritten form) and carry the GNU-BRE dialect hint when
+  the rewrite is the likely culprit.
 - **Collection read-access silent-corruption traps** (found by the collections
   milestone review) — five cases that returned a plausible wrong answer instead of
   erroring, all now loud:

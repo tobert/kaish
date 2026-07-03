@@ -14,6 +14,21 @@ before it ships.
 
 ---
 
+## BRE follow-ups + the stale-`$?` bug (2026-07-03)
+
+Working the PR #65 follow-up comments: awk's invalid-FS/`split()` errors now name
+the separator as the user wrote it (not the rewritten form the engine saw) and
+carry the dialect hint when the rewrite changed it.
+
+The bigger catch was the loose end from PR-D testing: a standalone `[[ ]]` never
+wrote `$?` — `[[ 1 = 2 ]]; echo $?` printed 0, so `[[ -f x ]]; ok=$?` silently
+read the *previous* command's status. Amy called it P1 on sight and it was
+cheaper to fix than file: `Stmt::Test` now mirrors `Stmt::Command` (write the
+result, honor suppressible errexit). The chain arms already suppress errexit
+around their left side and `if`/`while` conditions evaluate as expressions, so
+`[[ … ]] && cmd` and loop conditions are unaffected — pinned with five
+`shell_compat!` tests verified against real bash, including the `set -e` trip.
+
 ## GNU BRE superset for grep/sed/awk (2026-07-03)
 
 Issue #60 measured `grep 'a\|b'` as the single largest source of wasted agent

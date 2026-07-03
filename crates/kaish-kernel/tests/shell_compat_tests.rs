@@ -715,3 +715,38 @@ shell_compat! {
     script: "X=1; unset X; echo done",
     eq: "done",
 }
+
+// ---- standalone [[ ]] writes $? (docs/issues.md P1, found during PR-D) ----
+// A bare test statement must store its result in $? like any command. It
+// evaluated the test but never wrote $?, so a following read was stale.
+
+shell_compat! {
+    name: standalone_test_failure_writes_status,
+    script: "[[ 1 = 2 ]]; echo $?",
+    eq: "1",
+}
+
+shell_compat! {
+    name: standalone_test_success_writes_status,
+    script: "false; [[ 1 = 1 ]]; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: standalone_test_status_captured_in_var,
+    script: "[[ a = b ]]; ok=$?; echo $ok",
+    eq: "1",
+}
+
+shell_compat! {
+    name: failing_test_gates_and_chain,
+    script: "[[ 1 = 2 ]] && echo skipped; echo done",
+    eq: "done",
+}
+
+shell_compat! {
+    name: failing_test_statement_trips_errexit,
+    script: "set -e; [[ 1 = 2 ]]; echo unreachable",
+    absent: "unreachable",
+    exit: 1,
+}
