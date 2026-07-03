@@ -4140,7 +4140,22 @@ impl Kernel {
                 // Embedding binary into a string is a text context: fail loud
                 // rather than splice in U+FFFD garbage.
                 match result.try_text_out() {
-                    Ok(s) => Ok(s.trim_end_matches('\n').to_string()),
+                    // Text wins when present — unchanged behavior.
+                    Ok(s) if !s.is_empty() => Ok(s.trim_end_matches('\n').to_string()),
+                    // `.out` is empty: a builtin/tool that set only structured
+                    // `.data` must not silently evaporate to "" (SILENT DATA
+                    // LOSS). Render it the same way a bare `"$x"`
+                    // collection-valued variable renders — compact JSON for
+                    // lists/records, plain form for scalars — by reusing
+                    // `value_to_string` (the exact `StringPart::Var` helper
+                    // above) so `"$(cmd)"` and `x=$(cmd); "$x"` display
+                    // identically. No trailing-newline trim here: that's a
+                    // text-path artifact, not applicable to a freshly
+                    // rendered JSON/scalar string.
+                    Ok(_) => match &result.data {
+                        Some(data) => Ok(value_to_string(data)),
+                        None => Ok(String::new()),
+                    },
                     Err(e) => anyhow::bail!(
                         "command substitution in a string produced binary data ({e}) — \
                          pipe through base64/xxd"

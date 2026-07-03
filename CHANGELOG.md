@@ -193,6 +193,13 @@ breaking entries are marked **BREAKING**.
   demotion of `\|` to plain `|`).
 
 ### Fixed
+- **`"$(cmd)"` no longer drops a `.data`-only result to `""`** — quoted command
+  substitution used to read only a command's `.out` text; a tool that set
+  structured `.data` (a list/record) but left `.out` empty interpolated to
+  nothing, silently losing the collection. It now falls back to rendering
+  `.data` the same way a bare `"$x"` renders a collection-valued variable
+  (compact JSON for lists/records, plain form for scalars); non-empty `.out`
+  still wins unchanged.
 - **`Kernel::with_backend` now mounts `/dev` (DevFs) unconditionally** —
   custom-backend embedders (e.g. kaijutsu) previously had no `/dev/null`,
   `/dev/zero`, `/dev/random`, or `/dev/urandom` at all, and `VirtualOverlayBackend`
