@@ -14,6 +14,58 @@ before it ships.
 
 ---
 
+## scatter/gather's own flag values could silently drop a bad subscript (2026-07-03)
+
+A 0.11.0 pre-release punch-list item: `scatter`/`gather` bind their OWN flag
+values (`--as`, `--limit`, `--timeout`) through a *sync* twin of the real
+argument binder — `build_tool_args`/`eval_simple_expr` in
+`scheduler/pipeline.rs` — because `run_scatter_gather` parses those flags once,
+before any worker forks, and can't recurse back through the async
+`PipelineRunner::run` → `Kernel::dispatch` chain to get there. Every real
+command's arguments bind through the async `build_args_async` (`kernel.rs`),
+which already surfaces a `PathError` (missing key, shape mismatch, undefined
+subscripted root) loudly — matching the other three primary eval sites
+(assignment, `$(( ))`, `"${…}"`). The sync twin never got that treatment: every
+arm discarded the error via `.ok()` / `if let Ok(..)`, so `scatter --as
+${u[nope]}` silently fell back to treating `--as` as a bare boolean flag
+(dropping the intended value and stranding the bad expression as an unused
+positional) instead of failing, and `${#u[tags]}` on a bad subscript inside an
+interpolated flag value silently omitted the length instead of erroring.
+
+Confirmed `build_tool_args` has exactly one production call site —
+`run_scatter_gather`'s two calls parsing the `scatter`/`gather` commands'
+own args — everywhere else it's `#[cfg(test)]` (`BackendDispatcher`) or the
+~19 unit tests inside `pipeline.rs` itself. Gave `eval_simple_expr` and
+`eval_string_parts_sync` a real `Result` error channel: `Ok(Some(value))` on
+success, `Ok(None)` unchanged for "not representable in this reduced sync
+context" (binary ops, command substitution — still the documented, deferred
+"eliminate the sync twin" gap), and `Err(msg)` for a genuine `PathError`
+(absence/shape), propagated with the same message text the async path uses.
+Also noticed `eval_simple_expr`'s top-level match had no arm at all for a
+*bare* (unquoted, whole-token) `Expr::VarLength`/`Expr::VarWithDefault` —
+`scatter --limit ${#tags}` fell to the catch-all `_ => None` — so added those
+two arms routing through the same `resolve_length`/`resolve_default` the async
+path and the in-string arms already call. `build_tool_args` is now fallible;
+`run_scatter_gather` converts an `Err` into `ExecResult::failure(1, …)` at the
+same architectural boundary `run_single` already uses for a dispatch error, so
+the failure surfaces as a normal loud pipeline error, not a panic. Along the
+way, deduped `eval_simple_expr`'s `Expr::Interpolated` arm (it had its own
+~60-line copy of `eval_string_parts_sync`'s loop) down to a single call.
+
+TDD: wrote the new tests first against the unmodified source (verified two of
+them failed as expected — a bad subscript and a shape error in `--as` both
+silently exit 0), then applied the fix and confirmed all pass. One test needed
+a second pass — its worker read `$N` while the buggy fallback actually bound
+`$n` (a mangled but working var name), so it was accidentally passing "for
+free" on the old code for an unrelated reason (the worker's *own* command args
+already error loud via the async path); fixed to read `$n`, matching the
+silent-fallback name, so it's a real red/green pair now. Left the parallel
+`StringPart::Arithmetic` swallow in the same two functions alone — same
+symptom class, but a distinct `anyhow` error type (not `PathError`), so out of
+this fix's scope; recorded in issues.md for the next pass.
+
+---
+
 ## `/dev` was a no-op under `with_backend` (2026-07-03)
 
 Amy asked a throwaway question — "did we ever add `/dev/null`?" — which turned

@@ -35,15 +35,12 @@ consciously ship-as-known-limitation before the release:
 
 - **[SILENT DATA LOSS] `"$(cmd)"` drops a `.data`-only collection to `""`** — the
   clearest "crash-beats-corrupt" violation on the new surface. Detail under P3.
-- **[SILENT] reduced sync path coalesces bad/subscripted collection access** in
-  scatter/gather workers (`${#u[tags]}` → silent-0, bad subscript → dropped arg).
-  Detail under P2 (collection read-access follow-ups) and the #6 resolver entry.
 - **[LOUD gaps — OK to ship documented]** bracket-path `push` target
   (`push a[b] x`), deeply-nested glued list literals (`x=[[a] [b]]`), and
   nested `${#path}` / `${path:-default}` (blocked on the #6 resolver). All fail
   loudly today; ship as known limitations if not closed.
 
-Recommendation: land the two silent items; document the loud gaps in
+Recommendation: land the remaining silent item; document the loud gaps in
 `help collections` / `arrays-and-hashes.md` and defer.
 
 ---
@@ -160,10 +157,6 @@ bind/walk resolver"). This entry is now purely the resolver extraction — the
 `for k in $record` / E012 question is out of scope (iteration stays `$()`-only).
 
 Riders on #6 (currently loud, become nicer once it lands):
-- **Reduced sync path still coalesces** (also the P3 entry below): the subscripted-name
-  loud guard lands in `eval.rs` (sync) + `kernel.rs` (async), but
-  `scheduler/pipeline.rs`'s `eval_string_parts_sync` has no error channel, so
-  `${#u[tags]}` there is silent-0. **[SILENT — 0.11.0 candidate]**
 - **Expression-position `${#u[tags]}` gives a poor message.** In-string
   `"${#u[tags]}"` gets the "bind it first" guard, but `echo ${#u[tags]}` never becomes
   a `VarLength` node (the lexer regex excludes `[`), falling to `VarRef` root `#u` →
@@ -175,18 +168,18 @@ Riders on #6 (currently loud, become nicer once it lands):
   list available keys; `${.a}`/`${a.}` empty dot segments resolve as `${a}` silently.
 
 ### Collection read-access follow-ups
-- **P3 — reduced sync arg path coalesces a loud path error to skip.** The four primary
-  eval sites (`echo`, assignment, `$(( ))`, `"${…}"`) surface `PathError` loudly, but
-  the reduced sync pipeline path (`eval_simple_expr`/`eval_string_parts_sync`,
-  `pipeline.rs:943/950/1051`) coalesces resolution failure to None/skip — a bad
-  subscript in a scatter/gather worker's arg silently drops the arg. Give those sync
-  helpers an error channel (or route through the async resolver) when the
-  scatter/gather arg path is next touched. **[SILENT — 0.11.0 candidate]**
 - **P4 — a `]` inside a quoted subscript key is mishandled.** The lexer's bracket
   collector (`lexer.rs` `parse_var_ref`) scans to the first `]` with no quote
   awareness, so `${r["weird]key"]}` doesn't resolve the intended key. It errors (not
   silent), but cryptically. Fix: quote-aware bracket collector, or a clear diagnostic.
   (Same root cause bounds the empty-subscript `${r[]}` → `Key("")` oddity.)
+- **P4 — `scheduler/pipeline.rs`'s reduced sync path still silently swallows an
+  `Expr::Arithmetic`/`StringPart::Arithmetic` error** (`eval_simple_expr`,
+  `eval_string_parts_sync`) — a distinct pre-existing swallow from the
+  `PathError` one just closed (arithmetic errors are generic `anyhow`, not
+  `PathError`), noticed while fixing the collection-access case. Same class of
+  bug (a bad `scatter --limit $((1/0))` would silently omit the digits), lower
+  frequency. Give it the same `?`-propagation treatment when next touched.
 
 ### Streaming file reads — remaining
 - **`base64`** — deferred; only a pipe-case win, the 3-byte/4-char carry is fiddly.

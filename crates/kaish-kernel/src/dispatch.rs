@@ -427,9 +427,13 @@ impl CommandDispatcher for BackendDispatcher {
             _ => {}
         }
 
-        // Build tool args with schema-aware parsing (sync — no command substitution)
+        // Build tool args with schema-aware parsing (sync — no command substitution).
+        // A bad/subscripted collection access is a genuine PathError here too —
+        // propagate it via `?` rather than swallowing, same as the production
+        // Kernel::dispatch_command's `execute_command(..).await?`.
         let schema = self.tools.get(&cmd.name).map(|t| t.schema());
-        let tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
+        let tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref())
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         // Honor --json before the tool runs so a parse failure inside the
         // builtin doesn't drop the format on the floor. See kernel.rs for the
@@ -478,6 +482,7 @@ impl CommandDispatcher for BackendDispatcher {
     /// test dispatcher's documented "no async argument evaluation" limit.
     async fn eval_expr(&self, expr: &Expr, ctx: &ExecContext) -> Result<Value> {
         crate::scheduler::pipeline::eval_simple_expr(expr, ctx)
+            .map_err(|e| anyhow::anyhow!(e))?
             .ok_or_else(|| anyhow::anyhow!("cannot evaluate expression in test dispatcher"))
     }
 

@@ -237,6 +237,13 @@ breaking entries are marked **BREAKING**.
     default on a *subscripted* path — `${#u[tags]}`, `${cfg[port]:-8080}` — were
     briefly a loud "bind it first" error; they are now fully path-aware, see
     Added.)
+- **`scatter`/`gather`'s own flag values (`--as`, `--limit`, …) now fail loud on
+  a bad/subscripted collection access** — the reduced sync arg binder they use
+  (it runs once, before workers fork, so it can't recurse through the async
+  pipeline) used to discard a missing-key/shape `PathError` as a silently
+  dropped flag or an omitted `${#…}` length instead of erroring, unlike `echo`,
+  assignment, `$(( ))`, and `"${…}"`. A bad `scatter --as ${u[nope]}` now fails
+  the whole pipeline instead of quietly falling back to a bare boolean flag.
 - **A bare collection reaching an external command's argv or a redirect
   target silently JSON-serialized** (e.g. `curl -d $cfg` or `echo x > $cfg`);
   every process-boundary sink now refuses it with a `$(tojson $x)` hint. This
