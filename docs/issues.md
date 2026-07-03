@@ -35,9 +35,6 @@ consciously ship-as-known-limitation before the release:
 
 - **[SILENT DATA LOSS] `"$(cmd)"` drops a `.data`-only collection to `""`** — the
   clearest "crash-beats-corrupt" violation on the new surface. Detail under P3.
-- **[SILENT] reduced sync path coalesces bad/subscripted collection access** in
-  scatter/gather workers (`${#u[tags]}` → silent-0, bad subscript → dropped arg).
-  Detail under P2 (collection read-access follow-ups) and the #6 resolver entry.
 - **[LOUD gap — documented 2026-07-03]** bracket-path `push` target
   (`push a[b] x`) fails loudly (glob-expands, "no matches") and doesn't work.
   Documented as a known limitation with a working alternative in `help
@@ -49,10 +46,11 @@ consciously ship-as-known-limitation before the release:
   nested `${#path}` / `${path:-default}` (shipped in `28ec480`, before this
   list was written). Neither was actually a live gap by the time this section
   called for a decision — corrected in `arrays-and-hashes.md` ("Known
-  limitations (0.11.0)").
+  limitations (0.11.0)"). The sync-path silent coalescing (bad subscripts in
+  scatter/gather flag values) was fixed 2026-07-03 and dropped from this list.
 
-Recommendation: land the two silent items above; the one remaining loud gap
-(`push` bracket-path target) is documented, not fixed.
+Recommendation: land the remaining silent item (`"$(cmd)"` interpolation); the
+one remaining loud gap (`push` bracket-path target) is documented, not fixed.
 
 ---
 
@@ -172,10 +170,6 @@ empty → default) but loud on shape errors. Full writeup:
 The `for k in $record` / E012 question is out of scope (iteration stays `$()`-only).
 
 Riders on #6 (currently loud, become nicer once the perf extraction lands):
-- **Reduced sync path still coalesces** (also the P3 entry below): the subscripted-name
-  loud guard lands in `eval.rs` (sync) + `kernel.rs` (async), but
-  `scheduler/pipeline.rs`'s `eval_string_parts_sync` has no error channel, so
-  `${#u[tags]}` there is silent-0. **[SILENT — 0.11.0 candidate]**
 - **P3/P4 tail** (loud/cosmetic): `fromjson` on an already-typed value stringifies-
   then-reparses and loses `Value::Bytes` (short-circuit typed values); async `VarRef`
   "undefined variable" omits the name while sync includes it; missing-key errors could
@@ -186,18 +180,18 @@ Riders on #6 (currently loud, become nicer once the perf extraction lands):
   (P4 — pre-existing, general arithmetic gap, unrelated to path-nesting.)
 
 ### Collection read-access follow-ups
-- **P3 — reduced sync arg path coalesces a loud path error to skip.** The four primary
-  eval sites (`echo`, assignment, `$(( ))`, `"${…}"`) surface `PathError` loudly, but
-  the reduced sync pipeline path (`eval_simple_expr`/`eval_string_parts_sync`,
-  `pipeline.rs:943/950/1051`) coalesces resolution failure to None/skip — a bad
-  subscript in a scatter/gather worker's arg silently drops the arg. Give those sync
-  helpers an error channel (or route through the async resolver) when the
-  scatter/gather arg path is next touched. **[SILENT — 0.11.0 candidate]**
 - **P4 — a `]` inside a quoted subscript key is mishandled.** The lexer's bracket
   collector (`lexer.rs` `parse_var_ref`) scans to the first `]` with no quote
   awareness, so `${r["weird]key"]}` doesn't resolve the intended key. It errors (not
   silent), but cryptically. Fix: quote-aware bracket collector, or a clear diagnostic.
   (Same root cause bounds the empty-subscript `${r[]}` → `Key("")` oddity.)
+- **P4 — `scheduler/pipeline.rs`'s reduced sync path still silently swallows an
+  `Expr::Arithmetic`/`StringPart::Arithmetic` error** (`eval_simple_expr`,
+  `eval_string_parts_sync`) — a distinct pre-existing swallow from the
+  `PathError` one just closed (arithmetic errors are generic `anyhow`, not
+  `PathError`), noticed while fixing the collection-access case. Same class of
+  bug (a bad `scatter --limit $((1/0))` would silently omit the digits), lower
+  frequency. Give it the same `?`-propagation treatment when next touched.
 
 ### Streaming file reads — remaining
 - **`base64`** — deferred; only a pipe-case win, the 3-byte/4-char carry is fiddly.

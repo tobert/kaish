@@ -943,8 +943,11 @@ pub fn value_to_string_with_tilde(value: &Value, home: Option<&str>) -> String {
     }
 }
 
-/// Format a VarPath for error messages.
-fn format_path(path: &VarPath) -> String {
+/// Format a VarPath for error messages. `pub(crate)` so the scheduler's
+/// reduced sync evaluator (`scheduler/pipeline.rs::eval_simple_expr`) can
+/// emit the same "${x[key]}: undefined variable" shape [`resolve_length`]
+/// uses for a subscripted path on an undefined root.
+pub(crate) fn format_path(path: &VarPath) -> String {
     use crate::ast::VarSegment;
     let mut result = String::from("${");
     for (i, seg) in path.segments.iter().enumerate() {

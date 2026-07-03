@@ -263,3 +263,193 @@ async fn timed_out_worker_reports_124_and_gather_123() {
     assert_eq!(rows[0]["ok"], false);
     assert_eq!(rows[0]["timed_out"], true);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Reduced sync arg path: `scatter`/`gather`'s OWN flag values (`--as`,
+// `--limit`, …) bind through a sync twin of the async arg binder
+// (`build_tool_args`/`eval_simple_expr` in `scheduler/pipeline.rs`) because
+// it runs once, before any worker forks — it can't recurse back into
+// `PipelineRunner::run`. Before this fix that twin discarded a bad or
+// subscripted collection access (`PathError`) as a silently-skipped
+// flag/arg instead of failing, unlike the four primary eval sites (`echo`,
+// assignment, `$(( ))`, `"${…}"`). See docs/issues.md (closed by this fix)
+// and CHANGELOG.md.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn bad_subscript_in_scatter_flag_value_is_a_loud_error() {
+    // `--as ${u[nope]}` — a missing key on a record. Before the fix this
+    // silently dropped `--as`'s value (falling back to a bare boolean flag
+    // and orphaning the bad expression as an unused positional) instead of
+    // failing the pipeline.
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(
+        &k,
+        r#"u=$(fromjson '{"name":"amy"}')
+seq 1 2 | scatter --as ${u[nope]} | echo $N | gather"#,
+    )
+    .await;
+    assert_ne!(r.code, 0, "a bad subscript in a scatter flag value must fail, not silently proceed");
+    assert!(r.err.contains("no such key"), "got: {}", r.err);
+}
+
+#[tokio::test]
+async fn shape_error_in_scatter_flag_value_is_a_loud_error() {
+    // An integer index on a record is misuse, not absence — loud either way.
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(
+        &k,
+        r#"cfg=$(fromjson '{"port":9000}')
+seq 1 2 | scatter --as ${cfg[0]} | echo $N | gather"#,
+    )
+    .await;
+    assert_ne!(r.code, 0, "a shape error in a scatter flag value must fail loud");
+    assert!(r.err.contains("record keys are strings"), "got: {}", r.err);
+}
+
+#[tokio::test]
+async fn length_of_a_missing_subscripted_key_in_scatter_flag_is_loud_not_silent() {
+    // `${#u[nope]}` inside an interpolated `--as` value: `eval_string_parts_sync`
+    // used to discard the `PathError` from `resolve_length` and push nothing,
+    // silently producing a working-but-WRONG `--as n` (the digit just missing)
+    // instead of failing on the bad subscript. `echo $n` matches that mangled
+    // fallback name on purpose — if the bug regresses, the worker binds fine
+    // and this assertion is the only thing that catches it.
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(
+        &k,
+        r#"u=$(fromjson '{"tags":["a","b"]}')
+seq 1 2 | scatter --as "n${#u[nope]}" | echo $n | gather"#,
+    )
+    .await;
+    assert_ne!(r.code, 0, "a bad ${{#...}} subscript must fail, not silently produce a mangled var name");
+}
+
+#[tokio::test]
+async fn valid_subscripted_flag_value_still_works() {
+    // Happy path: a VALID subscripted access as a scatter option value must
+    // keep working through the reduced sync path.
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(
+        &k,
+        r#"cfg=$(fromjson '{"varname":"N"}')
+seq 1 2 | scatter --as ${cfg[varname]} | echo $N | gather"#,
+    )
+    .await;
+    assert_eq!(r.code, 0, "{:?}", r.err);
+    let rows = rows(&r.text_out());
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["out"], "1");
+    assert_eq!(rows[1]["out"], "2");
+}
+
+#[tokio::test]
+async fn valid_length_in_scatter_flag_value_resolves_the_real_count() {
+    // Happy path for `${#...}`: a valid subscripted length must resolve to
+    // the real element count, never a silently-dropped/omitted digit. If the
+    // length were swallowed (old bug), the var name would come out as bare
+    // "n" and `$n3` would be undefined, failing the pipeline instead of
+    // matching here.
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(
+        &k,
+        r#"u=$(fromjson '{"tags":["a","b","c"]}')
+seq 1 2 | scatter --as "n${#u[tags]}" | echo $n3 | gather"#,
+    )
+    .await;
+    assert_eq!(r.code, 0, "{:?}", r.err);
+    let rows = rows(&r.text_out());
+    assert_eq!(rows[0]["out"], "1", "var name resolved to n3, the real tag count");
+    assert_eq!(rows[1]["out"], "2");
+}
+
+#[tokio::test]
+async fn undefined_root_subscript_in_scatter_flag_value_is_loud() {
+    // kaibo review finding (PR #85): `${nope[key]}` where the ROOT is entirely
+    // undefined is `PathError::UndefinedRoot`, not `Absence` — the first cut
+    // coalesced ALL UndefinedRoot to a skipped flag, so a typo'd root still
+    // silently dropped `--as`'s value. Only a BARE undefined var may coalesce;
+    // a subscripted path on an undefined root errors, same split
+    // `resolve_length` draws.
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(
+        &k,
+        r#"seq 1 2 | scatter --as ${nope[key]} | echo $ITEM | gather"#,
+    )
+    .await;
+    assert_ne!(r.code, 0, "typo'd root in a subscripted flag value must fail loud");
+    assert!(r.err.contains("undefined variable"), "got: {}", r.err);
+}
+
+#[tokio::test]
+async fn bare_undefined_var_in_scatter_flag_still_coalesces() {
+    // The bash-compatible convention this reduced context keeps: a BARE
+    // undefined `$VAR` coalesces (the flag falls back to boolean, `--as`
+    // keeps its ITEM default) rather than erroring. Only subscripted paths
+    // went loud in the fix above.
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(
+        &k,
+        r#"seq 1 2 | scatter --as $KAISH_TEST_UNSET_VAR | echo $ITEM | gather"#,
+    )
+    .await;
+    assert_eq!(r.code, 0, "bare undefined var keeps coalescing: {:?}", r.err);
+    let rows = rows(&r.text_out());
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["out"], "1", "ITEM default binding still in effect");
+}
+
+#[tokio::test]
+async fn bare_length_bad_subscript_in_scatter_flag_is_loud() {
+    // Bare (unquoted whole-token) `${#u[nope]}` parses as `Expr::VarLength`,
+    // which used to fall through `eval_simple_expr`'s `_ => None` catch-all —
+    // silently dropping the flag and letting the pipeline proceed. Reaching a
+    // loud error here proves the new bare `VarLength` arm is wired: if the
+    // arm regressed to the catch-all, this pipeline would succeed.
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(
+        &k,
+        r#"u=$(fromjson '{"tags":["a","b"]}')
+seq 1 2 | scatter --limit ${#u[nope]} | echo $ITEM | gather"#,
+    )
+    .await;
+    assert_ne!(r.code, 0, "bad bare ${{#...}} flag value must fail, not be silently dropped");
+    assert!(r.err.contains("no such key"), "got: {}", r.err);
+}
+
+#[tokio::test]
+async fn bare_length_in_scatter_flag_value_succeeds() {
+    // Happy path for the bare `Expr::VarLength` arm: `--limit ${#u[tags]}`
+    // resolves to a valid limit (3) and the pipeline runs. Pairs with the
+    // loud-error test above, which is what proves the arm is reachable.
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(
+        &k,
+        r#"u=$(fromjson '{"tags":["a","b","c"]}')
+seq 1 2 | scatter --limit ${#u[tags]} | echo $ITEM | gather"#,
+    )
+    .await;
+    assert_eq!(r.code, 0, "{:?}", r.err);
+    assert_eq!(rows(&r.text_out()).len(), 2);
+}
+
+#[tokio::test]
+async fn bare_default_in_scatter_flag_value_binds_the_var_name() {
+    // Bare (unquoted whole-token) `${cfg[name]:-W}` parses as
+    // `Expr::VarWithDefault`, which also used to fall through the `_ => None`
+    // catch-all. Observable proof the arm is wired: the missing key folds to
+    // the default `W`, workers read `$W`, rows come out. If the arm regressed
+    // to the catch-all, the flag would drop, the binding would stay ITEM, and
+    // the workers' `$W` would fail loud (exit 123).
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(
+        &k,
+        r#"cfg=$(fromjson '{"other":1}')
+seq 1 2 | scatter --as ${cfg[name]:-W} | echo $W | gather"#,
+    )
+    .await;
+    assert_eq!(r.code, 0, "{:?}", r.err);
+    let rows = rows(&r.text_out());
+    assert_eq!(rows[0]["out"], "1", "default var name W bound the items");
+    assert_eq!(rows[1]["out"], "2");
+}

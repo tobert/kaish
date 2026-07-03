@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use crate::arithmetic;
 use crate::ast::{Arg, Command, Expr, Redirect, RedirectKind, Value};
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, PathError};
 use crate::tools::{ExecContext, ToolArgs, ToolRegistry, ToolSchema};
 use tokio::io::AsyncWriteExt;
 
@@ -165,7 +165,7 @@ async fn eval_redirect_target(expr: &Expr, ctx: &ExecContext) -> Result<String, 
     let value = if let Some(dispatcher) = &ctx.dispatcher {
         dispatcher.eval_expr(expr, ctx).await.map_err(|e| e.to_string())?
     } else {
-        eval_simple_expr(expr, ctx)
+        eval_simple_expr(expr, ctx)?
             .ok_or_else(|| "could not evaluate redirect target".to_string())?
     };
     // Decision D: a bare collection can't be a redirect target either — same
@@ -326,11 +326,23 @@ impl PipelineRunner {
         let post_gather = &commands[gather_idx + 1..];
 
         // Parse options from scatter and gather commands
-        // These are builtins with simple key=value syntax, no schema-driven parsing needed
+        // These are builtins with simple key=value syntax, no schema-driven parsing needed.
+        // build_tool_args is fallible: a bad/subscripted collection access in a
+        // scatter/gather flag value (`scatter --as ${u[nope]}`) must fail loud here,
+        // not silently coalesce to a dropped flag (see docs/issues.md's now-closed
+        // "reduced sync path" entry). Mirrors run_single's dispatch-error handling.
         let scatter_schema = self.tools.get("scatter").map(|t| t.schema());
         let gather_schema = self.tools.get("gather").map(|t| t.schema());
-        let scatter_opts = parse_scatter_options(&build_tool_args(&scatter_cmd.args, ctx, scatter_schema.as_ref()));
-        let gather_opts = parse_gather_options(&build_tool_args(&gather_cmd.args, ctx, gather_schema.as_ref()));
+        let scatter_args = match build_tool_args(&scatter_cmd.args, ctx, scatter_schema.as_ref()) {
+            Ok(args) => args,
+            Err(e) => return ExecResult::failure(1, format!("scatter: {e}")),
+        };
+        let gather_args = match build_tool_args(&gather_cmd.args, ctx, gather_schema.as_ref()) {
+            Ok(args) => args,
+            Err(e) => return ExecResult::failure(1, format!("gather: {e}")),
+        };
+        let scatter_opts = parse_scatter_options(&scatter_args);
+        let gather_opts = parse_gather_options(&gather_args);
 
         // We need an `Arc<dyn CommandDispatcher>` to hand to `ScatterGatherRunner`.
         // `fork_attached` produces a subkernel whose cancellation token is a
@@ -732,7 +744,16 @@ pub fn is_bool_type(param_type: &str) -> bool {
 /// - For `--flag` where schema says type is bool (or unknown): treat as boolean flag
 ///
 /// This enables natural shell syntax like `mcp_tool --query "test" --limit 10`.
-pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSchema>) -> ToolArgs {
+///
+/// Fallible: a bad/subscripted collection access (`${u[nope]}` on a record
+/// without that key, a subscript on a scalar, `${#u[tags]}` on an undefined
+/// subscripted root) must fail loud here too, matching the four primary eval
+/// sites (`echo`, assignment, `$(( ))`, `"${…}"`) — see [`eval_simple_expr`].
+pub fn build_tool_args(
+    args: &[Arg],
+    ctx: &ExecContext,
+    schema: Option<&ToolSchema>,
+) -> Result<ToolArgs, String> {
     let mut tool_args = ToolArgs::new();
     let param_lookup = schema.map(schema_param_lookup).unwrap_or_default();
     let accepts_word_assign = schema
@@ -763,18 +784,18 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
             Arg::Positional(expr) => {
                 // Check if this positional was consumed by a preceding flag
                 if !consumed_positionals.contains(&i)
-                    && let Some(value) = eval_simple_expr(expr, ctx)
+                    && let Some(value) = eval_simple_expr(expr, ctx)?
                 {
                     tool_args.positional.push(value);
                 }
             }
             Arg::Named { key, value } => {
-                if let Some(val) = eval_simple_expr(value, ctx) {
+                if let Some(val) = eval_simple_expr(value, ctx)? {
                     tool_args.named.insert(key.clone(), val);
                 }
             }
             Arg::WordAssign { key, value } => {
-                if let Some(val) = eval_simple_expr(value, ctx) {
+                if let Some(val) = eval_simple_expr(value, ctx)? {
                     if accepts_word_assign {
                         tool_args.named.insert(key.clone(), val);
                     } else {
@@ -805,7 +826,7 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
                             .find(|(idx, _)| *idx > i && !consumed_positionals.contains(idx));
 
                         if let Some((pos_idx, expr)) = next_positional {
-                            if let Some(value) = eval_simple_expr(expr, ctx) {
+                            if let Some(value) = eval_simple_expr(expr, ctx)? {
                                 tool_args.named.insert(canonical.to_string(), value);
                                 consumed_positionals.insert(*pos_idx);
                             } else {
@@ -824,7 +845,7 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
                             .iter()
                             .find(|(idx, _)| *idx > i && !consumed_positionals.contains(idx));
                         if let Some((pos_idx, expr)) = next_positional {
-                            if let Some(value) = eval_simple_expr(expr, ctx) {
+                            if let Some(value) = eval_simple_expr(expr, ctx)? {
                                 tool_args.named.insert(canonical.to_string(), value);
                                 consumed_positionals.insert(*pos_idx);
                             } else {
@@ -868,7 +889,7 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
                             .find(|(idx, _)| *idx > i && !consumed_positionals.contains(idx));
 
                         if let Some((pos_idx, expr)) = next_positional {
-                            if let Some(value) = eval_simple_expr(expr, ctx) {
+                            if let Some(value) = eval_simple_expr(expr, ctx)? {
                                 tool_args.named.insert(canonical.to_string(), value);
                                 consumed_positionals.insert(*pos_idx);
                             } else {
@@ -931,76 +952,56 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
         tool_args.positional = remaining;
     }
 
-    tool_args
+    Ok(tool_args)
 }
 
 /// Simple expression evaluation for args (without full scope access).
-pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> {
+///
+/// `Ok(None)` means "not representable in this reduced sync context" (binary
+/// ops, command substitution — these need the async kernel path; callers
+/// treat that the same as before, e.g. falling back to a bare flag). `Err`
+/// means a genuine [`PathError`] — undefined-subscripted-root, a missing key,
+/// or a shape mismatch — and MUST propagate loud, the same as the async
+/// `build_args_async`/`eval_expr_async` (`kernel.rs`) and the sync
+/// interpreter (`eval.rs`) treat it. Before this, every arm here discarded
+/// the error via `.ok()`/`if let Ok(..)`, so a bad subscript in a scatter/gather
+/// flag value silently dropped the argument instead of failing (docs/issues.md,
+/// now closed).
+pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Result<Option<Value>, String> {
     match expr {
-        Expr::Literal(value) => Some(eval_literal(value, ctx)),
-        // This reduced sync path coalesces any resolution failure to None
-        // (undefined or a loud path error alike); the async kernel paths carry
-        // the loud collection-access errors.
-        Expr::VarRef(path) => ctx.scope.resolve_path(path).ok(),
-        Expr::Interpolated(parts) => {
-            let mut result = String::new();
-            for part in parts {
-                match part {
-                    crate::ast::StringPart::Literal(s) => result.push_str(s),
-                    crate::ast::StringPart::Var(path) => {
-                        if let Ok(value) = ctx.scope.resolve_path(path) {
-                            result.push_str(&value_to_string(&value));
-                        }
-                    }
-                    crate::ast::StringPart::VarWithDefault { path, default } => {
-                        // Reduced-sync path has no error channel, so a shape error
-                        // coalesces (skipped) here — the known reduced-sync gap
-                        // (issues.md P3). Absence still yields the default.
-                        match crate::interpreter::resolve_default(&ctx.scope, path) {
-                            Ok(Some(value)) => result.push_str(&value_to_string(&value)),
-                            Ok(None) => result.push_str(&eval_string_parts_sync(default, ctx)),
-                            Err(_) => {}
-                        }
-                    }
-                    crate::ast::StringPart::VarLength(path) => {
-                        // Element/key count for collections, byte count for binary;
-                        // unset root → 0. A shape/absence error coalesces to nothing
-                        // (reduced-sync gap, P3).
-                        if let Ok(len) = crate::interpreter::resolve_length(&ctx.scope, path) {
-                            result.push_str(&len.to_string());
-                        }
-                    }
-                    crate::ast::StringPart::Positional(n) => {
-                        if let Some(s) = ctx.scope.get_positional(*n) {
-                            result.push_str(s);
-                        }
-                    }
-                    crate::ast::StringPart::AllArgs => {
-                        result.push_str(&ctx.scope.all_args().join(" "));
-                    }
-                    crate::ast::StringPart::ArgCount => {
-                        result.push_str(&ctx.scope.arg_count().to_string());
-                    }
-                    crate::ast::StringPart::Arithmetic(expr) => {
-                        // Evaluate arithmetic in pipeline context
-                        if let Ok(value) = arithmetic::eval_arithmetic(expr, &ctx.scope) {
-                            result.push_str(&value.to_string());
-                        }
-                    }
-                    crate::ast::StringPart::CommandSubst(_) => {
-                        // Command substitution requires async - skip in sync context
-                    }
-                    crate::ast::StringPart::LastExitCode => {
-                        result.push_str(&ctx.scope.last_result().code.to_string());
-                    }
-                    crate::ast::StringPart::CurrentPid => {
-                        result.push_str(&ctx.scope.pid().to_string());
-                    }
-                }
-            }
-            Some(Value::String(result))
+        Expr::Literal(value) => Ok(Some(eval_literal(value, ctx))),
+        Expr::VarRef(path) => match ctx.scope.resolve_path(path) {
+            Ok(v) => Ok(Some(v)),
+            // Unset BARE variable: coalesces (skip-the-arg) — this reduced
+            // context's bash-compatible convention. Bare-only on purpose: an
+            // undefined root under a SUBSCRIPTED path is loud below, the same
+            // split `resolve_length` draws — `scatter --as ${x[key]}` with a
+            // typo'd root must not silently drop the flag (kaibo review
+            // finding, PR #85).
+            Err(PathError::UndefinedRoot(_)) if path.segments.len() <= 1 => Ok(None),
+            Err(PathError::UndefinedRoot(_)) => Err(format!(
+                "{}: undefined variable",
+                crate::interpreter::format_path(path)
+            )),
+            // A loud path error (absence or shape) carries its own actionable
+            // message — never swallowed.
+            Err(PathError::Absence(msg)) | Err(PathError::Shape(msg)) => Err(msg),
+        },
+        Expr::Interpolated(parts) => Ok(Some(Value::String(eval_string_parts_sync(parts, ctx)?))),
+        // Bare (unquoted whole-token) forms — `scatter --limit ${#tags}`,
+        // `scatter --as ${cfg[name]:-N}` — reuse the same shared path resolver
+        // the async path calls (`eval_expr_async`'s `VarLength`/`VarWithDefault`
+        // arms), so length/default semantics agree between the two paths.
+        Expr::VarLength(path) => {
+            crate::interpreter::resolve_length(&ctx.scope, path).map(|n| Some(Value::Int(n)))
         }
-        Expr::GlobPattern(s) => Some(Value::String(s.clone())),
+        Expr::VarWithDefault { path, default } => {
+            match crate::interpreter::resolve_default(&ctx.scope, path)? {
+                Some(value) => Ok(Some(value)),
+                None => Ok(Some(Value::String(eval_string_parts_sync(default, ctx)?))),
+            }
+        }
+        Expr::GlobPattern(s) => Ok(Some(Value::String(s.clone()))),
         Expr::HereDocBody { parts, strip_tabs } => {
             // Heredoc body materialization for redirect targets. `<<-` tab
             // stripping applies to the literal source, not to tabs from a
@@ -1009,15 +1010,15 @@ pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> 
             for sp in parts {
                 match &sp.part {
                     crate::ast::StringPart::Literal(s) => asm.push_literal(s),
-                    other => asm.push_interpolated(&eval_string_parts_sync(
-                        std::slice::from_ref(other),
-                        ctx,
-                    )),
+                    other => {
+                        let s = eval_string_parts_sync(std::slice::from_ref(other), ctx)?;
+                        asm.push_interpolated(&s);
+                    }
                 }
             }
-            Some(Value::String(asm.into_string()))
+            Ok(Some(Value::String(asm.into_string())))
         }
-        _ => None, // Binary ops and command subst need more context
+        _ => Ok(None), // Binary ops and command subst need more context
     }
 }
 
@@ -1040,31 +1041,42 @@ fn value_to_string(value: &Value) -> String {
 }
 
 /// Evaluate string parts synchronously (for pipeline context).
-/// Command substitutions are skipped as they require async.
-fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -> String {
+///
+/// Command substitutions are skipped as they require async. A [`PathError`]
+/// (absence or shape) from a subscripted `$var`, `${…:-default}`, or `${#…}`
+/// propagates loud via `Err` — matching the async `eval_string_part_async`
+/// (`kernel.rs`) and the sync `Interpreter::eval_interpolated` (`eval.rs`).
+/// An unset BARE root still expands to empty (bash-compatible), unchanged.
+fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -> Result<String, String> {
     let mut result = String::new();
     for part in parts {
         match part {
             crate::ast::StringPart::Literal(s) => result.push_str(s),
-            crate::ast::StringPart::Var(path) => {
-                if let Ok(value) = ctx.scope.resolve_path(path) {
-                    result.push_str(&value_to_string(&value));
-                }
-            }
+            crate::ast::StringPart::Var(path) => match ctx.scope.resolve_path(path) {
+                Ok(value) => result.push_str(&value_to_string(&value)),
+                // Unconditional (even subscripted) on purpose: in STRING
+                // context both primary sites — async `eval_string_part_async`
+                // (kernel.rs) and sync `eval_interpolated` (eval.rs) — expand
+                // an undefined root to empty, bash-compatibly ("a${nope[k]}b"
+                // → "ab"). The bare-only restriction applies to the
+                // whole-token `Expr::VarRef` arm above, matching the primary
+                // sites' loud whole-token behavior.
+                Err(PathError::UndefinedRoot(_)) => {}
+                Err(PathError::Absence(msg)) | Err(PathError::Shape(msg)) => return Err(msg),
+            },
             crate::ast::StringPart::VarWithDefault { path, default } => {
-                // Reduced-sync path: a shape error coalesces (issues.md P3);
-                // absence still yields the default.
-                match crate::interpreter::resolve_default(&ctx.scope, path) {
-                    Ok(Some(value)) => result.push_str(&value_to_string(&value)),
-                    Ok(None) => result.push_str(&eval_string_parts_sync(default, ctx)),
-                    Err(_) => {}
+                match crate::interpreter::resolve_default(&ctx.scope, path)? {
+                    Some(value) => result.push_str(&value_to_string(&value)),
+                    None => result.push_str(&eval_string_parts_sync(default, ctx)?),
                 }
             }
             crate::ast::StringPart::VarLength(path) => {
-                // Unset root → 0; shape/absence coalesces to nothing (P3).
-                if let Ok(len) = crate::interpreter::resolve_length(&ctx.scope, path) {
-                    result.push_str(&len.to_string());
-                }
+                // Element/key count for collections, byte count for binary;
+                // unset BARE root → 0 (bash parity). A shape/absence error on a
+                // SUBSCRIPTED path now propagates loud instead of silently
+                // omitting the length (the fixed "silent 0" gap).
+                let len = crate::interpreter::resolve_length(&ctx.scope, path)?;
+                result.push_str(&len.to_string());
             }
             crate::ast::StringPart::Positional(n) => {
                 if let Some(s) = ctx.scope.get_positional(*n) {
@@ -1078,6 +1090,9 @@ fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -
                 result.push_str(&ctx.scope.arg_count().to_string());
             }
             crate::ast::StringPart::Arithmetic(expr) => {
+                // Arithmetic errors in this reduced sync context are a
+                // separate, pre-existing swallow (not a collection PathError)
+                // — out of scope here; tracked in docs/issues.md.
                 if let Ok(value) = arithmetic::eval_arithmetic(expr, &ctx.scope) {
                     result.push_str(&value.to_string());
                 }
@@ -1093,7 +1108,7 @@ fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -
             }
         }
     }
-    result
+    Ok(result)
 }
 
 /// Find scatter and gather commands in a pipeline.
@@ -1683,7 +1698,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         assert!(tool_args.flags.is_empty(), "No flags should be set");
         assert!(tool_args.positional.is_empty(), "No positionals - consumed by --query");
@@ -1703,7 +1718,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         assert!(tool_args.flags.contains("verbose"), "--verbose should be a flag");
         assert!(tool_args.named.is_empty(), "No named args");
@@ -1723,7 +1738,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         assert!(tool_args.positional.is_empty(), "file.txt consumed as query param");
         assert_eq!(
@@ -1752,7 +1767,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         assert!(tool_args.positional.is_empty(), "All positionals consumed");
         assert_eq!(
@@ -1783,7 +1798,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         assert_eq!(
             tool_args.named.get("output"),
@@ -1805,7 +1820,7 @@ mod tests {
         ];
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, None);
+        let tool_args = build_tool_args(&args, &ctx, None).expect("build_tool_args");
 
         // Without schema, --query is a flag and "test" is a positional
         assert!(tool_args.flags.contains("query"), "--query should be a flag");
@@ -1826,7 +1841,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         assert!(tool_args.flags.contains("unknown"));
         assert!(tool_args.positional.is_empty(), "value consumed as query param");
@@ -1849,7 +1864,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         assert_eq!(
             tool_args.named.get("query"),
@@ -1868,7 +1883,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         assert!(tool_args.flags.contains("l"));
         assert!(tool_args.flags.contains("a"));
@@ -1890,7 +1905,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         // output expects a value but none available after it, so it becomes a flag
         assert!(tool_args.flags.contains("output"));
@@ -1927,7 +1942,7 @@ mod tests {
         ];
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         assert_eq!(
             tool_args.named.get("query"),
@@ -1953,7 +1968,7 @@ mod tests {
         let schema = make_test_schema(); // query, limit(int), verbose(bool), output
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         // val1 → query, val2 → limit (int param but receives string — tool decides),
         // val3 → output
@@ -1985,7 +2000,7 @@ mod tests {
         ];
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         assert_eq!(
             tool_args.named.get("name"),
@@ -2011,7 +2026,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         assert_eq!(
             tool_args.named.get("query"),
@@ -2037,7 +2052,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         assert_eq!(
             tool_args.named.get("query"),
@@ -2062,7 +2077,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         assert_eq!(
             tool_args.named.get("output"),
@@ -2089,7 +2104,7 @@ mod tests {
         ];
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         assert_eq!(
             tool_args.named.get("query"),
@@ -2115,7 +2130,7 @@ mod tests {
         ];
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         // Positionals should NOT be consumed as named params
         assert_eq!(
@@ -2142,7 +2157,7 @@ mod tests {
         ];
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
 
         assert!(tool_args.flags.is_empty(), "no boolean flags: {:?}", tool_args.flags);
         assert_eq!(tool_args.named.get("lines"), Some(&Value::Int(5)), "should resolve alias to canonical name");
