@@ -14,35 +14,61 @@ before it ships.
 
 ---
 
-## Collections value-model tests — the cross-model consensus suite (2026-07-03)
+## Collections panel gate + docs delivery — sign-off (2026-07-03)
 
-With the write half merged (#66/#67), Amy fanned out a coverage question: a
-gemini-pro batch (13 whole files attached) on "the most important few tests for
-design confidence" and a fable deliberation (kaibo dossier → offline max
-thinking) hunting edge cases adversarially. Both independently converged on the
-same hole: the *load-bearing* value model — copy-on-assign, function-scope ×
-mutation, RMW ordering, iteration snapshots, and the round-trip law the design
-doc calls "test-pinned" — had zero integration tests. A future "make clones
-cheap" Rc/Arc refactor would have corrupted both bindings with the whole suite
-green.
+The last item on the collections milestone: Teaching note #8's pre-sign-off cross-model
+panel re-test against the *final* bracket surface (literals, lvalues, `push`, `$()`-only
+iteration — all merged to main this session via #66/#67), plus closing the docs/help gaps
+that closing out that milestone exposed.
 
-`collections_value_model_tests.rs` (30 tests) pins the consensus items; every
-assertion was probed against the live binary first (all behaviors were already
-correct — these are tripwires, not fixes). Notables: `local ys` without an
-initializer turns out to be a parse error, so fable's scariest edge (a local
-declaration silently punching writes through to the caller) is structurally
-impossible — pinned as a guard so it stays that way; bareword digits are
-integer indices even on records (loud, with the quoted-key fix-it), quoted
-numerics are string keys even on lists (loud) — stricter and better than the
-panel's gawk-shaped assumptions. Env-prefix `X=[1 2] /bin/true` gets the
-Decision-D guard test in `external_command_tests.rs` (the guard fires at spawn,
-so it needs a real binary — Linux-gated).
+**The composable-help surface had drifted from `LANGUAGE.md`.** Each collections PR kept
+`docs/LANGUAGE.md` in sync (per the CLAUDE.md convention), but the `collections`
+`syntax_section` in `crates/kaish-help/src/fragments.rs` — the single source for `help
+syntax`, `syntax.md`, and (new) `help collections` — was never updated when native literal
+construction and spread landed (#66/#64). It still taught `fromjson`-only construction.
+Fixed: the syntax_section now leads with the native literal forms (list/record/nesting) and
+the `...` spread nest-vs-flatten contrast, matching LANGUAGE.md; a new ranked Foundations
+Rule (`collection-literals`, rank 10) and Contrast fragment mention the literal forms and
+the dot-leakage error in the always-on onboarding block too.
 
-The review also verified two real findings fixed/queued separately (`${#nope[0]}`
-silent zero; `{"$k": …}` literal-key trap) and a ratification list for the
-design doc (RHS-snapshot semantics, iteration materialization timing,
-numeric-key non-normalization, scatter/gather typing) — those ride the PR body
-and the next design-doc pass, not this suite.
+**`help collections` is now a fragment query, not a file** (the design's explicit decision,
+finally implemented) — `compose::render_syntax_section(key)` renders a single `Syntax`
+fragment by its key, single-sourced with `syntax.md`, and `HelpTopic::parse_topic` falls
+back to it for any key that matches a registered syntax_section before falling through to
+`Tool(name)`. The mechanism is generic (any future subsystem-sized syntax feature gets
+`help <key>` for free by naming its section), not collections-specific plumbing.
+
+**A real regression surfaced while assembling the panel's cheat sheet, independent of the
+panel run itself.** Teaching note #1 — "teach an operator inside its full control
+structure, never bare" — is the hard-won rule from the *original* 2026-06-05 experiments
+(a standalone `[[ k in $r ]]` line reads as a complete statement to a model). Both the
+`collections` and `test-expressions` syntax_sections had shipped membership as a bare
+standalone `[[ ]]` line anyway — introduced when membership landed (#58) and never caught,
+because no panel re-test had exercised the *actual composed artifact* since then. Fixed in
+both fragments and in LANGUAGE.md's matching examples before running the panel, so the
+tested artifact reflects the corrected teaching copy rather than the regression it would
+otherwise have quietly re-validated.
+
+**The panel gate: 18/18 clean, zero correction rounds.** Ran the actual shipped
+`Recipe::agent_onboarding()` output plus the `collections` syntax_section — the real
+delivery artifact, not an ad-hoc cheat sheet — as a stateless one-shot prompt (no repo
+access) against DeepSeek V4, Gemini 3.5-flash, and Claude Haiku 4.5, on a 6-task script
+covering every item Teaching note #8 called out: nested record construction, bracket-path
+lvalues + `push`, the literal-vs-variable subscript distinction (`${user[name]}` vs
+`${user[$field]}`), membership inside a full `if/then/else`, a bare dot-leakage probe, and a
+slice. All three models converged immediately on `for k in $(keys $servers); do echo "$k:
+${servers[$k][port]}"; done` — the exact form the 2026-06-05 panel most commonly got wrong
+(it required explicit correction to stop reaching for the bare-builtin for-head). Zero
+dot-leakage on the bare field-access task, despite no "don't use dots" warning in the
+prompt — the taught contrast (`${u.name}` shown as the wrong form, with its error) held
+unprompted. All 18 generated scripts were then run against the real
+`./target/debug/kaish` binary and produced correct output. **The v2
+bare-collection-iterates relaxation is not adopted** — there's no evidence the `$()`-only
+form is a tax being paid forever; it converged in one round across the whole tested range.
+`docs/arrays-and-hashes.md` carries the full result inline at Teaching note #8 and the
+Resolved-decisions "Access form" entry, rather than a separate write-up, since the doc is
+already the design's evidence record.
+
 
 ## BRE follow-ups + the stale-`$?` bug (2026-07-03)
 
