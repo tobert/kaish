@@ -93,9 +93,9 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
 - **PRs land as merge commits that use the PR title and body** — the convention is
   a merge commit (`gh pr merge --merge`), not squash or rebase, with the merge
   commit's subject and body kept as the PR title/body so the decisions captured in
-  the PR description land in the history. Amy generally does the merging; write the
-  PR title/body to carry the same decision-narrative the commit messages do (see
-  below).
+  the PR description land in the history. A maintainer generally does the merging;
+  write the PR title/body to carry the same decision-narrative the commit messages
+  do (see below).
 - **Always add files by name**
 - Before committing, both must be clean:
   - `cargo test --all`
