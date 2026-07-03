@@ -1751,10 +1751,13 @@ fn mergeable_text(token: &Token) -> Option<String> {
 /// `$(x=[a b])` is still `test_depth == 0` and correctly does. This replaces
 /// the earlier pending-`for`/`case` counter entirely.
 ///
-/// `bracket_depth`/`brace_depth` are simple counters, not a real stack —
-/// deeply-nested *glued* literals (e.g. `x=[[a] [b]]`) are a documented
-/// deferral (see docs/issues.md); spaced nesting (`[ [a] [b] ]`) was never
-/// glued in the first place and is unaffected.
+/// `bracket_depth`/`brace_depth` are simple counters, not a real stack, but
+/// that's sufficient here: the `!currently_value` guard on `[[` detection
+/// above means a glued nested literal (`x=[[a] [b]]`) never gets mistaken for
+/// a `[[ ]]` test opener once bracket_depth is already > 0, so deeply-nested
+/// *glued* literals parse identically to spaced nesting (`[ [a] [b] ]`) at any
+/// depth — see `deeply_nested_glued_list_literal_matches_spaced_nesting` in
+/// `collection_literals_tests.rs`.
 #[derive(Clone, Copy, Default)]
 struct ValueContext {
     /// Inside (or opening) a value-position `[`/`{` literal — suppresses

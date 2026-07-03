@@ -57,6 +57,12 @@ breaking entries are marked **BREAKING**.
   stale since list/record literals landed. Membership (`in`/`not in`) is now
   always shown inside a full `if [[ … ]]; then … fi`, never a bare standalone
   test line (a prior regression against the shell's own teaching-note rule).
+- **`help collections` documents the one remaining 0.11.0 known limitation** —
+  `push` only accepts a top-level bareword target; a bracket-path target
+  (`push services[web][tags] item`) fails loudly instead of appending, with the
+  read/push/assign-back workaround shown inline. Two other suspected gaps
+  (deeply-nested glued list literals, nested `${#path}`/`${path:-default}`)
+  turned out already fixed on re-verification and needed no documentation.
 
 ### Added
 - **`help regex`** — a compact syntax section (also in `help syntax`/`syntax.md`)

@@ -158,6 +158,45 @@ for svc in $(values $to_restart); do
 done
 ```
 
+## Known limitations (0.11.0)
+
+Verification pass 2026-07-03, ahead of the 0.11.0 collections release, re-checked every
+gap `docs/issues.md` had flagged as "loud, ship as documented limitation if not closed."
+Two of the three no longer reproduce — they were fixed in passing by later work and the
+docs/issues.md entries were simply never updated:
+
+- **Deeply-nested *glued* list literals** (`x=[[a] [b]]`) — **FIXED.** The
+  `test_depth`-based rewrite of `lexer::compute_value_context` (commit `09c1a89`,
+  landed the same day as the original deferral) also fixed this as a side effect. Both
+  glued (`x=[[a] [b]]`) and spaced (`x=[ [a] [b] ]`) nesting now parse identically, at
+  any depth — pinned by `deeply_nested_glued_list_literal_matches_spaced_nesting` in
+  `collection_literals_tests.rs`.
+- **Nested `${#path}` and `${path:-default}`** (`${#u[tags]}`, `${u[missing]:-fallback}`)
+  — **FIXED.** Shipped in `28ec480` ("`feat(#6): path-aware ${#path} and ${path:-default}
+  with decision-A semantics`"), before the literal-syntax work that first flagged this as
+  a gap. Both forms resolve correctly in expression position, inside interpolated
+  strings, and on assignment RHS — see `collection_access_tests.rs`
+  (`length_of_a_subscripted_path_is_the_element_count`,
+  `default_on_a_missing_key_yields_the_default`, etc.). The one caveat: **`${#var}` length
+  syntax isn't recognized inside `$(( ))` arithmetic at all**, nested or not (a
+  pre-existing, general arithmetic gap unrelated to path-nesting — see `docs/issues.md`
+  P4). `$(( xs[i] ))` variable-subscript reads work fine; only the `${#…}` spelling is
+  unsupported there.
+- **Bracket-path `push` target** (`push services[web][tags] item`) — **confirmed, still
+  open.** `push` only accepts a top-level bareword target; a bracket path fuses into a
+  glob word and fails loudly (`no matches: services[web][tags]`) before `push` runs.
+  Workaround — read the nested list out, push, assign it back:
+  ```sh
+  tmp=${services[web][tags]}
+  push tmp item
+  services[web][tags]=$tmp
+  ```
+  Tracked as a real gap in `docs/issues.md` (P3, "Bracket-path `push` target"); needs its
+  own lexer/parser pass (a `push`-aware trigger, or routing `push`'s target through the
+  argv-position bracket-path grammar) before it can close.
+
+See also `help collections` for the same limitation in cheat-sheet form.
+
 ## Decisions, and the evidence behind them
 
 We stress-tested candidate syntaxes against four models (DeepSeek V4-Pro/Flash, Gemini
@@ -627,11 +666,12 @@ fixed three-token `for`-loop shape (`For Ident In`) to keep `for x in [a]` fusin
 glob; (2) the bracket-pair suppression only fires for runs that actually contain an
 `LBracket`/`RBracket` pair, so a pure `Star`/`Question` glob at value position
 (`X=*.txt`) is untouched and still evaluates to a literal string, exactly as before
-literals existed. Deferred, as flagged below: deeply-nested *glued* literals
-(`x=[[a] [b]]`) — spaced nesting (`[ [a] [b] ]`) was never glued and is unaffected; see
-`docs/issues.md` P3. The multi-word bareword record-value error
+literals existed. Deferred at the time: deeply-nested *glued* literals (`x=[[a] [b]]`)
+— spaced nesting (`[ [a] [b] ]`) was never glued and is unaffected. **FIXED as a side
+effect of `09c1a89`** (the `[[ ]]` test-depth rewrite below) — see "Known limitations
+(0.11.0)" above. The multi-word bareword record-value error
 (`{msg: hello world}`) is a loud parse error but with chumsky's generic message, not
-the hand-crafted "quote it" wording sketched in Teaching note #10 — also P3.
+the hand-crafted "quote it" wording sketched in Teaching note #10 — still open, `docs/issues.md` P3.
 
 - **Glob-merge is the big lexer collision — including one the first draft missed.**
   Space-separated literals are safe: the glob-run merger only fuses **span-adjacent** tokens
@@ -725,10 +765,10 @@ the hand-crafted "quote it" wording sketched in Teaching note #10 — also P3.
   shared with command names (`some-tool`) and must keep accepting those.
 - **`${#…}` length**: consolidated 2026-07-02 onto the shared `value_length` helper across all
   four sites (`kernel.rs` `Expr::VarLength` + in-string, `eval.rs` sync, `scheduler/pipeline.rs`
-  reduced sync — the last of which was still `value_to_string(value).len()`). The remaining length
-  work is *nested* length (`${#u[tags]}`): the `VarLength(String)` node carries a bare name, so it
-  can't reach a subscript — it's a loud "bind first" error until the node carries a `VarPath` (do
-  it with the resolver extraction below).
+  reduced sync — the last of which was still `value_to_string(value).len()`). This bullet
+  originally flagged *nested* length (`${#u[tags]}`) as remaining work — **shipped later the
+  same day in `28ec480`** (`VarLength`/`VarWithDefault` now carry a `VarPath`; see the `#6`
+  section below and "Known limitations (0.11.0)" above).
 - **`[[ in ]]`** — LANDED 2026-07-02. Routes through the async test path (`eval_test_async` in
   `kernel.rs`) so it is VFS/backend-aware; `TestExpr` gained `In`/`NotIn`; RHS shape-dispatches on
   `Value::Json` (array → element membership; object → key membership; string RHS → loud error).

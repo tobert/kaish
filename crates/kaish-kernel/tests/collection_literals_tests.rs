@@ -233,6 +233,30 @@ async fn nested_record_in_record() {
 }
 
 #[tokio::test]
+async fn deeply_nested_glued_list_literal_matches_spaced_nesting() {
+    // `x=[[a] [b]]` was flagged in docs/issues.md P3 as a deferred loud error —
+    // "deeply-nested glued literals aren't unfused by the lexer's value-position
+    // suppression." That was true against the pending-counter suppression this
+    // file's nesting tests were written under; the later `[[ ]]` test-depth
+    // rewrite (lexer.rs `compute_value_context`, commit 09c1a89) fixed it as a
+    // side effect: the `!currently_value` guard on `[[` detection means a glued
+    // nested run is never mistaken for a test opener. Pin it here — glued and
+    // spaced nesting must parse identically, at depth 2 and 3.
+    let k = setup().await;
+    let (out_glued, code_glued, err) = run(&k, "x=[[a] [b]]; echo $x").await;
+    assert_eq!(code_glued, 0, "err: {err}");
+    let (out_spaced, code_spaced, err) = run(&k, "x=[ [a] [b] ]; echo $x").await;
+    assert_eq!(code_spaced, 0, "err: {err}");
+    assert_eq!(out_glued, out_spaced);
+    assert_eq!(out_glued, r#"[["a"],["b"]]"#);
+
+    // Depth 3, still glued.
+    let (out_deep, code_deep, err) = run(&k, "x=[[[a] [b]] [c]]; echo $x").await;
+    assert_eq!(code_deep, 0, "err: {err}");
+    assert_eq!(out_deep, r#"[[["a"],["b"]],["c"]]"#);
+}
+
+#[tokio::test]
 async fn spread_flattens_a_list() {
     let k = setup().await;
     let (out, code, err) = run(&k, "xs=[a b c]; new=[...$xs date]; echo $new").await;

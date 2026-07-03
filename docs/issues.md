@@ -38,13 +38,21 @@ consciously ship-as-known-limitation before the release:
 - **[SILENT] reduced sync path coalesces bad/subscripted collection access** in
   scatter/gather workers (`${#u[tags]}` → silent-0, bad subscript → dropped arg).
   Detail under P2 (collection read-access follow-ups) and the #6 resolver entry.
-- **[LOUD gaps — OK to ship documented]** bracket-path `push` target
-  (`push a[b] x`), deeply-nested glued list literals (`x=[[a] [b]]`), and
-  nested `${#path}` / `${path:-default}` (blocked on the #6 resolver). All fail
-  loudly today; ship as known limitations if not closed.
+- **[LOUD gap — documented 2026-07-03]** bracket-path `push` target
+  (`push a[b] x`) fails loudly (glob-expands, "no matches") and doesn't work.
+  Documented as a known limitation with a working alternative in `help
+  collections` and `arrays-and-hashes.md`; the real fix stays open under P3
+  ("Bracket-path `push` target").
+  **Re-verified 2026-07-03 and dropped from this list, already fixed:**
+  deeply-nested glued list literals (`x=[[a] [b]]` — fixed as a side effect of
+  the `[[ ]]` test-depth lexer rewrite, `09c1a89`; regression test added) and
+  nested `${#path}` / `${path:-default}` (shipped in `28ec480`, before this
+  list was written). Neither was actually a live gap by the time this section
+  called for a decision — corrected in `arrays-and-hashes.md` ("Known
+  limitations (0.11.0)").
 
-Recommendation: land the two silent items; document the loud gaps in
-`help collections` / `arrays-and-hashes.md` and defer.
+Recommendation: land the two silent items above; the one remaining loud gap
+(`push` bracket-path target) is documented, not fixed.
 
 ---
 
@@ -149,30 +157,33 @@ Read access, membership, and lvalue writes shipped, but they lean on
 (O(n²) for `for k in $(keys $u)` with per-element `${u[$k]}`); the write side needs
 `&mut` serde navigation and can't reuse it. Extract **Bind**
 `(VarPath, &Scope) → Result<Vec<ConcreteStep>, PathError>` + **Walk** over
-`&serde_json::Value`. Folds in: `VarLength`/`VarWithDefault` → `VarPath` (unblocks
-nested `${#path}` and `${path:-default}`, plus widening the lexer `VarLength` regex
-to accept `[`), arithmetic's hand-collected brackets, and full-path error messages.
-**Decisions settled (2026-07-02):** `PathError` splits into `UndefinedRoot`/`Absence`/
+`&serde_json::Value`. **Correction 2026-07-03:** the "folds in" list this entry
+originally carried — `VarLength`/`VarWithDefault` → `VarPath`, the lexer `VarLength`
+regex widening, arithmetic's own path building, and full-path error messages — all
+shipped in `28ec480`, before this entry's decisions were even recorded below; nested
+`${#path}` and `${path:-default}` are working forms today, not blocked on this
+extraction. **This entry is now purely the `apply_segment` O(n²)-clone perf
+extraction** (killing the per-hop `clone()` by walking a borrowed root instead), which
+is genuinely still open. **Decisions settled (2026-07-02, already reflected in the
+shipped read-side resolver):** `PathError` splits into `UndefinedRoot`/`Absence`/
 `Shape`; `${path:-default}` is lenient on absence (unset root, missing key, OOB,
-empty → default) but loud on shape errors; `${#path}` stays loud "bind first" until
-path-aware. Full writeup: [arrays-and-hashes.md](arrays-and-hashes.md) ("Two-phase
-bind/walk resolver"). This entry is now purely the resolver extraction — the
-`for k in $record` / E012 question is out of scope (iteration stays `$()`-only).
+empty → default) but loud on shape errors. Full writeup:
+[arrays-and-hashes.md](arrays-and-hashes.md) ("#6 — the shared per-hop resolver").
+The `for k in $record` / E012 question is out of scope (iteration stays `$()`-only).
 
-Riders on #6 (currently loud, become nicer once it lands):
+Riders on #6 (currently loud, become nicer once the perf extraction lands):
 - **Reduced sync path still coalesces** (also the P3 entry below): the subscripted-name
   loud guard lands in `eval.rs` (sync) + `kernel.rs` (async), but
   `scheduler/pipeline.rs`'s `eval_string_parts_sync` has no error channel, so
   `${#u[tags]}` there is silent-0. **[SILENT — 0.11.0 candidate]**
-- **Expression-position `${#u[tags]}` gives a poor message.** In-string
-  `"${#u[tags]}"` gets the "bind it first" guard, but `echo ${#u[tags]}` never becomes
-  a `VarLength` node (the lexer regex excludes `[`), falling to `VarRef` root `#u` →
-  loud but bare "undefined variable". Fix rides #6 (widen the regex / route
-  `#`-prefixed `VarRef` through the length path).
 - **P3/P4 tail** (loud/cosmetic): `fromjson` on an already-typed value stringifies-
   then-reparses and loses `Value::Bytes` (short-circuit typed values); async `VarRef`
   "undefined variable" omits the name while sync includes it; missing-key errors could
   list available keys; `${.a}`/`${a.}` empty dot segments resolve as `${a}` silently.
+  Separately, `${#var}` length syntax (nested or not) isn't recognized at all inside
+  `$(( ))` arithmetic — `arithmetic.rs` never hand-collects a `#`-prefixed subscript;
+  `$(( xs[i] ))` variable-subscript reads work, only the `${#…}` spelling doesn't.
+  (P4 — pre-existing, general arithmetic gap, unrelated to path-nesting.)
 
 ### Collection read-access follow-ups
 - **P3 — reduced sync arg path coalesces a loud path error to skip.** The four primary
@@ -264,16 +275,14 @@ collection evaporates before reaching a process edge. Fix: when `.out` is empty 
 display) or fail loud — decide which; do NOT leave the silent `""`. **[0.11.0
 candidate — clearest crash-beats-corrupt item on the collections surface.]**
 
-### Collection literals: deeply-nested *glued* brackets + generic error text
-- **Deeply-nested glued list literals** (`x=[[a] [b]]`) aren't unfused by the lexer's
-  value-position suppression — only a flat/glued-single/empty run (`[dog]`, `[]`,
-  `[1]`) is exempt from `GlobWord` fusion. Spaced nesting (`[ [a] [b] ]`) works. Fix:
-  extend `lexer::compute_value_context`'s depth tracking to unfuse an inner glued run
-  once already inside an open value literal.
+### Collection literals: generic record-value error text
 - **Unquoted multi-word record value** (`{msg: hello world}`) is already a loud parse
   error (never silently split), but the message is chumsky's generic "expected `:`/`}`"
   rather than the crafted "quote it" wording. Fix: a `try_map` guard in
   `record_literal_parser` peeking for a stray bareword not followed by `:`.
+  (Deeply-nested *glued* list literals, `x=[[a] [b]]`, used to be listed here too —
+  fixed as a side effect of the `[[ ]]` test-depth lexer rewrite, `09c1a89`;
+  see `arrays-and-hashes.md` "Known limitations (0.11.0)".)
 
 ### Bracket-path `push` target (`push services[web][tags] item`) — deferred
 Lvalue *assignment* (`xs[0]=9`, deep paths) and `push` shipped, but `push` only
@@ -283,7 +292,9 @@ into a `GlobWord` and glob-expands (loud "no matches") before `push` runs. Loud,
 silent, but the feature doesn't work. Needs its own lexer/parser pass: a `push`-aware
 lexer trigger, or routing `push`'s target through the argv-position bracket-path
 grammar. The design intended `push` to accept bracket paths, so this is a real gap.
-**[0.11.0 loud gap — document as known limitation if not closed.]**
+**[0.11.0 loud gap — documented 2026-07-03 as a known limitation** in `help
+collections` and `arrays-and-hashes.md`, with the read/push/assign-back
+workaround; this entry stays open for the actual fix.**]**
 
 ### `JobManager` output-stream reads hold the jobs lock across `await`
 `read_stdout`/`read_stderr` (`scheduler/job.rs`, the `/v/jobs/{id}/stdout|stderr`

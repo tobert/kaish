@@ -361,6 +361,14 @@ user.email=x              # error — brackets only, use `user[email]=x`
 # push appends to a top-level LIST in place — takes the NAME (like read/unset)
 push xs date               # xs is now [...,"date"]
 push xs $rec               # values push as typed Values, not stringified text
+
+# KNOWN LIMITATION — push only takes a top-level bareword target; a bracket
+# path target fuses into a glob and fails loudly ("no matches") instead of
+# pushing. Read the nested list out, push, assign it back:
+push services[web][tags] item   # ERROR — no matches: services[web][tags]
+tmp=${services[web][tags]}      # workaround
+push tmp item
+services[web][tags]=$tmp
 ```"#,
     ),
     syntax_section(
