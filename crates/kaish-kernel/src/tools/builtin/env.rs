@@ -134,6 +134,15 @@ impl Tool for Env {
         let Some(cmd_idx) = command_start else {
             return ExecResult::failure(1, "env: internal error: missing command index");
         };
+        // Decision D: a bare collection can't cross the process boundary as the
+        // command name or an argv element — loud, not a silent JSON stringify.
+        // env consumes typed Values directly (no `build_args_flat`), so the
+        // guard lives here at env's own edge.
+        for v in &args.positional[cmd_idx..] {
+            if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", v) {
+                return ExecResult::failure(1, format!("env: {msg}"));
+            }
+        }
         let command = match &args.positional[cmd_idx] {
             Value::String(s) => s.clone(),
             other => value_to_string(other),
@@ -261,11 +270,22 @@ async fn execute_with_env(
     if clear {
         cmd.env_clear();
     } else {
-        // Set exported variables from scope
-        for (name, value) in ctx.scope.exported_vars() {
-            if !unset.contains(&name) {
-                cmd.env(&name, value_to_string(&value));
-            }
+        // Set exported variables from scope. A structured value can't cross the
+        // process boundary; refuse rather than silently JSON-serializing it into
+        // the child's environment. This is an independent spawn path that
+        // bypasses `try_execute_external`, so it must run the same
+        // `structured_export_error` guard (Decision D).
+        let exported: Vec<(String, Value)> = ctx
+            .scope
+            .exported_vars()
+            .into_iter()
+            .filter(|(name, _)| !unset.contains(name))
+            .collect();
+        if let Some(msg) = crate::interpreter::structured_export_error(&exported) {
+            return ExecResult::failure(1, msg);
+        }
+        for (name, value) in exported {
+            cmd.env(&name, value_to_string(&value));
         }
     }
 

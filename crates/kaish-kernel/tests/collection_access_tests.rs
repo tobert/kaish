@@ -968,3 +968,100 @@ fi
     assert_eq!(code_list, 0, "err: {err_list}");
     assert_eq!(out_list, "val:x\nval:y");
 }
+
+// ── Decision E: scalar test operators refuse a collection operand ──────────
+//
+// `==`/`!=` already error via `values_equal` (see
+// `values_equal_collection_vs_scalar_is_loud` in interpreter/eval.rs); `in`/
+// `not in` are the one operator family that legitimately takes a collection
+// and is exercised extensively above. Every other scalar-only test operator
+// must refuse a list/record operand loudly rather than silently stringifying
+// it (an empty list `[]` reading as `-z`-true was the trap).
+
+#[tokio::test]
+async fn dash_z_on_a_list_is_a_loud_shape_error() {
+    let k = setup().await;
+    let result = k
+        .execute(r#"xs=$(fromjson '[1,2]'); if [[ -z $xs ]]; then echo T; fi"#)
+        .await;
+    let msg = result.expect_err("-z on a list must be a loud Shape error, not silent JSON-string emptiness");
+    let msg = format!("{msg:#}");
+    assert!(msg.contains("-z"), "should name the operator: {msg}");
+    assert!(msg.contains("scalar"), "should say it needs a scalar: {msg}");
+}
+
+#[tokio::test]
+async fn dash_n_on_a_record_is_a_loud_shape_error() {
+    let k = setup().await;
+    let result = k
+        .execute(r#"r=$(fromjson '{"a":1}'); if [[ -n $r ]]; then echo T; fi"#)
+        .await;
+    result.expect_err("-n on a record must be a loud Shape error");
+}
+
+#[tokio::test]
+async fn regex_match_on_a_list_is_a_loud_shape_error() {
+    let k = setup().await;
+    let result = k
+        .execute(r#"xs=$(fromjson '["a","b"]'); if [[ $xs =~ a ]]; then echo T; fi"#)
+        .await;
+    let msg = result.expect_err("=~ on a list must be a loud Shape error");
+    assert!(format!("{msg:#}").contains("=~"), "should name the operator: {msg:#}");
+}
+
+#[tokio::test]
+async fn regex_not_match_on_a_list_is_a_loud_shape_error() {
+    let k = setup().await;
+    let result = k
+        .execute(r#"xs=$(fromjson '["a","b"]'); if [[ $xs !~ a ]]; then echo T; fi"#)
+        .await;
+    result.expect_err("!~ on a list must be a loud Shape error");
+}
+
+#[tokio::test]
+async fn numeric_gt_on_a_list_is_a_loud_shape_error() {
+    let k = setup().await;
+    let result = k
+        .execute(r#"xs=$(fromjson '[1,2,3]'); if [[ $xs -gt 3 ]]; then echo T; fi"#)
+        .await;
+    let msg = result.expect_err("-gt on a list must be a loud Shape error");
+    assert!(format!("{msg:#}").contains("-gt"), "should name the operator: {msg:#}");
+}
+
+#[tokio::test]
+async fn ordering_lt_on_two_lists_is_a_loud_shape_error() {
+    let k = setup().await;
+    let result = k
+        .execute(r#"a=$(fromjson '[1]'); b=$(fromjson '[2]'); if [[ $a < $b ]]; then echo T; fi"#)
+        .await;
+    let msg = result.expect_err("< on two lists must be a loud Shape error");
+    assert!(format!("{msg:#}").contains('<'), "should name the operator: {msg:#}");
+}
+
+#[tokio::test]
+async fn scalar_test_operators_still_work_on_scalars() {
+    let k = setup().await;
+    let (out, code, err) = run(&k, r#"if [[ -z "" ]]; then echo T; else echo F; fi"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "T");
+
+    let (out2, code2, err2) = run(&k, r#"s=hi; if [[ -n $s ]]; then echo T; else echo F; fi"#).await;
+    assert_eq!(code2, 0, "err: {err2}");
+    assert_eq!(out2, "T");
+}
+
+// ── Decision D: a bare collection can't be a redirect target ───────────────
+
+#[tokio::test]
+async fn redirect_target_bare_collection_is_a_loud_error() {
+    let k = setup().await;
+    let result = k.execute(r#"x=$(fromjson '[1,2]'); echo hi > $x"#).await;
+    let msg = match result {
+        Ok(r) => {
+            assert_ne!(r.code, 0, "redirecting into a bare collection target must fail: {r:?}");
+            r.err
+        }
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(msg.contains("tojson"), "should hint at serializing with tojson: {msg}");
+}

@@ -3615,16 +3615,30 @@ impl Kernel {
                         }
                     }
                     let value = self.eval_expr_async(expr).await?;
+                    // Decision D: a bare collection can't cross the external
+                    // process boundary as an argv element — refuse rather than
+                    // silently JSON-serializing it. A quoted `"$x"` already
+                    // reduced to a `Value::String` above (via `Expr::Interpolated`),
+                    // so only a live, un-interpolated `$x` trips this.
+                    if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &value) {
+                        return Err(anyhow::anyhow!(msg));
+                    }
                     let value = apply_tilde_expansion(value, home.as_deref());
                     argv.push(value_to_string(&value));
                 }
                 Arg::Named { key, value } => {
                     let val = self.eval_expr_async(value).await?;
+                    if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &val) {
+                        return Err(anyhow::anyhow!(msg));
+                    }
                     let val = apply_tilde_expansion(val, home.as_deref());
                     argv.push(format!("--{}={}", key, value_to_string(&val)));
                 }
                 Arg::WordAssign { key, value } => {
                     let val = self.eval_expr_async(value).await?;
+                    if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &val) {
+                        return Err(anyhow::anyhow!(msg));
+                    }
                     let val = apply_tilde_expansion(val, home.as_deref());
                     argv.push(format!("{}={}", key, value_to_string(&val)));
                 }
@@ -3868,6 +3882,18 @@ impl Kernel {
                 TestExpr::StringTest { op, value } => match op {
                     crate::ast::StringTestOp::IsEmpty | crate::ast::StringTestOp::IsNonEmpty => {
                         let val = self.eval_expr_async(value).await?;
+                        // Decision E: a collection operand is a loud Shape error
+                        // here too — must not diverge from the sync path in
+                        // interpreter/eval.rs (shared `scalar_test_operand_error`).
+                        let symbol = match op {
+                            crate::ast::StringTestOp::IsEmpty => "-z",
+                            crate::ast::StringTestOp::IsNonEmpty => "-n",
+                            crate::ast::StringTestOp::IsList
+                            | crate::ast::StringTestOp::IsRecord => unreachable!(),
+                        };
+                        if let Some(msg) = crate::interpreter::scalar_test_operand_error(symbol, &val) {
+                            anyhow::bail!(msg);
+                        }
                         let s = value_to_string(&val);
                         Ok(match op {
                             crate::ast::StringTestOp::IsEmpty => s.is_empty(),

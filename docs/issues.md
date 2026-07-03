@@ -486,6 +486,20 @@ the `WordAssign` arm degrade to a stringified positional when `past_double_dash`
 
 ## P3 — Scheduler and infra
 
+### `"$(cmd)"` interpolation drops a `.data`-only collection to empty string (silent data LOSS)
+Found alongside the collections boundary-ops work (2026-07-02, `feat/collections-boundary-ops`).
+Quoted command-substitution interpolation reads a command's `.out` via
+`try_text_out()` (kernel.rs `StringPart::CommandSubst`, ~line 4035), so a builtin
+that sets only structured `.data` (a collection) with an empty `.out` interpolates
+to `""` inside `"...$(cmd)..."`. This is a **silent data-loss** distinct from the
+Decision-D stringify boundary (which is now loud): the collection never reaches a
+process edge — it evaporates before it can. Repro shape: any builtin whose result
+carries `.data` but no materialized `.out`, spliced into a double-quoted string.
+Fix direction: when `.out` is empty but `.data` is a collection, either render the
+collection as compact JSON (consistent with bare `$c` display) or fail loud —
+decide which; do NOT leave the silent `""`. Different bug class from the
+boundary guards, so deferred here rather than fixed in that branch.
+
 ### `JobManager` output-stream reads hold the jobs lock across `await`
 Surfaced fixing the `wait`/`spawn` deadlock (2026-06-24). `read_stdout`/`read_stderr`
 (`scheduler/job.rs`, the `/v/jobs/{id}/stdout|stderr` reads) do

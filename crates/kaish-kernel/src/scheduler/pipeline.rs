@@ -162,17 +162,18 @@ async fn apply_redirects(
 /// inside a heredoc body. Falls back to the sync evaluator (which skips
 /// command substitution) only when no dispatcher is attached.
 async fn eval_redirect_target(expr: &Expr, ctx: &ExecContext) -> Result<String, String> {
-    if let Some(dispatcher) = &ctx.dispatcher {
-        dispatcher
-            .eval_expr(expr, ctx)
-            .await
-            .map(|v| value_to_string(&v))
-            .map_err(|e| e.to_string())
+    let value = if let Some(dispatcher) = &ctx.dispatcher {
+        dispatcher.eval_expr(expr, ctx).await.map_err(|e| e.to_string())?
     } else {
         eval_simple_expr(expr, ctx)
-            .map(|v| value_to_string(&v))
-            .ok_or_else(|| "could not evaluate redirect target".to_string())
+            .ok_or_else(|| "could not evaluate redirect target".to_string())?
+    };
+    // Decision D: a bare collection can't be a redirect target either — same
+    // process-boundary guard as external argv (see `structured_boundary_error`).
+    if let Some(msg) = crate::interpreter::structured_boundary_error("a redirect target", &value) {
+        return Err(msg);
     }
+    Ok(value_to_string(&value))
 }
 
 /// Write data to a file via the VFS backend.

@@ -122,12 +122,17 @@ impl Tool for Spawn {
             }
         };
 
-        // Get argv (optional)
-        let argv = args
-            .get_named("argv")
-            .or_else(|| args.get_positional(1))
-            .map(extract_string_array)
-            .unwrap_or_default();
+        // Get argv (optional). Decision D: a collection *element* (or a record
+        // as the whole argv) can't cross the process boundary — loud, not a
+        // silent JSON stringify. spawn's argv is legitimately a list of
+        // strings, so only nested collections trip the guard.
+        let argv = match args.get_named("argv").or_else(|| args.get_positional(1)) {
+            Some(v) => match extract_string_array(v) {
+                Ok(argv) => argv,
+                Err(msg) => return ExecResult::failure(1, format!("spawn: {msg}")),
+            },
+            None => Vec::new(),
+        };
 
         // Get env (optional)
         let env_vars = args
@@ -286,27 +291,47 @@ fn value_to_string(value: &Value) -> String {
 /// - JSON array (Value::Json): use elements directly
 /// - JSON array string: parse and extract string items
 /// - Plain string: one-element array (no implicit splitting)
-fn extract_string_array(value: &Value) -> Vec<String> {
+///
+/// Decision D: a nested-collection element (a list/record *inside* the argv
+/// list), or a record used as the whole argv, is a loud error — never a silent
+/// JSON stringify or a silently-dropped element. The top-level list itself is
+/// legitimate (spawn's argv is a list of strings). Reuses the shared
+/// `structured_boundary_error` so the message matches every other boundary.
+fn extract_string_array(value: &Value) -> Result<Vec<String>, String> {
     match value {
         Value::Json(serde_json::Value::Array(arr)) => {
-            arr.iter().map(|v| match v {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            }).collect()
+            let mut out = Vec::with_capacity(arr.len());
+            for v in arr {
+                if let Some(msg) = crate::interpreter::structured_boundary_error(
+                    "a command argument",
+                    &Value::Json(v.clone()),
+                ) {
+                    return Err(msg);
+                }
+                out.push(match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                });
+            }
+            Ok(out)
         }
+        Value::Json(obj @ serde_json::Value::Object(_)) => Err(
+            crate::interpreter::structured_boundary_error("a command argument", &Value::Json(obj.clone()))
+                .unwrap_or_else(|| "argv must be a list of strings".to_string()),
+        ),
         Value::String(s) => {
             // Try to parse as JSON array
             if s.starts_with('[')
                 && let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(s) {
-                    return arr
+                    return Ok(arr
                         .iter()
                         .filter_map(|v| v.as_str().map(String::from))
-                        .collect();
+                        .collect());
                 }
             // Plain string is one argument — no implicit whitespace splitting
-            vec![s.clone()]
+            Ok(vec![s.clone()])
         }
-        _ => vec![],
+        _ => Ok(vec![]),
     }
 }
 

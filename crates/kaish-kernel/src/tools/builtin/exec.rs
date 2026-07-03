@@ -103,16 +103,18 @@ impl Tool for Exec {
             }
         };
 
-        // Remaining positionals become argv
-        let argv: Vec<String> = args
-            .positional
-            .iter()
-            .skip(1)
-            .map(|v| match v {
-                Value::String(s) => s.clone(),
-                other => value_to_string(other),
-            })
-            .collect();
+        // Remaining positionals become argv. Decision D: a bare collection
+        // can't cross the process boundary as an argv element — refuse rather
+        // than the previous silent JSON stringify (via `value_to_string`).
+        // exec consumes typed Values directly (no `build_args_flat`), so the
+        // guard lives here at exec's own edge.
+        let mut argv: Vec<String> = Vec::with_capacity(args.positional.len().saturating_sub(1));
+        for v in args.positional.iter().skip(1) {
+            if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", v) {
+                return ExecResult::failure(1, format!("exec: {msg}"));
+            }
+            argv.push(value_to_string(v));
+        }
 
         // Platform-specific: Unix replaces the process, others error
         #[cfg(unix)]

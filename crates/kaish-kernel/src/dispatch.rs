@@ -190,29 +190,39 @@ impl BackendDispatcher {
             resolve_in_path(name, &path_var)?
         };
 
-        // Build flat argv from args
-        let argv: Vec<String> = args.iter().filter_map(|arg| {
+        // Build flat argv from args. A for-loop (not filter_map) so the
+        // Decision D collection-argv guard can short-circuit the whole spawn
+        // — kept in sync with the production build in kernel.rs::build_args_flat.
+        let mut argv: Vec<String> = Vec::new();
+        for arg in args {
             match arg {
                 Arg::Positional(expr) => match expr {
-                    Expr::Literal(Value::String(s)) => Some(s.clone()),
-                    Expr::Literal(Value::Int(i)) => Some(i.to_string()),
-                    Expr::Literal(Value::Float(f)) => Some(f.to_string()),
-                    Expr::VarRef(path) => ctx.scope.resolve_path(path).ok().map(|v| crate::interpreter::value_to_string(&v)),
-                    _ => None,
+                    Expr::Literal(Value::String(s)) => argv.push(s.clone()),
+                    Expr::Literal(Value::Int(i)) => argv.push(i.to_string()),
+                    Expr::Literal(Value::Float(f)) => argv.push(f.to_string()),
+                    Expr::VarRef(path) => {
+                        if let Ok(v) = ctx.scope.resolve_path(path) {
+                            if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &v) {
+                                return Some(ExecResult::failure(1, msg));
+                            }
+                            argv.push(crate::interpreter::value_to_string(&v));
+                        }
+                    }
+                    _ => {}
                 },
-                Arg::ShortFlag(f) => Some(format!("-{f}")),
-                Arg::LongFlag(f) => Some(format!("--{f}")),
+                Arg::ShortFlag(f) => argv.push(format!("-{f}")),
+                Arg::LongFlag(f) => argv.push(format!("--{f}")),
                 Arg::Named { key, value } => match value {
-                    Expr::Literal(Value::String(s)) => Some(format!("--{key}={s}")),
-                    _ => Some(format!("--{key}=")),
+                    Expr::Literal(Value::String(s)) => argv.push(format!("--{key}={s}")),
+                    _ => argv.push(format!("--{key}=")),
                 },
                 Arg::WordAssign { key, value } => match value {
-                    Expr::Literal(Value::String(s)) => Some(format!("{key}={s}")),
-                    _ => Some(format!("{key}=")),
+                    Expr::Literal(Value::String(s)) => argv.push(format!("{key}={s}")),
+                    _ => argv.push(format!("{key}=")),
                 },
-                Arg::DoubleDash => Some("--".to_string()),
+                Arg::DoubleDash => argv.push("--".to_string()),
             }
-        }).collect();
+        }
 
         // Check for streaming pipes
         let has_pipe_stdin = ctx.pipe_stdin.is_some();

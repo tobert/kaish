@@ -313,6 +313,17 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             TestExpr::StringTest { op, value } => match op {
                 StringTestOp::IsEmpty | StringTestOp::IsNonEmpty => {
                     let val = self.eval(value)?;
+                    // Decision E: a collection operand is a loud Shape error,
+                    // never silently stringified-then-measured (an empty list
+                    // `[]` must not read as "-z"-true via its JSON text).
+                    let symbol = match op {
+                        StringTestOp::IsEmpty => "-z",
+                        StringTestOp::IsNonEmpty => "-n",
+                        StringTestOp::IsList | StringTestOp::IsRecord => unreachable!(),
+                    };
+                    if let Some(msg) = scalar_test_operand_error(symbol, &val) {
+                        return Err(EvalError::Unsupported(msg));
+                    }
                     let s = value_to_string(&val);
                     match op {
                         StringTestOp::IsEmpty => s.is_empty(),
@@ -339,6 +350,8 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                     TestCmpOp::Eq => values_equal(&left_val, &right_val)?,
                     TestCmpOp::NotEq => !(values_equal(&left_val, &right_val)?),
                     TestCmpOp::Match => {
+                        // Decision E: regex match is scalar-only.
+                        guard_scalar_test_operands(op, &left_val, &right_val)?;
                         // Regex match — propagate compile errors loudly (no silent false).
                         match regex_match(&left_val, &right_val, false)? {
                             Value::Bool(b) => b,
@@ -346,6 +359,7 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                         }
                     }
                     TestCmpOp::NotMatch => {
+                        guard_scalar_test_operands(op, &left_val, &right_val)?;
                         // Regex not match — propagate compile errors loudly (no silent true).
                         match regex_match(&left_val, &right_val, true)? {
                             Value::Bool(b) => b,
@@ -353,6 +367,8 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                         }
                     }
                     TestCmpOp::Gt | TestCmpOp::Lt | TestCmpOp::GtEq | TestCmpOp::LtEq => {
+                        // Decision E: ordering is scalar-only.
+                        guard_scalar_test_operands(op, &left_val, &right_val)?;
                         // String comparison: `>` `<` `>=` `<=` use lexicographic ordering.
                         let ord = compare_values(&left_val, &right_val)?;
                         match op {
@@ -369,6 +385,8 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                     | TestCmpOp::NumLt
                     | TestCmpOp::NumGtEq
                     | TestCmpOp::NumLtEq => {
+                        // Decision E: numeric comparison is scalar-only.
+                        guard_scalar_test_operands(op, &left_val, &right_val)?;
                         // Arithmetic comparison: `-eq` `-ne` `-gt` `-lt` `-ge` `-le`
                         // always coerce operands to numbers. Non-numeric strings error.
                         let ord = numeric_compare(&left_val, &right_val)?;
@@ -680,6 +698,67 @@ pub fn structured_export_error(vars: &[(String, Value)]) -> Option<String> {
     None
 }
 
+/// True if `value` is a first-class collection (list/record) rather than a
+/// scalar. `Value::Json` also carries JSON scalars (numbers/strings/bool/null
+/// unwrapped at the value boundary — see `json_to_value_no_envelope`), so
+/// this only matches the two container variants.
+pub fn is_collection(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Json(serde_json::Value::Array(_)) | Value::Json(serde_json::Value::Object(_))
+    )
+}
+
+/// "list" or "record" for a value that `is_collection`. Callers only reach
+/// the fallback arm if they call this without checking `is_collection` first.
+fn collection_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Json(serde_json::Value::Array(_)) => "list",
+        Value::Json(serde_json::Value::Object(_)) => "record",
+        _ => "collection",
+    }
+}
+
+/// Decision D: reject a bare collection value crossing a process-boundary
+/// sink — an external command's argv element, or a redirect target. String
+/// interpolation (`"$c"`) already reduces to a `Value::String` (rendering
+/// compact JSON) before reaching either sink, so only a *live*,
+/// un-interpolated `Value::Json(Array|Object)` — a bare `$c` — trips this.
+/// `sink` names the boundary in the message (e.g. "a command argument",
+/// "a redirect target"). `None` for scalars. Callers: `kernel.rs`
+/// (`build_args_flat`, `try_execute_external`), `dispatch.rs` (`try_external`,
+/// test-only twin), `scheduler/pipeline.rs` (`eval_redirect_target`).
+pub fn structured_boundary_error(sink: &str, value: &Value) -> Option<String> {
+    if is_collection(value) {
+        let kind = collection_kind(value);
+        Some(format!(
+            "cannot use a {kind} as {sink} — serialize it explicitly first, e.g. `cmd $(tojson $x)`"
+        ))
+    } else {
+        None
+    }
+}
+
+/// Decision E: scalar-only test operators (`-z`/`-n`, `=~`/`!~`, ordering
+/// `<`/`>`/`<=`/`>=`, and numeric `-eq`/`-ne`/`-gt`/`-lt`/`-ge`/`-le`) refuse a
+/// collection operand loudly rather than falling through a stringify/silent
+/// path. `==`/`!=` already error via `values_equal`; `in`/`not in` are the one
+/// operator family that legitimately takes a collection operand and must
+/// never call this. `None` for scalars. Shared by the sync `eval_test`
+/// (interpreter/eval.rs) and the async `eval_test_async` (kernel.rs) so the
+/// two `[[ ]]` evaluators can't drift apart on this guard.
+pub fn scalar_test_operand_error(op_symbol: &str, value: &Value) -> Option<String> {
+    if is_collection(value) {
+        let kind = collection_kind(value);
+        Some(format!(
+            "`{op_symbol}` needs a scalar; got a {kind} — use `${{#x}}` for length, \
+             `-list`/`-record` to test shape, or `in` for membership"
+        ))
+    } else {
+        None
+    }
+}
+
 pub fn value_to_string(value: &Value) -> String {
     match value {
         Value::Null => "null".to_string(),
@@ -937,6 +1016,41 @@ fn eval_membership(needle: &Value, haystack: &Value) -> EvalResult<bool> {
             type_name(other),
         ))),
     }
+}
+
+/// The literal operator spelling for a `TestCmpOp`, used in Decision E's Shape
+/// error message so it names the exact operator the user wrote.
+fn cmp_op_symbol(op: &TestCmpOp) -> &'static str {
+    match op {
+        TestCmpOp::Eq => "==",
+        TestCmpOp::NotEq => "!=",
+        TestCmpOp::Match => "=~",
+        TestCmpOp::NotMatch => "!~",
+        TestCmpOp::Gt => ">",
+        TestCmpOp::Lt => "<",
+        TestCmpOp::GtEq => ">=",
+        TestCmpOp::LtEq => "<=",
+        TestCmpOp::NumEq => "-eq",
+        TestCmpOp::NumNotEq => "-ne",
+        TestCmpOp::NumGt => "-gt",
+        TestCmpOp::NumLt => "-lt",
+        TestCmpOp::NumGtEq => "-ge",
+        TestCmpOp::NumLtEq => "-le",
+    }
+}
+
+/// Decision E guard for every `TestExpr::Comparison` operator except `==`/`!=`
+/// (already loud via `values_equal`): a single call point so a new comparison
+/// operator can't be added without picking up the collection guard.
+fn guard_scalar_test_operands(op: &TestCmpOp, left: &Value, right: &Value) -> EvalResult<()> {
+    let symbol = cmp_op_symbol(op);
+    if let Some(msg) = scalar_test_operand_error(symbol, left) {
+        return Err(EvalError::Unsupported(msg));
+    }
+    if let Some(msg) = scalar_test_operand_error(symbol, right) {
+        return Err(EvalError::Unsupported(msg));
+    }
+    Ok(())
 }
 
 /// Compare two values for ordering.
