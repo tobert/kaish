@@ -362,3 +362,94 @@ seq 1 2 | scatter --as "n${#u[tags]}" | echo $n3 | gather"#,
     assert_eq!(rows[0]["out"], "1", "var name resolved to n3, the real tag count");
     assert_eq!(rows[1]["out"], "2");
 }
+
+#[tokio::test]
+async fn undefined_root_subscript_in_scatter_flag_value_is_loud() {
+    // kaibo review finding (PR #85): `${nope[key]}` where the ROOT is entirely
+    // undefined is `PathError::UndefinedRoot`, not `Absence` — the first cut
+    // coalesced ALL UndefinedRoot to a skipped flag, so a typo'd root still
+    // silently dropped `--as`'s value. Only a BARE undefined var may coalesce;
+    // a subscripted path on an undefined root errors, same split
+    // `resolve_length` draws.
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(
+        &k,
+        r#"seq 1 2 | scatter --as ${nope[key]} | echo $ITEM | gather"#,
+    )
+    .await;
+    assert_ne!(r.code, 0, "typo'd root in a subscripted flag value must fail loud");
+    assert!(r.err.contains("undefined variable"), "got: {}", r.err);
+}
+
+#[tokio::test]
+async fn bare_undefined_var_in_scatter_flag_still_coalesces() {
+    // The bash-compatible convention this reduced context keeps: a BARE
+    // undefined `$VAR` coalesces (the flag falls back to boolean, `--as`
+    // keeps its ITEM default) rather than erroring. Only subscripted paths
+    // went loud in the fix above.
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(
+        &k,
+        r#"seq 1 2 | scatter --as $KAISH_TEST_UNSET_VAR | echo $ITEM | gather"#,
+    )
+    .await;
+    assert_eq!(r.code, 0, "bare undefined var keeps coalescing: {:?}", r.err);
+    let rows = rows(&r.text_out());
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["out"], "1", "ITEM default binding still in effect");
+}
+
+#[tokio::test]
+async fn bare_length_bad_subscript_in_scatter_flag_is_loud() {
+    // Bare (unquoted whole-token) `${#u[nope]}` parses as `Expr::VarLength`,
+    // which used to fall through `eval_simple_expr`'s `_ => None` catch-all —
+    // silently dropping the flag and letting the pipeline proceed. Reaching a
+    // loud error here proves the new bare `VarLength` arm is wired: if the
+    // arm regressed to the catch-all, this pipeline would succeed.
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(
+        &k,
+        r#"u=$(fromjson '{"tags":["a","b"]}')
+seq 1 2 | scatter --limit ${#u[nope]} | echo $ITEM | gather"#,
+    )
+    .await;
+    assert_ne!(r.code, 0, "bad bare ${{#...}} flag value must fail, not be silently dropped");
+    assert!(r.err.contains("no such key"), "got: {}", r.err);
+}
+
+#[tokio::test]
+async fn bare_length_in_scatter_flag_value_succeeds() {
+    // Happy path for the bare `Expr::VarLength` arm: `--limit ${#u[tags]}`
+    // resolves to a valid limit (3) and the pipeline runs. Pairs with the
+    // loud-error test above, which is what proves the arm is reachable.
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(
+        &k,
+        r#"u=$(fromjson '{"tags":["a","b","c"]}')
+seq 1 2 | scatter --limit ${#u[tags]} | echo $ITEM | gather"#,
+    )
+    .await;
+    assert_eq!(r.code, 0, "{:?}", r.err);
+    assert_eq!(rows(&r.text_out()).len(), 2);
+}
+
+#[tokio::test]
+async fn bare_default_in_scatter_flag_value_binds_the_var_name() {
+    // Bare (unquoted whole-token) `${cfg[name]:-W}` parses as
+    // `Expr::VarWithDefault`, which also used to fall through the `_ => None`
+    // catch-all. Observable proof the arm is wired: the missing key folds to
+    // the default `W`, workers read `$W`, rows come out. If the arm regressed
+    // to the catch-all, the flag would drop, the binding would stay ITEM, and
+    // the workers' `$W` would fail loud (exit 123).
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(
+        &k,
+        r#"cfg=$(fromjson '{"other":1}')
+seq 1 2 | scatter --as ${cfg[name]:-W} | echo $W | gather"#,
+    )
+    .await;
+    assert_eq!(r.code, 0, "{:?}", r.err);
+    let rows = rows(&r.text_out());
+    assert_eq!(rows[0]["out"], "1", "default var name W bound the items");
+    assert_eq!(rows[1]["out"], "2");
+}

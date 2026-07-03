@@ -972,9 +972,17 @@ pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Result<Option<
         Expr::Literal(value) => Ok(Some(eval_literal(value, ctx))),
         Expr::VarRef(path) => match ctx.scope.resolve_path(path) {
             Ok(v) => Ok(Some(v)),
-            // Unset bare variable: coalesces like the async positional-arg
-            // path's `Ok(None)`/skip convention for this reduced context.
-            Err(PathError::UndefinedRoot(_)) => Ok(None),
+            // Unset BARE variable: coalesces (skip-the-arg) — this reduced
+            // context's bash-compatible convention. Bare-only on purpose: an
+            // undefined root under a SUBSCRIPTED path is loud below, the same
+            // split `resolve_length` draws — `scatter --as ${x[key]}` with a
+            // typo'd root must not silently drop the flag (kaibo review
+            // finding, PR #85).
+            Err(PathError::UndefinedRoot(_)) if path.segments.len() <= 1 => Ok(None),
+            Err(PathError::UndefinedRoot(_)) => Err(format!(
+                "{}: undefined variable",
+                crate::interpreter::format_path(path)
+            )),
             // A loud path error (absence or shape) carries its own actionable
             // message — never swallowed.
             Err(PathError::Absence(msg)) | Err(PathError::Shape(msg)) => Err(msg),
@@ -1046,6 +1054,13 @@ fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -
             crate::ast::StringPart::Literal(s) => result.push_str(s),
             crate::ast::StringPart::Var(path) => match ctx.scope.resolve_path(path) {
                 Ok(value) => result.push_str(&value_to_string(&value)),
+                // Unconditional (even subscripted) on purpose: in STRING
+                // context both primary sites — async `eval_string_part_async`
+                // (kernel.rs) and sync `eval_interpolated` (eval.rs) — expand
+                // an undefined root to empty, bash-compatibly ("a${nope[k]}b"
+                // → "ab"). The bare-only restriction applies to the
+                // whole-token `Expr::VarRef` arm above, matching the primary
+                // sites' loud whole-token behavior.
                 Err(PathError::UndefinedRoot(_)) => {}
                 Err(PathError::Absence(msg)) | Err(PathError::Shape(msg)) => return Err(msg),
             },

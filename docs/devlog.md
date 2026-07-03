@@ -64,6 +64,27 @@ silent-fallback name, so it's a real red/green pair now. Left the parallel
 symptom class, but a distinct `anyhow` error type (not `PathError`), so out of
 this fix's scope; recorded in issues.md for the next pass.
 
+kaibo's post-PR review caught a hole in the first cut: `eval_simple_expr`'s
+`Expr::VarRef` arm coalesced `PathError::UndefinedRoot` to `Ok(None)`
+*unconditionally*, so `scatter --as ${x[key]}` with a typo'd (entirely
+undefined) root still silently dropped the flag — UndefinedRoot isn't
+`Absence`. Follow-up commit restricts the coalesce to bare paths
+(`path.segments.len() <= 1`), erroring on subscripted paths with the same
+`"${x[key]}: undefined variable"` shape `resolve_length` uses (exported
+`format_path` as `pub(crate)` for it). Deliberately did NOT apply the same
+restriction to `eval_string_parts_sync`'s `StringPart::Var`: verified
+empirically that both primary string-interpolation sites (async
+`eval_string_part_async`, sync `eval_interpolated`) expand an undefined root
+to empty even when subscripted (`echo "a${nope[k]}b"` → `ab`, bash-compatible)
+— restricting only the sync twin would have made it *stricter* than the
+primaries, diverging the other way. The whole-token/string-context split is
+the shipped contract; the sync path now matches it on both sides. Also
+confirmed the bare `Expr::VarLength`/`VarWithDefault` arms added in the first
+cut are genuinely reachable (parser emits both variants in expression
+position, `parser.rs:2307`/`:48`) and pinned them with observable tests —
+the `VarWithDefault` one exploits the fact that a dropped `--as` leaves the
+ITEM binding in place, so the workers' `$W` fails loud if the arm regresses.
+
 ---
 
 ## `/dev` was a no-op under `with_backend` (2026-07-03)
