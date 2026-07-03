@@ -325,8 +325,8 @@ async fn sed_transliterate() {
     assert_eq!(result.text_out().trim(), "xyz", "{:?}", result.err);
 }
 
-/// `-E`/`-r` are accepted no-ops (Gemini reached for `-E`). The engine is
-/// already ERE, so the capture-group swap just works.
+/// `-E`/`-r` select strict ERE (Gemini reached for `-E`). Bare ERE groups work
+/// regardless of dialect, so the capture-group swap just works.
 #[tokio::test]
 async fn sed_dash_e_flag_is_accepted() {
     let kernel = kernel_at(tempfile::tempdir().unwrap().path());
@@ -337,39 +337,36 @@ async fn sed_dash_e_flag_is_accepted() {
     assert_eq!(result.text_out().trim(), "Smith John", "{:?}", result.err);
 }
 
-/// The BRE capture-group idiom (Claude-haiku reached for `\(…\)`) is rejected
-/// loudly with an ERE hint, instead of silently not matching.
+/// The BRE capture-group idiom (Claude-haiku reached for `\(…\)`) now works as a
+/// forgiving superset: `\(…\)` become real groups, `\1`/`\2` backref them
+/// (issue #60), instead of the old loud reject or a silent no-match.
 #[tokio::test]
-async fn sed_bre_capture_groups_rejected_with_hint() {
+async fn sed_bre_capture_groups_translate() {
     let kernel = kernel_at(tempfile::tempdir().unwrap().path());
-    let err = kernel
+    let result = kernel
         .execute(r#"echo 'John Smith' | sed 's/\(\w*\) \(\w*\)/\2 \1/'"#)
         .await
-        .expect_err("BRE groups should be rejected");
-    let msg = err.to_string();
-    assert!(msg.contains("E006"), "should name the code: {msg}");
-    assert!(msg.contains("ERE"), "should hint ERE: {msg}");
+        .expect("BRE groups should translate to ERE groups");
+    assert_eq!(result.text_out().trim(), "Smith John", "{:?}", result.err);
 }
 
-/// BRE alternation `\|` and intervals `\{N\}` mean literal `|`/`{` under ERE —
-/// they used to silently match the wrong thing. Now they're rejected with an ERE
-/// hint, through the full kernel path.
+/// BRE alternation `\|` and intervals `\{N\}` are rewritten to their ERE meaning
+/// (issue #60) through the full kernel path — the agent-idiomatic spelling that
+/// used to silently match the wrong thing (then loud-reject) now just works.
 #[tokio::test]
-async fn sed_bre_alternation_and_interval_rejected_with_hint() {
+async fn sed_bre_alternation_and_interval_translate() {
     let kernel = kernel_at(tempfile::tempdir().unwrap().path());
-    let err = kernel
+    let result = kernel
         .execute(r#"echo 'cat' | sed 's/cat\|dog/X/'"#)
         .await
-        .expect_err("BRE alternation should be rejected");
-    let msg = err.to_string();
-    assert!(msg.contains("E006"), "should name the code: {msg}");
-    assert!(msg.contains("ERE"), "should hint ERE: {msg}");
+        .expect("BRE alternation should translate");
+    assert_eq!(result.text_out().trim(), "X", "alternation: {:?}", result.err);
 
-    let err = kernel
+    let result = kernel
         .execute(r#"echo 'aa' | sed 's/a\{2\}/X/'"#)
         .await
-        .expect_err("BRE interval should be rejected");
-    assert!(err.to_string().contains("ERE"), "interval should hint ERE: {err}");
+        .expect("BRE interval should translate");
+    assert_eq!(result.text_out().trim(), "X", "interval: {:?}", result.err);
 }
 
 /// `-e EXPR file` (flag form) reads the file, not stdin. This exercises the

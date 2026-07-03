@@ -1,7 +1,9 @@
 //! awk — Pattern scanning and text processing language.
 //!
 //! A Bourne-lite awk implementation focused on the 80% use case.
-//! Uses ERE (extended regex) syntax like egrep, consistent with sed.
+//! Uses ERE (extended regex) syntax like egrep, consistent with sed. awk has no
+//! `-E`/`-r` flag, so the GNU BRE backslash-metas (`\|`, `\+`, `\(…\)`,
+//! `\{N,M\}`) are always accepted as a forgiving superset (issue #60).
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
@@ -12,7 +14,20 @@ use std::path::Path;
 #[cfg(test)]
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
+use crate::tools::builtin::regex_dialect::{append_dialect_hint, bre_metas_to_ere};
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+
+/// Compile an awk ERE pattern, first rewriting the GNU BRE backslash-metas to
+/// ERE so `\|`/`\(…\)`/`\{N\}` behave as operators (issue #60). awk is ERE-only
+/// with no `-E` flag, so the rewrite always applies. Callers with their own
+/// error wording (FS, `split()`) rewrite with [`bre_metas_to_ere`] directly.
+fn compile_ere(pattern: &str) -> Result<Regex, String> {
+    let rewritten = bre_metas_to_ere(pattern);
+    let rewrote = rewritten != pattern;
+    // awk has no `-E` flag, so the hint offers only the bracket-class spelling.
+    Regex::new(&rewritten)
+        .map_err(|e| append_dialect_hint(format!("invalid regex: {e}"), rewrote, None))
+}
 
 /// Awk tool: pattern-directed scanning and processing.
 pub struct Awk;
@@ -1879,6 +1894,11 @@ impl AwkRuntime {
         let fs = self.get_var("FS").to_string();
         self.fields = vec![AwkValue::StrNum(record.to_string())];
 
+        // Rewrite BRE metas BEFORE the single-char check: gawk demotes `\|` to
+        // plain `|` and a single-char FS is literal (POSIX), so `-F '\|'` /
+        // FS="\\|" split on a literal pipe — never the empty-alternation regex
+        // `|`, which would silently split between every character.
+        let fs = bre_metas_to_ere(&fs);
         let parts: Vec<&str> = if fs == " " {
             // Default: split on whitespace, trim leading/trailing
             record.split_whitespace().collect()
@@ -1994,7 +2014,7 @@ impl AwkRuntime {
             Pattern::All => Ok(true),
             Pattern::Begin | Pattern::End => Ok(false),
             Pattern::Regex(re) => {
-                let regex = Regex::new(re).map_err(|e| format!("invalid regex: {}", e))?;
+                let regex = compile_ere(re)?;
                 Ok(regex.is_match(&self.get_field(0).to_string()))
             }
             Pattern::Expr(expr) => {
@@ -2038,7 +2058,7 @@ impl AwkRuntime {
     fn eval_simple_pattern(&mut self, pattern: &Pattern) -> Result<bool, String> {
         match pattern {
             Pattern::Regex(re) => {
-                let regex = Regex::new(re).map_err(|e| format!("invalid regex: {}", e))?;
+                let regex = compile_ere(re)?;
                 Ok(regex.is_match(&self.get_field(0).to_string()))
             }
             Pattern::Expr(expr) => {
@@ -2279,7 +2299,7 @@ impl AwkRuntime {
             Expr::String(s) => Ok(AwkValue::String(s.clone())),
             Expr::Regex(re) => {
                 // When regex is used as expression, match against $0
-                let regex = Regex::new(re).map_err(|e| format!("invalid regex: {}", e))?;
+                let regex = compile_ere(re)?;
                 let matched = regex.is_match(&self.get_field(0).to_string());
                 Ok(AwkValue::Number(if matched { 1.0 } else { 0.0 }))
             }
@@ -2385,7 +2405,7 @@ impl AwkRuntime {
                     Expr::Regex(re) => re.clone(),
                     _ => self.eval_expr(right)?.to_string(),
                 };
-                let regex = Regex::new(&pattern).map_err(|e| format!("invalid regex: {}", e))?;
+                let regex = compile_ere(&pattern)?;
                 let matched = regex.is_match(&l);
                 let result = if op == BinOp::Match { matched } else { !matched };
                 Ok(AwkValue::Number(if result { 1.0 } else { 0.0 }))
@@ -2544,9 +2564,11 @@ impl AwkRuntime {
                 }
 
                 // Honor the same separator rules as split_record:
+                //   BRE-meta rewrite first (so `"\\|"` → `|` → literal, like gawk)
                 //   " " (default FS) → whitespace mode (split on runs, trim ends)
                 //   single char → literal split
                 //   multi-char → ERE regex
+                let sep = bre_metas_to_ere(&sep);
                 let parts: Vec<String> = if sep == " " {
                     s.split_whitespace().map(str::to_string).collect()
                 } else if sep.chars().count() == 1 {
@@ -2607,7 +2629,7 @@ impl AwkRuntime {
                     Expr::Regex(re) => re.clone(),
                     other => self.eval_expr(other)?.to_string(),
                 };
-                let regex = Regex::new(&pattern).map_err(|e| format!("invalid regex: {}", e))?;
+                let regex = compile_ere(&pattern)?;
                 if let Some(m) = regex.find(&s) {
                     let rstart = s[..m.start()].chars().count() as i64 + 1;
                     let rlength = m.as_str().chars().count() as i64;
@@ -2630,8 +2652,7 @@ impl AwkRuntime {
                     Expr::Regex(re) => re.clone(),
                     other => self.eval_expr(other)?.to_string(),
                 };
-                let regex =
-                    Regex::new(&pattern_str).map_err(|e| format!("invalid regex: {e}"))?;
+                let regex = compile_ere(&pattern_str)?;
 
                 // Evaluate the replacement template string (arg 1).
                 let repl_template = self.eval_expr(&args[1])?.to_string();

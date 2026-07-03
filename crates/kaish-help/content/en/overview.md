@@ -49,5 +49,5 @@ seq 1 100 | scatter --as N --limit 4 | process $N | gather
 - No backticks — `$(cmd)` only (the lexer rejects a bare backtick with a dedicated error rather than silently accepting it)
 - `$(cmd)` returns structured data — `for i in $(seq 1 5)` iterates 5 values, not split text
 - `for x in $(cmd)` splits on newlines — multi-line stdout iterates per line; whitespace within a line is never split
-- ERE regex everywhere — no BRE quirks
+- ERE regex everywhere — `grep`/`sed`/`awk` also accept the GNU BRE spellings (`a\|b`, `a\+`, `\(…\)`); `-E`/`-r` forces strict ERE
 - `true`/`false` only — `TRUE`, `yes`, `Yes` are errors

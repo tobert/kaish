@@ -39,6 +39,7 @@ pub(crate) mod format_string;
 mod gather;
 mod grep;
 mod grep_engine;
+mod regex_dialect;
 mod head;
 mod ignore;
 mod help;
