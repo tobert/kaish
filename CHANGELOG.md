@@ -243,7 +243,9 @@ breaking entries are marked **BREAKING**.
   pipeline) used to discard a missing-key/shape `PathError` as a silently
   dropped flag or an omitted `${#…}` length instead of erroring, unlike `echo`,
   assignment, `$(( ))`, and `"${…}"`. A bad `scatter --as ${u[nope]}` now fails
-  the whole pipeline instead of quietly falling back to a bare boolean flag.
+  the whole pipeline instead of quietly falling back to a bare boolean flag; a
+  subscripted path on an entirely undefined root (`${nope[key]}`) is loud too,
+  while a bare undefined `$VAR` keeps the bash-compatible coalesce.
 - **A bare collection reaching an external command's argv or a redirect
   target silently JSON-serialized** (e.g. `curl -d $cfg` or `echo x > $cfg`);
   every process-boundary sink now refuses it with a `$(tojson $x)` hint. This
