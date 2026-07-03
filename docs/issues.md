@@ -27,30 +27,23 @@ Path note: the 0.8.0 crate split moved some cited files — `vfs/local.rs` →
 
 ---
 
-## Before 0.11.0 (the collections release)
+## Before 0.11.0 (the collections release) — CLEARED 2026-07-03
 
-0.11.0's headline is the collections milestone (native literals, read access,
-lvalue writes, `push`). These open items sit *on that surface* — fix or
-consciously ship-as-known-limitation before the release:
+Every item this section carried is resolved; 0.11.0 is unblocked from this
+file's perspective:
 
-- **[SILENT DATA LOSS] `"$(cmd)"` drops a `.data`-only collection to `""`** — the
-  clearest "crash-beats-corrupt" violation on the new surface. Detail under P3.
-- **[LOUD gap — documented 2026-07-03]** bracket-path `push` target
-  (`push a[b] x`) fails loudly (glob-expands, "no matches") and doesn't work.
-  Documented as a known limitation with a working alternative in `help
-  collections` and `arrays-and-hashes.md`; the real fix stays open under P3
-  ("Bracket-path `push` target").
-  **Re-verified 2026-07-03 and dropped from this list, already fixed:**
-  deeply-nested glued list literals (`x=[[a] [b]]` — fixed as a side effect of
-  the `[[ ]]` test-depth lexer rewrite, `09c1a89`; regression test added) and
-  nested `${#path}` / `${path:-default}` (shipped in `28ec480`, before this
-  list was written). Neither was actually a live gap by the time this section
-  called for a decision — corrected in `arrays-and-hashes.md` ("Known
-  limitations (0.11.0)"). The sync-path silent coalescing (bad subscripts in
-  scatter/gather flag values) was fixed 2026-07-03 and dropped from this list.
-
-Recommendation: land the remaining silent item (`"$(cmd)"` interpolation); the
-one remaining loud gap (`push` bracket-path target) is documented, not fixed.
+- Both **[SILENT]** items are fixed and their entries deleted per this file's
+  convention: `"$(cmd)"` `.data`-only interpolation now renders like bare `$x`
+  (PR #82), and scatter/gather flag-value path errors are loud (PR #87,
+  superseding #85).
+- The one live **[LOUD]** gap — bracket-path `push` target (`push a[b] x`) —
+  ships as a documented known limitation (PR #83: `help collections` +
+  `arrays-and-hashes.md`, with the read/push/assign-back workaround); the real
+  fix stays open under P3 ("Bracket-path `push` target").
+- Two suspected loud gaps were re-verified already fixed on main and pinned
+  with tests: deeply-nested glued list literals (side effect of the `[[ ]]`
+  test-depth lexer rewrite `09c1a89`) and nested `${#path}`/`${path:-default}`
+  (shipped `28ec480`).
 
 ---
 
@@ -258,16 +251,6 @@ validator heuristic is cosmetic. Fix only if it bites.
 ---
 
 ## P3 — Scheduler and infra
-
-### `"$(cmd)"` interpolation drops a `.data`-only collection to `""` (SILENT DATA LOSS)
-Quoted command-substitution reads a command's `.out` via `try_text_out()`
-(`kernel.rs` `StringPart::CommandSubst`, ~line 4035), so a builtin that sets only
-structured `.data` (a collection) with an empty `.out` interpolates to `""` inside
-`"...$(cmd)..."`. Distinct from the Decision-D stringify boundary (now loud): the
-collection evaporates before reaching a process edge. Fix: when `.out` is empty but
-`.data` is a collection, render it as compact JSON (consistent with bare `$c`
-display) or fail loud — decide which; do NOT leave the silent `""`. **[0.11.0
-candidate — clearest crash-beats-corrupt item on the collections surface.]**
 
 ### Collection literals: generic record-value error text
 - **Unquoted multi-word record value** (`{msg: hello world}`) is already a loud parse
