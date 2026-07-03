@@ -1,9 +1,12 @@
 # Arrays & Hashes — Design Doc
 
 Status: read access, `keys`/`values`, membership, shape guards, the shared
-per-hop path resolver, and **list/record literals + spread** are SHIPPED (see
-`docs/LANGUAGE.md` Collections section). `push` and bracket-path **assignment**
-(`a[b]=x`) remain design-only — the rest of this document.
+per-hop path resolver, **list/record literals + spread**, and **bracket-path
+assignment + `push`** are SHIPPED (see `docs/LANGUAGE.md` Collections
+section). Bracket-path `push` (a subscripted target, e.g. `push
+services[web][tags] item`) remains deferred — only a top-level bareword
+target ships (see `docs/issues.md`). The rest of this document is design
+history/rationale.
 Author: design notes from a 2026-06-05 session.
 **Revised 2026-07-01** — brackets-only access, record iteration, comparison/unwrap semantics,
 full lvalue rules; implementation notes re-grounded against HEAD `f92070e`. Superseded

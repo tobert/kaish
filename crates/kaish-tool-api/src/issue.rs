@@ -58,6 +58,15 @@ pub enum IssueCode {
     /// (it would resolve to an external binary that bypasses the VFS); use
     /// `[[ … ]]`, which the validator checks before runtime.
     PosixTestCommand,
+    /// A subscripted assignment lvalue (`x[k]=v`) targets an undefined root
+    /// variable. Unlike a plain read, a path-set never autovivifies the
+    /// root — it must already exist as a collection.
+    LvalueUndefinedRoot,
+    /// An assignment target contains a dot (`user.email=x`). kaish is
+    /// brackets-only for collection access — the `Ident` token admits `.`
+    /// for other uses (filenames, `source foo.kai`), so this is caught here
+    /// rather than by tightening the lexer regex.
+    DottedAssignmentTarget,
 }
 
 impl IssueCode {
@@ -86,6 +95,8 @@ impl IssueCode {
             IssueCode::ScatterWithoutGather => "E014",
             IssueCode::LastResultFieldAccess => "E015",
             IssueCode::PosixTestCommand => "W006",
+            IssueCode::LvalueUndefinedRoot => "E016",
+            IssueCode::DottedAssignmentTarget => "E017",
         }
     }
 
@@ -113,7 +124,9 @@ impl IssueCode {
             | IssueCode::ReturnOutsideFunction
             | IssueCode::ForLoopScalarVar
             | IssueCode::ScatterWithoutGather
-            | IssueCode::LastResultFieldAccess => Severity::Error,
+            | IssueCode::LastResultFieldAccess
+            | IssueCode::LvalueUndefinedRoot
+            | IssueCode::DottedAssignmentTarget => Severity::Error,
 
             // These are warnings because context matters:
             // - MissingRequiredArg: might be provided by pipeline stdin or environment

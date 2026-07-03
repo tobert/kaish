@@ -520,6 +520,24 @@ collection as compact JSON (consistent with bare `$c` display) or fail loud —
 decide which; do NOT leave the silent `""`. Different bug class from the
 boundary guards, so deferred here rather than fixed in that branch.
 
+### Bracket-path `push` target (`push services[web][tags] item`) — deferred
+`feat/collections-lvalues` (2026-07-02) shipped bracket-path lvalue
+**assignment** (`xs[0]=9`, `user[email]=x`, deep paths) and `push`, but `push`
+only accepts a **top-level bareword** target (`push xs val`) — a subscripted
+target is out of scope for that PR. Reason: `push`'s target is NOT followed by
+`=`, so the lvalue lexer's `=`-triggered suppression (`flush_glob_run`'s
+`followed_by_eq`) never fires for it — `services[web][tags]` fuses into a
+`GlobWord` and **glob-expands** (failing loudly as "no matches") before `push`
+ever runs. This is loud, not silently wrong, but the feature doesn't work.
+Fixing it needs its own lexer/parser design pass: either a `push`-aware lexer
+trigger (peek for a leading bareword-like run inside the `push` command
+specifically — awkward, since the lexer doesn't know command names), or
+routing `push`'s target through the same argv-position bracket-path grammar
+`Arg`s already need for other collection-consuming builtins. Not attempted
+here — `docs/arrays-and-hashes.md`'s original design intended `push` to accept
+bracket paths (revised 2026-07-01), so this is a real gap, not a design
+rejection.
+
 ### `JobManager` output-stream reads hold the jobs lock across `await`
 Surfaced fixing the `wait`/`spawn` deadlock (2026-06-24). `read_stdout`/`read_stderr`
 (`scheduler/job.rs`, the `/v/jobs/{id}/stdout|stderr` reads) do

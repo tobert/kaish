@@ -43,6 +43,80 @@ now fails compile with an error describing a pattern the author never wrote
 spelling + the strict-ERE flag where one exists) whenever the rewrite actually
 changed the pattern.
 
+## Collection lvalue writes + `push` land (2026-07-02)
+
+`xs[0]=9`, `user[email]=x`, deep paths (`services[web][port]=9000`), and a
+bareword `push` — the write half of the collections effort, on top of the
+shared per-hop path resolver (`resolve_step`, from the read-side #6 work) and
+the collection-literals grammar.
+
+**`walk_write` mirrors the read descent, sharing `resolve_step` unchanged, but
+diverges at the leaf.** The read side (`resolve_path`) walks the tree with
+`Cow`-borrowed lookups; the write side clones the root once, then walks
+`&mut serde_json::Value` chains so mutating the deepest hop mutates the whole
+tree in place (no per-hop clone). Every hop still calls the SAME `resolve_step`
+for classification (bounds, shape) — read and write can never classify a
+subscript differently. The two walks diverge only in *leaf policy*: an
+intermediate hop requires the child to already exist (`descend_mut` — no
+autovivification, mirroring the read's `descend`), while the FINAL hop may
+insert a new record key (`apply_leaf_write`) — the one thing a path-set may
+create. A list index write is in-bounds only for free: `resolve_step`'s
+`classify_index` already turns an out-of-bounds index into a loud `Absence`
+before the write ever sees it. A slice step (`xs[0:2]=x`) is always a `Shape`
+error, at any hop — mutating through a detached slice copy would silently not
+write back to the real list, so it's rejected outright rather than special-cased
+only at the final position.
+
+**The lexer needed a SECOND, distinct suppression trigger.** The
+collection-literals grammar already taught the lexer to stop fusing a
+`[`-leading run into a `GlobWord` at *value position* (RHS of `=`/`in`). An
+assignment LHS (`fruits[0]=kiwi`) sits at argv position, not value position —
+a different shape entirely. `flush_glob_run` gained `followed_by_eq`: computed
+by peeking at whatever token triggers the run's flush (in token-stream order,
+regardless of whitespace, since `local xs[0] = 9` and `fruits[0]=kiwi` must
+both suppress), true only when that token is `Token::Eq`. A bracket-pair run
+with no `*`/`?` immediately before `=` is a subscripted assignment target, not
+a glob, and gets suppressed the same way the value-position case does — the
+two triggers are ORed together in `flush_glob_run`, each protecting a
+different shape of run.
+
+**`Assignment.name: String` widened to `Assignment.path: VarPath`** — no dual
+representation, every construction/read site updated in the same change
+(parser, kernel, sexpr formatter, validator, tests). `Assignment::name()`
+extracts the root `Field` for the still-common bare case; a subscripted write
+never honors `local` (it always mutates the existing root wherever it lives —
+`local` is meaningless once you're inside an existing collection).
+
+**Env-prefix assignment stays bare-ident-only, by construction, not by a
+runtime check.** `env_prefix_assign` still calls `ident_parser()` directly
+(never `lvalue_path_parser()`), so a subscripted target can't even reach the
+`EnvScoped` grammar arm — structured values can't cross the process boundary
+anyway. Grounding this surfaced a pre-existing, unrelated quirk: kaish's
+statement `terminator` is `.repeated()`, not `.at_least(1)`, so `X=1 Y=2` (no
+separator at all) already parsed as two independent assignment statements
+before this change. `user[email]=x echo hi` falls through the same way —
+NOT into `EnvScoped` (verified with a parser test), but into two ordinary
+statements. That's the existing grammar's behavior extended consistently, not
+a new hazard this work introduced.
+
+**Validator additions (E016, E017).** A subscripted assignment whose root
+isn't bound (`z[0]=x`) is now a static error with a "create it first" hint,
+the same treatment `push`'s undefined-target rule gets at runtime. A dotted
+assignment target (`user.email=x`) is now also a static error — the lexer's
+shared `Ident` token admits `.` for other legitimate uses (filenames,
+`source foo.kai`), so the restriction lives in the validator, not a regex
+change, with the fix (`user[email]=x`) in the message.
+
+**`push` ships bareword-target only; bracket-path `push` is a real, tracked
+gap, not a rejection.** `push services[web][tags] item` doesn't work: the
+target isn't followed by `=`, so the lvalue lexer's `followed_by_eq` trigger
+never fires, and the whole subscripted target fuses into a `GlobWord` that
+glob-expands (failing loudly as "no matches") before `push` ever runs. Loud,
+not silently wrong — but the feature the design doc originally scoped for
+`push` isn't there yet. Filed in `docs/issues.md` P3 rather than attempted
+here; it needs its own lexer/parser pass since the lexer has no notion of
+"this bareword run is `push`'s target."
+
 ## Collection literals + spread land (2026-07-02)
 
 `xs=[a b c]`, `{port: 8080}`/`{port:8080}`, multi-line records with a trailing

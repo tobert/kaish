@@ -71,7 +71,7 @@ pub fn format_stmt(stmt: &Stmt) -> String {
 /// Format an assignment as an S-expression.
 fn format_assignment(a: &Assignment) -> String {
     let value = format_expr(&a.value);
-    format!("(assign {} {} local={})", a.name, value, a.local)
+    format!("(assign {} {} local={})", format_varpath(&a.path), value, a.local)
 }
 
 /// Format a command as an S-expression.

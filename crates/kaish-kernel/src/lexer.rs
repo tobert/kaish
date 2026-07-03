@@ -2046,6 +2046,16 @@ fn merge_flag_metachar_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Toke
 /// above — so the list-literal parser sees primitive `LBracket`/`RBracket` tokens
 /// instead of a fused `GlobWord`. Argv-position brackets (`ls [dog]`, `for x in [a]`)
 /// are untouched.
+///
+/// A SEPARATE trigger suppresses fusion for an **assignment lvalue**:
+/// `fruits[0]=kiwi`, `user[email]=x`, `services[web][port]=9090`. This run sits
+/// at *argv/LHS position* (before `=`), not value position, so
+/// `ValueContext::in_literal` is false for it — the lvalue grammar needs its
+/// own peek-ahead: a bracket-pair run (no `*`/`?`) immediately followed by
+/// `Token::Eq` is a subscripted assignment target, not a glob, so it is
+/// suppressed the same way regardless of whitespace before the `=` (see
+/// `flush_glob_run`'s `followed_by_eq` parameter). See
+/// `docs/arrays-and-hashes.md` ("Assignment lvalues").
 fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
     if tokens.is_empty() {
         return tokens;
@@ -2074,7 +2084,17 @@ fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
         if adjacent && glob_mergeable_text(&token.token).is_some() {
             run.push(token);
         } else {
-            flush_glob_run(&mut run, &mut result, value_ctx[run_start].in_literal);
+            // `token` is whatever broke the run — an lvalue's `=` is never
+            // glob-mergeable, so it always lands here (not in the `if` arm
+            // above) regardless of whether whitespace separates it from the
+            // run (`fruits[0]=kiwi` and `fruits[0] = kiwi` both see it).
+            let followed_by_eq = matches!(token.token, Token::Eq);
+            flush_glob_run(
+                &mut run,
+                &mut result,
+                value_ctx[run_start].in_literal,
+                followed_by_eq,
+            );
             if glob_mergeable_text(&token.token).is_some() {
                 run.push(token);
                 run_start = idx;
@@ -2084,33 +2104,65 @@ fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
         }
     }
 
-    flush_glob_run(&mut run, &mut result, value_ctx[run_start].in_literal);
+    // End of input: no token follows the final run, so it can't be an lvalue
+    // (an assignment always has a value after `=`).
+    flush_glob_run(&mut run, &mut result, value_ctx[run_start].in_literal, false);
 
     result
 }
 
 /// Flush a run of glob-mergeable tokens: merge if it contains glob metacharacters.
-/// `suppress` (true when the run opened at value position — see `ValueContext`)
-/// forces individual emission for a run that contains an `LBracket`, so a
-/// `[`-leading run at value position always reaches the parser as primitive
-/// tokens for the list-literal grammar, never a `GlobWord`. A pure `Star`/
-/// `Question` glob with no brackets (`X=*.txt`) is untouched by `suppress` —
-/// it keeps fusing to a `GlobWord`, which evaluates to a literal string at
-/// value position exactly as it did before collection literals existed
-/// (see `test_glob_in_assignment_is_literal`); only bracket-shaped runs are
-/// reinterpreted as list-literal syntax.
-fn flush_glob_run(run: &mut Vec<&Spanned<Token>>, result: &mut Vec<Spanned<Token>>, suppress: bool) {
+///
+/// `value_position_suppress` (true when the run opened at value position — see
+/// `ValueContext`) forces individual emission for a run that contains an
+/// `LBracket`, so a `[`-leading run at value position always reaches the
+/// parser as primitive tokens for the list-literal grammar, never a
+/// `GlobWord`. A pure `Star`/`Question` glob with no brackets (`X=*.txt`) is
+/// untouched by `value_position_suppress` — it keeps fusing to a `GlobWord`,
+/// which evaluates to a literal string at value position exactly as it did
+/// before collection literals existed (see `test_glob_in_assignment_is_literal`);
+/// only bracket-shaped runs are reinterpreted as list-literal syntax.
+///
+/// `followed_by_eq` (true when the token right after this run — in stream
+/// order, whitespace or not — is `Token::Eq`) is the SEPARATE lvalue trigger:
+/// a bracket-pair run with no `*`/`?` immediately before `=` is a subscripted
+/// assignment target (`fruits[0]=kiwi`), not a glob, so it is suppressed too
+/// — even though it sits at argv/LHS position, not value position. The
+/// `has_star_or_question` guard keeps a real glob pattern that happens to
+/// precede an `=` (vanishingly rare, but not this run's job to reinterpret)
+/// out of the suppression.
+fn flush_glob_run(
+    run: &mut Vec<&Spanned<Token>>,
+    result: &mut Vec<Spanned<Token>>,
+    value_position_suppress: bool,
+    followed_by_eq: bool,
+) {
     if run.is_empty() {
         return;
     }
 
     let has_bracket_pair = run.iter().any(|t| matches!(t.token, Token::LBracket))
         && run.iter().any(|t| matches!(t.token, Token::RBracket));
-    let has_glob = run
+    let has_star_or_question = run
         .iter()
-        .any(|t| matches!(t.token, Token::Star | Token::Question))
-        || has_bracket_pair;
-    let suppress = suppress && has_bracket_pair;
+        .any(|t| matches!(t.token, Token::Star | Token::Question));
+    let has_glob = has_star_or_question || has_bracket_pair;
+
+    // An lvalue subscript run is a ROOT IDENTIFIER followed by brackets, so the
+    // run STARTS with an `Ident` (`arr[0]=` → run is `arr [ 0 ]`, glued, so
+    // `arr` is the first token OF the run — a lvalue root parses via
+    // `ident_parser()`, i.e. `Token::Ident`). A bare char-class comparison
+    // operand starts with `[` instead (`[[ [a] = b ]]` → the suppressible run
+    // is `[ a ]`, since the leading `[[` was flushed separately), so requiring
+    // an `Ident`-led run keeps `[[ [a] = b ]]` fusing-and-comparing as before
+    // while still catching every real lvalue.
+    let run_starts_with_ident = matches!(
+        run.first().map(|t| &t.token),
+        Some(Token::Ident(_))
+    );
+    let lvalue_suppress =
+        followed_by_eq && has_bracket_pair && !has_star_or_question && run_starts_with_ident;
+    let suppress = (value_position_suppress && has_bracket_pair) || lvalue_suppress;
 
     if !suppress && run.len() >= 2 && has_glob {
         let text: String = run

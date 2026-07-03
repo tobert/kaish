@@ -1037,10 +1037,20 @@ where
         // following, this alternative fails and we fall through to a plain,
         // persistent assignment. Must precede `assignment_parser` so the
         // prefixed-command form wins when a command follows.
+        // Env-prefix assignment stays BARE-IDENT ONLY — a subscripted target
+        // (`user[email]=x cmd`) is illegal here, not just unsupported:
+        // structured values can't cross the process boundary anyway (see
+        // docs/arrays-and-hashes.md, "Assignment lvalues"). Using
+        // `ident_parser()` directly (not `lvalue_path_parser()`) means a
+        // bracket run before `=` in this position never gets a chance to
+        // parse as a path — it either isn't there (plain ident) or the
+        // lexer's lvalue suppression fires and the stray `LBracket` fails
+        // this parser, falling through to a real parse error instead of
+        // silently being accepted.
         let env_prefix_assign = ident_parser()
             .then_ignore(just(Token::Eq))
             .then(value_expr_parser())
-            .map(|(name, value)| Assignment { name, value, local: false });
+            .map(|(name, value)| Assignment { path: VarPath::simple(name), value, local: false });
         let env_scoped = env_prefix_assign
             .repeated()
             .at_least(1)
@@ -1106,7 +1116,59 @@ where
     })
 }
 
-/// Assignment: `NAME=value` (bash-style) or `local NAME = value` (scoped)
+/// One bracket subscript in an assignment LHS: `[0]`, `[email]`, `["a b"]`,
+/// `[$k]`, `[0:2]`. Reached only via the lexer's lvalue suppression (see
+/// `lexer::flush_glob_run`), which keeps a bracket run immediately followed by
+/// `=` from fusing into a `GlobWord` — so this always sees primitive
+/// `LBracket`/`RBracket` tokens around one of a handful of interior shapes.
+/// Interior classification reuses [`parse_subscript`] (string-based) for the
+/// `Ident` case (bareword key or colon-fused slice like `0:2`/`0:-1` — colon
+/// merge already ran ahead of this parser) so read and write share one
+/// subscript grammar; the other interior kinds map straight to their segment.
+fn lvalue_subscript_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, VarSegment, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    let interior = choice((
+        select! { Token::SimpleVarRef(name) => VarSegment::Dynamic(name) },
+        select! { Token::String(s) => VarSegment::Key(s) },
+        select! { Token::SingleString(s) => VarSegment::Key(s) },
+        select! { Token::Int(n) => VarSegment::Index(n) },
+        select! { Token::Ident(s) => parse_subscript(&s) },
+    ));
+
+    just(Token::LBracket)
+        .ignore_then(interior)
+        .then_ignore(just(Token::RBracket))
+        .labelled("subscript")
+}
+
+/// An lvalue path: `NAME`, `NAME[sub]`, `NAME[sub][sub]…`. The root is a
+/// plain identifier; zero or more bracket subscripts follow with no
+/// whitespace expected between them (the lexer only suppresses fusion for a
+/// bracket run immediately followed by `=`, so this is the only shape that
+/// reaches here already split into primitive tokens).
+fn lvalue_path_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, VarPath, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    ident_parser()
+        .then(lvalue_subscript_parser().repeated().collect::<Vec<_>>())
+        .map(|(name, subscripts)| {
+            let mut segments = vec![VarSegment::Field(name)];
+            segments.extend(subscripts);
+            VarPath { segments }
+        })
+        .labelled("lvalue path")
+}
+
+/// Assignment: `NAME=value` / `NAME[sub]=value` (bash-style), or
+/// `local NAME = value` (scoped). Bracket paths are lvalues here — see
+/// `docs/arrays-and-hashes.md` ("Assignment lvalues") — and are resolved at
+/// runtime by `Scope::walk_write`, sharing the read resolver's per-hop
+/// classification.
 fn assignment_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Assignment, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
@@ -1114,22 +1176,22 @@ where
 {
     // local NAME = value (with spaces around =)
     let local_assignment = just(Token::Local)
-        .ignore_then(ident_parser())
+        .ignore_then(lvalue_path_parser())
         .then_ignore(just(Token::Eq))
         .then(value_expr_parser())
-        .map(|(name, value)| Assignment {
-            name,
+        .map(|(path, value)| Assignment {
+            path,
             value,
             local: true,
         });
 
-    // Bash-style: NAME=value (no spaces around =)
-    // The lexer produces IDENT EQ EXPR, so we parse it here
-    let bash_assignment = ident_parser()
+    // Bash-style: NAME=value / NAME[sub]=value (no spaces around =)
+    // The lexer produces IDENT (LBRACKET ... RBRACKET)* EQ EXPR, so we parse it here
+    let bash_assignment = lvalue_path_parser()
         .then_ignore(just(Token::Eq))
         .then(value_expr_parser())
-        .map(|(name, value)| Assignment {
-            name,
+        .map(|(path, value)| Assignment {
+            path,
             value,
             local: false,
         });
@@ -2950,12 +3012,124 @@ mod tests {
     }
 
     #[test]
+    fn parse_lvalue_single_index() {
+        let result = parse("xs[0]=9").unwrap();
+        match &result.statements[0] {
+            Stmt::Assignment(a) => {
+                assert_eq!(a.name(), "xs");
+                assert_eq!(
+                    a.path.segments,
+                    vec![VarSegment::Field("xs".into()), VarSegment::Index(0)]
+                );
+                assert!(!a.local);
+            }
+            other => panic!("expected assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_lvalue_negative_index() {
+        let result = parse("xs[-1]=7").unwrap();
+        match &result.statements[0] {
+            Stmt::Assignment(a) => assert_eq!(
+                a.path.segments,
+                vec![VarSegment::Field("xs".into()), VarSegment::Index(-1)]
+            ),
+            other => panic!("expected assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_lvalue_bareword_key() {
+        let result = parse("user[email]=x").unwrap();
+        match &result.statements[0] {
+            Stmt::Assignment(a) => assert_eq!(
+                a.path.segments,
+                vec![
+                    VarSegment::Field("user".into()),
+                    VarSegment::Key("email".into())
+                ]
+            ),
+            other => panic!("expected assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_lvalue_chained_keys() {
+        let result = parse("s[web][port]=9000").unwrap();
+        match &result.statements[0] {
+            Stmt::Assignment(a) => assert_eq!(
+                a.path.segments,
+                vec![
+                    VarSegment::Field("s".into()),
+                    VarSegment::Key("web".into()),
+                    VarSegment::Key("port".into())
+                ]
+            ),
+            other => panic!("expected assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_lvalue_dynamic_key() {
+        let result = parse("r[$k]=v").unwrap();
+        match &result.statements[0] {
+            Stmt::Assignment(a) => assert_eq!(
+                a.path.segments,
+                vec![
+                    VarSegment::Field("r".into()),
+                    VarSegment::Dynamic("k".into())
+                ]
+            ),
+            other => panic!("expected assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_local_lvalue_spaced() {
+        let result = parse("local xs[0] = 9").unwrap();
+        match &result.statements[0] {
+            Stmt::Assignment(a) => {
+                assert!(a.local);
+                assert_eq!(
+                    a.path.segments,
+                    vec![VarSegment::Field("xs".into()), VarSegment::Index(0)]
+                );
+            }
+            other => panic!("expected assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn env_prefix_subscripted_target_is_not_captured_as_env_scoped() {
+        // A subscripted target before a following command (`user[email]=x
+        // echo hi`) must NOT become `Stmt::EnvScoped` — structured values
+        // can't cross the process boundary, so env-prefix stays bare-ident
+        // only. The lexer suppression + `env_prefix_assign` using
+        // `ident_parser()` (not `lvalue_path_parser()`) means this falls
+        // through to an ordinary subscripted assignment followed by an
+        // independent statement — the SAME back-to-back-without-a-terminator
+        // shape `X=1 Y=2` already has (kaish's `terminator` is
+        // `.repeated()`, not `.at_least(1)`), not a new hazard.
+        let result = parse("user={}\nuser[email]=x echo hi").unwrap();
+        for stmt in &result.statements {
+            assert!(
+                !matches!(stmt, Stmt::EnvScoped { .. }),
+                "a subscripted assignment must never be captured into EnvScoped: {stmt:?}"
+            );
+        }
+        // Sanity: it really did parse as two independent statements.
+        assert!(matches!(&result.statements[1], Stmt::Assignment(a) if a.name() == "user"));
+        assert!(matches!(&result.statements[2], Stmt::Command(c) if c.name == "echo"));
+    }
+
+    #[test]
     fn parse_nested_cmd_subst() {
         // Nested command substitution is supported
         let result = parse("X=$(echo $(date))").unwrap();
         match &result.statements[0] {
             Stmt::Assignment(a) => {
-                assert_eq!(a.name, "X");
+                assert_eq!(a.name(), "X");
                 let outer = subst_cmd(&a.value);
                 assert_eq!(outer.name, "echo");
                 // The argument should be another command substitution
@@ -3005,7 +3179,7 @@ mod tests {
         let result = parse("X=42").unwrap();
         match &result.statements[0] {
             Stmt::Assignment(a) => {
-                assert_eq!(a.name, "X");
+                assert_eq!(a.name(), "X");
                 match &a.value {
                     Expr::Literal(Value::Int(n)) => assert_eq!(*n, 42),
                     other => panic!("expected int literal, got {:?}", other),
@@ -3083,7 +3257,7 @@ mod tests {
     fn value_assignment_name_preserved() {
         let result = parse("MY_VAR=1").unwrap();
         match &result.statements[0] {
-            Stmt::Assignment(a) => assert_eq!(a.name, "MY_VAR"),
+            Stmt::Assignment(a) => assert_eq!(a.name(), "MY_VAR"),
             other => panic!("expected assignment, got {:?}", other),
         }
     }
@@ -3436,7 +3610,7 @@ mod tests {
         let result = parse("X=$(echo)").unwrap();
         match &result.statements[0] {
             Stmt::Assignment(a) => {
-                assert_eq!(a.name, "X");
+                assert_eq!(a.name(), "X");
                 assert_eq!(subst_cmd(&a.value).name, "echo");
             }
             other => panic!("expected assignment, got {:?}", other),
@@ -3499,7 +3673,7 @@ mod tests {
         match &result.statements[0] {
             Stmt::EnvScoped { assignments, body } => {
                 assert_eq!(assignments.len(), 1);
-                assert_eq!(assignments[0].name, "FOO");
+                assert_eq!(assignments[0].name(), "FOO");
                 assert!(!assignments[0].local);
                 match body.as_ref() {
                     Stmt::Command(cmd) => assert_eq!(cmd.name, "echo"),
@@ -3516,8 +3690,8 @@ mod tests {
         match &result.statements[0] {
             Stmt::EnvScoped { assignments, body } => {
                 assert_eq!(assignments.len(), 2);
-                assert_eq!(assignments[0].name, "A");
-                assert_eq!(assignments[1].name, "B");
+                assert_eq!(assignments[0].name(), "A");
+                assert_eq!(assignments[1].name(), "B");
                 assert!(matches!(body.as_ref(), Stmt::Command(c) if c.name == "run"));
             }
             other => panic!("expected env-scoped, got {other:?}"),
@@ -3529,7 +3703,7 @@ mod tests {
         // No command follows — stays a plain (persistent) assignment.
         let result = parse("FOO=bar").unwrap();
         assert!(
-            matches!(&result.statements[0], Stmt::Assignment(a) if a.name == "FOO"),
+            matches!(&result.statements[0], Stmt::Assignment(a) if a.name() == "FOO"),
             "got {:?}",
             result.statements[0]
         );
@@ -3542,7 +3716,7 @@ mod tests {
         let result = parse("FOO=bar && echo hi").unwrap();
         match &result.statements[0] {
             Stmt::AndChain { left, right } => {
-                assert!(matches!(left.as_ref(), Stmt::Assignment(a) if a.name == "FOO"));
+                assert!(matches!(left.as_ref(), Stmt::Assignment(a) if a.name() == "FOO"));
                 assert!(matches!(right.as_ref(), Stmt::Command(c) if c.name == "echo"));
             }
             other => panic!("expected and-chain, got {other:?}"),
@@ -3554,7 +3728,7 @@ mod tests {
         let result = parse("FOO=bar cat | grep x").unwrap();
         match &result.statements[0] {
             Stmt::EnvScoped { assignments, body } => {
-                assert_eq!(assignments[0].name, "FOO");
+                assert_eq!(assignments[0].name(), "FOO");
                 match body.as_ref() {
                     Stmt::Pipeline(p) => assert_eq!(p.commands.len(), 2),
                     other => panic!("expected pipeline body, got {other:?}"),
@@ -3816,7 +3990,7 @@ fi
         // First: assignment with command substitution
         match stmts[0] {
             Stmt::Assignment(a) => {
-                assert_eq!(a.name, "RESULT");
+                assert_eq!(a.name(), "RESULT");
                 assert!(matches!(&a.value, Expr::CommandSubst(_)));
             }
             other => panic!("expected assignment, got {:?}", other),
@@ -3959,7 +4133,7 @@ fi
         // Command substitution with pipeline
         match stmts[0] {
             Stmt::Assignment(a) => {
-                assert_eq!(a.name, "RESULT");
+                assert_eq!(a.name(), "RESULT");
                 assert_eq!(subst_pipeline(&a.value).commands.len(), 3);
             }
             other => panic!("expected assignment, got {:?}", other),

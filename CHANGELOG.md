@@ -114,6 +114,21 @@ breaking entries are marked **BREAKING**.
   key). `xs[0]`, `xs[i]`, `xs[i + 1]`, `xs[-1]`, and chained `grid[i][j]` all
   work; an out-of-bounds index is loud. Previously a bare subscript was dropped
   and failed as "variable is JSON, not a number".
+- **Collection lvalue writes + `push`** — bracket paths are now assignment
+  targets too: `xs[0]=9` (in-bounds list index update, negative indices work),
+  `user[email]=x` (record key insert-or-update), and deep paths
+  (`services[web][port]=9000`). No autovivification — every intermediate
+  segment must already exist with the right shape; the ONLY thing a path-set
+  may create is the final record key. An out-of-bounds index set, a missing
+  intermediate, a scalar/undefined root, and a slice lvalue (`xs[0:2]=x`) are
+  all loud errors, never silent. `push NAME VALUE...` appends to a top-level
+  list variable in place (bareword target, like `read`/`unset`); the target
+  must already exist and be a list. The validator now rejects a dotted
+  assignment target (`user.email=x`, since the `Ident` token admits `.` for
+  other uses) with a bracket-form suggestion, and a subscripted assignment
+  whose root isn't already bound. Env-prefix assignment (`X=v cmd`) stays
+  bare-ident-only — a subscripted target there is never captured as an
+  exported command-scoped variable.
 - **`json_to_value_no_envelope` (kaish-types)** — envelope-free JSON→`Value`
   conversion for external JSON, so byte-envelope-shaped objects are never
   silently decoded to `Value::Bytes`.

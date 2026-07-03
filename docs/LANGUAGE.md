@@ -236,17 +236,69 @@ value is false; a bare unset `$var` is an undefined-variable error (like
 (`[[ -list $data ]]`) — a quoted `"$data"` would test the collection's JSON
 *string*, not its value.
 
+### Assignment — bracket-path lvalues + `push`
+
+The same bracket paths that read also write, in place, with **no
+spaces around `=`**:
+
+```sh
+xs=[1 2 3]
+xs[0]=9                     # in-bounds index update
+xs[-1]=7                    # negative index works too
+
+u={port: 8080}
+u[host]=localhost           # inserts a new key
+u[port]=9090                # updates an existing key
+
+s={web: {port: 8080}}
+s[web][port]=9000           # deep path
+```
+
+**No autovivification** — every intermediate segment must already exist with
+the right shape; the *only* thing a path-set may create is the **final**
+record key. An out-of-bounds list index, a missing intermediate key, a
+scalar or undefined root, and a slice lvalue (`xs[0:2]=x`) are all loud
+errors — `push` is how lists grow, and `x={}` / `x=[]` initializes an
+intermediate before you subscript into it:
+
+```sh
+xs=[1 2 3]; xs[9]=x                        # error: index out of bounds
+s={web: {port: 8080}}; s[api][port]=1      # error: no such key (no autoviv)
+y=hi; y[0]=x                                # error: not a collection
+z[0]=x                                      # error: z is not defined
+```
+
+A dotted assignment target is also rejected — kaish is brackets-only, and the
+`Ident` token otherwise admits `.` for other uses (filenames):
+
+```sh
+user.email=x     # error — use `user[email]=x`
+```
+
+`push` appends to a top-level **list** variable in place. Like `read`/`unset`,
+it takes the variable **name** (bareword), not `$name` — this is what lets it
+write back to the caller:
+
+```sh
+xs=[a b]
+push xs c                 # xs is now [a b c] — mutated in place
+push xs $rec              # values push as typed Values, not stringified text
+echo ${#xs} ${xs[-1]}     # 3 c
+```
+
+`push` to an undefined or non-list target is a loud error, never a silent
+create. Bracket-path `push` (`push services[web][tags] item` — a subscripted
+target) isn't supported yet; only a top-level bareword target.
+
 ### Crossing the boundary
 
 A collection **displays** as compact JSON (`echo $xs` → `[10,20,30]`), but it
 cannot silently cross into an OS environment variable: `export CFG=$cfg` where
 `$cfg` is a list/record is a loud error — serialize it first with
-`export CFG=$(tojson $cfg)`.
-
-> List/record **literals** (`xs=[a b c]`, `{k: v}`, spread) are documented
-> above and shipped. `push` and bracket-path **assignment** (`a[b]=x`,
-> `fruits[0]=kiwi`) are designed but not yet implemented — today, beyond
-> literals, collections enter the shell via `fromjson` / `$(...)`.
+`export CFG=$(tojson $cfg)`. Env-prefix assignment (`FOO=bar cmd`) stays
+bare-ident-only for the same reason — a subscripted target there
+(`user[email]=x cmd`) is never captured as an exported, command-scoped
+variable.
 
 ## Quoting
 

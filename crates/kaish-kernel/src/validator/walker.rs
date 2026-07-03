@@ -90,11 +90,50 @@ impl<'a> Validator<'a> {
     }
 
     /// Validate an assignment statement.
+    ///
+    /// A plain `NAME=value` is checked for a dotted target (`user.email=x`) —
+    /// kaish is brackets-only for collection access, and the `Ident` token
+    /// admits `.` for other uses (filenames), so a dotted assignment target
+    /// is caught here rather than by tightening the lexer regex. A
+    /// subscripted lvalue (`x[k]=v`) additionally requires the root to
+    /// already be bound — a path-set never autovivifies the root (see
+    /// `docs/arrays-and-hashes.md`, "Assignment lvalues").
     fn validate_assignment(&mut self, assign: &Assignment) {
         // Validate the value expression
         self.validate_expr(&assign.value);
-        // Bind the variable name in scope
-        self.scope.bind(&assign.name);
+
+        let name = assign.name();
+        if assign.path.segments.len() == 1 {
+            if let Some(dot) = name.find('.') {
+                let (root, rest) = (&name[..dot], &name[dot + 1..]);
+                self.issues.push(
+                    ValidationIssue::error(
+                        IssueCode::DottedAssignmentTarget,
+                        format!(
+                            "'{name}' is not a valid assignment target — kaish uses bracket \
+                             access, not dots"
+                        ),
+                    )
+                    .with_suggestion(format!("use `{root}[{rest}]=value`")),
+                );
+            }
+            // Bind the variable name in scope
+            self.scope.bind(name);
+        } else if !self.scope.is_bound(name) {
+            self.issues.push(
+                ValidationIssue::error(
+                    IssueCode::LvalueUndefinedRoot,
+                    format!(
+                        "'{name}' is not defined — a subscripted assignment never creates the \
+                         root variable"
+                    ),
+                )
+                .with_suggestion(format!("create it first, e.g. `{name}={{}}` or `{name}=[]`")),
+            );
+            // Bind it anyway so a later reference to the same (still-invalid)
+            // root doesn't ALSO trigger a separate undefined-variable warning.
+            self.scope.bind(name);
+        }
     }
 
     /// Validate a command invocation.
@@ -1089,7 +1128,7 @@ mod tests {
             statements: vec![
                 // First assign the variable
                 Stmt::Assignment(Assignment {
-                    name: "MY_VAR".to_string(),
+                    path: VarPath::simple("MY_VAR"),
                     value: Expr::Literal(Value::String("value".to_string())),
                     local: false,
                 }),
