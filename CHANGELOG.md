@@ -10,7 +10,30 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`grep`, `sed`, and `awk` accept the GNU BRE backslash-metas** (`\|`, `\+`,
+  `\?`, `\(`, `\)`, `\{`, `\}`) as a superset of their ERE regex, so
+  agent-idiomatic `grep 'foo\|bar'`, `sed 's/cat\|dog/X/'`, and
+  `awk '/a\|b/'` now alternate (and `sed 's/\(a\)\(b\)/\2\1/'` groups) instead
+  of silently matching a literal `|`/`(` and returning nothing (issue #60).
+  Pass `-E` (`grep`) or `-E`/`-r` (`sed`) for strict ERE, where those escapes
+  match the literal character — the escape hatch for a literal `|`/`+`; `awk`
+  has no such flag and always rewrites. Bare ERE (`foo|bar`) and `-F` are
+  unchanged. Narrow trade-off: in the default dialect a backslash before one of
+  these metas is the operator, never a literal — match the character itself with
+  a bracket class (`[+]`, `[|]`). A stray `\)`/`\{` that no longer parses fails
+  loudly, with a hint naming the dialect, the bracket-class spelling, and
+  (grep/sed) the strict-ERE flag. awk field splitting stays gawk-compatible:
+  `-F '\|'`, `FS="\\|"`, and `split(s, a, "\\|")` split on a literal pipe (the
+  rewrite runs before the single-char-FS-is-literal rule, matching gawk's
+  demotion of `\|` to plain `|`).
+
 ### Changed
+- **BREAKING:** **`sed` no longer rejects BRE idioms with a hint** — `\|`,
+  `\(…\)`, and `\{N,M\}` used to be a loud `E006` error; they now behave as
+  alternation/groups/intervals (see Added). Scripts that relied on the error, or
+  on `-E`-free `\|` matching a literal pipe, must use `-E`/`-r` or a bracket
+  class.
 - **Enumeration guidance points at `keys`/`values`** — the `for x in $VAR` error
   (E012) now leads with `for x in $(values $coll)` / `for k in $(keys $coll)` as
   the way to iterate a collection, and the help gains a Collections syntax section

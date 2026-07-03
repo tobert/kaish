@@ -1,7 +1,10 @@
 //! sed — Stream editor for filtering and transforming text.
 //!
 //! A Bourne-lite sed implementation focused on the 80% use case.
-//! Uses ERE (extended regex) syntax like egrep, not BRE.
+//! Uses ERE (extended regex) syntax like egrep. By default it also accepts the
+//! GNU BRE backslash-metas (`\|`, `\+`, `\(…\)`, `\{N,M\}`) as a forgiving
+//! superset (issue #60); pass `-E`/`-r` for strict ERE where those escapes are
+//! literals.
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
@@ -10,6 +13,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::backend::PatchOp;
+use crate::tools::builtin::regex_dialect::{append_dialect_hint, bre_metas_to_ere};
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::{IssueCode, ValidationIssue};
@@ -33,10 +37,10 @@ struct SedArgs {
     #[arg(short = 'e', long = "expression")]
     expression: Vec<String>,
 
-    /// Use extended regex (-E/-r). kaish sed is ALWAYS ERE, so this is a
-    /// compatibility no-op — accepted so muscle-memory `sed -E '(…)'` /
-    /// `sed -r` invocations don't error. (`\(…\)`-style BRE groups are
-    /// rejected with a hint; see the regex notes in `help sed`.)
+    /// Strict ERE (-E/-r): backslash-escaped metas match the literal
+    /// character (`\|` is a `|`, `\(` a paren). Default mode also accepts
+    /// the GNU BRE spellings (`s/a\|b/X/`, `s/\(a\)\(b\)/\2\1/`) as
+    /// operators; see the regex notes in `help sed`.
     #[arg(short = 'E', short_alias = 'r', long = "regexp-extended")]
     extended: bool,
 
@@ -85,6 +89,7 @@ impl Tool for Sed {
                 ("Line range", "sed '2,5d' file.txt"),
                 ("Alternative delimiter", "sed 's|/usr|/opt|g' file.txt"),
                 ("Capture groups (ERE)", "sed 's/(\\w+) (\\w+)/\\2 \\1/' file.txt"),
+                ("Alternation (ERE or GNU BRE)", r"sed 's/cat\|dog/pet/g' file.txt"),
             ],
         )
     }
@@ -109,8 +114,11 @@ impl Tool for Sed {
 
         // Nothing to validate if expressions are absent (execute() will also
         // reject this case at runtime with "missing expression").
+        // `-E`/`-r` selects strict ERE; default is the BRE-superset dialect.
+        let extended =
+            args.has_flag("E") || args.has_flag("r") || args.has_flag("regexp-extended");
         for expr in &exprs {
-            if let Err(msg) = parse_program(expr) {
+            if let Err(msg) = parse_program_dialect(expr, extended) {
                 issues.push(
                     ValidationIssue::error(
                         IssueCode::InvalidSedExpr,
@@ -118,7 +126,8 @@ impl Tool for Sed {
                     )
                     .with_suggestion(
                         "commands: s/pat/rep/[gipN], y/abc/xyz/, d, p, q, a/i/c TEXT; \
-                         chain with ; or -e; addresses: N, $, /re/, N,M; regex is ERE (egrep-style)",
+                         chain with ; or -e; addresses: N, $, /re/, N,M; regex is ERE \
+                         (egrep-style; GNU BRE \\| \\(…\\) \\{N,M\\} also accepted)",
                     ),
                 );
             }
@@ -153,6 +162,9 @@ impl Tool for Sed {
         // kernel may surface `-i.bak` as named["i"]=".bak" or bare `-i` as a flag.
         let in_place = parsed.in_place || args.has_flag("i");
         let confirm = parsed.confirm.clone();
+        // Regex dialect: `-E`/`-r` is strict ERE; default rewrites GNU BRE metas.
+        // Captured before `parsed` is shadowed by the built program below.
+        let extended = parsed.extended;
 
         // Collect expressions from the *raw* args, not `parsed.expression`: the
         // kernel accumulates repeated `-e` into a `Value::Json(Array)`, which
@@ -172,7 +184,7 @@ impl Tool for Sed {
         // ordered program (matching `-e A -e B` and `'A; B'` semantics).
         let mut parsed: Vec<SedExpression> = Vec::new();
         for expr in &expressions {
-            match parse_program(expr) {
+            match parse_program_dialect(expr, extended) {
                 Ok(cmds) => parsed.extend(cmds),
                 Err(e) => return ExecResult::failure(1, format!("sed: {}", e)),
             }
@@ -414,7 +426,18 @@ struct SedExpression {
 /// `/regex/` address it's an ordinary character (those parsers consume their own
 /// delimiters), and `a`/`i`/`c` swallow the rest of the program as literal text
 /// — matching GNU sed's one-line `a TEXT` behavior.
+/// Default (BRE-superset) program parse, used by the unit tests. Production
+/// routes through [`parse_program_dialect`] with the caller's `-E`/`-r` state.
+#[cfg(test)]
 fn parse_program(expr: &str) -> Result<Vec<SedExpression>, String> {
+    parse_program_dialect(expr, false)
+}
+
+/// Parse a full sed program. `extended` selects the regex dialect: `false`
+/// (default) rewrites the GNU BRE backslash-metas to ERE so `\|`/`\(…\)`/`\{N\}`
+/// behave as operators; `true` (`-E`/`-r`) is strict ERE, where those escapes
+/// match the literal character.
+fn parse_program_dialect(expr: &str, extended: bool) -> Result<Vec<SedExpression>, String> {
     let mut out = Vec::new();
     let mut rest = expr.to_string();
 
@@ -424,7 +447,7 @@ fn parse_program(expr: &str) -> Result<Vec<SedExpression>, String> {
             if trimmed.is_empty() {
                 break;
             }
-            let (expr, remaining) = parse_one(trimmed)?;
+            let (expr, remaining) = parse_one(trimmed, extended)?;
             out.push(expr);
             remaining
         };
@@ -438,14 +461,14 @@ fn parse_program(expr: &str) -> Result<Vec<SedExpression>, String> {
 }
 
 /// Parse a single address+command, returning it and the unconsumed remainder.
-fn parse_one(expr: &str) -> Result<(SedExpression, String), String> {
-    let (address, rest) = parse_address(expr)?;
-    let (command, rest) = parse_command(rest.trim_start())?;
+fn parse_one(expr: &str, extended: bool) -> Result<(SedExpression, String), String> {
+    let (address, rest) = parse_address(expr, extended)?;
+    let (command, rest) = parse_command(rest.trim_start(), extended)?;
     Ok((SedExpression { address, command }, rest))
 }
 
 /// Parse an optional address prefix, returning (Address, remaining).
-fn parse_address(expr: &str) -> Result<(Address, &str), String> {
+fn parse_address(expr: &str, extended: bool) -> Result<(Address, &str), String> {
     let expr = expr.trim();
 
     if expr.is_empty() {
@@ -454,10 +477,10 @@ fn parse_address(expr: &str) -> Result<(Address, &str), String> {
 
     // Check for pattern address: /regex/
     if expr.starts_with('/') {
-        let (pattern, rest) = parse_pattern_address(expr)?;
+        let (pattern, rest) = parse_pattern_address(expr, extended)?;
         // Check for range
         if let Some(after_comma) = rest.strip_prefix(',') {
-            let (end_addr, final_rest) = parse_address(after_comma)?;
+            let (end_addr, final_rest) = parse_address(after_comma, extended)?;
             return Ok((
                 Address::Range(Box::new(Address::Pattern(pattern)), Box::new(end_addr)),
                 final_rest,
@@ -469,7 +492,7 @@ fn parse_address(expr: &str) -> Result<(Address, &str), String> {
     // Check for $ (last line)
     if let Some(rest) = expr.strip_prefix('$') {
         if let Some(after_comma) = rest.strip_prefix(',') {
-            let (end_addr, final_rest) = parse_address(after_comma)?;
+            let (end_addr, final_rest) = parse_address(after_comma, extended)?;
             return Ok((
                 Address::Range(Box::new(Address::LastLine), Box::new(end_addr)),
                 final_rest,
@@ -490,7 +513,7 @@ fn parse_address(expr: &str) -> Result<(Address, &str), String> {
 
         // Check for range
         if let Some(after_comma) = rest.strip_prefix(',') {
-            let (end_addr, final_rest) = parse_address(after_comma)?;
+            let (end_addr, final_rest) = parse_address(after_comma, extended)?;
             return Ok((
                 Address::Range(Box::new(Address::Line(num)), Box::new(end_addr)),
                 final_rest,
@@ -504,7 +527,7 @@ fn parse_address(expr: &str) -> Result<(Address, &str), String> {
 }
 
 /// Parse a /pattern/ address, returning the compiled regex and remaining input.
-fn parse_pattern_address(expr: &str) -> Result<(Regex, &str), String> {
+fn parse_pattern_address(expr: &str, extended: bool) -> Result<(Regex, &str), String> {
     debug_assert!(expr.starts_with('/'));
 
     let chars: Vec<char> = expr.chars().collect();
@@ -533,8 +556,11 @@ fn parse_pattern_address(expr: &str) -> Result<(Regex, &str), String> {
         }
     }
 
-    detect_bre_idiom(&pattern, "")?;
-    let regex = compile_pattern(&pattern, false, false)?;
+    // Default mode rewrites GNU BRE metas to ERE; `-E`/`-r` leaves them literal.
+    let rewritten = if extended { pattern.clone() } else { bre_metas_to_ere(&pattern) };
+    let rewrote = rewritten != pattern;
+    let regex = compile_pattern(&rewritten, false, false)
+        .map_err(|e| append_dialect_hint(e, rewrote, Some("-E/-r")))?;
 
     // Calculate byte offset from char offset
     let consumed: usize = chars[..i].iter().map(|c| c.len_utf8()).sum();
@@ -544,7 +570,7 @@ fn parse_pattern_address(expr: &str) -> Result<(Regex, &str), String> {
 /// Parse a sed command and return it plus the unconsumed remainder of the
 /// program (everything after this command's text/flags, including a leading
 /// `;`/newline separator if present).
-fn parse_command(cmd: &str) -> Result<(Command, String), String> {
+fn parse_command(cmd: &str, extended: bool) -> Result<(Command, String), String> {
     // Safe: `parse_one` trims then checks non-empty before calling us, but guard
     // anyway so a bare `;;` can't panic.
     let Some(first) = cmd.chars().next() else {
@@ -553,7 +579,7 @@ fn parse_command(cmd: &str) -> Result<(Command, String), String> {
     let after_first = &cmd[first.len_utf8()..];
 
     match first {
-        's' => parse_substitute(after_first),
+        's' => parse_substitute(after_first, extended),
         'y' => parse_transliterate(after_first),
         'd' => Ok((Command::Delete, after_first.to_string())),
         'p' => Ok((Command::Print, after_first.to_string())),
@@ -578,7 +604,7 @@ fn parse_text_arg(s: &str) -> String {
 /// command and the unconsumed remainder. Supported flags: `g` (global),
 /// `i`/`I` (case-insensitive), `p` (print), `m`/`M` (multiline anchors), and a
 /// numeric `N` (act on the Nth match; combine with `g` for "Nth onward").
-fn parse_substitute(expr: &str) -> Result<(Command, String), String> {
+fn parse_substitute(expr: &str, extended: bool) -> Result<(Command, String), String> {
     let chars: Vec<char> = expr.chars().collect();
     if chars.is_empty() {
         return Err("s command requires delimiter".to_string());
@@ -621,9 +647,17 @@ fn parse_substitute(expr: &str) -> Result<(Command, String), String> {
         n
     };
 
-    detect_bre_idiom(&pattern_str, &replacement)?;
-
-    let regex = compile_pattern(&pattern_str, case_insensitive, multiline)?;
+    // Default mode rewrites GNU BRE metas to ERE (so `s/\(a\)\(b\)/\2\1/` works
+    // as capture groups); `-E`/`-r` leaves the escapes literal.
+    let (pattern_str, rewrote) = if extended {
+        (pattern_str, false)
+    } else {
+        let rewritten = bre_metas_to_ere(&pattern_str);
+        let rewrote = rewritten != pattern_str;
+        (rewritten, rewrote)
+    };
+    let regex = compile_pattern(&pattern_str, case_insensitive, multiline)
+        .map_err(|e| append_dialect_hint(e, rewrote, Some("-E/-r")))?;
 
     let rest: String = after_replacement[idx..].iter().collect();
     Ok((
@@ -683,127 +717,6 @@ fn compile_pattern(pattern: &str, case_insensitive: bool, multiline: bool) -> Re
         })
 }
 
-/// Catch the BRE idioms that would *silently* mis-behave under kaish's ERE regex
-/// and turn them into a teaching error instead of wrong output. kaish sed is
-/// ALWAYS ERE (egrep-style); under ERE these BRE escapes mean something else:
-///
-/// - `\|` is a literal `|`, not alternation
-/// - `\{N\}` / `\{N,M\}` are literal braces, not an interval quantifier
-/// - `\(…\)` are literal parens; combined with a numeric backreference in the
-///   replacement that's unambiguous BRE capture-group intent
-///
-/// The scan is *escape-aware*: a `\\` consumes as one unit, so a valid ERE
-/// pattern like `a\\|b` (literal backslash, then `|` alternation) is not
-/// mistaken for BRE `\|`. The one residual blind spot is inside bracket
-/// expressions — a `\|`/`\{` written inside `[…]` will still trip the detector
-/// (we don't track class state, because POSIX `[[:alpha:]]` makes naïve bracket
-/// tracking unsafe). That's a near-zero case and the natural ERE form there is
-/// `[|]`/`[{]` anyway.
-///
-/// `\+` / `\?` are intentionally NOT flagged: they're valid ERE escapes for a
-/// literal `+`/`?`, so BRE-vs-literal intent is genuinely ambiguous there and a
-/// flag would have false positives. The three above are high-signal enough that
-/// erroring beats silently matching the wrong thing.
-fn detect_bre_idiom(pattern: &str, replacement: &str) -> Result<(), String> {
-    let b = pattern.as_bytes();
-    let mut escaped_group = false;
-    let mut real_group = false;
-    // Track bracket-expression context so a literal `(` inside `[...]` is not
-    // mistaken for a real ERE group. (The `[]…]` / `[^]…]` literal-`]`-first
-    // edge isn't handled — vanishingly rare in agent-written sed.)
-    let mut in_bracket = false;
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] != b'\\' {
-            match b[i] {
-                b'[' if !in_bracket => in_bracket = true,
-                b']' if in_bracket => in_bracket = false,
-                // An unescaped `(` OUTSIDE a bracket class opens a real ERE
-                // group: the author is already writing ERE, so any `\(` beside
-                // it is a literal paren, not a BRE capture group. A `(` inside
-                // `[...]` is a literal and says nothing about ERE intent, so it
-                // must NOT suppress detection (silent-wrong otherwise).
-                b'(' if !in_bracket => real_group = true,
-                _ => {}
-            }
-            i += 1;
-            continue;
-        }
-        // `\` + the next byte form one escape unit; consume both regardless, so a
-        // `\\` pair can't leave a dangling backslash that re-arms detection.
-        match b.get(i + 1) {
-            Some(b'|') => {
-                return Err(
-                    "pattern uses BRE alternation \\|; kaish sed is ERE (egrep-style) — \
-                     write a|b, not a\\|b"
-                        .to_string(),
-                );
-            }
-            Some(b'{') if bre_interval_closes(b, i + 2) => {
-                return Err(
-                    "pattern uses a BRE interval \\{N\\}; kaish sed is ERE (egrep-style) — \
-                     write a{2,5}, not a\\{2,5\\}"
-                        .to_string(),
-                );
-            }
-            Some(b'(') | Some(b')') => escaped_group = true,
-            _ => {}
-        }
-        i += 2;
-    }
-
-    if escaped_group && !real_group && replacement_has_backref(replacement) {
-        return Err(
-            "pattern uses BRE capture groups \\(...\\); kaish sed is ERE \
-             (egrep-style) — write (...) and backreference \\1, not \\(...\\)"
-                .to_string(),
-        );
-    }
-    Ok(())
-}
-
-/// True if the replacement holds a `\N` backreference (N a digit) whose
-/// backslash is not itself escaped. A literal `\\1` (escaped backslash + `1`)
-/// is text, not a backref, and must not arm BRE capture-group detection —
-/// mirrors the pattern scan's `\\`-as-a-unit consumption.
-fn replacement_has_backref(replacement: &str) -> bool {
-    let b = replacement.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] != b'\\' {
-            i += 1;
-            continue;
-        }
-        if b.get(i + 1).is_some_and(u8::is_ascii_digit) {
-            return true;
-        }
-        // `\` + the next byte form one escape unit; consume both so a `\\` pair
-        // can't leave a dangling backslash that re-arms detection on a digit.
-        i += 2;
-    }
-    false
-}
-
-/// Given `start` pointing just past a `\{`, return true if a BRE interval body
-/// closes with `\}`: at least one leading digit, an optional `,` + digits, then
-/// `\}`. The leading-digit requirement keeps a stray `\{` from matching. ERE
-/// intervals use bare `{…}` and never reach here.
-fn bre_interval_closes(b: &[u8], start: usize) -> bool {
-    let mut j = start;
-    while b.get(j).is_some_and(u8::is_ascii_digit) {
-        j += 1;
-    }
-    if j == start {
-        return false;
-    }
-    if b.get(j) == Some(&b',') {
-        j += 1;
-        while b.get(j).is_some_and(u8::is_ascii_digit) {
-            j += 1;
-        }
-    }
-    b.get(j) == Some(&b'\\') && b.get(j + 1) == Some(&b'}')
-}
 
 /// Parse a delimited section, handling escapes.
 fn parse_delimited(chars: &[char], delimiter: char) -> Result<(String, &[char]), String> {
@@ -1645,20 +1558,62 @@ mod tests {
         assert!(err.contains("same length"), "got: {err}");
     }
 
-    // === ERE dialect honesty ===
+    // === Regex dialect: default BRE-superset vs `-E`/`-r` strict ERE (#60) ===
 
-    #[test]
-    fn bre_capture_group_idiom_is_rejected() {
-        let err = parse_program(r"s/\(a\)\(b\)/\2\1/").unwrap_err();
-        assert!(err.contains("ERE"), "should hint ERE: {err}");
-        assert!(err.contains("BRE"), "should name BRE: {err}");
+    /// Build one expression in strict-ERE (`-E`/`-r`) mode for the tests below.
+    fn parse_expression_ere(expr: &str) -> Result<SedExpression, String> {
+        let mut cmds = parse_program_dialect(expr, true)?;
+        if cmds.len() != 1 {
+            return Err(format!("expected 1 command, got {}", cmds.len()));
+        }
+        Ok(cmds.remove(0))
     }
 
     #[test]
-    fn escaped_paren_without_backref_is_allowed() {
-        // `\(` as a literal paren in ERE (no backref) must NOT trip the detector.
-        let expr = parse_expression(r"s/\(x\)/Y/").unwrap();
-        assert_eq!(execute_sed("(x)", &[expr], false), "Y\n");
+    fn bre_capture_groups_translate_to_ere_groups() {
+        // Default mode: `\(...\)` become real capture groups, `\1`/`\2` backref
+        // them — the agent-idiomatic spelling that used to be rejected.
+        let expr = parse_expression(r"s/\(a\)\(b\)/\2\1/").unwrap();
+        assert_eq!(execute_sed("ab", &[expr], false), "ba\n");
+    }
+
+    #[test]
+    fn bre_alternation_translates() {
+        // `cat\|dog` alternates (was a silent no-match / loud reject before #60).
+        let expr = parse_expression(r"s/cat\|dog/X/g").unwrap();
+        assert_eq!(execute_sed("cat dog", &[expr], false), "X X\n");
+    }
+
+    #[test]
+    fn bre_interval_translates() {
+        let expr = parse_expression(r"s/a\{2\}/X/").unwrap();
+        assert_eq!(execute_sed("aa", &[expr], false), "X\n");
+        let expr = parse_expression(r"s/a\{2,\}/X/").unwrap();
+        assert_eq!(execute_sed("aaaa", &[expr], false), "X\n");
+    }
+
+    #[test]
+    fn bre_plus_quantifier_translates() {
+        // `\+` is now the one-or-more quantifier (GNU BRE), not a literal `+`.
+        // The literal `+` is available as a bracket class `[+]`.
+        let expr = parse_expression(r"s/a\+/X/").unwrap();
+        assert_eq!(execute_sed("aaab", &[expr], false), "Xb\n");
+    }
+
+    #[test]
+    fn bre_idioms_work_in_addresses_too() {
+        // Addresses compile a pattern as well; the same rewrite applies.
+        let expr = parse_expression(r"/cat\|dog/d").unwrap();
+        assert_eq!(execute_sed("cat\nfish\ndog", &[expr], false), "fish\n");
+    }
+
+    #[test]
+    fn ere_interval_and_alternation_are_fine() {
+        // The bare ERE forms keep working — the rewrite is a superset.
+        let expr = parse_expression("s/a{2}/X/").unwrap();
+        assert_eq!(execute_sed("aa", &[expr], false), "X\n");
+        let expr = parse_expression("s/cat|dog/X/g").unwrap();
+        assert_eq!(execute_sed("cat dog", &[expr], false), "X X\n");
     }
 
     #[test]
@@ -1668,79 +1623,13 @@ mod tests {
     }
 
     #[test]
-    fn literal_double_backslash_digit_in_replacement_is_not_a_backref() {
-        // `\\1` is an escaped backslash + literal `1`, not a `\1` backref. The
-        // detector must consume `\\` as a unit so it doesn't see a phantom
-        // backref alongside `\(...\)` and reject valid ERE. (issues.md P2 (a))
-        assert!(detect_bre_idiom(r"\(x\)", r"\\1").is_ok());
-        // End to end: `\(x\)` matches literal `(x)`, `\\1` emits literal `\1`.
-        let expr = parse_expression(r"s/\(x\)/\\1/").unwrap();
-        assert_eq!(execute_sed("(x)", &[expr], false), "\\1\n");
-    }
-
-    #[test]
-    fn real_ere_group_alongside_literal_escaped_parens_is_allowed() {
-        // A genuine ERE group `(a)` means the author is writing ERE, so the
-        // `\(b\)` beside it is a literal paren — `\1` backrefs the real group.
-        // Must not be mistaken for BRE capture groups. (issues.md P2 (b))
-        assert!(detect_bre_idiom(r"(a)\(b\)", r"\1").is_ok());
-        let expr = parse_expression(r"s/(a)\(b\)/\1/").unwrap();
-        assert_eq!(execute_sed("a(b)", &[expr], false), "a\n");
-    }
-
-    #[test]
-    fn literal_paren_in_bracket_class_does_not_suppress_bre_detection() {
-        // `[(]` is a bracket expression matching a literal `(` — NOT a real ERE
-        // group, so it must not arm `real_group` and silently suppress the BRE
-        // error. The `\(x\)` beside it IS a genuine BRE capture-group mistake
-        // and must still fail loud. (code-review finding: unescaped `(` inside
-        // `[...]` was wrongly treated as a real group.)
-        assert!(detect_bre_idiom(r"[(]\(x\)", r"\1").is_err());
-        // The real-group suppression still works for a true unescaped group.
-        assert!(detect_bre_idiom(r"(a)\(b\)", r"\1").is_ok());
-    }
-
-    #[test]
-    fn bre_alternation_is_rejected() {
-        // `cat\|dog` is literal "cat|dog" under ERE — silently no-match before.
-        let err = parse_program(r"s/cat\|dog/X/").unwrap_err();
-        assert!(err.contains("alternation"), "should name alternation: {err}");
-        assert!(err.contains("ERE"), "should hint ERE: {err}");
-    }
-
-    #[test]
-    fn bre_interval_is_rejected() {
-        // `a\{2\}` is literal "a{2}" under ERE — silently no-match before.
-        let err = parse_program(r"s/a\{2\}/X/").unwrap_err();
-        assert!(err.contains("interval"), "should name interval: {err}");
-        let err = parse_program(r"s/a\{2,5\}/X/").unwrap_err();
-        assert!(err.contains("interval"), "ranged interval too: {err}");
-        let err = parse_program(r"s/a\{2,\}/X/").unwrap_err();
-        assert!(err.contains("interval"), "open interval too: {err}");
-    }
-
-    #[test]
-    fn bre_idioms_rejected_in_addresses_too() {
-        // Addresses compile a pattern as well; the same BRE traps apply.
-        assert!(parse_program(r"/cat\|dog/d").unwrap_err().contains("alternation"));
-        assert!(parse_program(r"/a\{2\}/d").unwrap_err().contains("interval"));
-    }
-
-    #[test]
-    fn ere_interval_and_alternation_are_fine() {
-        // The bare ERE forms must NOT trip the BRE detector.
-        let expr = parse_expression("s/a{2}/X/").unwrap();
-        assert_eq!(execute_sed("aa", &[expr], false), "X\n");
-        let expr = parse_expression("s/cat|dog/X/g").unwrap();
-        assert_eq!(execute_sed("cat dog", &[expr], false), "X X\n");
-    }
-
-    #[test]
-    fn escaped_plus_is_not_flagged_as_bre() {
-        // `\+` is a legitimate ERE escape for a literal `+` — ambiguous with BRE
-        // intent, so we deliberately don't flag it (no false positive).
-        let expr = parse_expression(r"s/a\+/X/").unwrap();
-        assert_eq!(execute_sed("a+b", &[expr], false), "Xb\n");
+    fn ere_mode_treats_backslash_metas_as_literals() {
+        // `-E`/`-r` is strict ERE: `\|` matches a literal pipe, `\(`/`\)` literal
+        // parens — the escape hatch for matching those characters.
+        let expr = parse_expression_ere(r"s/cat\|dog/X/").unwrap();
+        assert_eq!(execute_sed("cat|dog here", &[expr], false), "X here\n");
+        let expr = parse_expression_ere(r"s/\(x\)/Y/").unwrap();
+        assert_eq!(execute_sed("(x)", &[expr], false), "Y\n");
     }
 
     #[test]
@@ -1756,38 +1645,12 @@ mod tests {
     }
 
     #[test]
-    fn bre_interval_closes_edge_cases() {
-        // `start` points just past `\{` — here byte index 3 of `a\{…`.
-        assert!(bre_interval_closes(r"a\{2\}".as_bytes(), 3));
-        assert!(bre_interval_closes(r"a\{2,\}".as_bytes(), 3));
-        assert!(bre_interval_closes(r"a\{2,5\}".as_bytes(), 3));
-        // No leading digit isn't an interval.
-        assert!(!bre_interval_closes(r"a\{,5\}".as_bytes(), 3));
-        assert!(!bre_interval_closes(r"a\{x\}".as_bytes(), 3));
-        // Unterminated forms don't close.
-        assert!(!bre_interval_closes(r"a\{2".as_bytes(), 3));
-    }
-
-    #[test]
-    fn escaped_backslash_before_pipe_is_not_bre_alternation() {
-        // DeepSeek review: `a\\|b` is VALID ERE (literal backslash, then `|`
-        // alternation). The escape-aware scan must not mistake the second `\`
-        // for a BRE `\|`. Regression against a false positive on correct ERE.
+    fn escaped_backslash_before_pipe_is_literal_backslash_then_alternation() {
+        // `a\\|b` is a literal backslash then `|` alternation in BOTH dialects:
+        // the rewrite preserves `\\` as a unit, so the trailing `|` stays bare
+        // ERE alternation and is not consumed as a BRE `\|`.
         let expr = parse_expression(r"s/a\\|b/X/").unwrap();
         assert_eq!(execute_sed(r"a\ b c", &[expr], false), "X b c\n");
-    }
-
-    #[test]
-    fn escaped_backslash_does_not_re_arm_detection() {
-        // DeepSeek review: the escape-aware scan must consume `\\` as a unit so a
-        // dangling backslash can't re-arm `\|`/`\{` detection. These are valid ERE
-        // (literal backslash + the metachar), not BRE idioms — tested at the
-        // detector directly so regex-crate brace-literal quirks don't muddy it.
-        assert!(detect_bre_idiom(r"a\\|b", "").is_ok());
-        assert!(detect_bre_idiom(r"a\\{2\}", "").is_ok());
-        // Sanity: the genuinely-BRE forms still ARE flagged.
-        assert!(detect_bre_idiom(r"a\|b", "").is_err());
-        assert!(detect_bre_idiom(r"a\{2\}", "").is_err());
     }
 
     // === Integration Tests ===

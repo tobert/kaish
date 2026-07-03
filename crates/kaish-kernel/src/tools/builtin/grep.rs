@@ -17,6 +17,7 @@ use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::grep_engine::{AccumulatorSink, ContextKind, SearchEvent};
 use crate::tools::builtin::read_repeatable_strings;
+use crate::tools::builtin::regex_dialect::{append_dialect_hint, bre_metas_to_ere};
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
 use crate::walker::{
@@ -74,9 +75,9 @@ struct GrepArgs {
     #[arg(short = 'U', long = "multiline")]
     multiline: bool,
 
-    /// Extended regex (POSIX -E). No-op: Rust's regex crate is always
-    /// extended (alternation, grouping, quantifiers without backslash);
-    /// accepted for POSIX/muscle-memory compatibility.
+    /// Strict ERE (POSIX -E): backslash-escaped metas match the literal
+    /// character (`\|` is a `|`). Default mode also accepts the GNU BRE
+    /// spellings (`a\|b`, `\(…\)`, `x\{2,5\}`) as operators.
     #[arg(id = "extended_regexp", short = 'E', long = "extended-regexp", visible_alias = "extended_regexp")]
     _extended: bool,
 
@@ -161,6 +162,7 @@ impl Tool for Grep {
                 ("Extract matched text only", "grep -o 'https://[^\"]*' file.html"),
                 ("Context around matches", "grep -C 2 error log.txt"),
                 ("Recursive search", "grep -r TODO src/"),
+                ("Alternation (ERE or GNU BRE)", r"grep 'foo\|bar' file.txt"),
                 ("With file filter", "grep -rn TODO . --include='*.rs'"),
             ],
         )
@@ -172,12 +174,22 @@ impl Tool for Grep {
         // Skip regex syntax check when -F is set: pattern will be escaped at runtime.
         let fixed = args.has_flag("F") || args.has_flag("fixed-strings");
         if !fixed && let Some(pattern) = args.get_string("pattern", 0) {
+            // Validate the pattern that actually runs: rewrite GNU BRE metas to
+            // ERE first (issue #60) so `grep 'a\|b'` is checked as alternation.
+            // `-E` (strict ERE) skips the rewrite, matching execute().
+            let extended = args.has_flag("E") || args.has_flag("extended-regexp");
+            let rewritten = if extended { pattern.clone() } else { bre_metas_to_ere(&pattern) };
+            let rewrote = rewritten != pattern;
             // Don't validate if pattern looks dynamic (contains shell expansion markers)
-            if !pattern.contains("<dynamic>")
-                && let Err(e) = regex::Regex::new(&pattern) {
+            if !rewritten.contains("<dynamic>")
+                && let Err(e) = regex::Regex::new(&rewritten) {
                     issues.push(ValidationIssue::error(
                         IssueCode::InvalidRegex,
-                        format!("grep: invalid regex pattern: {}", e),
+                        append_dialect_hint(
+                            format!("grep: invalid regex pattern: {}", e),
+                            rewrote,
+                            Some("-E"),
+                        ),
                     ).with_suggestion("check regex syntax at https://docs.rs/regex"));
                 }
         }
@@ -281,9 +293,23 @@ impl Tool for Grep {
         };
 
         // -F: escape regex metachars so the pattern matches literally.
+        // Default: rewrite the GNU BRE backslash-metas (`\|`, `\+`, `\(`, …) into
+        // their ERE form so agent-idiomatic `grep 'a\|b'` alternates instead of
+        // silently matching a literal `|` (issue #60). `-E` (extended) is strict
+        // ERE, where those escapes stay literal — the escape hatch for a literal
+        // `|`/`+`.
         // -w wraps in word boundaries (regex syntax) AFTER escaping so
         // `grep -Fw "192.168.1.1"` still anchors at word boundaries.
-        let escaped = if fixed_strings { regex::escape(&pattern) } else { pattern };
+        let extended = args.has_flag("E") || args.has_flag("extended-regexp");
+        let (escaped, dialect_rewrote) = if fixed_strings {
+            (regex::escape(&pattern), false)
+        } else if extended {
+            (pattern, false)
+        } else {
+            let rewritten = bre_metas_to_ere(&pattern);
+            let rewrote = rewritten != pattern;
+            (rewritten, rewrote)
+        };
         let final_pattern = if word_regexp {
             format!(r"\b{}\b", escaped)
         } else {
@@ -299,7 +325,16 @@ impl Tool for Grep {
             .build()
         {
             Ok(r) => r,
-            Err(e) => return ExecResult::failure(1, format!("grep: invalid pattern: {}", e)),
+            Err(e) => {
+                return ExecResult::failure(
+                    1,
+                    append_dialect_hint(
+                        format!("grep: invalid pattern: {}", e),
+                        dialect_rewrote,
+                        Some("-E"),
+                    ),
+                )
+            }
         };
 
         // RegexMatcher drives the Searcher; same pattern, same flags.
@@ -309,7 +344,16 @@ impl Tool for Grep {
             .build(&final_pattern)
         {
             Ok(m) => m,
-            Err(e) => return ExecResult::failure(1, format!("grep: invalid pattern: {}", e)),
+            Err(e) => {
+                return ExecResult::failure(
+                    1,
+                    append_dialect_hint(
+                        format!("grep: invalid pattern: {}", e),
+                        dialect_rewrote,
+                        Some("-E"),
+                    ),
+                )
+            }
         };
 
         // `--max-count N`: stop after N matching lines per file (GNU semantics).

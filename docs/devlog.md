@@ -14,6 +14,35 @@ before it ships.
 
 ---
 
+## GNU BRE superset for grep/sed/awk (2026-07-03)
+
+Issue #60 measured `grep 'a\|b'` as the single largest source of wasted agent
+tool calls (12 of 41 explorer greps in one sweep, each followed by a single-term
+retry) — commercial models write GNU BRE reflexively and don't unlearn it from
+preamble text. kaish had three different wrong answers: grep silently no-matched
+(literal `|`), sed loud-rejected (the E006 teaching error from the ergonomics
+pass), awk silently no-matched. The fix reverses the sed-pass decision that
+erroring beats guessing: a shared rewriter (`regex_dialect.rs::bre_metas_to_ere`)
+turns the seven backslash-metas (`\| \+ \? \( \) \{ \}`) into their ERE forms, so
+both spellings are the same operation and it's no longer a guess. `-E`/`-r`
+(grep/sed) now mean *strict ERE* — the escape hatch where `\|` is a literal pipe;
+awk always rewrites (no flag). The narrow casualty: a backslashed meta is always
+the operator; literals move to bracket classes (`[|]`, `[)]`).
+
+The review round (self-review + kaibo deepseek on whole files, no diff) earned
+its keep: awk's FS/`split()` path applied the rewrite *inside* the multi-char
+regex branch, so the gawk literal-pipe idiom `FS="\\|"` became the
+empty-alternation regex `|` and split every character (NF=7 on `a|b|c` vs gawk's
+3) — silent-wrong, the exact class the branch exists to kill. gawk's actual
+order is demote-then-single-char-literal, so the fix is rewrite *before* the
+single-char check. Also caught: the `-E` flag doc comments still said "no-op"
+(and they're schema-visible via `schema_from_clap`), and the changelog claimed
+grep takes `-r` (that's recursive). Since a formerly-literal escape like `:\)`
+now fails compile with an error describing a pattern the author never wrote
+(`unopened group` on `:)`), compile errors append a dialect hint (bracket-class
+spelling + the strict-ERE flag where one exists) whenever the rewrite actually
+changed the pattern.
+
 ## Importance-ranked onboarding tiers (2026-07-01)
 
 Step 3 of the collections effort splits in two: the tier *mechanism* (pure infra,

@@ -33,7 +33,9 @@ BEGIN{FS=":"; OFS="\t"}     # or set FS/OFS in BEGIN
 ```
 
 Default FS splits on runs of whitespace (leading/trailing trimmed). A
-multi-char FS is an ERE regex. Range patterns work: `/start/,/stop/`.
+single-char FS is literal; a multi-char FS is an ERE regex. `-F '\|'` /
+`FS="\\|"` split on a literal pipe (like gawk). Range patterns work:
+`/start/,/stop/`.
 
 ## Strings & substitution
 
@@ -51,8 +53,10 @@ substr(s,2,3) index(s,t) toupper(s) tolower(s) sprintf("%05.2f", x)
 ```
 
 Regex is the Rust `regex` crate (ERE-like), not gawk's engine:
-**no backreferences** in patterns, and a few escapes differ. Stick to
-character classes, `*+?`, `{m,n}`, anchors, and alternation.
+**no backreferences** in patterns. Use `*+?`, `{m,n}`, anchors, character
+classes, and alternation. The GNU BRE spellings `\|`, `\(…\)`, `\{n,m\}`, and
+`\+`/`\?` are also accepted (rewritten to ERE); awk has no `-E` flag, so match a
+literal `|`/`+` with a bracket class (`[|]`/`[+]`).
 
 ## Control flow, arrays, output
 
