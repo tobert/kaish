@@ -33,6 +33,7 @@ mod export;
 mod fg;
 mod file;
 mod fromjson;
+mod fromjsonl;
 mod glob;
 mod find;
 pub(crate) mod format_string;
@@ -85,6 +86,7 @@ mod tail;
 mod tee;
 mod timeout;
 mod tojson;
+mod tojsonl;
 #[cfg(feature = "tokens")]
 mod tokens;
 mod touch;
@@ -162,6 +164,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(fg::Fg);
     registry.register(file::File);
     registry.register(fromjson::FromJson);
+    registry.register(fromjsonl::FromJsonl);
     registry.register(glob::Glob);
     registry.register(find::Find);
     registry.register(gather::Gather);
@@ -215,6 +218,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     #[cfg(feature = "tokens")]
     registry.register(tokens::Tokens);
     registry.register(tojson::ToJson);
+    registry.register(tojsonl::ToJsonl);
     registry.register(touch::Touch);
     registry.register(tr::Tr);
     registry.register(tree::Tree);

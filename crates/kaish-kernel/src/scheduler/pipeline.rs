@@ -351,7 +351,7 @@ impl PipelineRunner {
         let sequential_dispatcher: Arc<dyn CommandDispatcher> = dispatcher.fork_attached().await;
 
         let runner = ScatterGatherRunner::new(self.tools.clone(), sequential_dispatcher);
-        runner
+        let result = runner
             .run(
                 pre_scatter,
                 scatter_opts,
@@ -360,7 +360,21 @@ impl PipelineRunner {
                 post_gather,
                 ctx,
             )
-            .await
+            .await;
+
+        // `gather`'s own trailing redirect (`… | gather > results.jsonl`, GH
+        // #80's canonical egress-to-file flow) is only meaningful when gather
+        // is the pipeline's last command — `runner.run` splices post_gather
+        // stages through the normal `run_sequential` path, which already
+        // applies each of *their* redirects. Without this, `gather`'s
+        // redirect was silently dropped (the rows landed in `result.out`
+        // instead of the file) because `ScatterGatherRunner::run` only sees
+        // `gather_opts` (parsed flags), never `gather_cmd.redirects`.
+        if post_gather.is_empty() {
+            apply_redirects(result, &gather_cmd.redirects, ctx).await
+        } else {
+            result
+        }
     }
 
     /// Run a single command with optional stdin.

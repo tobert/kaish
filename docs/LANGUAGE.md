@@ -423,6 +423,34 @@ jq -n --arg a one --arg b two -r '$a + "-" + $b'
 Both flags are repeatable. `--argjson` errors loudly on malformed JSON
 (matching real jq).
 
+### The text boundary — one document vs. many (JSONL)
+
+`fromjson` / `tojson` and kaish's `jq` all take **exactly one JSON document**
+of text — trailing data after it is a loud error, not a silent slurp. A
+stream of *many* documents (NDJSON/JSONL: an API response, a log file, kaish's
+own `gather` output) needs an explicit door:
+
+```sh
+curl -s api/events.ndjson | fromjsonl | scatter -- restart ${ITEM[host]}
+cat results.jsonl | fromjsonl | jq '.[] | select(.ok | not)'   # ingress: text → typed list
+xs=$(fromjson '[1,2,3]'); tojsonl $xs                          # egress: list → JSONL text
+```
+
+`fromjsonl` is strictly line-oriented (one document per line, blank lines
+skipped, any bad line — including a truncated trailing one — is a loud error
+naming the line number); a pretty-printed multi-line document is a loud error
+pointing at `fromjson` (one document) or `jq -s` (below). `tojsonl` is the
+egress mirror: a list in, one compact document per line out — a record or
+scalar is one document, so that's `tojson`'s job instead.
+
+`jq -s` / `--slurp` also reads a document stream, with real jq framing (so
+pretty multi-line documents are fine) and *always* wraps the result in an
+array — even a single document (`printf '{"a":1}' | jq -s length` → `1`, the
+array length). On the `.data` pipeline path `-s` is a no-op — the upstream
+stage already handed over one structured value. If plain `jq` (no `-s`) sees
+JSONL-shaped input, the error names the document count and points at
+`fromjsonl` or `jq -s` instead of a bare parse failure.
+
 ## Statement Chaining
 
 ```sh

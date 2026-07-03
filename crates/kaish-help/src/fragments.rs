@@ -347,6 +347,7 @@ elif [[ -list $data ]]; then
 fi
 
 tojson $u                 # serialize back to JSON text (--pretty to indent)
+# A stream of many documents (JSONL/NDJSON) is fromjsonl/tojsonl, not fromjson/tojson.
 
 # ASSIGNMENT — the same bracket paths write, in place, no spaces around `=`.
 # No autovivification — every intermediate must already exist with the right
