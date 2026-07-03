@@ -14,6 +14,17 @@ before it ships.
 
 ---
 
+## `help regex` — waking the ERE weights (2026-07-03)
+
+PR #65's last follow-up: the BRE-superset story lived in four places (grep
+schema, sed schema, awk help, LANGUAGE.md) with no single teachable surface.
+Amy's framing set the design: token-efficient, and written to *wake up the
+model's ERE weights* — so the fragment leads with working ERE idioms
+(alternation, capture groups, quantifiers) before mentioning BRE compat at all,
+then covers the two escape hatches and the one hard limit. One screen, every
+line verified against the binary. Rides the #69 `syntax_section` mechanism, so
+`help regex` worked the moment the fragment was named.
+
 ## The two review bugs: silent-zero length + literal-`$k` record keys (2026-07-03)
 
 The 2026-07-03 coverage review verified two live silent-wrongs; both fixed here.
@@ -32,6 +43,7 @@ literal-`$` escape hatch, and an unset var in a key expands to `""` — the
 ratified string-interpolation rule applied consistently, pinned with a test.
 
 ---
+
 
 ## Collections panel gate + docs delivery — sign-off (2026-07-03)
 
