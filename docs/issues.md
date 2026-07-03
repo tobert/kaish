@@ -193,6 +193,16 @@ over the `&[Value]` primitive (trivial `.map(Value::String)` wrapper).
 
 ## P2 — Focused refactors & real bugs
 
+### Scatter/gather element typing — decide, then implement (2026-07-03)
+`scatter` stringifies typed elements: a list of records reaches workers as compact-JSON
+text (`${ITEM[id]}` errors loudly), and `1`/`"1"`, `true`/`"true"`, `null`/`"null"`
+conflate silently — the one *currently-silent* wrongness left from the collections
+coverage review (fable finding #6). The decision (typed workers, matching the
+`$(values …)` for-loop precedent, vs. ratified text boundary that refuses typed
+elements loudly) is recorded as an Open decision in `arrays-and-hashes.md`; gather's
+output typing rides the same call. Once decided: implement + pin with kernel-routed
+tests (including the `typeof $ITEM` and conflation cases the review sketched).
+
 ### Pre-release sweep — real bugs (2026-06-23, verified local)
 Builtin batch FIXED 2026-06-24 (`fix/p2-verified-bugs`, kernel-routed regression
 tests per fix): **`glob`** exit 1 on zero matches (`glob_no_match_tests`);

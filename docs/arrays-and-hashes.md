@@ -505,9 +505,46 @@ for the record.
   does not exist there. The lexer has no `..`/`...` handling at all — `...` is a new token,
   meaningful only inside `[ ]` value context.)*
 
+- **Write ordering — the RHS evaluates against the pre-write state.** *(Ratified 2026-07-03,
+  from the cross-model coverage review.)* In `xs[0]=${xs[-1]}` the RHS is fully evaluated
+  before `walk_write` clones-and-swaps the root, so a self-referential write reads the old
+  value (`[10 20 30]` → `[30 20 30]`), and `push ys ${ys[-1]}` appends exactly one element
+  read from the pre-append tail. This was true by code structure (kernel evaluates the value
+  expression before the write; the clone-then-swap makes the write atomic) but unratified —
+  it becomes load-bearing the moment anyone optimizes the clone away into in-place mutation.
+  Pinned by `collections_value_model_tests.rs` (RMW section).
+
+- **Iteration materializes at loop entry.** *(Ratified 2026-07-03.)* `for v in $(values $xs)`
+  snapshots: the `$()` materializes `values`' output before the loop starts and the for-loop
+  pre-collects its items, so mutating `$xs` inside the body (push, replace, clear) changes
+  neither the trip count nor the yielded elements — mutations land on the variable but never
+  feed back into the iteration. A lazy/streaming refactor of `$()`-into-for would break this
+  ratified contract (wrong trip counts, classically nondeterministic). Pinned by
+  `collections_value_model_tests.rs` (iteration-snapshot section).
+
+- **Record keys are exact strings — no numeric normalization, no cross-shape coercion.**
+  *(Ratified 2026-07-03.)* `"1"` and `"01"` are distinct record keys; no layer may run keys
+  through an integer parse (a well-meaning "coerce numeric keys" change would silently collide
+  them). The subscript rule stays strict in both directions: a bareword digit is an integer
+  index even on a record (loud error naming the quoted fix, `${r["1"]}`), a quoted numeric is
+  a string key even on a list (loud), and a dynamic `${r[$n]}` arrives as the string value of
+  `$n` and keys the record. Pinned by `collections_value_model_tests.rs` (Decision-B/key
+  section).
+
 ## Open decisions
 
 Not yet resolved; flagging them so we decide deliberately.
+
+- **Scatter/gather element typing.** *(Flagged 2026-07-03 by the fable edge-case
+  deliberation.)* `scatter` stringifies typed elements today (`extract_items` does
+  `to_string()`; `ITEM` is always a string in the worker), so a list of records arrives as
+  compact-JSON text (`${ITEM[id]}` is a loud "not a collection" error — at least loud), and —
+  the genuinely silent half — `1`/`"1"`, `true`/`"true"`, `null`/`"null"` become
+  byte-identical inside workers with no diagnostic. The design doc never addressed scatter
+  receiving typed `.data`. Options: (a) workers receive typed values (matches the
+  `for v in $(values …)` precedent — preferred by the review), or (b) scatter is ratified as a
+  text boundary like external argv, refusing typed elements loudly. Gather's output typing is
+  unspecified too and should be decided in the same pass. Tracked in issues.md (P2).
 
 - **jq vs native — and whether jq can leave the core.** With native traversal, `${user[name]}`
   competes with `jq -r '.name'` for simple cases. The division is at least clean now: native is
