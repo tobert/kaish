@@ -5,9 +5,12 @@
 //! the *load-bearing* semantics here had zero integration tests: copy-on-assign
 //! aliasing, function-scope × mutation, read-modify-write ordering, iteration
 //! snapshots, and the fromjson/tojson round-trip law the design doc declares
-//! "test-pinned". Every test pins RATIFIED design (docs/arrays-and-hashes.md);
-//! behaviors the review flagged as unratified are deliberately NOT asserted
-//! here — they're queued for Decisions-section ratification first.
+//! "test-pinned". Every test pins RATIFIED design (docs/arrays-and-hashes.md),
+//! with one deliberate exception: `local_without_initializer_does_not_parse`
+//! guards current *implementation* behavior because the write-through safety
+//! property depends on it (see that test's comment). Behaviors the review
+//! flagged as unratified are otherwise NOT asserted here — they're queued for
+//! Decisions-section ratification first.
 //!
 //! The shared failure mode these guard against is the project's cardinal sin:
 //! a plausible-but-wrong value with no error. In particular, a future
@@ -112,9 +115,10 @@ async fn key_insert_on_a_copy_does_not_grow_the_original() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Function scope × mutation: bracket writes punch through to the caller
-// (documented write-through, design doc "regardless of `local`");
-// `local xs=$xs` is the protection idiom (copy-on-assign + frame-local).
+// Function scope × mutation. Write-through follows from the ratified
+// pieces: functions run in shared scope (sh-compatible) and `b=$a` is
+// copy-on-assign — so an un-`local`ed bracket write reaches the caller,
+// and `local xs=$xs` is the protection idiom (frame-local copy).
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -123,7 +127,7 @@ async fn subscript_write_in_a_function_reaches_the_caller() {
     let (out, code, err) =
         run(&k, "xs=[1 2 3]\nf() { xs[0]=99; }\nf\necho ${xs[0]}").await;
     assert_eq!(code, 0, "err: {err}");
-    assert_eq!(out, "99", "documented write-through");
+    assert_eq!(out, "99", "shared-scope write-through");
 }
 
 #[tokio::test]
@@ -157,14 +161,16 @@ async fn local_copy_shadows_and_protects_the_caller() {
 #[tokio::test]
 async fn local_without_initializer_does_not_parse() {
     // Guard for a hazard that is structurally impossible today: `local ys`
-    // (no initializer) is a parse error, so a subscript write after it can
+    // (no initializer) is a PARSE error, so a subscript write after it can
     // never silently fall through the frame walk to the caller's collection.
-    // If bare `local ys` is ever accepted, this test fails and the
+    // This pins implementation behavior, not ratified design (the file-header
+    // exception): if bare `local ys` is ever accepted, this fails and the
     // write-through interaction MUST be decided deliberately (see the
-    // 2026-07-03 coverage review).
+    // 2026-07-03 coverage review). Asserting "parse" specifically so a future
+    // accept-then-fail-at-runtime path can't satisfy this test vacuously.
     let k = setup().await;
     let err = loud_err(&k, "ys=[a b c]\nf() { local ys; ys[0]=zzz; }\nf").await;
-    assert!(!err.is_empty(), "bare `local ys` must stay an error");
+    assert!(err.contains("parse"), "must be a PARSE-level rejection: {err}");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -424,10 +430,11 @@ async fn dynamic_key_lvalue_writes_the_resolved_key() {
 #[tokio::test]
 async fn spread_at_argv_is_a_parse_error() {
     // `...` is a value-position token only; `cmd ...$xs` argv splat is
-    // explicitly excluded by the design.
+    // explicitly excluded by the design. Asserting a PARSE-level rejection so
+    // a future accept-then-glob/stringify path can't pass this vacuously.
     let k = setup().await;
     let err = loud_err(&k, "xs=[a b]\necho ...$xs").await;
-    assert!(!err.is_empty(), "argv spread must not parse");
+    assert!(err.contains("parse"), "argv spread must be a parse error: {err}");
 }
 
 #[tokio::test]
