@@ -32,6 +32,18 @@ breaking entries are marked **BREAKING**.
   builtin may return someday.
 
 ### Added
+- **Native collection literals** — `xs=[a b c]` (list), `{port: 8080}` /
+  `{port:8080}` (record, colon may be spaced or unspaced), `xs=[]` / `xs=[dog]`
+  (empty and single-element lists), multi-line records with a trailing comma,
+  nesting (`{tags: [a b], meta: {active: true}}`), and spread
+  (`new=[...$xs date]`, `[...$a ...$b]` — flattens a list operand's elements; a
+  bare `$var` inside `[ ]` nests as ONE element instead). Literals are
+  value-position only (assignment RHS, the `in`/`not in` RHS operand, and
+  nested literal interiors) — never argv (`ls [dog]` stays a glob) or a
+  `for`-head item (`for x in [a]` stays a word list). A `[`-leading glob at
+  value position (`logs=[0-9]*.log`) is now a loud parse error instead of
+  silently reinterpreting the glob; a multi-word bareword record value
+  (`{msg: hello world}`) is a loud parse error too — quote it.
 - **Native collection read access** — `${xs[0]}`, `${r[key]}`, `${r[$k]}`,
   `${r["weird-key"]}`, `${xs[-1]}` (negative index), `${xs[0:2]}` (end-exclusive
   slice → a list), and chained `${a[b][c]}`, over any `Value::Json` (e.g. from

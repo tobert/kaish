@@ -14,6 +14,86 @@ before it ships.
 
 ---
 
+## Collection literals + spread land (2026-07-02)
+
+`xs=[a b c]`, `{port: 8080}`/`{port:8080}`, multi-line records with a trailing
+comma, nesting, and `[...$xs date]` spread — the construction half of the
+collections effort, on top of the read-side resolver and the value/argv
+grammar seam (both already landed). Value model unchanged: a literal just
+evaluates to `Value::Json(Array|Object)`, so every existing access/`keys`/
+`values`/membership/shape-guard/`${#…}` mechanism works on a literal for free.
+
+The load-bearing decision was **context-aware lexer suppression over a global
+rule**. The obvious fix — stop the glob-merge pass from ever fusing a
+`[`-leading run — was rejected up front: kaish's argv glob path (`ls [dog]`,
+`foo[0-9]`) and scalar assignment (`x=foo:bar`) both lean on the *existing*
+fusion behavior, so a global change would either break those or need a second,
+parallel "argv assembles from primitives" grammar that doesn't exist. Instead
+`lexer::compute_value_context` walks the token stream once and marks a
+per-token flag — inside/opening a value-position `[`/`{` literal — and the
+glob-merge/colon-merge passes skip fusion *only* where that flag is set. Value
+position starts right after `Token::Eq` (assignment) or a genuine membership
+`Token::In`; everything else is untouched.
+
+The load-bearing subtlety is that the two tokens the suppression keys on are
+each **reused** for a non-value grammatical role, and getting the split wrong
+breaks real syntax. This took three iterations to get right (two intermediate
+heuristics landed and regressed before the grammar-exact rule) — the story is
+worth keeping because it's a clean case of "reason from the grammar, not the
+token":
+
+- **`Token::In` is both membership and a statement head; `Token::Eq` is both
+  assignment and `[[ ]]` comparison.** Membership `in` (`[[ e in $c ]]`) must
+  open value position for its RHS literal; a `for`/`case` head `in`
+  (`for f in *.txt`, `case 5 in [0-9]*)`) must NOT (the following word is an
+  argv glob / char-class pattern). Symmetrically, an assignment `=`
+  (`x=[a b]`) must open value position; a comparison `=` (`[[ $x = [0-9]* ]]`)
+  must NOT. The **grammar-exact discriminator is `[[ ]]` test depth**:
+  membership `in` occurs only *inside* `[[ ]]`, a head `in` only *outside*;
+  assignment `=` occurs *outside*, comparison `=` only *inside*. So
+  `compute_value_context` tracks `test_depth` in its forward pass and opens
+  value position on `Token::In` iff `test_depth > 0` and on `Token::Eq` iff
+  `test_depth == 0`. (`==` is a distinct `Token::EqEq` and never opens value.)
+  Two rejected intermediate heuristics that each shipped and regressed:
+  (1) a fixed three-token lookback `For Ident In` — covered `for` but missed
+  `case`'s variable-length head (`case EXPR in`), so `case 5 in [0-9]*)`
+  parse-errored; (2) a general pending-`for`/`case` counter — fixed the `in`
+  half but the `=` half was still wrong (`[[ $x = [0-9]* ]]` regressed), and a
+  bareword `for`/`case`/`in` inside `$(…)` could leak the counter/flag past
+  `RParen`. The `test_depth` rule subsumes all of it: no per-keyword casing, no
+  state to leak across `$()` (a bareword `in` inside `$(echo in)` is at
+  `test_depth 0` → never membership; a real sub-shell assignment `$(x=…)` is
+  also `test_depth 0` → still an assignment), and the `[[` detection is guarded
+  by `!currently_value` so a glued nested value list `x=[[a] [b]]` reads as
+  literal brackets, not a bogus test.
+- **A pure `Star`/`Question` glob at value position must NOT suppress.**
+  The first pass suppressed *any* run that opened right after `Eq`, which
+  broke the existing `X=*.txt` → literal-string-`"*.txt"` invariant (caught by
+  the pre-existing `kernel::tests::test_glob_in_assignment_is_literal`, not a
+  new test — the full suite is the safety net here). Narrowed to: suppress
+  only when the run actually contains an `LBracket`/`RBracket` pair — a glob
+  with no brackets at value position is unaffected and keeps evaluating to a
+  literal string exactly as before literals existed.
+
+The colon-fusion exemption for `{port:8080}` needed the same care in the other
+direction: it must NOT fire for a plain scalar assignment like `x=foo:bar`
+(which must keep fusing into one `Ident`), so the suppression flag there is
+narrower than the bracket one — specifically "inside an open value-position
+`{`", not just "at value position".
+
+AST: `Expr::ListLiteral(Vec<ListElem>)` / `Expr::RecordLiteral(Vec<RecordEntry>)`,
+`ListElem::{Item,Spread}`, `RecordKey::{Bare,Quoted}`. Eval landed twice (async
+`kernel.rs::eval_expr_async` for real execution, sync `interpreter/eval.rs`
+`Evaluator::eval` for the reduced sync path) with a shared `spread_non_list_message`
+helper so the two paths can't diverge on wording for a non-list spread — the
+same dual-eval-site pattern as `${#…}` length and `${…:-default}` before it.
+
+Deferred (`docs/issues.md` P3): deeply-nested *glued* list literals
+(`x=[[a] [b]]` — spaced nesting works fine, only the glued form isn't
+unfused), and the multi-word-bareword-record-value error
+(`{msg: hello world}`) is loud but carries chumsky's generic message instead
+of the hand-crafted "quote it" wording the design doc sketched.
+
 ## Importance-ranked onboarding tiers (2026-07-01)
 
 Step 3 of the collections effort splits in two: the tier *mechanism* (pure infra,
