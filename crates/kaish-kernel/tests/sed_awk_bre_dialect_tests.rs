@@ -153,3 +153,32 @@ async fn awk_multichar_fs_still_gets_bre_rewrite() {
     assert_eq!(code, 0, "out={out:?}");
     assert_eq!(out.trim(), "3 c", "multi-char FS alternates on \\|: {out:?}");
 }
+
+/// An FS/split() separator that's invalid AFTER the rewrite errors naming the
+/// separator as the user wrote it (not the rewritten form the engine saw), and
+/// carries the dialect hint (without `-E` — awk has none). PR #65 follow-ups.
+#[tokio::test]
+async fn awk_invalid_separator_error_names_raw_form_with_hint() {
+    let kernel = kernel_at(tempdir().unwrap().path());
+
+    // FS path: `xx\(` → rewrite → `xx(` (unclosed group). The error must show
+    // `xx\(` — the separator as written — plus the dialect note.
+    let result = kernel
+        .execute(r#"echo x | awk -F 'xx\(' '{print NF}'"#)
+        .await
+        .expect("invalid FS is a runtime error, not a validation error");
+    assert_ne!(result.code, 0, "invalid FS should fail: {result:?}");
+    // The separator appears {:?}-quoted, so the raw `xx\(` renders as `"xx\\("`.
+    assert!(result.err.contains(r"xx\\("), "names raw separator: {}", result.err);
+    assert!(result.err.contains("GNU BRE"), "carries the dialect hint: {}", result.err);
+    assert!(!result.err.contains("-E"), "awk must not suggest -E: {}", result.err);
+
+    // split() path: same contract.
+    let result = kernel
+        .execute(r#"echo x | awk '{n = split("abc", a, "yy\\("); print n}'"#)
+        .await
+        .expect("invalid split() separator is a runtime error");
+    assert_ne!(result.code, 0, "invalid separator should fail: {result:?}");
+    assert!(result.err.contains(r"yy\\("), "names raw separator: {}", result.err);
+    assert!(result.err.contains("GNU BRE"), "carries the dialect hint: {}", result.err);
+}

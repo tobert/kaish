@@ -1891,14 +1891,14 @@ impl AwkRuntime {
     }
 
     fn split_record(&mut self, record: &str) -> Result<(), String> {
-        let fs = self.get_var("FS").to_string();
+        let fs_raw = self.get_var("FS").to_string();
         self.fields = vec![AwkValue::StrNum(record.to_string())];
 
         // Rewrite BRE metas BEFORE the single-char check: gawk demotes `\|` to
         // plain `|` and a single-char FS is literal (POSIX), so `-F '\|'` /
         // FS="\\|" split on a literal pipe — never the empty-alternation regex
         // `|`, which would silently split between every character.
-        let fs = bre_metas_to_ere(&fs);
+        let fs = bre_metas_to_ere(&fs_raw);
         let parts: Vec<&str> = if fs == " " {
             // Default: split on whitespace, trim leading/trailing
             record.split_whitespace().collect()
@@ -1909,9 +1909,15 @@ impl AwkRuntime {
         } else {
             // Multi-character FS is an ERE. An invalid regex is a loud error,
             // not a silent literal-split fallback (which silently miscounts
-            // fields). Matches gawk's fatal behavior.
-            let re = Regex::new(&fs)
-                .map_err(|e| format!("invalid FS regex {:?}: {}", fs, e))?;
+            // fields). Matches gawk's fatal behavior. Report the FS as the user
+            // wrote it, with the dialect hint when the rewrite changed it.
+            let re = Regex::new(&fs).map_err(|e| {
+                append_dialect_hint(
+                    format!("invalid FS regex {:?}: {}", fs_raw, e),
+                    fs != fs_raw,
+                    None,
+                )
+            })?;
             re.split(record).collect()
         };
 
@@ -2568,7 +2574,8 @@ impl AwkRuntime {
                 //   " " (default FS) → whitespace mode (split on runs, trim ends)
                 //   single char → literal split
                 //   multi-char → ERE regex
-                let sep = bre_metas_to_ere(&sep);
+                let sep_raw = sep;
+                let sep = bre_metas_to_ere(&sep_raw);
                 let parts: Vec<String> = if sep == " " {
                     s.split_whitespace().map(str::to_string).collect()
                 } else if sep.chars().count() == 1 {
@@ -2576,8 +2583,15 @@ impl AwkRuntime {
                 } else {
                     // Multi-char separator is an ERE; an invalid regex is a loud
                     // error, not a silent literal-split fallback (gawk: fatal).
-                    let re = Regex::new(&sep)
-                        .map_err(|e| format!("invalid split() separator regex {:?}: {}", sep, e))?;
+                    // Report the separator as the user wrote it, with the
+                    // dialect hint when the rewrite changed it.
+                    let re = Regex::new(&sep).map_err(|e| {
+                        append_dialect_hint(
+                            format!("invalid split() separator regex {:?}: {}", sep_raw, e),
+                            sep != sep_raw,
+                            None,
+                        )
+                    })?;
                     re.split(&s).map(str::to_string).collect()
                 };
 

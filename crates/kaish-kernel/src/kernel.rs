@@ -2520,11 +2520,24 @@ impl Kernel {
             }
             Stmt::Test(test_expr) => {
                 let is_true = self.eval_test_async(test_expr).await?;
-                if is_true {
-                    Ok(ControlFlow::ok(ExecResult::success("")))
+                let result = if is_true {
+                    ExecResult::success("")
                 } else {
-                    Ok(ControlFlow::ok(ExecResult::failure(1, "")))
+                    ExecResult::failure(1, "")
+                };
+                // A bare test writes `$?` and honors `set -e` like any command
+                // (bash: `[[ 1 = 2 ]]; echo $?` → 1). `&&`/`||` operands stay
+                // safe: the chain arms suppress errexit around their left side,
+                // and `if`/`while` conditions evaluate as expressions, never
+                // through this statement arm.
+                self.update_last_result(&result).await;
+                if !result.ok() {
+                    let scope = self.scope.read().await;
+                    if scope.error_exit_enabled() {
+                        return Ok(ControlFlow::exit_code(result.code));
+                    }
                 }
+                Ok(ControlFlow::ok(result))
             }
             Stmt::EnvScoped { assignments, body } => {
                 // Inline env prefix (`NAME=value ... command`): apply the
