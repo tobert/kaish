@@ -1,34 +1,101 @@
-# 散/集 (Scatter/Gather) — Parallel Processing
+# 散/集 (Scatter/Gather) — Parallel Map over Structured Data
 
 ## Syntax
 
 ```
-input | scatter [--as VAR] [--limit N] [--timeout DUR] | command | gather [--first N] [--format lines|json]
+input | scatter [--as VAR] [--limit N] [--timeout DUR] | worker… | gather [--lines|--json]
 ```
+
+## The model
+
+scatter fans structured input out to parallel workers; gather collects one
+**JSONL result record per worker**, in item order, **every worker — failures
+included**:
+
+```jsonl
+{"i":0,"item":"web-1","ok":true,"code":0,"out":"restarted","err":""}
+{"i":1,"item":"web-2","ok":false,"code":7,"out":"","err":"connection refused"}
+```
+
+Fields: `i` (item index), `item` (the input, **typed** — a record stays a
+record), `ok`, `code`, `out` (worker stdout, trailing newline stripped), `err`
+(worker stderr — always present) on every row; `data` (the worker's structured
+output, typed) and `timed_out:true` only when present. A timed-out worker
+reports `code` 124.
+
+`ITEM` is **typed**: from a JSON array (jq/`values`/seq/split/glob/find), each
+worker binds the real element — `${ITEM[id]}` subscripts a record, numbers stay
+numbers, `1` ≠ `"1"`. From plain text, one string item per line (blank lines
+skipped). Quote it at command boundaries: `work "$ITEM"` (a record renders as
+compact JSON). A single non-array object, a `null` element, or binary input is
+a loud error.
+
+## Consuming results
+
+```sh
+# kaish jq gets the records as ONE ARRAY — stream rows with .[] :
+… | gather | jq -r '.[] | select(.ok) | .out'        # successes' outputs
+… | gather | jq -r '.[] | select(.ok | not) | .item' # failed items
+… | gather | jq '[.[] | select(.ok)] | length'       # count successes
+
+# Typed iteration — each r is a record:
+for r in $(… | gather); do
+  if [[ ${r[ok]} == false ]]; then retry "${r[item]}"; fi
+done
+
+… | gather --json    # same records as one pretty JSON array
+… | gather --lines   # raw successful outputs only, item order — HARD ERROR
+                     # (exit 123, no partial text) if ANY worker failed
+```
+
+## Exit codes
+
+`0` every worker succeeded · `123` any worker failed (partial or total —
+distinguish via the rows) · `2` usage error. A pipeline's status is its last
+command's, so check gather's code directly or gate with `if`/`&&`.
 
 ## Parameters
 
-**scatter:** `--as VAR` (default: `ITEM`) — variable name per item. `--limit N` (default: 8, clamped to 1..=10000) — max concurrent workers. Requests above 10000 are clamped and emit a `tracing::warn` on the `kaish::scatter` target. `--timeout DUR` (default: none) — per-worker timeout (`30`, `5s`, `500ms`, `2m`, `1h`); cancels the worker and kills its external children with the kernel's `kill_grace`. Workers that hit the timeout are tagged `"timed_out": true` in `gather --format json` output.
+**scatter:** `--as VAR` (default `ITEM`) — binding name per item. `--limit N`
+(default 8, clamped 1..=10000) — max concurrent workers. `--timeout DUR`
+(`30`, `5s`, `500ms`, `2m`, `1h`) — per-worker timeout; cancels the worker,
+kills its external children, row gets `code` 124 + `timed_out:true`.
 
-**gather:** `--first N` (default: 0/all) — take first N results. `--format lines|json` (default: `lines`) — output format. JSON output includes per-worker `timed_out` flag.
+**gather:** `--lines` — raw text escape hatch (above). `--json` — one JSON
+array instead of JSONL rows.
 
-## Example
+## Examples
 
 ```sh
-# Fan out to 4 workers, compute squares, collect first 5 as JSON
-seq 1 20 | scatter --as N --limit 4 | echo "{\"id\": $N, \"square\": $((N * N))}" | gather --first 5 --format json
+# Typed records from a file: deploy each job, then list timeouts
+jq '.jobs' jobs.json | scatter --limit 4 --timeout 30s \
+  | deploy --id "${ITEM[id]}" --host "${ITEM[host]}" \
+  | gather | jq -r '.[] | select(.timed_out) | .item.id'
 
-# Process files in parallel
-glob "*.json" | scatter --as FILE --limit 4 | jq ".name" $FILE | gather
+# Fan out an existing collection variable
+values $hosts | scatter | ping -c1 "$ITEM" | gather
+
+# Sum parallel outputs (out is a string — tonumber)
+seq 1 20 | scatter | slowsquare "$ITEM" | gather --json \
+  | jq '[.[] | .out | tonumber] | add'
+
+# Retry failures sequentially
+for r in $(cat hosts.txt | scatter --as H | probe "$H" | gather); do
+  if [[ ${r[ok]} == false ]]; then probe --slow "${r[item]}"; fi
+done
 ```
 
 ## Behavior
 
-- Results arrive in **completion order**, not input order
-- Each worker runs the full pipeline with `$VAR` set to its item
-- Outer scope variables are visible to workers
-- Workers share the same VFS
-- Failed workers: error collected, other workers continue
-- `set -e` before scatter stops on first error
-- **Workers run in a forked kernel.** Each parallel worker gets its own kernel instance with snapshotted session state (scope, cwd, aliases, user tools). This means workers can run the **full dispatch chain**: user-defined functions (`tool name { ... }`), `.kai` scripts, and command substitution in arguments all work correctly inside scatter workers. Mutations within a worker (e.g. changing a variable) stay within that worker and do not leak back to the parent or other workers.
-- **Cancellation cascades.** Workers fork with `fork_attached`, so their cancellation tokens are children of the parent kernel's. A parent timeout, `Kernel::cancel`, or REPL Ctrl-C propagates into every running worker and kills its external children via SIGTERM → `kill_grace` → SIGKILL.
+- **Rows are in item order** (deterministic), regardless of completion order.
+- Each worker runs the pipeline segment in its own **forked kernel**
+  (snapshotted scope/cwd/aliases/user tools) — full dispatch chain works;
+  worker mutations don't leak back. A worker's `code` is its segment's last
+  command's exit code.
+- Workers all run to completion — gather never short-circuits remaining
+  workers on a failure (contrast with POSIX `xargs`, which may stop early).
+- Nested scatter: pass `--as` explicitly — an inner default `ITEM` shadows the
+  outer binding.
+- **Cancellation cascades**: parent timeout / `Kernel::cancel` / Ctrl-C
+  propagates into every worker (SIGTERM → `kill_grace` → SIGKILL).
+- Empty input: exit 0, no rows.

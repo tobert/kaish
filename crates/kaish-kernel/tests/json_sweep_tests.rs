@@ -111,8 +111,8 @@ const CASES: &[Case] = &[
     Case { name: "fromjson", setup: &[], cmd: r#"fromjson '{"a":1}' --json"#, expect: Expect::Object },
     // scatter/gather own their output (`owns_output`): `--json` passes
     // through untouched and `--format json` is the structured form.
-    Case { name: "gather", setup: &[], cmd: "seq 1 2 | scatter --as N | echo $N | gather --format json", expect: Expect::Array },
-    Case { name: "scatter", setup: &[], cmd: "seq 1 2 | scatter --as N | echo $N | gather --format json", expect: Expect::Array },
+    Case { name: "gather", setup: &[], cmd: "seq 1 2 | scatter --as N | echo $N | gather --json", expect: Expect::Array },
+    Case { name: "scatter", setup: &[], cmd: "seq 1 2 | scatter --as N | echo $N | gather --json", expect: Expect::Array },
     Case { name: "git", setup: &["git init ."], cmd: "git status --json", expect: Expect::String },
     Case { name: "glob", setup: &[], cmd: "glob 'tmp/*.json' --json", expect: Expect::Array },
     Case { name: "grep", setup: &[], cmd: "grep INFO tmp/app.log --json", expect: Expect::Array },

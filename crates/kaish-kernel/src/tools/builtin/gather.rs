@@ -1,22 +1,24 @@
 //! gather — Collect results from parallel scatter processing.
 //!
-//! Gather collects results from parallel scatter workers and outputs
-//! them as lines or JSON.
+//! Gather emits one JSONL result record per worker, in item order, every
+//! worker including failures (GH #73). `--lines` is the raw-text escape hatch
+//! (successful workers' stdout; hard error if any worker failed). The kernel
+//! `--json` flag renders the same records as one JSON array.
 //!
 //! # Usage
 //!
 //! ```text
-//! echo "a\nb\nc" | scatter | process ${ITEM} | gather
-//! gather --json                               # output as JSON array
-//! gather --first 5                            # take first 5 results
-//! gather --progress                           # show progress
+//! seq 1 5 | scatter | process "$ITEM" | gather
+//! ... | gather | jq -r 'select(.ok) | .out'    # successes' outputs
+//! ... | gather --lines                         # raw outputs; loud on failure
+//! ... | gather --json                          # one JSON array (kernel flag)
 //! ```
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData};
-use crate::scheduler::{parse_gather_options, GatherOptions};
+use crate::scheduler::parse_gather_options;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Gather tool: collect results from parallel processing.
@@ -30,13 +32,11 @@ pub struct Gather;
 #[derive(Parser, Debug)]
 #[command(name = "gather", about = "Collect results from parallel scatter processing")]
 struct GatherArgs {
-    /// Take first N results only (0 = all).
-    #[arg(id = "first", long = "first")]
-    _first: Option<String>,
-
-    /// Output format: 'lines' or 'json'.
-    #[arg(id = "format", long = "format")]
-    _format: Option<String>,
+    /// Raw text mode: each successful worker's stdout in item order.
+    /// Hard error (exit 123) if ANY worker failed — bare lines can't
+    /// represent a failure. Default is JSONL result records.
+    #[arg(id = "lines", long = "lines")]
+    _lines: bool,
 
     #[command(flatten)]
     global: GlobalFlags,
@@ -58,10 +58,16 @@ impl Tool for Gather {
             "gather",
             "Collect results from parallel scatter processing",
             [
-                ("Collect scatter results", "seq 1 10 | scatter | echo ${ITEM} | gather"),
-                ("Collect first 5 results", "gather --first 5"),
+                ("Collect scatter results (JSONL rows)", "seq 1 10 | scatter | work \"$ITEM\" | gather"),
+                ("Successes' outputs only", "... | gather | jq -r 'select(.ok) | .out'"),
+                ("Raw outputs, loud on any failure", "... | gather --lines"),
+                ("One JSON array of records", "... | gather --json"),
             ],
         )
+        // scatter/gather own their output: the runner renders JSONL/array/lines
+        // itself, and the kernel-wide --json flag must REACH the tool (it
+        // selects the array view) instead of being consumed upstream.
+        .with_owned_output()
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
@@ -76,10 +82,12 @@ impl Tool for Gather {
         };
         parsed.global.apply(ctx);
 
-        // Parse options (still reads from args.named to preserve Value::Int etc.)
-        let opts = parse_gather_options(&args);
+        // Validate flags even standalone (parse_gather_options is the runner's
+        // reader; here it only needs to not reject).
+        let _opts = parse_gather_options(&args);
 
-        // Get input (in standalone mode, just pass through)
+        // Standalone (not in a scatter/gather pipeline): pass stdin through.
+        // The real result-record rendering lives in the ScatterGatherRunner.
         let input = match ctx.read_stdin_to_text().await {
             Ok(s) => s.unwrap_or_default(),
             Err(e) => return ExecResult::failure(2, format!("gather: {e}")),
@@ -89,88 +97,16 @@ impl Tool for Gather {
             return ExecResult::success("");
         }
 
-        // In standalone mode (not in a scatter/gather pipeline),
-        // format the input according to options
-        let output = format_output(&input, &opts);
-
-        ExecResult::with_output(OutputData::text(output))
-    }
-}
-
-/// Format output according to gather options.
-fn format_output(input: &str, opts: &GatherOptions) -> String {
-    let lines: Vec<&str> = input.lines().collect();
-
-    let lines_to_use = if opts.first > 0 && opts.first < lines.len() {
-        &lines[..opts.first]
-    } else {
-        &lines[..]
-    };
-
-    if opts.format == "json" {
-        // Output as JSON array of strings
-        let json_arr: Vec<serde_json::Value> = lines_to_use
-            .iter()
-            .map(|s| serde_json::Value::String(s.to_string()))
-            .collect();
-
-        serde_json::to_string_pretty(&json_arr).unwrap_or_default()
-    } else {
-        // Output as lines
-        lines_to_use.join("\n")
+        ExecResult::with_output(OutputData::text(input))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Value;
-
-    #[test]
-    fn test_format_output_lines() {
-        let opts = GatherOptions::default();
-        let output = format_output("a\nb\nc", &opts);
-        assert_eq!(output, "a\nb\nc");
-    }
-
-    #[test]
-    fn test_format_output_json() {
-        let opts = GatherOptions {
-            format: "json".to_string(),
-            ..Default::default()
-        };
-        let output = format_output("a\nb", &opts);
-        assert!(output.contains("\"a\""));
-        assert!(output.contains("\"b\""));
-    }
-
-    #[test]
-    fn test_format_output_first_n() {
-        let opts = GatherOptions {
-            first: 2,
-            ..Default::default()
-        };
-        let output = format_output("a\nb\nc\nd", &opts);
-        assert_eq!(output, "a\nb");
-    }
-
-    #[test]
-    fn test_format_output_first_n_json() {
-        let opts = GatherOptions {
-            first: 2,
-            format: "json".to_string(),
-            ..Default::default()
-        };
-        let output = format_output("a\nb\nc", &opts);
-        // Should only have 2 items
-        let arr: Vec<String> = serde_json::from_str(&output).unwrap();
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0], "a");
-        assert_eq!(arr[1], "b");
-    }
 
     #[tokio::test]
-    async fn test_gather_passthrough() {
+    async fn test_gather_standalone_passthrough() {
         use crate::vfs::{MemoryFs, VfsRouter};
         use std::sync::Arc;
 
@@ -185,7 +121,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gather_format_json() {
+    async fn test_gather_standalone_lines_flag_accepted() {
         use crate::vfs::{MemoryFs, VfsRouter};
         use std::sync::Arc;
 
@@ -195,30 +131,9 @@ mod tests {
         ctx.set_stdin("a\nb".to_string());
 
         let mut args = ToolArgs::new();
-        args.named.insert("format".to_string(), Value::String("json".to_string()));
-
+        args.flags.insert("lines".to_string());
         let result = Gather.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        assert!(result.text_out().contains("["));
-        assert!(result.text_out().contains("\"a\""));
-    }
-
-    #[tokio::test]
-    async fn test_gather_first_option() {
-        use crate::vfs::{MemoryFs, VfsRouter};
-        use std::sync::Arc;
-
-        let mut vfs = VfsRouter::new();
-        vfs.mount("/", MemoryFs::new());
-        let mut ctx = ExecContext::new(Arc::new(vfs));
-        ctx.set_stdin("1\n2\n3\n4\n5".to_string());
-
-        let mut args = ToolArgs::new();
-        args.named.insert("first".to_string(), Value::Int(3));
-
-        let result = Gather.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        assert_eq!(&*result.text_out(), "1\n2\n3");
+        assert!(result.ok(), "--lines must parse standalone: {}", result.err);
     }
 
     #[tokio::test]

@@ -11,6 +11,23 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Changed
+- **BREAKING: scatter/gather is now the typed parallel map** (GH #73,
+  panel-validated). `gather` emits one JSONL result record per worker, in item
+  order, failures included — `{"i":N,"item":<typed>,"ok":…,"code":…,"out":…,
+  "err":…}` plus `data`/`timed_out` when present (timeout → `code` 124). The
+  same records are the structured data (`for r in $(… | gather)` iterates typed
+  records; kaish `jq` receives them as one array — stream rows with `.[]`), and
+  `gather --json` renders one JSON array. Worker bindings are TYPED: a JSON
+  array fans out element-by-element with real types (`${ITEM[id]}` subscripts a
+  record; `1` and `"1"` no longer conflate). Exit codes: `0` all ok · `123` any
+  worker failed · `2` usage. `gather --format` and `--first` are REMOVED;
+  new `gather --lines` emits raw successful outputs and hard-errors if any
+  worker failed. Scatter ingress errors loudly on a single non-array object
+  (with a select-the-array hint), `null` items, and binary input; blank text
+  lines are skipped. A future `xargs` builtin (GH #78) will carry the POSIX
+  bare-lines flavor.
+
+### Changed
 - **BREAKING:** **`sed` no longer rejects BRE idioms with a hint** — `\|`,
   `\(…\)`, and `\{N,M\}` used to be a loud `E006` error; they now behave as
   alternation/groups/intervals (see Added). Scripts that relied on the error, or

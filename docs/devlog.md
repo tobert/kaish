@@ -14,6 +14,36 @@ before it ships.
 
 ---
 
+## scatter/gather goes typed-JSONL (2026-07-03)
+
+GH #73's silent conflation (`1`/`"1"` byte-identical inside workers) turned into
+a full redesign once Amy asked "could we lean more into JSON data?" — and the
+answer reshaped both ends. Ingress: items stay typed through the fan-out
+(`${ITEM[id]}` subscripts a record; the binding uses the for-loop's exact
+json→Value conversion). Egress: gather emits one JSONL result record per
+worker, item order, failures included — which deletes the old line mode's
+can't-represent-a-failure short-circuit hack. Same records three ways: JSONL
+text, `--json` array, typed `.data` for `for r in $(… | gather)`. `--format`
+and `--first` died (`--first` was just `head` on JSONL — both hostile reviews
+independently said delete it); `--lines` is the raw escape hatch that keeps the
+old safety property (hard error on any failure, no partial text).
+
+The panel (5 models battery + 2 hostile reviews, raw data gisted on the issue)
+earned its keep twice. First: capability tiers split cleanly on exit-code
+priors — cheap models guessed 0, frontier guessed 123 — and fable caught that
+proposal A *fought the prior it borrowed* (real xargs 123 covers all-failed
+too), which became A′: 0 / 123-any-failure / 2. Second: every model one-shot
+`${ITEM[id]}` correctly, validating typed ingress before a line of code.
+
+One divergence surfaced only at implementation: kaish jq is array-as-document
+(`seq 1 3 | jq add` depends on it), so the gather idiom is
+`jq -r '.[] | select(.ok) | .out'` — NOT the real-jq streaming form all five
+panel models wrote. Docs teach `.[]` prominently; if agents thrash on it in
+practice, a jq streaming affordance is the revisit point. The old
+"single JSON object = one item" pin (P2 sweep) reversed deliberately: an
+object is now a loud error with a select-the-array hint, and the
+pretty-print-splitting regression it guarded stays impossible.
+
 ## `help regex` — waking the ERE weights (2026-07-03)
 
 PR #65's last follow-up: the BRE-superset story lived in four places (grep

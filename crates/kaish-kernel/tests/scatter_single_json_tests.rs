@@ -22,21 +22,24 @@ fn kernel() -> Kernel {
 // Single JSON object must produce exactly 1 item (the core regression case)
 // ---------------------------------------------------------------------------
 
-/// `echo '{"k":1}' | jq . | scatter` — jq emits a single JSON object as
-/// structured data; scatter must treat it as ONE item, not split the
-/// pretty-printed lines.
+/// `echo '{"k":1}' | jq . | scatter` — a single JSON object is almost always
+/// the unselected envelope around the array the caller meant, so it's a LOUD
+/// error with a select-the-array hint (GH #73; supersedes the earlier
+/// one-item behavior). The original regression this file guards — a
+/// pretty-printed object newline-splitting into N bogus items — stays
+/// impossible: the error fires before any text splitting.
 #[tokio::test]
-async fn single_json_object_is_one_item() {
+async fn single_json_object_is_a_loud_error_with_hint() {
     let kernel = kernel();
     let r = kernel
         .execute(r#"echo '{"k":1}' | jq . | scatter"#)
         .await
         .expect("execute");
-    assert_eq!(r.code, 0, "should succeed; err={:?}", r.err);
+    assert_ne!(r.code, 0, "object input must be loud: {:?}", r.text_out());
     assert!(
-        r.text_out().contains("1 items"),
-        "expected 1 item for a single JSON object, got: {:?}",
-        r.text_out()
+        r.err.contains("single object"),
+        "should name the problem, got: {:?}",
+        r.err
     );
 }
 

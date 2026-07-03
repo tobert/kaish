@@ -960,40 +960,62 @@ Embedders that want isolated execution simply leave `initial_vars` empty — see
 | `scriptname` (via PATH) | isolated | ✗ no |
 | `cargo build` (external) | isolated | ✗ no |
 
-## 散・集 (San/Shū) — Scatter/Gather *(experimental)*
+## 散・集 (San/Shū) — Scatter/Gather
 
-Fan-out parallelism:
+The kaish-native **typed parallel map** (GH #73; panel-validated 2026-07-03).
+A future `xargs` builtin will own the POSIX bare-lines flavor; scatter/gather
+is unapologetically structured.
 
 ```sh
-# 散 (scatter) - fan out to parallel workers
-# 集 (gather) - collect results back
-cat items.txt | scatter --as ITEM --limit 8 | process $ITEM | gather > results.json
+# 散 (scatter) fans structured input out to workers; 集 (gather) collects
+# one JSONL result record per worker, in item order, FAILURES INCLUDED:
+cat hosts.txt | scatter --as H --limit 8 | ping -c1 "$H" | gather
+#   {"i":0,"item":"web1","ok":true,"code":0,"out":"…","err":""}
+#   {"i":1,"item":"db1","ok":false,"code":1,"out":"","err":"…"}
 
-# With progress
-cat big_list.txt \
-    | scatter --as ID --limit 4 \
-    | slow-operation --id $ID \
-    | gather --progress true
+# ITEM is TYPED — a JSON-array element keeps its real type:
+jq '.jobs' jobs.json | scatter --limit 4 \
+    | deploy --id "${ITEM[id]}" --host "${ITEM[host]}" | gather
+
+# Consume: kaish jq receives the records as ONE ARRAY — stream with .[] :
+… | gather | jq -r '.[] | select(.ok) | .out'
+# or iterate typed records:
+for r in $(… | gather); do
+  if [[ ${r[ok]} == false ]]; then retry "${r[item]}"; fi
+done
+
+… | gather --json     # one JSON array instead of JSONL
+… | gather --lines    # raw successful outputs; HARD ERROR if any worker failed
 ```
 
-Scatter's input fans out one worker per item: structured `.data` (a JSON array
-from `split`/`seq`/`glob`/`find`) spreads element-by-element, and **plain-text
-stdin splits on newlines** — one worker per line, exactly like `for line in
-$(cmd)` (whitespace within a line is never split; trailing newlines and `\r` are
-trimmed). So `cat items.txt | scatter --as ITEM ...` runs one worker per line.
+- **Row schema**: `i`, `item` (typed), `ok`, `code`, `out` (stdout, trailing
+  newline stripped), `err` (stderr, always present) on every row; `data` (the
+  worker's structured output) and `timed_out:true` when present. Timeout →
+  `code` 124.
+- **Exit codes**: `0` all workers ok · `123` any worker failed (partial or
+  total — the rows carry which) · `2` usage.
+- **Ingress**: a JSON array fans out typed, element-by-element (`1` and `"1"`
+  stay distinct); plain text is one string item per line (blank lines skipped,
+  whitespace within a line never split). A single non-array object errors
+  loudly with a select-the-array hint; `null` items and binary input error
+  loudly. Empty input exits 0 with no rows.
+- Quote `"$ITEM"` at command boundaries — a bare record at an external
+  command's argv is the usual loud boundary error.
 
 Each **scatter worker** runs in its own **parallel kernel fork**. This means
 workers can run the full resolution chain: user-defined functions, `.kai`
 scripts, and command substitutions in their arguments. Each worker gets its
 own snapshotted scope/cwd/aliases, ensuring they don't race against each
-other or the parent.
+other or the parent. A worker's `code` is its pipeline segment's last
+command's exit code; all workers run to completion (gather never
+short-circuits the rest on a failure).
 
 ## Cancellation and Timeouts
 
 Kaish has a single, uniform cancellation discipline that reaches every spawned external child:
 
 - **`timeout DURATION COMMAND`** (builtin) — runs `COMMAND` with a deadline. On elapsed, the child's process group receives **SIGTERM**, then after `kill_grace` (default 2s) **SIGKILL**, then `timeout` returns exit code **124** (coreutils convention).
-- **`scatter ... --timeout DUR ...`** — per-worker timeout. Hung workers are cancelled and their externals killed; the result is tagged `"timed_out": true` in `gather --format json`.
+- **`scatter ... --timeout DUR ...`** — per-worker timeout. Hung workers are cancelled and their externals killed; the result row is tagged `"timed_out": true` with `code` 124.
 - **`Kernel::cancel()`** (embedder API) — fires the kernel's cancellation token; running externals get SIGTERM/SIGKILL via the same path. The REPL wires this to Ctrl-C.
 - **`KernelConfig::request_timeout`** (embedder default) and **`ExecuteOptions::timeout`** (per-call) — apply at the kernel-call boundary; same kill behaviour, return code 124.
 - **`ExecuteOptions::cancel_token`** (per-call) — embedders can pass an externally-owned `tokio_util::sync::CancellationToken` that's *raced* against the kernel's internal token. The kernel does not retain it past the call.

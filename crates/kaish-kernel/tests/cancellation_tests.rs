@@ -584,16 +584,24 @@ async fn scatter_timeout_kills_stuck_workers() {
     let kernel = kernel_for_test();
     let result = kernel
         .execute(
-            r#"echo "1\n2\n3" | split "\n" | scatter --limit 3 --timeout 300ms | bash -c "sleep 60" | gather --format json"#,
+            r#"echo "1\n2\n3" | split "\n" | scatter --limit 3 --timeout 300ms | bash -c "sleep 60" | gather"#,
         )
         .await
         .expect("execute");
 
+    // GH #73: timeouts are failure rows (code 124, timed_out:true) and gather
+    // exits 123.
+    assert_eq!(result.code, 123, "timeouts count as failures: {:?}", result.err);
     let output = result.text_out();
     let trimmed = output.trim();
     assert!(
-        trimmed.contains("\"timed_out\": true"),
-        "scatter --timeout did not surface timed_out in JSON: {}",
+        trimmed.contains("\"timed_out\":true"),
+        "scatter --timeout did not surface timed_out rows: {}",
+        trimmed,
+    );
+    assert!(
+        trimmed.contains("\"code\":124"),
+        "timed-out rows report 124: {}",
         trimmed,
     );
 }

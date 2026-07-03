@@ -60,11 +60,16 @@ impl Tool for Scatter {
             "scatter",
             "Fan out input items for parallel processing",
             [
-                ("Parallel processing", "seq 1 10 | scatter | echo ${ITEM} | gather"),
-                ("Custom variable name", "split \"a,b,c\" \",\" | scatter --as X | echo ${X} | gather"),
-                ("Per-worker timeout", "seq 1 5 | scatter --timeout 2s | sleep 60 | gather"),
+                ("Parallel processing", "seq 1 10 | scatter | work \"$ITEM\" | gather"),
+                ("Typed record items", "jq '.jobs' jobs.json | scatter --limit 4 | deploy --id \"${ITEM[id]}\" | gather"),
+                ("Custom variable name", "split \"a,b,c\" \",\" | scatter --as X | work \"$X\" | gather"),
+                ("Per-worker timeout", "seq 1 5 | scatter --timeout 30s | slowtask \"$ITEM\" | gather"),
             ],
         )
+        // scatter/gather own their output: the runner renders JSONL/array/lines
+        // itself, and the kernel-wide --json flag must REACH the tool (it
+        // selects the array view) instead of being consumed upstream.
+        .with_owned_output()
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
@@ -105,7 +110,7 @@ impl Tool for Scatter {
             items.len(),
             opts.var_name,
             opts.limit,
-            items.join("\n")
+            items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>().join("\n")
         );
 
         ExecResult::with_output(OutputData::text(output))
