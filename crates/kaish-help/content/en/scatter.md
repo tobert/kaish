@@ -28,7 +28,9 @@ worker binds the real element — `${ITEM[id]}` subscripts a record, numbers sta
 numbers, `1` ≠ `"1"`. From plain text, one string item per line (blank lines
 skipped). Quote it at command boundaries: `work "$ITEM"` (a record renders as
 compact JSON). A single non-array object, a `null` element, or binary input is
-a loud error.
+a loud error. External JSONL (an API stream, a log file) fans out **typed**
+only through `fromjsonl` first — `curl … | fromjsonl | scatter …` — see
+`help fromjsonl`.
 
 ## Consuming results
 
@@ -46,6 +48,11 @@ done
 … | gather --json    # same records as one pretty JSON array
 … | gather --lines   # raw successful outputs only, item order — HARD ERROR
                      # (exit 123, no partial text) if ANY worker failed
+
+# gather's JSONL rows round-trip through a file:
+… | gather > results.jsonl
+cat results.jsonl | fromjsonl | jq '.[] | select(.ok | not)'    # re-read, typed
+cat results.jsonl | fromjsonl | scatter | retry ${ITEM[item][host]} | gather  # re-fan-out
 ```
 
 ## Exit codes

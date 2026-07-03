@@ -10,7 +10,28 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`fromjsonl` / `tojsonl`** — the JSONL (NDJSON) doors, GH #80. `fromjsonl`
+  parses strictly line-oriented JSONL text (one JSON document per line, blank
+  lines skipped, any bad line — including a truncated trailing one — a loud
+  error naming the line number; empty input is a legitimate zero-document
+  stream → `[]`) into a typed list in `.data`. `tojsonl` is the egress mirror:
+  a list in, one compact JSON document per line out (a record/scalar is one
+  document — that's `tojson`'s job). Unlocks `curl … | fromjsonl | scatter`
+  and re-ingesting kaish's own `gather` output (`cat results.jsonl | fromjsonl
+  | jq …`).
+
 ### Changed
+- **`jq -s`/`--slurp` is now real jq slurp semantics**, not a no-op (GH #80).
+  On the text path it parses the whole whitespace-separated document stream
+  and always wraps the result in an array — even a single document
+  (`printf '{"a":1}' | jq -s length` → `1`, the array length, not a no-op's
+  accidental key count). On the `.data` pipeline path `-s` stays a no-op (the
+  upstream stage already handed over one structured value). Plain `jq` (no
+  `-s`) on JSONL-shaped text now names the document count and points at
+  `fromjsonl`/`jq -s` instead of a bare "trailing characters" parse error; the
+  runtime `cannot index [...] with ...` error gains a `.[] | …` hint (kaish
+  jq is always-slurped).
 - **BREAKING: scatter/gather is now the typed parallel map** (GH #73,
   panel-validated). `gather` emits one JSONL result record per worker, in item
   order, failures included — `{"i":N,"item":<typed>,"ok":…,"code":…,"out":…,
@@ -193,6 +214,11 @@ breaking entries are marked **BREAKING**.
   demotion of `\|` to plain `|`).
 
 ### Fixed
+- **`gather`'s own trailing redirect (`… | gather > file`) is no longer silently
+  dropped.** Found while wiring up the JSONL doors (GH #80): the scatter/gather
+  special-cased pipeline path never applied `gather`'s redirects when it was
+  the pipeline's last command — the JSONL rows landed back in the result
+  instead of the file.
 - **`Kernel::with_backend` now mounts `/dev` (DevFs) unconditionally** —
   custom-backend embedders (e.g. kaijutsu) previously had no `/dev/null`,
   `/dev/zero`, `/dev/random`, or `/dev/urandom` at all, and `VirtualOverlayBackend`

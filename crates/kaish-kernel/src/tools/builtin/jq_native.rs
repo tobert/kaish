@@ -54,6 +54,13 @@ struct JqArgs {
     #[arg(short = 'n', long = "null-input", visible_alias = "null_input")]
     null_input: bool,
 
+    /// Slurp mode (-s): read the whole input as a document stream and wrap
+    /// it in one array — always, even for a single document (real jq
+    /// semantics; see module docs "jq — stays one-document, gets louder").
+    /// A no-op on the `.data` path, where the pipeline is already slurped.
+    #[arg(short = 's', long = "slurp")]
+    slurp: bool,
+
     /// Read from VFS file instead of stdin.
     #[arg(long = "path")]
     path: Option<String>,
@@ -209,7 +216,19 @@ fn execute_filter_json(
                 values.push(val_to_json(&val));
             }
             Err(e) => {
-                return Err(format!("jq runtime error: {e}"));
+                let msg = e.to_string();
+                // jaq's own array-index error renders as `cannot index [...]
+                // with ...` (the array prints as its JSON text). That's the
+                // exact signature of writing real-jq's per-row streaming
+                // form (`.foo`) against kaish's always-slurped array input
+                // (GH #80's `.[]` watch item from scatter/gather) — hint the
+                // fix rather than leaving the agent to guess.
+                let hint = if msg.starts_with("cannot index [") {
+                    " — kaish jq is always-slurped — try '.[] | …'"
+                } else {
+                    ""
+                };
+                return Err(format!("jq runtime error: {msg}{hint}"));
             }
         }
     }
@@ -420,6 +439,10 @@ impl Tool for JqNative {
                     "Bind a kaish variable into the filter",
                     r#"R='{"x":42}'; jq -n --argjson r "$R" '$r.x'"#,
                 ),
+                (
+                    "Slurp a document stream into one array",
+                    "cat results.jsonl | jq -s 'length'",
+                ),
             ],
         );
         // Bump consumes=2 for arg/argjson: clap layer parses them as
@@ -522,6 +545,7 @@ impl Tool for JqNative {
         let compact = parsed.compact || args.has_flag("compact") || args.has_flag("c");
         let null_input =
             parsed.null_input || args.has_flag("null-input") || args.has_flag("n");
+        let slurp = parsed.slurp || args.has_flag("slurp") || args.has_flag("s");
 
         // Get input JSON. `-n` / `--null-input` skips stdin entirely and feeds
         // `null` to the filter — same as real jq. Otherwise: fast path through
@@ -545,9 +569,25 @@ impl Tool for JqNative {
                                 )
                             }
                         };
-                        match serde_json::from_str(&text) {
-                            Ok(json) => json,
-                            Err(e) => return ExecResult::failure(1, format!("jq: invalid JSON in {}: {}", path, e)),
+                        if slurp {
+                            match parse_document_stream(&text) {
+                                Ok(docs) => serde_json::Value::Array(docs),
+                                Err(e) => {
+                                    return ExecResult::failure(1, format!("jq: -s: {}: {}", path, e))
+                                }
+                            }
+                        } else {
+                            match serde_json::from_str(&text) {
+                                Ok(json) => json,
+                                Err(e) => {
+                                    let hint =
+                                        jsonl_hint_for_trailing_error(&text, &e).unwrap_or_default();
+                                    return ExecResult::failure(
+                                        1,
+                                        format!("jq: invalid JSON in {}: {}{}", path, e, hint),
+                                    );
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -555,41 +595,15 @@ impl Tool for JqNative {
                     }
                 }
             } else {
-                // Resolve stdin: structured `.data` from the pipeline if the
-                // upstream produced it, else the raw text. resolve_stdin drains
-                // the pipe before awaiting the data sideband — no startup race.
-                let (data, text) = match ctx.resolve_stdin().await {
-                    Ok(pair) => pair,
-                    Err(e) => return ExecResult::failure(2, format!("jq: {e}")),
-                };
-                if let Some(data) = data {
-                    ast_value_to_json(&data)
-                } else {
-                    if text.is_empty() {
-                        return ExecResult::failure(1, "jq: no input provided");
-                    }
-                    match serde_json::from_str(&text) {
-                        Ok(json) => json,
-                        Err(e) => return ExecResult::failure(1, format!("jq: invalid JSON input: {}", e)),
-                    }
+                match resolve_stdin_json(ctx, slurp).await {
+                    Ok(json) => json,
+                    Err((code, msg)) => return ExecResult::failure(code, msg),
                 }
             }
         } else {
-            // Same structured-or-text resolution as the no-files branch above.
-            let (data, text) = match ctx.resolve_stdin().await {
-                Ok(pair) => pair,
-                Err(e) => return ExecResult::failure(2, format!("jq: {e}")),
-            };
-            if let Some(data) = data {
-                ast_value_to_json(&data)
-            } else {
-                if text.is_empty() {
-                    return ExecResult::failure(1, "jq: no input provided");
-                }
-                match serde_json::from_str(&text) {
-                    Ok(json) => json,
-                    Err(e) => return ExecResult::failure(1, format!("jq: invalid JSON input: {}", e)),
-                }
+            match resolve_stdin_json(ctx, slurp).await {
+                Ok(json) => json,
+                Err((code, msg)) => return ExecResult::failure(code, msg),
             }
         };
 
@@ -693,6 +707,76 @@ fn build_exec_result(run: JqRun) -> ExecResult {
         }
     }
     ExecResult::success_with_data(text, Value::Json(serde_json::Value::Array(values)))
+}
+
+/// Parse a whitespace-separated stream of JSON documents (real-jq slurp
+/// framing — `serde_json`'s `StreamDeserializer` tolerates the pretty-printed
+/// multi-line case, unlike a strict line-oriented split).
+///
+/// Used both by `-s`/`--slurp` (GH #80) and by the JSONL-hint diagnosis
+/// below, which needs to know how many documents actually parse.
+fn parse_document_stream(text: &str) -> Result<Vec<serde_json::Value>, String> {
+    let mut docs = Vec::new();
+    for item in serde_json::Deserializer::from_str(text).into_iter::<serde_json::Value>() {
+        match item {
+            Ok(v) => docs.push(v),
+            Err(e) => return Err(format!("invalid JSON in document stream: {e}")),
+        }
+    }
+    Ok(docs)
+}
+
+/// After a single-document parse failure, check whether the remainder is
+/// actually more JSON documents (JSONL-shaped input) rather than plain
+/// garbage. kaish jq is one-document-only (GH #80) — this turns the
+/// confusing raw "trailing characters" error into a pointer at the real fix:
+/// `fromjsonl` upstream, or `jq -s` in place. Returns `None` (no hint) for
+/// any other parse error, or when the stream doesn't fully parse (genuine
+/// garbage, not a document stream).
+fn jsonl_hint_for_trailing_error(text: &str, err: &serde_json::Error) -> Option<String> {
+    if !err.to_string().contains("trailing characters") {
+        return None;
+    }
+    let docs = parse_document_stream(text).ok()?;
+    (docs.len() >= 2).then(|| {
+        format!(
+            " — input looks like JSONL ({} documents) — kaish jq takes one document; \
+             use fromjsonl upstream, or jq -s",
+            docs.len()
+        )
+    })
+}
+
+/// Resolve the pipeline's stdin (no `--path` file) into the JSON fed to the
+/// filter, shared by both the bare-stdin and empty-`--path=` branches of
+/// `execute`. Returns `(exit_code, message)` on failure so the caller can
+/// preserve the existing 1-vs-2 exit-code split (parse/runtime vs. plumbing).
+async fn resolve_stdin_json(ctx: &mut ExecContext, slurp: bool) -> Result<serde_json::Value, (i64, String)> {
+    let (data, text) = ctx.resolve_stdin().await.map_err(|e| (2, format!("jq: {e}")))?;
+    if let Some(data) = data {
+        // `.data` path: `-s` is a no-op — the upstream stage (scatter/gather,
+        // fromjson, …) already handed over one structured value.
+        return Ok(ast_value_to_json(&data));
+    }
+    if text.is_empty() {
+        return if slurp {
+            // A stream of zero documents slurps to an empty array (matches
+            // real jq: `printf '' | jq -s .` → `[]`).
+            Ok(serde_json::Value::Array(Vec::new()))
+        } else {
+            Err((1, "jq: no input provided".to_string()))
+        };
+    }
+    if slurp {
+        parse_document_stream(&text)
+            .map(serde_json::Value::Array)
+            .map_err(|e| (1, format!("jq: -s: {e}")))
+    } else {
+        serde_json::from_str(&text).map_err(|e| {
+            let hint = jsonl_hint_for_trailing_error(&text, &e).unwrap_or_default();
+            (1, format!("jq: invalid JSON input: {e}{hint}"))
+        })
+    }
 }
 
 /// Validate a jq filter expression without executing it.
