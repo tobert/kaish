@@ -90,6 +90,11 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
   review; `/code-review` on the diff or another agent/model also works. A few
   tokens on review goes a long way (this is what we ask outside contributors to do
   too; see README "Contributing").
+- **Merge with a merge commit that uses the PR title and body** — merge PRs with
+  `gh pr merge --merge`, not squash or rebase, and keep the merge commit's subject
+  and body as the PR title/body (so the decisions captured in the PR description
+  land in the history). The PR title/body carry the same decision-narrative the
+  commit messages do (see below).
 - **Always add files by name**
 - Before committing, both must be clean:
   - `cargo test --all`
@@ -180,8 +185,13 @@ Hard-won rules that aren't obvious from the code. Violating these silently break
 
 - **No legacy dual-representations.** Delete old code the moment it's superseded —
   no compatibility shims, no parallel old/new types. Fix call sites immediately.
-- **Defer out-of-scope work to `docs/issues.md`** under a P1–P4 heading, not as
-  inline `TODO`s in code or scratch notes.
+- **Defer out-of-scope work to GitHub Issues**, not inline `TODO`s in code or
+  scratch notes. New deferrals discovered *outside* an active PR go to
+  `gh issue create` (GH is the transparent surface contributors see); scoped
+  deferrals found *while building a PR* may still be recorded in `docs/issues.md`
+  (or the PR body) so they carry with the change. `docs/issues.md` is being phased
+  out — its remaining P1–P4 entries are unmigrated backlog, not the place for new
+  items.
 - **Test builtins through `kernel.execute(...)`, not a builtin's direct
   `.execute()`.** Direct calls skip the dispatch chain (arg binding, `--json`,
   output limits) and pass while the real path is broken.
