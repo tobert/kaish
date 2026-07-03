@@ -307,6 +307,29 @@ pub fn format_expr(expr: &Expr) -> String {
         Expr::LastExitCode => "(last-exit-code)".to_string(),
         Expr::CurrentPid => "(current-pid)".to_string(),
         Expr::GlobPattern(s) => format!("(glob \"{}\")", s),
+        Expr::ListLiteral(elems) => {
+            let parts: Vec<String> = elems
+                .iter()
+                .map(|elem| match elem {
+                    ListElem::Item(e) => format_expr(e),
+                    ListElem::Spread(e) => format!("(spread {})", format_expr(e)),
+                })
+                .collect();
+            format!("(list {})", parts.join(" "))
+        }
+        Expr::RecordLiteral(entries) => {
+            let parts: Vec<String> = entries
+                .iter()
+                .map(|entry| {
+                    let key = match &entry.key {
+                        RecordKey::Bare(s) => s.clone(),
+                        RecordKey::Quoted(s) => format!("\"{}\"", s),
+                    };
+                    format!("({} {})", key, format_expr(&entry.value))
+                })
+                .collect();
+            format!("(record {})", parts.join(" "))
+        }
     }
 }
 

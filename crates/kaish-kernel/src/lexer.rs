@@ -355,6 +355,13 @@ pub enum Token {
     #[token(",")]
     Comma,
 
+    /// Spread operator: `[...$xs date]`. Only meaningful inside a list literal
+    /// (value context); inert everywhere else. logos resolves the `"..."` vs
+    /// `".."` (`DotDot`) ambiguity by longest match, so no explicit priority
+    /// is needed here.
+    #[token("...")]
+    DotDotDot,
+
     #[token("..")]
     DotDot,
 
@@ -750,7 +757,8 @@ impl Token {
             | Token::Star
             | Token::Newline
             | Token::LineContinuation
-            | Token::CmdSubstStart => TokenCategory::Punctuation,
+            | Token::CmdSubstStart
+            | Token::DotDotDot => TokenCategory::Punctuation,
 
             // Glob words (merged tokens containing wildcards)
             Token::GlobWord(_) => TokenCategory::Path,
@@ -998,6 +1006,7 @@ impl fmt::Display for Token {
             Token::Comma => write!(f, ","),
             Token::Dot => write!(f, "."),
             Token::DotDot => write!(f, ".."),
+            Token::DotDotDot => write!(f, "..."),
             Token::Tilde => write!(f, "~"),
             Token::TildePath(s) => write!(f, "{}", s),
             Token::RelativePath(s) => write!(f, "{}", s),
@@ -1709,6 +1718,132 @@ fn mergeable_text(token: &Token) -> Option<String> {
     }
 }
 
+/// Per-token context computed ahead of the colon-merge and glob-merge passes:
+/// is this token part of a *value*-position collection literal (assignment
+/// RHS, `in`/`not in` RHS)? Both merge passes suppress their fusion there so
+/// `x=[dog]` / `{port:8080}` reach the parser as primitive tokens instead of
+/// a fused `GlobWord`/`Ident` — see docs/arrays-and-hashes.md
+/// ("Implementation notes: Glob-merge is the big lexer collision" and the
+/// colon-fusion note right after it).
+///
+/// A run is "at value position" when it opens immediately after a token that
+/// *grammatically* introduces a value — an **assignment** `=` or a
+/// **membership** `in`. The trap is that both of those tokens are reused for a
+/// non-value role: `Token::Eq` is also the `[[ ]]` comparison `=`
+/// (`[[ $x = [0-9]* ]]`), and `Token::In` is also the `for`/`case` statement
+/// head (`for f in *.txt`, `case 5 in [0-9]*)`). In every one of those
+/// non-value uses the following word is argv-shaped (a glob / char-class
+/// pattern) and must keep fusing, so getting this discrimination wrong breaks
+/// real syntax.
+///
+/// The discrimination is **grammar-exact by `[[ ]]` test depth**, which needs
+/// no per-keyword special-casing:
+/// - membership `in` occurs ONLY inside `[[ ]]`; a `for`/`case` head `in`
+///   occurs ONLY outside. So `Token::In` opens value position **iff
+///   `test_depth > 0`**.
+/// - an assignment `=` occurs outside `[[ ]]`; a comparison `=` occurs inside.
+///   So `Token::Eq` opens value position **iff `test_depth == 0`**.
+///
+/// Tracking `test_depth` in the same forward pass also dissolves two `$()`
+/// leaks a hand-rolled keyword counter suffered: a bareword `in`/`for`/`case`
+/// inside `$(…)` sits at `test_depth == 0` and never opens value position (nor
+/// leaks any state past `RParen`), while a real sub-shell assignment
+/// `$(x=[a b])` is still `test_depth == 0` and correctly does. This replaces
+/// the earlier pending-`for`/`case` counter entirely.
+///
+/// `bracket_depth`/`brace_depth` are simple counters, not a real stack —
+/// deeply-nested *glued* literals (e.g. `x=[[a] [b]]`) are a documented
+/// deferral (see docs/issues.md); spaced nesting (`[ [a] [b] ]`) was never
+/// glued in the first place and is unaffected.
+#[derive(Clone, Copy, Default)]
+struct ValueContext {
+    /// Inside (or opening) a value-position `[`/`{` literal — suppresses
+    /// glob-merge bracket-pair fusion.
+    in_literal: bool,
+    /// Inside a value-position `{` literal specifically — suppresses
+    /// colon-merge fusion. Narrower than `in_literal` on purpose: a plain
+    /// scalar assignment like `x=foo:bar` must keep fusing into one `Ident`.
+    in_brace: bool,
+}
+
+fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
+    let mut ctx = vec![ValueContext::default(); tokens.len()];
+    let mut bracket_depth: usize = 0;
+    let mut brace_depth: usize = 0;
+    // `[[ ]]` nesting depth. `[[` is two `Token::LBracket`, `]]` two
+    // `Token::RBracket` (kaish has no compound bracket token). This is what
+    // tells an assignment `=` from a comparison `=`, and a membership `in`
+    // from a `for`/`case` head `in`.
+    let mut test_depth: usize = 0;
+    let mut expect_value = false;
+    // Set after consuming the first `[`/`]` of a `[[`/`]]` pair so the paired
+    // bracket is skipped for depth accounting (it's a pure test delimiter).
+    let mut skip_paired_bracket = false;
+
+    for i in 0..tokens.len() {
+        let tok = &tokens[i].token;
+
+        let currently_value = expect_value || bracket_depth > 0 || brace_depth > 0;
+        ctx[i] = ValueContext {
+            in_literal: currently_value,
+            in_brace: brace_depth > 0,
+        };
+
+        if skip_paired_bracket {
+            // Second `[` of `[[` or second `]` of `]]`: already accounted for
+            // by its partner, no depth effect.
+            skip_paired_bracket = false;
+        } else {
+            match tok {
+                Token::LBracket => {
+                    let next_is_lbracket =
+                        matches!(tokens.get(i + 1).map(|t| &t.token), Some(Token::LBracket));
+                    if next_is_lbracket && !currently_value {
+                        // `[[` opens a test — NOT a value literal. The
+                        // `!currently_value` guard keeps a glued nested value
+                        // list (`x=[[a] [b]]`) as literal brackets, not a bogus
+                        // test.
+                        test_depth += 1;
+                        skip_paired_bracket = true;
+                    } else if currently_value {
+                        bracket_depth += 1;
+                    }
+                    // A lone `[` outside any value literal (argv `ls [dog]`,
+                    // a `[0-9]` char-class) neither opens a test nor a literal.
+                }
+                Token::RBracket => {
+                    let next_is_rbracket =
+                        matches!(tokens.get(i + 1).map(|t| &t.token), Some(Token::RBracket));
+                    if bracket_depth > 0 {
+                        // Close an open value-literal bracket first — in
+                        // `[[ x in [a b] ]]` the `[a b]`'s own `]` closes here
+                        // (bracket_depth 1→0) before the trailing `]]`.
+                        bracket_depth -= 1;
+                    } else if test_depth > 0 && next_is_rbracket {
+                        test_depth -= 1;
+                        skip_paired_bracket = true;
+                    }
+                }
+                Token::LBrace if currently_value => brace_depth += 1,
+                Token::RBrace if brace_depth > 0 => brace_depth -= 1,
+                _ => {}
+            }
+        }
+
+        // Grammar-exact: assignment `=` (outside `[[ ]]`) and membership `in`
+        // (inside `[[ ]]`) open value position; comparison `=` and for/case
+        // head `in` do not. `Token::EqEq` (`==`) is a distinct token and never
+        // opens value position at all.
+        expect_value = match tok {
+            Token::Eq => test_depth == 0,
+            Token::In => test_depth > 0,
+            _ => false,
+        };
+    }
+
+    ctx
+}
+
 /// Merge span-adjacent token runs containing `Token::Colon` into single `Ident` tokens.
 ///
 /// In bash, `:` is a regular character in unquoted words. kaish tokenizes it
@@ -1716,19 +1851,25 @@ fn mergeable_text(token: &Token) -> Option<String> {
 ///
 /// This pass fuses span-adjacent mergeable tokens (Ident, Colon, Int, Path, Float)
 /// into a single `Ident` when the run contains at least one `Colon`. Runs without
-/// colons or standalone tokens pass through unchanged.
+/// colons or standalone tokens pass through unchanged. A run that opens inside a
+/// value-position record literal (`{port:8080}`) is exempted — see
+/// `ValueContext`/`compute_value_context` above — so the record parser sees the
+/// `Colon` as its own token.
 fn merge_colon_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
     if tokens.is_empty() {
         return tokens;
     }
 
+    let value_ctx = compute_value_context(&tokens);
     let mut result = Vec::with_capacity(tokens.len());
     let mut run: Vec<&Spanned<Token>> = Vec::new();
+    let mut run_start = 0usize;
 
-    for token in &tokens {
+    for (idx, token) in tokens.iter().enumerate() {
         if run.is_empty() {
             if mergeable_text(&token.token).is_some() {
                 run.push(token);
+                run_start = idx;
             } else {
                 result.push(token.clone());
             }
@@ -1743,29 +1884,33 @@ fn merge_colon_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
         if adjacent && mergeable_text(&token.token).is_some() {
             run.push(token);
         } else {
-            flush_colon_run(&mut run, &mut result);
+            flush_colon_run(&mut run, &mut result, value_ctx[run_start].in_brace);
             if mergeable_text(&token.token).is_some() {
                 run.push(token);
+                run_start = idx;
             } else {
                 result.push(token.clone());
             }
         }
     }
 
-    flush_colon_run(&mut run, &mut result);
+    flush_colon_run(&mut run, &mut result, value_ctx[run_start].in_brace);
 
     result
 }
 
-/// Flush a run of mergeable tokens: merge if it contains a colon, otherwise emit individually.
-fn flush_colon_run(run: &mut Vec<&Spanned<Token>>, result: &mut Vec<Spanned<Token>>) {
+/// Flush a run of mergeable tokens: merge if it contains a colon, otherwise emit
+/// individually. `suppress` (true when the run opened inside a value-position
+/// record literal) forces individual emission even when `has_colon` would
+/// otherwise fuse — see `ValueContext`.
+fn flush_colon_run(run: &mut Vec<&Spanned<Token>>, result: &mut Vec<Spanned<Token>>, suppress: bool) {
     if run.is_empty() {
         return;
     }
 
     let has_colon = run.iter().any(|t| matches!(t.token, Token::Colon));
 
-    if run.len() >= 2 && has_colon {
+    if !suppress && run.len() >= 2 && has_colon {
         let text: String = run
             .iter()
             .filter_map(|t| mergeable_text(&t.token))
@@ -1895,18 +2040,27 @@ fn merge_flag_metachar_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Toke
 ///
 /// Runs after colon merge: `foo::bar` stays as `Ident("foo::bar")` because colon merge
 /// already fused it before this pass sees it.
+///
+/// A run that opens at *value position* (`x=[dog]`, `[[ $a in [dog] ]]`) is exempted
+/// from the `[`/`]` bracket-pair fusion — see `ValueContext`/`compute_value_context`
+/// above — so the list-literal parser sees primitive `LBracket`/`RBracket` tokens
+/// instead of a fused `GlobWord`. Argv-position brackets (`ls [dog]`, `for x in [a]`)
+/// are untouched.
 fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
     if tokens.is_empty() {
         return tokens;
     }
 
+    let value_ctx = compute_value_context(&tokens);
     let mut result = Vec::with_capacity(tokens.len());
     let mut run: Vec<&Spanned<Token>> = Vec::new();
+    let mut run_start = 0usize;
 
-    for token in &tokens {
+    for (idx, token) in tokens.iter().enumerate() {
         if run.is_empty() {
             if glob_mergeable_text(&token.token).is_some() {
                 run.push(token);
+                run_start = idx;
             } else {
                 result.push(token.clone());
             }
@@ -1920,32 +2074,45 @@ fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
         if adjacent && glob_mergeable_text(&token.token).is_some() {
             run.push(token);
         } else {
-            flush_glob_run(&mut run, &mut result);
+            flush_glob_run(&mut run, &mut result, value_ctx[run_start].in_literal);
             if glob_mergeable_text(&token.token).is_some() {
                 run.push(token);
+                run_start = idx;
             } else {
                 result.push(token.clone());
             }
         }
     }
 
-    flush_glob_run(&mut run, &mut result);
+    flush_glob_run(&mut run, &mut result, value_ctx[run_start].in_literal);
 
     result
 }
 
 /// Flush a run of glob-mergeable tokens: merge if it contains glob metacharacters.
-fn flush_glob_run(run: &mut Vec<&Spanned<Token>>, result: &mut Vec<Spanned<Token>>) {
+/// `suppress` (true when the run opened at value position — see `ValueContext`)
+/// forces individual emission for a run that contains an `LBracket`, so a
+/// `[`-leading run at value position always reaches the parser as primitive
+/// tokens for the list-literal grammar, never a `GlobWord`. A pure `Star`/
+/// `Question` glob with no brackets (`X=*.txt`) is untouched by `suppress` —
+/// it keeps fusing to a `GlobWord`, which evaluates to a literal string at
+/// value position exactly as it did before collection literals existed
+/// (see `test_glob_in_assignment_is_literal`); only bracket-shaped runs are
+/// reinterpreted as list-literal syntax.
+fn flush_glob_run(run: &mut Vec<&Spanned<Token>>, result: &mut Vec<Spanned<Token>>, suppress: bool) {
     if run.is_empty() {
         return;
     }
 
-    let has_glob = run.iter().any(|t| {
-        matches!(t.token, Token::Star | Token::Question)
-    }) || (run.iter().any(|t| matches!(t.token, Token::LBracket))
-        && run.iter().any(|t| matches!(t.token, Token::RBracket)));
+    let has_bracket_pair = run.iter().any(|t| matches!(t.token, Token::LBracket))
+        && run.iter().any(|t| matches!(t.token, Token::RBracket));
+    let has_glob = run
+        .iter()
+        .any(|t| matches!(t.token, Token::Star | Token::Question))
+        || has_bracket_pair;
+    let suppress = suppress && has_bracket_pair;
 
-    if run.len() >= 2 && has_glob {
+    if !suppress && run.len() >= 2 && has_glob {
         let text: String = run
             .iter()
             .filter_map(|t| glob_mergeable_text(&t.token))

@@ -5,8 +5,8 @@
 
 use crate::ast::{
     Arg, Assignment, BinaryOp, CaseBranch, CaseStmt, Command, Expr, FileTestOp, ForLoop, IfStmt,
-    Pipeline, Program, Redirect, RedirectKind, SpannedPart, Stmt, StringPart, StringTestOp,
-    TestCmpOp, TestExpr, ToolDef, Value, VarPath, VarSegment, WhileLoop,
+    ListElem, Pipeline, Program, RecordEntry, RecordKey, Redirect, RedirectKind, SpannedPart, Stmt,
+    StringPart, StringTestOp, TestCmpOp, TestExpr, ToolDef, Value, VarPath, VarSegment, WhileLoop,
 };
 use crate::lexer::{self, HereDocData, Token};
 use chumsky::{input::ValueInput, prelude::*};
@@ -2102,27 +2102,121 @@ where
 }
 
 /// Value-position expression parser (assignment RHS: bash-style, `local`,
-/// and env-prefix). Currently identical to `expr_parser`; the seam where
-/// collection literals (lists/records) will be added so they appear on
-/// assignment RHS but never in argv or `for`-head items.
+/// and env-prefix). Adds collection literals on top of everything
+/// `primary_expr_parser` covers, so they appear on assignment RHS but never
+/// in argv or `for`-head items (`expr_parser`, above, stays untouched).
 fn value_expr_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    primary_expr_parser()
+    value_literal_parser()
 }
 
 /// Value-position primary parser (`in`/`not in` RHS operand only — the
 /// collection being tested for membership; the left needle stays on
-/// `primary_expr_parser`). Currently identical to `primary_expr_parser`;
-/// the seam where list/record literal arms get added later.
+/// `primary_expr_parser`). Same grammar as `value_expr_parser`; kept as a
+/// separate name because the two seams are conceptually distinct call sites
+/// (see PR-A) even though they currently share an implementation.
 fn value_primary_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    primary_expr_parser()
+    value_literal_parser()
+}
+
+/// The value-position grammar: list/record literals (tried first, so a
+/// `[`/`{` at value position is always a literal — never a bareword/glob),
+/// falling back to everything `primary_expr_parser` covers ($(), `$VAR`,
+/// scalars, …). `recursive` lets literal interiors reference this same
+/// grammar, so nesting (`{tags: [a b], meta: {active: true}}`) and spread
+/// (`[...$xs date]`) both parse.
+///
+/// The lexer guarantees a `[`/`{` reaching here at value position was never
+/// fused into a `GlobWord`/colon-joined `Ident` (see
+/// `lexer::compute_value_context`), so this choice never needs to "unfuse"
+/// anything — it just sees primitive bracket/brace tokens.
+fn value_literal_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    recursive(|value| {
+        choice((
+            list_literal_parser(value.clone()),
+            record_literal_parser(value.clone()),
+            primary_expr_parser(),
+        ))
+    })
+    .boxed()
+}
+
+/// List literal: `[a b c]`, `[]`, `[...$xs date]`. Elements may be separated
+/// by whitespace alone, commas, newlines, or any mix — all optional and
+/// interchangeable (see docs/arrays-and-hashes.md, "Commas optional in BOTH
+/// lists and records") — and newlines are consumed rather than treated as
+/// statement terminators, so a multi-line literal doesn't end the assignment
+/// early. A bare element nests as ONE item; `...` flattens a list operand's
+/// elements into this one (spread).
+fn list_literal_parser<'tokens, I, V>(
+    value: V,
+) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+    V: Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
+{
+    let spread_elem = just(Token::DotDotDot)
+        .ignore_then(value.clone())
+        .map(ListElem::Spread);
+    let item_elem = value.map(ListElem::Item);
+    let elem = choice((spread_elem, item_elem));
+
+    let sep = choice((just(Token::Comma).to(()), just(Token::Newline).to(()))).repeated();
+
+    just(Token::LBracket)
+        .ignore_then(just(Token::Newline).repeated())
+        .ignore_then(elem.then_ignore(sep).repeated().collect::<Vec<_>>())
+        .then_ignore(just(Token::RBracket))
+        .map(Expr::ListLiteral)
+        .labelled("list literal")
+}
+
+/// Record literal: `{name: amy, role: maintainer}`, `{port:8080}` (the
+/// colon-fusion exemption in the lexer means both spellings reach here as
+/// the same three tokens). Keys are a bareword (`Ident`) or a quoted string
+/// (for anything that isn't a bareword, e.g. `{"content-type": x}`); values
+/// are the full recursive value grammar, so nested literals work. Entries
+/// separate the same way list elements do (comma/newline/whitespace, all
+/// optional) — including multi-line literals with a trailing comma.
+fn record_literal_parser<'tokens, I, V>(
+    value: V,
+) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+    V: Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
+{
+    let bare_key = select! { Token::Ident(s) => RecordKey::Bare(s) };
+    let quoted_key = choice((
+        select! { Token::String(s) => s },
+        select! { Token::SingleString(s) => s },
+    ))
+    .map(RecordKey::Quoted);
+    let key = choice((quoted_key, bare_key)).labelled("record key");
+
+    let entry = key
+        .then_ignore(just(Token::Colon))
+        .then(value)
+        .map(|(key, value)| RecordEntry { key, value });
+
+    let sep = choice((just(Token::Comma).to(()), just(Token::Newline).to(()))).repeated();
+
+    just(Token::LBrace)
+        .ignore_then(just(Token::Newline).repeated())
+        .ignore_then(entry.then_ignore(sep).repeated().collect::<Vec<_>>())
+        .then_ignore(just(Token::RBrace))
+        .map(Expr::RecordLiteral)
+        .labelled("record literal")
 }
 
 /// Primary expression: literal, variable reference, command substitution, or bare identifier.
@@ -4312,5 +4406,198 @@ cmd < "input.txt"
         assert_eq!(parts.len(), 1);
         assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "\\"));
         assert_eq!(parts[0].len, 2);
+    }
+
+    // ── Collection literals ─────────────────────────────────────────────
+
+    /// Extract the RHS `Expr` from a one-statement `NAME=value` assignment.
+    fn assignment_value(source: &str) -> Expr {
+        let program = parse(source).unwrap_or_else(|e| panic!("parse {source:?}: {e:?}"));
+        match program.statements.as_slice() {
+            [Stmt::Assignment(a)] => a.value.clone(),
+            other => panic!("expected a single assignment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_literal_three_elements() {
+        let expr = assignment_value("xs=[a b c]");
+        match expr {
+            Expr::ListLiteral(elems) => {
+                assert_eq!(elems.len(), 3);
+                assert!(elems.iter().all(|e| matches!(e, ListElem::Item(_))));
+            }
+            other => panic!("expected ListLiteral, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_literal_empty() {
+        let expr = assignment_value("xs=[]");
+        assert!(matches!(expr, Expr::ListLiteral(elems) if elems.is_empty()));
+    }
+
+    #[test]
+    fn list_literal_single_glued_dog() {
+        // `[dog]` is glued (no spaces) — the value-position glob-merge
+        // suppression must still hand it to the parser as a one-element list,
+        // not a fused GlobWord.
+        let expr = assignment_value("xs=[dog]");
+        match expr {
+            Expr::ListLiteral(elems) => assert_eq!(elems.len(), 1),
+            other => panic!("expected ListLiteral, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_literal_single_int() {
+        let expr = assignment_value("xs=[1]");
+        match expr {
+            Expr::ListLiteral(elems) => match elems.as_slice() {
+                [ListElem::Item(Expr::Literal(Value::Int(1)))] => {}
+                other => panic!("expected one Int(1) item, got {other:?}"),
+            },
+            other => panic!("expected ListLiteral, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_literal_unspaced_colon_equals_spaced() {
+        let spaced = assignment_value("x={port: 8080}");
+        let unspaced = assignment_value("x={port:8080}");
+        assert_eq!(spaced, unspaced, "{{port:8080}} must parse identically to {{port: 8080}}");
+        match spaced {
+            Expr::RecordLiteral(entries) => match entries.as_slice() {
+                [RecordEntry { key: RecordKey::Bare(k), value: Expr::Literal(Value::Int(8080)) }] => {
+                    assert_eq!(k, "port");
+                }
+                other => panic!("expected one port:8080 entry, got {other:?}"),
+            },
+            other => panic!("expected RecordLiteral, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_literal_name_role() {
+        let expr = assignment_value("u={name: amy, role: maintainer}");
+        match expr {
+            Expr::RecordLiteral(entries) => assert_eq!(entries.len(), 2),
+            other => panic!("expected RecordLiteral, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_literal_multiline_trailing_comma() {
+        let source = "services={\n  web:    {port: 8080, replicas: 3, healthy: true},\n  api:    {port: 9000, replicas: 2, healthy: false},\n}";
+        let expr = assignment_value(source);
+        match expr {
+            Expr::RecordLiteral(entries) => assert_eq!(entries.len(), 2, "web + api entries"),
+            other => panic!("expected RecordLiteral, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_literal_quoted_key() {
+        let expr = assignment_value(r#"r={"content-type": x}"#);
+        match expr {
+            Expr::RecordLiteral(entries) => match entries.as_slice() {
+                [RecordEntry { key: RecordKey::Quoted(k), .. }] => assert_eq!(k, "content-type"),
+                other => panic!("expected one quoted-key entry, got {other:?}"),
+            },
+            other => panic!("expected RecordLiteral, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_list_and_record_in_record() {
+        let expr = assignment_value("x={tags: [a b], meta: {active: true}}");
+        match expr {
+            Expr::RecordLiteral(entries) => {
+                assert_eq!(entries.len(), 2);
+                assert!(matches!(entries[0].value, Expr::ListLiteral(_)));
+                assert!(matches!(entries[1].value, Expr::RecordLiteral(_)));
+            }
+            other => panic!("expected RecordLiteral, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spread_and_item_elements() {
+        let expr = assignment_value("new=[...$xs date]");
+        match expr {
+            Expr::ListLiteral(elems) => match elems.as_slice() {
+                [ListElem::Spread(Expr::VarRef(_)), ListElem::Item(Expr::Literal(Value::String(s)))] => {
+                    assert_eq!(s, "date");
+                }
+                other => panic!("expected [Spread($xs), Item(date)], got {other:?}"),
+            },
+            other => panic!("expected ListLiteral, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spread_of_two_variables() {
+        let expr = assignment_value("c=[...$a ...$b]");
+        match expr {
+            Expr::ListLiteral(elems) => {
+                assert_eq!(elems.len(), 2);
+                assert!(elems.iter().all(|e| matches!(e, ListElem::Spread(_))));
+            }
+            other => panic!("expected ListLiteral, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn in_rhs_accepts_a_list_literal() {
+        let program = parse("if [[ $a not in [dog] ]]; then echo hit; fi")
+            .unwrap_or_else(|e| panic!("parse: {e:?}"));
+        assert_eq!(program.statements.len(), 1);
+    }
+
+    #[test]
+    fn multiword_bareword_record_value_is_a_parse_error() {
+        // Strict quoting inside literals: a record value must be exactly one
+        // word or one quoted string — never silently split or joined.
+        assert!(parse("x={msg: hello world}").is_err());
+    }
+
+    // ── Invariant guards: argv/for-head globs must be unaffected ────────
+
+    #[test]
+    fn argv_bracket_glob_stays_a_glob_pattern() {
+        // `ls [dog]` is argv position — the glued `[dog]` run must still fuse
+        // to a GlobWord (the value-position suppression only applies right
+        // after `Eq`/a genuine membership `In`, not after a command name).
+        let program = parse("ls [dog]").unwrap_or_else(|e| panic!("parse: {e:?}"));
+        assert_eq!(program.statements.len(), 1);
+    }
+
+    #[test]
+    fn brace_expansion_at_argv_position_is_unaffected() {
+        // `*.{rs,go}` is glob/brace-expansion argv syntax (the glob-merge run
+        // needs a wildcard char present to fuse at all — a bare `{a,b}` with
+        // no `*`/`?`/`[...]` never fuses into a GlobWord, independent of this
+        // PR). Value-position literal parsing must not leak into argv.
+        let program = parse("cmd *.{rs,go}").unwrap_or_else(|e| panic!("parse: {e:?}"));
+        assert_eq!(program.statements.len(), 1);
+    }
+
+    #[test]
+    fn for_head_item_is_not_a_literal() {
+        // `for x in [a]` stays argv (a GlobPattern word list), never a
+        // ListLiteral — collection literals are value-position only.
+        let program = parse("for x in [a]; do echo $x; done")
+            .unwrap_or_else(|e| panic!("parse: {e:?}"));
+        match program.statements.as_slice() {
+            [Stmt::For(for_loop)] => {
+                assert_eq!(for_loop.items.len(), 1);
+                assert!(
+                    !matches!(for_loop.items[0], Expr::ListLiteral(_)),
+                    "for-head item must not be a ListLiteral: {:?}",
+                    for_loop.items[0]
+                );
+            }
+            other => panic!("expected a single For statement, got {other:?}"),
+        }
     }
 }

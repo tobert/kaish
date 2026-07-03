@@ -70,6 +70,57 @@ u=$(fromjson '{"name":"amy","tags":["rust","shell"]}')
 xs=$(fromjson '[10,20,30]')
 ```
 
+### Construction — list/record literals
+
+Lists and records also have native syntax, no `fromjson` needed. Commas are
+optional in both — whitespace, commas, or a mix all work as separators:
+
+```sh
+xs=[apple banana cherry]     # list — space-separated, like shell words
+nums=[1 2 3] ≡ [1, 2, 3]     # commas optional
+empty=[]
+dog=[dog]                    # single-element list (glued `[dog]` still a list, never a glob)
+
+user={name: amy, role: maintainer}     # record — string-keyed map
+compact={port:8080}                    # colon may be spaced or unspaced — same value
+r={"content-type": x}                  # quoted key for anything that isn't a bareword
+
+nested={tags: [a b], meta: {active: true}}   # nesting works both ways
+```
+
+Multi-line literals consume interior newlines instead of ending the statement,
+so a trailing comma before the closing brace is fine:
+
+```sh
+services={
+  web: {port: 8080, replicas: 3},
+  api: {port: 9000, replicas: 2},
+}
+```
+
+A list element or record value is exactly **one** word or **one** quoted
+string — `["green apple" banana]`, `{msg: "hello world"}`. An unquoted
+multi-word value (`{msg: hello world}`) is a parse error with the quoted fix
+in the message, never silently split or joined.
+
+**Spread (`...`) flattens; a bare variable nests.** Inside `[ ]`, a bare
+`$var` is ONE element (it nests); `...$var` flattens that list's elements into
+the new one:
+
+```sh
+xs=[1 2]
+ys=[0 $xs 4]        # [0,[1,2],4]     — nests (one element)
+new=[...$xs date]   # [1,2,"date"]    — flattens
+both=[...$a ...$b]  # concatenates two lists
+```
+
+Collection literals are **value-position only** — an assignment RHS, the
+`in`/`not in` right-hand operand, or nested inside another literal. They never
+appear in a command argument (`ls [dog]` is still a glob) or a `for`-head item
+(`for x in [a]` is still a word list) — see "Iteration is `$()`-only" below.
+Assigning a `[`-leading glob (`logs=[0-9]*.log`) is a parse error at value
+position; use `$(glob '[0-9]*.log')` if you actually want glob expansion there.
+
 ### Read access — brackets only, never dots
 
 ```sh
@@ -192,9 +243,10 @@ cannot silently cross into an OS environment variable: `export CFG=$cfg` where
 `$cfg` is a list/record is a loud error — serialize it first with
 `export CFG=$(tojson $cfg)`.
 
-> Construction — list/record **literals** (`xs=[a b c]`, `{k: v}`), `push`, and
-> bracket-path **assignment** (`a[b]=x`) — is designed but not yet implemented;
-> today collections enter the shell via `fromjson` / `$(...)`.
+> List/record **literals** (`xs=[a b c]`, `{k: v}`, spread) are documented
+> above and shipped. `push` and bracket-path **assignment** (`a[b]=x`,
+> `fruits[0]=kiwi`) are designed but not yet implemented — today, beyond
+> literals, collections enter the shell via `fromjson` / `$(...)`.
 
 ## Quoting
 

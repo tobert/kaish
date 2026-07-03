@@ -19,14 +19,15 @@ string arguments, invisible to the validator until runtime — exactly the kind 
 late-failure footgun kaish avoids. Use `[[ -f x ]]`, `[[ $a = $b ]]`, `[[ -z $s ]]`.
 
 A `test` builtin might return someday if a compelling case appears. `[` will not:
-the bracket belongs to kaish — `[[ … ]]` today, native list literals in the planned
-collections syntax — and invoking an external `[` binary isn't supported either.
+the bracket belongs to kaish — `[[ … ]]` and native list literals (`xs=[a b c]`,
+see `help syntax` → Collections) — and invoking an external `[` binary isn't
+supported either.
 
 ## Lexer/Parser Limitations
 
 | Limitation | Details | Workaround |
 |-----------|---------|------------|
-| `[[ ]]` parsed as two brackets | Two separate `[` tokens, not a compound keyword | Works for tests; the two-token design deliberately reserves `[ ]` for kaish's planned native list literals |
+| `[[ ]]` parsed as two brackets | Two separate `[` tokens, not a compound keyword | Works for tests; the two-token design deliberately reserves `[ ]` for kaish's native list literals |
 | Statement-opening keywords as bare arguments | `echo if` / `echo for` / `echo while` / `echo case` are parse errors (keyword starts a statement). Closers (`done`, `then`, `fi`) are fine. | Quote: `echo "if"` |
 | No token-pasting of adjacent unquoted words | `$VAR`/`$(cmd)`/globs are separate words. Unquoted text glued to an expansion (`echo $dir/f`, `echo /tmp/$(id -u).x`, `> $dir/f`) is a **parse error**, not a silent splat. Single-token words (`file.txt`, `v1.2.3`) are fine. | **Quote the whole word**: `"$dir/f"`, `"/tmp/$(id -u).x"`. See `help syntax` → Quoting. |
 

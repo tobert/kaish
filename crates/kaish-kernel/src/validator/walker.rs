@@ -3,8 +3,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
-    Arg, Assignment, CaseBranch, CaseStmt, Command, Expr, ForLoop, IfStmt, Pipeline, Program,
-    SpannedPart, Stmt, StringPart, TestExpr, ToolDef, VarPath, VarSegment, WhileLoop, Value,
+    Arg, Assignment, CaseBranch, CaseStmt, Command, Expr, ForLoop, IfStmt, ListElem, Pipeline,
+    Program, SpannedPart, Stmt, StringPart, TestExpr, ToolDef, VarPath, VarSegment, WhileLoop,
+    Value,
 };
 use crate::kernel::{bind_glued_short_value, push_repeatable_value};
 use crate::scheduler::{is_bool_type, schema_param_lookup};
@@ -442,6 +443,18 @@ impl<'a> Validator<'a> {
             Expr::Command(cmd) => self.validate_command(cmd),
             Expr::LastExitCode | Expr::CurrentPid => {}
             Expr::GlobPattern(_) => {}
+            Expr::ListLiteral(elems) => {
+                for elem in elems {
+                    match elem {
+                        ListElem::Item(e) | ListElem::Spread(e) => self.validate_expr(e),
+                    }
+                }
+            }
+            Expr::RecordLiteral(entries) => {
+                for entry in entries {
+                    self.validate_expr(&entry.value);
+                }
+            }
         }
     }
 
