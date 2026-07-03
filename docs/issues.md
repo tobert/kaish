@@ -311,19 +311,6 @@ ranked Rules instead of beside its Rule sibling. The sort key can't include
 registry order for equal ranks), so the fix is to give each Contrast/Reference
 fragment the same rank as its Rule counterpart when such a consumer is built.
 
-**Importance-ranked onboarding tiers (2026-07-01, from the arrays-and-hashes
-review):** restructure `agent_onboarding()` composition into ~200–300-char ranks in
-descending importance — the first rank carries the most critical rules so the client
-model gets them immediately even under skimming/truncation; successive ranks follow;
-everything else moves to an easy-to-find, loadable resource (help topics / MCP
-prompts) pointed at from the block's tail. Mechanically: fragments gain an importance
-rank, recipes compose by rank, and a size assertion in kaish-help's tests caps the
-ranked tier stack (today nothing caps composed size — no test, no ceiling; `Depth` is
-the only lever, and the block is already ~9–10.5K chars with the builtin index
-dominating at ~5.4K). Do this before the collections fragments land — they're the
-feature that will test it. See [arrays-and-hashes.md](arrays-and-hashes.md)
-"Help & teaching delivery".
-
 **Collection read-access follow-ups (2026-07-01, from the read-access deepseek
 review; verified locally):**
 - **P3 — reduced sync arg path coalesces a loud path error to skip.** The four

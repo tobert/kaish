@@ -7,6 +7,7 @@ Validates before execution. Builtins run in-process; external commands via PATH.
 
 ```
 help syntax     Variables, quoting, pipes, control flow
+help collections  Lists & records: literals, access, iteration, lvalues
 help builtins   List of all builtins
 help vfs        Virtual filesystem mounts
 help scatter    Parallel processing (散/集)

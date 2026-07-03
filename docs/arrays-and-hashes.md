@@ -5,8 +5,13 @@ per-hop path resolver, **list/record literals + spread**, and **bracket-path
 assignment + `push`** are SHIPPED (see `docs/LANGUAGE.md` Collections
 section). Bracket-path `push` (a subscripted target, e.g. `push
 services[web][tags] item`) remains deferred — only a top-level bareword
-target ships (see `docs/issues.md`). The rest of this document is design
-history/rationale.
+target ships (see `docs/issues.md`). **The Teaching note #8 pre-sign-off panel
+re-test against the FINAL surface is DONE (2026-07-03)** — 18/18 clean across
+DeepSeek, Gemini, and Claude Haiku, including immediate, unprompted
+convergence on `$(keys $servers)`/`$(values ...)` in the for-head (the
+2026-06-05 panel's most common error). No correction round needed; the v2
+bare-collection-iterates relaxation is NOT adopted. The rest of this document
+is design history/rationale.
 Author: design notes from a 2026-06-05 session.
 **Revised 2026-07-01** — brackets-only access, record iteration, comparison/unwrap semantics,
 full lvalue rules; implementation notes re-grounded against HEAD `f92070e`. Superseded
@@ -246,7 +251,11 @@ for the record.
   side by side: arithmetic `$((x + 1))` evaluates bare names as variables (separate mini-parser,
   `arithmetic.rs:285`, inherited from bash) while bracket subscripts treat barewords as literal
   keys. Assignment *lvalues* use the same bracket paths, bare (no `${…}`) — `${…}` is for
-  reading. **Untested surface — panel re-test required before sign-off** (Teaching note #8).
+  reading. **Panel re-test DONE (Teaching note #8, 2026-07-03)** — dot-leakage did not
+  reproduce even without a fresh-context "don't use dots" warning: all three models,
+  taught only via the shipped `help collections` cheat sheet (which shows `${u.name}` as
+  the WRONG form alongside its error), used bracket access unprompted for both the
+  dynamic-vs-literal-subscript task and a bare field-access task.
 
 - **Collection iteration is `$()`-only; a bare `$var` in a for-head stays E012.** *(REVISED
   2026-07-02 — supersedes the "`for k in $record` iterates keys" decision of 2026-07-01.)* The
@@ -856,7 +865,7 @@ taught a specific way** — get the examples wrong and even capable models fail.
    kaish does not have. All future model tests must use sh-style `do/done` / `then/fi`, no-space
    assignment, and `push` for append — otherwise we're validating a language we don't ship.
 
-8. **Pre-sign-off re-test — REQUIRED AGAIN (the 2026-06-05 pass is superseded).** The earlier
+8. **Pre-sign-off re-test — DONE 2026-07-03 (the 2026-06-05 pass is superseded).** The earlier
    Haiku re-test validated the *dotted* braced syntax (`${r.key}`, `${r.$k}`, `${users.alice.city}`)
    and the bare-builtin for-head — both since replaced. Re-run the panel (include the weak tail,
    not just Haiku) against the FINAL surface: bracket access incl. `${r[$k]}` dynamic keys and
@@ -865,11 +874,45 @@ taught a specific way** — get the examples wrong and even capable models fail.
    `for k in $record` — superseded), bracket lvalues (`user[email]=x`, `fruits[0]=kiwi`), plus a
    **dot-leakage negative task** (does the model reach for `${user.name}`? does the error copy
    converge it in one round?) and a literal-vs-variable subscript task (`${user[name]}` vs
-   `${user[$name]}`). **Watch one number above all: convergence on `$(values $xs)` in the
+   `${user[$name]}`).
+
+   **Result: 18/18 clean, zero corrections needed.** Ran DeepSeek V4, Gemini 3.5-flash, and
+   Claude Haiku 4.5 as stateless `oneshot` one-round calls (no repo access — each model's ENTIRE
+   reference was the actual shipped `Recipe::agent_onboarding()` output plus the actual shipped
+   `help collections` fragment, per "Validate the shipped artifact" below), on a 6-task script
+   covering every item above. Every model, on the first try: wrote a nested record literal and
+   iterated it with `for k in $(keys $servers); do echo "$k: ${servers[$k][port]}"; done` —
+   **immediate, unprompted convergence on the exact form the 2026-06-05 panel most commonly got
+   wrong** (that panel required `$(keys $r)`-in-head prompting; this one needed none); performed
+   the dynamic-subscript task correctly (`${user[$field]}`, distinct from the literal-key form);
+   wrapped membership in a full `if [[ … ]]; then … else … fi` (never a bare `[[ ]]` line — the
+   Teaching note #1 rule, which two pre-existing fragments were found to violate and were fixed
+   as part of this pass, see below); used bracket access with **zero dot-leakage** on the bare
+   field-access probe, despite no "don't use dots" warning in the prompt; and wrote the correct
+   slice `${xs[0:3]}`. All 18 generated scripts (6 tasks × 3 models) were then run against the
+   real `./target/debug/kaish` binary and produced correct output with no errors. **The v2
+   bare-collection-iterates relaxation is NOT adopted** — the taught `$()`-only form converged
+   in one round across the whole tested capability range, so there is no evidence the mandated
+   form is a tax being paid forever. Local/self-hosted models (`qwen`, `zorak`, `glm` casts)
+   were not reachable in this environment; re-run against them if that capacity comes up, as
+   a bonus tail check, not a blocking gap — three cross-vendor commercial families already
+   exceeds the original recipe's panel composition.
+
+   **A real doc bug surfaced during test-prep, independent of the panel itself:** both the
+   `collections` and `test-expressions` Syntax fragments (`crates/kaish-help/src/fragments.rs`)
+   showed membership (`in`/`not in`) as a **bare standalone `[[ ]]` line** — exactly the pattern
+   Teaching note #1 already identified as broken (a novel operator shown standalone reads as a
+   complete statement) — introduced when membership shipped (#58) and never caught because no
+   panel re-test had exercised the actual composed artifact until now. Fixed in both fragments
+   and in `docs/LANGUAGE.md`'s matching examples before running the panel, so the tested
+   artifact reflects the corrected teaching copy, not the regression.
+
+   **Watch one number above all: convergence on `$(values $xs)` in the
    for-head** — the 2026-06-05 panel's single most common error was *requiring `$(keys $r)` in the
    head*, which the `$()`-only decision now mandates; if models need more than one verify round to
    accept it routinely, execute the v2 relaxation (bare collection iterates; bare string is a loud
-   runtime error) early. Results not yet gathered — do not sign off without them.
+   runtime error) early. **Results above: 3/3 models converged in round one — no relaxation
+   triggered.**
 
 9. **Update the "sh subset / shellcheck" framing in the same PR** (see issues.md P4). The docs
    that introduce collections are the natural place to restate "inspired by sh/bash, informed by

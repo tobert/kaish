@@ -305,6 +305,23 @@ pub fn render_syntax_reference() -> String {
     out
 }
 
+/// Render a single `Syntax` section by its fragment key (e.g. `"collections"`),
+/// or `None` if no such section exists.
+///
+/// This is what backs `help <subsystem>` for a syntax feature big enough to want
+/// its own topic (`help collections`) without hand-writing a second, driftable
+/// copy of the reference text — single-sourced with [`render_syntax_reference`]
+/// and `content/en/syntax.md`. The pattern generalizes to any future
+/// subsystem-sized syntax feature: give its `syntax_section` a memorable key and
+/// it's queryable via `help <key>` for free.
+pub fn render_syntax_section(key: &str) -> Option<String> {
+    let fragment = FRAGMENTS.iter().find(|f| {
+        f.concept == Concept::Syntax && f.locale == DEFAULT_LOCALE && f.key == key
+    })?;
+    let title = fragment.title.unwrap_or(fragment.key);
+    Some(format!("## {title}\n\n{}\n", fragment.body.trim()))
+}
+
 /// A fragment present in English but missing in another locale.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MissingFragment {

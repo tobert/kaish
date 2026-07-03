@@ -7,6 +7,7 @@
 
 use kaish_types::ToolSchema;
 
+use crate::compose::render_syntax_section;
 use crate::content::{IGNORE, LIMITS, OUTPUT_LIMIT, OVERLAY, OVERVIEW, SCATTER, SYNTAX, VFS};
 
 /// Help topics available in kaish.
@@ -30,6 +31,9 @@ pub enum HelpTopic {
     Limits,
     /// Overlay VFS mode and kaish-vfs builtin.
     Overlay,
+    /// A single subsystem-sized syntax section (e.g. `collections`), composed
+    /// straight from its `Syntax` fragment — single-sourced with `help syntax`.
+    SyntaxSection(String),
     /// Help for a specific tool.
     Tool(String),
 }
@@ -50,6 +54,7 @@ impl HelpTopic {
             "output-limit" | "spill" | "truncate" | "kaish-output-limit" => Self::OutputLimit,
             "limits" | "limitations" | "missing" => Self::Limits,
             "overlay" | "kaish-vfs" | "vfs-overlay" => Self::Overlay,
+            other if render_syntax_section(other).is_some() => Self::SyntaxSection(other.to_string()),
             other => Self::Tool(other.to_string()),
         }
     }
@@ -66,6 +71,7 @@ impl HelpTopic {
             Self::OutputLimit => "Output size limit configuration",
             Self::Limits => "Known limitations",
             Self::Overlay => "Copy-on-write overlay mode and kaish-vfs",
+            Self::SyntaxSection(_) => "A single syntax reference section",
             Self::Tool(_) => "Help for a specific tool",
         }
     }
@@ -87,6 +93,11 @@ pub fn get_help(topic: &HelpTopic, tool_schemas: &[ToolSchema]) -> String {
         HelpTopic::OutputLimit => OUTPUT_LIMIT.to_string(),
         HelpTopic::Limits => LIMITS.to_string(),
         HelpTopic::Overlay => OVERLAY.to_string(),
+        HelpTopic::SyntaxSection(key) => render_syntax_section(key).unwrap_or_else(|| {
+            format!(
+                "Unknown topic or tool: {key}\n\nUse 'help' to see available topics, or 'help builtins' for tool list."
+            )
+        }),
         HelpTopic::Tool(name) => format_tool_help(name, tool_schemas),
     }
 }
@@ -172,6 +183,7 @@ pub fn list_topics() -> Vec<(&'static str, &'static str)> {
         ("output-limit", "Output size limit configuration"),
         ("limits", "Known limitations"),
         ("overlay", "Copy-on-write overlay mode and kaish-vfs"),
+        ("collections", "Lists & records: literals, access, iteration, lvalues"),
     ]
 }
 
@@ -197,6 +209,27 @@ mod tests {
             HelpTopic::parse_topic("grep"),
             HelpTopic::Tool("grep".to_string())
         );
+        assert_eq!(
+            HelpTopic::parse_topic("collections"),
+            HelpTopic::SyntaxSection("collections".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_help_collections_section() {
+        let content = get_help(&HelpTopic::SyntaxSection("collections".to_string()), &[]);
+        assert!(content.contains("Collections (lists & records)"));
+        assert!(content.contains("xs=[apple banana cherry]"));
+        // Single-sourced with `help syntax` — not a second, hand-written copy.
+        assert!(SYNTAX.contains("xs=[apple banana cherry]"));
+    }
+
+    #[test]
+    fn test_get_help_unknown_syntax_section_falls_back() {
+        // Guards against constructing the variant directly with a bad key
+        // (bypassing parse_topic's existence check) and panicking.
+        let content = get_help(&HelpTopic::SyntaxSection("not-a-real-section".to_string()), &[]);
+        assert!(content.contains("Unknown topic or tool"));
     }
 
     #[test]

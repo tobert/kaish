@@ -35,8 +35,17 @@ breaking entries are marked **BREAKING**.
   brackets are reserved by kaish (`[[ ]]` today, native list literals per the
   arrays-and-hashes design). The `[` command stays banned permanently; a `test`
   builtin may return someday.
+- **The `collections` help fragment now teaches native literal construction and
+  `...` spread** — it previously only showed `fromjson`-based construction,
+  stale since list/record literals landed. Membership (`in`/`not in`) is now
+  always shown inside a full `if [[ … ]]; then … fi`, never a bare standalone
+  test line (a prior regression against the shell's own teaching-note rule).
 
 ### Added
+- **`help collections`** — a new help topic, composed straight from the
+  `collections` syntax reference fragment (single-sourced with `help syntax`,
+  not a second hand-written doc). The underlying mechanism is generic: any
+  `syntax_section` becomes queryable as `help <key>` for free.
 - **Native collection literals** — `xs=[a b c]` (list), `{port: 8080}` /
   `{port:8080}` (record, colon may be spaced or unspaced), `xs=[]` / `xs=[dog]`
   (empty and single-element lists), multi-line records with a trailing comma,

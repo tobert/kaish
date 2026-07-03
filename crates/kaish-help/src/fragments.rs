@@ -72,10 +72,11 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         None,
-        "Values can be structured JSON — a list or a record — not only strings. \
-         Access is brackets-only (`${r[key]}`, `${xs[0]}`, never dots); iterate with \
-         `$(values $c)` (elements/values) or `$(keys $c)` (indices/keys); `fromjson` / \
-         `tojson` bridge JSON text in and out. See `help syntax` → Collections.",
+        "Values can be structured — a list (`xs=[a b c]`) or a record (`u={k: v}`), not \
+         only strings. Access is brackets-only (`${r[key]}`, `${xs[0]}`, never dots); \
+         iterate with `$(values $c)` (elements/values) or `$(keys $c)` (indices/keys); \
+         `fromjson` / `tojson` bridge real JSON text in and out. See `help syntax` → \
+         Collections.",
     ),
     en(
         Concept::Model,
@@ -228,6 +229,28 @@ pub const FRAGMENTS: &[Fragment] = &[
          discarded.",
     )
     .ranked(9),
+    en(
+        Concept::Foundations,
+        "collection-literals",
+        Variant::Rule,
+        Depth::Summary,
+        None,
+        "**Collection literals.** Lists/records have native syntax — `xs=[a b c]`, \
+         `u={k: v}` — no `fromjson` needed. `push xs v` appends in place (like \
+         `read`/`unset`, it takes the bareword NAME, not `$xs`); `...$xs` spread \
+         flattens into a new list — a bare `$xs` nests as one element instead.",
+    )
+    .ranked(10),
+    en(
+        Concept::Foundations,
+        "collection-literals",
+        Variant::Contrast,
+        Depth::Reference,
+        None,
+        "Collections are brackets-only, never dots: `${u.name}` is a loud parse \
+         error naming the fix (`${u[name]}`) — the `Ident` token allows `.` for \
+         other uses (filenames), so this can't be caught silently.",
+    ),
     // ---- Syntax reference (single source for content/en/syntax.md) -----------
     syntax_section(
         "variables",
@@ -263,7 +286,20 @@ processes, where the host PID is meaningless to the script."#,
         "collections",
         "Collections (lists & records)",
         r#"```sh
-# Values are structured JSON (list or record); fromjson/tojson bridge text.
+# CONSTRUCTION — native literal syntax, no fromjson needed. Commas optional.
+xs=[apple banana cherry]  # list — space-separated, like shell words
+nums=[1 2 3]               # ≡ [1, 2, 3]
+u={name: amy, role: maintainer}   # record — bareword keys
+compact={port:8080}        # colon may be spaced or unspaced
+r={"content-type": x}      # quoted key for anything that isn't a bareword
+nested={tags: [a b], meta: {active: true}}   # nesting works both ways
+
+# SPREAD (...) flattens; a bare $var nests as ONE element instead:
+xs=[1 2]
+ys=[0 $xs 4]                # [0,[1,2],4]  — nests
+new=[...$xs date]           # [1,2,"date"] — flattens
+
+# Values are also structured JSON — fromjson/tojson bridge real JSON text:
 u=$(fromjson '{"name":"amy","tags":["rust","shell"]}')
 xs=$(fromjson '[10,20,30]')
 
@@ -274,6 +310,7 @@ ${xs[0]}   ${xs[-1]}      # list index; negative counts from the end
 ${xs[0:2]}                # slice (end-exclusive) → a list
 ${u[tags][0]}             # nested path
 ${#xs}   ${#u}            # length: list elements / record keys
+${u.name}                 # error — brackets only, use ${u[name]}
 
 # ENUMERATE — always wrap the collection in $(keys ...) or $(values ...).
 # A bare `for x in $xs` is an ERROR (E012): there is no word splitting.
@@ -296,9 +333,9 @@ for x in $(values $xs); do
 done
 
 # MEMBERSHIP — RHS must be a collection (see Test Expressions):
-[[ rust in $(values ${u[tags]}) ]]                 # element present?
-[[ name in $u ]]                                   # record has key?
-[[ 1 in $(keys $xs) ]]                             # index in bounds?
+if [[ rust in $(values ${u[tags]}) ]]; then echo "has it"; fi   # element present?
+if [[ name in $u ]]; then echo "has it"; fi                     # record has key?
+if [[ 1 in $(keys $xs) ]]; then echo "in bounds"; fi            # index in bounds?
 
 # SHAPE GUARD — an API sometimes returns a list, sometimes a record; check
 # before committing to keys/values/for. typeof + [[ -list ]] / [[ -record ]]:
@@ -414,8 +451,8 @@ cmd1 || cmd2              # cmd2 if cmd1 fails
 [[ -f config.json && -n $NAME ]]
 [[ $N -gt 5 ]]
 [[ $s =~ "\.rs$" ]]
-[[ banana in $fruits ]]
-[[ tmp not in $services ]]
+if [[ banana in $fruits ]]; then echo "have one"; fi
+if [[ tmp not in $services ]]; then echo "not running"; fi
 [[ -list $x ]]
 [[ -record $x ]]
 ```"#,
