@@ -198,10 +198,10 @@ The right-hand side must be a collection (a string RHS is a loud error — use
 `=~` / globs / `case` for substrings):
 
 ```sh
-[[ rust in $(values ${u[tags]}) ]]   # element present in a list?
-[[ name in $u ]]                     # record has key?
-[[ 1 in $(keys $xs) ]]               # index in bounds?
-[[ tmp not in $u ]]                  # absent?
+if [[ rust in $(values ${u[tags]}) ]]; then echo "has it"; fi   # element present in a list?
+if [[ name in $u ]]; then echo "has it"; fi                     # record has key?
+if [[ 1 in $(keys $xs) ]]; then echo "in bounds"; fi            # index in bounds?
+if [[ tmp not in $u ]]; then echo "absent"; fi                  # absent?
 ```
 
 Element equality uses the same rule as `==` (a numeric bareword matches a JSON
@@ -464,10 +464,10 @@ mkdir /tmp/work && cd /tmp/work && echo "ready"
 
 # Collection membership (list → element, record → key; typed equality, so
 # 443 in a list matches the JSON number, not just the string "443")
-[[ banana in $fruits ]]         # element in a list
-[[ name in $user ]]             # key in a record
-[[ tmp not in $services ]]      # negated membership
-[[ 443 in ${servers[web]} ]]    # nested path as the RHS
+if [[ banana in $fruits ]]; then echo "have one"; fi          # element in a list
+if [[ name in $user ]]; then echo "known"; fi                 # key in a record
+if [[ tmp not in $services ]]; then echo "not running"; fi    # negated membership
+if [[ 443 in ${servers[web]} ]]; then echo "listening"; fi    # nested path as the RHS
 # A scalar/string RHS is a loud error — use =~, glob ([[ $s == *sub* ]]), or
 # case for substring tests; `in` is collection-only.
 

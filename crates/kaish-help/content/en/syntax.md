@@ -31,7 +31,20 @@ processes, where the host PID is meaningless to the script.
 ## Collections (lists & records)
 
 ```sh
-# Values are structured JSON (list or record); fromjson/tojson bridge text.
+# CONSTRUCTION — native literal syntax, no fromjson needed. Commas optional.
+xs=[apple banana cherry]  # list — space-separated, like shell words
+nums=[1 2 3]               # ≡ [1, 2, 3]
+u={name: amy, role: maintainer}   # record — bareword keys
+compact={port:8080}        # colon may be spaced or unspaced
+r={"content-type": x}      # quoted key for anything that isn't a bareword
+nested={tags: [a b], meta: {active: true}}   # nesting works both ways
+
+# SPREAD (...) flattens; a bare $var nests as ONE element instead:
+xs=[1 2]
+ys=[0 $xs 4]                # [0,[1,2],4]  — nests
+new=[...$xs date]           # [1,2,"date"] — flattens
+
+# Values are also structured JSON — fromjson/tojson bridge real JSON text:
 u=$(fromjson '{"name":"amy","tags":["rust","shell"]}')
 xs=$(fromjson '[10,20,30]')
 
@@ -42,6 +55,7 @@ ${xs[0]}   ${xs[-1]}      # list index; negative counts from the end
 ${xs[0:2]}                # slice (end-exclusive) → a list
 ${u[tags][0]}             # nested path
 ${#xs}   ${#u}            # length: list elements / record keys
+${u.name}                 # error — brackets only, use ${u[name]}
 
 # ENUMERATE — always wrap the collection in $(keys ...) or $(values ...).
 # A bare `for x in $xs` is an ERROR (E012): there is no word splitting.
@@ -64,9 +78,9 @@ for x in $(values $xs); do
 done
 
 # MEMBERSHIP — RHS must be a collection (see Test Expressions):
-[[ rust in $(values ${u[tags]}) ]]                 # element present?
-[[ name in $u ]]                                   # record has key?
-[[ 1 in $(keys $xs) ]]                             # index in bounds?
+if [[ rust in $(values ${u[tags]}) ]]; then echo "has it"; fi   # element present?
+if [[ name in $u ]]; then echo "has it"; fi                     # record has key?
+if [[ 1 in $(keys $xs) ]]; then echo "in bounds"; fi            # index in bounds?
 
 # SHAPE GUARD — an API sometimes returns a list, sometimes a record; check
 # before committing to keys/values/for. typeof + [[ -list ]] / [[ -record ]]:
@@ -177,8 +191,8 @@ cmd1 || cmd2              # cmd2 if cmd1 fails
 [[ -f config.json && -n $NAME ]]
 [[ $N -gt 5 ]]
 [[ $s =~ "\.rs$" ]]
-[[ banana in $fruits ]]
-[[ tmp not in $services ]]
+if [[ banana in $fruits ]]; then echo "have one"; fi
+if [[ tmp not in $services ]]; then echo "not running"; fi
 [[ -list $x ]]
 [[ -record $x ]]
 ```
