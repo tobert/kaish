@@ -42,6 +42,10 @@ breaking entries are marked **BREAKING**.
   test line (a prior regression against the shell's own teaching-note rule).
 
 ### Added
+- **`help regex`** — a compact syntax section (also in `help syntax`/`syntax.md`)
+  covering the regex dialect in one screen: ERE everywhere (grep/sed/awk), the
+  accepted GNU BRE spellings, the bracket-class/`-E` escape hatches for literal
+  metas, and the no-backreferences-in-patterns rule.
 - **`help collections`** — a new help topic, composed straight from the
   `collections` syntax reference fragment (single-sourced with `help syntax`,
   not a second hand-written doc). The underlying mechanism is generic: any

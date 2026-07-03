@@ -280,6 +280,27 @@ set -o glob               # re-enable (on by default)
 
 Zero matches is an error (exit code 1). The `glob` builtin still works for `--exclude` and `**`.
 
+## Regex (grep, sed, awk)
+
+```sh
+# ERE (egrep-style) everywhere: a|b  (…)  x+ y? z{2,5}  [a-z]  ^…$
+grep 'error|warn' log.txt           # alternation — one call, many terms
+sed -E 's/v([0-9]+)\.[0-9]+/\1/'    # (…) capture; \1 \2 in the REPLACEMENT
+awk '/^(GET|POST) /' access.log     # same engine in all three
+
+# GNU BRE spellings are accepted too — \| \(…\) \{n,m\} \+ \? rewrite to ERE:
+grep 'error\|warn' log.txt          # ≡ error|warn
+sed 's/\(a\)\(b\)/\2\1/'            # ≡ s/(a)(b)/\2\1/
+
+# A literal | + ? ( ) { }: bracket class, or strict-ERE mode
+grep '[|]' f                        # literal pipe (works in all three)
+grep -E 'a\|b' f                    # -E / -r (grep, sed): backslashed meta = literal
+grep -F 'a|b' f                     # -F: fixed string, nothing is a metachar
+
+grep '\d+\.\w\b' f                  # \d \w \s \b \. work; \< \> too
+sed 's/(a)\1/x/'                    # ERROR — no backreference IN a pattern
+```
+
 ## Shell Options
 
 ```sh
