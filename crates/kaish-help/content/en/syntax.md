@@ -37,6 +37,7 @@ nums=[1 2 3]               # ≡ [1, 2, 3]
 u={name: amy, role: maintainer}   # record — bareword keys
 compact={port:8080}        # colon may be spaced or unspaced
 r={"content-type": x}      # quoted key for anything that isn't a bareword
+d={"$k": x}                # double-quoted keys interpolate; '$k' stays literal
 nested={tags: [a b], meta: {active: true}}   # nesting works both ways
 
 # SPREAD (...) flattens; a bare $var nests as ONE element instead:

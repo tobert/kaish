@@ -84,6 +84,8 @@ dog=[dog]                    # single-element list (glued `[dog]` still a list, 
 user={name: amy, role: maintainer}     # record — string-keyed map
 compact={port:8080}                    # colon may be spaced or unspaced — same value
 r={"content-type": x}                  # quoted key for anything that isn't a bareword
+d={"$k": x}                            # double-quoted keys interpolate ($k resolves);
+                                       # single quotes keep a literal $ ({'$k': x})
 
 nested={tags: [a b], meta: {active: true}}   # nesting works both ways
 ```

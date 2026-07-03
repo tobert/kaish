@@ -172,6 +172,14 @@ breaking entries are marked **BREAKING**.
   demotion of `\|` to plain `|`).
 
 ### Fixed
+- **`${#path}` on an undefined subscripted root is now loud** — `${#nope[items]}`
+  silently returned `0` (the bash-parity `${#unset}` → 0 rule leaked into
+  subscripted paths), so a typo'd name in a length-guarded loop spun zero times
+  with no diagnostic. Bare `${#unset}` stays `0`.
+- **Double-quoted record-literal keys now interpolate** — `{"$k": v}` resolves
+  `$k` like any double-quoted string instead of silently creating a literal
+  `"$k"` key. Single quotes keep a literal `$` (`{'$k': v}`), same quoting
+  contract as everywhere else.
 - **A standalone `[[ ]]` test now writes `$?`** — `[[ 1 = 2 ]]; echo $?` printed
   `0` (the previous command's status; the test never stored its result), so
   `[[ -f x ]]; ok=$?` patterns silently read a stale status. A bare test

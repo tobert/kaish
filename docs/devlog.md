@@ -14,6 +14,25 @@ before it ships.
 
 ---
 
+## The two review bugs: silent-zero length + literal-`$k` record keys (2026-07-03)
+
+The 2026-07-03 coverage review verified two live silent-wrongs; both fixed here.
+`${#nope[items]}` returned 0 — `resolve_length`'s bash-parity arm (`${#unset}` →
+0) didn't distinguish bare roots from subscripted paths, so a typo'd name in a
+length-guarded loop spun zero times with no diagnostic. Subscripted paths now
+error like bare `${nope[items]}` does; bare `${#unset}` stays 0, pinned
+separately so the forms can't drift together.
+
+`{"$k": 8080}` created a literal `"$k"` key — the record-literal parser took
+`Token::String` raw. Double-quoted keys now interpolate like every other
+double-quoted string (new `RecordKey::Interpolated(Vec<StringPart>)` riding the
+existing StringPart machinery in both eval sites; a pure-literal parse folds
+back to `Quoted` so the common case is free). Single quotes remain the
+literal-`$` escape hatch, and an unset var in a key expands to `""` — the
+ratified string-interpolation rule applied consistently, pinned with a test.
+
+---
+
 ## Collections panel gate + docs delivery — sign-off (2026-07-03)
 
 The last item on the collections milestone: Teaching note #8's pre-sign-off cross-model

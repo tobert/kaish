@@ -441,6 +441,32 @@ async fn length_of_a_missing_key_is_a_loud_error() {
 }
 
 #[tokio::test]
+async fn length_of_an_undefined_subscripted_root_is_loud() {
+    // `${#nope[items]}` used to silently return 0 (the bare-`${#unset}` bash
+    // parity leaked into subscripted paths), so a typo'd name in
+    // `while [[ ${#queue[items]} -gt 0 ]]` looped zero times with no
+    // diagnostic. Loud now, consistent with bare `${nope[items]}`.
+    // (2026-07-03 cross-model review, fable finding #1.)
+    let k = setup().await;
+    let (_, code, err) = run(&k, "echo ${#nope[0]}").await;
+    assert_ne!(code, 0, "undefined subscripted root must be loud");
+    assert!(err.contains("undefined"), "should say undefined: {err}");
+
+    let (_, code, _) = run(&k, "echo ${#nope[key]}").await;
+    assert_ne!(code, 0, "record-shaped path too");
+}
+
+#[tokio::test]
+async fn length_of_an_undefined_bare_root_stays_zero() {
+    // The bash-parity half stays: `${#unset}` (no subscript) is 0, not an
+    // error. Pinned separately so the two forms can't drift together.
+    let k = setup().await;
+    let (out, code, err) = run(&k, "echo ${#unset_thing}").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "0");
+}
+
+#[tokio::test]
 async fn for_loop_over_envelope_shaped_elements_stays_a_record() {
     // A `fromjson` array element that happens to be envelope-shaped is external
     // data — it must NOT be silently re-decoded to binary during iteration.
