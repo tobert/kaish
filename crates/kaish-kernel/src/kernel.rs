@@ -3896,6 +3896,11 @@ impl Kernel {
                 for entry in entries {
                     let key = match &entry.key {
                         RecordKey::Bare(s) | RecordKey::Quoted(s) => s.clone(),
+                        // `{"$k": v}` resolves like any double-quoted string
+                        // (used to silently create a literal "$k" key).
+                        RecordKey::Interpolated(parts) => {
+                            self.eval_string_parts_async(parts).await?
+                        }
                     };
                     let value = self.eval_expr_async(&entry.value).await?;
                     map.insert(key, crate::interpreter::value_to_json(&value));

@@ -156,6 +156,47 @@ async fn record_literal_quoted_key() {
 }
 
 #[tokio::test]
+async fn record_literal_double_quoted_key_interpolates() {
+    // `{"$k": v}` resolves $k like any double-quoted string — it used to
+    // silently create a literal "$k" key (2026-07-03 review, gemini #10).
+    let k = setup().await;
+    let (out, code, err) =
+        run(&k, r#"k=port; r={"$k": 8080}; echo ${r[port]} ${#r}"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "8080 1", "key must be the resolved name, no phantom $k");
+}
+
+#[tokio::test]
+async fn record_literal_braced_key_interpolates_composite() {
+    let k = setup().await;
+    let (out, code, err) =
+        run(&k, r#"k=port; r={"${k}_num": 1}; keys $r"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, r#"["port_num"]"#);
+}
+
+#[tokio::test]
+async fn record_literal_single_quoted_key_stays_literal() {
+    // Single quotes are the escape hatch for a literal `$` in a key — same
+    // quoting contract as everywhere else in the shell.
+    let k = setup().await;
+    let (out, code, err) = run(&k, r#"r={'$k': 1}; keys $r"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, r#"["$k"]"#);
+}
+
+#[tokio::test]
+async fn record_literal_undefined_var_key_is_empty_string() {
+    // An unset var in a double-quoted key expands to "" — the ratified
+    // string-interpolation rule (undefined root in a string is empty), applied
+    // consistently. An empty-string key is a legal record key.
+    let k = setup().await;
+    let (out, code, err) = run(&k, r#"r={"$nope_undefined": 1}; keys $r"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, r#"[""]"#);
+}
+
+#[tokio::test]
 async fn record_literal_access_by_bareword_key() {
     let k = setup().await;
     let (out, code, err) = run(&k, "u={port: 8080}; echo ${u[port]}").await;

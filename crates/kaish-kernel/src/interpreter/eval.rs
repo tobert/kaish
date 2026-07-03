@@ -292,6 +292,12 @@ impl<'a, E: Executor> Evaluator<'a, E> {
         for entry in entries {
             let key = match &entry.key {
                 RecordKey::Bare(s) | RecordKey::Quoted(s) => s.clone(),
+                // `{"$k": v}` — a double-quoted key resolves like any
+                // double-quoted string (issue found by the 2026-07-03 review:
+                // it used to silently create a literal "$k" key).
+                RecordKey::Interpolated(parts) => {
+                    value_to_string(&self.eval_interpolated(parts)?)
+                }
             };
             let value = self.eval(&entry.value)?;
             map.insert(key, kaish_types::value_to_json(&value));
@@ -694,14 +700,19 @@ pub fn value_defaults_on_emptiness(value: &Value) -> bool {
     }
 }
 
-/// `${#path}` length semantics over the shared path resolver. An unset *root* is
-/// length 0 (bash parity for `${#unset}`); a missing key, out-of-bounds index,
-/// or shape error is loud (consistent with bare `${u[nope]}` being loud). The
-/// resolver borrows the tree — no whole-root clone.
+/// `${#path}` length semantics over the shared path resolver. An unset BARE
+/// root is length 0 (bash parity for `${#unset}`); an unset root under a
+/// SUBSCRIPTED path is loud, consistent with bare `${nope[k]}` — a typo'd name
+/// in `while [[ ${#queue[items]} -gt 0 ]]` must not silently count 0 forever
+/// (2026-07-03 review finding). Missing key, out-of-bounds index, and shape
+/// errors stay loud. The resolver borrows the tree — no whole-root clone.
 pub fn resolve_length(scope: &Scope, path: &VarPath) -> Result<i64, String> {
     match scope.resolve_path(path) {
         Ok(value) => Ok(value_length(&value)),
-        Err(super::scope::PathError::UndefinedRoot(_)) => Ok(0),
+        Err(super::scope::PathError::UndefinedRoot(_)) if path.segments.len() <= 1 => Ok(0),
+        Err(super::scope::PathError::UndefinedRoot(_)) => {
+            Err(format!("{}: undefined variable", format_path(path)))
+        }
         Err(super::scope::PathError::Absence(msg)) | Err(super::scope::PathError::Shape(msg)) => {
             Err(msg)
         }

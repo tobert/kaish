@@ -324,6 +324,11 @@ pub fn format_expr(expr: &Expr) -> String {
                     let key = match &entry.key {
                         RecordKey::Bare(s) => s.clone(),
                         RecordKey::Quoted(s) => format!("\"{}\"", s),
+                        RecordKey::Interpolated(parts) => {
+                            let parts_str: Vec<String> =
+                                parts.iter().map(format_string_part).collect();
+                            format!("(interpolated {})", parts_str.join(" "))
+                        }
                     };
                     format!("({} {})", key, format_expr(&entry.value))
                 })

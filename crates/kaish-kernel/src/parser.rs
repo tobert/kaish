@@ -2259,12 +2259,22 @@ where
     V: Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
 {
     let bare_key = select! { Token::Ident(s) => RecordKey::Bare(s) };
-    let quoted_key = choice((
-        select! { Token::String(s) => s },
-        select! { Token::SingleString(s) => s },
-    ))
-    .map(RecordKey::Quoted);
-    let key = choice((quoted_key, bare_key)).labelled("record key");
+    // A double-quoted key interpolates like any double-quoted string ({"$k": v}
+    // resolves $k at eval time — it used to silently create a literal "$k"
+    // key); a pure-literal result folds back to Quoted so the common case
+    // carries no eval overhead. Single quotes stay verbatim — the escape hatch
+    // for a literal `$` in a key.
+    let double_key = select! { Token::String(s) => s }.try_map(|s, span| {
+        let parts = parse_interpolated_string(&s)
+            .map_err(|e| Rich::custom(span, format!("record key: {e}")))?;
+        Ok(match parts.as_slice() {
+            [] => RecordKey::Quoted(String::new()),
+            [StringPart::Literal(lit)] => RecordKey::Quoted(lit.clone()),
+            _ => RecordKey::Interpolated(parts),
+        })
+    });
+    let single_key = select! { Token::SingleString(s) => RecordKey::Quoted(s) };
+    let key = choice((double_key, single_key, bare_key)).labelled("record key");
 
     let entry = key
         .then_ignore(just(Token::Colon))

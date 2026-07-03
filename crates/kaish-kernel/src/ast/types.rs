@@ -345,12 +345,15 @@ pub struct RecordEntry {
     pub value: Expr,
 }
 
-/// A record literal key: `{name: amy}` (bare) or `{"content-type": x}` (quoted,
-/// for anything that isn't a bareword). See `docs/arrays-and-hashes.md`.
+/// A record literal key: `{name: amy}` (bare), `{"content-type": x}` (quoted,
+/// for anything that isn't a bareword), or `{"$k": x}` (double-quoted with
+/// interpolation — resolved at eval time like any double-quoted string; single
+/// quotes are the literal-`$` escape hatch). See `docs/arrays-and-hashes.md`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RecordKey {
     Bare(String),
     Quoted(String),
+    Interpolated(Vec<StringPart>),
 }
 
 /// Human-readable value-kind name for a spread (`[...expr]`) operand that
