@@ -11,6 +11,10 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **Redirects now work inside `$(...)`** — `x=$(cmd > file)`, `$(cmd 2> err)`,
+  `$(cmd >> log)` and friends parse and run, matching the top-level command
+  grammar (the command-substitution body used to reject any redirect). Control
+  structures inside `$()` remain out of scope.
 - **`fromjsonl` / `tojsonl`** — the JSONL (NDJSON) doors, GH #80. `fromjsonl`
   parses strictly line-oriented JSONL text (one JSON document per line, blank
   lines skipped, any bad line — including a truncated trailing one — a loud
@@ -220,6 +224,15 @@ breaking entries are marked **BREAKING**.
   demotion of `\|` to plain `|`).
 
 ### Fixed
+- **A stdout redirect now clears the structured `.data` sideband too**, not just
+  `.out`/`.output`. `.data` is the structured view of stdout, so `> file` /
+  `>> file` / `&> file` take it along with the text: `x=$(cmd > file)` captures
+  `""` (bash parity) and `cmd > file | consumer` no longer leaks a structured
+  value past its own redirect. A pending confirmation-latch request is the one
+  exception — it is a control-plane signal, not stdout, so it survives a
+  redirect (a latched `rm precious > log` still gates). Consequence: recovering
+  a redirected command's `.data` after the fact (`cmd > /dev/null; kaish-last`)
+  no longer works — don't redirect the output you meant to capture.
 - **`"$(cmd)"` no longer drops a `.data`-only result to `""`** — quoted command
   substitution used to read only a command's `.out` text; a tool that set
   structured `.data` (a list/record) but left `.out` empty interpolated to

@@ -413,6 +413,33 @@ impl ExecResult {
         self.out = OutputPayload::Text(String::new());
     }
 
+    /// Drop every representation of stdout: the text `.out`, the structured
+    /// `.output`, and the *data-plane* `.data` sideband. Used when a stdout
+    /// redirect (`> file`, `>> file`, `&> file`) has consumed the command's
+    /// output — the bytes went to the file, so nothing flows onward to a pipe,
+    /// a `$(...)` capture, or the `.data` sideband. Clearing all three in one
+    /// place keeps them from drifting: a redirect that cleared `.out`/`.output`
+    /// but left `.data` would leak structured data past its own redirect
+    /// (`x=$(fromjson … > file)` capturing the value instead of `""`).
+    ///
+    /// A pending confirmation-latch request is the exception. `.data` is
+    /// overloaded: for `seq`/`jq`/`fromjson` it is the structured view of
+    /// stdout (clear it), but for a latched `rm` it is a *control-plane* signal
+    /// — the nonce the frontend needs to approve the operation. That is not
+    /// stdout and must survive the redirect, or `rm precious > log` becomes a
+    /// silent, unconfirmable delete-in-waiting. `latch_request()` matches only
+    /// the exact exit-2 + `LatchRequest` envelope, so ordinary structured data
+    /// is never mistaken for it. This discriminator is a bridge: once the latch
+    /// gets its own typed field (GH #92), `.data` is unambiguously data-plane
+    /// and this becomes an unconditional `self.data = None`.
+    pub fn clear_stdout(&mut self) {
+        self.out = OutputPayload::Text(String::new());
+        self.output = None;
+        if self.latch_request().is_none() {
+            self.data = None;
+        }
+    }
+
     /// Replace `.output`.
     pub fn set_output(&mut self, o: Option<OutputData>) {
         self.output = o;

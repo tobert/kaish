@@ -17,27 +17,36 @@ async fn setup() -> Arc<Kernel> {
         .into_arc()
 }
 
+/// kaish-last runs last, so its output is the final line of the captured
+/// stream. The producer's own stdout precedes it and can no longer be silenced
+/// with `> /dev/null`: a stdout redirect now drops `.data` too (it is the
+/// structured view of stdout, so it rides the redirect to the file — see
+/// `redirect_in_cmdsubst_tests.rs`). Isolating kaish-last's contribution by the
+/// last line keeps these tests honest about that shared stream.
+fn last_line(s: &str) -> &str {
+    s.trim().lines().last().unwrap_or("")
+}
+
 #[tokio::test]
 async fn emits_data_as_json_from_jq() {
-    // Discard jq's stdout so r.text_out() reflects only kaish-last's output.
     let k = setup().await;
     let r = k
-        .execute(r#"echo '["a","b","c"]' | jq -r '.[]' > /dev/null; kaish-last"#)
+        .execute(r#"echo '["a","b","c"]' | jq -r '.[]'; kaish-last"#)
         .await
         .expect("script ran");
     assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
-    assert_eq!(r.text_out().trim(), r#"["a","b","c"]"#);
+    assert_eq!(last_line(&r.text_out()), r#"["a","b","c"]"#);
 }
 
 #[tokio::test]
 async fn emits_data_as_json_from_seq() {
     let k = setup().await;
     let r = k
-        .execute(r#"seq 1 5 > /dev/null; kaish-last"#)
+        .execute(r#"seq 1 5; kaish-last"#)
         .await
         .expect("script ran");
     assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
-    assert_eq!(r.text_out().trim(), "[1,2,3,4,5]");
+    assert_eq!(last_line(&r.text_out()), "[1,2,3,4,5]");
 }
 
 #[tokio::test]
@@ -46,22 +55,22 @@ async fn data_can_be_piped_into_jq() {
     // jq consumes it.
     let k = setup().await;
     let r = k
-        .execute(r#"seq 1 5 > /dev/null; kaish-last | jq '.[2]'"#)
+        .execute(r#"seq 1 5; kaish-last | jq '.[2]'"#)
         .await
         .expect("script ran");
     assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
-    assert_eq!(r.text_out().trim(), "3");
+    assert_eq!(last_line(&r.text_out()), "3");
 }
 
 #[tokio::test]
 async fn capture_via_command_substitution() {
     let k = setup().await;
     let r = k
-        .execute(r#"seq 1 3 > /dev/null; DATA=$(kaish-last); echo "$DATA""#)
+        .execute(r#"seq 1 3; DATA=$(kaish-last); echo "$DATA""#)
         .await
         .expect("script ran");
     assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
-    assert_eq!(r.text_out().trim(), "[1,2,3]");
+    assert_eq!(last_line(&r.text_out()), "[1,2,3]");
 }
 
 #[tokio::test]

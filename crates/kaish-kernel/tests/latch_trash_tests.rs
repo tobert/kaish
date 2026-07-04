@@ -108,6 +108,39 @@ async fn latch_gates_rm_then_confirm_hint_deletes() {
 }
 
 #[tokio::test]
+async fn latch_survives_stdout_redirect() {
+    // A stdout redirect on a latched `rm` must NOT disable the confirmation
+    // gate. `apply_redirects` clears the *data-plane* `.data` (the structured
+    // view of stdout) on a stdout redirect — but the latch nonce is a
+    // *control-plane* signal, not stdout. Dropping it would silently turn
+    // `rm precious.txt > log` into an unconfirmable delete-in-waiting: exit 2,
+    // no recoverable nonce, file stranded. Regression guard for the
+    // `.data`-clearing that landed with redirect-inside-`$()` support.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("precious.txt"), "data").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    run(&kernel, "set -o latch").await;
+    let gated = run(&kernel, "rm precious.txt > out.log").await;
+
+    assert_eq!(
+        gated.code, 2,
+        "a redirect must not bypass the latch gate: {}",
+        gated.err
+    );
+    assert!(
+        gated.latch_request().is_some(),
+        "the latch nonce must survive a stdout redirect (it is control-plane, \
+         not stdout); got data: {:?}",
+        gated.data
+    );
+    assert!(
+        dir.path().join("precious.txt").exists(),
+        "file must survive the latch gate even with a redirect"
+    );
+}
+
+#[tokio::test]
 async fn latch_bogus_nonce_fails_and_file_survives() {
     let dir = tempdir();
     std::fs::write(dir.path().join("precious.txt"), "data").expect("write");

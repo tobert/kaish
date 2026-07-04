@@ -14,6 +14,54 @@ before it ships.
 
 ---
 
+## Redirects inside `$()`, and what that taught us about `.data` (2026-07-04)
+
+Started from a curiosity: a test comment said "kaish's grammar doesn't accept a
+redirect inside `$(...)`." It turned out to be a one-line gap — `cmd_subst_parser`
+hardcoded `redirects: vec![]` and never called `redirect_parser` — but wiring it
+up surfaced two deeper things.
+
+**The parser cycle.** Naively calling `redirect_parser()` from the cmd-subst body
+stack-overflowed at *parse* time: `redirect_parser` built `primary_expr_parser()`
+for its target, `primary_expr_parser` builds a `cmd_subst_parser`, which now calls
+`redirect_parser` again — an unbounded *construction* cycle. Fix: parameterize
+`redirect_parser` on its target parser. The top level passes a fresh
+`primary_expr_parser()`; the cmd-subst body passes its already-recursive `expr`
+handle, so the nested target flows through chumsky's existing `recursive` wrapper
+instead of constructing a new parser at each depth. `$(cmd > $(subst))` now parses.
+
+**What a stdout redirect means for `.data`.** The interesting part. `$()` capture
+prefers a result's structured `.data` over its text, so `x=$(seq 1 3 > file)` was
+capturing `[1,2,3]` instead of bash's `""` — the redirect sent the text to the
+file but left `.data` intact. We decided `.data` is *the structured view of
+stdout* (every builtin that sets it — seq/jq/fromjson/keys/find — does so as the
+typed form of what it wrote to stdout), so a stdout redirect must take `.data`
+with it. New `ExecResult::clear_stdout()` clears `.out`/`.output`/`.data` together;
+the three file-redirect arms and (caught in review) the `1>&2` merge arm all route
+through it. This also kills a pipe-sideband leak (`cmd > file | consumer`) and
+makes `for x in $(cmd > file)` correctly iterate zero times.
+
+**Two things this disturbed.** First, four `kaish-last` tests broke — they used
+`producer > /dev/null; kaish-last` where the `> /dev/null` was a *harness trick*
+to silence the producer's stdout in the shared capture stream (the line-22 comment
+said so), and leaned on `.data` surviving that redirect. That reliance was an
+accident of the original `.data` rollout, not a contract; rewrote them to isolate
+kaish-last's output by its last line, no redirect. Second, and more important:
+`.data` is *overloaded* — for `rm` under `set -o latch` it carries the
+confirmation nonce, a control-plane signal, not stdout. Blanket-clearing `.data`
+silently disabled the safety gate on `rm precious > log` (a TDD guard caught it).
+The scoped fix: `clear_stdout` preserves `.data` when `latch_request()` matches
+(exit-2 + the exact `LatchRequest` envelope). Amy's call: that overloading is a
+real smell, but the latch deserves a first-class typed public-API field of its
+own rather than being refactored as a rider on this change — deferred to its own
+worktree so neither feature's boundary gets weakened.
+
+Cross-family review (DeepSeek + Gemini via kaibo, whole files, no diff) converged
+independently on the one bug this text glosses: the `1>&2` arm cleared only
+`.out`, leaking `.data`. Fixed, with a guard test. Review also surfaced GH #90 —
+`$()` in a redirect *target* fails for a bare single command (dispatcher not
+attached) — a pre-existing bug, orthogonal, filed not fixed here.
+
 ## scatter/gather's own flag values could silently drop a bad subscript (2026-07-03)
 
 A 0.11.0 pre-release punch-list item: `scatter`/`gather` bind their OWN flag

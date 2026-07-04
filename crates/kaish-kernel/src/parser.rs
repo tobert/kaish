@@ -1579,7 +1579,7 @@ where
     // (verified empirically 2026-06-07; see docs/issues.md).
     command_name
         .then(args_list_parser())
-        .then(redirect_parser().repeated().collect::<Vec<_>>())
+        .then(redirect_parser(primary_expr_parser()).repeated().collect::<Vec<_>>())
         .map(|((name, args), redirects)| Command {
             name,
             args,
@@ -1837,10 +1837,20 @@ where
 }
 
 /// Redirect: `> file`, `>> file`, `< file`, `<< heredoc`, `2> file`, `&> file`, `2>&1`
-fn redirect_parser<'tokens, I>(
+///
+/// `target` parses the file word (and here-string body). Callers pass the
+/// expression parser appropriate to their context: the top-level command
+/// grammar passes a fresh `primary_expr_parser()`, while `cmd_subst_parser`
+/// passes its *already-recursive* `expr` handle. Threading it in (rather than
+/// building `primary_expr_parser()` internally) is what lets `$(cmd > file)`
+/// parse without an unbounded `cmd_subst → redirect → primary_expr → cmd_subst`
+/// construction cycle.
+fn redirect_parser<'tokens, I, T>(
+    target: T,
 ) -> impl Parser<'tokens, I, Redirect, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
+    T: Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
 {
     // Regular redirects: >, >>, <, 2>, &>
     let regular_redirect = select! {
@@ -1850,7 +1860,7 @@ where
         Token::Stderr => RedirectKind::Stderr,
         Token::Both => RedirectKind::Both,
     }
-    .then(primary_expr_parser())
+    .then(target.clone())
     .map(|(kind, target)| Redirect { kind, target });
 
     // Here-doc redirect: << content
@@ -1901,7 +1911,7 @@ where
     // The target is any single expression; kaish's existing Expr machinery
     // handles interpolation, single-quoted literals, and command substitution.
     let herestring_redirect = just(Token::HereString)
-        .ignore_then(primary_expr_parser())
+        .ignore_then(target.clone())
         .map(|target| Redirect {
             kind: RedirectKind::HereString,
             target,
@@ -2436,7 +2446,7 @@ fn cmd_subst_parser<'tokens, I, E>(
 ) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
-    E: Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone,
+    E: Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
 {
     // Argument parser using the recursive expression parser
     // Long flag with value: --name=value
@@ -2465,7 +2475,7 @@ where
         .map(|(key, value)| Arg::WordAssign { key, value });
 
     // Positional argument
-    let positional = expr.map(Arg::Positional);
+    let positional = expr.clone().map(Arg::Positional);
 
     let arg = choice((
         long_flag_with_value,
@@ -2482,13 +2492,23 @@ where
         just(Token::False).to("false".to_string()),
     ));
 
-    // Command parser
+    // Command parser. Trailing redirects (`> file`, `2> file`, `>> file`, …)
+    // reuse the same `redirect_parser` combinator the top-level
+    // `command_parser` uses, so `$(cmd > file)` parses like any other command.
+    // The redirect *target* threads the recursive `expr` handle (not a fresh
+    // `primary_expr_parser()`) so the target may itself contain `$(...)` while
+    // avoiding an unbounded parser-construction cycle.
     let command = command_name
         .then(arg.repeated().collect::<Vec<_>>())
-        .map(|(name, args)| Command {
+        .then(
+            redirect_parser(expr.clone())
+                .repeated()
+                .collect::<Vec<_>>(),
+        )
+        .map(|((name, args), redirects)| Command {
             name,
             args,
-            redirects: vec![],
+            redirects,
         });
 
     // Pipeline parser
@@ -3655,6 +3675,89 @@ mod tests {
                 assert_eq!(pipeline.commands[1].name, "grep");
             }
             other => panic!("expected assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cmd_subst_with_redirect() {
+        // Regression: `cmd_subst_parser` used to hardcode `redirects: vec![]`,
+        // so a redirect inside `$()` was a parse error. A command carrying a
+        // redirect stays a `Stmt::Pipeline` (`pipeline_into_stmt` only unwraps
+        // redirect-free commands), so read it back through `subst_pipeline`.
+        let result = parse("X=$(echo hi > out.txt)").unwrap();
+        match &result.statements[0] {
+            Stmt::Assignment(a) => {
+                let pipeline = subst_pipeline(&a.value);
+                assert_eq!(pipeline.commands.len(), 1);
+                let cmd = &pipeline.commands[0];
+                assert_eq!(cmd.name, "echo");
+                assert_eq!(cmd.redirects.len(), 1);
+                assert!(matches!(
+                    cmd.redirects[0].kind,
+                    RedirectKind::StdoutOverwrite
+                ));
+            }
+            other => panic!("expected assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cmd_subst_redirect_target_with_nested_subst() {
+        // The cycle-break's sharpest case: a `$(...)` in the redirect *target*,
+        // inside a `$(...)`. This exercises cmd_subst → redirect → (recursive
+        // expr) → cmd_subst, the path that used to recurse unboundedly during
+        // parser construction (stack overflow). It must parse; the target is a
+        // nested `CommandSubst`.
+        let result = parse("X=$(echo hi > $(echo f))").unwrap();
+        match &result.statements[0] {
+            Stmt::Assignment(a) => {
+                let pipeline = subst_pipeline(&a.value);
+                assert_eq!(pipeline.commands.len(), 1);
+                let cmd = &pipeline.commands[0];
+                assert_eq!(cmd.name, "echo");
+                assert_eq!(cmd.redirects.len(), 1);
+                assert!(
+                    matches!(cmd.redirects[0].target, Expr::CommandSubst(_)),
+                    "redirect target should be a nested command substitution, got {:?}",
+                    cmd.redirects[0].target
+                );
+            }
+            other => panic!("expected assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cmd_subst_chain_with_redirect() {
+        // A redirect in a chained `$()` body binds to its own command, not to
+        // the chain: `$(a && b > f)` → AndChain{ left: a, right: (b > f) }, with
+        // the redirect on `b` only.
+        let result = parse("X=$(echo a && echo b > out.txt)").unwrap();
+        let stmts = match &result.statements[0] {
+            Stmt::Assignment(a) => match &a.value {
+                Expr::CommandSubst(s) => s,
+                other => panic!("expected command subst, got {:?}", other),
+            },
+            other => panic!("expected assignment, got {:?}", other),
+        };
+        match stmts.as_slice() {
+            [Stmt::AndChain { left, right }] => {
+                // `echo a` is redirect-free → unwrapped to Stmt::Command.
+                assert!(
+                    matches!(**left, Stmt::Command(_)),
+                    "left of && should be a bare command, got {:?}",
+                    left
+                );
+                // `echo b > out.txt` carries a redirect → stays Stmt::Pipeline.
+                match &**right {
+                    Stmt::Pipeline(p) => {
+                        assert_eq!(p.commands.len(), 1);
+                        assert_eq!(p.commands[0].name, "echo");
+                        assert_eq!(p.commands[0].redirects.len(), 1);
+                    }
+                    other => panic!("right should be a redirect-bearing pipeline, got {:?}", other),
+                }
+            }
+            other => panic!("expected a single AndChain, got {:?}", other),
         }
     }
 

@@ -61,8 +61,14 @@ async fn apply_redirects(
                 if !result.text_out().is_empty() {
                     let out = result.text_out().into_owned();
                     result.err.push_str(&out);
-                    result.clear_out();
                 }
+                // `1>&2` is still a stdout redirect: stdout went to stderr, so
+                // drop out/output AND the .data sideband (same as a file
+                // redirect), or a structured result leaks past `x=$(cmd >&2)`
+                // and `cmd >&2 | consumer`. Unconditional so a .data-only,
+                // empty-.out result is cleared too. clear_stdout preserves a
+                // control-plane latch request.
+                result.clear_stdout();
             }
             RedirectKind::StdoutOverwrite => {
                 let path = match eval_redirect_target(&redir.target, ctx).await {
@@ -86,8 +92,8 @@ async fn apply_redirects(
                 } else if let Err(e) = redirect_write(ctx, &path, result.text_out().as_bytes()).await {
                     return ExecResult::failure(1, format!("redirect: {e}"));
                 }
-                result.clear_out();
-                result.set_output(None);
+                // stdout went to the file: drop out/output AND the .data sideband.
+                result.clear_stdout();
             }
             RedirectKind::StdoutAppend => {
                 let path = match eval_redirect_target(&redir.target, ctx).await {
@@ -111,8 +117,8 @@ async fn apply_redirects(
                 } else if let Err(e) = redirect_append(ctx, &path, result.text_out().as_bytes()).await {
                     return ExecResult::failure(1, format!("redirect: {e}"));
                 }
-                result.clear_out();
-                result.set_output(None);
+                // stdout went to the file: drop out/output AND the .data sideband.
+                result.clear_stdout();
             }
             RedirectKind::Stderr => {
                 let path = match eval_redirect_target(&redir.target, ctx).await {
@@ -139,8 +145,8 @@ async fn apply_redirects(
                 if let Err(e) = redirect_write(ctx, &path, &combined).await {
                     return ExecResult::failure(1, format!("redirect: {e}"));
                 }
-                result.clear_out();
-                result.set_output(None);
+                // both streams went to the file: drop stdout (incl. .data) + stderr.
+                result.clear_stdout();
                 result.err.clear();
             }
             // Pre-execution redirects - already handled before command execution
