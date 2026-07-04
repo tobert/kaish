@@ -153,6 +153,24 @@ async fn arity_errors_are_loud() {
     assert_eq!(code_of("test a b").await, 2, "two barewords, no operator");
 }
 
+/// Subtle arity edges around the leading-`!` parity strip and operators that
+/// appear in operand position — each must resolve to a definite true/false or a
+/// loud exit 2, never a surprise. (Pinned after a kaibo review confirmed the
+/// behavior but found no coverage.)
+#[tokio::test]
+async fn arity_edge_cases() {
+    // Double negation collapses by parity: `! ! x` == `x` (non-empty → true).
+    assert_eq!(code_of("test ! ! x").await, 0, "! ! x is identity on non-empty");
+    // A bare `!` left after the strip has no expression → loud.
+    assert_eq!(code_of("test ! !").await, 2, "trailing bare ! is a usage error");
+    // `=` is a binary op, not unary — `! = x` has no valid primary → loud.
+    assert_eq!(code_of("test ! = x").await, 2, "= is not a unary operator");
+    // The operator token as a literal operand: `= = =` is string-eq of "=","=".
+    assert_eq!(code_of("test = = =").await, 0, r#""=" equals "=""#);
+    // An operator in operand position of a unary test: file named "-f".
+    assert_eq!(code_of("test -f -f").await, 1, r#"stats a file literally named "-f""#);
+}
+
 // --- compound (-a/-o) is rejected loudly, shell chaining is the path --------
 
 #[tokio::test]
