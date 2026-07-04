@@ -3152,13 +3152,16 @@ impl Kernel {
         // for a precise `Kernel::confirm` replay — no re-parsing of the human
         // `hint`. `to_argv()` is computed before `tool_args` moves into execute.
         //
-        // Gated on `latch_enabled`: a latch can only fire when armed, so in the
-        // common (latch-off) case this stays out of the hot dispatch path —
-        // no allocation and no extra frame weight for deep `$()`/recursion,
-        // which would otherwise cost stack headroom (GH #46/#47).
-        if ctx.scope.latch_enabled() {
-            ctx.current_invocation = Some(Box::new((name.to_string(), tool_args.to_argv())));
-        }
+        // Captured unconditionally, NOT gated on `latch_enabled`: `kaish-trash
+        // empty` gates every time (it's inherently destructive, independent of
+        // `set -o latch`), so a `latch_enabled`-only gate would leave its
+        // `tool`/`argv` empty and break `confirm`. The cost is a small argv
+        // clone per command — marginal beside the per-command ExecContext
+        // snapshot above — and it does NOT reintroduce the deep-`$()` stack
+        // overflow (that was the inline `LatchRequest` in `ExecResult`, now
+        // boxed; the capture's temporaries don't survive into the recursive
+        // `tool.execute` below).
+        ctx.current_invocation = Some(Box::new((name.to_string(), tool_args.to_argv())));
 
         let result = tool.execute(tool_args, &mut ctx).await;
 

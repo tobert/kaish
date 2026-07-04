@@ -265,6 +265,33 @@ async fn confirm_replays_a_gate_overwrite() {
 }
 
 #[tokio::test]
+async fn confirm_replays_a_subcommand_gate() {
+    // `kaish-trash empty` gates *unconditionally* (inherently destructive — no
+    // `set -o latch` needed), and its dispatch name ("kaish-trash") differs from
+    // its display command ("kaish-trash empty"). Two things to prove: the seam
+    // captures the argv even with latch off (so `confirm` has tool/argv), and
+    // replaying `execute_argv("kaish-trash", ["--confirm=N", "--", "empty"])`
+    // recomputes the same command scope the nonce was issued under, so it
+    // validates.
+    let dir = tempdir();
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    let gated = run(&kernel, "kaish-trash empty").await;
+    assert_eq!(gated.code, 2, "empty gates unconditionally: {}", gated.err);
+    let req = gated.latch_request().expect("a latch request");
+    assert_eq!(req.tool, "kaish-trash", "dispatch name for replay");
+    assert!(
+        req.argv.iter().any(|a| a == "empty"),
+        "the subcommand token must be captured in argv: {:?}",
+        req.argv
+    );
+
+    let done = kernel.confirm(&req).await.expect("confirm executes");
+    assert_eq!(done.code, 0, "confirm should empty the trash: {}", done.err);
+}
+
+#[tokio::test]
 async fn confirm_without_captured_invocation_errors() {
     // A latch with no captured argv (produced outside a dispatch seam) can't be
     // replayed — `confirm` fails loud (exit 2) rather than silently no-op.
