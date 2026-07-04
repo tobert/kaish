@@ -347,8 +347,14 @@ impl PipelineRunner {
             Ok(args) => args,
             Err(e) => return ExecResult::failure(1, format!("gather: {e}")),
         };
-        let scatter_opts = parse_scatter_options(&scatter_args);
-        let gather_opts = parse_gather_options(&gather_args);
+        let scatter_opts = match parse_scatter_options(&scatter_args) {
+            Ok(opts) => opts,
+            Err(e) => return ExecResult::failure(2, format!("scatter: {e}")),
+        };
+        let gather_opts = match parse_gather_options(&gather_args) {
+            Ok(opts) => opts,
+            Err(e) => return ExecResult::failure(2, format!("gather: {e}")),
+        };
 
         // We need an `Arc<dyn CommandDispatcher>` to hand to `ScatterGatherRunner`.
         // `fork_attached` produces a subkernel whose cancellation token is a
@@ -1071,7 +1077,12 @@ fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -
         match part {
             crate::ast::StringPart::Literal(s) => result.push_str(s),
             crate::ast::StringPart::Var(path) => match ctx.scope.resolve_path(path) {
-                Ok(value) => result.push_str(&value_to_string(&value)),
+                // Text sink: binary goes loud, never the `[binary: N bytes]`
+                // placeholder — matches the async `eval_string_part_async`
+                // (kernel.rs) and sync `eval_interpolated` (eval.rs).
+                Ok(value) => result.push_str(
+                    &crate::interpreter::value_to_text_sink(&value).map_err(|e| e.to_string())?,
+                ),
                 // Unconditional (even subscripted) on purpose: in STRING
                 // context both primary sites — async `eval_string_part_async`
                 // (kernel.rs) and sync `eval_interpolated` (eval.rs) — expand
@@ -1084,7 +1095,9 @@ fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -
             },
             crate::ast::StringPart::VarWithDefault { path, default } => {
                 match crate::interpreter::resolve_default(&ctx.scope, path)? {
-                    Some(value) => result.push_str(&value_to_string(&value)),
+                    Some(value) => result.push_str(
+                        &crate::interpreter::value_to_text_sink(&value).map_err(|e| e.to_string())?,
+                    ),
                     None => result.push_str(&eval_string_parts_sync(default, ctx)?),
                 }
             }

@@ -54,7 +54,7 @@ pub use kaish_types::{CommandKind, ExecuteOptions};
 use crate::backend::{BackendError, KernelBackend};
 use kaish_glob::glob_match;
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
-use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value_no_envelope, value_to_bool, value_to_string, ControlFlow, ExecResult, PathError, Scope};
+use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value_no_envelope, value_to_bool, value_to_string, value_to_text_sink, ControlFlow, ExecResult, PathError, Scope};
 use crate::parser::parse;
 use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_stream, BoundedStream, JobManager, PipelineRunner, StderrReceiver};
 #[cfg(feature = "subprocess")]
@@ -3691,7 +3691,9 @@ impl Kernel {
                         return Err(anyhow::anyhow!(msg));
                     }
                     let value = apply_tilde_expansion(value, home.as_deref());
-                    argv.push(value_to_string(&value));
+                    // External-command argv is a text sink: a bare `$BIN` binary
+                    // word goes loud, never the `[binary: N bytes]` placeholder.
+                    argv.push(value_to_text_sink(&value).map_err(|e| anyhow::anyhow!("{e}"))?);
                 }
                 Arg::Named { key, value } => {
                     let val = self.eval_expr_async(value).await?;
@@ -3699,7 +3701,8 @@ impl Kernel {
                         return Err(anyhow::anyhow!(msg));
                     }
                     let val = apply_tilde_expansion(val, home.as_deref());
-                    argv.push(format!("--{}={}", key, value_to_string(&val)));
+                    let val_str = value_to_text_sink(&val).map_err(|e| anyhow::anyhow!("{e}"))?;
+                    argv.push(format!("--{key}={val_str}"));
                 }
                 Arg::WordAssign { key, value } => {
                     let val = self.eval_expr_async(value).await?;
@@ -3707,7 +3710,8 @@ impl Kernel {
                         return Err(anyhow::anyhow!(msg));
                     }
                     let val = apply_tilde_expansion(val, home.as_deref());
-                    argv.push(format!("{}={}", key, value_to_string(&val)));
+                    let val_str = value_to_text_sink(&val).map_err(|e| anyhow::anyhow!("{e}"))?;
+                    argv.push(format!("{key}={val_str}"));
                 }
                 Arg::ShortFlag(name) => {
                     // Preserve original format: -l, -la (combined flags)
@@ -4089,7 +4093,10 @@ impl Kernel {
                 StringPart::Var(path) => {
                     let scope = self.scope.read().await;
                     match scope.resolve_path(path) {
-                        Ok(value) => Ok(value_to_string(&value)),
+                        // Text sink: binary goes loud, never the placeholder —
+                        // a `b=$(cat blob)` capture holds real bytes; splicing
+                        // `[binary: N bytes]` into "$b" would be silent loss.
+                        Ok(value) => value_to_text_sink(&value).map_err(|e| anyhow::anyhow!("{e}")),
                         // Unset vars expand to empty; loud path errors surface.
                         Err(PathError::UndefinedRoot(_)) => Ok(String::new()),
                         Err(PathError::Absence(msg)) | Err(PathError::Shape(msg)) => {
@@ -4104,7 +4111,7 @@ impl Kernel {
                             .map_err(|msg| anyhow::anyhow!(msg))?
                     };
                     match resolved {
-                        Some(value) => Ok(value_to_string(&value)),
+                        Some(value) => value_to_text_sink(&value).map_err(|e| anyhow::anyhow!("{e}")),
                         None => self.eval_string_parts_async(default).await,
                     }
                 }

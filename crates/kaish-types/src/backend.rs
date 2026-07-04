@@ -299,7 +299,19 @@ impl From<ExecResult> for ToolResult {
         // Saturating cast: codes outside i32 range clamp to i32::MIN/MAX
         let code = exec.code.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
 
-        // Materialize text before moving fields out
+        // HAZARD: `text_out()` is the infallible/lossy decoder — a binary
+        // `OutputPayload::Bytes` (already produced by `cat`/`head`/`tail`/
+        // `base64 -d`/`xxd -r`/`dd`/`tee`/external commands, so this is real
+        // today, not merely a future risk) gets its invalid-UTF-8 bytes
+        // replaced with U+FFFD here. This `From` impl is infallible by
+        // signature, so it cannot fail loud the way `try_text_out()` does —
+        // this is an accepted, deliberate exception, not an oversight. The
+        // binary survives losslessly in the preserved `output: Option<OutputData>`
+        // field below; a structured/binary-aware consumer MUST read `output`,
+        // never `stdout`, to avoid the lossy decode. If a future embedder seam
+        // needs a fallible conversion here, add a `TryFrom` (or a bytes-carrying
+        // field) rather than changing this `From`'s behavior. See
+        // `docs/binary-data.md`.
         let stdout = exec.text_out().into_owned();
         let output = exec.take_output();
 

@@ -3,7 +3,6 @@
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -49,8 +48,19 @@ impl Tool for Echo {
         };
         // Preserve the original Value rendering (true/false/3.14/etc.) before
         // collapsing through to_argv()'s string layer — echo formats numerics
-        // specially and we don't want clap to re-stringify them.
-        let words: Vec<String> = args.positional.iter().map(value_to_string).collect();
+        // specially and we don't want clap to re-stringify them. `echo` is a
+        // pure TEXT SINK, so a binary (`Value::Bytes`) positional goes LOUD via
+        // `value_to_text_sink` rather than rendering the `[binary: N bytes]`
+        // placeholder — printing that placeholder where the user's real bytes
+        // should be is silent corruption. (Path-coercing builtins like `mkdir`
+        // and env export remain deferred — the binary-at-text-sinks cluster.)
+        let mut words = Vec::with_capacity(args.positional.len());
+        for value in &args.positional {
+            match crate::interpreter::value_to_text_sink(value) {
+                Ok(s) => words.push(s),
+                Err(e) => return ExecResult::failure(1, format!("echo: {e}")),
+            }
+        }
 
         let parsed = match EchoArgs::try_parse_from(
             std::iter::once("echo".to_string()).chain(args.to_argv()),
@@ -69,23 +79,11 @@ impl Tool for Echo {
     }
 }
 
-/// Convert a value to its string representation for echo.
-fn value_to_string(value: &Value) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Int(i) => i.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::String(s) => s.clone(),
-        Value::Json(json) => json.to_string(),
-        Value::Bytes(b) => format!("[binary: {} bytes]", b.len()),
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 

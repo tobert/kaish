@@ -205,7 +205,12 @@ impl BackendDispatcher {
                             if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &v) {
                                 return Some(ExecResult::failure(1, msg));
                             }
-                            argv.push(crate::interpreter::value_to_string(&v));
+                            // Text sink: binary goes loud (kept in sync with
+                            // kernel.rs::build_args_flat).
+                            match crate::interpreter::value_to_text_sink(&v) {
+                                Ok(s) => argv.push(s),
+                                Err(e) => return Some(ExecResult::failure(1, e.to_string())),
+                            }
                         }
                     }
                     _ => {}

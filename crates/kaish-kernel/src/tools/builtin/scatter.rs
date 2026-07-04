@@ -85,7 +85,10 @@ impl Tool for Scatter {
         parsed.global.apply(ctx);
 
         // Parse options for reporting (reads args.named to preserve Value::Int etc.)
-        let opts = parse_scatter_options(&args);
+        let opts = match parse_scatter_options(&args) {
+            Ok(opts) => opts,
+            Err(e) => return ExecResult::failure(2, format!("scatter: {e}")),
+        };
 
         // Get structured data and text from stdin (drains the pipe first, then
         // resolves the structured-data sideband — no startup race).

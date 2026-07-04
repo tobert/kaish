@@ -4,8 +4,10 @@
 //! Variable references are resolved through the Scope, and string
 //! interpolation is expanded.
 //!
-//! Command substitution (`$(pipeline)`) requires an executor, which is
-//! provided by higher layers (L6: Pipes & Jobs).
+//! Command substitution (`$(pipeline)`) is handled by the async evaluator in
+//! the kernel, which resolves each `$(...)` to a literal value before this sync
+//! evaluator runs. A `CommandSubst` node reaching the sync path is therefore a
+//! loud error, never silently executed or emptied.
 
 use std::fmt;
 
@@ -13,13 +15,10 @@ use kaish_types::json_to_value_no_envelope;
 
 use crate::arithmetic;
 use crate::ast::{
-    spread_non_list_message, BinaryOp, Expr, FileTestOp, ListElem, RecordEntry, RecordKey, Stmt,
+    spread_non_list_message, BinaryOp, Expr, ListElem, RecordEntry, RecordKey,
     StringPart, StringTestOp, TestCmpOp, TestExpr, Value, VarPath,
 };
-use crate::vfs::DirEntry;
-use std::path::Path;
 
-use super::result::ExecResult;
 use super::scope::Scope;
 
 /// Strip leading tabs from each line, per POSIX `<<-EOF` heredoc semantics.
@@ -118,7 +117,10 @@ pub enum EvalError {
     TypeError { expected: &'static str, got: String },
     /// Command substitution failed.
     CommandFailed(String),
-    /// No executor available for command substitution.
+    /// A node that only the async evaluator can handle (command substitution,
+    /// or a command used as a condition) reached the sync evaluator, which has
+    /// no way to execute pipelines. Unreachable in practice — the kernel
+    /// resolves these to literals first — but loud rather than silently empty.
     NoExecutor,
     /// Division by zero or similar arithmetic error.
     ArithmeticError(String),
@@ -139,7 +141,10 @@ impl fmt::Display for EvalError {
                 write!(f, "type error: expected {expected}, got {got}")
             }
             EvalError::CommandFailed(msg) => write!(f, "command failed: {msg}"),
-            EvalError::NoExecutor => write!(f, "no executor available for command substitution"),
+            EvalError::NoExecutor => write!(
+                f,
+                "command substitution must be resolved by the async evaluator before sync evaluation"
+            ),
             EvalError::ArithmeticError(msg) => write!(f, "arithmetic error: {msg}"),
             EvalError::RegexError(msg) => write!(f, "regex error: {msg}"),
             EvalError::Unsupported(msg) => write!(f, "{msg}"),
@@ -152,73 +157,20 @@ impl std::error::Error for EvalError {}
 /// Result type for evaluation.
 pub type EvalResult<T> = Result<T, EvalError>;
 
-/// Trait for executing pipelines (command substitution).
-///
-/// This is implemented by higher layers (L6: Pipes & Jobs) to provide
-/// actual command execution. The evaluator calls this when it encounters
-/// a `$(pipeline)` expression.
-pub trait Executor {
-    /// Execute a command-substitution body — a block of statements (the full
-    /// grammar: pipelines, `&&`/`||` chains, `;`/newline sequences) — and return
-    /// its combined result.
-    ///
-    /// The executor should:
-    /// 1. Run each statement, accumulating stdout/stderr
-    /// 2. Carry the last statement's exit code and structured data through
-    /// 3. Return an ExecResult with code, output, and parsed data
-    fn execute(&mut self, stmts: &[Stmt], scope: &mut Scope) -> EvalResult<ExecResult>;
-
-    /// Stat a file path through the VFS.
-    ///
-    /// Returns `Some(entry)` if the path exists, `None` otherwise.
-    /// Used by `[[ -d path ]]`, `[[ -f path ]]`, etc.
-    ///
-    /// Default: falls back to `std::fs::metadata` (bypasses VFS).
-    fn file_stat(&self, path: &Path) -> Option<DirEntry> {
-        std::fs::metadata(path).ok().map(|meta| {
-            if meta.is_dir() {
-                DirEntry::directory(path.file_name().unwrap_or_default().to_string_lossy())
-            } else {
-                #[allow(unused_mut)]
-                let mut entry = DirEntry::file(
-                    path.file_name().unwrap_or_default().to_string_lossy(),
-                    meta.len(),
-                );
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    entry.permissions = Some(meta.permissions().mode());
-                }
-                entry
-            }
-        })
-    }
-}
-
-/// A stub executor that always returns an error.
-///
-/// Used in L3 before the full executor is available.
-pub struct NoOpExecutor;
-
-impl Executor for NoOpExecutor {
-    fn execute(&mut self, _stmts: &[Stmt], _scope: &mut Scope) -> EvalResult<ExecResult> {
-        Err(EvalError::NoExecutor)
-    }
-}
-
 /// Expression evaluator.
 ///
-/// Evaluates AST expressions to values, using the provided scope for
-/// variable lookup and the executor for command substitution.
-pub struct Evaluator<'a, E: Executor> {
+/// Evaluates AST expressions to values using the provided scope for variable
+/// lookup. Command substitution (`$(...)`) and command-as-condition are NOT
+/// handled here — the kernel's async evaluator resolves those to literal values
+/// first; if one reaches this sync evaluator it is a loud [`EvalError`].
+pub struct Evaluator<'a> {
     scope: &'a mut Scope,
-    executor: &'a mut E,
 }
 
-impl<'a, E: Executor> Evaluator<'a, E> {
-    /// Create a new evaluator with the given scope and executor.
-    pub fn new(scope: &'a mut Scope, executor: &'a mut E) -> Self {
-        Self { scope, executor }
+impl<'a> Evaluator<'a> {
+    /// Create a new evaluator with the given scope.
+    pub fn new(scope: &'a mut Scope) -> Self {
+        Self { scope }
     }
 
     /// Evaluate an expression to a value.
@@ -243,7 +195,10 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                 Ok(Value::String(asm.into_string()))
             }
             Expr::BinaryOp { left, op, right } => self.eval_binary_op(left, *op, right),
-            Expr::CommandSubst(stmts) => self.eval_command_subst(stmts),
+            // Command substitution is resolved to a literal by the async
+            // evaluator before sync evaluation. Reaching it here is a loud
+            // error (unreachable in practice), never a silent empty string.
+            Expr::CommandSubst(_) => Err(EvalError::NoExecutor),
             Expr::Test(test_expr) => self.eval_test(test_expr),
             Expr::Positional(n) => self.eval_positional(*n),
             Expr::AllArgs => self.eval_all_args(),
@@ -318,18 +273,15 @@ impl<'a, E: Executor> Evaluator<'a, E> {
     /// Evaluate a command as a condition (exit code determines truthiness).
     fn eval_command(&mut self, cmd: &crate::ast::Command) -> EvalResult<Value> {
         // Special-case true/false builtins - they have well-known return values
-        // and don't need an executor to evaluate. Like real shells, any args are ignored.
+        // and don't need execution. Like real shells, any args are ignored.
         match cmd.name.as_str() {
-            "true" => return Ok(Value::Bool(true)),
-            "false" => return Ok(Value::Bool(false)),
-            _ => {}
+            "true" => Ok(Value::Bool(true)),
+            "false" => Ok(Value::Bool(false)),
+            // Any other command as a condition needs real execution, which only
+            // the kernel's async evaluator provides. Unreachable in practice
+            // (the async path handles command conditions); loud, not silent.
+            _ => Err(EvalError::NoExecutor),
         }
-
-        // For other commands, run the command as a one-statement block.
-        let block = [Stmt::Command(cmd.clone())];
-        let result = self.executor.execute(&block, self.scope)?;
-        // Exit code 0 = true, non-zero = false
-        Ok(Value::Bool(result.code == 0))
     }
 
     /// Evaluate arithmetic expansion: `$((expr))`
@@ -342,23 +294,16 @@ impl<'a, E: Executor> Evaluator<'a, E> {
     /// Evaluate a test expression `[[ ... ]]` to a boolean value.
     fn eval_test(&mut self, test_expr: &TestExpr) -> EvalResult<Value> {
         let result = match test_expr {
-            TestExpr::FileTest { op, path } => {
-                let path_value = self.eval(path)?;
-                let path_str = value_to_string(&path_value);
-                let path = Path::new(&path_str);
-                let entry = self.executor.file_stat(path);
-                match op {
-                    FileTestOp::Exists => entry.is_some(),
-                    FileTestOp::IsFile => entry.as_ref().is_some_and(|e| e.is_file()),
-                    FileTestOp::IsDir => entry.as_ref().is_some_and(|e| e.is_dir()),
-                    FileTestOp::Readable => entry.is_some(),
-                    FileTestOp::Writable => entry.as_ref().is_some_and(|e| {
-                        e.permissions.is_none_or(|p| p & 0o222 != 0)
-                    }),
-                    FileTestOp::Executable => entry.as_ref().is_some_and(|e| {
-                        e.permissions.is_some_and(|p| p & 0o111 != 0)
-                    }),
-                }
+            TestExpr::FileTest { .. } => {
+                // Unreachable in practice: file tests are resolved by the async
+                // `eval_test_async` (VFS-aware — it stats through the backend).
+                // The sync evaluator only ever receives Comparison/In operands
+                // pre-resolved to literals, so a FileTest here is the outside
+                // case: fail loud rather than silently stat via `std::fs` and
+                // bypass the VFS.
+                return Err(EvalError::Unsupported(
+                    "file tests must be resolved by the async evaluator".to_string(),
+                ));
             }
             TestExpr::StringTest { op, value } => match op {
                 StringTestOp::IsEmpty | StringTestOp::IsNonEmpty => {
@@ -554,7 +499,8 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                 StringPart::Literal(s) => result.push_str(s),
                 StringPart::Var(path) => {
                     match self.scope.resolve_path(path) {
-                        Ok(value) => result.push_str(&value_to_string(&value)),
+                        // Text sink: binary goes loud, never the placeholder.
+                        Ok(value) => result.push_str(&value_to_text_sink(&value)?),
                         // Unset variables expand to empty string (bash-compatible).
                         Err(super::scope::PathError::UndefinedRoot(_)) => {}
                         // A loud path error (absence or shape) is surfaced, never
@@ -567,33 +513,36 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                 }
                 StringPart::VarWithDefault { path, default } => {
                     let value = self.eval_var_with_default(path, default)?;
-                    result.push_str(&value_to_string(&value));
+                    result.push_str(&value_to_text_sink(&value)?);
                 }
                 StringPart::VarLength(path) => {
                     let value = self.eval_var_length(path)?;
-                    result.push_str(&value_to_string(&value));
+                    result.push_str(&value_to_text_sink(&value)?);
                 }
                 StringPart::Positional(n) => {
                     let value = self.eval_positional(*n)?;
-                    result.push_str(&value_to_string(&value));
+                    result.push_str(&value_to_text_sink(&value)?);
                 }
                 StringPart::AllArgs => {
                     let value = self.eval_all_args()?;
-                    result.push_str(&value_to_string(&value));
+                    result.push_str(&value_to_text_sink(&value)?);
                 }
                 StringPart::ArgCount => {
                     let value = self.eval_arg_count()?;
-                    result.push_str(&value_to_string(&value));
+                    result.push_str(&value_to_text_sink(&value)?);
                 }
                 StringPart::Arithmetic(expr) => {
                     // Parse and evaluate the arithmetic expression
                     let value = self.eval_arithmetic_string(expr)?;
-                    result.push_str(&value_to_string(&value));
+                    result.push_str(&value_to_text_sink(&value)?);
                 }
-                StringPart::CommandSubst(stmts) => {
-                    // Execute the statement block and capture its output
-                    let value = self.eval_command_subst(stmts)?;
-                    result.push_str(&value_to_string(&value));
+                StringPart::CommandSubst(_) => {
+                    // Command substitution must be resolved by the async
+                    // evaluator (kernel.rs) before sync evaluation — the sync
+                    // path has no executor. Unreachable in practice (operands
+                    // arrive pre-resolved as literals), but loud rather than
+                    // silently empty if a future sync embedder trips it.
+                    return Err(EvalError::NoExecutor);
                 }
                 StringPart::LastExitCode => {
                     result.push_str(&self.scope.last_result().code.to_string());
@@ -636,17 +585,6 @@ impl<'a, E: Executor> Evaluator<'a, E> {
         }
     }
 
-    /// Evaluate command substitution.
-    fn eval_command_subst(&mut self, stmts: &[Stmt]) -> EvalResult<Value> {
-        let result = self.executor.execute(stmts, self.scope)?;
-
-        // Update $? with the result
-        self.scope.set_last_result(result.clone());
-
-        // Return the result as a value (the result object itself)
-        // The caller can access .ok, .data, etc.
-        Ok(result_to_value(&result))
-    }
 }
 
 /// Convert a Value to its string representation for interpolation.
@@ -822,9 +760,43 @@ pub fn value_to_string(value: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::String(s) => s.clone(),
         Value::Json(json) => json.to_string(),
-        // Binary in a text context: visible placeholder, not raw bytes. The
-        // loud-error guard lands with the Phase-2 arg/sink rework.
+        // Binary in a NON-sink context (case-glob matching, `==`/`in`, `${#…}`
+        // length, debug rendering): a stable, visible placeholder. Text SINKS —
+        // string interpolation and external-command argv — must NOT use this;
+        // they go through `value_to_text_sink`, which is loud on binary so the
+        // user's real bytes are never silently replaced by this placeholder.
         Value::Bytes(b) => format!("[binary: {} bytes]", b.len()),
+    }
+}
+
+/// Materialize a `Value` for a TEXT SINK — string interpolation (`"x=$b"`) or an
+/// external-command argv element (`prog $b`) — going LOUD on binary rather than
+/// emitting the `[binary: N bytes]` placeholder that [`value_to_string`] uses.
+///
+/// Splicing binary into text as a placeholder is silent data corruption: a
+/// command may already have captured the user's real bytes (e.g. `b=$(cat
+/// blob)` stores a `Value::Bytes` — `cat` emits raw bytes for non-UTF-8
+/// content), and the placeholder throws those bytes away where the data should
+/// be. Valid-UTF-8 bytes coerce (mirroring [`ExecResult::try_text_out`]);
+/// everything else is a loud error. In practice `Value::Bytes` only ever holds
+/// non-UTF-8 content (the producer coercion in `ExecResult::success_text_or_bytes`
+/// keeps valid UTF-8 as text), so this errors whenever a `Bytes` value reaches a
+/// text sink. See `docs/binary-data.md`.
+///
+/// This is deliberately NOT a global replacement for [`value_to_string`] — the
+/// infallible form stays correct for semantic/internal uses where a stable
+/// placeholder is wanted and no data crosses a text boundary.
+pub fn value_to_text_sink(value: &Value) -> EvalResult<String> {
+    match value {
+        Value::Bytes(b) => match std::str::from_utf8(b) {
+            Ok(s) => Ok(s.to_string()),
+            Err(_) => Err(EvalError::Unsupported(format!(
+                "binary data ({} bytes) cannot be used as text — decode it \
+                 (base64/xxd) or redirect to a file",
+                b.len()
+            ))),
+        },
+        other => Ok(value_to_string(other)),
     }
 }
 
@@ -1197,26 +1169,6 @@ fn type_name(value: &Value) -> &'static str {
     }
 }
 
-/// Convert an ExecResult to a Value for command substitution return.
-///
-/// Prefers structured data if available (for iteration in for loops),
-/// otherwise returns stdout (trimmed) as a string. `$?` exposes the exit
-/// code as an int; `kaish-last` exposes the previous command's structured
-/// data or stdout as text.
-fn result_to_value(result: &ExecResult) -> Value {
-    // Prefer structured data if available (enables `for i in $(cmd)` iteration)
-    if let Some(data) = &result.data {
-        return data.clone();
-    }
-    // Otherwise return stdout as single string (NO implicit splitting).
-    // Strip trailing newlines only, not all trailing whitespace — same trim as
-    // the async kernel command-subst path (`kernel.rs` Expr::CommandSubst) and
-    // the quoted `"$(…)"` interpolation, so this sync evaluator (dead today —
-    // it runs under `NoOpExecutor` — but a trap for a future non-async embedder)
-    // can't silently diverge.
-    Value::String(result.text_out().trim_end_matches('\n').to_string())
-}
-
 /// Perform regex match or not-match on two values.
 ///
 /// The left operand is the string to match against.
@@ -1250,10 +1202,12 @@ fn regex_match(left: &Value, right: &Value, negate: bool) -> EvalResult<Value> {
 
 /// Convenience function to evaluate an expression with a scope.
 ///
-/// Uses NoOpExecutor, so command substitution will fail.
+/// This is the sync evaluator: command substitution (`$(...)`) is not executed
+/// here — the kernel's async evaluator resolves those to literal values first.
+/// A `CommandSubst` (or command-as-condition) node reaching this function is a
+/// loud [`EvalError::NoExecutor`], never a silent empty value.
 pub fn eval_expr(expr: &Expr, scope: &mut Scope) -> EvalResult<Value> {
-    let mut executor = NoOpExecutor;
-    let mut evaluator = Evaluator::new(scope, &mut executor);
+    let mut evaluator = Evaluator::new(scope);
     evaluator.eval(expr)
 }
 
@@ -1261,7 +1215,8 @@ pub fn eval_expr(expr: &Expr, scope: &mut Scope) -> EvalResult<Value> {
 #[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
-    use crate::ast::VarSegment;
+    use crate::ast::{Stmt, VarSegment};
+    use super::super::result::ExecResult;
 
     // Helper to create a simple variable expression
     fn var_expr(name: &str) -> Expr {
@@ -1415,7 +1370,10 @@ mod tests {
     }
 
     #[test]
-    fn eval_command_subst_fails_without_executor() {
+    fn sync_command_subst_is_loud_not_silent() {
+        // The async evaluator resolves `$(...)` to a literal before sync
+        // evaluation; a CommandSubst reaching the sync path is a loud error
+        // (never silently empty). Pins the removal of the old executor path.
         use crate::ast::Command;
 
         let mut scope = Scope::new();

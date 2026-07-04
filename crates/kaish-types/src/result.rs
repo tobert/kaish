@@ -332,11 +332,12 @@ impl ExecResult {
     /// `OutputData::to_canonical_string()`. This is the canonical way to
     /// get text for pipes, command substitution, and file redirects.
     ///
-    /// **Binary payloads** decode lossily here (`U+FFFD` for invalid UTF-8). No
-    /// builtin produces a `Bytes` payload yet (Phase 1), so this lossy path is
-    /// unreachable in practice; the loud-error guard for binary lives in
-    /// [`Self::try_text_out`], which the Phase-2 text sinks adopt. See
-    /// `docs/binary-data.md`.
+    /// **Binary payloads** decode lossily here (`U+FFFD` for invalid UTF-8).
+    /// Several builtins already produce a `Bytes` payload (`cat`/`head`/`tail`/
+    /// `base64 -d`/`xxd -r`/`dd`/`tee`/external commands), so this lossy path
+    /// IS reachable — callers that need to catch binary rather than silently
+    /// mangle it should use [`Self::try_text_out`] instead, which loud-errors
+    /// with [`BinaryNotText`] on invalid UTF-8. See `docs/binary-data.md`.
     pub fn text_out(&self) -> Cow<'_, str> {
         match &self.out {
             OutputPayload::Text(s) if !s.is_empty() => Cow::Borrowed(s),
