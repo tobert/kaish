@@ -11,6 +11,17 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **The confirmation latch is now a first-class typed field with a
+  fulfillment API** (GH #92). A gated destructive op returns exit 2 with the
+  request on a dedicated `ExecResult.latch: Option<Box<LatchRequest>>`
+  (control-plane), no longer serialized into the data-plane `.data`. Read it via
+  `ExecResult::latch_request()` (unchanged); fulfill it via the new
+  `Kernel::confirm(&LatchRequest)`, which replays the **exact captured argv**
+  (`LatchRequest.tool` + `.argv`, new fields) with `--confirm=<nonce>` — precise
+  even for paths with spaces/globs, where the human `hint` string can't round
+  trip. **BREAKING (embedders/`--json`):** a latched `--json` result now surfaces
+  the nonce under a `latch` key in the error envelope, not nested under `data`;
+  embedders reading the nonce out of `.data` must switch to `latch_request()`.
 - **Redirects now work inside `$(...)`** — `x=$(cmd > file)`, `$(cmd 2> err)`,
   `$(cmd >> log)` and friends parse and run, matching the top-level command
   grammar (the command-substitution body used to reject any redirect). Control

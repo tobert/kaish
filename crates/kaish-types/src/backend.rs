@@ -248,8 +248,9 @@ pub struct ToolResult {
     pub baggage: BTreeMap<String, String>,
     /// A pending confirmation-latch request (propagated from ExecResult), so a
     /// backend-tool latch survives the ExecResult↔ToolResult roundtrip. Its own
-    /// typed field — never folded into `data`.
-    pub latch: Option<LatchRequest>,
+    /// typed field — never folded into `data`. Boxed to match `ExecResult.latch`
+    /// (keeps the roundtrip a direct move; see that field for why).
+    pub latch: Option<Box<LatchRequest>>,
 }
 
 impl ToolResult {

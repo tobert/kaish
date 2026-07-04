@@ -75,11 +75,27 @@ pub struct LatchRequest {
     /// Confirmation nonce — pass back as `--confirm=<nonce>` on the same command.
     pub nonce: String,
     /// The canonical command being gated (e.g. `"rm"`, `"kaish-trash empty"`).
+    /// A human/display label — for a precise machine replay use `tool` + `argv`.
     pub command: String,
     /// The resolved paths the operation would touch. Empty for command-only ops.
     pub paths: Vec<String>,
-    /// A ready-to-run confirmation command string (informational).
+    /// A ready-to-run confirmation command string (informational, for humans).
+    /// Machine fulfillment should prefer `Kernel::confirm` (which replays the
+    /// captured `tool`/`argv`); the hint is a display string and does not
+    /// robustly quote paths with spaces or glob characters.
     pub hint: String,
+    /// The dispatch name of the gated tool (e.g. `"rm"`, `"kaish-trash"`), as
+    /// resolved at the dispatch seam — the argv0 for a replay via
+    /// `Kernel::execute_argv`. Empty only when the latch was produced outside a
+    /// dispatch (a direct `tool.execute` in a unit test).
+    #[serde(default)]
+    pub tool: String,
+    /// The exact captured argv (`ToolArgs::to_argv`) of the gated invocation,
+    /// minus the tool name and the `--confirm` nonce. `Kernel::confirm` prepends
+    /// `--confirm=<nonce>` and replays `execute_argv(tool, argv)` — the
+    /// highest-fidelity fulfillment, with no re-parsing of the `hint`.
+    #[serde(default)]
+    pub argv: Vec<String>,
     /// Seconds until the nonce expires.
     pub ttl: u64,
 }
@@ -156,8 +172,14 @@ pub struct ExecResult {
     /// from the data-plane `.data`: a stdout redirect clears `.data` but never
     /// this. Read it via [`Self::latch_request`]; set it via
     /// `ToolCtx::latch_result`.
+    ///
+    /// Boxed: `ExecResult` is returned up every level of deep `$()`/pipeline
+    /// recursion, and `LatchRequest` is ~150 bytes — inline it would fatten
+    /// every stack frame and cost interpreter stack headroom (GH #46/#47). The
+    /// box is allocated only when a latch actually fires. Serializes identically
+    /// to an unboxed `Option` (Box is transparent to serde).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latch: Option<LatchRequest>,
+    pub latch: Option<Box<LatchRequest>>,
 }
 
 impl ExecResult {
@@ -497,7 +519,7 @@ impl ExecResult {
     /// latch) returns `None`. Unlike the data-plane `.data`, `.latch` survives
     /// `--json` formatting, so this is safe to call before or after it.
     pub fn latch_request(&self) -> Option<LatchRequest> {
-        self.latch.clone()
+        self.latch.as_deref().cloned()
     }
 
     /// Set content type hint, returning self for chaining.
@@ -886,6 +908,8 @@ mod tests {
             command: "rm".to_string(),
             paths: paths.iter().map(|p| (*p).to_string()).collect(),
             hint: "rm --confirm=\"a3f7b2c1\" important.dat".to_string(),
+            tool: "rm".to_string(),
+            argv: paths.iter().map(|p| (*p).to_string()).collect(),
             ttl: 60,
         }
     }
@@ -893,7 +917,7 @@ mod tests {
     #[test]
     fn latch_request_reads_the_latch_field() {
         let mut result = ExecResult::failure(2, "rm: confirmation required (latch enabled)");
-        result.latch = Some(latch_req(&["important.dat"]));
+        result.latch = Some(Box::new(latch_req(&["important.dat"])));
 
         let req = result.latch_request().expect("a latch request");
         assert_eq!(req.nonce, "a3f7b2c1");
@@ -906,13 +930,15 @@ mod tests {
     #[test]
     fn latch_request_handles_command_only_empty_paths() {
         let mut result = ExecResult::failure(2, "kaish-trash empty: confirmation required");
-        result.latch = Some(LatchRequest {
+        result.latch = Some(Box::new(LatchRequest {
             nonce: "deadbeef".to_string(),
             command: "kaish-trash empty".to_string(),
             paths: vec![],
             hint: "kaish-trash empty --confirm=deadbeef".to_string(),
+            tool: "kaish-trash".to_string(),
+            argv: vec!["--".to_string(), "empty".to_string()],
             ttl: 60,
-        });
+        }));
 
         let req = result.latch_request().expect("a latch request");
         assert_eq!(req.command, "kaish-trash empty");
@@ -943,7 +969,7 @@ mod tests {
         // control-plane latch on its own field survives (rm precious > log still
         // gates). Guards the plane split at the type level.
         let mut result = ExecResult::success_data(Value::Json(serde_json::json!([1, 2, 3])));
-        result.latch = Some(latch_req(&["precious.txt"]));
+        result.latch = Some(Box::new(latch_req(&["precious.txt"])));
         result.clear_stdout();
         assert!(result.data.is_none(), "data-plane .data must clear");
         assert!(
