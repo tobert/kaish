@@ -362,9 +362,14 @@ fn render_value(val: &Val, raw_output: bool, compact: bool) -> String {
 
 /// Convert ast::Value to serde_json::Value for jq processing.
 ///
-/// This is smarter than the generic value_to_json because it handles the case
-/// where Value::String contains serialized JSON (for legacy compatibility).
 /// Value::Json is returned directly as it's already a serde_json::Value.
+/// Value::String converts to a JSON string verbatim — it is never re-parsed
+/// as a JSON document. `.data` structure is opt-in (set by an upstream
+/// producer like `fromjson`), never sniffed from string content: a
+/// `Value::String("1")` is the kaish string `1`, and must stay the JSON
+/// string `"1"` here, not become the JSON number `1` (see
+/// `docs/arch_no_json_sniffing` / CLAUDE.md's ".data is opt-in, never
+/// inferred from stdout text" invariant).
 fn ast_value_to_json(value: &Value) -> serde_json::Value {
     match value {
         Value::Null => serde_json::Value::Null,
@@ -375,10 +380,7 @@ fn ast_value_to_json(value: &Value) -> serde_json::Value {
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null)
         }
-        Value::String(s) => {
-            // Try to parse as JSON first - for backwards compatibility with serialized JSON in strings
-            serde_json::from_str(s).unwrap_or_else(|_| serde_json::Value::String(s.clone()))
-        }
+        Value::String(s) => serde_json::Value::String(s.clone()),
         Value::Json(json) => json.clone(),
         // Binary jq input surfaces as the self-describing base64 envelope.
         Value::Bytes(b) => kaish_types::bytes_to_envelope(b),

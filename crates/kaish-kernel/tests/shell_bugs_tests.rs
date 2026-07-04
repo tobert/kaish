@@ -678,6 +678,37 @@ async fn test_source_alias_with_space_still_works() {
 }
 
 // ============================================================================
+// Top-level `return` in a skip-validation embedder context must stop the
+// script and keep prior statements' accumulated output, like `exit` — not
+// silently discard it and keep running. Ordinary kernels reject a top-level
+// `return` at validation time (`ReturnOutsideFunction`), but an embedder that
+// opts into `with_skip_validation(true)` (a supported, commonly-used config —
+// see the many test files that build kernels this way) can still reach this
+// path, so `execute_streaming_inner`'s handling of it must be correct too.
+// ============================================================================
+
+#[tokio::test]
+async fn test_top_level_return_keeps_prior_output_and_stops_execution() {
+    use kaish_kernel::KernelConfig;
+    let kernel = Kernel::new(KernelConfig::transient().with_skip_validation(true)).unwrap();
+    let result = kernel
+        .execute("echo setup-ok; return 0; echo after")
+        .await
+        .expect("skip-validation kernel should run a top-level return");
+    assert_eq!(result.code, 0);
+    assert!(
+        result.text_out().contains("setup-ok"),
+        "return must not discard prior statements' output: {:?}",
+        result.text_out()
+    );
+    assert!(
+        !result.text_out().contains("after"),
+        "return must stop execution of subsequent statements: {:?}",
+        result.text_out()
+    );
+}
+
+// ============================================================================
 // `!` precedence in `[[ ]]` — `!` binds tighter than `&&`/`||`
 //
 // Regression for the 2026-06-09 finding: the parser bound `!` to the entire
@@ -756,3 +787,28 @@ async fn test_double_dash_protects_multiple_dash_words() {
     let result = kernel.execute("echo -- -a-b -c-d").await.unwrap();
     assert_eq!(result.text_out().trim(), "-a-b -c-d");
 }
+
+// ============================================================================
+// `--` end-of-flags does not choke on an assignment-shaped word.
+//
+// After `--`, nothing is special — including `=` — so `a=b` is one literal
+// positional word, matching standard shell behavior. The post-`--` argument
+// grammar previously had no rule to absorb a bareword `key=value` token
+// (`Arg::WordAssign`'s `Ident`+`Eq`+expr production only ran pre-`--`), so the
+// parser hard-failed on the unhandled `=` instead of producing a positional.
+// ============================================================================
+
+#[tokio::test]
+async fn test_double_dash_allows_bareword_assignment() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute("echo -- a=b").await.unwrap();
+    assert_eq!(result.text_out().trim(), "a=b");
+}
+
+#[tokio::test]
+async fn test_double_dash_allows_multiple_bareword_assignments() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute("echo -- a=b c=d").await.unwrap();
+    assert_eq!(result.text_out().trim(), "a=b c=d");
+}
+

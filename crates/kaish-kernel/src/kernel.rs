@@ -678,6 +678,10 @@ pub struct Kernel {
     runner: PipelineRunner,
     /// Execution context (cwd, stdin, etc.).
     exec_ctx: RwLock<ExecContext>,
+    /// Frontend-seeded variables (HOME/PATH/etc, from `KernelConfig::initial_vars`),
+    /// retained past construction so `reset()` can re-seed them into the fresh
+    /// scope instead of silently dropping them.
+    initial_vars: HashMap<String, Value>,
     /// Whether to skip pre-execution validation.
     skip_validation: bool,
     /// When true, standalone external commands inherit stdio for real-time output.
@@ -1118,13 +1122,14 @@ impl Kernel {
                 // Frontends (REPL, MCP) populate this from std::env::vars()
                 // for shell-like UX; embedders that want hermetic behavior
                 // simply leave it empty.
-                for (name, value) in initial_vars {
+                for (name, value) in initial_vars.clone() {
                     scope.set_exported(name, value);
                 }
                 scope.set_latch_enabled(latch_enabled);
                 scope.set_trash_enabled(trash_enabled);
                 scope
             }),
+            initial_vars,
             tools,
             user_tools: RwLock::new(HashMap::new()),
             vfs,
@@ -1262,6 +1267,7 @@ impl Kernel {
         let fork = Self {
             name: format!("{}:fork", self.name),
             scope: RwLock::new(scope_snapshot),
+            initial_vars: self.initial_vars.clone(),
             tools: Arc::clone(&self.tools),
             user_tools: RwLock::new(user_tools_snapshot),
             vfs: Arc::clone(&self.vfs),
@@ -2035,14 +2041,21 @@ impl Kernel {
                         value.err = format!("{}{}", drained_stderr, value.err);
                     }
                     on_output(&value);
-                    result = value;
+                    // A top-level `return` stops the script, like `exit` —
+                    // it must not discard prior statements' accumulated
+                    // output nor let execution continue past it.
+                    accumulate_result(&mut result, &value);
+                    if !surfaced_warnings.is_empty() {
+                        result.err = format!("{surfaced_warnings}{}", result.err);
+                    }
+                    return Ok(result);
                 }
                 ControlFlow::Break { result: mut r, .. } | ControlFlow::Continue { result: mut r, .. } => {
                     if !drained_stderr.is_empty() {
                         r.err = format!("{}{}", drained_stderr, r.err);
                     }
                     on_output(&r);
-                    result = r;
+                    accumulate_result(&mut result, &r);
                 }
             }
         }
@@ -2954,7 +2967,18 @@ impl Kernel {
                 // Clone backend and drop read lock before awaiting (may involve network I/O).
                 // Backend tools expect named JSON params, so enable positional mapping.
                 let backend = self.exec_ctx.read().await.backend.clone();
-                let tool_schema = backend.get_tool(name).await.ok().flatten().map(|t| {
+                let tool_schema = backend
+                    .get_tool(name)
+                    .await
+                    .unwrap_or_else(|e| {
+                        // Schema lookup failing just means positionals won't
+                        // get name-mapped below — `call_tool` is still
+                        // attempted. Trace it so the degradation is visible
+                        // rather than silently swallowed.
+                        tracing::debug!("backend get_tool error for {name}: {e}");
+                        None
+                    })
+                    .map(|t| {
                     let mut s = t.schema;
                     // Flat backend/MCP tools expect named JSON params, so map
                     // bare positionals onto named params. Subcommand-aware tools
@@ -2977,19 +3001,23 @@ impl Kernel {
                     Ok(tool_result) => {
                         let mut scope = self.scope.write().await;
                         *scope = ctx.scope.clone();
-                        let mut exec = ExecResult::from_output(
-                            tool_result.code as i64, tool_result.stdout, tool_result.stderr,
-                        );
-                        exec.set_output(tool_result.output);
-                        return Ok(exec);
+                        // Preserve every field (data/content_type/baggage,
+                        // not just stdout text) — this is the embedder seam:
+                        // `x=$(embedder_tool)` and structured iteration over
+                        // its result depend on `.data` surviving the crossing
+                        // back into the kernel.
+                        return Ok(ExecResult::from(tool_result));
                     }
                     Err(BackendError::ToolNotFound(_)) => {
-                        // Fall through to "command not found"
+                        // The backend confirms no such tool exists — fall
+                        // through to "command not found" below.
                     }
                     Err(e) => {
-                        // Backend dispatch is last-resort lookup — if it fails
-                        // for any reason, the command simply doesn't exist.
-                        tracing::debug!("backend error for {name}: {e}");
+                        // The tool was found (dispatch reached real
+                        // execution) but running it failed — a genuine
+                        // execution error, not "command not found". Surface
+                        // it loudly instead of masking it as exit-127.
+                        return Ok(ExecResult::failure(1, format!("{}: {}", name, e)));
                     }
                 }
 
@@ -4433,8 +4461,22 @@ impl Kernel {
             }
         };
 
-        // Execute each statement in the CURRENT scope (not isolated)
-        let mut result = ExecResult::success("");
+        // Execute each statement in the CURRENT scope (not isolated), accumulating
+        // stdout/stderr across statements like `execute_user_tool` — a sourced
+        // script's earlier statements must not be silently dropped in favor of
+        // just the last one.
+        fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
+            match r.out_bytes() {
+                Some(b) => buf.extend_from_slice(b),
+                None => buf.extend_from_slice(r.text_out().as_bytes()),
+            }
+        }
+
+        let mut accumulated_out: Vec<u8> = Vec::new();
+        let mut accumulated_err = String::new();
+        let mut last_code = 0i64;
+        let mut last_data: Option<Value> = None;
+
         for stmt in program.statements {
             if matches!(stmt, crate::ast::Stmt::Empty) {
                 continue;
@@ -4442,10 +4484,19 @@ impl Kernel {
 
             match self.execute_stmt_flow(&stmt).await {
                 Ok(flow) => {
-                    self.drain_stderr_into(&mut result).await;
+                    let drained = {
+                        let mut receiver = self.stderr_receiver.lock().await;
+                        receiver.drain_lossy()
+                    };
+                    if !drained.is_empty() {
+                        accumulated_err.push_str(&drained);
+                    }
                     match flow {
                         ControlFlow::Normal(r) => {
-                            result = r.clone();
+                            push_out(&mut accumulated_out, &r);
+                            accumulated_err.push_str(&r.err);
+                            last_code = r.code;
+                            last_data = r.data.clone();
                             self.update_last_result(&r).await;
                         }
                         ControlFlow::Break { .. } | ControlFlow::Continue { .. } => {
@@ -4455,10 +4506,19 @@ impl Kernel {
                             ));
                         }
                         ControlFlow::Return { value } => {
-                            return Ok(value);
+                            push_out(&mut accumulated_out, &value);
+                            accumulated_err.push_str(&value.err);
+                            let mut result = ExecResult::success_text_or_bytes(accumulated_out)
+                                .with_code(value.code);
+                            result.err = accumulated_err;
+                            result.data = value.data;
+                            return Ok(result);
                         }
                         ControlFlow::Exit { code } => {
-                            result.code = code;
+                            let mut result =
+                                ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
+                            result.err = accumulated_err;
+                            result.data = last_data;
                             return Ok(result);
                         }
                     }
@@ -4469,6 +4529,9 @@ impl Kernel {
             }
         }
 
+        let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(last_code);
+        result.err = accumulated_err;
+        result.data = last_data;
         Ok(result)
     }
 
@@ -4559,8 +4622,20 @@ impl Kernel {
                 std::mem::replace(&mut *scope, isolated_scope)
             };
 
-            // Execute script statements — track outcome for cleanup
-            let mut result = ExecResult::success("");
+            // Execute script statements — accumulate stdout/stderr across
+            // statements like `execute_user_tool`, rather than keeping only the
+            // last one's result.
+            fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
+                match r.out_bytes() {
+                    Some(b) => buf.extend_from_slice(b),
+                    None => buf.extend_from_slice(r.text_out().as_bytes()),
+                }
+            }
+
+            let mut accumulated_out: Vec<u8> = Vec::new();
+            let mut accumulated_err = String::new();
+            let mut last_code = 0i64;
+            let mut last_data: Option<Value> = None;
             let mut exec_error: Option<anyhow::Error> = None;
             let mut exit_code: Option<i64> = None;
 
@@ -4571,10 +4646,25 @@ impl Kernel {
 
                 match self.execute_stmt_flow(&stmt).await {
                     Ok(flow) => {
+                        let drained = {
+                            let mut receiver = self.stderr_receiver.lock().await;
+                            receiver.drain_lossy()
+                        };
+                        if !drained.is_empty() {
+                            accumulated_err.push_str(&drained);
+                        }
                         match flow {
-                            ControlFlow::Normal(r) => result = r,
+                            ControlFlow::Normal(r) => {
+                                push_out(&mut accumulated_out, &r);
+                                accumulated_err.push_str(&r.err);
+                                last_code = r.code;
+                                last_data = r.data;
+                            }
                             ControlFlow::Return { value } => {
-                                result = value;
+                                push_out(&mut accumulated_out, &value);
+                                accumulated_err.push_str(&value.err);
+                                last_code = value.code;
+                                last_data = value.data;
                                 break;
                             }
                             ControlFlow::Exit { code } => {
@@ -4582,7 +4672,10 @@ impl Kernel {
                                 break;
                             }
                             ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
-                                result = r;
+                                push_out(&mut accumulated_out, &r);
+                                accumulated_err.push_str(&r.err);
+                                last_code = r.code;
+                                last_data = r.data;
                             }
                         }
                     }
@@ -4603,11 +4696,10 @@ impl Kernel {
             if let Some(e) = exec_error {
                 return Err(e.context(format!("script: {}", script_path.display())));
             }
-            if let Some(code) = exit_code {
-                result.code = code;
-                return Ok(Some(result));
-            }
-
+            let code = exit_code.unwrap_or(last_code);
+            let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
+            result.err = accumulated_err;
+            result.data = last_data;
             return Ok(Some(result));
         }
 
@@ -5309,12 +5401,27 @@ impl Kernel {
 
     /// Reset kernel to initial state.
     ///
-    /// Clears in-memory variables and resets cwd to root.
-    /// History is not cleared (it persists across resets).
+    /// Clears in-memory variables and resets cwd to root. History is not
+    /// cleared (it persists across resets). The kernel's `$$` identity, the
+    /// confirmation latch / trash-on-delete configuration, and any
+    /// frontend-seeded `initial_vars` (HOME/PATH/etc, from `KernelConfig`)
+    /// are re-applied to the fresh scope rather than silently reverting to
+    /// defaults — an embedder that opted into `with_latch(true)` must not
+    /// find the gate quietly disabled after a `reset()` between requests.
     pub async fn reset(&self) -> Result<()> {
         {
             let mut scope = self.scope.write().await;
-            *scope = Scope::new();
+            let pid = scope.pid();
+            let latch_enabled = scope.latch_enabled();
+            let trash_enabled = scope.trash_enabled();
+            let mut fresh = Scope::new();
+            fresh.set_pid(pid);
+            for (name, value) in self.initial_vars.clone() {
+                fresh.set_exported(name, value);
+            }
+            fresh.set_latch_enabled(latch_enabled);
+            fresh.set_trash_enabled(trash_enabled);
+            *scope = fresh;
         }
         {
             let mut ctx = self.exec_ctx.write().await;
@@ -5636,12 +5743,17 @@ fn classify_argv_token(token: &Value) -> Arg {
     Arg::Positional(Expr::Literal(Value::String(s.clone())))
 }
 
-/// A short-flag word: a leading ASCII letter and no `=`. `-la`, `-A1`, `-a:`
-/// qualify (the lexer's flag token absorbs `:`/`.` and friends); `-1` (a number)
-/// and `-k=v` (`=` is the assignment operator — a parse error in the string door)
-/// do not, so they fall through to a literal positional.
+/// A short-flag word: a leading ASCII letter, then only ASCII
+/// letters/digits/`-` (the lexer's base `-[a-zA-Z][a-zA-Z0-9-]*` regex) or `:`
+/// (which `merge_flag_metachar_adjacent` glues onto a `ShortFlag` for the
+/// `awk -F:` idiom). `-la`, `-A1`, `-a:` qualify; `-1` (a number), `-k=v`
+/// (`=` is the assignment operator — a parse error in the string door), and
+/// any non-ASCII tail (never produced by the lexer, and not safe for the
+/// combined-short-flag binder's byte-index slicing) do not, so they fall
+/// through to a literal positional instead of a malformed `ShortFlag`.
 fn is_short_flag_body(s: &str) -> bool {
-    s.starts_with(|c: char| c.is_ascii_alphabetic()) && !s.contains('=')
+    s.starts_with(|c: char| c.is_ascii_alphabetic())
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == ':')
 }
 
 /// Bash-style assignment-LHS identifier: `[A-Za-z_][A-Za-z0-9_]*`.
@@ -5905,6 +6017,31 @@ mod argv_classify_tests {
         // A bare dash and a number-dash are positionals (covered above too).
         assert_eq!(classify("-"), pos("-"));
         assert_eq!(classify("-9"), pos("-9"));
+        // A non-ASCII tail is not part of the lexer's short-flag char class
+        // (`-[a-zA-Z][a-zA-Z0-9-]*`, plus the `:` the metachar-merge pass
+        // absorbs) — classifying it as `ShortFlag` would hand the combined
+        // short-flag binder a byte string it (correctly, for real ASCII flag
+        // words) slices by *byte* index, panicking on a multi-byte char
+        // boundary. Fall back to a literal positional instead.
+        assert_eq!(classify("-lé"), pos("-lé"));
+        assert_eq!(classify("-é"), pos("-é"));
+    }
+
+    #[tokio::test]
+    async fn non_ascii_short_flag_bundle_does_not_panic() {
+        // Regression: `execute_argv`'s combined-short-flag loop assumed the
+        // flag body was ASCII (safe to byte-slice) because the lexer's
+        // grammar guarantees that on the *string* door. The argv door's
+        // classifier let a non-ASCII tail through as `ShortFlag`, so
+        // `execute_argv("ls", &["-lé"])` sliced mid-codepoint and panicked.
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        let result = kernel
+            .execute_argv("ls", &[Value::String("-lé".into())])
+            .await
+            .expect("execute_argv must not panic on a non-ASCII short-flag token");
+        // Not a well-formed flag word, so it's a literal positional — `ls`
+        // then reports it as a missing path rather than mangling flags.
+        assert_ne!(result.code, 0);
     }
 
     proptest::proptest! {
@@ -6064,6 +6201,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backend_tool_data_content_type_and_baggage_survive_into_exec_result() {
+        // The embedder seam: a backend-registered tool (kaijutsu, an MCP
+        // engine, …) returns a `ToolResult` with structured `data` — this
+        // must reach the caller's `ExecResult` intact so `x=$(embedder_tool)`
+        // and `for r in $(embedder_tool)` see the typed value, not just
+        // stdout text.
+        use crate::backend::testing::MockBackend;
+        use crate::backend::ToolResult;
+        let (mock, _calls) = MockBackend::new();
+        let backend = mock.with_tool_result(|_name| {
+            let mut baggage = std::collections::BTreeMap::new();
+            baggage.insert("trace_id".to_string(), "abc123".to_string());
+            Ok(ToolResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                data: Some(serde_json::json!({"key": "value"})),
+                output: None,
+                content_type: Some("application/json".to_string()),
+                baggage,
+            })
+        });
+        let backend: Arc<dyn crate::backend::KernelBackend> = Arc::new(backend);
+        let kernel = Kernel::with_backend(backend, KernelConfig::isolated(), |_| {}, |_| {})
+            .expect("with_backend kernel");
+
+        let result = kernel
+            .execute("embedder_tool")
+            .await
+            .expect("execution failed");
+        assert!(result.ok(), "backend tool call should succeed: {result:?}");
+        assert_eq!(
+            result.data,
+            Some(Value::Json(serde_json::json!({"key": "value"}))),
+            "backend tool's structured data must survive into ExecResult, not be dropped"
+        );
+        assert_eq!(
+            result.content_type.as_deref(),
+            Some("application/json"),
+            "backend tool's content_type must survive into ExecResult"
+        );
+        assert_eq!(
+            result.baggage.get("trace_id").map(String::as_str),
+            Some("abc123"),
+            "backend tool's baggage must survive into ExecResult"
+        );
+    }
+
+    #[tokio::test]
+    async fn backend_tool_execution_error_is_not_reported_as_command_not_found() {
+        // A backend tool that IS found but fails during execution (`Io`,
+        // `PermissionDenied`, …) must surface its real error, not get
+        // misreported as exit-127 "command not found" — that masks a genuine
+        // failure as a lookup miss.
+        use crate::backend::testing::MockBackend;
+        let (mock, _calls) = MockBackend::new();
+        let backend = mock.with_tool_result(|_name| Err(BackendError::Io("disk exploded".to_string())));
+        let backend: Arc<dyn crate::backend::KernelBackend> = Arc::new(backend);
+        let kernel = Kernel::with_backend(backend, KernelConfig::isolated(), |_| {}, |_| {})
+            .expect("with_backend kernel");
+
+        let result = kernel
+            .execute("embedder_tool")
+            .await
+            .expect("execution failed");
+        assert_ne!(result.code, 127, "a real execution error must not look like command-not-found: {result:?}");
+        assert!(!result.ok());
+        assert!(
+            result.err.contains("disk exploded"),
+            "the real backend error must be visible, not masked: {result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_external_command_true() {
         // Use REPL config for passthrough filesystem access
         let kernel = Kernel::new(KernelConfig::repl()).expect("failed to create kernel");
@@ -6106,6 +6317,57 @@ mod tests {
 
         kernel.reset().await.expect("reset failed");
         assert!(kernel.get_var("X").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_kernel_reset_preserves_latch_and_trash_config() {
+        // An embedder configuring `with_latch(true)` must not have the
+        // confirmation gate silently disabled by a later `reset()` — that
+        // would let a destructive command through with no nonce and no
+        // error, exactly the "silent fallback" the latch exists to prevent.
+        let kernel = Kernel::new(
+            KernelConfig::transient()
+                .with_latch(true)
+                .with_skip_validation(true),
+        )
+        .expect("failed to create kernel");
+
+        // Write and rm relative to `/` (reset()'s post-reset cwd) so the file
+        // is reachable identically before and after reset.
+        kernel.execute("cd /; echo hi > latch-probe.txt").await.expect("setup write failed");
+
+        let before = kernel.execute("rm latch-probe.txt").await.expect("execute failed");
+        assert_eq!(before.code, 2, "latch should require confirmation before reset: {before:?}");
+
+        kernel.reset().await.expect("reset failed");
+
+        // reset() only clears scope/cwd (to `/`), not the VFS — the
+        // un-deleted probe file (the latch blocked the delete above) is
+        // still there.
+        let after = kernel.execute("rm latch-probe.txt").await.expect("execute failed");
+        assert_eq!(
+            after.code, 2,
+            "latch must still require confirmation after reset, not silently disable: {after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kernel_reset_preserves_pid_and_initial_vars() {
+        let kernel = Kernel::new(KernelConfig::transient().with_var("HOME", Value::String("/home/probe".into())))
+            .expect("failed to create kernel");
+
+        let pid_before = kernel.execute("echo $$").await.expect("execute failed").text_out().trim().to_string();
+        assert_eq!(kernel.get_var("HOME").await, Some(Value::String("/home/probe".into())));
+
+        kernel.reset().await.expect("reset failed");
+
+        let pid_after = kernel.execute("echo $$").await.expect("execute failed").text_out().trim().to_string();
+        assert_eq!(pid_before, pid_after, "$$ must stay stable across reset(), not silently renumber");
+        assert_eq!(
+            kernel.get_var("HOME").await,
+            Some(Value::String("/home/probe".into())),
+            "frontend-seeded initial vars (HOME/PATH) must survive reset(), not silently vanish"
+        );
     }
 
     #[tokio::test]

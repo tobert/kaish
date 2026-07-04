@@ -19,13 +19,13 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tracing::Instrument;
 
-use crate::ast::{Command, Value};
+use crate::ast::{Command, Redirect, Value};
 use crate::dispatch::CommandDispatcher;
 use crate::duration::parse_duration;
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ToolRegistry};
 
-use super::pipeline::PipelineRunner;
+use super::pipeline::{apply_redirects, PipelineRunner};
 
 /// Options for scatter operation.
 #[derive(Debug, Clone)]
@@ -147,12 +147,14 @@ impl ScatterGatherRunner {
     ///
     /// Returns the final result after all stages complete.
     #[tracing::instrument(level = "info", skip(self, pre_scatter, scatter_opts, parallel, gather_opts, post_gather, ctx), fields(item_count = tracing::field::Empty, parallelism = scatter_opts.limit))]
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         &self,
         pre_scatter: &[Command],
         scatter_opts: ScatterOptions,
         parallel: &[Command],
         gather_opts: GatherOptions,
+        gather_redirects: &[Redirect],
         post_gather: &[Command],
         ctx: &mut ExecContext,
     ) -> ExecResult {
@@ -198,6 +200,19 @@ impl ScatterGatherRunner {
         // row per worker, failures included), or `--lines` raw text. Exit codes
         // are A′: 0 all ok · 123 any worker failed · 2 usage (clap layer).
         let gathered = gather_results(&results, &gather_opts);
+
+        // `gather`'s own trailing redirect (`… | gather > results.jsonl | …`)
+        // must apply to gather's OWN result before anything downstream sees
+        // it — matching shell semantics where a file redirect on a pipeline
+        // stage wins over the pipe (`cmd > file | next` sends cmd's real
+        // stdout to the file; `next` reads nothing from cmd). Applying it
+        // unconditionally (regardless of exit code) matches a redirect being
+        // a file-descriptor operation independent of the command's success —
+        // `false > file` still creates the file. Previously this only ran
+        // when gather was the pipeline's last command, so a trailing
+        // `gather > file | jq` silently skipped the file and let the
+        // unredirected rows flow to `jq` instead.
+        let gathered = apply_redirects(gathered, gather_redirects, ctx).await;
 
         // Run post-gather commands if any. A failed gather short-circuits —
         // feeding partial/failed output onward would propagate corruption.
@@ -248,6 +263,16 @@ impl ScatterGatherRunner {
             let base_scope = base_ctx.scope.clone();
             let backend = base_ctx.backend.clone();
             let cwd = base_ctx.cwd.clone();
+            // A worker must run with the parent's execution config, not a
+            // from-scratch default — otherwise an aliased command that works
+            // in the foreground fails 127 inside a worker, an embedder's
+            // ignore/output-limit/external-command policy is silently
+            // bypassed, and the worker starts fully re-armed even under
+            // `allow_external_commands: false`.
+            let aliases = base_ctx.aliases.clone();
+            let ignore_config = base_ctx.ignore_config.clone();
+            let output_limit = base_ctx.output_limit.clone();
+            let allow_external_commands = base_ctx.allow_external_commands;
             let parent_token = base_ctx.cancel.clone();
             let worker_token = parent_token.child_token();
 
@@ -287,6 +312,10 @@ impl ScatterGatherRunner {
                 let mut ctx = ExecContext::with_backend_and_scope(backend, scope);
                 ctx.set_cwd(cwd);
                 ctx.cancel = worker_token;
+                ctx.aliases = aliases;
+                ctx.ignore_config = ignore_config;
+                ctx.output_limit = output_limit;
+                ctx.allow_external_commands = allow_external_commands;
 
                 // Run through PipelineRunner + dispatcher (full resolution chain).
                 // Uses run_sequential to avoid async recursion and infinite future size.

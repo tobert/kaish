@@ -345,8 +345,10 @@ filter is requested but `info`/the field is `None`. (Inverse of the PR-#41 bug.)
 - **Scheduler:** concurrent stages/workers use `Vec<JoinHandle>` (not `JoinSet`) with no
   abort — bounded leak, not unbounded (join-all + `fork_attached` cancellation cascade);
   the redirect "stream-to-disk" comment overstates (materializes in memory first); the
-  sync `build_tool_args` drops a `$()`-valued scatter/gather *option* (folds into the
-  "eliminate the sync twin" item). (`scheduler/{pipeline,scatter}.rs`)
+  sync `build_tool_args` still can't *evaluate* a `$()`-valued scatter/gather option — it
+  now fails loud instead of silently dropping the value (0.11.0 hardening pass), but
+  actually supporting command substitution here still needs the "eliminate the sync
+  twin" refactor. (`scheduler/{pipeline,scatter}.rs`)
 - **Scatter/gather structured-data pre-read:** the scatter runner
   (`scheduler/scatter.rs:136`) still uses the old one-shot `take_stdin_data` rather than
   the `resolve_stdin()` drain-then-await the main consumers adopted. Latent — fold it in

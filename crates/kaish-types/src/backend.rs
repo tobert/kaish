@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 use thiserror::Error;
 
 use crate::output::OutputData;
-use crate::result::{value_to_json, ExecResult};
+use crate::result::{json_to_value_no_envelope, value_to_json, ExecResult};
 use crate::tool::ToolSchema;
 
 /// Result type for backend operations.
@@ -315,6 +315,28 @@ impl From<ExecResult> for ToolResult {
             content_type: exec.content_type,
             baggage: exec.baggage,
         }
+    }
+}
+
+impl From<ToolResult> for ExecResult {
+    /// The symmetric peer of `From<ExecResult> for ToolResult` above — every
+    /// field that direction preserves, this direction must preserve too, or a
+    /// backend-registered tool's structured `data`/`content_type`/`baggage`
+    /// silently vanishes crossing back into the kernel (the embedder seam:
+    /// `x=$(embedder_tool)` and `for r in $(embedder_tool)` need `.data` to
+    /// see typed results, not just stdout text).
+    ///
+    /// `data` uses [`json_to_value_no_envelope`] rather than the internal
+    /// round-trip conversion: a backend tool's JSON is external input, so an
+    /// object shaped like the byte envelope must stay a plain record, never
+    /// silently auto-decode to `Value::Bytes`.
+    fn from(result: ToolResult) -> Self {
+        let mut exec = ExecResult::from_output(result.code as i64, result.stdout, result.stderr);
+        exec.set_output(result.output);
+        exec.data = result.data.map(json_to_value_no_envelope);
+        exec.content_type = result.content_type;
+        exec.baggage = result.baggage;
+        exec
     }
 }
 

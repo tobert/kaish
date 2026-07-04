@@ -1718,6 +1718,13 @@ where
             Token::ShortFlag(name) => Arg::Positional(Expr::Literal(Value::String(format!("-{}", name)))),
             Token::LongFlag(name) => Arg::Positional(Expr::Literal(Value::String(format!("--{}", name)))),
         },
+        // `name=value` — same WordAssign production used before `--`. Nothing
+        // is special after `--` (standard shell behavior), but the
+        // WordAssign→positional collapse already yields the literal
+        // `"name=value"` string for commands that don't consume shell
+        // assignments (like `echo`), so no separate literal-folding rule is
+        // needed here.
+        word_assign_arg_parser(),
         // Everything else stays the same
         primary_expr_parser().map(Arg::Positional),
     ));
@@ -1773,6 +1780,40 @@ where
     .map(|s| s.to_string())
 }
 
+/// Shell assignment in argv position: `name=value` (must not have spaces
+/// around `=`). Produces `Arg::WordAssign`; the kernel routes it through
+/// `tool_args.named` only for shell-assignment-accepting builtins (export,
+/// alias). For every other command it materialises as a `"name=value"`
+/// positional, matching bash semantics (`cat foo=bar` opens a file named
+/// `foo=bar`). Shared by the pre-`--` and post-`--` argument grammars — the
+/// `WordAssign`/positional collapse already gives `--`-following `a=b` the
+/// literal-string behavior shell users expect, so it needs no special casing
+/// after `--`.
+fn word_assign_arg_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, Arg, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    choice((
+        select! { Token::Ident(s) => s },
+        keyword_word(),
+    ))
+    .map_with(|s, e| -> (String, Span) { (s, e.span()) })
+    .then(just(Token::Eq).map_with(|_, e| -> Span { e.span() }))
+    .then(primary_expr_parser().map_with(|expr, e| -> (Expr, Span) { (expr, e.span()) }))
+    .try_map(|(((key, key_span), eq_span), (value, value_span)): (((String, Span), Span), (Expr, Span)), span| {
+        // Check that key ends where = starts and = ends where value starts
+        if key_span.end != eq_span.start || eq_span.end != value_span.start {
+            Err(Rich::custom(
+                span,
+                "shell assignment must not have spaces around '=' (use 'key=value' not 'key = value')",
+            ))
+        } else {
+            Ok(Arg::WordAssign { key, value })
+        }
+    })
+}
+
 /// Argument parser for arguments before `--` (normal flag handling).
 fn arg_before_double_dash_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Arg, extra::Err<Rich<'tokens, Token, Span>>> + Clone
@@ -1798,28 +1839,7 @@ where
     };
 
     // Shell assignment in argv position: name=value (must not have spaces around =).
-    // Produces Arg::WordAssign; the kernel routes it through tool_args.named
-    // only for shell-assignment-accepting builtins (export, alias). For every
-    // other command it materialises as a `"name=value"` positional, matching
-    // bash semantics (`cat foo=bar` opens a file named `foo=bar`).
-    let named = choice((
-        select! { Token::Ident(s) => s },
-        keyword_word(),
-    ))
-    .map_with(|s, e| -> (String, Span) { (s, e.span()) })
-    .then(just(Token::Eq).map_with(|_, e| -> Span { e.span() }))
-    .then(primary_expr_parser().map_with(|expr, e| -> (Expr, Span) { (expr, e.span()) }))
-    .try_map(|(((key, key_span), eq_span), (value, value_span)): (((String, Span), Span), (Expr, Span)), span| {
-        // Check that key ends where = starts and = ends where value starts
-        if key_span.end != eq_span.start || eq_span.end != value_span.start {
-            Err(Rich::custom(
-                span,
-                "shell assignment must not have spaces around '=' (use 'key=value' not 'key = value')",
-            ))
-        } else {
-            Ok(Arg::WordAssign { key, value })
-        }
-    });
+    let named = word_assign_arg_parser();
 
     // Positional argument
     let positional = primary_expr_parser().map(Arg::Positional);
@@ -4693,6 +4713,41 @@ cmd < "input.txt"
         assert_eq!(parts.len(), 1);
         assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "\\"));
         assert_eq!(parts[0].len, 2);
+    }
+
+    #[test]
+    fn spanned_standalone_cr_continuation_realigns_span_start() {
+        // `\` + bare `\r` (old Mac line ending, no trailing `\n`) is a line
+        // continuation: 2 source bytes, consumed with no output. Pins the
+        // `current_text_start` update on that branch (parser.rs's `Some('\r')`
+        // arm in `parse_interpolated_string_spanned`) — if it failed to
+        // advance past the consumed `\`+`\r`, the following literal run would
+        // be misreported starting at byte 0 instead of byte 2, corrupting
+        // every subsequent span in the string (here, the `${x}` var's offset).
+        let parts = parse_interpolated_string_spanned("\\\rCD${x}", 0);
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "CD"));
+        assert_eq!(parts[0].offset, 2, "literal run must start after the consumed \\+CR");
+        assert_eq!(parts[0].len, 2);
+        assert!(matches!(&parts[1].part, StringPart::Var(_)));
+        assert_eq!(parts[1].offset, 4);
+        assert_eq!(parts[1].len, 4); // "${x}"
+    }
+
+    #[test]
+    fn spanned_standalone_cr_continuation_mid_run_keeps_span_start() {
+        // Same continuation, but hit mid-run (current_text already holds
+        // "AB") — current_text_start must stay anchored to the run's true
+        // start (0), not jump to the post-continuation position, so "AB"
+        // and "CD" merge into one literal spanning the whole source run.
+        let parts = parse_interpolated_string_spanned("AB\\\rCD${x}", 0);
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "ABCD"));
+        assert_eq!(parts[0].offset, 0);
+        assert_eq!(parts[0].len, 6); // "AB" + "\" + "\r" + "CD" = 6 source bytes
+        assert!(matches!(&parts[1].part, StringPart::Var(_)));
+        assert_eq!(parts[1].offset, 6);
+        assert_eq!(parts[1].len, 4); // "${x}"
     }
 
     // ── Collection literals ─────────────────────────────────────────────

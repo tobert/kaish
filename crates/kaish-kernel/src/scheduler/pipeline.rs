@@ -26,7 +26,7 @@ use super::scatter::{
 /// Pre-execution redirects (Stdin, HereDoc) should be handled before calling.
 /// Post-execution redirects (stdout/stderr to file, merge) applied here.
 /// Redirects are processed left-to-right per POSIX.
-async fn apply_redirects(
+pub(crate) async fn apply_redirects(
     mut result: ExecResult,
     redirects: &[Redirect],
     ctx: &ExecContext,
@@ -357,30 +357,17 @@ impl PipelineRunner {
         let sequential_dispatcher: Arc<dyn CommandDispatcher> = dispatcher.fork_attached().await;
 
         let runner = ScatterGatherRunner::new(self.tools.clone(), sequential_dispatcher);
-        let result = runner
+        runner
             .run(
                 pre_scatter,
                 scatter_opts,
                 parallel,
                 gather_opts,
+                &gather_cmd.redirects,
                 post_gather,
                 ctx,
             )
-            .await;
-
-        // `gather`'s own trailing redirect (`… | gather > results.jsonl`, GH
-        // #80's canonical egress-to-file flow) is only meaningful when gather
-        // is the pipeline's last command — `runner.run` splices post_gather
-        // stages through the normal `run_sequential` path, which already
-        // applies each of *their* redirects. Without this, `gather`'s
-        // redirect was silently dropped (the rows landed in `result.out`
-        // instead of the file) because `ScatterGatherRunner::run` only sees
-        // `gather_opts` (parsed flags), never `gather_cmd.redirects`.
-        if post_gather.is_empty() {
-            apply_redirects(result, &gather_cmd.redirects, ctx).await
-        } else {
-            result
-        }
+            .await
     }
 
     /// Run a single command with optional stdin.
@@ -1038,7 +1025,18 @@ pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Result<Option<
             }
             Ok(Some(Value::String(asm.into_string())))
         }
-        _ => Ok(None), // Binary ops and command subst need more context
+        // Command substitution can't be evaluated here (this reduced sync
+        // binder runs before any worker forks, so it can't recurse through
+        // the async pipeline) — but that must fail loud, not silently
+        // coalesce to a bare boolean flag/dropped value the way an unset
+        // bare variable does. `scatter --limit $(echo 5)` used to silently
+        // run at the default limit instead of erroring.
+        Expr::CommandSubst(_) | Expr::Command(_) => Err(
+            "command substitution `$(...)` is not supported in a scatter/gather flag value here; \
+             assign it to a variable first (e.g. `n=$(...); scatter --limit $n`)"
+                .to_string(),
+        ),
+        _ => Ok(None), // Binary ops need more context
     }
 }
 
@@ -1118,7 +1116,16 @@ fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -
                 }
             }
             crate::ast::StringPart::CommandSubst(_) => {
-                // Command substitution requires async - skip in sync context
+                // Command substitution can't run in this reduced sync
+                // context (see `eval_simple_expr`'s CommandSubst arm) — fail
+                // loud instead of silently splicing in nothing.
+                // `scatter --as "W$(suffix)"` used to bind the plain "W"
+                // with the substitution silently dropped.
+                return Err(
+                    "command substitution `$(...)` is not supported inside a scatter/gather \
+                     flag's interpolated value here; assign it to a variable first"
+                        .to_string(),
+                );
             }
             crate::ast::StringPart::LastExitCode => {
                 result.push_str(&ctx.scope.last_result().code.to_string());

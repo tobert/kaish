@@ -453,3 +453,72 @@ seq 1 2 | scatter --as ${cfg[name]:-W} | echo $W | gather"#,
     assert_eq!(rows[0]["out"], "1", "default var name W bound the items");
     assert_eq!(rows[1]["out"], "2");
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Scatter workers must inherit the parent's execution config (aliases,
+// ignore filters, output limits, external-command policy), not run against
+// a from-scratch context — an aliased command that works in the foreground
+// must also work inside a scatter worker.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn scatter_worker_sees_parent_aliases() {
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(
+        &k,
+        r#"alias greet='echo hi'
+seq 1 2 | scatter | greet | gather"#,
+    )
+    .await;
+    assert_eq!(r.code, 0, "{:?}", r.err);
+    let rows = rows(&r.text_out());
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        assert_eq!(row["ok"], true, "aliased command must resolve inside a worker: {row:?}");
+        assert_ne!(row["code"], 127, "must not be command-not-found: {row:?}");
+        assert_eq!(row["out"], "hi");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// `gather`'s own trailing redirect must apply even when the pipeline
+// continues past it — matching shell semantics where a file redirect on a
+// stage wins over the pipe (`cmd > file | next` sends `cmd`'s real stdout to
+// the file; `next` gets nothing from `cmd`).
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn gather_redirect_applies_even_with_trailing_pipeline_stages() {
+    let dir = tempdir().unwrap();
+    let k = kernel_at(dir.path());
+    let r = run_full(&k, "seq 1 2 | scatter | echo $ITEM | gather > audit.jsonl | wc -c").await;
+    assert_eq!(r.code, 0, "{:?}", r.err);
+    assert_eq!(
+        r.text_out().trim(),
+        "0",
+        "gather's redirect must send rows to the file, not the downstream pipe: out={:?} err={:?}",
+        r.text_out(),
+        r.err
+    );
+    let audit = std::fs::read_to_string(dir.path().join("audit.jsonl"))
+        .expect("gather's redirect should have created audit.jsonl");
+    assert!(audit.contains(r#""out":"1""#), "audit file missing row 1: {audit}");
+    assert!(audit.contains(r#""out":"2""#), "audit file missing row 2: {audit}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// A `$(...)` scatter/gather flag value can't be evaluated by the reduced
+// sync arg binder (`build_tool_args`/`eval_simple_expr` run before any
+// worker forks, so they can't recurse through the async pipeline) — but it
+// must fail loud, not silently coalesce to a bare boolean flag/default limit.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn scatter_flag_value_command_substitution_is_loud_not_silently_dropped() {
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(&k, "seq 1 3 | scatter --limit $(echo 2) | echo $ITEM | gather").await;
+    assert_ne!(
+        r.code, 0,
+        "a $(...) scatter flag value must fail loud, not silently coalesce to the default limit: {r:?}"
+    );
+}

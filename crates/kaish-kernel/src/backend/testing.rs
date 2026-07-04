@@ -16,17 +16,33 @@ use crate::vfs::{DirEntry, MountInfo};
 /// Used to verify tool dispatch routes through the backend.
 pub struct MockBackend {
     pub call_count: Arc<AtomicUsize>,
+    /// Overrides `call_tool`'s return value when set — lets a test drive an
+    /// arbitrary `ToolResult` (structured `data`/`content_type`/`baggage`) or
+    /// a `BackendError` other than `ToolNotFound` through the real dispatch
+    /// path, instead of always getting `ToolResult::success("mock executed")`.
+    #[allow(clippy::type_complexity)]
+    tool_result: Option<Arc<dyn Fn(&str) -> BackendResult<ToolResult> + Send + Sync>>,
 }
 
 impl MockBackend {
     pub fn new() -> (Self, Arc<AtomicUsize>) {
         let count = Arc::new(AtomicUsize::new(0));
-        (Self { call_count: count.clone() }, count)
+        (Self { call_count: count.clone(), tool_result: None }, count)
     }
 
     /// Get the current call count.
     pub fn calls(&self) -> usize {
         self.call_count.load(Ordering::SeqCst)
+    }
+
+    /// Configure what `call_tool` returns for every invocation, keyed by the
+    /// tool name it was called with.
+    pub fn with_tool_result(
+        mut self,
+        result: impl Fn(&str) -> BackendResult<ToolResult> + Send + Sync + 'static,
+    ) -> Self {
+        self.tool_result = Some(Arc::new(result));
+        self
     }
 }
 
@@ -34,6 +50,7 @@ impl Default for MockBackend {
     fn default() -> Self {
         Self {
             call_count: Arc::new(AtomicUsize::new(0)),
+            tool_result: None,
         }
     }
 }
@@ -91,6 +108,9 @@ impl KernelBackend for MockBackend {
         _ctx: &mut dyn ToolCtx,
     ) -> BackendResult<ToolResult> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(f) = &self.tool_result {
+            return f(name);
+        }
         Ok(ToolResult::success(format!("mock executed: {}", name)))
     }
 
