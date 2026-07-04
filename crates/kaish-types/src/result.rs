@@ -429,7 +429,9 @@ impl ExecResult {
     /// stdout and must survive the redirect, or `rm precious > log` becomes a
     /// silent, unconfirmable delete-in-waiting. `latch_request()` matches only
     /// the exact exit-2 + `LatchRequest` envelope, so ordinary structured data
-    /// is never mistaken for it.
+    /// is never mistaken for it. This discriminator is a bridge: once the latch
+    /// gets its own typed field (GH #92), `.data` is unambiguously data-plane
+    /// and this becomes an unconditional `self.data = None`.
     pub fn clear_stdout(&mut self) {
         self.out = OutputPayload::Text(String::new());
         self.output = None;
