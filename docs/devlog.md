@@ -14,6 +14,47 @@ before it ships.
 
 ---
 
+## The confirmation latch becomes a first-class, fulfillable API (2026-07-04)
+
+Fell out of the redirect-in-`$()` work above. That change had to special-case
+`clear_stdout` so a stdout redirect wouldn't clear the `rm` latch nonce — because
+the nonce rode inside `ExecResult.data` as serialized JSON, overloading the
+data-plane `.data` (structured stdout) with a control-plane signal. Amy's call:
+don't slime the latch through another feature's field with a runtime shape-check
+— give it a first-class typed home.
+
+**The field.** `ExecResult.latch: Option<Box<LatchRequest>>`. `latch_result`
+sets it typed (no serialize round-trip); `latch_request()` reads it; `clear_stdout`
+drops the discriminator and clears `.data` unconditionally. Threaded through the
+`ExecResult`↔`ToolResult` backend roundtrip (which #94 had just converted to
+symmetric `From` impls, fixing the old #84 field-drop) and through
+`accumulate_result` — a single `rm x` statement flows through accumulation, so
+forgetting `.latch` there lost every gate (a test caught it). `--json` surfaces
+it under a dedicated `latch` key, never folded into `data`.
+
+**Then Amy pushed on fulfillment.** Inspection was first-class (`latch_request()`),
+but *fulfilling* a latch meant re-running with `--confirm=<nonce>` — via the
+`hint` string, which is `format!`-built and doesn't quote paths (a space breaks
+it), or by manually rebuilding argv. She wanted the latch to hold the exact state
+for a precise replay. So: capture the exact argv at the dispatch seam
+(`(dispatch_name, ToolArgs::to_argv())`) into `LatchRequest.tool`/`.argv`, and add
+`Kernel::confirm(&LatchRequest)` that replays `execute_argv(tool, argv)` with
+`--confirm` **prepended** (appending would let `to_argv`'s trailing `--`
+terminator swallow the flag). A path with a space now round-trips exactly where
+the hint can't — the payoff, pinned by a test. The seam capture is gated on
+`latch_enabled` so it's free when the latch is off.
+
+**Two stack-size lessons, the hard way.** `ExecContext` and `ExecResult` are both
+rebuilt/returned at every level of deep `$()` recursion. Adding an inline
+`(String, Vec<String>)` to `ExecContext`, and growing the inline `LatchRequest`
+inside `ExecResult` by two fields, fattened every frame enough to overflow the
+stack on `deeply_nested_command_substitution` — but only under `cargo test --all`
+(parallel binaries, tighter thread stacks; it passed in isolation). Boxing both
+(`Box<(String, Vec<String>)>`, `Option<Box<LatchRequest>>`) kept the hot structs
+lean and fixed it. Lesson: a ~150-byte field on a stack-hot, deeply-recursive
+struct wants a box (see GH #46/#47). Docs (EMBEDDING.md, LANGUAGE.md, README,
+the syntax fragment) reworked to teach the typed field + `confirm`.
+
 ## Redirects inside `$()`, and what that taught us about `.data` (2026-07-04)
 
 Started from a curiosity: a test comment said "kaish's grammar doesn't accept a

@@ -133,49 +133,85 @@ rails — see below), `.with_vfs_budget(bytes)` / `.without_vfs_budget()` (cap
 in-memory VFS growth), `.with_skip_validation(bool)`, `.with_initial_vars(map)`
 (below).
 
-#### Destructive-op rails: reading the latch nonce
+#### Destructive-op rails: inspecting and fulfilling the latch
 
 With `.with_latch(true)`, a destructive op (`rm`'s delete, and the truncating
 overwrite behind `tee` / `patch` / `sed -i` / `write` / `cp` / `mv` / `dd of=`)
 does not run on first call — it returns an `ExecResult` with **exit code 2** and a
-confirmation nonce. The re-run is the same argv plus `--confirm=<nonce>` (`dd` uses
-its `confirm=<nonce>` key=value idiom). Copying or moving *into* a directory, and
-recursive `cp -r`/`mv` of a tree, gate only the named destination, not per-child
-overwrites. The output contract:
+confirmation request. Copying or moving *into* a directory, and recursive
+`cp -r`/`mv` of a tree, gate only the named destination, not per-child overwrites.
+The output contract:
 
 - **`ExecResult.err`** (which a frontend routes to stderr) carries the
   human-readable prompt;
 - **stdout** is empty (nothing happened, so there is no success output);
-- **`ExecResult.data`** carries the nonce as structured JSON — read it here
-  rather than parsing the `err` text:
+- **`ExecResult.latch`** carries the request as a first-class typed field —
+  `Option<Box<LatchRequest>>`, control-plane and distinct from the data-plane
+  `.data`.
 
-  ```json
-  { "nonce": "a3f7b2c1", "command": "rm",
-    "paths": ["important.dat"], "hint": "...", "ttl": 60 }
-  ```
+`LatchRequest` is the whole inspect+fulfill contract:
 
-  From Rust, prefer the typed accessor over reaching into `.data` by key:
+```rust
+pub struct LatchRequest {
+    pub nonce: String,        // pass back as --confirm=<nonce>
+    pub command: String,      // display label, e.g. "rm", "kaish-trash empty"
+    pub paths: Vec<String>,   // resolved paths the op would touch (for policy)
+    pub hint: String,         // human re-run string (display only)
+    pub tool: String,         // dispatch name — argv0 for a precise replay
+    pub argv: Vec<String>,    // the EXACT captured argv (minus the nonce)
+    pub ttl: u64,             // seconds until the nonce expires
+}
+```
 
-  ```rust
-  // Returns Some(LatchRequest { nonce, command, paths, hint, ttl }) only for a
-  // latch gate (exit 2 + nonce payload); None for a plain usage error.
-  if let Some(req) = result.latch_request() {
-      // apply preapproval policy / model review over (req.command, req.paths) …
-      // approve → re-run the same argv with `--confirm=<req.nonce>`.
-  }
-  ```
+**Inspect** with the typed accessor (works before or after `--json` — `.latch`
+survives formatting):
 
-  This is the seam to hook embedder-side policy: check a preapproval allowlist or
-  ask a model to review the resolved `(command, paths)` before re-running. The
-  kernel owns the *mechanism* (issuing/validating the path- and command-scoped
-  nonce); the embedder owns the *judgment*. Call it on the raw result, before any
-  `--json` formatting.
+```rust
+if let Some(req) = result.latch_request() {
+    // apply preapproval policy / model review over (req.command, req.paths),
+    // or inspect the exact req.argv that a confirm will replay …
+}
+```
 
-  If you executed with `--json` (`OutputFormat::Json`), this is a non-zero exit
-  with a diagnostic, so the result is wrapped in the standard JSON error envelope
-  and the nonce payload is nested one level down, under `data`:
-  `{ "error": "...", "code": 2, "data": { "nonce": ... } }`. Reading
-  `ExecResult.data` from the struct without `--json` gives you the bare payload.
+**Fulfill** with `Kernel::confirm` — the highest-fidelity path. It replays the
+*exact captured argv* (`req.tool` + `req.argv`) with `--confirm=<nonce>`
+prepended, via the argv door — no re-parsing, so paths with spaces or glob
+characters round-trip precisely:
+
+```rust
+let gated = kernel.execute("rm 'my notes.txt'").await?;
+if let Some(req) = gated.latch_request() {
+    if approve(&req) {                       // your policy
+        let done = kernel.confirm(&req).await?;   // replays exactly, deletes
+    }
+}
+```
+
+Prefer `confirm` over hand-building the re-run. The `hint` field is a
+*human-display* string and does **not** robustly quote paths (`rm --confirm="N"
+my notes.txt` re-parses as two paths); `confirm` sidesteps that entirely. If you
+must build it yourself, use the argv door: `execute_argv(req.tool, [..req.argv,
+"--confirm=<nonce>"])`.
+
+The kernel owns the *mechanism* (issuing/validating the path- and command-scoped
+nonce, capturing the argv at the dispatch seam); the embedder owns the
+*judgment*. The latch is **never** folded into `.data` — a stdout redirect
+(`rm big > log`) clears the data-plane `.data` but can't touch the control-plane
+`.latch`, so the gate can't be silently bypassed.
+
+> **Note:** the argv is captured at the kernel's dispatch seam, so it's present
+> for every kaish builtin and any tool you register in the kernel's registry
+> (the `Kernel::with_backend` tools closure). A tool served *only* by a custom
+> `KernelBackend::call_tool` that raises its own latch leaves `tool`/`argv`
+> empty; `confirm` then fails loud (exit 2) — fulfill those via the `hint` or a
+> manually reconstructed argv.
+
+If you executed with `--json` (`OutputFormat::Json`), the gate is a non-zero exit
+with a diagnostic, so the result is wrapped in the standard JSON error envelope
+and the request is surfaced under its own `latch` key:
+`{ "error": "...", "code": 2, "latch": { "nonce": ..., "tool": ..., "argv":
+[...], "paths": [...], "hint": ..., "ttl": 60 } }`. The typed `latch_request()`
+accessor works the same either way, so it's the recommended path.
 
 Nonces are scoped to `(command, paths)`, expire after 60s, and are not consumed
 on use (idempotent retries). To confirm a nonce issued in one `execute()` call
@@ -363,8 +399,8 @@ Semantics:
   the string door at the shared dispatch chain.
 - **Same tail as the string door.** Command resolution (aliases, user tools,
   `.kai` scripts, externals, backend tools), `--json`, and the confirmation latch
-  all apply, so a latched `rm` still returns exit 2 with a nonce in
-  `ExecResult.data` (see [Destructive-op rails](#destructive-op-rails-reading-the-latch-nonce)).
+  all apply, so a latched `rm` still returns exit 2 with a request on
+  `ExecResult.latch` (see [Destructive-op rails](#destructive-op-rails-reading-the-latch-nonce)).
   The kernel's pre-execution *syntax* validator does not run — argv carries no
   shell syntax — but a tool's own `validate()`/clap parse still does.
 - **Typed-passthrough caveat.** Because builtins re-parse their own `to_argv()`

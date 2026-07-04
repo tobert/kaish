@@ -437,24 +437,15 @@ mod tests {
         assert!(result.err.contains("Authorized: /file.txt"));
         assert!(result.err.contains("--confirm="));
         assert!(result.err.contains("60 seconds"));
-        // Structured latch data should be present
-        let data = result.data.as_ref().expect("latch result should have data");
-        if let Value::Json(json) = data {
-            assert!(json["nonce"].is_string());
-            assert_eq!(json["command"], "rm");
-            assert_eq!(json["paths"], serde_json::json!(["/file.txt"]));
-            assert_eq!(json["ttl"], 60);
-            assert!(json["hint"].as_str().unwrap().contains("--confirm="));
-        } else {
-            panic!("expected Value::Json, got {:?}", data);
-        }
         // File should still exist
         assert!(ctx.backend.exists(Path::new("/file.txt")).await);
 
-        // The typed accessor must decode the same payload — this ties the
-        // kernel-side `latch_result` construction to `LatchRequest` so the keys
-        // can't drift apart silently. (Embedders hook this seam.)
-        let req = result.latch_request().expect("a latch request from exit-2 + nonce data");
+        // The latch rides its own typed control-plane field; the accessor ties
+        // `latch_result` construction to `LatchRequest` so the keys can't drift
+        // apart silently. (Embedders hook this seam.) The data-plane `.data`
+        // stays empty — a latch is not stdout.
+        assert!(result.data.is_none(), "latch must not use the data-plane .data");
+        let req = result.latch_request().expect("a latch request on the .latch field");
         assert_eq!(req.command, "rm");
         assert_eq!(req.paths, vec!["/file.txt".to_string()]);
         assert_eq!(req.ttl, 60);

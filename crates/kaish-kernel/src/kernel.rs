@@ -54,7 +54,7 @@ pub use kaish_types::{CommandKind, ExecuteOptions};
 use crate::backend::{BackendError, KernelBackend};
 use kaish_glob::glob_match;
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
-use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value_no_envelope, value_to_bool, value_to_string, value_to_text_sink, ControlFlow, ExecResult, PathError, Scope};
+use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value_no_envelope, value_to_bool, value_to_string, value_to_text_sink, ControlFlow, ExecResult, LatchRequest, PathError, Scope};
 use crate::parser::parse;
 use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_stream, BoundedStream, JobManager, PipelineRunner, StderrReceiver};
 #[cfg(feature = "subprocess")]
@@ -1473,6 +1473,36 @@ impl Kernel {
         Ok(result)
     }
 
+    /// Fulfill a confirmation latch by replaying its exact captured invocation
+    /// with the nonce — the highest-fidelity approval path.
+    ///
+    /// Inspect a gated result with [`ExecResult::latch_request`]; apply whatever
+    /// policy (allowlist, model review) over `req.command`/`req.paths`; then call
+    /// this to approve. It replays `execute_argv(req.tool, req.argv)` with
+    /// `--confirm=<nonce>` prepended — no re-parsing of the human `hint`, so a
+    /// path with spaces or glob characters round-trips exactly. Share the nonce
+    /// store ([`KernelConfig::with_nonce_store`]) to confirm from a *later*
+    /// kernel call than the one that produced the latch.
+    ///
+    /// Errors (exit 2) if the latch carries no captured invocation — a latch
+    /// produced outside a dispatch seam (a direct `tool.execute` in a unit
+    /// test). Those are confirmable only by re-running with `--confirm=<nonce>`.
+    pub async fn confirm(&self, latch: &LatchRequest) -> Result<ExecResult> {
+        if latch.tool.is_empty() {
+            return Ok(ExecResult::failure(
+                2,
+                "confirm: latch carries no captured invocation to replay — \
+                 re-run the command with --confirm=<nonce> instead",
+            ));
+        }
+        // Prepend the nonce as a `--confirm=` flag: `to_argv()` trails a `--`
+        // positional terminator, so appending would let it swallow the flag.
+        let mut argv: Vec<Value> = Vec::with_capacity(latch.argv.len() + 1);
+        argv.push(Value::String(format!("--confirm={}", latch.nonce)));
+        argv.extend(latch.argv.iter().map(|a| Value::String(a.clone())));
+        self.execute_argv(&latch.tool, &argv).await
+    }
+
     /// Run `work` under the movable-deadline watchdog for `timeout`, shared by the
     /// string door ([`Self::execute_with_options`]) and the argv door
     /// ([`Self::execute_argv`]).
@@ -2679,6 +2709,7 @@ impl Kernel {
                     token.clone()
                 },
                 output_format: None,
+                current_invocation: None,
                 vfs_budget: self.vfs_budget.clone(),
                 watchdog: ec.watchdog.clone(),
                 #[cfg(all(feature = "localfs", feature = "overlay"))]
@@ -3001,7 +3032,7 @@ impl Kernel {
                     Ok(tool_result) => {
                         let mut scope = self.scope.write().await;
                         *scope = ctx.scope.clone();
-                        // Preserve every field (data/content_type/baggage,
+                        // Preserve every field (data/content_type/baggage/latch,
                         // not just stdout text) — this is the embedder seam:
                         // `x=$(embedder_tool)` and structured iteration over
                         // its result depend on `.data` surviving the crossing
@@ -3090,6 +3121,7 @@ impl Kernel {
                 // default fresh token from a non-dispatch path.
                 cancel: ec.cancel.clone(),
                 output_format: None,
+                current_invocation: None,
                 vfs_budget: self.vfs_budget.clone(),
                 watchdog: ec.watchdog.clone(),
                 #[cfg(all(feature = "localfs", feature = "overlay"))]
@@ -3114,6 +3146,22 @@ impl Kernel {
         // --json on the floor when `try_parse_from` returns Err early).
         // The builtin's own `parsed.global.apply(ctx)` becomes idempotent.
         GlobalFlags::apply_from_args(&tool_args, &mut ctx);
+
+        // Capture the exact invocation at the dispatch seam so a latch producer
+        // (`latch_result`/`gate_overwrites`) can stamp it into the LatchRequest
+        // for a precise `Kernel::confirm` replay — no re-parsing of the human
+        // `hint`. `to_argv()` is computed before `tool_args` moves into execute.
+        //
+        // Captured unconditionally, NOT gated on `latch_enabled`: `kaish-trash
+        // empty` gates every time (it's inherently destructive, independent of
+        // `set -o latch`), so a `latch_enabled`-only gate would leave its
+        // `tool`/`argv` empty and break `confirm`. The cost is a small argv
+        // clone per command — marginal beside the per-command ExecContext
+        // snapshot above — and it does NOT reintroduce the deep-`$()` stack
+        // overflow (that was the inline `LatchRequest` in `ExecResult`, now
+        // boxed; the capture's temporaries don't survive into the recursive
+        // `tool.execute` below).
+        ctx.current_invocation = Some(Box::new((name.to_string(), tool_args.to_argv())));
 
         let result = tool.execute(tool_args, &mut ctx).await;
 
@@ -5622,6 +5670,9 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     accumulated.original_code = new.original_code;
     accumulated.content_type = new.content_type.clone();
     accumulated.baggage.clone_from(&new.baggage);
+    // A latch gate (exit-2 + nonce) is the last statement's result; carry its
+    // control-plane field through accumulation or the confirmation is lost.
+    accumulated.latch = new.latch.clone();
 }
 
 /// Fold a loop's accumulated output into a break/continue signal that is
@@ -6228,6 +6279,7 @@ mod tests {
                 output: None,
                 content_type: Some("application/json".to_string()),
                 baggage,
+                latch: None,
             })
         });
         let backend: Arc<dyn crate::backend::KernelBackend> = Arc::new(backend);

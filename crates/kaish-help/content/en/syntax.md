@@ -330,8 +330,8 @@ Confirmed paths must be subset of authorized paths. Exit code 2 = needs confirma
 Applies to `rm` and to truncating overwrites (`tee`, `patch`, `sed -i`) —
 confirm those with `--confirm=<nonce>`. `tee -a` append, new files, and
 `patch --dry-run` don't gate. The prompt prints to stderr (stdout stays empty);
-the nonce is on the result's `data` field — nested under `data` in the error
-envelope when `--json` is on.
+the nonce is on the result's typed `latch` field — surfaced under a `latch` key
+in the error envelope when `--json` is on.
 
 **Trash:** Files <= 10MB and directories always trash. `/tmp`, `/v/*` excluded.
 A truncating overwrite under `trash` snapshots the file's prior content first

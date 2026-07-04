@@ -141,6 +141,19 @@ pub struct ExecContext {
     /// don't touch it.
     pub output_format: Option<OutputFormat>,
 
+    /// The command currently executing, captured at the dispatch seam as
+    /// `(dispatch_name, argv)` where `argv` is the canonical `ToolArgs::to_argv`.
+    /// A latch producer (`latch_result`/`gate_overwrites`) stamps this into the
+    /// `LatchRequest` so `Kernel::confirm` can replay the *exact* invocation with
+    /// `--confirm=<nonce>` — no re-parsing of the human `hint`. `None` for a
+    /// direct `tool.execute` call in a unit test (no dispatch seam ran).
+    ///
+    /// Boxed to keep `ExecContext` lean: it is cloned/rebuilt at every recursion
+    /// level (pipeline stages, `$(...)`, functions), so an inline `(String,
+    /// Vec<String>)` would grow every frame and eat into the interpreter's stack
+    /// headroom (see GH #46/#47). The box is allocated once per gated command.
+    pub current_invocation: Option<Box<(String, Vec<String>)>>,
+
     /// Shared VFS memory budget for this kernel's `MemoryFs` mounts.
     ///
     /// `Arc`-cloned from the owning `Kernel` (or its fork parent) so all
@@ -297,6 +310,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            current_invocation: None,
             vfs_budget: None,
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
@@ -336,6 +350,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            current_invocation: None,
             vfs_budget: None,
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
@@ -372,6 +387,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            current_invocation: None,
             vfs_budget: None,
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
@@ -408,6 +424,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            current_invocation: None,
             vfs_budget: None,
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
@@ -447,6 +464,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            current_invocation: None,
             vfs_budget: None,
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
@@ -483,6 +501,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            current_invocation: None,
             vfs_budget: None,
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
@@ -681,6 +700,8 @@ impl ExecContext {
             cancel: self.cancel.clone(),
             // Output format is per-execution; child pipeline stages start fresh.
             output_format: None,
+            // Per-command; each pipeline stage stamps its own at the dispatch seam.
+            current_invocation: None,
             // Budget is shared: the child draws from the same pool as the parent.
             vfs_budget: self.vfs_budget.clone(),
             // Watchdog is shared: a patient hold in a pipeline stage or fork
@@ -737,21 +758,22 @@ impl ExecContext {
         let mut result = ExecResult::failure(2, format!(
             "{command}: confirmation required ({reason}){authorized}\nTo confirm, run: {hint}\nNonce expires in {ttl} seconds."
         ));
-        // The struct is the single source of truth for the payload shape; the
-        // typed accessor `ExecResult::latch_request` deserializes exactly this.
-        let request = crate::interpreter::LatchRequest {
+        // Stamp the exact invocation captured at the dispatch seam so
+        // `Kernel::confirm` can replay it precisely. `None` (a direct
+        // `tool.execute` in a unit test, no seam) leaves tool/argv empty — such
+        // a latch is confirmable only via the `hint` string, not `confirm`.
+        let (tool, argv) = self.current_invocation.as_deref().cloned().unwrap_or_default();
+        // The latch request rides its own typed control-plane field, distinct
+        // from the data-plane `.data`. `ExecResult::latch_request` reads it back.
+        result.latch = Some(Box::new(crate::interpreter::LatchRequest {
             nonce,
             command: command.to_string(),
             paths: paths.iter().map(|p| (*p).to_string()).collect(),
             hint,
+            tool,
+            argv,
             ttl,
-        };
-        // Infallible: every field is String/Vec<String>/u64 (see NonceStore for
-        // the same allow on a genuinely-unreachable error).
-        #[allow(clippy::expect_used)]
-        let payload = serde_json::to_value(&request)
-            .expect("LatchRequest serializes infallibly (String/Vec<String>/u64)");
-        result.data = Some(Value::Json(payload));
+        }));
         result
     }
 

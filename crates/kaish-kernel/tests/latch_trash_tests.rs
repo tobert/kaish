@@ -22,7 +22,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use kaish_kernel::ast::Value;
 use kaish_kernel::interpreter::ExecResult;
 use kaish_kernel::trash::{TrashBackend, TrashEntry, TrashError};
 use kaish_kernel::{Kernel, KernelConfig};
@@ -50,18 +49,16 @@ async fn run(kernel: &Kernel, script: &str) -> ExecResult {
     kernel.execute(script).await.expect("kernel execute")
 }
 
-/// Pull a string field out of a latch result's structured `.data`.
+/// Pull a string field out of a latch result's typed `.latch` request.
 fn latch_data_str(result: &ExecResult, key: &str) -> String {
-    let data = result
-        .data
-        .as_ref()
-        .expect("latch exit-2 result carries structured data");
-    match data {
-        Value::Json(json) => json[key]
-            .as_str()
-            .unwrap_or_else(|| panic!("latch data {key:?} should be a string: {json}"))
-            .to_string(),
-        other => panic!("expected Value::Json latch data, got {other:?}"),
+    let req = result
+        .latch_request()
+        .expect("latch exit-2 result carries a typed LatchRequest");
+    match key {
+        "hint" => req.hint,
+        "nonce" => req.nonce,
+        "command" => req.command,
+        other => panic!("latch field {other:?} is not a string field"),
     }
 }
 
@@ -108,6 +105,39 @@ async fn latch_gates_rm_then_confirm_hint_deletes() {
 }
 
 #[tokio::test]
+async fn latch_json_surfaces_nonce_under_latch_key() {
+    // `--json` on a gated op surfaces the confirmation request under a dedicated
+    // `latch` key in the error envelope — control-plane, never folded into
+    // `data`. And `.latch` survives formatting, so latch_request() still works
+    // on the --json'd result.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("precious.txt"), "data").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    run(&kernel, "set -o latch").await;
+    let gated = run(&kernel, "rm precious.txt --json").await;
+    assert_eq!(gated.code, 2, "err: {}", gated.err);
+
+    let envelope: serde_json::Value =
+        serde_json::from_str(gated.text_out().trim()).expect("a JSON error envelope");
+    assert_eq!(envelope["code"], 2, "envelope: {envelope}");
+    assert!(envelope["error"].is_string(), "envelope: {envelope}");
+    assert!(
+        envelope["latch"]["nonce"].is_string(),
+        "nonce must be under the `latch` key: {envelope}"
+    );
+    assert_eq!(envelope["latch"]["command"], "rm", "envelope: {envelope}");
+    assert!(
+        envelope.get("data").is_none(),
+        "the latch must not be folded under `data`: {envelope}"
+    );
+    assert!(
+        gated.latch_request().is_some(),
+        "the typed latch must survive --json formatting"
+    );
+}
+
+#[tokio::test]
 async fn latch_survives_stdout_redirect() {
     // A stdout redirect on a latched `rm` must NOT disable the confirmation
     // gate. `apply_redirects` clears the *data-plane* `.data` (the structured
@@ -138,6 +168,147 @@ async fn latch_survives_stdout_redirect() {
         dir.path().join("precious.txt").exists(),
         "file must survive the latch gate even with a redirect"
     );
+}
+
+#[tokio::test]
+async fn latch_captures_the_exact_invocation() {
+    // The latch stamps the dispatch name + exact argv captured at the seam, so
+    // an embedder can inspect precisely what `confirm` will replay.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("precious.txt"), "data").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    run(&kernel, "set -o latch").await;
+    let gated = run(&kernel, "rm precious.txt").await;
+    let req = gated.latch_request().expect("a latch request");
+
+    assert_eq!(req.tool, "rm", "dispatch name should be the argv0 for replay");
+    assert!(
+        req.argv.iter().any(|a| a == "precious.txt"),
+        "captured argv must contain the operand: {:?}",
+        req.argv
+    );
+}
+
+#[tokio::test]
+async fn confirm_replays_rm_and_deletes() {
+    // The whole point: inspect the latch, then fulfill it by replaying the exact
+    // captured invocation — no hint string, no manual argv reconstruction.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("precious.txt"), "data").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    run(&kernel, "set -o latch").await;
+    let gated = run(&kernel, "rm precious.txt").await;
+    assert_eq!(gated.code, 2, "err: {}", gated.err);
+    let req = gated.latch_request().expect("a latch request");
+
+    let done = kernel.confirm(&req).await.expect("confirm executes");
+    assert_eq!(done.code, 0, "confirm should succeed: {}", done.err);
+    assert!(
+        !dir.path().join("precious.txt").exists(),
+        "confirm should have deleted the file"
+    );
+}
+
+#[tokio::test]
+async fn confirm_replays_a_path_with_spaces_the_hint_cannot() {
+    // The payoff of capturing argv over the hint string: a path with a space
+    // round-trips exactly through `confirm` (execute_argv, no re-parse), whereas
+    // the hint (`rm --confirm="N" a b.txt`, unquoted) would re-parse as two
+    // paths. This is why argv capture matters.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("a b.txt"), "data").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    run(&kernel, "set -o latch").await;
+    let gated = run(&kernel, r#"rm "a b.txt""#).await;
+    assert_eq!(gated.code, 2, "err: {}", gated.err);
+    let req = gated.latch_request().expect("a latch request");
+    assert!(
+        req.argv.iter().any(|a| a == "a b.txt"),
+        "the space-bearing path must survive as one argv token: {:?}",
+        req.argv
+    );
+
+    let done = kernel.confirm(&req).await.expect("confirm executes");
+    assert_eq!(done.code, 0, "confirm should succeed: {}", done.err);
+    assert!(
+        !dir.path().join("a b.txt").exists(),
+        "confirm should have deleted the space-named file"
+    );
+}
+
+#[tokio::test]
+async fn confirm_replays_a_gate_overwrite() {
+    // The overwrite gate (`cp`/`mv`/`tee`/…) goes through `gate_overwrites`, a
+    // different producer than `rm` — the dispatch-seam capture covers it too.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("src.txt"), "fresh").expect("write");
+    std::fs::write(dir.path().join("dst.txt"), "old").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    run(&kernel, "set -o latch").await;
+    let gated = run(&kernel, "cp src.txt dst.txt").await;
+    assert_eq!(gated.code, 2, "err: {}", gated.err);
+    let req = gated.latch_request().expect("a latch request");
+    assert_eq!(req.tool, "cp");
+
+    let done = kernel.confirm(&req).await.expect("confirm executes");
+    assert_eq!(done.code, 0, "confirm should succeed: {}", done.err);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("dst.txt")).unwrap(),
+        "fresh",
+        "confirm should have completed the overwrite"
+    );
+}
+
+#[tokio::test]
+async fn confirm_replays_a_subcommand_gate() {
+    // `kaish-trash empty` gates *unconditionally* (inherently destructive — no
+    // `set -o latch` needed), and its dispatch name ("kaish-trash") differs from
+    // its display command ("kaish-trash empty"). Two things to prove: the seam
+    // captures the argv even with latch off (so `confirm` has tool/argv), and
+    // replaying `execute_argv("kaish-trash", ["--confirm=N", "--", "empty"])`
+    // recomputes the same command scope the nonce was issued under, so it
+    // validates.
+    let dir = tempdir();
+    let mock = Arc::new(MockTrash::default());
+    let kernel = kernel_with_trash(dir.path(), &mock);
+
+    let gated = run(&kernel, "kaish-trash empty").await;
+    assert_eq!(gated.code, 2, "empty gates unconditionally: {}", gated.err);
+    let req = gated.latch_request().expect("a latch request");
+    assert_eq!(req.tool, "kaish-trash", "dispatch name for replay");
+    assert!(
+        req.argv.iter().any(|a| a == "empty"),
+        "the subcommand token must be captured in argv: {:?}",
+        req.argv
+    );
+
+    let done = kernel.confirm(&req).await.expect("confirm executes");
+    assert_eq!(done.code, 0, "confirm should empty the trash: {}", done.err);
+}
+
+#[tokio::test]
+async fn confirm_without_captured_invocation_errors() {
+    // A latch with no captured argv (produced outside a dispatch seam) can't be
+    // replayed — `confirm` fails loud (exit 2) rather than silently no-op.
+    let dir = tempdir();
+    let kernel = kernel_at(dir.path());
+    let bare = kaish_kernel::interpreter::LatchRequest {
+        nonce: "deadbeef".to_string(),
+        command: "rm".to_string(),
+        paths: vec!["x".to_string()],
+        hint: "rm --confirm=deadbeef x".to_string(),
+        tool: String::new(),
+        argv: vec![],
+        ttl: 60,
+    };
+    let r = kernel.confirm(&bare).await.expect("confirm returns");
+    assert_eq!(r.code, 2, "must not silently succeed: {r:?}");
+    assert!(r.err.contains("no captured invocation"), "err: {}", r.err);
 }
 
 #[tokio::test]
