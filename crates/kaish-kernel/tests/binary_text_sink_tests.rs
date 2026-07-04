@@ -67,6 +67,13 @@ async fn bare_word_binary_into_echo_is_loud() {
 }
 
 #[tokio::test]
+async fn binary_arg_into_printf_is_loud() {
+    // `printf` is a pure text-output sink like `echo`; a binary operand goes
+    // loud instead of the `[binary: N bytes]` placeholder (kaibo C1).
+    assert_loud_binary(r#"b=$(cat src.bin); printf "val=%s\n" "$b""#).await;
+}
+
+#[tokio::test]
 async fn binary_in_default_expansion_is_loud() {
     // `${b:-fallback}` where b is present-and-binary must also go loud, not
     // render the placeholder (the value is present, so the default never fires).

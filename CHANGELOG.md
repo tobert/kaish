@@ -228,7 +228,7 @@ breaking entries are marked **BREAKING**.
   `Value::Bytes` value (e.g. `b=$(cat some-binary-file)`, since `cat` emits raw
   bytes for non-UTF-8 content) used to render the placeholder `[binary: N bytes]`
   when interpolated into a string (`"x=$b"`), passed as a bare word to an external
-  command (`prog $b`), or printed by `echo`. These text sinks now error (`binary
+  command (`prog $b`), or printed by `echo`/`printf`. These text sinks now error (`binary
   data (N bytes) cannot be used as text — decode it (base64/xxd) or redirect to a
   file`); valid-UTF-8 bytes still coerce. Semantic uses (`==`, `in`, `${#…}`,
   `case`) are unchanged. Path-positional/env/redirect sinks remain a known gap.

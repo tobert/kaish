@@ -213,6 +213,13 @@ impl BackendDispatcher {
                             }
                         }
                     }
+                    // Remaining literal types (Bool/Json/Null/Bytes) — kept in
+                    // sync with the production build_args_flat, which resolves
+                    // every positional through value_to_text_sink (binary loud).
+                    Expr::Literal(other) => match crate::interpreter::value_to_text_sink(other) {
+                        Ok(s) => argv.push(s),
+                        Err(e) => return Some(ExecResult::failure(1, e.to_string())),
+                    },
                     _ => {}
                 },
                 Arg::ShortFlag(f) => argv.push(format!("-{f}")),
