@@ -58,11 +58,13 @@ impl<'de> serde::Deserialize<'de> for OutputPayload {
 /// A pending confirmation-latch request, decoded from a latched [`ExecResult`].
 ///
 /// When the confirmation latch (`set -o latch`) gates a destructive operation,
-/// the kernel returns exit code 2 and attaches this payload to
-/// [`ExecResult::data`] as JSON. Embedders recover it as a typed struct via
-/// [`ExecResult::latch_request`] instead of reaching into the JSON by key — the
-/// seam an embedder hooks to apply preapproval policy or a model review before
-/// approving the operation.
+/// the kernel returns exit code 2 with this typed payload on the dedicated
+/// [`ExecResult::latch`] field. Embedders read it via
+/// [`ExecResult::latch_request`] — the seam to apply preapproval policy or a
+/// model review before approving the operation. It is deliberately *not* the
+/// data-plane [`ExecResult::data`]: a stdout redirect clears `.data` but never
+/// this control-plane signal, and it survives `--json` formatting (surfaced
+/// under a `latch` key in the error envelope).
 ///
 /// To approve, re-run the *same argv* with `--confirm=<nonce>` (the `hint`
 /// shows the exact form). The nonce is command- and path-scoped, so it cannot
@@ -148,6 +150,14 @@ pub struct ExecResult {
     /// application-level hints, etc.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub baggage: BTreeMap<String, String>,
+    /// A pending confirmation-latch request — the *control-plane* signal a
+    /// gated destructive op (`rm`/`kaish-trash`/an overwrite under `set -o
+    /// latch`) raises alongside exit code 2. First-class and typed, distinct
+    /// from the data-plane `.data`: a stdout redirect clears `.data` but never
+    /// this. Read it via [`Self::latch_request`]; set it via
+    /// `ToolCtx::latch_result`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latch: Option<LatchRequest>,
 }
 
 impl ExecResult {
@@ -163,6 +173,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            latch: None,
         }
     }
 
@@ -185,6 +196,7 @@ impl ExecResult {
                 original_code: None,
                 content_type: None,
                 baggage: BTreeMap::new(),
+                latch: None,
             },
         }
     }
@@ -221,6 +233,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            latch: None,
         }
     }
 
@@ -243,6 +256,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            latch: None,
         }
     }
 
@@ -258,6 +272,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            latch: None,
         }
     }
 
@@ -277,6 +292,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            latch: None,
         }
     }
 
@@ -295,6 +311,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            latch: None,
         }
     }
 
@@ -315,6 +332,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            latch: None,
         }
     }
 
@@ -415,30 +433,22 @@ impl ExecResult {
     }
 
     /// Drop every representation of stdout: the text `.out`, the structured
-    /// `.output`, and the *data-plane* `.data` sideband. Used when a stdout
-    /// redirect (`> file`, `>> file`, `&> file`) has consumed the command's
-    /// output — the bytes went to the file, so nothing flows onward to a pipe,
-    /// a `$(...)` capture, or the `.data` sideband. Clearing all three in one
-    /// place keeps them from drifting: a redirect that cleared `.out`/`.output`
-    /// but left `.data` would leak structured data past its own redirect
-    /// (`x=$(fromjson … > file)` capturing the value instead of `""`).
+    /// `.output`, and the data-plane `.data` sideband. Used when a stdout
+    /// redirect (`> file`, `>> file`, `&> file`, `1>&2`) has consumed the
+    /// command's output — the bytes went to the file (or stderr), so nothing
+    /// flows onward to a pipe, a `$(...)` capture, or the `.data` sideband.
+    /// Clearing all three together keeps them from drifting: a redirect that
+    /// cleared `.out`/`.output` but left `.data` would leak structured data past
+    /// its own redirect (`x=$(fromjson … > file)` capturing the value instead
+    /// of `""`).
     ///
-    /// A pending confirmation-latch request is the exception. `.data` is
-    /// overloaded: for `seq`/`jq`/`fromjson` it is the structured view of
-    /// stdout (clear it), but for a latched `rm` it is a *control-plane* signal
-    /// — the nonce the frontend needs to approve the operation. That is not
-    /// stdout and must survive the redirect, or `rm precious > log` becomes a
-    /// silent, unconfirmable delete-in-waiting. `latch_request()` matches only
-    /// the exact exit-2 + `LatchRequest` envelope, so ordinary structured data
-    /// is never mistaken for it. This discriminator is a bridge: once the latch
-    /// gets its own typed field (GH #92), `.data` is unambiguously data-plane
-    /// and this becomes an unconditional `self.data = None`.
+    /// The confirmation-latch request is untouched by design: it is a
+    /// *control-plane* signal on the dedicated `.latch` field, not stdout, so a
+    /// redirect can't drop it — `rm precious > log` still gates.
     pub fn clear_stdout(&mut self) {
         self.out = OutputPayload::Text(String::new());
         self.output = None;
-        if self.latch_request().is_none() {
-            self.data = None;
-        }
+        self.data = None;
     }
 
     /// Replace `.output`.
@@ -477,25 +487,17 @@ impl ExecResult {
         self.code == 0
     }
 
-    /// Decode a confirmation-latch request from this result, if it is one.
+    /// The pending confirmation-latch request, if this result is a latch gate.
     ///
-    /// Returns `Some` only when the result is a latch gate: exit code 2 carrying
-    /// the structured nonce payload the latch system attaches to `.data`. This
-    /// is the typed seam an embedder hooks to apply preapproval policy or a
-    /// model review before re-running the command with `--confirm=<nonce>` —
-    /// instead of string-matching the error or digging the JSON by key. A plain
-    /// usage error (also exit 2, but no nonce payload) returns `None`.
-    ///
-    /// Call this on the raw result from `execute()`, before any `--json` output
-    /// formatting (which re-nests `.data` under an error envelope).
+    /// A gated destructive op (`rm`/`kaish-trash`/an overwrite under `set -o
+    /// latch`) returns exit code 2 with the typed request on the `.latch` field.
+    /// This is the seam an embedder hooks to apply preapproval policy or a model
+    /// review before re-running the command with `--confirm=<nonce>`, instead of
+    /// string-matching the error. A plain usage error (also exit 2, but no
+    /// latch) returns `None`. Unlike the data-plane `.data`, `.latch` survives
+    /// `--json` formatting, so this is safe to call before or after it.
     pub fn latch_request(&self) -> Option<LatchRequest> {
-        if self.code != 2 {
-            return None;
-        }
-        match self.data.as_ref()? {
-            Value::Json(payload) => serde_json::from_value(payload.clone()).ok(),
-            _ => None,
-        }
+        self.latch.clone()
     }
 
     /// Set content type hint, returning self for chaining.
@@ -878,20 +880,20 @@ mod tests {
         assert!(json_result.data.is_none());
     }
 
-    fn latch_payload(paths: &[&str]) -> Value {
-        Value::Json(serde_json::json!({
-            "nonce": "a3f7b2c1",
-            "command": "rm",
-            "paths": paths,
-            "hint": "rm --confirm=\"a3f7b2c1\" important.dat",
-            "ttl": 60,
-        }))
+    fn latch_req(paths: &[&str]) -> LatchRequest {
+        LatchRequest {
+            nonce: "a3f7b2c1".to_string(),
+            command: "rm".to_string(),
+            paths: paths.iter().map(|p| (*p).to_string()).collect(),
+            hint: "rm --confirm=\"a3f7b2c1\" important.dat".to_string(),
+            ttl: 60,
+        }
     }
 
     #[test]
-    fn latch_request_decodes_latch_result() {
+    fn latch_request_reads_the_latch_field() {
         let mut result = ExecResult::failure(2, "rm: confirmation required (latch enabled)");
-        result.data = Some(latch_payload(&["important.dat"]));
+        result.latch = Some(latch_req(&["important.dat"]));
 
         let req = result.latch_request().expect("a latch request");
         assert_eq!(req.nonce, "a3f7b2c1");
@@ -904,13 +906,13 @@ mod tests {
     #[test]
     fn latch_request_handles_command_only_empty_paths() {
         let mut result = ExecResult::failure(2, "kaish-trash empty: confirmation required");
-        result.data = Some(Value::Json(serde_json::json!({
-            "nonce": "deadbeef",
-            "command": "kaish-trash empty",
-            "paths": [],
-            "hint": "kaish-trash empty --confirm=deadbeef",
-            "ttl": 60,
-        })));
+        result.latch = Some(LatchRequest {
+            nonce: "deadbeef".to_string(),
+            command: "kaish-trash empty".to_string(),
+            paths: vec![],
+            hint: "kaish-trash empty --confirm=deadbeef".to_string(),
+            ttl: 60,
+        });
 
         let req = result.latch_request().expect("a latch request");
         assert_eq!(req.command, "kaish-trash empty");
@@ -918,26 +920,36 @@ mod tests {
     }
 
     #[test]
-    fn latch_request_none_for_success() {
-        // Same payload shape, but exit 0 is not a latch gate.
-        let mut result = ExecResult::success("");
-        result.data = Some(latch_payload(&["important.dat"]));
-        assert!(result.latch_request().is_none());
+    fn latch_request_none_when_no_latch_set() {
+        // A success result and a plain exit-2 usage error both carry no latch.
+        assert!(ExecResult::success("").latch_request().is_none());
+        assert!(ExecResult::failure(2, "rm: unknown flag --bogus")
+            .latch_request()
+            .is_none());
     }
 
     #[test]
-    fn latch_request_none_for_usage_error() {
-        // A plain exit-2 usage error carries no nonce payload.
-        let result = ExecResult::failure(2, "rm: unknown flag --bogus");
-        assert!(result.latch_request().is_none());
-    }
-
-    #[test]
-    fn latch_request_none_for_unrelated_data() {
-        // Exit 2 with some other structured data is not a latch request.
+    fn latch_request_ignores_data_plane_data() {
+        // Data-plane `.data` (even on an exit-2 result) is never a latch — the
+        // latch lives on its own field. Structural guarantee, pinned.
         let mut result = ExecResult::failure(2, "boom");
         result.data = Some(Value::Json(serde_json::json!({"count": 3})));
         assert!(result.latch_request().is_none());
+    }
+
+    #[test]
+    fn clear_stdout_drops_data_but_never_the_latch() {
+        // A stdout redirect clears the data-plane .data unconditionally, but the
+        // control-plane latch on its own field survives (rm precious > log still
+        // gates). Guards the plane split at the type level.
+        let mut result = ExecResult::success_data(Value::Json(serde_json::json!([1, 2, 3])));
+        result.latch = Some(latch_req(&["precious.txt"]));
+        result.clear_stdout();
+        assert!(result.data.is_none(), "data-plane .data must clear");
+        assert!(
+            result.latch_request().is_some(),
+            "control-plane latch must survive a stdout redirect"
+        );
     }
 
     #[test]

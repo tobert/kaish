@@ -22,7 +22,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use kaish_kernel::ast::Value;
 use kaish_kernel::interpreter::ExecResult;
 use kaish_kernel::trash::{TrashBackend, TrashEntry, TrashError};
 use kaish_kernel::{Kernel, KernelConfig};
@@ -52,16 +51,14 @@ async fn run(kernel: &Kernel, script: &str) -> ExecResult {
 
 /// Pull a string field out of a latch result's structured `.data`.
 fn latch_data_str(result: &ExecResult, key: &str) -> String {
-    let data = result
-        .data
-        .as_ref()
-        .expect("latch exit-2 result carries structured data");
-    match data {
-        Value::Json(json) => json[key]
-            .as_str()
-            .unwrap_or_else(|| panic!("latch data {key:?} should be a string: {json}"))
-            .to_string(),
-        other => panic!("expected Value::Json latch data, got {other:?}"),
+    let req = result
+        .latch_request()
+        .expect("latch exit-2 result carries a typed LatchRequest");
+    match key {
+        "hint" => req.hint,
+        "nonce" => req.nonce,
+        "command" => req.command,
+        other => panic!("latch field {other:?} is not a string field"),
     }
 }
 
@@ -104,6 +101,39 @@ async fn latch_gates_rm_then_confirm_hint_deletes() {
     assert!(
         !dir.path().join("precious.txt").exists(),
         "file should be deleted after confirmation"
+    );
+}
+
+#[tokio::test]
+async fn latch_json_surfaces_nonce_under_latch_key() {
+    // `--json` on a gated op surfaces the confirmation request under a dedicated
+    // `latch` key in the error envelope — control-plane, never folded into
+    // `data`. And `.latch` survives formatting, so latch_request() still works
+    // on the --json'd result.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("precious.txt"), "data").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    run(&kernel, "set -o latch").await;
+    let gated = run(&kernel, "rm precious.txt --json").await;
+    assert_eq!(gated.code, 2, "err: {}", gated.err);
+
+    let envelope: serde_json::Value =
+        serde_json::from_str(gated.text_out().trim()).expect("a JSON error envelope");
+    assert_eq!(envelope["code"], 2, "envelope: {envelope}");
+    assert!(envelope["error"].is_string(), "envelope: {envelope}");
+    assert!(
+        envelope["latch"]["nonce"].is_string(),
+        "nonce must be under the `latch` key: {envelope}"
+    );
+    assert_eq!(envelope["latch"]["command"], "rm", "envelope: {envelope}");
+    assert!(
+        envelope.get("data").is_none(),
+        "the latch must not be folded under `data`: {envelope}"
+    );
+    assert!(
+        gated.latch_request().is_some(),
+        "the typed latch must survive --json formatting"
     );
 }
 

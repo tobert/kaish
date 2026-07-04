@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 use thiserror::Error;
 
 use crate::output::OutputData;
-use crate::result::{json_to_value_no_envelope, value_to_json, ExecResult};
+use crate::result::{json_to_value_no_envelope, value_to_json, ExecResult, LatchRequest};
 use crate::tool::ToolSchema;
 
 /// Result type for backend operations.
@@ -246,6 +246,10 @@ pub struct ToolResult {
     pub content_type: Option<String>,
     /// Opaque key-value context (propagated from ExecResult).
     pub baggage: BTreeMap<String, String>,
+    /// A pending confirmation-latch request (propagated from ExecResult), so a
+    /// backend-tool latch survives the ExecResult↔ToolResult roundtrip. Its own
+    /// typed field — never folded into `data`.
+    pub latch: Option<LatchRequest>,
 }
 
 impl ToolResult {
@@ -259,6 +263,7 @@ impl ToolResult {
             output: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            latch: None,
         }
     }
 
@@ -272,6 +277,7 @@ impl ToolResult {
             output: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            latch: None,
         }
     }
 
@@ -285,6 +291,7 @@ impl ToolResult {
             output: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            latch: None,
         }
     }
 
@@ -326,6 +333,7 @@ impl From<ExecResult> for ToolResult {
             output,
             content_type: exec.content_type,
             baggage: exec.baggage,
+            latch: exec.latch,
         }
     }
 }
@@ -348,6 +356,7 @@ impl From<ToolResult> for ExecResult {
         exec.data = result.data.map(json_to_value_no_envelope);
         exec.content_type = result.content_type;
         exec.baggage = result.baggage;
+        exec.latch = result.latch;
         exec
     }
 }

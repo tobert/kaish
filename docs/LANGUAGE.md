@@ -745,30 +745,29 @@ Nonce expires in 60 seconds.
 
 **Latch output contract.** The prompt above is written to the result's **`err`
 channel** (what a frontend renders to stderr); **stdout is empty** — nothing was
-deleted, so there is no success output. The nonce is also attached as structured
-data, so a program driving the shell reads it from the result rather than scraping
-the stderr text. Where it lands depends on the output format:
+deleted, so there is no success output. The nonce is also attached as a
+first-class typed field, so a program driving the shell reads it from the result
+rather than scraping the stderr text. It is control-plane, distinct from the
+data-plane `.data`:
 
-- **No `--json`** — `ExecResult.data` is the bare nonce payload:
-
-  ```json
-  { "nonce": "a3f7b2c1", "command": "rm",
-    "paths": ["important.dat"], "hint": "...", "ttl": 60 }
-  ```
+- **No `--json`** — `ExecResult.latch` is the typed request
+  `Some(LatchRequest { nonce, command, paths, hint, ttl })` (embedders read it
+  via `latch_request()`).
 
 - **`--json`** — the result is a non-zero exit with a diagnostic, so it's wrapped
-  in the standard JSON error envelope; the nonce payload is nested under `data`:
+  in the standard JSON error envelope; the request is surfaced under its own
+  `latch` key (never folded into `data`):
 
   ```json
   { "error": "rm: confirmation required (latch enabled)…",
     "code": 2,
-    "data": { "nonce": "a3f7b2c1", "command": "rm", "paths": ["important.dat"],
-              "hint": "...", "ttl": 60 } }
+    "latch": { "nonce": "a3f7b2c1", "command": "rm", "paths": ["important.dat"],
+               "hint": "...", "ttl": 60 } }
   ```
 
 The same contract holds for the truncating-overwrite gate (`tee`, `patch`,
 `sed -i`, `write`, `cp`, `mv`, `dd of=`): exit 2, human prompt on the `err`
-channel, nonce on `.data` (nested under `--json`). `dd` confirms with its
+channel, request on `.latch` (under the `latch` key with `--json`). `dd` confirms with its
 `confirm=<nonce>` key=value idiom rather than `--confirm=`; copying or moving
 *into* a directory (and recursive `cp -r`/`mv` of a tree) gates the named
 destination, not each child file.

@@ -564,14 +564,21 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
                         "error": result.err,
                         "code": result.code,
                     });
-                    // A tool that attached structured data to an error result —
-                    // notably the latch nonce payload {nonce, command, paths,
-                    // hint, ttl} from `ToolCtx::latch_result` — must keep it
-                    // reachable under --json. Nest it under `data` so the error
-                    // envelope holds the diagnostic *and* the structured truth
-                    // instead of clobbering one with the other.
+                    // A tool that attached structured data to an error result
+                    // must keep it reachable under --json — nest it under `data`
+                    // so the envelope holds the diagnostic *and* the structured
+                    // truth instead of clobbering one with the other.
                     if let Some(data) = &result.data {
                         obj["data"] = crate::result::value_to_json(data);
+                    }
+                    // A confirmation-latch request is control-plane, not stdout
+                    // data — surface it under its own `latch` key (the nonce the
+                    // caller re-runs with `--confirm=<nonce>`), never folded into
+                    // `data`. Infallible: LatchRequest is String/Vec<String>/u64.
+                    if let Some(latch) = &result.latch {
+                        if let Ok(v) = serde_json::to_value(latch) {
+                            obj["latch"] = v;
+                        }
                     }
                     let out =
                         serde_json::to_string(&obj).unwrap_or_else(|_| "null".to_string());

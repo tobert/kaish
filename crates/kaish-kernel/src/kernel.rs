@@ -3001,7 +3001,7 @@ impl Kernel {
                     Ok(tool_result) => {
                         let mut scope = self.scope.write().await;
                         *scope = ctx.scope.clone();
-                        // Preserve every field (data/content_type/baggage,
+                        // Preserve every field (data/content_type/baggage/latch,
                         // not just stdout text) — this is the embedder seam:
                         // `x=$(embedder_tool)` and structured iteration over
                         // its result depend on `.data` surviving the crossing
@@ -5622,6 +5622,9 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     accumulated.original_code = new.original_code;
     accumulated.content_type = new.content_type.clone();
     accumulated.baggage.clone_from(&new.baggage);
+    // A latch gate (exit-2 + nonce) is the last statement's result; carry its
+    // control-plane field through accumulation or the confirmation is lost.
+    accumulated.latch = new.latch.clone();
 }
 
 /// Fold a loop's accumulated output into a break/continue signal that is

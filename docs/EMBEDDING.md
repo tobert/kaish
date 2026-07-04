@@ -146,19 +146,14 @@ overwrites. The output contract:
 - **`ExecResult.err`** (which a frontend routes to stderr) carries the
   human-readable prompt;
 - **stdout** is empty (nothing happened, so there is no success output);
-- **`ExecResult.data`** carries the nonce as structured JSON — read it here
-  rather than parsing the `err` text:
-
-  ```json
-  { "nonce": "a3f7b2c1", "command": "rm",
-    "paths": ["important.dat"], "hint": "...", "ttl": 60 }
-  ```
-
-  From Rust, prefer the typed accessor over reaching into `.data` by key:
+- **`ExecResult.latch`** carries the request as a first-class typed field —
+  `Option<LatchRequest>`, control-plane and distinct from the data-plane
+  `.data`. Read it via the typed accessor:
 
   ```rust
-  // Returns Some(LatchRequest { nonce, command, paths, hint, ttl }) only for a
-  // latch gate (exit 2 + nonce payload); None for a plain usage error.
+  // Some(LatchRequest { nonce, command, paths, hint, ttl }) only for a latch
+  // gate (exit 2 + a request on .latch); None for a plain usage error. Safe to
+  // call before or after --json formatting — .latch survives it.
   if let Some(req) = result.latch_request() {
       // apply preapproval policy / model review over (req.command, req.paths) …
       // approve → re-run the same argv with `--confirm=<req.nonce>`.
@@ -168,14 +163,16 @@ overwrites. The output contract:
   This is the seam to hook embedder-side policy: check a preapproval allowlist or
   ask a model to review the resolved `(command, paths)` before re-running. The
   kernel owns the *mechanism* (issuing/validating the path- and command-scoped
-  nonce); the embedder owns the *judgment*. Call it on the raw result, before any
-  `--json` formatting.
+  nonce); the embedder owns the *judgment*. The latch is **never** folded into
+  `.data` — a stdout redirect (`rm big > log`) clears the data-plane `.data` but
+  can't touch the control-plane `.latch`, so the gate can't be silently bypassed.
 
   If you executed with `--json` (`OutputFormat::Json`), this is a non-zero exit
   with a diagnostic, so the result is wrapped in the standard JSON error envelope
-  and the nonce payload is nested one level down, under `data`:
-  `{ "error": "...", "code": 2, "data": { "nonce": ... } }`. Reading
-  `ExecResult.data` from the struct without `--json` gives you the bare payload.
+  and the request is surfaced under its own `latch` key:
+  `{ "error": "...", "code": 2, "latch": { "nonce": ..., "command": ..., "paths":
+  [...], "hint": ..., "ttl": 60 } }`. The typed `latch_request()` accessor works
+  the same either way, so it's the recommended path.
 
 Nonces are scoped to `(command, paths)`, expire after 60s, and are not consumed
 on use (idempotent retries). To confirm a nonce issued in one `execute()` call
@@ -363,8 +360,8 @@ Semantics:
   the string door at the shared dispatch chain.
 - **Same tail as the string door.** Command resolution (aliases, user tools,
   `.kai` scripts, externals, backend tools), `--json`, and the confirmation latch
-  all apply, so a latched `rm` still returns exit 2 with a nonce in
-  `ExecResult.data` (see [Destructive-op rails](#destructive-op-rails-reading-the-latch-nonce)).
+  all apply, so a latched `rm` still returns exit 2 with a request on
+  `ExecResult.latch` (see [Destructive-op rails](#destructive-op-rails-reading-the-latch-nonce)).
   The kernel's pre-execution *syntax* validator does not run — argv carries no
   shell syntax — but a tool's own `validate()`/clap parse still does.
 - **Typed-passthrough caveat.** Because builtins re-parse their own `to_argv()`
