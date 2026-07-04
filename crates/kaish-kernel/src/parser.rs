@@ -1725,6 +1725,8 @@ where
         // assignments (like `echo`), so no separate literal-folding rule is
         // needed here.
         word_assign_arg_parser(),
+        // `test`/`[` operators stay literal after `--` too (`test -- a = b`).
+        test_operator_arg_parser(),
         // Everything else stays the same
         primary_expr_parser().map(Arg::Positional),
     ));
@@ -1814,6 +1816,36 @@ where
     })
 }
 
+/// The `test`/`[` comparison and negation operators (`=`, `==`, `!=`, `!`) as
+/// ordinary positional argv words.
+///
+/// POSIX `test` is a *command*, so its operators must reach it flat as argv —
+/// but kaish lexes `=`/`==`/`!=`/`!` as shell-significant tokens, so at
+/// command-argument position they used to parse-error before ever reaching a
+/// command (`test a = b`). This production makes each a literal-string
+/// positional. It is name-agnostic: like bash, `echo a = b` prints `a = b` —
+/// no command name is special-cased (that would be fragile under aliases).
+///
+/// Deliberately EXCLUDES the angle brackets `<` `>` `<=` `>=`: those stay
+/// redirection (making them argv would shadow redirects) and remain
+/// `[[ ]]`-only. Ordered after the flag/`word_assign` productions so a glued
+/// `name=value` still binds as a `WordAssign` — this bare-operator rule only
+/// fires once the current token IS the standalone operator (a spaced `a = b`,
+/// where `word_assign`'s span-adjacency check has already declined).
+fn test_operator_arg_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, Arg, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    select! {
+        Token::Eq => "=",
+        Token::EqEq => "==",
+        Token::NotEq => "!=",
+        Token::Bang => "!",
+    }
+    .map(|s| Arg::Positional(Expr::Literal(Value::String(s.to_string()))))
+}
+
 /// Argument parser for arguments before `--` (normal flag handling).
 fn arg_before_double_dash_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Arg, extra::Err<Rich<'tokens, Token, Span>>> + Clone
@@ -1844,6 +1876,11 @@ where
     // Positional argument
     let positional = primary_expr_parser().map(Arg::Positional);
 
+    // The `test`/`[` operators (`=` `==` `!=` `!`) as literal positionals.
+    // After the flag/`named` productions (so glued `name=value` stays a
+    // WordAssign), before `positional` (which can't parse these tokens).
+    let test_operator = test_operator_arg_parser();
+
     // Order matters: try more specific patterns first
     // Note: DoubleDash is NOT included here - it's handled by args_list_parser
     choice((
@@ -1851,6 +1888,7 @@ where
         long_flag,
         short_flag,
         named,
+        test_operator,
         positional,
     ))
     .boxed()

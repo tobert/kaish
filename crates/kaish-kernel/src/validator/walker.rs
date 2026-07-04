@@ -154,27 +154,13 @@ impl<'a> Validator<'a> {
         let is_special = is_special_command(&cmd.name);
 
         if !is_builtin && !is_user_tool && !is_special {
-            // `[ … ]` can't reach here — it's a parse error (`[` opens a `[[ ]]`
-            // test), so `test` is the only POSIX-conditional name that lands as a
-            // command. kaish has no `test` builtin; unguarded it resolves to an
-            // external binary that evaluates against the real host FS, bypassing
-            // the VFS/overlay — a silent wrong answer flowing into `if`/`&&`.
-            // Steer to `[[ … ]]`. Surfaced to the agent (see surfaces_to_agent).
-            if cmd.name == "test" {
-                self.issues.push(ValidationIssue::warning(
-                    IssueCode::PosixTestCommand,
-                    "'test' is not a kaish command".to_string(),
-                ).with_suggestion(
-                    "use [[ … ]] for conditionals — it is validated before running, \
-                     whereas `test` resolves to an external command that bypasses the VFS",
-                ));
-            } else {
-                // Warning only - command might be a script in PATH or external tool
-                self.issues.push(ValidationIssue::warning(
-                    IssueCode::UndefinedCommand,
-                    format!("command '{}' not found in builtin registry", cmd.name),
-                ).with_suggestion("this may be a script in PATH or external command"));
-            }
+            // Warning only - command might be a script in PATH or external tool.
+            // (`test` is now a first-class builtin — VFS-aware, validated — so it
+            // takes the `is_builtin` path above and never lands here.)
+            self.issues.push(ValidationIssue::warning(
+                IssueCode::UndefinedCommand,
+                format!("command '{}' not found in builtin registry", cmd.name),
+            ).with_suggestion("this may be a script in PATH or external command"));
         }
 
         // Validate arguments expressions
@@ -688,8 +674,8 @@ pub(crate) fn classify_command_name(
 
 /// Check if a command is a special built-in that we don't validate.
 fn is_special_command(name: &str) -> bool {
-    // `test`/`[`/`[[` are intentionally absent: there is no `test` builtin
-    // (it gets the PosixTestCommand advisory above), and `[`/`[[` parse as
+    // `test`/`[`/`[[` are intentionally absent: `test` is a real builtin now
+    // (it validates via the registry like any other), and `[`/`[[` parse as
     // `[[ … ]]` test expressions, never reaching here as a command name.
     matches!(name, "true" | "false" | ":" | "readonly" | "local")
 }
@@ -964,8 +950,11 @@ mod tests {
         assert!(issues.iter().any(|i| i.code == IssueCode::UndefinedCommand));
     }
 
+    /// `test` is a first-class builtin now, so it validates through the
+    /// registry like any other command — no POSIX-conditional advisory, and no
+    /// spurious undefined-command warning.
     #[test]
-    fn test_command_steers_to_double_bracket() {
+    fn test_command_is_a_known_builtin() {
         let (registry, user_tools) = make_validator();
         let validator = Validator::new(&registry, &user_tools);
 
@@ -981,40 +970,10 @@ mod tests {
         };
 
         let issues = validator.validate(&program);
-        let issue = issues
-            .iter()
-            .find(|i| i.code == IssueCode::PosixTestCommand)
-            .expect("`test` should emit a PosixTestCommand advisory");
-        assert_eq!(issue.severity, crate::validator::Severity::Warning);
-        assert!(issue.code.surfaces_to_agent(), "the advisory must surface to the agent");
-        assert!(issue.suggestion.as_deref().unwrap_or_default().contains("[["));
-        // It must NOT also fire the generic undefined-command warning.
-        assert!(!issues.iter().any(|i| i.code == IssueCode::UndefinedCommand));
-    }
-
-    #[test]
-    fn path_qualified_test_is_honored_not_steered() {
-        // A user who writes a path clearly wants that external binary — only the
-        // bare ident `test` is the POSIX-conditional footgun. The parser keeps
-        // the path in `cmd.name` (path_parser / DotSlashPath), so the advisory's
-        // `cmd.name == "test"` guard naturally excludes these.
-        let (registry, user_tools) = make_validator();
-
-        for name in ["./test", "/opt/custom/test"] {
-            let validator = Validator::new(&registry, &user_tools);
-            let program = Program {
-                statements: vec![Stmt::Command(Command {
-                    name: name.to_string(),
-                    args: vec![],
-                    redirects: vec![],
-                })],
-            };
-            let issues = validator.validate(&program);
-            assert!(
-                !issues.iter().any(|i| i.code == IssueCode::PosixTestCommand),
-                "path-qualified '{name}' must not get the test advisory"
-            );
-        }
+        assert!(
+            !issues.iter().any(|i| i.code == IssueCode::UndefinedCommand),
+            "`test` is a builtin — no undefined-command warning: {issues:?}"
+        );
     }
 
     #[test]

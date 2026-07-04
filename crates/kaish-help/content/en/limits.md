@@ -9,19 +9,17 @@
 | Backticks `` `cmd` `` (lexer error, not silently tolerated) | `$(cmd)` |
 | `eval` | Write explicit code |
 | Implicit word splitting on whitespace | `split "$VAR"` (for-loop `$(cmd)` does split on newlines — see Bash vs kaish below) |
-| `test` / `[ … ]` conditional commands | `[[ … ]]` (the one supported test form) |
+| `[ … ]` single-bracket conditional | `test …` or `[[ … ]]` |
 
-There is no `test` builtin and no `[` command — conditionals go through `[[ … ]]`.
-This is deliberate: `[[ … ]]` is real syntax the parser understands, so kaish can
-**validate it before running** (catch a malformed test, an unknown operator, an
-unquoted expansion). `test`/`[` are ordinary commands whose operators are just
-string arguments, invisible to the validator until runtime — exactly the kind of
-late-failure footgun kaish avoids. Use `[[ -f x ]]`, `[[ $a = $b ]]`, `[[ -z $s ]]`.
-
-A `test` builtin might return someday if a compelling case appears. `[` will not:
-the bracket belongs to kaish — `[[ … ]]` and native list literals (`xs=[a b c]`,
-see `help syntax` → Collections) — and invoking an external `[` binary isn't
-supported either.
+`test` is a real builtin (VFS-aware, following `[[`'s semantics), so both
+`test -f x` and `[[ -f x ]]` work. There is no `[` command, though: the bracket
+belongs to kaish — `[[ … ]]` and native list literals (`xs=[a b c]`, see
+`help syntax` → Collections) — so `[ -f x ]` is a parse error. Prefer `[[ … ]]`:
+it is real syntax the parser understands, so kaish can **validate it before
+running** (catch a malformed test, an unknown operator, an unquoted expansion),
+and it carries the richer tests (membership, regex, shape guards) plus compound
+`&&`/`||`/`!` in one construct. Reach for `test` for muscle memory or where a
+plain command is wanted — `test -f x && echo yes`, `if test "$a" = "$b"; then`.
 
 ## Lexer/Parser Limitations
 

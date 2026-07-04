@@ -233,6 +233,19 @@ pub struct ToolSchema {
     /// themselves and emit final bytes. See [`ToolSchema::with_owned_output`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub owns_output: bool,
+    /// The tool wants its argv **in source order, with types preserved** — the
+    /// binder must NOT split flags into the unordered `flags` set. When true,
+    /// every argument is bound to `positional` in the order written (operators
+    /// like `-f`/`=`/`!` as strings, operands keeping their `Value` type), and
+    /// `named`/`flags` stay empty.
+    ///
+    /// Default false: normal tools get the clap-style order-independent split
+    /// (`-la` == `-al`). Set true for the rare *position-sensitive* command
+    /// whose operands may themselves look like flags — POSIX `test`, where
+    /// `test $x = -n` and `test 0 -gt -5` must see `-n`/`-5` as literal
+    /// operands. See [`ToolSchema::with_raw_argv`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub raw_argv: bool,
 }
 
 impl ToolSchema {
@@ -247,7 +260,15 @@ impl ToolSchema {
             subcommands: Vec::new(),
             aliases: Vec::new(),
             owns_output: false,
+            raw_argv: false,
         }
+    }
+
+    /// Declare that this tool wants its argv in source order with types
+    /// preserved (no flag/positional split). See [`ToolSchema::raw_argv`].
+    pub fn with_raw_argv(mut self) -> Self {
+        self.raw_argv = true;
+        self
     }
 
     /// Enable positional->named parameter mapping for MCP/external tools.

@@ -795,22 +795,25 @@ async fn validation_issue_in_heredoc_body_full_rendering_snapshot() {
 }
 
 // ============================================================================
-// Tests that verify selective warning SURFACING (W006 reaches the agent;
-// the generic undefined-command warning stays trace-only)
+// Tests that verify selective warning SURFACING. The one opted-in code (W006,
+// the old POSIX-`test` advisory) was retired when `test` became a builtin, so
+// surfacing is currently dormant; the generic undefined-command warning still
+// stays trace-only.
 // ============================================================================
 
 #[tokio::test]
-async fn posix_test_command_surfaces_advisory_but_still_runs() {
+async fn test_is_a_builtin_no_advisory() {
     let kernel = make_kernel().await;
-    // `test` is not a kaish command; the validator advisory (W006) must reach
-    // the agent on stderr, and the warning must NOT block execution.
+    // `test` is a first-class builtin now — it just runs. No W006 advisory and
+    // no undefined-command noise should reach the agent on stderr.
     let result = kernel
         .execute("test -n hi")
         .await
-        .expect("a warning must not turn into a validation error");
+        .expect("test runs as a builtin");
+    assert_eq!(result.code, 0, "`test -n hi` is true");
     assert!(
-        result.err.contains("W006") && result.err.contains("[["),
-        "the W006 `[[ … ]]` advisory should surface on stderr, got err: {:?}",
+        !result.err.contains("W006") && !result.err.contains("builtin registry"),
+        "no validator advisory should surface for the `test` builtin, got err: {:?}",
         result.err
     );
 }

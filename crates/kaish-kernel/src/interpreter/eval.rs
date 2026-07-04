@@ -968,7 +968,7 @@ fn is_truthy(value: &Value) -> bool {
 /// `[[ "01" == 1 ]]` returned true via parse-as-int while `[[ "01" == "1" ]]`
 /// returned false. Users wanting numeric equality across stringified
 /// numbers should use `-eq`, which coerces via `numeric_compare`.
-fn values_equal(left: &Value, right: &Value) -> EvalResult<bool> {
+pub fn values_equal(left: &Value, right: &Value) -> EvalResult<bool> {
     match (left, right) {
         (Value::Null, Value::Null) => Ok(true),
         (Value::Bool(a), Value::Bool(b)) => Ok(a == b),
@@ -1138,8 +1138,10 @@ fn value_to_num(value: &Value) -> EvalResult<Num> {
 }
 
 /// Numeric ordering for `[[ -eq ]]`/`-gt`/`-lt`/`-ge`/`-le`/`-ne`.
-/// Coerces string operands via `value_to_num`.
-fn numeric_compare(left: &Value, right: &Value) -> EvalResult<std::cmp::Ordering> {
+/// Coerces string operands via `value_to_num`. Shared verbatim with the `test`
+/// builtin so `test`'s numeric ops match `[[` exactly (JSON-number semantics,
+/// floats included — not POSIX integer-only).
+pub fn numeric_compare(left: &Value, right: &Value) -> EvalResult<std::cmp::Ordering> {
     let l = value_to_num(left)?;
     let r = value_to_num(right)?;
     match (l, r) {

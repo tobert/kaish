@@ -14,6 +14,57 @@ before it ships.
 
 ---
 
+## The `test` builtin — `[[` semantics as a command (2026-07-04)
+
+`test` had been quietly shelling out to the host `/usr/bin/test`: OS-dependent,
+not VFS-aware, and command-not-found in a no-subprocess build. Amy asked whether
+we could add a `test` that follows kaish's own `[[` semantics and whether that
+would be safe for muscle memory. A 4-model kaibo panel (deepseek/gemini/or-gpt/
+or-kimi, stateless) converged hard: yes — but a flag-form-only shim is
+*not credible*, because `test a = b` is the canonical idiom, and without it the
+thing would parse-error on the one form everyone reaches for. Full scope it was.
+
+**Two parts, and the second was the surprise.** Part one was grammar relief: kaish
+lexes `=`/`==`/`!=`/`!` as shell-significant tokens, so `test a = b` /
+`test ! -f x` parse-errored before reaching a command. The fix is a small,
+name-agnostic arg-parser production making those four operators literal positional
+words (angle brackets `< > <= >=` deliberately excluded — they stay redirection).
+A side effect, bash-consistent: spaced `cmd key = value` now parses as a three-arg
+command instead of an error (glued `key=value` stays an assignment).
+
+Part two — the builtin — turned out to be *not* about the predicate logic (that
+reuses `[[`'s engine verbatim), but about **argv shape**. POSIX `test` is
+position-sensitive (`test $x = -n`, `test 0 -gt -5`), while kaish's `ToolArgs`
+splits flags into an unordered set — so an operand that merely *looks* like a flag
+gets silently mis-routed (proof: `echo a -n b` prints `a b`). Amy pushed on
+whether the lexer could just preserve order always; the honest trace showed order
+dies in the *binder*, not the lexer, and that faithful source order is a distinct
+binding mode incompatible with the flag-value-consumption logic (`grep -A 3`
+consumes its `3`). So: a first-class opt-in `ToolSchema.raw_argv` — the binder
+binds every arg to `positional` in source order with `Value` types preserved.
+`test` opts in; nothing else pays. (A first-class field, not a reconstruct-and-
+shape-check — the same principle as the latch below.)
+
+**One decision reversed on the merits.** The panel wanted integer-strict numerics
+(POSIX errors on `1.5 -eq 1`). Amy pointed out that kaish numbers *are* JSON
+numbers and `[[` already compares floats via this exact `numeric_compare` —
+rejecting `1.5` in `test` but not `[[` would be the odd one out. She was right,
+and it *simplified* the code: `test` numeric == `[[` numeric, verbatim, no
+integer-strict wrapper. Still loud on non-numeric/collection/NaN.
+
+Predictable-by-design divergences from POSIX `test`, all deliberate: no word
+splitting; `-a`/`-o`/`( )` rejected loudly (chain with shell `&&`/`||` or use
+`[[ ]]`); no arg-count magic (an operator missing its operand is loud, not a
+surprise-true); negation is a single parity-collapsing leading `!`. Adding the
+builtin retired the `PosixTestCommand` validator advisory (W006) that used to
+steer `test` toward `[[` — it's a real command now.
+
+**Sequencing.** Built on a worktree parked while #94 (hardening) and #92/#97
+(latch) landed — the `raw_argv` work touches the same dispatch seam #92 reworks,
+so it went *after*, beside `current_invocation`, not in conflict. Then rebased
+across #99 (chumsky alpha.8 → 0.13); the parser change compiled clean on the new
+combinator surface.
+
 ## The confirmation latch becomes a first-class, fulfillable API (2026-07-04)
 
 Fell out of the redirect-in-`$()` work above. That change had to special-case

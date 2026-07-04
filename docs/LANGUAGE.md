@@ -510,10 +510,39 @@ if [[ 443 in ${servers[web]} ]]; then echo "listening"; fi    # nested path as t
 [[ ! -f a || -d b && -e c ]]    # parsed as: (! -f a) || ((-d b) && (-e c))
 ```
 
-Note: `[ expr ]` (single brackets) is **not** kaish syntax and there is no `test`
-builtin — use `[[ ]]` for all conditionals (`[[ -f file ]] && echo yes`). This is
-deliberate: `[[ ]]` is real grammar the validator checks before runtime, whereas
-`test`/`[` would hide their operators as opaque runtime arguments.
+### The `test` command
+
+`test EXPR` is the command form of the same conditionals — exit `0` if true, `1`
+if false, `2` on a usage or type error. It is a real builtin (VFS-aware,
+validated), not a shell-out to the host `/usr/bin/test`:
+
+```sh
+test -f config.toml             # file tests: -e -f -d -r -w -x
+test -z "$out"                  # string tests: -z -n
+test "$mode" = release          # equality: = == != (literal, not glob)
+test "$count" -gt 0             # numeric: -eq -ne -gt -lt -ge -le
+test ! -d build                 # negation: a single leading !
+test -f a && test -f b          # compound: chain with shell && / ||
+if test -f "$path"; then …; fi  # the usual home, an `if`/`while` condition
+```
+
+`test` follows `[[`'s semantics, with a few deliberate, predictable differences:
+
+- **Numbers are kaish (JSON) numbers**, so `test 1.5 -gt 1` compares (it does not
+  error the way POSIX `test` would); a non-numeric operand is a loud error.
+- **No `-a` / `-o` / `\( \)`** — those ambiguous XSI operators are rejected
+  loudly. Compose with shell `&&` / `||`, or use `[[ ]]`.
+- **An operator missing its operand is a loud error** (`test -f` on its own),
+  never a surprise-true — kaish does no word splitting, so the classic
+  `test -n $empty` footgun can't arise.
+- **Richer tests stay `[[ ]]`-only**: membership (`in` / `not in`), regex
+  (`=~` / `!~`), and the shape guards (`-list` / `-record`).
+
+Prefer `[[ ]]` — it is real grammar the validator checks before runtime, carries
+the richer tests, and expresses compound logic (`&&` / `||` / `!`) in one
+construct. Reach for `test` for muscle memory or where a plain command is wanted
+(a condition builtin, a `&&` chain). `[ expr ]` (single brackets) remains **not**
+kaish syntax — `[` opens a list literal, so use `test` or `[[ ]]`.
 
 ## Control Flow
 

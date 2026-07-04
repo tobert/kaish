@@ -744,9 +744,18 @@ fn parser_named_arg_no_spaces() {
     parse_and_snapshot("named_arg_no_spaces", "cmd key=value");
 }
 
+/// Post-`test`-grammar-relief: a *spaced* `key = value` is no longer a
+/// "no spaces around =" parse error. `=` is now a literal argv operator (so
+/// POSIX `test a = b` can reach the `test` command), which makes
+/// `cmd key = value` parse as `cmd` with three positional args — exactly like
+/// bash. A *glued* `key=value` still binds as a WordAssign
+/// (see `parser_named_arg_no_spaces`), so the useful distinction survives.
 #[test]
-fn parser_named_arg_with_spaces_error() {
-    expect_parse_error("cmd key = value");
+fn parser_spaced_equals_is_literal_argv_operator() {
+    assert_eq!(
+        one_stmt_sexpr("cmd key = value"),
+        r#"(cmd cmd (pos (string "key")) (pos (string "=")) (pos (string "value")))"#
+    );
 }
 
 #[test]
@@ -941,4 +950,136 @@ fn parser_glob_in_named_arg() {
 #[test]
 fn parser_glob_in_test() {
     parse_and_snapshot("glob_in_test", "[[ *.txt == foo ]]");
+}
+
+// ---------------------------------------------------------------------------
+// Grammar relief for the `test` builtin (Phase 1). POSIX `test`/`[` is a
+// *command*, so its comparison and negation operators (`=`, `==`, `!=`, `!`)
+// must reach it as ordinary positional argv words. kaish's grammar treats
+// these as shell-significant tokens, so they used to parse-error before ever
+// reaching a command. This relief makes them literal positionals — but ONLY
+// these four: `<` `>` `<=` `>=` stay redirection (see the redirect-unaffected
+// test below) and remain `[[ ]]`-only. See signoff.md / project_test_builtin.
+// ---------------------------------------------------------------------------
+
+/// Parse `input`, require exactly one statement, and return its s-expr.
+/// A parse error (or a split into multiple statements) fails loudly here —
+/// that IS the pre-relief bug we're fixing.
+fn one_stmt_sexpr(input: &str) -> String {
+    let program = parse(input).unwrap_or_else(|errors| {
+        let msg = errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        panic!("parse error for {input:?}: {msg}");
+    });
+    assert_eq!(
+        program.statements.len(),
+        1,
+        "{input:?} must be ONE statement, got {}: {}",
+        program.statements.len(),
+        format_program(&program),
+    );
+    format_program(&program)
+}
+
+#[rstest]
+// The canonical string-equality idiom — THE reason a flag-form-only `test`
+// was judged not-credible.
+#[case(
+    "test a = b",
+    r#"(cmd test (pos (string "a")) (pos (string "=")) (pos (string "b")))"#
+)]
+// bash-refugee `==` alias.
+#[case(
+    "test a == b",
+    r#"(cmd test (pos (string "a")) (pos (string "==")) (pos (string "b")))"#
+)]
+// Inequality.
+#[case(
+    "test a != b",
+    r#"(cmd test (pos (string "a")) (pos (string "!=")) (pos (string "b")))"#
+)]
+// Leading-`!` negation sugar (kaish has no `! cmd` pipeline negation, so this
+// is the only negation path for the builtin).
+#[case(
+    "test ! -f x",
+    r#"(cmd test (pos (string "!")) (shortflag f) (pos (string "x")))"#
+)]
+// Operators as ordinary argv on any command, not just `test` (the relief is
+// name-agnostic — no fragile special-casing of the `test` command name).
+#[case(
+    "echo a = b",
+    r#"(cmd echo (pos (string "a")) (pos (string "=")) (pos (string "b")))"#
+)]
+fn test_operators_reach_command_as_positionals(#[case] input: &str, #[case] expected: &str) {
+    assert_eq!(one_stmt_sexpr(input), expected);
+}
+
+/// The most common real-world form: quoted variable operands around `=`.
+/// We only assert the operator lands as a literal positional between them;
+/// the operand rendering is exercised elsewhere.
+#[test]
+fn test_quoted_var_equality_parses() {
+    let sexpr = one_stmt_sexpr(r#"test "$a" = "$b""#);
+    assert!(
+        sexpr.starts_with("(cmd test "),
+        "expected a `test` command, got: {sexpr}"
+    );
+    assert!(
+        sexpr.contains(r#"(pos (string "="))"#),
+        "`=` must land as a literal positional, got: {sexpr}"
+    );
+}
+
+// --- Regressions: the relief must not disturb assignment / argv-assign /
+// long-flag-value / redirection parsing. ---
+
+/// A glued `x=y` at statement level is still an ASSIGNMENT, not a command
+/// `x` with a bare `=` argument.
+#[test]
+fn glued_assignment_still_assignment_not_command() {
+    let sexpr = one_stmt_sexpr("x=y");
+    assert!(
+        !sexpr.starts_with("(cmd "),
+        "`x=y` must stay an assignment, not become a command: {sexpr}"
+    );
+}
+
+/// A glued `key=value` in argv position (`cat foo=bar`) stays the WordAssign
+/// production (bash: opens a file literally named `foo=bar`), NOT split into
+/// `foo` `=` `bar`.
+#[test]
+fn glued_argv_assign_stays_wordassign() {
+    let sexpr = one_stmt_sexpr("cat foo=bar");
+    assert!(
+        sexpr.contains("(wordassign foo"),
+        "glued `foo=bar` must stay a WordAssign, got: {sexpr}"
+    );
+    assert!(
+        !sexpr.contains(r#"(pos (string "="))"#),
+        "glued `foo=bar` must not fragment into a bare `=` positional: {sexpr}"
+    );
+}
+
+/// A glued `--name=value` long flag still binds its value.
+#[test]
+fn long_flag_with_value_still_binds() {
+    let sexpr = one_stmt_sexpr("grep --context=3 pat");
+    assert!(
+        sexpr.contains("(named context"),
+        "`--context=3` must stay a named flag, got: {sexpr}"
+    );
+}
+
+/// `<` / `>` stay REDIRECTION — the relief deliberately excludes the angle
+/// brackets so it can't shadow redirects.
+#[test]
+fn angle_brackets_stay_redirection() {
+    let sexpr = one_stmt_sexpr("echo x > f");
+    assert!(
+        sexpr.contains("redir") && !sexpr.contains(r#"(pos (string ">"))"#),
+        "`>` must remain a redirect, not become a positional: {sexpr}"
+    );
 }

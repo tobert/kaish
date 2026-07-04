@@ -11,6 +11,20 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`test` builtin** — POSIX condition evaluation as a command, following
+  kaish's `[[` semantics (exit `0` true / `1` false / `2` usage-or-type error).
+  File tests (`-e -f -d -r -w -x`) stat through the VFS, not the host FS; string
+  equality (`= == !=`) is literal; numeric (`-eq -ne -gt -lt -ge -le`) uses
+  kaish (JSON) number semantics, so floats compare (identical to `[[`) and a
+  non-numeric operand is loud. Negation is a single leading `!`. Deliberately
+  **no `-a`/`-o`/`( )`** (rejected loudly — chain with shell `&&`/`||` or use
+  `[[ ]]`) and **no arg-count magic** (an operator missing its operand is a loud
+  error, not a surprise-true). Replaces the previous shell-out to `/usr/bin/test`.
+  Membership/regex/shape-guards remain `[[ ]]`-only.
+- **`ToolSchema.raw_argv`** (embedder API) — a tool can opt into receiving its
+  argv in source order with `Value` types preserved (no flag/positional split),
+  for position-sensitive commands whose operands may look like flags (`test $x =
+  -n`, `test 0 -gt -5`). Used by the `test` builtin.
 - **The confirmation latch is now a first-class typed field with a
   fulfillment API** (GH #92). A gated destructive op returns exit 2 with the
   request on a dedicated `ExecResult.latch: Option<Box<LatchRequest>>`
@@ -37,6 +51,12 @@ breaking entries are marked **BREAKING**.
   | jq …`).
 
 ### Changed
+- **Comparison/negation operators reach commands as literal argv.** The command
+  grammar now accepts `=`, `==`, `!=`, and `!` as literal positional words, so
+  POSIX `test a = b` / `test ! -f x` reach the `test` command. As a side effect,
+  a *spaced* `cmd key = value` now parses as `cmd` with three arguments (like
+  bash) instead of a parse error; a *glued* `key=value` is still a shell
+  assignment. The angle brackets `< > <= >=` remain redirection (unchanged).
 - **Parser dependency migrated off a dead-ended prerelease**: chumsky
   `1.0.0-alpha.8` → `0.13` (GH #98). Zero code changes — kaish's combinator
   surface survived the upstream stabilization intact (verified by the full
@@ -238,6 +258,11 @@ breaking entries are marked **BREAKING**.
   `-F '\|'`, `FS="\\|"`, and `split(s, a, "\\|")` split on a literal pipe (the
   rewrite runs before the single-char-FS-is-literal rule, matching gawk's
   demotion of `\|` to plain `|`).
+
+### Removed
+- Validator advisory **W006** (`PosixTestCommand`, which steered `test`/`[`
+  toward `[[ ]]`) is retired — `test` is a first-class builtin now and validates
+  through the registry like any other command.
 
 ### Fixed
 - **Binary data at text sinks is loud, not a silent placeholder** — a
