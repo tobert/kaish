@@ -40,11 +40,25 @@ If any builtins were added, removed, or recategorized since the last tag,
 verify that documentation matches the actual tool registry. Launch a Task
 subagent (Explore type) to:
 
-1. List every builtin tool name from `crates/kaish-kernel/src/tools/builtin/`
-   (each file's `fn name(&self)` return value)
-2. Compare against the builtin table in `README.md` (the `| Category | Tools |` table)
-3. Compare against the category match arms in `crates/kaish-kernel/src/help.rs`
-   (`format_tool_list` function)
+1. List every registered builtin tool name. The authority is
+   `register_builtins()` in `crates/kaish-kernel/src/tools/builtin/mod.rs` — each
+   `registry.register(...)` maps to one `fn name()`. Note: multi-name builtins
+   register distinct structs (there is no `fn aliases()` mechanism), and
+   capability-gated builtins (subprocess/host/tokens) are absent from a default
+   build but are still real builtins.
+2. Compare against the builtin table in `README.md` (the `| Category | Tools |`
+   table). **This README table is the only *categorized* listing of builtins
+   anywhere**, so it's the only place a builtin can be hand-miscategorized or
+   omitted — check it carefully.
+3. There are **no code-side category groupings** to check against. The
+   `help builtins` output (`format_tool_list` in
+   `crates/kaish-help/src/topic.rs`) and the `kaish-tools` builtin
+   (`format_tool_list` in `crates/kaish-kernel/src/tools/builtin/introspect.rs`)
+   both emit a flat, alphabetical list built directly from the live registry
+   schemas, so they cannot omit or miscategorize a registered builtin
+   (feature-gated ones drop out naturally). `crates/kaish-kernel/src/help.rs` is
+   now just a re-export shim into the `kaish-help` crate — the old
+   `format_tool_list` category match arms it once held are gone.
 4. Check for hardcoded tool counts anywhere in docs (`README.md`, `docs/help/*.md`)
 
 Report any mismatches: ghost entries (listed but don't exist), missing entries
