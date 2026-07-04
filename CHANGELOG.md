@@ -224,6 +224,52 @@ breaking entries are marked **BREAKING**.
   demotion of `\|` to plain `|`).
 
 ### Fixed
+- **Binary data at text sinks is loud, not a silent placeholder** — a
+  `Value::Bytes` value (e.g. `b=$(cat some-binary-file)`, since `cat` emits raw
+  bytes for non-UTF-8 content) used to render the placeholder `[binary: N bytes]`
+  when interpolated into a string (`"x=$b"`), passed as a bare word to an external
+  command (`prog $b`), or printed by `echo`. These text sinks now error (`binary
+  data (N bytes) cannot be used as text — decode it (base64/xxd) or redirect to a
+  file`); valid-UTF-8 bytes still coerce. Semantic uses (`==`, `in`, `${#…}`,
+  `case`) are unchanged. Path-positional/env/redirect sinks remain a known gap.
+- **Binary worker output no longer corrupts `gather`** — scatter/gather result
+  rows and `gather --lines` lossily UTF-8-decoded (`U+FFFD`) a worker whose stdout
+  was binary; a row now reports `ok:false` with a clear error and `--lines`
+  hard-errors (exit 123) instead of emitting mangled bytes.
+- **`scatter`/`gather` reject wrong-typed flag values loudly** — `--limit`,
+  `--as`, and `--timeout` silently fell back to their defaults when handed a
+  value of the wrong type (a string `--limit "5"` from a variable, a negative
+  `--timeout`) or a `$(...)` the reduced sync binder can't evaluate; they now
+  coerce where sensible (`--limit "5"` → 5) and otherwise fail with a usage error
+  instead of running mis-configured.
+- **`scatter` workers inherit the parent execution context** — workers ran with a
+  from-scratch context that dropped the script watchdog (so a `ctx.patient` hold
+  suspended a missing clock → false-positive request-timeout kills) and bypassed
+  the output-limit memory cap (N parallel workers could each hold unbounded
+  output). Workers now derive from the parent, carrying the watchdog, output limit
+  (with a per-worker spill boundary), aliases, and ignore/external-command policy.
+- **Backend-tool results keep their structured data across the kernel seam** — a
+  backend-registered tool's `ToolResult` → `ExecResult` conversion carried only
+  `.out`, dropping `.data`/`content_type`/`baggage` (so `x=$(embedder_tool)` lost
+  a structured/collection result and OTel baggage). A symmetric conversion now
+  preserves them, and a real backend execution error is reported as a failure
+  rather than masked as exit-127 "command not found".
+- **`source` / PATH `.kai` scripts accumulate output across statements** — they
+  used to keep only the last statement's stdout, silently discarding everything
+  earlier.
+- **`Kernel::reset()` preserves embedder state** — it silently reverted the
+  confirmation-latch/trash flags, the kernel's `$$` identity, and frontend-seeded
+  `initial_vars` (HOME/PATH), so an embedder resetting between requests lost its
+  latch gate. `reset()` now keeps all three.
+- **`jq` no longer JSON-sniffs a `Value::String` `.data` payload** — `fromjson
+  '"1"' | jq type` reported `"number"`; a string is now converted directly,
+  honouring the no-sniffing invariant.
+- **The argv door no longer panics on a non-ASCII short-flag bundle** —
+  `execute_argv("ls", ["-lé"])` sliced mid-codepoint and panicked; the classifier
+  now only accepts the lexer's real short-flag char class, falling back to a
+  literal positional.
+- **A bareword `key=value` positional after `--` parses** — `echo -- a=b` used to
+  hard-fail.
 - **A stdout redirect now clears the structured `.data` sideband too**, not just
   `.out`/`.output`. `.data` is the structured view of stdout, so `> file` /
   `>> file` / `&> file` take it along with the text: `x=$(cmd > file)` captures
@@ -414,6 +460,12 @@ breaking entries are marked **BREAKING**.
   now correctly reports source order.
 
 ### Removed
+- **BREAKING: the unused `Executor` trait and `NoOpExecutor` are removed from the
+  public `interpreter` surface.** The sync expression evaluator no longer takes an
+  executor — command substitution is resolved by the async evaluator, which
+  pre-resolves operands to literals before any sync evaluation, so the sync path's
+  command-substitution/file-test arms were dead code. Pre-1.0, breaking-in-name
+  only; nothing implemented or consumed them.
 - **BREAKING: the `test` builtin and `[` command are gone.** Use `[[ … ]]`, the one
   supported test form. The removed builtins never worked end-to-end through the
   parser anyway: `[` could not be a command name and `test`'s comparison operators
