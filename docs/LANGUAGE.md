@@ -1191,5 +1191,4 @@ These are documented limitations of the current implementation:
 
 ### Build/Development
 
-- **chumsky parser is pre-1.0** — The parser combinator library is the crates.io `1.0.0-alpha` series; kaish will move to stable chumsky 1.0 before its own 1.0.
 - **Fuzz tests require nightly** — The fuzz testing infrastructure requires Rust nightly compiler.

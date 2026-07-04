@@ -50,7 +50,7 @@ tracing-opentelemetry = "0.32"
 
 # Lexer/Parser (L1-L2)
 logos = "0.16"
-chumsky = "1.0.0-alpha.8"
+chumsky = "0.13"
 ariadne = "0.6"
 
 # CLI arg parsing (used inside builtins via the clap-migration recipe)

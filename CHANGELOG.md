@@ -37,6 +37,11 @@ breaking entries are marked **BREAKING**.
   | jq …`).
 
 ### Changed
+- **Parser dependency migrated off a dead-ended prerelease**: chumsky
+  `1.0.0-alpha.8` → `0.13` (GH #98). Zero code changes — kaish's combinator
+  surface survived the upstream stabilization intact (verified by the full
+  gate suite passing unchanged, snapshots included). Embedders see a smaller
+  dependency tree (two stale transitive regex crates drop out).
 - **`jq -s`/`--slurp` is now real jq slurp semantics**, not a no-op (GH #80).
   On the text path it parses the whole whitespace-separated document stream
   and always wraps the result in an array — even a single document
