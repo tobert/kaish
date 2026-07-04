@@ -4104,8 +4104,15 @@ impl Kernel {
                     let home = self.scope_home().await;
                     let path_value = apply_tilde_expansion(path_value, home.as_deref());
                     let path_str = value_to_string(&path_value);
-                    let backend = self.exec_ctx.read().await.backend.clone();
-                    let entry = backend.stat(std::path::Path::new(&path_str)).await.ok();
+                    // Resolve against the *session* cwd, not the process cwd, so a
+                    // relative `[[ -f rel ]]` honors `cd` and agrees with the
+                    // VFS-aware `test` builtin (GH #101). Backend stats a raw
+                    // relative path against the process cwd otherwise.
+                    let (resolved, backend) = {
+                        let ctx = self.exec_ctx.read().await;
+                        (ctx.resolve_path(&path_str), ctx.backend.clone())
+                    };
+                    let entry = backend.stat(&resolved).await.ok();
                     Ok(match op {
                         FileTestOp::Exists => entry.is_some(),
                         FileTestOp::IsFile => entry.as_ref().is_some_and(|e| e.is_file()),

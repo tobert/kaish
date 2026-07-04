@@ -265,6 +265,10 @@ breaking entries are marked **BREAKING**.
   through the registry like any other command.
 
 ### Fixed
+- **`[[ ]]` file tests honor `cd`** (GH #101). A relative path in `[[ -f x ]]`
+  (and `-e -d -r -w -x`) used to stat against the process cwd, so after a `cd` an
+  existing file read as absent — a silent wrong `false` into `if`/`&&`. It now
+  resolves against the session cwd, agreeing with the VFS-aware `test` builtin.
 - **Binary data at text sinks is loud, not a silent placeholder** — a
   `Value::Bytes` value (e.g. `b=$(cat some-binary-file)`, since `cat` emits raw
   bytes for non-UTF-8 content) used to render the placeholder `[binary: N bytes]`

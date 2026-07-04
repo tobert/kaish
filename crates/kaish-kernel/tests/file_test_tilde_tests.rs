@@ -93,3 +93,64 @@ async fn file_test_tilde_resolves_against_home_not_cwd() {
         "`~` did not resolve against the session HOME"
     );
 }
+
+// --- relative paths resolve against the session cwd (GH #101) ---------------
+
+/// A bare relative path in a `[[ ]]` file test must stat against the session
+/// cwd, not the process cwd. `eval_test_async` used to hand the raw string to
+/// `backend.stat`, so `[[ -f rel ]]` silently missed a file that exists in the
+/// shell's cwd — a wrong `false` flowing into `if`/`&&`.
+#[tokio::test]
+async fn file_test_relative_path_resolves_against_session_cwd() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("here.txt"), b"hi").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let out = kernel
+        .execute("[[ -f here.txt ]] && echo 'yes' || echo 'no'")
+        .await
+        .unwrap();
+    assert_eq!(out.text_out().trim(), "yes", "relative -f ignored the session cwd");
+}
+
+/// The reported repro (GH #101): after `cd sub`, a relative `[[ -f f ]]` must
+/// honor the new cwd.
+#[tokio::test]
+async fn file_test_honors_cd() {
+    let dir = tempdir();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub").join("f.txt"), b"hi").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let out = kernel
+        .execute("cd sub; [[ -f f.txt ]] && echo 'yes' || echo 'no'")
+        .await
+        .unwrap();
+    assert_eq!(out.text_out().trim(), "yes", "[[ -f ]] did not honor cd");
+}
+
+/// Differential guard: `[[ -f rel ]]` and the VFS-aware `test -f rel` must
+/// agree on a relative path after `cd` (they disagreed before this fix —
+/// `test` resolved the cwd, `[[` did not).
+#[tokio::test]
+async fn double_bracket_and_test_agree_on_relative_path() {
+    let dir = tempdir();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub").join("f.txt"), b"hi").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let out = kernel
+        .execute(
+            "cd sub\n\
+             [[ -f f.txt ]]; b=$?\n\
+             test -f f.txt; t=$?\n\
+             [[ $b -eq $t ]] && echo agree || echo \"disagree b=$b t=$t\"",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.text_out().trim(),
+        "agree",
+        "[[ -f ]] and test -f disagreed on a relative path"
+    );
+}
