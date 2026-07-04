@@ -54,10 +54,6 @@ pub enum IssueCode {
     InvalidSedExpr,
     /// jq filter expression is syntactically invalid.
     InvalidJqFilter,
-    /// A POSIX `test` / `[ … ]` conditional was used. kaish has no such command
-    /// (it would resolve to an external binary that bypasses the VFS); use
-    /// `[[ … ]]`, which the validator checks before runtime.
-    PosixTestCommand,
     /// A subscripted assignment lvalue (`x[k]=v`) targets an undefined root
     /// variable. Unlike a plain read, a path-set never autovivifies the
     /// root — it must already exist as a collection.
@@ -73,7 +69,8 @@ impl IssueCode {
     /// Returns a short code string for the issue.
     ///
     /// Code numbers are stable identifiers, not contiguous. E010 and
-    /// W003/W004/W005 remain retired. E006 (InvalidSedExpr), E007
+    /// W003/W004/W005 remain retired, as does W006 (PosixTestCommand, retired
+    /// when `test` became a first-class builtin). E006 (InvalidSedExpr), E007
     /// (InvalidJqFilter), and E011 (DiffNeedsTwoFiles) were wired up with
     /// real emitters in 2026-06-14.
     pub fn code(&self) -> &'static str {
@@ -94,7 +91,6 @@ impl IssueCode {
             IssueCode::ForLoopScalarVar => "E012",
             IssueCode::ScatterWithoutGather => "E014",
             IssueCode::LastResultFieldAccess => "E015",
-            IssueCode::PosixTestCommand => "W006",
             IssueCode::LvalueUndefinedRoot => "E016",
             IssueCode::DottedAssignmentTarget => "E017",
         }
@@ -107,8 +103,13 @@ impl IssueCode {
     /// external command (`grep`, `cargo`), so surfacing them all would be
     /// noise. Opt a code in here only when its guidance is worth interrupting
     /// for. This is the surfacing seam for the "did-you-mean" guidance pass.
+    ///
+    /// Currently dormant: the one opted-in code (`PosixTestCommand`) was retired
+    /// when `test` became a builtin. The seam stays wired for the next code that
+    /// earns surfacing — add a `matches!(self, IssueCode::Foo | …)` arm here.
     pub fn surfaces_to_agent(&self) -> bool {
-        matches!(self, IssueCode::PosixTestCommand)
+        let _ = self;
+        false
     }
 
     /// Default severity for this issue code.
@@ -136,7 +137,6 @@ impl IssueCode {
             | IssueCode::InvalidArgType
             | IssueCode::UndefinedCommand
             | IssueCode::UnknownFlag
-            | IssueCode::PosixTestCommand
             | IssueCode::PossiblyUndefinedVariable => Severity::Warning,
         }
     }

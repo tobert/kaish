@@ -84,6 +84,7 @@ mod stat;
 mod tac;
 mod tail;
 mod tee;
+mod test;
 mod timeout;
 mod tojson;
 mod tojsonl;
@@ -214,6 +215,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(tac::Tac);
     registry.register(tail::Tail);
     registry.register(tee::Tee);
+    registry.register(test::Test);
     registry.register(timeout::Timeout);
     #[cfg(feature = "tokens")]
     registry.register(tokens::Tokens);

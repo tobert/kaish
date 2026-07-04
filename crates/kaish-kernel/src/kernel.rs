@@ -3331,6 +3331,85 @@ impl Kernel {
     async fn build_args_async(&self, args: &[Arg], schema: Option<&crate::tools::ToolSchema>) -> Result<ToolArgs> {
         let mut tool_args = ToolArgs::new();
         let home = self.scope_home().await;
+
+        // Raw-argv fast path (POSIX `test`): bind every argument to `positional`
+        // in source order with types preserved — operators (`-f`, `=`, `!`) as
+        // strings, operands keeping their `Value` — leaving `flags`/`named`
+        // empty. A position-sensitive command needs the *true* argv: an operand
+        // that looks like a flag (`test $x = -n`, `test 0 -gt -5`) must not be
+        // hoisted into the unordered flag set the normal binder splits into.
+        // Globs still expand and `~` still resolves, matching normal positional
+        // binding — so `test -f *.rs` errors on too many args, not a literal
+        // pattern stat.
+        if schema.is_some_and(|s| s.raw_argv) {
+            for arg in args {
+                match arg {
+                    Arg::Positional(expr) => {
+                        let glob = if let Expr::GlobPattern(p) = expr {
+                            self.scope.read().await.glob_enabled().then(|| p.clone())
+                        } else {
+                            None
+                        };
+                        if let Some(pattern) = glob {
+                            let (paths, cwd) = {
+                                let ctx = self.exec_ctx.read().await;
+                                let paths = ctx
+                                    .expand_glob(&pattern)
+                                    .await
+                                    .map_err(|e| anyhow::anyhow!("glob: {}", e))?;
+                                let cwd = ctx.resolve_path(".");
+                                (paths, cwd)
+                            };
+                            if paths.is_empty() {
+                                return Err(anyhow::anyhow!("no matches: {}", pattern));
+                            }
+                            for path in paths {
+                                let display = if !pattern.starts_with('/') {
+                                    path.strip_prefix(&cwd)
+                                        .unwrap_or(&path)
+                                        .to_string_lossy()
+                                        .into_owned()
+                                } else {
+                                    path.to_string_lossy().into_owned()
+                                };
+                                tool_args.positional.push(Value::String(display));
+                            }
+                        } else {
+                            let value = self.eval_expr_async(expr).await?;
+                            let value = apply_tilde_expansion(value, home.as_deref());
+                            tool_args.positional.push(value);
+                        }
+                    }
+                    Arg::ShortFlag(name) => {
+                        tool_args.positional.push(Value::String(format!("-{name}")));
+                    }
+                    Arg::LongFlag(name) => {
+                        tool_args.positional.push(Value::String(format!("--{name}")));
+                    }
+                    Arg::Named { key, value } => {
+                        let val = self.eval_expr_async(value).await?;
+                        let val = apply_tilde_expansion(val, home.as_deref());
+                        tool_args.positional.push(Value::String(format!(
+                            "--{key}={}",
+                            crate::interpreter::value_to_string(&val)
+                        )));
+                    }
+                    Arg::WordAssign { key, value } => {
+                        let val = self.eval_expr_async(value).await?;
+                        let val = apply_tilde_expansion(val, home.as_deref());
+                        tool_args.positional.push(Value::String(format!(
+                            "{key}={}",
+                            crate::interpreter::value_to_string(&val)
+                        )));
+                    }
+                    Arg::DoubleDash => {
+                        tool_args.positional.push(Value::String("--".to_string()));
+                    }
+                }
+            }
+            return Ok(tool_args);
+        }
+
         // Subcommand-aware tools (e.g. `kj context list`) expose a tree of
         // schemas; pick the leaf the leading positionals route to and bind
         // flags against *its* params. Flat tools return the root. select_leaf

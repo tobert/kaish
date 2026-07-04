@@ -71,6 +71,7 @@ const SKIPS: &[Skip] = &[
     Skip { name: "fg", reason: "requires a stopped job (PTY job control)" },
     Skip { name: "exec", reason: "replaces the calling process" },
     Skip { name: "kaish-trash", reason: "reads the user's real OS trash — non-hermetic" },
+    Skip { name: "test", reason: "exit-code only, no output surface; raw_argv makes --json a literal operand (like [[ ]], test takes no --json)" },
 ];
 
 const CASES: &[Case] = &[
