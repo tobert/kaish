@@ -31,7 +31,9 @@ impl FormatArg for Value {
             Value::Bool(b) => b.to_string(),
             Value::Null => String::new(),
             Value::Json(json) => json.to_string(),
-            Value::Bytes(b) => format!("[binary: {} bytes]", b.len()),
+            // Non-UTF-8 bytes are rejected loud at printf's arg gate before we
+            // get here; valid-UTF-8 bytes render as their text.
+            Value::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
         }
     }
 
@@ -99,6 +101,14 @@ impl Tool for Printf {
         };
 
         let format_args: Vec<&Value> = args.positional.iter().skip(1).collect();
+        // printf is a text sink: a binary (non-UTF-8) operand is loud, never a
+        // silent `[binary: N bytes]` placeholder (kept in sync with `echo` and
+        // the interpolation/argv sinks). Valid-UTF-8 bytes coerce below.
+        for &v in &format_args {
+            if let Err(e) = crate::interpreter::value_to_text_sink(v) {
+                return ExecResult::failure(1, format!("printf: {e}"));
+            }
+        }
         // POSIX printf reuses the format until all operands are consumed.
         let output = format_string::format_string_cycling(&format, &format_args);
 

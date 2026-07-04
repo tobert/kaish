@@ -164,6 +164,21 @@ async fn dotted_assignment_target_is_rejected_with_bracket_suggestion() {
     );
 }
 
+#[tokio::test]
+async fn dotted_env_prefix_assignment_target_is_also_rejected() {
+    // Env-prefix assignments (`NAME=value cmd`) build an `Assignment` the same
+    // way a bare assignment does (`Stmt::EnvScoped` validates each entry via
+    // the same `validate_assignment`), so a dotted root here must be caught
+    // too — not just the bare-statement form.
+    let k = setup().await;
+    let err = loud_err(&k, "X.Y=v echo hi").await;
+    assert!(err.contains("E017"), "got: {err}");
+    assert!(
+        err.contains("X[Y]"),
+        "expected the bracket-form suggestion: {err}"
+    );
+}
+
 // ── push ───────────────────────────────────────────────────────────────────
 
 #[tokio::test]

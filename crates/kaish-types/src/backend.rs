@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 use thiserror::Error;
 
 use crate::output::OutputData;
-use crate::result::{value_to_json, ExecResult};
+use crate::result::{json_to_value_no_envelope, value_to_json, ExecResult};
 use crate::tool::ToolSchema;
 
 /// Result type for backend operations.
@@ -299,7 +299,19 @@ impl From<ExecResult> for ToolResult {
         // Saturating cast: codes outside i32 range clamp to i32::MIN/MAX
         let code = exec.code.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
 
-        // Materialize text before moving fields out
+        // HAZARD: `text_out()` is the infallible/lossy decoder — a binary
+        // `OutputPayload::Bytes` (already produced by `cat`/`head`/`tail`/
+        // `base64 -d`/`xxd -r`/`dd`/`tee`/external commands, so this is real
+        // today, not merely a future risk) gets its invalid-UTF-8 bytes
+        // replaced with U+FFFD here. This `From` impl is infallible by
+        // signature, so it cannot fail loud the way `try_text_out()` does —
+        // this is an accepted, deliberate exception, not an oversight. The
+        // binary survives losslessly in the preserved `output: Option<OutputData>`
+        // field below; a structured/binary-aware consumer MUST read `output`,
+        // never `stdout`, to avoid the lossy decode. If a future embedder seam
+        // needs a fallible conversion here, add a `TryFrom` (or a bytes-carrying
+        // field) rather than changing this `From`'s behavior. See
+        // `docs/binary-data.md`.
         let stdout = exec.text_out().into_owned();
         let output = exec.take_output();
 
@@ -315,6 +327,28 @@ impl From<ExecResult> for ToolResult {
             content_type: exec.content_type,
             baggage: exec.baggage,
         }
+    }
+}
+
+impl From<ToolResult> for ExecResult {
+    /// The symmetric peer of `From<ExecResult> for ToolResult` above — every
+    /// field that direction preserves, this direction must preserve too, or a
+    /// backend-registered tool's structured `data`/`content_type`/`baggage`
+    /// silently vanishes crossing back into the kernel (the embedder seam:
+    /// `x=$(embedder_tool)` and `for r in $(embedder_tool)` need `.data` to
+    /// see typed results, not just stdout text).
+    ///
+    /// `data` uses [`json_to_value_no_envelope`] rather than the internal
+    /// round-trip conversion: a backend tool's JSON is external input, so an
+    /// object shaped like the byte envelope must stay a plain record, never
+    /// silently auto-decode to `Value::Bytes`.
+    fn from(result: ToolResult) -> Self {
+        let mut exec = ExecResult::from_output(result.code as i64, result.stdout, result.stderr);
+        exec.set_output(result.output);
+        exec.data = result.data.map(json_to_value_no_envelope);
+        exec.content_type = result.content_type;
+        exec.baggage = result.baggage;
+        exec
     }
 }
 

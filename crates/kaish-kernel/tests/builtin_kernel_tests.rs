@@ -268,6 +268,31 @@ async fn source_alias_still_works_in_command_position() {
 }
 
 #[tokio::test]
+async fn source_accumulates_every_statements_stdout_not_just_the_last() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "multi.kai", "echo one\necho two\necho three\n");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "source multi.kai").await;
+    assert_eq!(code, 0, "source should succeed: {out:?}");
+    assert!(out.contains("one"), "source dropped first statement's output: {out:?}");
+    assert!(out.contains("two"), "source dropped second statement's output: {out:?}");
+    assert!(out.contains("three"), "source should keep the last statement's output: {out:?}");
+}
+
+#[tokio::test]
+async fn path_kai_script_accumulates_every_statements_stdout() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "multi.kai", "echo one\necho two\necho three\n");
+    let kernel = kernel_at(dir.path());
+    let script = format!("PATH={}; multi", dir.path().display());
+    let (out, code) = run(&kernel, &script).await;
+    assert_eq!(code, 0, "PATH .kai script should succeed: {out:?}");
+    assert!(out.contains("one"), "script dropped first statement's output: {out:?}");
+    assert!(out.contains("two"), "script dropped second statement's output: {out:?}");
+    assert!(out.contains("three"), "script should keep the last statement's output: {out:?}");
+}
+
+#[tokio::test]
 async fn find_name_filters_to_matches_recursively() {
     let dir = tempdir().unwrap();
     touch(dir.path(), "keep.log", "");

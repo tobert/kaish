@@ -84,7 +84,9 @@ impl Tool for Gather {
 
         // Validate flags even standalone (parse_gather_options is the runner's
         // reader; here it only needs to not reject).
-        let _opts = parse_gather_options(&args);
+        if let Err(e) = parse_gather_options(&args) {
+            return ExecResult::failure(2, format!("gather: {e}"));
+        }
 
         // Standalone (not in a scatter/gather pipeline): pass stdin through.
         // The real result-record rendering lives in the ScatterGatherRunner.

@@ -121,7 +121,9 @@ everywhere, a `jq` that always uses the same filter syntax, an `awk` that never 
   as expected.
 - **80/20** — implement the features used 80% of the time, deliberately omit the 20% that add
   complexity without proportional value. Missing features compose via pipes.
-- **ERE everywhere** — all regex uses Extended Regular Expressions. No BRE/ERE confusion.
+- **ERE-first regex** — Extended Regular Expressions are the dialect everywhere; common GNU BRE
+  spellings (`\|`, `\(…\)`, `\{n,m\}`, `\+`, `\?`) are accepted too and rewrite to ERE, so existing
+  scripts keep working. `-E`/`-r` opts into strict ERE.
 
 | Category | Tools |
 |----------|-------|

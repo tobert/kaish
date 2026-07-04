@@ -13,9 +13,11 @@
 //!
 //! # Command Substitution
 //!
-//! The evaluator supports `$(pipeline)` expressions through the `Executor` trait.
-//! Higher layers (L6: Pipes & Jobs) implement this trait to provide actual
-//! command execution. For standalone expression evaluation, use `NoOpExecutor`.
+//! `$(pipeline)` expressions are executed by the async evaluator in the kernel
+//! (`kernel.rs`), which resolves them to literal values before any synchronous
+//! expression evaluation runs. The sync [`eval_expr`] evaluator therefore never
+//! sees a `CommandSubst` node; encountering one is a loud error, not a silent
+//! empty string.
 //!
 //! # Example
 //!
@@ -37,7 +39,7 @@ mod result;
 mod scope;
 
 pub use control_flow::ControlFlow;
-pub use eval::{eval_expr, expand_tilde, is_collection, resolve_default, resolve_length, scalar_test_operand_error, strip_leading_tabs, structured_boundary_error, structured_export_error, value_defaults_on_emptiness, value_to_bool, value_to_exit_code, value_length, value_to_string, value_to_string_with_tilde, EvalError, EvalResult, Evaluator, Executor, HeredocAssembler, NoOpExecutor};
+pub use eval::{eval_expr, expand_tilde, is_collection, resolve_default, resolve_length, scalar_test_operand_error, strip_leading_tabs, structured_boundary_error, structured_export_error, value_defaults_on_emptiness, value_to_bool, value_to_exit_code, value_length, value_to_string, value_to_string_with_tilde, value_to_text_sink, EvalError, EvalResult, Evaluator, HeredocAssembler};
 pub use result::{apply_output_format, hex_dump, json_to_value, json_to_value_no_envelope, value_to_json, EntryType, ExecResult, LatchRequest, OutputData, OutputFormat, OutputNode, OutputPayload};
 pub use scope::{PathError, Scope};
 // Crate-internal: the reduced sync evaluator (scheduler/pipeline.rs) reuses the

@@ -19,13 +19,13 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tracing::Instrument;
 
-use crate::ast::{Command, Value};
+use crate::ast::{Command, Redirect, Value};
 use crate::dispatch::CommandDispatcher;
 use crate::duration::parse_duration;
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ToolRegistry};
 
-use super::pipeline::PipelineRunner;
+use super::pipeline::{apply_redirects, PipelineRunner};
 
 /// Options for scatter operation.
 #[derive(Debug, Clone)]
@@ -43,8 +43,6 @@ pub struct ScatterOptions {
 /// Options for gather operation.
 #[derive(Debug, Clone, Default)]
 pub struct GatherOptions {
-    /// Show progress indicator.
-    pub progress: bool,
     /// `--lines`: emit each successful worker's raw `out` in item order instead
     /// of JSONL rows — and HARD-ERROR (exit 123, no partial text) if any worker
     /// failed, since bare lines cannot represent a failure. The text escape
@@ -147,12 +145,14 @@ impl ScatterGatherRunner {
     ///
     /// Returns the final result after all stages complete.
     #[tracing::instrument(level = "info", skip(self, pre_scatter, scatter_opts, parallel, gather_opts, post_gather, ctx), fields(item_count = tracing::field::Empty, parallelism = scatter_opts.limit))]
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         &self,
         pre_scatter: &[Command],
         scatter_opts: ScatterOptions,
         parallel: &[Command],
         gather_opts: GatherOptions,
+        gather_redirects: &[Redirect],
         post_gather: &[Command],
         ctx: &mut ExecContext,
     ) -> ExecResult {
@@ -199,6 +199,19 @@ impl ScatterGatherRunner {
         // are A′: 0 all ok · 123 any worker failed · 2 usage (clap layer).
         let gathered = gather_results(&results, &gather_opts);
 
+        // `gather`'s own trailing redirect (`… | gather > results.jsonl | …`)
+        // must apply to gather's OWN result before anything downstream sees
+        // it — matching shell semantics where a file redirect on a pipeline
+        // stage wins over the pipe (`cmd > file | next` sends cmd's real
+        // stdout to the file; `next` reads nothing from cmd). Applying it
+        // unconditionally (regardless of exit code) matches a redirect being
+        // a file-descriptor operation independent of the command's success —
+        // `false > file` still creates the file. Previously this only ran
+        // when gather was the pipeline's last command, so a trailing
+        // `gather > file | jq` silently skipped the file and let the
+        // unredirected rows flow to `jq` instead.
+        let gathered = apply_redirects(gathered, gather_redirects, ctx).await;
+
         // Run post-gather commands if any. A failed gather short-circuits —
         // feeding partial/failed output onward would propagate corruption.
         if post_gather.is_empty() || gathered.code != 0 {
@@ -244,12 +257,34 @@ impl ScatterGatherRunner {
             // external children via the wait_or_kill discipline.
             let worker_dispatcher = self.sequential_dispatcher.fork_attached().await;
             let commands = commands.to_vec();
-            let var_name = var_name.clone();
-            let base_scope = base_ctx.scope.clone();
-            let backend = base_ctx.backend.clone();
-            let cwd = base_ctx.cwd.clone();
             let parent_token = base_ctx.cancel.clone();
             let worker_token = parent_token.child_token();
+
+            // Build the worker context FROM THE PARENT, not from scratch. A
+            // from-scratch `ExecContext::with_backend_and_scope` starts
+            // `watchdog = None`; `dispatch_command` then syncs that `None` INTO
+            // the subkernel (kernel.rs `ec.watchdog = ctx.watchdog.clone()`),
+            // clobbering the fork's inherited watchdog — so inside a worker the
+            // script clock is gone and any `ctx.patient` hold suspends a
+            // *missing* timer, yielding false-positive request timeouts that
+            // kill the worker. `child_for_pipeline` clones exactly what a worker
+            // needs in one shot — watchdog, vfs_budget, aliases, ignore_config,
+            // output_limit, allow_external_commands, backend, cwd, scope,
+            // dispatcher — replacing the manual field-copy that was easy to let
+            // drift (and that dropped the watchdog). `base_ctx` is a borrow (not
+            // `'static`), so the child MUST be built here and MOVED into the
+            // spawn — it cannot be constructed inside the closure.
+            let mut worker_ctx = base_ctx.child_for_pipeline();
+            // Per-worker TYPED binding — the same json→Value conversion the
+            // for-loop uses for `$(cmd)` items (GH #73), so a record element
+            // subscripts as `${ITEM[k]}`.
+            worker_ctx.scope.set(
+                &var_name,
+                crate::interpreter::json_to_value_no_envelope(item.json.clone()),
+            );
+            // Per-worker cancel token (a child of the parent's), so the timeout
+            // timer and a parent cancel both reach this worker's externals.
+            worker_ctx.cancel = worker_token.clone();
 
             // Per-worker timeout: spawn a delay task that cancels the worker's
             // child token after `opts.timeout`. The cancel cascades into the
@@ -274,24 +309,29 @@ impl ScatterGatherRunner {
             // provides the tracing parent; this provides the OTel parent.
             let handle = tokio::spawn(crate::telemetry::bind_current_context(async move {
                 let _permit = permit; // Hold permit until done
-
-                // Create context for this worker. The binding is TYPED — the
-                // same json→Value conversion the for-loop uses for `$(cmd)`
-                // items (GH #73), so a record element subscripts as ${ITEM[k]}.
-                let mut scope = base_scope;
-                scope.set(
-                    &var_name,
-                    crate::interpreter::json_to_value_no_envelope(item.json.clone()),
-                );
-
-                let mut ctx = ExecContext::with_backend_and_scope(backend, scope);
-                ctx.set_cwd(cwd);
-                ctx.cancel = worker_token;
+                let mut worker_ctx = worker_ctx; // moved in; built from parent above
 
                 // Run through PipelineRunner + dispatcher (full resolution chain).
                 // Uses run_sequential to avoid async recursion and infinite future size.
                 let runner = PipelineRunner::new(tools);
-                let result = runner.run_sequential(&commands, &mut ctx, &*worker_dispatcher).await;
+                let mut result =
+                    runner.run_sequential(&commands, &mut worker_ctx, &*worker_dispatcher).await;
+
+                // Per-worker spill boundary. `run_sequential` never reaches the
+                // kernel's top-level post-run spill check (kernel.rs:2704), so
+                // without this each worker holds its FULL output in memory —
+                // N concurrent workers × large output evades the sandbox
+                // `output_limit` (10 workers × 1 GB = 10 GB resident before
+                // anything spills). Cap here, where the N× multiplication lives;
+                // `child_for_pipeline` shares the parent's `output_limit`, so
+                // workers cap against the same budget.
+                if worker_ctx.output_limit.is_enabled() {
+                    let _ = crate::output_limit::spill_if_needed(
+                        &mut result,
+                        &worker_ctx.output_limit,
+                    )
+                    .await;
+                }
 
                 // Worker finished — abort the timer if still pending so it
                 // doesn't fire a now-pointless cancel and idle resources.
@@ -430,22 +470,52 @@ fn strip_one_trailing_newline(s: &str) -> &str {
 /// present (`err` deliberately so — omit-empty on the most-read field would
 /// make `${r[err]}` a loud missing-key error on every successful row). A
 /// timed-out worker reports `code` 124 (the `timeout(1)` prior) and `ok` false.
+///
+/// # Binary-output hazard
+///
+/// A worker's `out` is a `text_out()`-shaped string field, but the worker's
+/// `ExecResult` payload can be `OutputPayload::Bytes` — several builtins
+/// already produce it (`cat`/`head`/`tail`/`base64 -d`/`xxd -r`/`dd`/`tee`/
+/// external commands via `env`/`spawn`), so a worker running e.g. `cat
+/// binary.file` is not a hypothetical, it is reachable today. `text_out()`
+/// would lossily replace invalid UTF-8 with U+FFFD — silent data corruption
+/// riding through the row as if it were the worker's real text output. Per
+/// "crash beats corrupt" we go loud at row granularity instead: `try_text_out`
+/// catches it, the row is forced `ok:false` with a clear `err` (never a
+/// lossily-decoded `out`), and the OTHER rows are unaffected — see
+/// `docs/binary-data.md` for the broader binary-data plan.
 fn result_row(i: usize, r: &ScatterResult) -> serde_json::Value {
-    let ok = r.result.ok() && !r.timed_out;
-    let code = if r.timed_out { 124 } else { r.result.code };
+    let mut ok = r.result.ok() && !r.timed_out;
+    let mut code = if r.timed_out { 124 } else { r.result.code };
+
+    let (out_text, err_text) = match r.result.try_text_out() {
+        Ok(text) => (
+            strip_one_trailing_newline(&text).to_string(),
+            strip_one_trailing_newline(&r.result.err).to_string(),
+        ),
+        Err(e) => {
+            ok = false;
+            if code == 0 {
+                code = 1;
+            }
+            (
+                String::new(),
+                format!(
+                    "binary worker output not representable as text ({} bytes) — \
+                     encode it in the worker (base64/xxd)",
+                    e.len
+                ),
+            )
+        }
+    };
+
     let mut row = serde_json::Map::new();
     row.insert("i".into(), serde_json::json!(i));
     row.insert("item".into(), r.item.json.clone());
     row.insert("ok".into(), serde_json::json!(ok));
     row.insert("code".into(), serde_json::json!(code));
-    row.insert(
-        "out".into(),
-        serde_json::json!(strip_one_trailing_newline(&r.result.text_out())),
-    );
-    row.insert(
-        "err".into(),
-        serde_json::json!(strip_one_trailing_newline(&r.result.err)),
-    );
+    row.insert("out".into(), serde_json::json!(out_text));
+    row.insert("err".into(), serde_json::json!(err_text));
     if let Some(data) = &r.result.data {
         row.insert("data".into(), kaish_types::value_to_json(data));
     }
@@ -470,23 +540,41 @@ fn result_row(i: usize, r: &ScatterResult) -> serde_json::Value {
 /// Exit codes (A′): `0` all workers ok · `123` any worker failed, partial or
 /// total (timeouts count) — partial-vs-total is distinguished in the rows.
 fn gather_results(results: &[ScatterResult], opts: &GatherOptions) -> ExecResult {
-    let failed: Vec<&ScatterResult> =
-        results.iter().filter(|r| !r.result.ok() || r.timed_out).collect();
+    // A worker's binary stdout that can't decode as text is a failure for
+    // gather's purposes too — see `result_row`'s hazard doc. Folding it into
+    // `failed` here keeps the overall exit code (0 vs 123) honest: a `--lines`
+    // or JSONL caller checking `$?` must see non-zero, not a silent "0 all
+    // ok" while one row was actually corruption-guarded away.
+    let is_unrepresentable = |r: &ScatterResult| r.result.try_text_out().is_err();
+
+    let failed: Vec<&ScatterResult> = results
+        .iter()
+        .filter(|r| !r.result.ok() || r.timed_out || is_unrepresentable(r))
+        .collect();
     let code = if failed.is_empty() { 0 } else { 123 };
     let err = if failed.is_empty() {
         String::new()
     } else {
-        format!(
-            "gather: {} of {} worker(s) failed: {}",
-            failed.len(),
-            results.len(),
-            failed.iter().map(|r| r.item.label.as_str()).collect::<Vec<_>>().join(", ")
-        )
+        let names = failed
+            .iter()
+            .map(|r| {
+                if is_unrepresentable(r) {
+                    format!("{} (binary output not representable as text)", r.item.label)
+                } else {
+                    r.item.label.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("gather: {} of {} worker(s) failed: {names}", failed.len(), results.len())
     };
 
     if opts.lines {
         // Bare lines can't carry a failure — refuse with no partial text
-        // rather than silently dropping rows.
+        // rather than silently dropping rows. This also covers binary output
+        // (folded into `failed` above): `--lines` is a text-only escape
+        // hatch, and a U+FFFD-laden line would be exactly the silent
+        // corruption this hardening pass exists to prevent.
         if !failed.is_empty() {
             return ExecResult::failure(code, format!("{err} (drop --lines to get per-worker rows)"));
         }
@@ -511,47 +599,105 @@ fn gather_results(results: &[ScatterResult], opts: &GatherOptions) -> ExecResult
     ExecResult::from_parts(code, text, err, Some(Value::Json(array)))
 }
 
+/// Human-readable repr of a `Value` for a "wrong type" error message —
+/// deliberately not `Debug` (whose `String("five")` quoting/enum-tag noise
+/// reads badly to a user who just typed `--limit five`).
+fn describe_value(v: &Value) -> String {
+    match v {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Int(n) => n.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::String(s) => format!("{s:?}"),
+        Value::Json(j) => j.to_string(),
+        Value::Bytes(b) => format!("<{} bytes>", b.len()),
+    }
+}
+
 /// Parse scatter options from tool args.
-pub fn parse_scatter_options(args: &crate::tools::ToolArgs) -> ScatterOptions {
+///
+/// A flag key *present* in `args.named` with a value of the wrong type is a
+/// loud `Err`, never a silent fall-back to the default — `scatter --limit
+/// five` must not quietly run at the default limit, and `scatter --as 42`
+/// must not quietly bind `$ITEM`. (An *absent* or unresolved flag falls back
+/// to a bare boolean earlier, at the pipeline arg-binding layer — that lenient
+/// path is unrelated and untouched here.)
+pub fn parse_scatter_options(args: &crate::tools::ToolArgs) -> Result<ScatterOptions, String> {
     let mut opts = ScatterOptions::default();
 
-    if let Some(Value::String(name)) = args.named.get("as") {
-        opts.var_name = name.clone();
+    match args.named.get("as") {
+        None => {}
+        Some(Value::String(name)) => opts.var_name = name.clone(),
+        Some(other) => {
+            return Err(format!(
+                "scatter --as: expected a variable name, got {}",
+                describe_value(other)
+            ))
+        }
     }
 
-    if let Some(Value::Int(n)) = args.named.get("limit") {
-        let requested = *n;
-        let clamped = requested.clamp(1, SCATTER_LIMIT_MAX as i64);
-        if requested > SCATTER_LIMIT_MAX as i64 {
-            tracing::warn!(
-                target: "kaish::scatter",
-                requested = requested,
-                ceiling = SCATTER_LIMIT_MAX,
-                "scatter limit clamped to ceiling"
-            );
+    match args.named.get("limit") {
+        None => {}
+        Some(Value::Int(n)) => opts.limit = clamp_scatter_limit(*n),
+        // Values from variables often stringify (`--limit "$n"`) — coerce a
+        // numeric string the same as an int.
+        Some(Value::String(s)) => match s.trim().parse::<i64>() {
+            Ok(n) => opts.limit = clamp_scatter_limit(n),
+            Err(_) => {
+                return Err(format!(
+                    "scatter --limit: expected a positive integer, got {}",
+                    describe_value(&Value::String(s.clone()))
+                ))
+            }
+        },
+        Some(other) => {
+            return Err(format!(
+                "scatter --limit: expected a positive integer, got {}",
+                describe_value(other)
+            ))
         }
-        opts.limit = clamped as usize;
     }
 
     // --timeout DURATION: per-worker timeout. Accepts the same forms as the
-    // `timeout` builtin (30, 5s, 500ms, 2m, 1h). Invalid input is ignored
-    // with a warn so a typo doesn't silently disable cancellation.
-    if let Some(Value::String(s)) = args.named.get("timeout") {
-        match parse_duration(s) {
+    // `timeout` builtin (30, 5s, 500ms, 2m, 1h). A present-but-invalid value
+    // is a loud Err — a typo here must not silently disable cancellation.
+    match args.named.get("timeout") {
+        None => {}
+        Some(Value::String(s)) => match parse_duration(s) {
             Some(d) => opts.timeout = Some(d),
-            None => tracing::warn!(
-                target: "kaish::scatter",
-                value = %s,
-                "scatter --timeout: invalid duration (try: 30, 5s, 500ms, 2m, 1h)"
-            ),
-        }
-    } else if let Some(Value::Int(n)) = args.named.get("timeout") {
-        if *n >= 0 {
-            opts.timeout = Some(Duration::from_secs(*n as u64));
+            None => {
+                return Err(format!(
+                    "scatter --timeout: invalid duration {} (try: 30, 5s, 500ms, 2m, 1h)",
+                    describe_value(&Value::String(s.clone()))
+                ))
+            }
+        },
+        Some(Value::Int(n)) if *n >= 0 => opts.timeout = Some(Duration::from_secs(*n as u64)),
+        Some(other) => {
+            return Err(format!(
+                "scatter --timeout: expected a non-negative duration, got {}",
+                describe_value(other)
+            ))
         }
     }
 
-    opts
+    Ok(opts)
+}
+
+/// Clamp a requested `--limit` to `[1, SCATTER_LIMIT_MAX]`, warning (not
+/// erroring) when the ceiling clamps a value down — this ceiling exists to
+/// protect the host, not to reject user input, so it stays a warn+clamp.
+fn clamp_scatter_limit(requested: i64) -> usize {
+    let clamped = requested.clamp(1, SCATTER_LIMIT_MAX as i64);
+    if requested > SCATTER_LIMIT_MAX as i64 {
+        tracing::warn!(
+            target: "kaish::scatter",
+            requested = requested,
+            ceiling = SCATTER_LIMIT_MAX,
+            "scatter limit clamped to ceiling"
+        );
+    }
+    clamped as usize
 }
 
 /// Upper bound on the concurrency `scatter --limit N` accepts. Users who
@@ -560,12 +706,14 @@ pub fn parse_scatter_options(args: &crate::tools::ToolArgs) -> ScatterOptions {
 pub const SCATTER_LIMIT_MAX: usize = 10_000;
 
 /// Parse gather options from tool args.
-pub fn parse_gather_options(args: &crate::tools::ToolArgs) -> GatherOptions {
+///
+/// Returns `Err` for a present-but-wrong-typed flag value, mirroring
+/// [`parse_scatter_options`]. Today gather's only value-carrying flags are
+/// boolean (`--lines`/`--json`), so this can't yet fail — the `Result` return
+/// keeps the signature symmetric with scatter's and ready for the next
+/// value-carrying gather flag.
+pub fn parse_gather_options(args: &crate::tools::ToolArgs) -> Result<GatherOptions, String> {
     let mut opts = GatherOptions::default();
-
-    if args.has_flag("progress") {
-        opts.progress = true;
-    }
 
     if args.has_flag("lines") {
         opts.lines = true;
@@ -575,7 +723,7 @@ pub fn parse_gather_options(args: &crate::tools::ToolArgs) -> GatherOptions {
         opts.json = true;
     }
 
-    opts
+    Ok(opts)
 }
 
 #[cfg(test)]
@@ -825,7 +973,7 @@ mod tests {
         args.named.insert("as".to_string(), Value::String("URL".to_string()));
         args.named.insert("limit".to_string(), Value::Int(4));
 
-        let opts = parse_scatter_options(&args);
+        let opts = parse_scatter_options(&args).unwrap();
         assert_eq!(opts.var_name, "URL");
         assert_eq!(opts.limit, 4);
     }
@@ -837,9 +985,9 @@ mod tests {
         let mut args = ToolArgs::new();
         args.flags.insert("lines".to_string());
 
-        let opts = parse_gather_options(&args);
+        let opts = parse_gather_options(&args).unwrap();
         assert!(opts.lines);
-        assert!(!parse_gather_options(&ToolArgs::new()).lines, "default is JSONL");
+        assert!(!parse_gather_options(&ToolArgs::new()).unwrap().lines, "default is JSONL");
     }
 
     #[test]
@@ -848,7 +996,7 @@ mod tests {
 
         let mut args = ToolArgs::new();
         args.named.insert("limit".to_string(), Value::Int(999_999));
-        let opts = parse_scatter_options(&args);
+        let opts = parse_scatter_options(&args).unwrap();
         assert_eq!(opts.limit, SCATTER_LIMIT_MAX);
     }
 
@@ -858,7 +1006,7 @@ mod tests {
 
         let mut args = ToolArgs::new();
         args.named.insert("limit".to_string(), Value::Int(0));
-        let opts = parse_scatter_options(&args);
+        let opts = parse_scatter_options(&args).unwrap();
         assert_eq!(opts.limit, 1);
     }
 
@@ -868,7 +1016,7 @@ mod tests {
 
         let mut args = ToolArgs::new();
         args.named.insert("limit".to_string(), Value::Int(-42));
-        let opts = parse_scatter_options(&args);
+        let opts = parse_scatter_options(&args).unwrap();
         assert_eq!(opts.limit, 1);
     }
 
@@ -878,7 +1026,209 @@ mod tests {
 
         let mut args = ToolArgs::new();
         args.named.insert("limit".to_string(), Value::Int(500));
-        let opts = parse_scatter_options(&args);
+        let opts = parse_scatter_options(&args).unwrap();
         assert_eq!(opts.limit, 500);
+    }
+
+    // ── FIX A: loud on present-but-wrong-typed flag values ──
+
+    #[test]
+    fn scatter_limit_wrong_type_is_loud_error() {
+        use crate::tools::ToolArgs;
+
+        let mut args = ToolArgs::new();
+        args.named.insert("limit".to_string(), Value::String("five".to_string()));
+        let err = parse_scatter_options(&args).unwrap_err();
+        assert!(err.contains("--limit"), "{err}");
+        assert!(err.contains("five"), "{err}");
+    }
+
+    #[test]
+    fn scatter_limit_bool_is_loud_error() {
+        use crate::tools::ToolArgs;
+
+        let mut args = ToolArgs::new();
+        args.named.insert("limit".to_string(), Value::Bool(true));
+        let err = parse_scatter_options(&args).unwrap_err();
+        assert!(err.contains("--limit"), "{err}");
+    }
+
+    #[test]
+    fn scatter_limit_numeric_string_coerces() {
+        // Values from variables often stringify: `scatter --limit "$n"`.
+        use crate::tools::ToolArgs;
+
+        let mut args = ToolArgs::new();
+        args.named.insert("limit".to_string(), Value::String("5".to_string()));
+        let opts = parse_scatter_options(&args).unwrap();
+        assert_eq!(opts.limit, 5);
+    }
+
+    #[test]
+    fn scatter_as_wrong_type_is_loud_error() {
+        use crate::tools::ToolArgs;
+
+        let mut args = ToolArgs::new();
+        args.named.insert("as".to_string(), Value::Int(42));
+        let err = parse_scatter_options(&args).unwrap_err();
+        assert!(err.contains("--as"), "{err}");
+        assert!(err.contains("42"), "{err}");
+    }
+
+    #[test]
+    fn scatter_timeout_negative_int_is_loud_error() {
+        use crate::tools::ToolArgs;
+
+        let mut args = ToolArgs::new();
+        args.named.insert("timeout".to_string(), Value::Int(-5));
+        let err = parse_scatter_options(&args).unwrap_err();
+        assert!(err.contains("--timeout"), "{err}");
+    }
+
+    #[test]
+    fn scatter_timeout_unparseable_string_is_loud_error() {
+        use crate::tools::ToolArgs;
+
+        let mut args = ToolArgs::new();
+        args.named.insert("timeout".to_string(), Value::String("banana".to_string()));
+        let err = parse_scatter_options(&args).unwrap_err();
+        assert!(err.contains("--timeout"), "{err}");
+        assert!(err.contains("banana"), "{err}");
+    }
+
+    #[test]
+    fn scatter_timeout_valid_duration_string_parses() {
+        use crate::tools::ToolArgs;
+
+        let mut args = ToolArgs::new();
+        args.named.insert("timeout".to_string(), Value::String("5s".to_string()));
+        let opts = parse_scatter_options(&args).unwrap();
+        assert_eq!(opts.timeout, Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn scatter_timeout_nonnegative_int_is_seconds() {
+        use crate::tools::ToolArgs;
+
+        let mut args = ToolArgs::new();
+        args.named.insert("timeout".to_string(), Value::Int(30));
+        let opts = parse_scatter_options(&args).unwrap();
+        assert_eq!(opts.timeout, Some(Duration::from_secs(30)));
+    }
+
+    // ── FIX C: binary worker output must not silently corrupt to U+FFFD ──
+
+    fn binary_result(invalid_utf8: Vec<u8>) -> ExecResult {
+        ExecResult::success_bytes(invalid_utf8)
+    }
+
+    #[test]
+    fn gather_row_goes_loud_not_lossy_on_binary_out() {
+        // 0xFF is never valid UTF-8 on its own — text_out() would replace it
+        // with U+FFFD; try_text_out() must catch it instead.
+        let results = vec![ScatterResult {
+            item: item("bin"),
+            result: binary_result(vec![0xFF, 0xFE, 0x00, 0x01]),
+            timed_out: false,
+        }];
+        let out = gather_results(&results, &GatherOptions::default());
+        assert_eq!(out.code, 123, "a binary row flips the overall exit code too");
+        let row: serde_json::Value =
+            serde_json::from_str(out.text_out().lines().next().unwrap()).unwrap();
+        assert_eq!(row["ok"], false, "binary output must not be silently ok:true");
+        assert_ne!(row["code"], 0, "must carry a nonzero code");
+        assert!(row["out"].as_str().unwrap().is_empty(), "no lossy text in out");
+        let err_text = row["err"].as_str().unwrap();
+        assert!(err_text.contains("binary"), "{err_text}");
+        assert!(!err_text.contains('\u{FFFD}'), "must not carry U+FFFD: {err_text}");
+    }
+
+    #[test]
+    fn gather_lines_hard_errors_on_binary_out() {
+        // --lines is the raw-text escape hatch; binary must hard-error the
+        // whole gather rather than emit a U+FFFD-laden line.
+        let results = vec![
+            ScatterResult { item: item("a"), result: ExecResult::success("good"), timed_out: false },
+            ScatterResult {
+                item: item("bin"),
+                result: binary_result(vec![0xFF, 0xFE]),
+                timed_out: false,
+            },
+        ];
+        let out = gather_results(&results, &GatherOptions { lines: true, ..Default::default() });
+        assert_eq!(out.code, 123);
+        assert!(out.text_out().is_empty(), "no partial/lossy text on binary --lines failure");
+        assert!(!out.err.contains('\u{FFFD}'), "must not carry U+FFFD: {}", out.err);
+        assert!(out.err.contains("binary") || out.err.contains("bin"), "{}", out.err);
+    }
+
+    // ── FIX D: workers must inherit the parent's watchdog ──
+
+    fn ctx_with_memory_fs() -> ExecContext {
+        use crate::vfs::{MemoryFs, VfsRouter};
+        use std::sync::Arc;
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        ExecContext::new(Arc::new(vfs))
+    }
+
+    #[test]
+    fn worker_ctx_inherits_parent_watchdog() {
+        use crate::watchdog::Watchdog;
+        use std::sync::Arc;
+
+        let mut parent = ctx_with_memory_fs();
+        parent.watchdog = Some(Arc::new(Watchdog::new(Duration::from_secs(30))));
+
+        // The fix: workers are built via `child_for_pipeline`, which clones the
+        // parent's watchdog. The old from-scratch `with_backend_and_scope`
+        // path (below) dropped it — this test would fail against that path.
+        let worker_ctx = parent.child_for_pipeline();
+        assert!(
+            worker_ctx.watchdog.is_some(),
+            "worker must carry the parent's script watchdog, not None"
+        );
+
+        // Document the trap the fix closes: the old construction starts with a
+        // None watchdog, which dispatch_command then syncs into the subkernel.
+        let from_scratch =
+            ExecContext::with_backend_and_scope(parent.backend.clone(), parent.scope.clone());
+        assert!(
+            from_scratch.watchdog.is_none(),
+            "the abandoned from-scratch path is exactly why the worker lost its watchdog"
+        );
+    }
+
+    // ── FIX E: workers cap output against the shared spill budget ──
+
+    #[tokio::test]
+    async fn worker_spills_over_the_shared_output_limit() {
+        use crate::output_limit::{spill_if_needed, OutputLimitConfig};
+
+        // Small in-memory limit (no disk writes in tests — CLAUDE.md).
+        let mut cfg = OutputLimitConfig::agent().in_memory();
+        cfg.set_limit(Some(64));
+
+        let mut parent = ctx_with_memory_fs();
+        parent.output_limit = cfg;
+
+        // `child_for_pipeline` shares the parent's output_limit, so the worker
+        // caps against the same budget — this is exactly what the worker path
+        // now reads (`worker_ctx.output_limit`) before building its
+        // ScatterResult.
+        let worker_ctx = parent.child_for_pipeline();
+        assert!(worker_ctx.output_limit.is_enabled(), "budget must reach the worker");
+
+        // Mirror the worker sequence: a large result, then the per-worker spill.
+        let mut result = ExecResult::success("x".repeat(4096));
+        assert!(worker_ctx.output_limit.is_enabled());
+        let _ = spill_if_needed(&mut result, &worker_ctx.output_limit).await;
+
+        assert!(result.did_spill, "worker output over the limit must spill, not stay resident");
+        assert!(
+            result.text_out().len() < 4096,
+            "spilled output must be truncated, not the full payload: {} bytes",
+            result.text_out().len()
+        );
     }
 }

@@ -112,7 +112,7 @@ using the same schema-driven flag/value/repeatable/`consumes` consumption that
 `Expr` evaluation step (tokens are already values). From `ToolArgs` onward it
 reuses **everything**: validation, `--json` (`GlobalFlags::apply_from_args`),
 latch/nonce, `owns_output`, the snapshot/dispatch block
-(`execute_command_depth`). No changes to the 70+ builtins. Effort: small — one
+(`execute_command_depth`). No changes to the 90+ builtins. Effort: small — one
 helper plus a thin public method.
 
 ### The one honest wrinkle

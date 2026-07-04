@@ -413,3 +413,65 @@ async fn jq_pretty_output_is_two_space_indented() {
         .expect("ran");
     assert_eq!(r.text_out(), "{\n  \"a\": 1\n}\n");
 }
+
+// ============================================================================
+// Value::String .data must not be JSON-sniffed on the way into jq
+// ============================================================================
+//
+// jq's `.data`-path stdin resolution (`ast_value_to_json`, feeding
+// `resolve_stdin_json`) converts kaish's typed `Value` into the
+// `serde_json::Value` jq operates on. `Value::String(s)` is a *string*, full
+// stop — it must become a JSON string, never be re-parsed as a JSON document.
+// Re-parsing is the project's banned "JSON-sniffing" (docs/arch_no_json_sniffing
+// invariant): `.data` is opt-in structure, never inferred from text content.
+// `fromjson '"1"'` is the sharpest reproduction: it produces `Value::String("1")`
+// — the *decoded contents* of the JSON string `"1"`, i.e. the one-character
+// string `1`, not the bare number 1. Piping that into `jq 'type'` must report
+// "string", not "number".
+
+#[tokio::test]
+async fn jq_type_does_not_json_sniff_a_data_string() {
+    let k = setup().await;
+    let r = k
+        .execute(r#"fromjson '"1"' | jq 'type'"#)
+        .await
+        .expect("script ran");
+    assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "\"string\"");
+}
+
+#[tokio::test]
+async fn jq_identity_does_not_json_sniff_a_data_string() {
+    // Same bug, checked via the identity filter and quoting: the string "1"
+    // fed through `jq '.'` must render as the JSON string `"1"`, not the bare
+    // JSON number `1`.
+    let k = setup().await;
+    let r = k
+        .execute(r#"fromjson '"1"' | jq '.'"#)
+        .await
+        .expect("script ran");
+    assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "\"1\"");
+}
+
+#[tokio::test]
+async fn jq_type_does_not_json_sniff_other_json_looking_strings() {
+    // The sniffing bug only fires when the string *happens* to parse as JSON
+    // — pin down a few more shapes so a partial fix can't slip through.
+    let k = setup().await;
+    for (literal, expected) in [
+        (r#"'"true"'"#, "\"string\""),
+        (r#"'"null"'"#, "\"string\""),
+        (r#"'"[1,2]"'"#, "\"string\""),
+        (r#"'"8"'"#, "\"string\""),
+    ] {
+        let script = format!("fromjson {literal} | jq 'type'");
+        let r = k.execute(&script).await.expect("script ran");
+        assert!(r.ok(), "script: {script}, exit: {}, err: {}", r.code, r.err);
+        assert_eq!(
+            r.text_out().trim(),
+            expected,
+            "script: {script}"
+        );
+    }
+}
