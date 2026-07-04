@@ -586,8 +586,6 @@ so they bite only once a builtin exposes a `-L`/`--follow` flag.
 - **Extract `skip_quoted_content()`** shared by `preprocess_arithmetic()` and
   `preprocess_heredocs()` (~150 lines each of duplicated quote/escape tracking).
 - **`parse_interpolated_string` is ~200 lines** — split into helpers.
-- **chumsky alpha → 1.0 before kaish 1.0**: on `1.0.0-alpha.8`; upgrade when stable
-  ships.
 
 ### REPL polish
 Syntax highlighting (chumsky already produces structured tokens), abbreviation
