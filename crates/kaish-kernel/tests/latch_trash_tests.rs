@@ -1099,3 +1099,78 @@ async fn dd_of_overwrite_under_trash_snapshots_prior_bytes() {
     assert_eq!(snaps[0].1, b"old");
     assert_eq!(std::fs::read_to_string(dir.path().join("out.bin")).unwrap(), "fresh");
 }
+
+// ─── GH #96: a *backgrounded* confirmation latch reaches its consumers ───────
+// `rm x &` under `set -o latch` gates in the background — exit 2 + a stored
+// LatchRequest — but the latch was invisible to every job consumer: `wait`
+// reported "Failed", `jobs`/`JobInfo` had no latch, `/v/jobs/{id}` had no latch
+// node, and `JobStatus` mapped exit 2 to `Failed`. So a backgrounded gate could
+// never be *fulfilled* — the nonce was unreachable. These pin the surfaces.
+
+/// The capstone: background a gated `rm`, surface the latch via `wait`, and
+/// fulfill it with `Kernel::confirm` — the whole point of #96.
+#[tokio::test]
+async fn backgrounded_latch_is_reachable_and_confirmable() {
+    let dir = tempdir();
+    let kernel = kernel_at(dir.path());
+    let precious = dir.path().join("precious.txt");
+    std::fs::write(&precious, "keep me").expect("write");
+
+    run(&kernel, "set -o latch").await;
+    let bg = run(&kernel, "rm precious.txt &").await;
+    assert_eq!(bg.code, 0, "backgrounding itself succeeds: {}", bg.err);
+
+    // `wait` surfaces the stored latch on the control-plane field, exit 2.
+    let waited = run(&kernel, "wait 1").await;
+    assert_eq!(waited.code, 2, "a latched job waits to exit 2, not 1: {waited:?}");
+    let latch = waited
+        .latch_request()
+        .expect("wait must surface the backgrounded job's LatchRequest");
+    assert!(precious.exists(), "the gate held — file still present pre-confirm");
+
+    // and the embedder can fulfill the backgrounded gate.
+    let confirmed = kernel.confirm(&latch).await.expect("confirm");
+    assert_eq!(confirmed.code, 0, "confirm deletes: {}", confirmed.err);
+    assert!(!precious.exists(), "file removed after confirm");
+}
+
+/// `jobs` and `/v/jobs/{id}/status` name the latched state distinctly, not
+/// the generic "Failed".
+#[tokio::test]
+async fn backgrounded_latch_shows_distinct_status() {
+    let dir = tempdir();
+    let kernel = kernel_at(dir.path());
+    std::fs::write(dir.path().join("p.txt"), "x").expect("write");
+
+    run(&kernel, "set -o latch").await;
+    run(&kernel, "rm p.txt &").await;
+    run(&kernel, "wait 1").await; // let the background job reach the gate
+
+    let jobs = run(&kernel, "jobs").await;
+    assert!(jobs.text_out().contains("Latched"), "jobs shows Latched: {}", jobs.text_out());
+    assert!(!jobs.text_out().contains("Failed"), "not a plain failure: {}", jobs.text_out());
+
+    let status = run(&kernel, "cat /v/jobs/1/status").await;
+    assert_eq!(status.text_out().trim(), "latched", "status node: {}", status.text_out());
+}
+
+/// `/v/jobs/{id}/latch` renders the stored LatchRequest as JSON carrying the
+/// nonce, so a VFS consumer can read (and then confirm) it.
+#[tokio::test]
+async fn backgrounded_latch_vfs_node_renders_json() {
+    let dir = tempdir();
+    let kernel = kernel_at(dir.path());
+    std::fs::write(dir.path().join("p.txt"), "x").expect("write");
+
+    run(&kernel, "set -o latch").await;
+    run(&kernel, "rm p.txt &").await;
+    let waited = run(&kernel, "wait 1").await;
+    let nonce = waited.latch_request().expect("latch").nonce;
+
+    let node = run(&kernel, "cat /v/jobs/1/latch").await;
+    assert_eq!(node.code, 0, "latch node readable: {}", node.err);
+    assert!(node.text_out().contains(&nonce), "latch JSON carries the nonce: {}", node.text_out());
+    // round-trips through kaish's own JSON door.
+    let parsed = run(&kernel, "cat /v/jobs/1/latch | fromjson").await;
+    assert_eq!(parsed.code, 0, "latch node is valid JSON: {}", parsed.err);
+}

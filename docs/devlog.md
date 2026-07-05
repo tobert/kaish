@@ -14,6 +14,36 @@ before it ships.
 
 ---
 
+## Surfacing the backgrounded confirmation latch (2026-07-05, GH #96)
+
+The confirmation latch (`set -o latch`) went first-class in #92, but a gap
+survived: background a gated op — `rm precious.txt &` — and the latch is stored
+in the job's result, but *every* consumer was blind to it. `wait` reported
+`Failed`; `jobs`, `JobInfo`, and `/v/jobs/{id}` had no latch anywhere;
+`Job::status()` folded the exit-2-latch into `Failed`, indistinguishable from a
+real error. The op stayed safely *blocked* (no data loss), but the nonce was
+unreachable, so a backgrounded gate could never be *fulfilled*. Low-stakes, but
+a real dead-end in the safety story.
+
+The fix threads the stored `LatchRequest` out to all four surfaces named in the
+issue, each with one job: `JobStatus::Latched` (the state is *held*, not
+errored, so `jobs` and `/v/jobs/{id}/status` say so distinctly);
+`JobInfo.latch: Option<LatchRequest>` (the programmatic surface an embedder
+reads from `JobManager::list`/`get`); `wait` surfacing the request on its
+result's control-plane `.latch` field with exit 2, mirroring a foreground gate
+so `latch_request()`/`Kernel::confirm` work identically; and a new
+`/v/jobs/{id}/latch` VFS node rendering the request as JSON (nonce, command,
+paths, hint) — empty body when the job isn't gated, so a reader reads-then-parses.
+
+TDD, and the capstone test earns its keep: background a gated `rm`, `wait 1` to
+surface the latch, `Kernel::confirm(&latch)`, assert the file is gone — the
+whole loop, from backgrounded gate to fulfillment, in one test. Two design
+touches worth noting: `wait` on several gated jobs keeps the *first* latch
+(`.latch` holds one; waiting on multiple gated jobs is an odd pattern), and the
+VFS node stays plain-text-empty rather than error when not latched, matching how
+`status`/`command` always read. Three kernel-routed tests red→green, 4377 suite
++ clippy `--all-targets` clean, verified end-to-end through the REPL.
+
 ## `$()` in a redirect target — the bug that only bit embedders (2026-07-05, GH #90)
 
 Picked this up expecting a quick "attach the dispatcher for bare commands" fix.

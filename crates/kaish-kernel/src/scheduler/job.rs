@@ -185,6 +185,10 @@ impl Job {
         self.try_poll();
         match &self.result {
             Some(r) if r.ok() => JobStatus::Done,
+            // A gated destructive op (exit 2 with a stored latch) is *held*,
+            // not failed — surface it distinctly so `Kernel::confirm` can
+            // still fulfill it (GH #96).
+            Some(r) if r.latch_request().is_some() => JobStatus::Latched,
             Some(_) => JobStatus::Failed,
             None => JobStatus::Running,
         }
@@ -195,14 +199,24 @@ impl Job {
     /// Returns:
     /// - `"running"` if the job is still running
     /// - `"done:0"` if the job completed successfully
+    /// - `"latched"` if the job is blocked on an unfulfilled confirmation latch
     /// - `"failed:{code}"` if the job failed with an exit code
     pub fn status_string(&mut self) -> String {
         self.try_poll();
         match &self.result {
             Some(r) if r.ok() => "done:0".to_string(),
+            Some(r) if r.latch_request().is_some() => "latched".to_string(),
             Some(r) => format!("failed:{}", r.code),
             None => "running".to_string(),
         }
+    }
+
+    /// The job's pending confirmation-latch request, if it is gated
+    /// (`JobStatus::Latched`). `None` otherwise. Backs `JobInfo.latch` and the
+    /// `/v/jobs/{id}/latch` node so a backgrounded gate is fulfillable (#96).
+    pub fn latch(&mut self) -> Option<kaish_types::result::LatchRequest> {
+        self.try_poll();
+        self.result.as_ref().and_then(|r| r.latch_request())
     }
 
     /// Get the stdout stream (if attached).
@@ -600,12 +614,17 @@ impl JobManager {
     pub async fn list(&self) -> Vec<JobInfo> {
         let mut jobs = self.jobs.lock().await;
         jobs.values_mut()
-            .map(|job| JobInfo {
-                id: job.id,
-                command: job.command.clone(),
-                status: job.status(),
-                output_file: job.output_file.clone(),
-                pid: job.pid,
+            .map(|job| {
+                let status = job.status();
+                let latch = job.latch();
+                JobInfo {
+                    id: job.id,
+                    command: job.command.clone(),
+                    status,
+                    output_file: job.output_file.clone(),
+                    pid: job.pid,
+                    latch,
+                }
             })
             .collect()
     }
@@ -644,12 +663,17 @@ impl JobManager {
     /// Get info for a specific job.
     pub async fn get(&self, id: JobId) -> Option<JobInfo> {
         let mut jobs = self.jobs.lock().await;
-        jobs.get_mut(&id).map(|job| JobInfo {
-            id: job.id,
-            command: job.command.clone(),
-            status: job.status(),
-            output_file: job.output_file.clone(),
-            pid: job.pid,
+        jobs.get_mut(&id).map(|job| {
+            let status = job.status();
+            let latch = job.latch();
+            JobInfo {
+                id: job.id,
+                command: job.command.clone(),
+                status,
+                output_file: job.output_file.clone(),
+                pid: job.pid,
+                latch,
+            }
         })
     }
 
@@ -663,6 +687,15 @@ impl JobManager {
     pub async fn get_status_string(&self, id: JobId) -> Option<String> {
         let mut jobs = self.jobs.lock().await;
         jobs.get_mut(&id).map(|job| job.status_string())
+    }
+
+    /// Get a gated job's pending confirmation-latch request (for
+    /// `/v/jobs/{id}/latch` and any embedder reaching a backgrounded gate).
+    /// `Some(None)` vs `None` distinguishes "job exists, not latched" from
+    /// "no such job"; jobfs flattens both to an empty node body. GH #96.
+    pub async fn get_latch(&self, id: JobId) -> Option<kaish_types::result::LatchRequest> {
+        let mut jobs = self.jobs.lock().await;
+        jobs.get_mut(&id).and_then(|job| job.latch())
     }
 
     /// Read stdout stream content for a job.

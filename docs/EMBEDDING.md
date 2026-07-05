@@ -643,8 +643,9 @@ job state:
 ├── 1/
 │   ├── stdout    # Captured stdout (bounded)
 │   ├── stderr    # Captured stderr (bounded)
-│   ├── status    # "running", "done:0", or "failed:N"
-│   └── command   # Original command string
+│   ├── status    # "running", "done:0", "latched", or "failed:N"
+│   ├── command   # Original command string
+│   └── latch     # Confirmation-latch request (JSON) if gated, else empty
 ├── 2/
 │   └── ...
 ```
@@ -659,6 +660,13 @@ cat /v/jobs/1/status    # "running"
 cat /v/jobs/1/stdout    # Job's stdout
 cat /v/jobs/1/status    # "done:0" on success, "failed:N" otherwise
 ```
+
+A destructive op backgrounded under `set -o latch` (`rm x &`) gates in the
+background rather than running: `status` is `latched`, `JobInfo.latch` (from
+`JobManager::list`/`get`) and `/v/jobs/{id}/latch` (JSON) carry the pending
+`LatchRequest`, and `wait` surfaces it on the result's `.latch` field (exit 2).
+An embedder fulfills the backgrounded gate with `Kernel::confirm(&latch)` — the
+same API as a foreground gate.
 
 The status strings are exactly `running`, `done:0`, and `failed:{code}` —
 match on those, not on `completed`.

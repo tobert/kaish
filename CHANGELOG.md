@@ -10,6 +10,19 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **A backgrounded confirmation latch is now surfaced and fulfillable** (GH
+  #96). A destructive op gated under `set -o latch` and run in the background
+  (`rm x &`) stored its `LatchRequest` but no consumer exposed it, so the nonce
+  was unreachable and the gate could never be confirmed. Now: `wait` surfaces
+  the request on the result's `.latch` field (exit 2, like a foreground gate);
+  `jobs` and `/v/jobs/{id}/status` report `Latched` distinctly from a plain
+  failure; and a new `/v/jobs/{id}/latch` node renders the request as JSON
+  (nonce, command, paths, hint) — empty when the job isn't gated. An embedder
+  fulfills it with `Kernel::confirm(&latch)`. **BREAKING (embedders):**
+  `JobStatus` gains a `Latched` variant (exhaustive matches must handle it) and
+  `JobInfo` gains a `latch: Option<LatchRequest>` field.
+
 ### Fixed
 - **`$(...)` in a redirect target now works on a bare `Kernel::execute`** (GH
   #90). Command substitution in a redirect target or heredoc body (`echo x >
