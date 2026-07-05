@@ -3173,6 +3173,13 @@ impl Kernel {
             return Ok(ExecResult::with_output(crate::interpreter::OutputData::text(content)));
         }
 
+        // `owns_output` is the only thing read from `schema` after the recursive
+        // `tool.execute` await below; capture the bool and drop the (heap-backed)
+        // `ToolSchema` now so it doesn't ride that await in every command's frame
+        // (GH #48, item 7).
+        let owns_output = schema.owns_output;
+        drop(schema);
+
         // Snapshot exec_ctx into a local context and release the write lock
         // before calling tool.execute. Holding the write across tool execution
         // would deadlock any builtin that re-dispatches through ctx.dispatcher
@@ -3253,7 +3260,7 @@ impl Kernel {
         // struct and write ctx.output_format. The kernel applies it — unless the
         // tool owns its own output (renders --json itself), in which case we
         // leave its bytes untouched.
-        let result = finalize_output(result, ctx.output_format, schema.owns_output);
+        let result = finalize_output(result, ctx.output_format, owns_output);
 
         Ok(result)
     }
