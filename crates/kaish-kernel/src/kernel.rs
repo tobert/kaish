@@ -52,22 +52,27 @@ static KERNEL_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// or mutually recursive script hits a catchable ceiling, not a signal.
 ///
 /// Each level stacks the dispatch chain between re-entries. After the GH #48
-/// allocation pass this measures ~50 KB (release) / ~57 KB (debug, the default
-/// `opt-level = 1` dev profile — see the root `Cargo.toml`) / ~193 KB (debug
-/// with optimization off) of native stack per level, down from ~80 / ~380 KB
-/// before; the `recursion_stack_cost_tests` probe reports the live figure. `32`
-/// sits well inside [`RECOMMENDED_STACK_SIZE`] with a wide margin in **every**
-/// profile (16 MB / 193 KB ≈ 85 levels even unoptimized) while allowing far
-/// deeper nesting than any real script. #48 leaves room to raise this cap or
-/// lower the floor; both are left as a follow-up decision on GH #46 / #47.
-/// **The guard only fires *before* the stack overflows on a thread that meets
-/// that floor** — this is why the REPL sizes its threads to it and embedders
-/// must too (see `docs/EMBEDDING.md`). Forks (background jobs, scatter workers,
-/// pipeline stages) run on fresh stacks and get a fresh counter, bounding each
-/// chain independently. GH #46 / #47.
-pub const MAX_RECURSION_DEPTH: usize = 32;
+/// allocation pass this measures ~50 KB (release) / ~57 KB (debug at the default
+/// `opt-level = 1` dev profile — see the root `Cargo.toml`) / ~193 KB (a fully
+/// unoptimized debug build) of native stack per level, down from ~80 / ~380 KB
+/// before; the `recursion_stack_cost_tests` probe reports the live figure.
+///
+/// This cap and [`RECOMMENDED_STACK_SIZE`] are a **matched pair**: the cap must
+/// trip *before* `cap × (worst-case per-level stack)` can exceed the floor, so a
+/// runaway is caught, not a `SIGSEGV`. The worst case is the ~193 KB unoptimized
+/// figure — the `opt-level = 1` dev profile above is local to this workspace and
+/// does **not** propagate to embedders, whose own debug builds of the kernel pay
+/// the full unoptimized cost. `48 × 193 KB ≈ 9.3 MB` under the 12 MiB floor
+/// keeps the same ~1.3× margin the pre-#48 pair had (`32 × 380 KB ≈ 12 MB` under
+/// 16 MiB); #48's smaller frames are what let the cap rise 32→48 and the floor
+/// drop 16→12 MiB together. **The guard only fires *before* the stack overflows
+/// on a thread that meets that floor** — this is why the REPL sizes its threads
+/// to it and embedders must too (see `docs/EMBEDDING.md`). Forks (background
+/// jobs, scatter workers, pipeline stages) run on fresh stacks and get a fresh
+/// counter, bounding each chain independently. GH #46 / #47 / #48.
+pub const MAX_RECURSION_DEPTH: usize = 48;
 
-/// Recommended native stack size (16 MiB) for any thread that drives kaish
+/// Recommended native stack size (12 MiB) for any thread that drives kaish
 /// execution — the REPL sizes its `block_on` thread and tokio worker threads
 /// to this, and embedders that call `Kernel::execute` (directly or via a tokio
 /// runtime) should do the same (`runtime::Builder::thread_stack_size`, and a
@@ -77,9 +82,13 @@ pub const MAX_RECURSION_DEPTH: usize = 32;
 /// functions, `.kai` scripts). [`MAX_RECURSION_DEPTH`] converts a runaway into
 /// a loud error, but only *if the stack is at least this large* — on the
 /// default ~2 MB tokio worker stack the recursion overflows (SIGSEGV) before
-/// reaching the cap. kaish can't set this itself (it doesn't own the runtime),
-/// so it exposes the floor for owners to apply. See GH #47.
-pub const RECOMMENDED_STACK_SIZE: usize = 16 * 1024 * 1024;
+/// reaching the cap. This floor is the companion to that cap (see its docs for
+/// the `cap × per-level < floor` relationship): 12 MiB holds the depth-48 cap
+/// with margin even for an unoptimized embedder build (~193 KB/level), and #48
+/// shrank the per-level cost enough to drop it from 16 MiB. kaish can't set this
+/// itself (it doesn't own the runtime), so it exposes the floor for owners to
+/// apply. See GH #47 / #48.
+pub const RECOMMENDED_STACK_SIZE: usize = 12 * 1024 * 1024;
 
 use async_trait::async_trait;
 
