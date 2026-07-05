@@ -51,10 +51,15 @@ static KERNEL_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// alias re-entry cap (10) and the lexer's `MAX_PAREN_DEPTH` (256): a runaway
 /// or mutually recursive script hits a catchable ceiling, not a signal.
 ///
-/// Each level stacks the dispatch chain between re-entries, which we measured
-/// at ~80 KB (release) / ~380 KB (debug) of native stack per level. `32` sits
-/// well inside [`RECOMMENDED_STACK_SIZE`] in **both** profiles (16 MB / 380 KB
-/// ≈ 42 debug levels) while allowing far deeper nesting than any real script.
+/// Each level stacks the dispatch chain between re-entries. After the GH #48
+/// allocation pass this measures ~50 KB (release) / ~57 KB (debug, the default
+/// `opt-level = 1` dev profile — see the root `Cargo.toml`) / ~193 KB (debug
+/// with optimization off) of native stack per level, down from ~80 / ~380 KB
+/// before; the `recursion_stack_cost_tests` probe reports the live figure. `32`
+/// sits well inside [`RECOMMENDED_STACK_SIZE`] with a wide margin in **every**
+/// profile (16 MB / 193 KB ≈ 85 levels even unoptimized) while allowing far
+/// deeper nesting than any real script. #48 leaves room to raise this cap or
+/// lower the floor; both are left as a follow-up decision on GH #46 / #47.
 /// **The guard only fires *before* the stack overflows on a thread that meets
 /// that floor** — this is why the REPL sizes its threads to it and embedders
 /// must too (see `docs/EMBEDDING.md`). Forks (background jobs, scatter workers,

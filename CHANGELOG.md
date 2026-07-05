@@ -34,6 +34,30 @@ breaking entries are marked **BREAKING**.
   worker threads (`thread_stack_size`) and its `block_on` driver thread to it;
   embedders should too (see `docs/EMBEDDING.md`).
 
+### Changed
+- **Interpreter allocation/stack pass** (GH #48). The native stack consumed per
+  statement-engine re-entry level (`$(…)`, shell functions, `source`) is cut
+  ~46% (release ~92 → ~50 KB/level; debug similarly), shrinking the interpreter's
+  hot futures by boxing the cold dispatch branches, the per-command
+  `ExecContext`/scope snapshots, and `ExecResult`'s structured-output field, and
+  by dropping the per-command tracing spans on the recursion ring. The two
+  interpreter crates (`kaish-kernel`, `kaish-types`) also build at
+  `opt-level = 1` in dev/test now (contained compile-time cost, ~7× smaller debug
+  stack). A new `recursion_stack_cost_tests` probe measures the per-level cost.
+  This leaves headroom to raise `MAX_RECURSION_DEPTH` or lower
+  `RECOMMENDED_STACK_SIZE` as a follow-up (GH #46/#47).
+- **Removed the internal per-command/per-pipeline tracing spans** from the hot
+  execution ring (GH #48) — coarse spans remain on the outer execute entries, so
+  embedders consuming kaish's `tracing` output now see one execution span per
+  top-level call rather than one per nested command. Observability-shape change,
+  not a behavior change.
+- **BREAKING (embedders):** `ExecContext.tool_schemas` is now `Arc<[ToolSchema]>`
+  instead of `Vec<ToolSchema>` (GH #48) — the ~70-entry schema catalog is shared
+  by refcount rather than deep-cloned into every per-command context.
+  `set_tool_schemas` still accepts a `Vec` (converts internally) and all read
+  sites are unaffected (deref coercion to `&[ToolSchema]`); only direct field
+  assignment/mutation of the public field needs `.into()`.
+
 ### Fixed
 - **Deep recursion no longer crashes the process** (GH #46). `f() { f; }; f`,
   mutual recursion, and deeply nested `$(...)` aborted with a bare stack
