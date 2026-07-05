@@ -10,6 +10,15 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+- **`grep -r PATTERN FILE`** (a file operand, not a directory) now searches
+  that file instead of silently finding nothing (GH #105). `-r`/`-R` used to
+  treat every operand as a walk root; a file has nothing "under" it, so the
+  walk collected zero entries → 0 matches, exit 1, no error — a false negative
+  a model reads as "not found". `-r` now governs only how *directories* expand:
+  files are searched directly, directories walked, and a mixed `grep -r p file
+  dir` operand list does both.
+
 ## [0.11.0] - 2026-07-04
 
 ### Added

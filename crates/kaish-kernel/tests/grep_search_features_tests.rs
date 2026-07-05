@@ -202,3 +202,63 @@ async fn max_count_caps_streaming_stdin() {
     assert_eq!(code, 0, "out={out:?}");
     assert_eq!(out.lines().count(), 2, "stdin stream capped at 2: {out:?}");
 }
+
+// ─── #105: `grep -r PATTERN FILE` (a file operand, not a dir) ────────────────
+// `-r` used to unconditionally treat the operand as a walk root; a file has
+// nothing "under" it, so the walk collected zero entries → 0 matches, exit 1,
+// silently. A file operand under `-r` must be searched directly instead.
+
+/// The headline reflex: `grep -r PATTERN <file>` searches the file.
+#[tokio::test]
+async fn recursive_flag_searches_a_file_operand() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("notes.txt"), "needle a\nhay\nneedle b\n").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "grep -r needle notes.txt").await;
+    assert_eq!(code, 0, "a file operand under -r must match, not silently miss: {out:?}");
+    assert!(out.contains("needle a"), "first match: {out:?}");
+    assert!(out.contains("needle b"), "second match: {out:?}");
+}
+
+/// `grep -rc PATTERN <file>` reports the real count (was 0), like plain `-c`
+/// on a single file — no filename prefix.
+#[tokio::test]
+async fn recursive_count_on_a_file_operand() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("notes.txt"), "needle\nneedle\nhay\nneedle\n").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "grep -rc needle notes.txt").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out.trim(), "3", "count of a single file operand: {out:?}");
+}
+
+/// The uppercase `-R` alias behaves identically on a file operand.
+#[tokio::test]
+async fn recursive_upper_flag_searches_a_file_operand() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("notes.txt"), "needle a\nhay\n").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "grep -R needle notes.txt").await;
+    assert_eq!(code, 0, "-R on a file operand must match: {out:?}");
+    assert!(out.contains("needle a"), "match: {out:?}");
+}
+
+/// A mixed operand list — a file *and* a directory — searches the file
+/// directly and walks the directory, prefixing both (multi-source display).
+#[tokio::test]
+async fn recursive_mixed_file_and_dir_operands() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("top.txt"), "needle top\n").expect("write top");
+    fs::create_dir(dir.path().join("sub")).expect("mkdir sub");
+    fs::write(dir.path().join("sub/inner.txt"), "needle inner\n").expect("write inner");
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "grep -r needle top.txt sub").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert!(out.contains("top.txt"), "the file operand is searched: {out:?}");
+    assert!(out.contains("inner.txt"), "the dir operand is walked: {out:?}");
+    assert!(out.contains("needle top") && out.contains("needle inner"), "both matches: {out:?}");
+}

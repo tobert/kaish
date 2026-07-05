@@ -379,59 +379,107 @@ impl Tool for Grep {
 
         // Handle recursive search
         if recursive {
-            let path = args
-                .get_string("path", 1)
-                .unwrap_or_else(|| ".".to_string());
-            let root = ctx.resolve_path(&path);
-
-            // Build include/exclude filter
-            let mut filter = IncludeExclude::new();
-            if let Some(Value::String(inc)) = args.get("include", usize::MAX) {
-                filter.include(inc);
-            }
-            if let Some(Value::String(exc)) = args.get("exclude", usize::MAX) {
-                filter.exclude(exc);
-            }
-
-            // Build glob pattern if include is specified
-            let glob = if let Some(Value::String(inc)) = args.get("include", usize::MAX) {
-                GlobPath::new(&format!("**/{}", inc)).ok()
+            // Partition the operands by kind. A *directory* is walked; a *file*
+            // is searched directly (#105 — a file has nothing "under" it, so
+            // treating it as a walk root collected zero entries and reported no
+            // matches *silently*, the worst failure mode for a model reading the
+            // empty result as "not found"). `-r` governs how *directories*
+            // expand, which is the only thing anyone means by it. A missing or
+            // otherwise-unstattable operand falls to the walker, preserving the
+            // pre-#105 behavior for a bad root.
+            let operands: Vec<String> = args
+                .positional
+                .iter()
+                .skip(1)
+                .map(crate::interpreter::value_to_string)
+                .collect();
+            let operands = if operands.is_empty() {
+                vec![".".to_string()]
             } else {
-                GlobPath::new("**/*").ok()
+                operands
             };
 
-            let options = WalkOptions {
-                max_depth: None,
-                entry_types: crate::walker::EntryTypes::files_only(),
-                respect_gitignore: ctx.ignore_config.auto_gitignore(),
-                include_hidden,
-                filter,
-                types: file_types.clone(),
-                ..WalkOptions::default()
-            };
-
-            let fs = BackendWalkerFs(ctx.backend.as_ref());
-            let mut walker = if let Some(g) = glob {
-                FileWalker::new(&fs, &root)
-                    .with_pattern(g)
-                    .with_options(options)
-            } else {
-                FileWalker::new(&fs, &root).with_options(options)
-            };
-
-            // Inject ignore filter from config
-            if let Some(ignore_filter) = ctx.build_ignore_filter(&root).await {
-                walker = walker.with_ignore(ignore_filter);
+            let mut dir_roots: Vec<PathBuf> = Vec::new();
+            let mut file_operands: Vec<PathBuf> = Vec::new();
+            for operand in &operands {
+                let resolved = ctx.resolve_path(operand);
+                match ctx.backend.stat(&resolved).await {
+                    Ok(entry) if entry.is_file() => file_operands.push(resolved),
+                    _ => dir_roots.push(resolved),
+                }
             }
 
-            let files = match walker.collect().await {
-                Ok(f) => f,
-                Err(e) => return ExecResult::failure(1, format!("grep: {}", e)),
-            };
+            // No directory to recurse into: every operand is a plain file. Fall
+            // through to the ordinary file-operand handling below (a lone file
+            // → no prefix like `grep -c`; several → prefixed) — exactly what
+            // grep *without* `-r` does with these files. This is the #105 fix.
+            if !dir_roots.is_empty() {
+                let fs = BackendWalkerFs(ctx.backend.as_ref());
+                let mut files: Vec<PathBuf> = Vec::new();
+                for root in &dir_roots {
+                    // include/exclude + glob are walk-only (see the validation
+                    // note above); rebuilt per root since `with_options` moves.
+                    let mut filter = IncludeExclude::new();
+                    if let Some(Value::String(inc)) = args.get("include", usize::MAX) {
+                        filter.include(inc);
+                    }
+                    if let Some(Value::String(exc)) = args.get("exclude", usize::MAX) {
+                        filter.exclude(exc);
+                    }
+                    let glob = if let Some(Value::String(inc)) = args.get("include", usize::MAX) {
+                        GlobPath::new(&format!("**/{}", inc)).ok()
+                    } else {
+                        GlobPath::new("**/*").ok()
+                    };
 
-            return self
-                .grep_multiple_files(ctx, &files, &root, &matcher, &grep_opts, quiet, files_only, count_only, false)
-                .await;
+                    let options = WalkOptions {
+                        max_depth: None,
+                        entry_types: crate::walker::EntryTypes::files_only(),
+                        respect_gitignore: ctx.ignore_config.auto_gitignore(),
+                        include_hidden,
+                        filter,
+                        types: file_types.clone(),
+                        ..WalkOptions::default()
+                    };
+
+                    let mut walker = if let Some(g) = glob {
+                        FileWalker::new(&fs, root)
+                            .with_pattern(g)
+                            .with_options(options)
+                    } else {
+                        FileWalker::new(&fs, root).with_options(options)
+                    };
+
+                    if let Some(ignore_filter) = ctx.build_ignore_filter(root).await {
+                        walker = walker.with_ignore(ignore_filter);
+                    }
+
+                    match walker.collect().await {
+                        Ok(f) => files.extend(f),
+                        Err(e) => return ExecResult::failure(1, format!("grep: {}", e)),
+                    }
+                }
+
+                // Directly-named file operands (the mixed `grep -r p file dir`
+                // case) join the walked set.
+                let has_file_operands = !file_operands.is_empty();
+                files.extend(file_operands);
+
+                // Display prefix: strip the sole walk root — preserving the
+                // historical `grep -r p dir` → `file` display byte-for-byte —
+                // whenever there's exactly one directory and no file operand
+                // mixed in. Otherwise strip cwd so each source shows under its
+                // own subpath (`top.txt`, `sub/inner.txt`).
+                let display_root = if dir_roots.len() == 1 && !has_file_operands {
+                    dir_roots[0].clone()
+                } else {
+                    ctx.resolve_path(".")
+                };
+
+                return self
+                    .grep_multiple_files(ctx, &files, &display_root, &matcher, &grep_opts, quiet, files_only, count_only, false)
+                    .await;
+            }
         }
 
         // Explicit multiple file operands: positional[1..]. The kernel

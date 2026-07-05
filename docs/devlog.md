@@ -14,6 +14,31 @@ before it ships.
 
 ---
 
+## `grep -r` searches a file operand instead of silently missing (2026-07-05, GH #105)
+
+The reflex `grep -r PATTERN FILE` — `-r` is muscle memory, and everyone assumes
+handing a file to a recursive search searches *that file* — returned zero matches,
+exit 1, and **no error**. The recursive branch unconditionally treated the operand
+as a walk root and enumerated it with a files-only `**/*`; a directory yields its
+files, a plain file has nothing "under" it, so the walk collected nothing. The
+worst failure mode: silent. A model reads the empty result as "not found" and
+quietly corrupts whatever reasoning follows — bad enough that kaibo carries a note
+in its shell preamble steering models around it, spending instruction tokens every
+session.
+
+The fix reframes what `-r` *means*: it governs how **directories** expand, nothing
+more. The recursive branch now partitions its operands by `stat` — files are
+searched directly (falling through to the ordinary file-operand path, so a lone
+file prints unprefixed like plain `grep -c`), directories are walked, and a mixed
+`grep -r p file dir` does both. A stat-unresolvable operand still falls to the
+walker, preserving pre-fix behavior for a bad root. Display is conservative: the
+sole-directory walk strips its root exactly as before (byte-for-byte unchanged
+output for the overwhelmingly common `grep -r p dir`); only the genuinely-new
+mixed/multi-source shapes switch to cwd-relative prefixes so each source shows
+under its own subpath. TDD: four kernel-routed regression tests (single file, `-c`
+count, `-R` alias, mixed file+dir) red first, then green; 4370-test suite and
+clippy `--all-targets` clean. Once this ships, kaibo's preamble note can go.
+
 ## The `test` builtin — `[[` semantics as a command (2026-07-04)
 
 `test` had been quietly shelling out to the host `/usr/bin/test`: OS-dependent,
