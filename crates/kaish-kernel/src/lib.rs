@@ -64,7 +64,10 @@ pub use backend::{
 };
 pub use dispatch::{CommandDispatcher, PipelinePosition};
 pub use ignore_config::{IgnoreConfig, IgnoreScope};
-pub use kernel::{CommandKind, ExecuteOptions, Kernel, KernelConfig, VfsMountMode};
+pub use kernel::{
+    CommandKind, ExecuteOptions, Kernel, KernelConfig, VfsMountMode, MAX_RECURSION_DEPTH,
+    RECOMMENDED_STACK_SIZE,
+};
 pub use output_limit::OutputLimitConfig;
 
 // ═══════════════════════════════════════════════════════════════════════════

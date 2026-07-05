@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -43,6 +43,38 @@ use tokio::sync::RwLock;
 /// `~/.claude/projects/-home-atobey-src-kaish/memory/lang_dollar_dollar_identifier.md`
 /// for the design rationale.
 static KERNEL_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Maximum depth of dynamic statement-engine re-entry — command substitution
+/// (`$(…)`), shell-function calls, and `.kai` script sourcing — before a
+/// **loud** error is returned instead of letting the native call stack
+/// overflow (a `SIGSEGV`/abort with no diagnostic). Mirrors the intent of the
+/// alias re-entry cap (10) and the lexer's `MAX_PAREN_DEPTH` (256): a runaway
+/// or mutually recursive script hits a catchable ceiling, not a signal.
+///
+/// Each level stacks the dispatch chain between re-entries, which we measured
+/// at ~80 KB (release) / ~380 KB (debug) of native stack per level. `32` sits
+/// well inside [`RECOMMENDED_STACK_SIZE`] in **both** profiles (16 MB / 380 KB
+/// ≈ 42 debug levels) while allowing far deeper nesting than any real script.
+/// **The guard only fires *before* the stack overflows on a thread that meets
+/// that floor** — this is why the REPL sizes its threads to it and embedders
+/// must too (see `docs/EMBEDDING.md`). Forks (background jobs, scatter workers,
+/// pipeline stages) run on fresh stacks and get a fresh counter, bounding each
+/// chain independently. GH #46 / #47.
+pub const MAX_RECURSION_DEPTH: usize = 32;
+
+/// Recommended native stack size (16 MiB) for any thread that drives kaish
+/// execution — the REPL sizes its `block_on` thread and tokio worker threads
+/// to this, and embedders that call `Kernel::execute` (directly or via a tokio
+/// runtime) should do the same (`runtime::Builder::thread_stack_size`, and a
+/// `std::thread` stack for a non-worker driver).
+///
+/// The kernel recurses on the native stack (command substitution, shell
+/// functions, `.kai` scripts). [`MAX_RECURSION_DEPTH`] converts a runaway into
+/// a loud error, but only *if the stack is at least this large* — on the
+/// default ~2 MB tokio worker stack the recursion overflows (SIGSEGV) before
+/// reaching the cap. kaish can't set this itself (it doesn't own the runtime),
+/// so it exposes the floor for owners to apply. See GH #47.
+pub const RECOMMENDED_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 use async_trait::async_trait;
 
@@ -738,6 +770,29 @@ pub struct Kernel {
     /// stages do NOT take this lock — they run against a *forked* Kernel
     /// (see [`Kernel::fork`]) so they never contend with the foreground.
     execute_lock: tokio::sync::Mutex<()>,
+    /// Current dynamic statement-engine re-entry depth — incremented on entry
+    /// to command substitution, a shell-function call, or a `.kai` source, and
+    /// decremented (via an RAII guard, so cancellation stays balanced) on exit.
+    /// Checked against [`MAX_RECURSION_DEPTH`] to turn a stack overflow into a
+    /// loud error (GH #46). Per-Kernel: a fork starts fresh at 0 because it
+    /// runs on its own stack. Atomic only for `Send`/`Sync`; within one Kernel
+    /// the recursion chain is single-threaded (top-level `execute` is
+    /// serialized by `execute_lock`; concurrency happens on forks).
+    recursion_depth: AtomicUsize,
+}
+
+/// RAII balance for [`Kernel::recursion_depth`]: increments on construction
+/// (in `enter_recursion`) and decrements on drop, so a cancelled or
+/// error-unwound re-entry can never leave the counter inflated (which would
+/// spuriously trip later, unrelated recursions).
+struct RecursionGuard<'a> {
+    counter: &'a AtomicUsize,
+}
+
+impl Drop for RecursionGuard<'_> {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Internal result of [`Kernel::setup_vfs`].
@@ -1148,6 +1203,7 @@ impl Kernel {
             terminal_state: None,
             self_weak: std::sync::OnceLock::new(),
             execute_lock: tokio::sync::Mutex::new(()),
+            recursion_depth: AtomicUsize::new(0),
             bg_job_id: None,
             // Overlay handle is set by Kernel::new after assemble returns;
             // assemble itself doesn't know the handle (it's constructed in setup_vfs).
@@ -1290,6 +1346,9 @@ impl Kernel {
             terminal_state: None,
             self_weak: std::sync::OnceLock::new(),
             execute_lock: tokio::sync::Mutex::new(()),
+            // A fork runs on a fresh stack (spawned task) — its recursion
+            // budget is independent of the parent's current depth (GH #46).
+            recursion_depth: AtomicUsize::new(0),
             bg_job_id,
             // Arc-clone the overlay handle so forks (background jobs, scatter
             // workers, pipeline stages) can reach the same overlay transaction
@@ -4373,6 +4432,8 @@ impl Kernel {
     /// with `local` are scoped to the function; other assignments modify outer
     /// scopes (or create in root if new).
     async fn execute_user_tool(&self, def: ToolDef, args: &[Arg]) -> Result<ExecResult> {
+        let _depth = self.enter_recursion("a shell function")?;
+
         // 1. Build function args from AST args (async to support command substitution)
         let tool_args = self.build_args_async(args, None).await?;
 
@@ -4487,7 +4548,30 @@ impl Kernel {
     /// so `for x in $(seq 3)` still iterates the array and `$(printf a; printf b)`
     /// captures `ab`. Scope/cwd snapshotting (so `$(cd / && pwd)` cannot leak the
     /// cwd) is the caller's responsibility.
+    /// Enter one level of dynamic statement-engine re-entry (command
+    /// substitution / function call / script source), returning an RAII guard
+    /// that releases the level on drop. Past [`MAX_RECURSION_DEPTH`] it returns
+    /// a loud, catchable error instead of letting the native stack overflow
+    /// (GH #46). `what` names the re-entry kind for the message.
+    ///
+    /// The guard is constructed *before* the ceiling check so the error path
+    /// unwinds it too — the counter is always balanced, even when we reject.
+    fn enter_recursion(&self, what: &str) -> Result<RecursionGuard<'_>> {
+        let depth = self.recursion_depth.fetch_add(1, Ordering::Relaxed) + 1;
+        let guard = RecursionGuard { counter: &self.recursion_depth };
+        if depth > MAX_RECURSION_DEPTH {
+            return Err(anyhow::anyhow!(
+                "maximum recursion depth ({MAX_RECURSION_DEPTH}) exceeded in {what} — \
+                 a runaway or mutually recursive script (deeply nested $(…), or \
+                 functions/scripts that call each other without a base case) was \
+                 stopped before it could overflow the stack"
+            ));
+        }
+        Ok(guard)
+    }
+
     async fn execute_block_capturing(&self, stmts: &[Stmt]) -> Result<ExecResult> {
+        let _depth = self.enter_recursion("command substitution")?;
         // Accumulate stdout as raw bytes so a binary-producing statement
         // (`$(dd …)`, `$(base64 -d …)`) isn't lossy-decoded here before the
         // caller can preserve it. The final result is text iff valid UTF-8.
@@ -4551,6 +4635,13 @@ impl Kernel {
     /// Unlike regular tool execution, `source` executes in the CURRENT scope,
     /// allowing the sourced script to set variables and modify shell state.
     async fn execute_source(&self, args: &[Arg]) -> Result<ExecResult> {
+        // `source`/`.` is the fourth dynamic re-entry point: it runs the
+        // sourced file's statements inline via `execute_stmt_flow`, so a file
+        // that sources itself recurses unbounded just like a runaway function
+        // (GH #46). It's intercepted as a special form *before* the other
+        // guarded paths, so it needs its own guard.
+        let _depth = self.enter_recursion("source")?;
+
         // Get the file path from the first positional argument
         let tool_args = self.build_args_async(args, None).await?;
         let path = match tool_args.positional.first() {
@@ -4681,6 +4772,12 @@ impl Kernel {
     /// Searches PATH for `{name}.kai` files and executes them in isolated scope
     /// (like user-defined tools). Returns None if no script is found.
     async fn try_execute_script(&self, name: &str, args: &[Arg]) -> Result<Option<ExecResult>> {
+        // Held across the PATH probe *and* body execution: a `.kai` sourcing a
+        // `.kai` re-enters here, and that nesting is what must be bounded (#46).
+        // A non-script command pays only a transient, balanced increment during
+        // the probe before falling through to the external path.
+        let _depth = self.enter_recursion("a .kai script")?;
+
         // Get PATH from scope (default to "/bin")
         let path_value = {
             let scope = self.scope.read().await;
