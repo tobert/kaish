@@ -44,6 +44,54 @@ VFS node stays plain-text-empty rather than error when not latched, matching how
 `status`/`command` always read. Three kernel-routed tests red→green, 4377 suite
 + clippy `--all-targets` clean, verified end-to-end through the REPL.
 
+## The recursion guard, and why #46 and #47 are one PR (2026-07-05, GH #46/#47)
+
+The plan was a tidy correctness fix: thread a depth counter through the three
+dynamic re-entry points (command substitution, shell functions, `.kai`
+scripts), return a loud error past a cap, done. The counter + RAII guard part
+*was* tidy (an `AtomicUsize` on the Kernel, fresh per fork, decremented on drop
+so cancellation stays balanced). Picking the **cap** is where physics showed up.
+
+We measured the native stack cost per recursion level by disabling the cap and
+probing depth-at-overflow: **~380 KB/level in debug, ~80 KB/level in release**
+(the fat boxed async futures #48 is about). That means:
+
+| thread | debug | release |
+|---|---|---|
+| 8 MB main | ~21 levels | ~100 |
+| 2 MB tokio worker | ~5 | ~25 |
+
+The plan had been "defer #47 (stack size) to a doc note, ship #46 alone." The
+measurement killed it: with the default stacks, **no single cap works** — one
+safe on a 2 MB worker (~4) is uselessly shallow, and a useful cap (~16) doesn't
+protect workers *or the test itself* (a `#[tokio::test]` thread is ~2 MB, so a
+recursion test would SIGSEGV at ~5 before it could assert the loud error). #46
+needs #47's controlled stack to be effective *and* testable. Amy called it:
+ship them together.
+
+So the guard is tuned for a **documented floor**: `RECOMMENDED_STACK_SIZE`
+(16 MiB) and `MAX_RECURSION_DEPTH` (32), both `pub` so embedders can size their
+runtime against them. kaish can't set the stack itself (it doesn't own the
+runtime), so the REPL walks the talk — `thread_stack_size` on its tokio workers,
+and a `std::thread` with the recommended stack driving `block_on` (the OS main
+thread's ~8 MB overflows a deep debug recursion before the cap). The tests run
+each recursion on a `RECOMMENDED_STACK_SIZE` thread with a fresh current-thread
+runtime — the only honest way to reach the cap without the overflow-under-test
+taking down the binary. Verified end-to-end: `f(){f;};f`, mutual recursion, and
+`$()`-nested recursion all go loud (debug and release), foreground and inside a
+pipeline stage; `countdown 20` still runs.
+
+One consistency note banked: a recursion error *inside* `$(...)` follows kaish's
+existing command-substitution semantics — a failed `$()` yields an empty
+expansion and doesn't fail the enclosing command (same as `echo $(false)`), so
+that path is *bounded* (no crash) but not exit-code-loud. Direct recursion
+(functions, scripts) is exit-1-loud. Not a new silent path — it matches how
+`$()` already behaves; making `$()` failures louder is a separate concern.
+
+Meanwhile fired gemini-pro + fable batches at the kernel/types source to hunt
+per-level stack reductions (#48 territory) — shrink the ~380 KB and the floor
+can drop. That's a follow-up; this PR ships the guard + the floor it needs.
+
 ## `$()` in a redirect target — the bug that only bit embedders (2026-07-05, GH #90)
 
 Picked this up expecting a quick "attach the dispatcher for bare commands" fix.

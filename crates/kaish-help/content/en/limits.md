@@ -48,6 +48,7 @@ plain command is wanted — `test -f x && echo yes`, `if test "$a" = "$b"; then`
 - **Pipeline stages run concurrently** with isolated scopes (like bash subshells). Variable assignments in one stage aren't visible in others. Last stage syncs back to parent.
 - **Scatter results in completion order**, not input order.
 - **Command substitution runs in redirect targets and here-doc bodies** — `cmd > $(gen-path)`, `cat < $(find-cfg)`, and `$(...)` inside a here-doc body all work. The target is a single word, so quote it when it mixes text with an expansion: `> "/tmp/$(id -u).log"`, not `> /tmp/$(id -u).log`.
+- **Recursion is depth-capped at 32** — nested `$(...)`, recursive shell functions, and `.kai` scripts sourcing each other are bounded so a runaway (or a missing base case) returns a loud `maximum recursion depth exceeded` error instead of overflowing the stack. Real recursion nests far shallower; this only stops runaways.
 - **Preprocessor is context-unaware** — `$(( ))` and heredoc markers replaced before parsing.
 
 ## External Commands

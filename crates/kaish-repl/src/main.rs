@@ -108,16 +108,39 @@ fn execute_noninteractive(
 }
 
 fn main() -> ExitCode {
-    // Initialize tracing (respects RUST_LOG env var)
+    // Initialize tracing (respects RUST_LOG env var) on the process's original
+    // thread, before we hand off to the sized driver thread below.
     tracing_subscriber::registry()
         .with(fmt::layer())
         .with(EnvFilter::from_default_env())
         .init();
 
-    match run() {
-        Ok(code) => code,
+    // Drive the whole REPL on a thread sized to `RECOMMENDED_STACK_SIZE`. The
+    // interpreter recurses on the native stack (command substitution, shell
+    // functions, `.kai` scripts) and its foreground work runs on the
+    // `block_on` thread — the OS-default main-thread stack (~8 MB) overflows a
+    // deep recursion in debug *before* the depth guard's cap trips, defeating
+    // it. Worker threads are sized via `build_runtime`; this covers the driver
+    // (GH #46/#47).
+    let spawned = std::thread::Builder::new()
+        .name("kaish".to_string())
+        .stack_size(kaish_kernel::RECOMMENDED_STACK_SIZE)
+        .spawn(run);
+    let joined = match spawned {
+        Ok(handle) => handle.join(),
         Err(e) => {
+            eprintln!("Error: could not spawn kaish driver thread: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match joined {
+        Ok(Ok(code)) => code,
+        Ok(Err(e)) => {
             eprintln!("Error: {e:?}");
+            ExitCode::FAILURE
+        }
+        Err(_) => {
+            eprintln!("Error: kaish driver thread panicked");
             ExitCode::FAILURE
         }
     }
@@ -224,7 +247,7 @@ fn run_script(path: &str, overlay: bool) -> Result<ExitCode> {
 
     let client = EmbeddedClient::new(kernel);
 
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = kaish_repl::build_runtime()?;
     // Set $0 to the script path
     rt.block_on(client.kernel().set_positional(path, vec![]));
     // Forward any upstream W3C trace context (TRACEPARENT/TRACESTATE/BAGGAGE)
@@ -254,7 +277,7 @@ fn run_command(cmd: &str, overlay: bool) -> Result<ExitCode> {
 
     let client = EmbeddedClient::new(kernel);
 
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = kaish_repl::build_runtime()?;
     // Forward any upstream W3C trace context (TRACEPARENT/TRACESTATE/BAGGAGE)
     // so e.g. `otel-cli exec -- kaish -c '…'` traces across the boundary.
     let opts = kaish_repl::trace_options_from_env();

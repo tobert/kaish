@@ -22,8 +22,21 @@ breaking entries are marked **BREAKING**.
   fulfills it with `Kernel::confirm(&latch)`. **BREAKING (embedders):**
   `JobStatus` gains a `Latched` variant (exhaustive matches must handle it) and
   `JobInfo` gains a `latch: Option<LatchRequest>` field.
+- **Recursion is depth-guarded (`MAX_RECURSION_DEPTH` = 32)** (GH #46/#47).
+  Command substitution, shell-function calls, and `.kai` script sourcing all
+  re-enter the statement engine on the native stack; a runaway or mutually
+  recursive script now returns a loud `maximum recursion depth exceeded` error
+  instead of overflowing the stack (a `SIGSEGV`/abort with no diagnostic). Two
+  new `pub const`s let embedders size their runtime: `MAX_RECURSION_DEPTH` and
+  `RECOMMENDED_STACK_SIZE` (16 MiB). The guard only fires *before* an overflow
+  on a thread that meets that floor — the reference REPL now sizes its tokio
+  worker threads (`thread_stack_size`) and its `block_on` driver thread to it;
+  embedders should too (see `docs/EMBEDDING.md`).
 
 ### Fixed
+- **Deep recursion no longer crashes the process** (GH #46). `f() { f; }; f`,
+  mutual recursion, and deeply nested `$(...)` aborted with a bare stack
+  overflow; they now hit the depth guard above and fail loudly.
 - **`$(...)` in a redirect target now works on a bare `Kernel::execute`** (GH
   #90). Command substitution in a redirect target or heredoc body (`echo x >
   $(gen)`, `cat < $(gen)`, `cmd > $(gen)` in a pipeline stage) only ran when the

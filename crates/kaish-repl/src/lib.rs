@@ -504,6 +504,20 @@ pub struct Repl {
     runtime: Runtime,
 }
 
+/// Build the tokio runtime kaish execution runs on, with worker threads sized
+/// to [`kaish_kernel::RECOMMENDED_STACK_SIZE`] so deeply nested command
+/// substitution / shell functions / `.kai` scripts reach the interpreter's
+/// recursion guard (a loud error) instead of overflowing the default ~2 MB
+/// worker stack (GH #46/#47). The `block_on` *driver* thread is sized
+/// separately in `main.rs` — tokio doesn't own it.
+pub fn build_runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(kaish_kernel::RECOMMENDED_STACK_SIZE)
+        .enable_all()
+        .build()
+        .context("Failed to create tokio runtime")
+}
+
 impl Repl {
     /// Create a new REPL instance with passthrough filesystem access.
     pub fn new() -> Result<Self> {
@@ -511,7 +525,7 @@ impl Repl {
             .with_interactive(true)
             .with_initial_vars(os_env_vars());
         let mut kernel = Kernel::new(config).context("Failed to create kernel")?;
-        let runtime = Runtime::new().context("Failed to create tokio runtime")?;
+        let runtime = build_runtime()?;
 
         // Initialize terminal job control if stdin is a TTY. See `new()`.
         #[cfg(unix)]
@@ -528,7 +542,7 @@ impl Repl {
     /// Create a new REPL with a custom kernel configuration.
     pub fn with_config(config: KernelConfig) -> Result<Self> {
         let mut kernel = Kernel::new(config).context("Failed to create kernel")?;
-        let runtime = Runtime::new().context("Failed to create tokio runtime")?;
+        let runtime = build_runtime()?;
 
         // Initialize terminal job control if stdin is a TTY. This needs the
         // owned kernel (&mut, local-TTY setup), so it stays as pre-wrap
