@@ -2160,8 +2160,11 @@ impl Kernel {
         &'a self,
         stmt: &'a Stmt,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ControlFlow>> + Send + 'a>> {
-        use tracing::Instrument;
-        let span = tracing::debug_span!("execute_stmt_flow", stmt_type = %stmt.kind_name());
+        // No per-statement span here: `execute_stmt_flow` is the largest future
+        // on the recursion ring, and wrapping it in `Instrumented<Span>` carries
+        // the span's state through every `.await` at every level, costing native
+        // stack per level (GH #48). Coarser spans on the outer execute entries
+        // remain. See item 3 of the #48 burndown.
         Box::pin(async move {
         match stmt {
             Stmt::Assignment(assign) => {
@@ -2704,11 +2707,10 @@ impl Kernel {
             }
             Stmt::Empty => Ok(ControlFlow::ok(ExecResult::success(""))),
         }
-        }.instrument(span))
+        })
     }
 
     /// Execute a pipeline.
-    #[tracing::instrument(level = "debug", skip(self, pipeline), fields(background = pipeline.background, command_count = pipeline.commands.len()))]
     async fn execute_pipeline(&self, pipeline: &crate::ast::Pipeline) -> Result<ExecResult> {
         if pipeline.commands.is_empty() {
             return Ok(ExecResult::success(""));
@@ -2985,8 +2987,13 @@ impl Kernel {
         self.execute_command_depth(name, args, 0).await
     }
 
-    #[tracing::instrument(level = "info", skip(self, args, alias_depth), fields(command = %name), err)]
     async fn execute_command_depth(&self, name: &str, args: &[Arg], alias_depth: u8) -> Result<ExecResult> {
+        // Dispatch breadcrumb instead of an `#[instrument]` span: this is the
+        // most-recursed function on the ring, so wrapping its future in
+        // `Instrumented<Span>` (plus the `err` recorder) cost native stack at
+        // every level (GH #48, item 3). A `trace!` event records the command name
+        // without living in the future.
+        tracing::trace!(command = %name, alias_depth, "dispatch");
         // Special built-ins. `SpecialForm::from_name` is the single source of
         // truth (shared with `classify_command` via `is_runtime_special_form`),
         // and this match on the enum is *exhaustive* — adding a special-form is a
