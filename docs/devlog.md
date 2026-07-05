@@ -14,6 +14,43 @@ before it ships.
 
 ---
 
+## `$()` in a redirect target — the bug that only bit embedders (2026-07-05, GH #90)
+
+Picked this up expecting a quick "attach the dispatcher for bare commands" fix.
+The first surprise: the exact repro (`echo x > $(echo f.txt)`) **worked** through
+the REPL. The `Stmt::Command` fast path was removed months ago ("This is the
+single execution path — no fast path for single commands"), so bare commands run
+through `execute_pipeline`, which attaches `ctx.dispatcher`. The GH #90 comment
+in `redirect_in_cmdsubst_tests.rs` describing it as blocked was stale — or so it
+looked. I nearly closed it as already-fixed with a pinning test.
+
+The pinning test is what saved it. Written through `kernel.execute()` (the
+embedder API, not the REPL), all three cases went **red**: `eval_redirect_target`
+fell back to the sync evaluator and failed with "could not evaluate redirect
+target". The REPL worked; `kernel.execute()` didn't. The tell: `ctx.dispatcher`
+is only populated by `self.dispatcher()`, which upgrades a `self_weak` that's set
+**only in `into_arc`**. The REPL Arc-attaches its kernel; a bare `Kernel` from
+`Kernel::new()` — every embedder holding a `Kernel` by value, and the entire
+4000-test harness — never sets `self_weak`, so `dispatcher()` returns `None` and
+a `$()` redirect target silently degrades. #90 was real, and it bit *exactly the
+surface that matters* (kaibo/kaijutsu drive `kernel.execute`), while hiding from
+the interactive shell we test by hand.
+
+The fix follows the constraint: without an `Arc<Kernel>` there is no
+`Arc<dyn CommandDispatcher>` to put in `ctx.dispatcher`, so the owned-handle
+approach can't work for a bare kernel. But the *runner* always holds a real
+`&dyn CommandDispatcher` (the kernel itself, Arc'd or not). So thread it: through
+`apply_redirects` and `setup_stdin_redirects` into `eval_redirect_target`, which
+now calls `dispatcher.eval_expr` directly and no longer reads `ctx.dispatcher` or
+falls back to the sync evaluator. The silent fallback — the thing that turned a
+missing dispatcher into a wrong answer instead of a loud error — is deleted
+outright. Bonus coverage: a pipeline-stage target (`echo x | cat > $(echo g)`)
+had the same gap (the stage context copies `dispatcher: None` too) and is now
+fixed and pinned. Four kernel-routed tests, red→green; 4374 suite + clippy clean.
+
+Lesson banked: **test the embedder path, not the REPL.** A convenience wrapper
+that Arc-attaches can paper over a defect on the API every real consumer uses.
+
 ## `grep -r` searches a file operand instead of silently missing (2026-07-05, GH #105)
 
 The reflex `grep -r PATTERN FILE` — `-r` is muscle memory, and everyone assumes

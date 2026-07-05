@@ -30,6 +30,7 @@ pub(crate) async fn apply_redirects(
     mut result: ExecResult,
     redirects: &[Redirect],
     ctx: &ExecContext,
+    dispatcher: &dyn CommandDispatcher,
 ) -> ExecResult {
     // Defer materialization of OutputData → result.out to individual redirect
     // handlers. File redirects (Overwrite/Append) can stream OutputData directly
@@ -71,7 +72,7 @@ pub(crate) async fn apply_redirects(
                 result.clear_stdout();
             }
             RedirectKind::StdoutOverwrite => {
-                let path = match eval_redirect_target(&redir.target, ctx).await {
+                let path = match eval_redirect_target(&redir.target, ctx, dispatcher).await {
                     Ok(p) => p,
                     Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
                 };
@@ -96,7 +97,7 @@ pub(crate) async fn apply_redirects(
                 result.clear_stdout();
             }
             RedirectKind::StdoutAppend => {
-                let path = match eval_redirect_target(&redir.target, ctx).await {
+                let path = match eval_redirect_target(&redir.target, ctx, dispatcher).await {
                     Ok(p) => p,
                     Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
                 };
@@ -121,7 +122,7 @@ pub(crate) async fn apply_redirects(
                 result.clear_stdout();
             }
             RedirectKind::Stderr => {
-                let path = match eval_redirect_target(&redir.target, ctx).await {
+                let path = match eval_redirect_target(&redir.target, ctx, dispatcher).await {
                     Ok(p) => p,
                     Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
                 };
@@ -131,7 +132,7 @@ pub(crate) async fn apply_redirects(
                 result.err.clear();
             }
             RedirectKind::Both => {
-                let path = match eval_redirect_target(&redir.target, ctx).await {
+                let path = match eval_redirect_target(&redir.target, ctx, dispatcher).await {
                     Ok(p) => p,
                     Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
                 };
@@ -163,17 +164,24 @@ pub(crate) async fn apply_redirects(
 
 /// Evaluate a redirect target expression to get the file path (or heredoc body).
 ///
-/// Routes through `ctx.dispatcher` so command substitution (`$(...)`) in the
-/// target runs — e.g. `cat < $(echo f)`, `echo x > $(echo f)`, and `$(...)`
-/// inside a heredoc body. Falls back to the sync evaluator (which skips
-/// command substitution) only when no dispatcher is attached.
-async fn eval_redirect_target(expr: &Expr, ctx: &ExecContext) -> Result<String, String> {
-    let value = if let Some(dispatcher) = &ctx.dispatcher {
-        dispatcher.eval_expr(expr, ctx).await.map_err(|e| e.to_string())?
-    } else {
-        eval_simple_expr(expr, ctx)?
-            .ok_or_else(|| "could not evaluate redirect target".to_string())?
-    };
+/// Takes the `dispatcher` explicitly rather than reading `ctx.dispatcher`, so
+/// command substitution (`$(...)`) in the target runs on the *same* dispatcher
+/// the runner already uses — `cat < $(echo f)`, `echo x > $(echo f)`, and
+/// `$(...)` inside a heredoc body. `ctx.dispatcher` is only populated when the
+/// kernel is Arc-attached (`into_arc`); a bare `Kernel::execute` — every test,
+/// and any embedder holding a `Kernel` by value — left it `None`, so a `$()`
+/// target silently fell back to the sync evaluator that can't run it (GH #90).
+/// The runner always holds a real dispatcher; thread it through so the behavior
+/// no longer depends on how the kernel was constructed.
+async fn eval_redirect_target(
+    expr: &Expr,
+    ctx: &ExecContext,
+    dispatcher: &dyn CommandDispatcher,
+) -> Result<String, String> {
+    let value = dispatcher
+        .eval_expr(expr, ctx)
+        .await
+        .map_err(|e| e.to_string())?;
     // Decision D: a bare collection can't be a redirect target either — same
     // process-boundary guard as external argv (see `structured_boundary_error`).
     if let Some(msg) = crate::interpreter::structured_boundary_error("a redirect target", &value) {
@@ -209,12 +217,16 @@ async fn redirect_append(ctx: &ExecContext, path: &str, data: &[u8]) -> Result<(
 /// target resolved against `ctx.cwd`, mirroring how `cat` and the output
 /// redirects resolve their operands. A missing/unreadable file or non-UTF-8
 /// content is a hard error — we never silently feed the command empty stdin.
-async fn setup_stdin_redirects(cmd: &Command, ctx: &mut ExecContext) -> Result<(), String> {
+async fn setup_stdin_redirects(
+    cmd: &Command,
+    ctx: &mut ExecContext,
+    dispatcher: &dyn CommandDispatcher,
+) -> Result<(), String> {
     use std::path::Path;
     for redir in &cmd.redirects {
         match &redir.kind {
             RedirectKind::Stdin => {
-                let path = eval_redirect_target(&redir.target, ctx).await?;
+                let path = eval_redirect_target(&redir.target, ctx, dispatcher).await?;
                 let resolved = ctx.resolve_path(&path);
                 let data = ctx
                     .backend
@@ -233,7 +245,7 @@ async fn setup_stdin_redirects(cmd: &Command, ctx: &mut ExecContext) -> Result<(
                     // Heredoc bodies may contain `$(...)`; route through the
                     // dispatcher so command substitution runs.
                     expr => {
-                        let body = eval_redirect_target(expr, ctx).await?;
+                        let body = eval_redirect_target(expr, ctx, dispatcher).await?;
                         ctx.set_stdin(body);
                     }
                 }
@@ -241,7 +253,7 @@ async fn setup_stdin_redirects(cmd: &Command, ctx: &mut ExecContext) -> Result<(
             RedirectKind::HereString => {
                 // Per bash, here-strings append a trailing newline to the
                 // expanded word so the command receives a terminated line.
-                let mut s = eval_redirect_target(&redir.target, ctx).await?;
+                let mut s = eval_redirect_target(&redir.target, ctx, dispatcher).await?;
                 s.push('\n');
                 ctx.set_stdin(s);
             }
@@ -389,7 +401,7 @@ impl PipelineRunner {
         dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
         // Set up stdin from redirects (< file, <<heredoc)
-        if let Err(e) = setup_stdin_redirects(cmd, ctx).await {
+        if let Err(e) = setup_stdin_redirects(cmd, ctx, dispatcher).await {
             return ExecResult::failure(1, e);
         }
 
@@ -408,7 +420,7 @@ impl PipelineRunner {
         };
 
         // Apply post-execution redirects
-        apply_redirects(result, &cmd.redirects, ctx).await
+        apply_redirects(result, &cmd.redirects, ctx, dispatcher).await
     }
 
     /// Run a multi-command pipeline concurrently.
@@ -465,7 +477,7 @@ impl PipelineRunner {
             // Set up stdin from redirects on the child context. A failure here
             // (e.g. `cmd < missing`) fails this stage; surface it from inside
             // the spawned task so the normal join/collection path reports it.
-            let stdin_setup = setup_stdin_redirects(&cmd, &mut stage_ctx).await;
+            let stdin_setup = setup_stdin_redirects(&cmd, &mut stage_ctx, dispatcher).await;
 
             // Wire pipe_stdin: stage 0 gets parent stdin (if no redirect), others get pipe reader
             if i == 0 {
@@ -528,8 +540,11 @@ impl PipelineRunner {
                     Err(e) => ExecResult::failure(1, e.to_string()),
                 };
 
-                // Apply post-execution redirects
-                result = apply_redirects(result, &cmd.redirects, &stage_ctx).await;
+                // Apply post-execution redirects. Use the stage's own
+                // (forked) dispatcher — the borrowed `dispatcher` can't cross
+                // the spawn boundary, and `stage_ctx.dispatcher` is `None` on a
+                // bare kernel, which is exactly the GH #90 gap.
+                result = apply_redirects(result, &cmd.redirects, &stage_ctx, &*task_dispatcher).await;
 
                 // Flush buffered stderr to the kernel's stderr stream.
                 // This delivers error output from intermediate pipeline stages
@@ -1728,6 +1743,13 @@ mod tests {
         ExecContext::new(Arc::new(vfs))
     }
 
+    /// A throwaway dispatcher for `apply_redirects` in tests that exercise
+    /// merge redirects (`2>&1`) only — they never evaluate a `$()` target, so
+    /// an empty-registry backend dispatcher suffices to satisfy the signature.
+    fn test_dispatcher() -> BackendDispatcher {
+        BackendDispatcher::new(Arc::new(ToolRegistry::new()))
+    }
+
     #[test]
     fn test_schema_aware_string_arg() {
         // --query "test" should become named: {"query": "test"}
@@ -2217,7 +2239,7 @@ mod tests {
         }];
 
         let ctx = make_minimal_ctx();
-        let result = apply_redirects(result, &redirects, &ctx).await;
+        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
 
         assert_eq!(&*result.text_out(), "stdout contentstderr content");
         assert!(result.err.is_empty());
@@ -2234,7 +2256,7 @@ mod tests {
         }];
 
         let ctx = make_minimal_ctx();
-        let result = apply_redirects(result, &redirects, &ctx).await;
+        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
 
         assert_eq!(&*result.text_out(), "stdout only");
         assert!(result.err.is_empty());
@@ -2255,7 +2277,7 @@ mod tests {
         }];
 
         let ctx = make_minimal_ctx();
-        let result = apply_redirects(result, &redirects, &ctx).await;
+        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
 
         assert_eq!(&*result.text_out(), "stdout\nstderr\n");
         assert!(result.err.is_empty());

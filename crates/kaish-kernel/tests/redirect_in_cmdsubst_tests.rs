@@ -130,11 +130,90 @@ async fn merge_stdout_to_stderr_inside_cmdsubst_does_not_leak_data() {
     );
 }
 
-// The sharpest test of the parser cycle-break — a `$(...)` in the redirect
-// *target*, itself inside a `$(...)` — lives as a parser unit test
-// (`parser::tests::parse_cmd_subst_redirect_target_with_nested_subst`): the
-// hazard it guards is parser *construction* (infinite recursion / stack
-// overflow), which is a parse-layer concern. End-to-end execution of a
-// `$()`-valued redirect target on a *bare* single command is blocked by a
-// separate, pre-existing bug (the dispatcher isn't attached, so the target
-// `$()` can't run) — GH #90, orthogonal to redirect-in-`$()`.
+// ─── GH #90: `$()` in a redirect target on a *bare* single command ──────────
+//
+// The parser cycle-break for a `$(...)` in the redirect *target* itself nested
+// inside a `$(...)` is pinned by a parser unit test
+// (`parser::tests::parse_cmd_subst_redirect_target_with_nested_subst`) — that
+// hazard is parser *construction* (infinite recursion). The *execution* half is
+// pinned here.
+//
+// #90 reported that a `$()`-valued redirect target on a bare single command
+// (not part of a pipeline or `&&`/`||` chain) failed with "could not evaluate
+// redirect target" — the dispatcher wasn't attached, so `eval_redirect_target`
+// fell back to the sync evaluator, which can't run `$()`. It's resolved: bare
+// commands no longer take a reduced sync fast path — every statement runs
+// through `execute_pipeline`, which attaches `ctx.dispatcher` (kernel.rs, "This
+// is the single execution path — no fast path for single commands"), so the
+// target `$()` runs regardless of surrounding syntax. These pin that.
+
+/// The exact #90 repro: a `$()` redirect *target* on a bare single command
+/// (`echo x > $(echo f)`) evaluates the substitution and writes the file.
+#[tokio::test]
+async fn bare_command_cmdsubst_redirect_target_writes_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let r = kernel
+        .execute("echo hi > $(echo out.txt)")
+        .await
+        .expect("execute");
+    assert_eq!(r.code, 0, "bare-command redirect target must run $(): {r:?}");
+
+    let f = kernel.execute("cat out.txt").await.expect("cat");
+    assert_eq!(f.text_out().trim(), "hi", "the file received the output: {f:?}");
+}
+
+/// A `$()` *stdin* redirect target (`cat < $(echo f)`) on a bare command runs
+/// too — the same dispatcher path serves input redirects.
+#[tokio::test]
+async fn bare_command_cmdsubst_stdin_redirect_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+
+    kernel.execute("echo payload > src.txt").await.expect("seed");
+    let r = kernel
+        .execute("cat < $(echo src.txt)")
+        .await
+        .expect("execute");
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(r.text_out().trim(), "payload", "stdin target $() must resolve: {r:?}");
+}
+
+/// The nested form #90 called out: a redirect inside `$()` whose target is
+/// itself a `$()` — `$(cmd > $(subst))`. The parser handles the nesting; the
+/// target-eval step used to fail. Now it executes: capture is empty (stdout
+/// went to the file) and the file has the bytes.
+#[tokio::test]
+async fn nested_cmdsubst_redirect_target_executes() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let r = kernel
+        .execute(r#"x=$(echo hi > $(echo inner.txt)); echo "[$x]""#)
+        .await
+        .expect("execute");
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(r.text_out().trim(), "[]", "stdout went to the file, capture empty: {r:?}");
+
+    let f = kernel.execute("cat inner.txt").await.expect("cat");
+    assert_eq!(f.text_out().trim(), "hi", "the nested-target file received the output: {f:?}");
+}
+
+/// A `$()` redirect target on a *pipeline stage* (`echo x | cat > $(echo g)`).
+/// On a bare kernel the stage context copies `dispatcher: None` too, so this
+/// path had the same GH #90 gap — the fix threads the stage's own dispatcher.
+#[tokio::test]
+async fn pipeline_stage_cmdsubst_redirect_target_writes_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let r = kernel
+        .execute("echo piped | cat > $(echo g.txt)")
+        .await
+        .expect("execute");
+    assert_eq!(r.code, 0, "{r:?}");
+
+    let f = kernel.execute("cat g.txt").await.expect("cat");
+    assert_eq!(f.text_out().trim(), "piped", "the pipeline redirect target resolved: {f:?}");
+}

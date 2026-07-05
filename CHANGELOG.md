@@ -11,6 +11,15 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Fixed
+- **`$(...)` in a redirect target now works on a bare `Kernel::execute`** (GH
+  #90). Command substitution in a redirect target or heredoc body (`echo x >
+  $(gen)`, `cat < $(gen)`, `cmd > $(gen)` in a pipeline stage) only ran when the
+  kernel was Arc-attached via `into_arc` — the REPL. A bare `Kernel::execute`
+  (every embedder holding a `Kernel` by value, and the whole test harness) left
+  `ctx.dispatcher` unset, so the target silently fell back to a sync evaluator
+  that can't run `$()` and failed with "could not evaluate redirect target".
+  The redirect evaluator now takes the dispatcher the runner already holds, so
+  the behavior no longer depends on how the kernel was constructed.
 - **`grep -r PATTERN FILE`** (a file operand, not a directory) now searches
   that file instead of silently finding nothing (GH #105). `-r`/`-R` used to
   treat every operand as a walk root; a file has nothing "under" it, so the

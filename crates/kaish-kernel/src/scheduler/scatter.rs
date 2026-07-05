@@ -210,7 +210,7 @@ impl ScatterGatherRunner {
         // when gather was the pipeline's last command, so a trailing
         // `gather > file | jq` silently skipped the file and let the
         // unredirected rows flow to `jq` instead.
-        let gathered = apply_redirects(gathered, gather_redirects, ctx).await;
+        let gathered = apply_redirects(gathered, gather_redirects, ctx, &*self.sequential_dispatcher).await;
 
         // Run post-gather commands if any. A failed gather short-circuits —
         // feeding partial/failed output onward would propagate corruption.
