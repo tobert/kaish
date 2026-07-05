@@ -14,6 +14,77 @@ before it ships.
 
 ---
 
+## Interpreter allocation/stack pass (2026-07-05, GH #48)
+
+#46/#47 landed a recursion depth guard sized against a measured ~380 KB of
+native stack *per statement-engine re-entry level* — the figure that forced
+`RECOMMENDED_STACK_SIZE` to 16 MiB. #48 is the pass to make that cheaper. A
+model panel (gemini-pro + fable, whole hot files, no diff) had converged on a
+ranked burndown, posted on the issue: profile fix first, then a batch of
+mechanical boxing, then two wider items to measure-and-decide.
+
+**The measurement had a trap.** The obvious tool, `-Zprint-type-sizes`, reports
+the *coroutine layout* (future struct size), which is computed at MIR level and
+is invariant to optimization. So it's a fine proxy for the boxing items (they
+shrink the struct) but completely blind to the profile change and to
+codegen-level native-stack cost — the thing #46/#47 actually cares about. Proof:
+the debug and `opt-level=1` type-size logs were byte-identical. So the first real
+deliverable was a *runtime* probe: a `stackprobe` builtin that steps into a
+`#[inline(never)]` sync frame (the async body is heap-boxed by `async_trait`, so
+a local there isn't the native stack) to read the true stack pointer at each
+`$(…)` nesting level. Pure builtins never yield, so a nest runs in one
+synchronous poll and adjacent probes differ by exactly one re-entry level. It
+reads dead-consistent (min=max=median across 25 samples) — the recursion is
+perfectly self-similar — and it became the metric every item was measured
+against, plus a durable regression guard.
+
+**The batch, each step measured (median per-`$()`-level, `opt-level=1`):**
+- *Item 0* — `opt-level = 1` on the two interpreter crates: 414 → 106 KB debug
+  (**3.9×**), nearly closing the debug↔release gap. fable's lead insight —
+  unoptimized async poll frames are ~proportional to future size with redundant
+  memcpys — landed exactly.
+- *Item 1* (box the cold dispatch branches + the two `execute_pipeline` calls):
+  106 → 96.
+- *Item 3* (drop the per-command tracing spans off the ring): 96 → 76 — the
+  `Instrumented<Span>` wrapper was heavy on the big ring futures.
+- *Item 4* (box the command-subst scope snapshot): 78.7 → 77.8 KB.
+- *Item 2* (box the two per-command `ExecContext` snapshots via a sync helper,
+  collapsing two near-duplicate 30-field blocks into one): 77.8 → 74.6.
+- *Item 7* (drop the `ToolSchema` before the execute await): no-op under
+  optimization (the compiler already narrows it), kept for debug + clarity — and
+  reported honestly as such.
+- *Item 8* (`tool_schemas: Vec → Arc<[…]>`): an *allocation* win (the ~70-schema
+  catalog was deep-cloned per dispatch → refcount bump), invisible to the stack
+  probe, so validated by construction.
+- *Item 5* (box `ExecResult.output` and `Scope.last_result`) — **the headline:**
+  74.6 → 56.8. `ExecResult` is the most-replicated type in the recursion frame
+  (every `ControlFlow`, every return, the accumulator), so boxing its 120-byte
+  `output` cascaded ~10× per level for a single 14 KB/level drop.
+
+**Result: ~46% off the per-level native stack** — release 92 → 50 KB, debug
+opt=1 106 → 57 KB, debug no-opt 414 → 193 KB.
+
+**Two decisions were Amy's.** The wider items 6 (box `Value::Json`) and 9
+(Arc-split `ExecContext`) turned out poor value once re-measured: `Value` is only
+72 B and no longer dominant, and item 9's benefit largely evaporated — item 2
+already boxed `ExecContext` off the stack and item 8 already Arc'd its expensive
+clone, leaving a large invasive refactor for a small allocation gain. Deferred
+both (measure-first follow-ups on #48). And with the frames this much smaller,
+the #46/#47 pair was relaxed: `MAX_RECURSION_DEPTH` 32 → 48 and
+`RECOMMENDED_STACK_SIZE` 16 → 12 MiB, adjusted *together* with a comment making
+the relationship explicit — the cap must trip before `cap × (worst-case
+per-level) < floor`, and the worst case is deliberately the ~193 KB *unoptimized*
+figure because the new `opt-level=1` dev profile is local to this workspace and
+does **not** propagate to embedders, whose own debug builds pay the full cost.
+`48 × 193 KB ≈ 9.3 MB` under 12 MiB keeps the same ~1.3× margin the old pair had.
+
+kaibo (deepseek, holistic, pointed at the worktree) reviewed all six change
+classes clean — no drop-order/lock-lifetime issue from the `Box::pin`s, faithful
+field parity in the snapshot helper, correct accessor boxing, identical serde
+wire format, sound `Arc` sharing, and adequate margin math. One flagged
+"output_limit sync" was pre-existing code it noticed while reading, not part of
+the change.
+
 ## Surfacing the backgrounded confirmation latch (2026-07-05, GH #96)
 
 The confirmation latch (`set -o latch`) went first-class in #92, but a gap
