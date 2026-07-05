@@ -374,7 +374,13 @@ pub struct Scope {
     /// Variables marked for export to child processes.
     exported: HashSet<String>,
     /// The result of the last command execution.
-    last_result: ExecResult,
+    ///
+    /// Boxed: `Scope` is cloned/held by value at every recursion level (the
+    /// dispatch snapshot, the command-subst save/restore), and an inline
+    /// `ExecResult` made `Scope` ~half again as large in each of those copies
+    /// (GH #48, item 5). The box is reused in place by `set_last_result`, so the
+    /// steady state is one allocation per `Scope`, not one per update.
+    last_result: Box<ExecResult>,
     /// Script or tool name ($0).
     script_name: String,
     /// Positional arguments ($1-$9, $@, $#).
@@ -412,7 +418,7 @@ impl Scope {
         Self {
             frames: Arc::new(vec![HashMap::new()]),
             exported: HashSet::new(),
-            last_result: ExecResult::default(),
+            last_result: Box::new(ExecResult::default()),
             script_name: String::new(),
             positional: Vec::new(),
             error_exit: false,
@@ -510,7 +516,8 @@ impl Scope {
 
     /// Set the last command result (accessible via `$?`).
     pub fn set_last_result(&mut self, result: ExecResult) {
-        self.last_result = result;
+        // Write through the existing box rather than reallocating one.
+        *self.last_result = result;
     }
 
     /// Get the last command result.
