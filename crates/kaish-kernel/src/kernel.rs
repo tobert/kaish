@@ -2202,7 +2202,7 @@ impl Kernel {
                     commands: vec![cmd.clone()],
                     background: false,
                 };
-                let result = self.execute_pipeline(&pipeline).await?;
+                let result = Box::pin(self.execute_pipeline(&pipeline)).await?;
                 self.update_last_result(&result).await;
 
                 // Check for error exit mode (set -e)
@@ -2216,7 +2216,7 @@ impl Kernel {
                 Ok(ControlFlow::ok(result))
             }
             Stmt::Pipeline(pipeline) => {
-                let result = self.execute_pipeline(pipeline).await?;
+                let result = Box::pin(self.execute_pipeline(pipeline)).await?;
                 self.update_last_result(&result).await;
 
                 // Check for error exit mode (set -e)
@@ -2997,7 +2997,7 @@ impl Kernel {
             return match form {
                 crate::validator::SpecialForm::True => Ok(ExecResult::success("")),
                 crate::validator::SpecialForm::False => Ok(ExecResult::failure(1, "")),
-                crate::validator::SpecialForm::Source => self.execute_source(args).await,
+                crate::validator::SpecialForm::Source => Box::pin(self.execute_source(args)).await,
             };
         }
 
@@ -3035,7 +3035,7 @@ impl Kernel {
             if let Some(tool_def) = user_tools.get(name) {
                 let tool_def = tool_def.clone();
                 drop(user_tools);
-                return self.execute_user_tool(tool_def, args).await;
+                return Box::pin(self.execute_user_tool(tool_def, args)).await;
             }
         }
 
@@ -3044,11 +3044,15 @@ impl Kernel {
             Some(t) => t,
             None => {
                 // Try executing as .kai script from PATH
-                if let Some(result) = self.try_execute_script(name, args).await? {
+                if let Some(result) = Box::pin(self.try_execute_script(name, args)).await? {
                     return Ok(result);
                 }
-                // Try executing as external command from PATH
-                if let Some(result) = self.try_execute_external(name, args).await? {
+                // Try executing as external command from PATH — boxed because its
+                // future is the heaviest branch here (holds a `tokio::process::Command`,
+                // argv, the child's stdio streams, and kill/reap drop guards); leaving
+                // it inline fattens every `execute_command_depth` frame on the recursion
+                // ring even when the command is a builtin.
+                if let Some(result) = Box::pin(self.try_execute_external(name, args)).await? {
                     return Ok(result);
                 }
 
