@@ -146,7 +146,15 @@ pub struct ExecResult {
     /// Stdout is *never* sniffed; this stays `None` for external commands.
     pub data: Option<Value>,
     /// Structured output data for rendering.
-    output: Option<OutputData>,
+    ///
+    /// Boxed like [`Self::latch`]: `OutputData` is ~120 B and `ExecResult` (and
+    /// the `ControlFlow` that wraps it) is returned up every level of deep
+    /// `$()`/pipeline recursion, so an inline `Option<OutputData>` fattened every
+    /// frame. The box is allocated only when a builtin sets structured output,
+    /// and it serializes identically (Box is transparent to serde). Private —
+    /// the public accessors below hand back plain `OutputData`/`&OutputData`, so
+    /// the boxing never leaks (GH #48, item 5).
+    output: Option<Box<OutputData>>,
     /// True if the output limiter capped this result. Either the overflow was
     /// written to a disk spill file (the `out` message carries the path) or it
     /// was truncated in memory (Memory spill mode — head+tail only, no
@@ -213,7 +221,7 @@ impl ExecResult {
                 out: OutputPayload::Text(String::new()),
                 err: String::new(),
                 data: None,
-                output: Some(output),
+                output: Some(Box::new(output)),
                 did_spill: false,
                 original_code: None,
                 content_type: None,
@@ -328,7 +336,7 @@ impl ExecResult {
             out: OutputPayload::Text(text.into()),
             err: String::new(),
             data: None,
-            output: Some(output),
+            output: Some(Box::new(output)),
             did_spill: false,
             original_code: None,
             content_type: None,
@@ -421,7 +429,7 @@ impl ExecResult {
 
     /// Get a reference to structured output data.
     pub fn output(&self) -> Option<&OutputData> {
-        self.output.as_ref()
+        self.output.as_deref()
     }
 
     /// True if structured output data is present.
@@ -475,12 +483,12 @@ impl ExecResult {
 
     /// Replace `.output`.
     pub fn set_output(&mut self, o: Option<OutputData>) {
-        self.output = o;
+        self.output = o.map(Box::new);
     }
 
     /// Take `.output`, leaving None.
     pub fn take_output(&mut self) -> Option<OutputData> {
-        self.output.take()
+        self.output.take().map(|o| *o)
     }
 
     /// Materialize: if `.out` is empty and `.output` is present,
@@ -498,7 +506,7 @@ impl ExecResult {
     /// so caller can stream directly without materializing.
     pub fn take_output_for_stream(&mut self) -> Option<OutputData> {
         if matches!(&self.out, OutputPayload::Text(s) if s.is_empty()) {
-            self.output.take()
+            self.output.take().map(|o| *o)
         } else {
             None
         }

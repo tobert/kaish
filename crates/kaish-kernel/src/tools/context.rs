@@ -75,7 +75,14 @@ pub struct ExecContext {
     /// Streaming pipe output (set when this command is in a concurrent pipeline).
     pub pipe_stdout: Option<PipeWriter>,
     /// Tool schemas for help command.
-    pub tool_schemas: Vec<ToolSchema>,
+    ///
+    /// `Arc<[…]>` rather than `Vec`: the full builtin schema catalog (~70
+    /// entries, each with its own `Vec`s and `String`s) is snapshotted into a
+    /// fresh `ExecContext` at every command dispatch and pipeline/fork child. As
+    /// a `Vec` that was a deep clone of the whole catalog per command; as an
+    /// `Arc<[…]>` it's a refcount bump (GH #48, item 8). Immutable after the
+    /// kernel seeds it, so a shared slice is the right shape.
+    pub tool_schemas: Arc<[ToolSchema]>,
     /// Tool registry reference (for tools that need to inspect available tools).
     pub tools: Option<Arc<ToolRegistry>>,
     /// Job manager for background jobs (optional).
@@ -294,7 +301,7 @@ impl ExecContext {
             pipe_stdin: None,
             pipe_stdout: None,
             stderr: None,
-            tool_schemas: Vec::new(),
+            tool_schemas: Vec::new().into(),
             tools: None,
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
@@ -334,7 +341,7 @@ impl ExecContext {
             pipe_stdin: None,
             pipe_stdout: None,
             stderr: None,
-            tool_schemas: Vec::new(),
+            tool_schemas: Vec::new().into(),
             tools: Some(tools),
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
@@ -371,7 +378,7 @@ impl ExecContext {
             pipe_stdin: None,
             pipe_stdout: None,
             stderr: None,
-            tool_schemas: Vec::new(),
+            tool_schemas: Vec::new().into(),
             tools: None,
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
@@ -408,7 +415,7 @@ impl ExecContext {
             pipe_stdin: None,
             pipe_stdout: None,
             stderr: None,
-            tool_schemas: Vec::new(),
+            tool_schemas: Vec::new().into(),
             tools: Some(tools),
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
@@ -448,7 +455,7 @@ impl ExecContext {
             pipe_stdin: None,
             pipe_stdout: None,
             stderr: None,
-            tool_schemas: Vec::new(),
+            tool_schemas: Vec::new().into(),
             tools: None,
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
@@ -485,7 +492,7 @@ impl ExecContext {
             pipe_stdin: None,
             pipe_stdout: None,
             stderr: None,
-            tool_schemas: Vec::new(),
+            tool_schemas: Vec::new().into(),
             tools: None,
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
@@ -510,8 +517,11 @@ impl ExecContext {
     }
 
     /// Set the available tool schemas (for help command).
+    ///
+    /// Takes a `Vec` for caller convenience and converts to the shared
+    /// `Arc<[…]>` the field stores (see the field docs; GH #48).
     pub fn set_tool_schemas(&mut self, schemas: Vec<ToolSchema>) {
-        self.tool_schemas = schemas;
+        self.tool_schemas = schemas.into();
     }
 
     /// Set the tool registry reference.

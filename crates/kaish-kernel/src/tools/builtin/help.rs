@@ -73,7 +73,7 @@ mod tests {
         let mut ctx = ExecContext::new(Arc::new(vfs));
 
         // Add some test schemas
-        ctx.tool_schemas = vec![
+        ctx.set_tool_schemas(vec![
             ToolSchema::new("echo", "Print arguments to stdout").param(ParamSchema::optional(
                 "args",
                 "any",
@@ -83,7 +83,7 @@ mod tests {
             ToolSchema::new("cat", "Read and output file contents")
                 .param(ParamSchema::required("path", "string", "File path to read")),
             ToolSchema::new("ls", "List directory contents"),
-        ];
+        ]);
 
         ctx
     }

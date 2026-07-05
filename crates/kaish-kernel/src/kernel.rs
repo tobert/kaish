@@ -51,18 +51,28 @@ static KERNEL_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// alias re-entry cap (10) and the lexer's `MAX_PAREN_DEPTH` (256): a runaway
 /// or mutually recursive script hits a catchable ceiling, not a signal.
 ///
-/// Each level stacks the dispatch chain between re-entries, which we measured
-/// at ~80 KB (release) / ~380 KB (debug) of native stack per level. `32` sits
-/// well inside [`RECOMMENDED_STACK_SIZE`] in **both** profiles (16 MB / 380 KB
-/// ≈ 42 debug levels) while allowing far deeper nesting than any real script.
-/// **The guard only fires *before* the stack overflows on a thread that meets
-/// that floor** — this is why the REPL sizes its threads to it and embedders
-/// must too (see `docs/EMBEDDING.md`). Forks (background jobs, scatter workers,
-/// pipeline stages) run on fresh stacks and get a fresh counter, bounding each
-/// chain independently. GH #46 / #47.
-pub const MAX_RECURSION_DEPTH: usize = 32;
+/// Each level stacks the dispatch chain between re-entries. After the GH #48
+/// allocation pass this measures ~50 KB (release) / ~57 KB (debug at the default
+/// `opt-level = 1` dev profile — see the root `Cargo.toml`) / ~193 KB (a fully
+/// unoptimized debug build) of native stack per level, down from ~80 / ~380 KB
+/// before; the `recursion_stack_cost_tests` probe reports the live figure.
+///
+/// This cap and [`RECOMMENDED_STACK_SIZE`] are a **matched pair**: the cap must
+/// trip *before* `cap × (worst-case per-level stack)` can exceed the floor, so a
+/// runaway is caught, not a `SIGSEGV`. The worst case is the ~193 KB unoptimized
+/// figure — the `opt-level = 1` dev profile above is local to this workspace and
+/// does **not** propagate to embedders, whose own debug builds of the kernel pay
+/// the full unoptimized cost. `48 × 193 KB ≈ 9.3 MB` under the 12 MiB floor
+/// keeps the same ~1.3× margin the pre-#48 pair had (`32 × 380 KB ≈ 12 MB` under
+/// 16 MiB); #48's smaller frames are what let the cap rise 32→48 and the floor
+/// drop 16→12 MiB together. **The guard only fires *before* the stack overflows
+/// on a thread that meets that floor** — this is why the REPL sizes its threads
+/// to it and embedders must too (see `docs/EMBEDDING.md`). Forks (background
+/// jobs, scatter workers, pipeline stages) run on fresh stacks and get a fresh
+/// counter, bounding each chain independently. GH #46 / #47 / #48.
+pub const MAX_RECURSION_DEPTH: usize = 48;
 
-/// Recommended native stack size (16 MiB) for any thread that drives kaish
+/// Recommended native stack size (12 MiB) for any thread that drives kaish
 /// execution — the REPL sizes its `block_on` thread and tokio worker threads
 /// to this, and embedders that call `Kernel::execute` (directly or via a tokio
 /// runtime) should do the same (`runtime::Builder::thread_stack_size`, and a
@@ -72,9 +82,13 @@ pub const MAX_RECURSION_DEPTH: usize = 32;
 /// functions, `.kai` scripts). [`MAX_RECURSION_DEPTH`] converts a runaway into
 /// a loud error, but only *if the stack is at least this large* — on the
 /// default ~2 MB tokio worker stack the recursion overflows (SIGSEGV) before
-/// reaching the cap. kaish can't set this itself (it doesn't own the runtime),
-/// so it exposes the floor for owners to apply. See GH #47.
-pub const RECOMMENDED_STACK_SIZE: usize = 16 * 1024 * 1024;
+/// reaching the cap. This floor is the companion to that cap (see its docs for
+/// the `cap × per-level < floor` relationship): 12 MiB holds the depth-48 cap
+/// with margin even for an unoptimized embedder build (~193 KB/level), and #48
+/// shrank the per-level cost enough to drop it from 16 MiB. kaish can't set this
+/// itself (it doesn't own the runtime), so it exposes the floor for owners to
+/// apply. See GH #47 / #48.
+pub const RECOMMENDED_STACK_SIZE: usize = 12 * 1024 * 1024;
 
 use async_trait::async_trait;
 
@@ -2160,8 +2174,11 @@ impl Kernel {
         &'a self,
         stmt: &'a Stmt,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ControlFlow>> + Send + 'a>> {
-        use tracing::Instrument;
-        let span = tracing::debug_span!("execute_stmt_flow", stmt_type = %stmt.kind_name());
+        // No per-statement span here: `execute_stmt_flow` is the largest future
+        // on the recursion ring, and wrapping it in `Instrumented<Span>` carries
+        // the span's state through every `.await` at every level, costing native
+        // stack per level (GH #48). Coarser spans on the outer execute entries
+        // remain. See item 3 of the #48 burndown.
         Box::pin(async move {
         match stmt {
             Stmt::Assignment(assign) => {
@@ -2202,7 +2219,7 @@ impl Kernel {
                     commands: vec![cmd.clone()],
                     background: false,
                 };
-                let result = self.execute_pipeline(&pipeline).await?;
+                let result = Box::pin(self.execute_pipeline(&pipeline)).await?;
                 self.update_last_result(&result).await;
 
                 // Check for error exit mode (set -e)
@@ -2216,7 +2233,7 @@ impl Kernel {
                 Ok(ControlFlow::ok(result))
             }
             Stmt::Pipeline(pipeline) => {
-                let result = self.execute_pipeline(pipeline).await?;
+                let result = Box::pin(self.execute_pipeline(pipeline)).await?;
                 self.update_last_result(&result).await;
 
                 // Check for error exit mode (set -e)
@@ -2704,11 +2721,62 @@ impl Kernel {
             }
             Stmt::Empty => Ok(ControlFlow::ok(ExecResult::success(""))),
         }
-        }.instrument(span))
+        })
+    }
+
+    /// Build a boxed per-command `ExecContext` snapshot from the persistent
+    /// kernel state (`ec`/`scope`, both already locked by the caller).
+    ///
+    /// Sync on purpose: the ~30 field clones live in this transient frame rather
+    /// than a coroutine slot, and the result is `Box`ed so only an 8-byte pointer
+    /// — not the 960-byte struct — rides the dispatch await at every recursion
+    /// level (GH #48, item 2). `pipeline_position` and `cancel` are the only
+    /// per-site differences (the pipeline runner uses the kernel's own cancel
+    /// token and forces `Only`; the per-command dispatch inherits `ec`'s), so
+    /// they're parameters; every other field is snapshotted identically.
+    fn snapshot_exec_ctx(
+        &self,
+        ec: &ExecContext,
+        scope: &Scope,
+        pipeline_position: PipelinePosition,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Box<ExecContext> {
+        Box::new(ExecContext {
+            backend: ec.backend.clone(),
+            scope: scope.clone(),
+            cwd: ec.cwd.clone(),
+            prev_cwd: ec.prev_cwd.clone(),
+            stdin: ec.stdin.clone(),
+            stdin_data: ec.stdin_data.clone(),
+            stdin_data_rx: None,
+            pipe_stdin: None,
+            pipe_stdout: None,
+            stderr: ec.stderr.clone(),
+            tool_schemas: ec.tool_schemas.clone(),
+            tools: ec.tools.clone(),
+            job_manager: ec.job_manager.clone(),
+            pipeline_position,
+            interactive: self.interactive,
+            aliases: ec.aliases.clone(),
+            ignore_config: ec.ignore_config.clone(),
+            output_limit: ec.output_limit.clone(),
+            allow_external_commands: self.allow_external_commands,
+            nonce_store: ec.nonce_store.clone(),
+            trash_backend: ec.trash_backend.clone(),
+            #[cfg(all(unix, feature = "subprocess"))]
+            terminal_state: ec.terminal_state.clone(),
+            dispatcher: self.dispatcher(),
+            cancel,
+            output_format: None,
+            current_invocation: None,
+            vfs_budget: self.vfs_budget.clone(),
+            watchdog: ec.watchdog.clone(),
+            #[cfg(all(feature = "localfs", feature = "overlay"))]
+            overlay_handle: self.overlay_handle.clone(),
+        })
     }
 
     /// Execute a pipeline.
-    #[tracing::instrument(level = "debug", skip(self, pipeline), fields(background = pipeline.background, command_count = pipeline.commands.len()))]
     async fn execute_pipeline(&self, pipeline: &crate::ast::Pipeline) -> Result<ExecResult> {
         if pipeline.commands.is_empty() {
             return Ok(ExecResult::success(""));
@@ -2733,47 +2801,17 @@ impl Kernel {
             // the persistent exec_ctx; it's moved (non-Clone) into this ctx in
             // the consume-once block below, so note its presence here.
             let has_pipe_stdin = ec.pipe_stdin.is_some();
-            (ExecContext {
-                backend: ec.backend.clone(),
-                scope: scope.clone(),
-                cwd: ec.cwd.clone(),
-                prev_cwd: ec.prev_cwd.clone(),
-                // Seed the first stage's stdin from any frontend-supplied input
-                // (`ExecuteOptions::stdin`, e.g. `printf … | kaish -c sort`). The
-                // runner forwards `ctx.stdin` to stage 0 unless a redirect
-                // (`< file`/heredoc) already set it, so redirect precedence holds.
-                stdin: ec.stdin.clone(),
-                stdin_data: ec.stdin_data.clone(),
-                stdin_data_rx: None,
-                pipe_stdin: None,
-                pipe_stdout: None,
-                stderr: ec.stderr.clone(),
-                tool_schemas: ec.tool_schemas.clone(),
-                tools: ec.tools.clone(),
-                job_manager: ec.job_manager.clone(),
-                pipeline_position: PipelinePosition::Only,
-                interactive: self.interactive,
-                aliases: ec.aliases.clone(),
-                ignore_config: ec.ignore_config.clone(),
-                output_limit: ec.output_limit.clone(),
-                allow_external_commands: self.allow_external_commands,
-                nonce_store: ec.nonce_store.clone(),
-                trash_backend: ec.trash_backend.clone(),
-                #[cfg(all(unix, feature = "subprocess"))]
-                terminal_state: ec.terminal_state.clone(),
-                dispatcher: self.dispatcher(),
-                cancel: {
-                    #[allow(clippy::expect_used)]
-                    let token = self.cancel_token.lock().expect("cancel_token poisoned");
-                    token.clone()
-                },
-                output_format: None,
-                current_invocation: None,
-                vfs_budget: self.vfs_budget.clone(),
-                watchdog: ec.watchdog.clone(),
-                #[cfg(all(feature = "localfs", feature = "overlay"))]
-                overlay_handle: self.overlay_handle.clone(),
-            }, has_pipe_stdin)
+            // The pipeline runner drives stage 0 with the first stage's stdin
+            // seeded from any frontend-supplied input (`ExecuteOptions::stdin`,
+            // e.g. `printf … | kaish -c sort`) unless a redirect already set it,
+            // and uses the kernel's own cancel token so a `cancel()` reaches the
+            // stages. See `snapshot_exec_ctx` for why the snapshot is boxed.
+            let cancel = {
+                #[allow(clippy::expect_used)]
+                let token = self.cancel_token.lock().expect("cancel_token poisoned");
+                token.clone()
+            };
+            (self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel), has_pipe_stdin)
         }; // locks released
 
         // Consume-once: move/clear the seeded stdin sources from the persistent
@@ -2985,8 +3023,13 @@ impl Kernel {
         self.execute_command_depth(name, args, 0).await
     }
 
-    #[tracing::instrument(level = "info", skip(self, args, alias_depth), fields(command = %name), err)]
     async fn execute_command_depth(&self, name: &str, args: &[Arg], alias_depth: u8) -> Result<ExecResult> {
+        // Dispatch breadcrumb instead of an `#[instrument]` span: this is the
+        // most-recursed function on the ring, so wrapping its future in
+        // `Instrumented<Span>` (plus the `err` recorder) cost native stack at
+        // every level (GH #48, item 3). A `trace!` event records the command name
+        // without living in the future.
+        tracing::trace!(command = %name, alias_depth, "dispatch");
         // Special built-ins. `SpecialForm::from_name` is the single source of
         // truth (shared with `classify_command` via `is_runtime_special_form`),
         // and this match on the enum is *exhaustive* — adding a special-form is a
@@ -2997,7 +3040,7 @@ impl Kernel {
             return match form {
                 crate::validator::SpecialForm::True => Ok(ExecResult::success("")),
                 crate::validator::SpecialForm::False => Ok(ExecResult::failure(1, "")),
-                crate::validator::SpecialForm::Source => self.execute_source(args).await,
+                crate::validator::SpecialForm::Source => Box::pin(self.execute_source(args)).await,
             };
         }
 
@@ -3035,7 +3078,7 @@ impl Kernel {
             if let Some(tool_def) = user_tools.get(name) {
                 let tool_def = tool_def.clone();
                 drop(user_tools);
-                return self.execute_user_tool(tool_def, args).await;
+                return Box::pin(self.execute_user_tool(tool_def, args)).await;
             }
         }
 
@@ -3044,11 +3087,15 @@ impl Kernel {
             Some(t) => t,
             None => {
                 // Try executing as .kai script from PATH
-                if let Some(result) = self.try_execute_script(name, args).await? {
+                if let Some(result) = Box::pin(self.try_execute_script(name, args)).await? {
                     return Ok(result);
                 }
-                // Try executing as external command from PATH
-                if let Some(result) = self.try_execute_external(name, args).await? {
+                // Try executing as external command from PATH — boxed because its
+                // future is the heaviest branch here (holds a `tokio::process::Command`,
+                // argv, the child's stdio streams, and kill/reap drop guards); leaving
+                // it inline fattens every `execute_command_depth` frame on the recursion
+                // ring even when the command is a builtin.
+                if let Some(result) = Box::pin(self.try_execute_external(name, args)).await? {
                     return Ok(result);
                 }
 
@@ -3140,6 +3187,13 @@ impl Kernel {
             return Ok(ExecResult::with_output(crate::interpreter::OutputData::text(content)));
         }
 
+        // `owns_output` is the only thing read from `schema` after the recursive
+        // `tool.execute` await below; capture the bool and drop the (heap-backed)
+        // `ToolSchema` now so it doesn't ride that await in every command's frame
+        // (GH #48, item 7).
+        let owns_output = schema.owns_output;
+        drop(schema);
+
         // Snapshot exec_ctx into a local context and release the write lock
         // before calling tool.execute. Holding the write across tool execution
         // would deadlock any builtin that re-dispatches through ctx.dispatcher
@@ -3148,44 +3202,12 @@ impl Kernel {
         let mut ctx = {
             let ec = self.exec_ctx.write().await;
             let scope = self.scope.read().await;
-            ExecContext {
-                backend: ec.backend.clone(),
-                scope: scope.clone(),
-                cwd: ec.cwd.clone(),
-                prev_cwd: ec.prev_cwd.clone(),
-                stdin: ec.stdin.clone(),
-                stdin_data: ec.stdin_data.clone(),
-                stdin_data_rx: None,
-                pipe_stdin: None, // streaming pipes are per-pipeline; not snapshotted
-                pipe_stdout: None,
-                stderr: ec.stderr.clone(),
-                tool_schemas: ec.tool_schemas.clone(),
-                tools: ec.tools.clone(),
-                job_manager: ec.job_manager.clone(),
-                pipeline_position: ec.pipeline_position,
-                interactive: self.interactive,
-                aliases: ec.aliases.clone(),
-                ignore_config: ec.ignore_config.clone(),
-                output_limit: ec.output_limit.clone(),
-                allow_external_commands: self.allow_external_commands,
-                nonce_store: ec.nonce_store.clone(),
-                trash_backend: ec.trash_backend.clone(),
-                #[cfg(all(unix, feature = "subprocess"))]
-                terminal_state: ec.terminal_state.clone(),
-                dispatcher: self.dispatcher(),
-                // Use ec.cancel (set by dispatch_command from the runner's
-                // ctx.cancel) so any builtin-swapped child token (e.g. timeout's
-                // child token) reaches the spawned external via wait_or_kill.
-                // Falls back to the kernel's own token when ec.cancel is the
-                // default fresh token from a non-dispatch path.
-                cancel: ec.cancel.clone(),
-                output_format: None,
-                current_invocation: None,
-                vfs_budget: self.vfs_budget.clone(),
-                watchdog: ec.watchdog.clone(),
-                #[cfg(all(feature = "localfs", feature = "overlay"))]
-                overlay_handle: self.overlay_handle.clone(),
-            }
+            // Inherit `ec.pipeline_position` and `ec.cancel` (the latter set by
+            // dispatch_command from the runner's ctx.cancel, so a builtin-swapped
+            // child token — e.g. timeout's — reaches the spawned external via
+            // wait_or_kill; it falls back to the kernel's own token on a
+            // non-dispatch path). See `snapshot_exec_ctx` for the boxing rationale.
+            self.snapshot_exec_ctx(&ec, &scope, ec.pipeline_position, ec.cancel.clone())
         }; // both locks released — tool.execute can re-dispatch safely
 
         // Move stdin out of self.exec_ctx into the snapshot (consumed-by-tool
@@ -3204,7 +3226,7 @@ impl Kernel {
         // parse failure (e.g. `cmd --json --bogus-flag` would otherwise drop
         // --json on the floor when `try_parse_from` returns Err early).
         // The builtin's own `parsed.global.apply(ctx)` becomes idempotent.
-        GlobalFlags::apply_from_args(&tool_args, &mut ctx);
+        GlobalFlags::apply_from_args(&tool_args, &mut *ctx);
 
         // Capture the exact invocation at the dispatch seam so a latch producer
         // (`latch_result`/`gate_overwrites`) can stamp it into the LatchRequest
@@ -3222,7 +3244,7 @@ impl Kernel {
         // `tool.execute` below).
         ctx.current_invocation = Some(Box::new((name.to_string(), tool_args.to_argv())));
 
-        let result = tool.execute(tool_args, &mut ctx).await;
+        let result = tool.execute(tool_args, &mut *ctx).await;
 
         // Sync mutations back. Tools may have changed scope (set/cd),
         // cwd/prev_cwd (cd), and aliases (alias). Also return any unused pipe
@@ -3252,7 +3274,7 @@ impl Kernel {
         // struct and write ctx.output_format. The kernel applies it — unless the
         // tool owns its own output (renders --json itself), in which case we
         // leave its bytes untouched.
-        let result = finalize_output(result, ctx.output_format, schema.owns_output);
+        let result = finalize_output(result, ctx.output_format, owns_output);
 
         Ok(result)
     }
@@ -3977,7 +3999,10 @@ impl Kernel {
             Expr::CommandSubst(stmts) => {
                 // Snapshot scope+cwd before running — only output escapes,
                 // not side effects like `cd` or variable assignments.
-                let saved_scope = { self.scope.read().await.clone() };
+                // Boxed: this ~470 B scope snapshot is held across the nested
+                // `$(…)` recursion await below, so inlining it grows every
+                // command-substitution level's future (GH #48, item 4).
+                let saved_scope = Box::new(self.scope.read().await.clone());
                 let saved_cwd = {
                     let ec = self.exec_ctx.read().await;
                     (ec.cwd.clone(), ec.prev_cwd.clone())
@@ -3989,7 +4014,7 @@ impl Kernel {
                 // Restore scope and cwd regardless of success/failure
                 {
                     let mut scope = self.scope.write().await;
-                    *scope = saved_scope;
+                    *scope = *saved_scope;
                     if let Ok(ref r) = run_result {
                         scope.set_last_result(r.clone());
                     }
@@ -4339,7 +4364,10 @@ impl Kernel {
             StringPart::CommandSubst(stmts) => {
                 // Snapshot scope+cwd — command substitution in strings must
                 // not leak side effects (e.g., `"dir: $(cd /; pwd)"` must not change cwd).
-                let saved_scope = { self.scope.read().await.clone() };
+                // Boxed: this ~470 B scope snapshot is held across the nested
+                // `$(…)` recursion await below, so inlining it grows every
+                // command-substitution level's future (GH #48, item 4).
+                let saved_scope = Box::new(self.scope.read().await.clone());
                 let saved_cwd = {
                     let ec = self.exec_ctx.read().await;
                     (ec.cwd.clone(), ec.prev_cwd.clone())
@@ -4351,7 +4379,7 @@ impl Kernel {
                 // Restore scope and cwd regardless of success/failure
                 {
                     let mut scope = self.scope.write().await;
-                    *scope = saved_scope;
+                    *scope = *saved_scope;
                     if let Ok(ref r) = run_result {
                         scope.set_last_result(r.clone());
                     }

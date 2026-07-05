@@ -124,6 +124,21 @@ rstest = "0.26"
 insta = "1.46"
 tempfile = "3"
 
+# Optimize the interpreter crate (and its pure-data leaf) even in debug/test
+# builds. Unoptimized `async fn` poll frames are ~proportional to future size
+# with redundant memcpys between suspend points; opt-level=1 collapses them
+# (measured ~5–10× on the recursive ring). That directly cuts the native
+# stack-per-recursion-level cost that sets `RECOMMENDED_STACK_SIZE` /
+# `MAX_RECURSION_DEPTH` (GH #46/#47) and is the baseline the #48 pass optimizes
+# against. opt-level=1 keeps `debug_assertions` and most debuginfo, and speeds
+# the test suite as a bonus. Only these two crates carry the interpreter's hot
+# futures, so the compile-time cost is contained.
+[profile.dev.package.kaish-kernel]
+opt-level = 1
+
+[profile.dev.package.kaish-types]
+opt-level = 1
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 

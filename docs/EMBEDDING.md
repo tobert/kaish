@@ -47,15 +47,17 @@ and `data` are public fields.
 The interpreter recurses on the **native stack**: command substitution
 (`$(…)`), shell-function calls, and `.kai` script sourcing all re-enter the
 statement engine. A runaway or mutually recursive script is caught by a depth
-guard ([`MAX_RECURSION_DEPTH`], 32) that returns a loud
+guard ([`MAX_RECURSION_DEPTH`], 48) that returns a loud
 `"maximum recursion depth exceeded"` error instead of overflowing the stack —
 **but the guard only fires *before* the overflow if the thread has enough
 stack.** On the default ~2 MB tokio worker stack, a deep recursion SIGSEGVs
 before reaching the cap.
 
 kaish can't set this itself (it doesn't own your runtime), so it exposes the
-floor: **[`RECOMMENDED_STACK_SIZE`] (16 MiB)**. Size every thread that drives
-kaish execution to at least this:
+floor: **[`RECOMMENDED_STACK_SIZE`] (12 MiB)**. The cap and the floor are a
+matched pair — the floor is sized so the guard trips before `cap × per-level
+stack` can overflow it. Size every thread that drives kaish execution to at
+least this:
 
 ```rust
 // Worker threads (pipeline stages, background jobs, scatter workers run here):
@@ -75,8 +77,17 @@ std::thread::Builder::new()
 Below the floor the guard still bounds *most* recursion, but a deep foreground
 recursion on an undersized driver thread can still overflow — the reference
 REPL (`kaish-repl`) sizes both its runtime workers and its driver thread to
-`RECOMMENDED_STACK_SIZE`, and is the working example. (Reducing the per-level
-stack cost so the floor can drop is tracked as an optimization pass.)
+`RECOMMENDED_STACK_SIZE`, and is the working example.
+
+> **Debug builds pay more per level.** The GH #48 allocation pass cut the
+> per-level stack to ~50 KB (release) / ~57 KB (this workspace's debug, which
+> builds the interpreter crates at `opt-level = 1`). That profile setting lives
+> in kaish's own `Cargo.toml` and does **not** propagate to your build — your
+> *debug* build of the kernel pays the full unoptimized ~193 KB/level. The
+> 12 MiB floor is deliberately sized against that worst case (48 × 193 KB ≈
+> 9.3 MB), so you're covered either way; if you want the smaller debug frames
+> too, add `[profile.dev.package.kaish-kernel] opt-level = 1` to your own
+> workspace.
 
 ## Architecture
 

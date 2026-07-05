@@ -284,7 +284,6 @@ impl PipelineRunner {
     /// The `dispatcher` handles the full command resolution chain (user tools,
     /// builtins, scripts, external commands, backend tools). The runner handles
     /// I/O routing: stdin redirects, piping between commands, and output redirects.
-    #[tracing::instrument(level = "debug", skip(self, commands, ctx, dispatcher), fields(command_count = commands.len()))]
     pub async fn run(
         &self,
         commands: &[Command],
@@ -307,7 +306,6 @@ impl PipelineRunner {
     ///
     /// Used by `ScatterGatherRunner` for pre_scatter, post_gather, and parallel
     /// workers. Breaks the async recursion chain (`run` → scatter → `run`).
-    #[tracing::instrument(level = "debug", skip(self, commands, ctx, dispatcher), fields(command_count = commands.len()))]
     pub async fn run_sequential(
         &self,
         commands: &[Command],
@@ -392,7 +390,6 @@ impl PipelineRunner {
     ///
     /// The dispatcher handles arg parsing, schema lookup, output format, and execution.
     /// The runner handles stdin setup (redirects + pipeline) and output redirects.
-    #[tracing::instrument(level = "debug", skip(self, cmd, ctx, stdin, dispatcher), fields(command = %cmd.name))]
     async fn run_single(
         &self,
         cmd: &Command,
@@ -432,7 +429,6 @@ impl PipelineRunner {
     /// - Early termination (e.g., `seq 1 1000000 | head -n 5`)
     ///
     /// Structured data (`stdin_data`) is passed via oneshot channels alongside pipes.
-    #[tracing::instrument(level = "debug", skip(self, commands, ctx, dispatcher), fields(stage_count = commands.len()))]
     async fn run_pipeline(
         &self,
         commands: &[Command],

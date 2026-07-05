@@ -22,17 +22,43 @@ breaking entries are marked **BREAKING**.
   fulfills it with `Kernel::confirm(&latch)`. **BREAKING (embedders):**
   `JobStatus` gains a `Latched` variant (exhaustive matches must handle it) and
   `JobInfo` gains a `latch: Option<LatchRequest>` field.
-- **Recursion is depth-guarded (`MAX_RECURSION_DEPTH` = 32)** (GH #46/#47).
-  Command substitution, shell-function calls, `.kai` script execution, and
-  `source`/`.` all re-enter the statement engine on the native stack; a runaway
-  or mutually
-  recursive script now returns a loud `maximum recursion depth exceeded` error
-  instead of overflowing the stack (a `SIGSEGV`/abort with no diagnostic). Two
-  new `pub const`s let embedders size their runtime: `MAX_RECURSION_DEPTH` and
-  `RECOMMENDED_STACK_SIZE` (16 MiB). The guard only fires *before* an overflow
-  on a thread that meets that floor — the reference REPL now sizes its tokio
-  worker threads (`thread_stack_size`) and its `block_on` driver thread to it;
-  embedders should too (see `docs/EMBEDDING.md`).
+- **Recursion is depth-guarded (`MAX_RECURSION_DEPTH` = 48)** (GH #46/#47, tuned
+  by #48). Command substitution, shell-function calls, `.kai` script execution,
+  and `source`/`.` all re-enter the statement engine on the native stack; a
+  runaway or mutually recursive script now returns a loud `maximum recursion
+  depth exceeded` error instead of overflowing the stack (a `SIGSEGV`/abort with
+  no diagnostic). Two new `pub const`s let embedders size their runtime:
+  `MAX_RECURSION_DEPTH` and the paired `RECOMMENDED_STACK_SIZE` (12 MiB) — the
+  cap trips before `cap × per-level-stack` can exceed the floor. #48's smaller
+  interpreter frames let the cap rise (32→48) and the floor drop (16→12 MiB)
+  together while keeping the same safety margin. The guard only fires *before* an
+  overflow on a thread that meets that floor — the reference REPL now sizes its
+  tokio worker threads (`thread_stack_size`) and its `block_on` driver thread to
+  it; embedders should too (see `docs/EMBEDDING.md`).
+
+### Changed
+- **Interpreter allocation/stack pass** (GH #48). The native stack consumed per
+  statement-engine re-entry level (`$(…)`, shell functions, `source`) is cut
+  ~46% (release ~92 → ~50 KB/level; debug similarly), shrinking the interpreter's
+  hot futures by boxing the cold dispatch branches, the per-command
+  `ExecContext`/scope snapshots, and `ExecResult`'s structured-output field, and
+  by dropping the per-command tracing spans on the recursion ring. The two
+  interpreter crates (`kaish-kernel`, `kaish-types`) also build at
+  `opt-level = 1` in dev/test now (contained compile-time cost, ~7× smaller debug
+  stack). A new `recursion_stack_cost_tests` probe measures the per-level cost.
+  This leaves headroom to raise `MAX_RECURSION_DEPTH` or lower
+  `RECOMMENDED_STACK_SIZE` as a follow-up (GH #46/#47).
+- **Removed the internal per-command/per-pipeline tracing spans** from the hot
+  execution ring (GH #48) — coarse spans remain on the outer execute entries, so
+  embedders consuming kaish's `tracing` output now see one execution span per
+  top-level call rather than one per nested command. Observability-shape change,
+  not a behavior change.
+- **BREAKING (embedders):** `ExecContext.tool_schemas` is now `Arc<[ToolSchema]>`
+  instead of `Vec<ToolSchema>` (GH #48) — the ~70-entry schema catalog is shared
+  by refcount rather than deep-cloned into every per-command context.
+  `set_tool_schemas` still accepts a `Vec` (converts internally) and all read
+  sites are unaffected (deref coercion to `&[ToolSchema]`); only direct field
+  assignment/mutation of the public field needs `.into()`.
 
 ### Fixed
 - **Deep recursion no longer crashes the process** (GH #46). `f() { f; }; f`,
