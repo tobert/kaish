@@ -1093,7 +1093,7 @@ VFS mounts provide unified resource access:
 /v/                → in-memory scratch storage
 /v/bin/            → read-only builtin listing (invocable: /v/bin/echo hi)
 /v/blobs/          → in-memory blob storage
-/v/jobs/<id>/      → live background job state (stdout, stderr, status, command)
+/v/jobs/<id>/      → live background job state (stdout, stderr, status, command, latch)
 /dev/              → synthetic devices: /dev/null, /dev/zero, /dev/urandom, /dev/random
 ```
 

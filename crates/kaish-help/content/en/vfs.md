@@ -33,9 +33,15 @@ Each background job gets a directory:
 ```
 /v/jobs/{id}/stdout    live output (ring buffer, 10MB max)
 /v/jobs/{id}/stderr    live error stream
-/v/jobs/{id}/status    "running" | "done:0" | "failed:N"
+/v/jobs/{id}/status    "running" | "done:0" | "latched" | "failed:N"
 /v/jobs/{id}/command   original command string
+/v/jobs/{id}/latch     confirmation-latch request (JSON) if gated, else empty
 ```
+
+A destructive op backgrounded under `set -o latch` (`rm x &`) gates in the
+background: status is `latched`, and `/v/jobs/{id}/latch` carries the JSON
+request (nonce, command, paths) so the gate can be fulfilled — read the nonce
+and re-run with `--confirm=<nonce>`, or, from an embedder, `Kernel::confirm`.
 
 ```sh
 cargo build &
