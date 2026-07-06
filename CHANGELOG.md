@@ -83,7 +83,18 @@ breaking entries are marked **BREAKING**.
   pre-existing papercuts in that path: `ls /v` returned nothing (kaish mounts sit
   at `/v/jobs`/`/v/blobs`, not `/v`), and `ls /` dropped `dev`. Not breaking — no
   API signatures change; the only behavior affected is an embedder that *relied*
-  on the old `/v/*`→`NotFound` reservation.
+  on the old `/v/*`→`NotFound` reservation. Relatedly, `is_trash_excluded` no
+  longer treats a real `/v/...` path as trash-exempt: with routing delegating
+  unclaimed `/v/*` to the embedder, that predicate would have silently stripped
+  the trash/latch safety net from an embedder's real content under `/v` (the
+  clause was stale anyway — kaish's own in-memory `/v` mounts resolve to no real
+  path and were never matched by it).
+- **Intermediate mount-ancestor directories are navigable.** A directory that
+  has no mount of its own but sits *above* one (e.g. `/v` above `/v/jobs`, or
+  `/home` above a lone `/home/user` mount in a sandboxed kernel) now `stat`s as a
+  directory and `list`s its child mounts, instead of returning `NotFound`. This
+  is a general `VfsRouter` change — it fixes `cd /v`/`ls /v` for embedders and
+  makes the standalone kernel's mount tree navigable the same way.
 - **`jq -s`/`--slurp` now wraps the `.data` pipeline path in an array-of-one,
   matching real jq** (GH #93 item 2). Real `jq -s` always wraps its input in
   an array, even a single document. On kaish's structured `.data` shortcut

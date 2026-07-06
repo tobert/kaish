@@ -613,6 +613,34 @@ mod tests {
         assert_eq!(names, vec!["jobs".to_string()]);
     }
 
+    #[cfg(feature = "localfs")]
+    #[tokio::test]
+    async fn test_unclaimed_v_resolves_to_inner_real_path() {
+        use crate::vfs::LocalFs;
+        // Embedder root with real content under /v.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("v/cas")).unwrap();
+        std::fs::write(dir.path().join("v/cas/blob.bin"), b"x").unwrap();
+
+        let mut inner_router = VfsRouter::new();
+        inner_router.mount("/", LocalFs::read_only(dir.path().to_path_buf()));
+        let inner: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(inner_router)));
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/v/jobs", MemoryFs::new());
+        let overlay = VirtualOverlayBackend::new(inner, Arc::new(vfs));
+
+        // Unclaimed /v/* now resolves to the embedder's REAL path (was `None`
+        // under the old lexical reservation). This is the path that reaches the
+        // trash/latch gate, so `is_trash_excluded` must NOT lexically exclude
+        // `/v` — otherwise this real content silently loses its safety net
+        // (see tools/context.rs).
+        let real = overlay.resolve_real_path(Path::new("/v/cas/blob.bin"));
+        assert!(real.is_some(), "unclaimed /v/* must resolve to the embedder real path");
+        assert!(real.unwrap().ends_with("v/cas/blob.bin"));
+        // A kaish-owned /v mount stays virtual — no real path.
+        assert!(overlay.resolve_real_path(Path::new("/v/jobs/1")).is_none());
+    }
+
     #[tokio::test]
     async fn test_root_lists_both_v_and_dev() {
         // The generalized union at shared parents fixes the old root merge,

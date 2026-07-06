@@ -204,20 +204,27 @@ pub(crate) enum MutationAction {
 /// caller writes those without a CAS expectation.
 pub(crate) type GateSnapshots = std::collections::HashMap<PathBuf, Vec<u8>>;
 
-/// Real paths the trash gate skips: scratch (`/tmp`) and the in-memory VFS
-/// (`/v`) mounts, where snapshotting prior content to trash is pointless.
-/// Shared by `rm`'s delete gate (`decide_rm_action`) and the overwrite gate
-/// (`decide_mutation_action`) so the exclusion list can't drift between them.
-/// `Path::starts_with` is component-aware, so `/tmp_file` does not match `/tmp`.
+/// Real paths the trash gate skips: host scratch under `/tmp`, where
+/// snapshotting prior content to trash is pointless. Shared by `rm`'s delete
+/// gate (`decide_rm_action`) and the overwrite gate (`decide_mutation_action`)
+/// so the exclusion can't drift between them. `Path::starts_with` is
+/// component-aware, so `/tmp_file` does not match `/tmp`.
+///
+/// Note: kaish's own in-memory VFS mounts (e.g. `/v/blobs`) have `real_path ==
+/// None`, so they are handled by the no-real-path gating path, not here — there
+/// is deliberately no lexical `/v` exclusion. Mount-coverage routing delegates
+/// unclaimed `/v/*` to the embedder's backend, whose *real* content under `/v`
+/// (a real path like `/v/cas/blob.bin`) must keep the trash/latch safety net; a
+/// `/v` prefix exclusion here would silently strip it.
 pub(crate) fn is_trash_excluded(real_path: Option<&Path>) -> bool {
-    matches!(real_path, Some(rp) if rp.starts_with("/tmp") || rp.starts_with("/v"))
+    matches!(real_path, Some(rp) if rp.starts_with("/tmp"))
 }
 
 /// Decide how to gate a truncating overwrite, mirroring `rm`'s trash/latch
 /// priority. Pure so the decision table is unit-testable in isolation.
 ///
 /// - A non-existent target or an append has nothing to lose → `Proceed`.
-/// - A real path under `/tmp` or `/v` is excluded (matches `rm`) → `Proceed`.
+/// - A real path under `/tmp` (host scratch) is excluded (matches `rm`) → `Proceed`.
 /// - Trash wins over latch (trash IS the safety net): `TrashFirst` when trash
 ///   is on **and** the prior content fits under `trash_max_size` (a file too
 ///   big to snapshot can't be backed up, so it falls through, exactly like
@@ -1182,10 +1189,13 @@ mod tests {
     }
 
     #[test]
-    fn excluded_real_paths_bypass_the_gate() {
-        // /tmp and /v real paths proceed even with both gates on (matches rm).
+    fn tmp_bypasses_gate_but_real_v_path_stays_gated() {
+        // /tmp scratch proceeds even with both gates on (matches rm).
         assert_eq!(decide(true, true, Some("/tmp/scratch"), true, false), MutationAction::Proceed);
-        assert_eq!(decide(true, true, Some("/v/mem/file"), true, false), MutationAction::Proceed);
+        // A *real* path under /v is NOT excluded: mount-coverage routing now
+        // delegates unclaimed /v/* to the embedder's backend, so its real
+        // content under /v must keep the trash/latch safety net. Trash wins.
+        assert_eq!(decide(true, true, Some("/v/cas/blob.bin"), true, false), MutationAction::TrashFirst);
     }
 
     #[test]
