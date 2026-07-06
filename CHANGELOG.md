@@ -61,6 +61,12 @@ breaking entries are marked **BREAKING**.
   assignment/mutation of the public field needs `.into()`.
 
 ### Fixed
+- **README install instructions pointed at a crate that doesn't exist.**
+  `cargo install kaish` fails — there is no `kaish` package on crates.io; the
+  binary named `kaish` ships in the `kaish-repl` crate. The README now says
+  `cargo install kaish-repl` (and was restructured for first-time visitors
+  alongside; the exit-code table and output contract moved to
+  `docs/EMBEDDING.md`, trash thresholds to `docs/LANGUAGE.md`).
 - **`jq -s`/`--slurp` now wraps the `.data` pipeline path in an array-of-one,
   matching real jq** (GH #93 item 2). Real `jq -s` always wraps its input in
   an array, even a single document. On kaish's structured `.data` shortcut

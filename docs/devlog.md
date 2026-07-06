@@ -14,6 +14,39 @@ before it ships.
 
 ---
 
+## The README learns to face the front door (2026-07-06)
+
+Amy asked for a first-time-visitor evaluation of README.md ahead of a rewrite.
+Two stateless outside reads (deepseek and gemini-flash via kaibo `oneshot`,
+given only the README — exactly what a visitor sees) converged with our own
+read almost point-for-point: the project thesis ("Why a shell for agents?")
+was buried as an `####` heading inside Components → Embedding at 85% document
+depth; the doc oscillated between agent-runtime and daily-driver-shell
+identities section by section; and reference-grade material (exit-code table,
+latch/trash mechanics, embedder lifecycle) clogged the middle. The accuracy
+pass found worse: the very first instruction was broken — `cargo install
+kaish` names a crate that doesn't exist (the binary ships in `kaish-repl`) —
+and "still experimental" contradicted the settled-language stance.
+
+Decisions:
+
+- **Sequence, don't interleave.** The rewrite front-loads the universal pitch
+  (hero with the "skills transfer" line both reviewers independently named the
+  strongest sentence in the file, thesis, differences-from-bash), keeps the
+  Quick Tour, then branches Getting Started into the two real journeys: REPL
+  and embedding. Six crates ship this README as their crates.io page, so the
+  embedder content stays — sequenced, not braided.
+- **Reference material moved to its homes.** Exit-code table + output contract
+  + fresh-kernel-per-request lifecycle → EMBEDDING.md (new "result contract"
+  section; its stale "0.8.x" fixed too). Trash thresholds/exclusions →
+  LANGUAGE.md — they had no home outside the README.
+- **Everything shown is verified.** Every tour example ran against the current
+  binary (including the quote-to-join parse error); the embed example was
+  compiled and run from a scratch crate against the worktree kernel. The tour
+  now shows 0.11 typed collections (`fromjson` + `${r[k]}`) instead of jq —
+  Amy may spin jq out to its own crate, so the README stops showcasing it
+  (it stays in the builtin inventory table, which tracks code).
+
 ## `jq -s` stops being a no-op on the `.data` path (2026-07-06, GH #93 item 2)
 
 Real `jq -s`/`--slurp` has one law: wrap the inputs in an array, always —
