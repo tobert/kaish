@@ -246,6 +246,18 @@ pub struct ToolSchema {
     /// operands. See [`ToolSchema::with_raw_argv`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub raw_argv: bool,
+    /// The tool consumes glob patterns **as data** — the argv binder must pass
+    /// a bare glob pattern through as literal text instead of expanding it to
+    /// matching paths.
+    ///
+    /// Default false: shell semantics — `cat *.rs` sees matching files and
+    /// zero matches is a bind-time error. Set true for a tool whose input *is*
+    /// the pattern (`glob`), so the natural unquoted spelling
+    /// (`glob **/*.rs`) hands the pattern text to the tool instead of walking
+    /// the tree at bind time and binding the first match as the "pattern".
+    /// See [`ToolSchema::with_glob_passthrough`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub glob_passthrough: bool,
 }
 
 impl ToolSchema {
@@ -261,6 +273,7 @@ impl ToolSchema {
             aliases: Vec::new(),
             owns_output: false,
             raw_argv: false,
+            glob_passthrough: false,
         }
     }
 
@@ -268,6 +281,14 @@ impl ToolSchema {
     /// preserved (no flag/positional split). See [`ToolSchema::raw_argv`].
     pub fn with_raw_argv(mut self) -> Self {
         self.raw_argv = true;
+        self
+    }
+
+    /// Declare that this tool consumes glob patterns as data: the argv binder
+    /// passes bare patterns through as literal text instead of expanding them.
+    /// See [`ToolSchema::glob_passthrough`].
+    pub fn with_glob_passthrough(mut self) -> Self {
+        self.glob_passthrough = true;
         self
     }
 

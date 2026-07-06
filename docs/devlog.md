@@ -14,6 +14,36 @@ before it ships.
 
 ---
 
+## `glob **/*.rs` stops eating its own pattern (2026-07-06)
+
+Amy hit it live at the REPL: `glob **/*.rs` at the kaish repo root took a long
+time, then printed exactly one file — `crates/kaish-client/src/embedded.rs`.
+Contributing factors, in order: (1) an unquoted pattern in argv position is a
+`GlobPattern` token, and the kernel's argv binder pre-expands those into
+matching paths before the tool runs — correct shell semantics for `cat *.rs`,
+fatal for a tool whose *input is the pattern*; (2) the `glob` builtin read
+positional 0 as its pattern and silently dropped the rest, so the first
+pre-expanded path (alphabetically first — kaish-client sorts first) became the
+"pattern", an all-literal glob that matches exactly itself; (3) the REPL runs
+`IgnoreConfig::none()`, so the bind-time walk descended all of `target/`
+unfiltered — that was the "long time", paid twice because the builtin then
+walked again to match the literal path. The builtin's own schema examples
+teach the unquoted spelling, so every agent following the help walks into it.
+
+The fix is a first-class seam, not a special case: `ToolSchema` grows a
+`glob_passthrough` flag (sibling of `raw_argv`/`owns_output`) telling the
+binder to hand bare patterns through as written; the eval fallback already
+binds `Expr::GlobPattern` to its literal text (it's what `set +o glob` used).
+`glob` opts in and now consumes *all* positionals as patterns — deduped union
+in pattern order, strict per-pattern no-match errors that name the missing
+pattern — instead of silently ignoring everything past the first. This is
+also consistent with the builtin-side expansion family: cat/head/tail/ls/…
+already do their own glob eval on string args via `ctx.expand_paths`, so the
+tool owning pattern semantics was the established pattern; the binder just
+had to stop pre-chewing glob's input. Embedder tools with pattern-shaped
+inputs get the same opt-in. The REPL's unfiltered `target/` walk (slow even
+when correct) stays open as a follow-up.
+
 ## Escaped quotes in `${VAR:-default}` (2026-07-06, GH #93 item 5)
 
 Item 5 of #93's punch list: `unquote_default_word` (the function that strips
