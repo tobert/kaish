@@ -49,6 +49,13 @@ fn dir_basename(path: &Path) -> String {
         .unwrap_or_else(|| "/".to_string())
 }
 
+/// Explanatory clause for errors on a shared-ancestor path (see
+/// `VirtualOverlayBackend::is_shared_ancestor`), so a rejected mutation reads
+/// clearly instead of the misleading `NotFound` a bare inner delegation gives.
+fn synth_dir_note(path: &Path) -> String {
+    format!("{} is a synthesized directory that only holds kaish mounts", path.display())
+}
+
 /// Backend that overlays virtual paths (`/v/*`) on top of a custom backend.
 ///
 /// This enables embedders to provide their own storage backend while still
@@ -91,6 +98,17 @@ impl VirtualOverlayBackend {
         self.vfs.has_mount(path)
     }
 
+    /// A *shared ancestor*: a path that is not itself covered by a kaish mount
+    /// but sits above one (`/`, `/v`, `/v/etc`, …). It is presented as a
+    /// **read-only synthesized directory** — a union of the embedder's view and
+    /// kaish's child mounts. Reads and listing treat it as a directory; every
+    /// direct mutation is rejected, because the node exists only insofar as
+    /// kaish mounts live beneath it, so there is nothing coherent for the
+    /// embedder alone to create, remove, or re-time.
+    fn is_shared_ancestor(&self, path: &Path) -> bool {
+        !self.is_virtual_path(path) && self.vfs.has_mount_under(path)
+    }
+
     /// Get the inner backend.
     pub fn inner(&self) -> &Arc<dyn KernelBackend> {
         &self.inner
@@ -120,6 +138,8 @@ impl KernelBackend for VirtualOverlayBackend {
     async fn read(&self, path: &Path, range: Option<ReadRange>) -> BackendResult<Vec<u8>> {
         if self.is_virtual_path(path) {
             Ok(self.vfs.read_range(path, range).await?)
+        } else if self.is_shared_ancestor(path) {
+            Err(BackendError::IsDirectory(synth_dir_note(path)))
         } else {
             self.inner.read(path, range).await
         }
@@ -149,6 +169,8 @@ impl KernelBackend for VirtualOverlayBackend {
                 }
             }
             Ok(())
+        } else if self.is_shared_ancestor(path) {
+            Err(BackendError::IsDirectory(synth_dir_note(path)))
         } else {
             self.inner.write(path, content, mode).await
         }
@@ -158,6 +180,8 @@ impl KernelBackend for VirtualOverlayBackend {
         if self.is_virtual_path(path) {
             self.vfs.set_mtime(path, mtime).await?;
             Ok(())
+        } else if self.is_shared_ancestor(path) {
+            Err(BackendError::InvalidOperation(format!("cannot set mtime: {}", synth_dir_note(path))))
         } else {
             self.inner.set_mtime(path, mtime).await
         }
@@ -173,6 +197,8 @@ impl KernelBackend for VirtualOverlayBackend {
             existing.extend_from_slice(content);
             self.vfs.write(path, &existing).await?;
             Ok(())
+        } else if self.is_shared_ancestor(path) {
+            Err(BackendError::IsDirectory(synth_dir_note(path)))
         } else {
             self.inner.append(path, content).await
         }
@@ -193,6 +219,8 @@ impl KernelBackend for VirtualOverlayBackend {
             // Write back
             self.vfs.write(path, content.as_bytes()).await?;
             Ok(())
+        } else if self.is_shared_ancestor(path) {
+            Err(BackendError::IsDirectory(synth_dir_note(path)))
         } else {
             self.inner.patch(path, ops).await
         }
@@ -205,31 +233,34 @@ impl KernelBackend for VirtualOverlayBackend {
     async fn list(&self, path: &Path) -> BackendResult<Vec<DirEntry>> {
         if self.is_virtual_path(path) {
             Ok(self.vfs.list(path).await?)
-        } else if self.vfs.has_mount_under(path) {
+        } else if self.is_shared_ancestor(path) {
             // A shared parent of kaish mounts (`/`, `/v`, `/v/etc`, …): return
-            // the union of the embedder's view and kaish's child mounts, so
-            // both layers' entries show at the directory. kaish entries take
-            // precedence on a name clash (an explicit kaish mount wins its
-            // subtree via longest-prefix routing). A `NotFound` from the inner
-            // backend means "embedder has nothing here" — kaish-only, not an
-            // error — but any other inner error propagates.
-            let mut names = std::collections::HashSet::new();
-            let mut entries = Vec::new();
-            for entry in self.vfs.list(path).await? {
-                names.insert(entry.name.clone());
-                entries.push(entry);
-            }
-            match self.inner.list(path).await {
-                Ok(inner_entries) => {
-                    for entry in inner_entries {
-                        if names.insert(entry.name.clone()) {
-                            entries.push(entry);
-                        }
-                    }
+            // the union of the embedder's view and kaish's child mounts. The
+            // embedder's entries come first so they carry real metadata; then
+            // for each kaish child, an explicit kaish *mount* (`/dev`, `/v/jobs`)
+            // shadows the embedder's same-named entry (longest-prefix routing
+            // owns that subtree), while a synthesized *intermediate* (`/v` under
+            // `/`, when nothing is mounted at `/v`) only fills a gap — keeping
+            // the embedder's real entry if it has one. Any inner error (the
+            // embedder has no listable directory here: `NotFound`,
+            // `NotADirectory` over an inner file, a permission error) means
+            // "embedder contributes nothing"; kaish's mounts still list.
+            let mut by_name: std::collections::HashMap<String, DirEntry> =
+                std::collections::HashMap::new();
+            if let Ok(inner_entries) = self.inner.list(path).await {
+                for entry in inner_entries {
+                    by_name.insert(entry.name.clone(), entry);
                 }
-                Err(BackendError::NotFound(_)) => {}
-                Err(e) => return Err(e),
             }
+            for entry in self.vfs.list(path).await? {
+                if self.vfs.has_mount(&path.join(&entry.name)) {
+                    by_name.insert(entry.name.clone(), entry);
+                } else {
+                    by_name.entry(entry.name.clone()).or_insert(entry);
+                }
+            }
+            let mut entries: Vec<DirEntry> = by_name.into_values().collect();
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
             Ok(entries)
         } else {
             self.inner.list(path).await
@@ -239,15 +270,16 @@ impl KernelBackend for VirtualOverlayBackend {
     async fn stat(&self, path: &Path) -> BackendResult<DirEntry> {
         if self.is_virtual_path(path) {
             Ok(self.vfs.stat(path).await?)
-        } else {
+        } else if self.is_shared_ancestor(path) {
+            // A shared ancestor is a directory (kaish mounts live under it).
+            // Prefer the embedder's real directory metadata; otherwise (embedder
+            // lacks it, has a file there, or errors) synthesize a plain dir.
             match self.inner.stat(path).await {
-                // A shared ancestor of kaish mounts (e.g. `/v`) the embedder
-                // doesn't have still exists as a directory on our side.
-                Err(BackendError::NotFound(_)) if self.vfs.has_mount_under(path) => {
-                    Ok(DirEntry::directory(dir_basename(path)))
-                }
-                other => other,
+                Ok(entry) if entry.is_dir() => Ok(entry),
+                _ => Ok(DirEntry::directory(dir_basename(path))),
             }
+        } else {
+            self.inner.stat(path).await
         }
     }
 
@@ -255,6 +287,8 @@ impl KernelBackend for VirtualOverlayBackend {
         if self.is_virtual_path(path) {
             self.vfs.mkdir(path).await?;
             Ok(())
+        } else if self.is_shared_ancestor(path) {
+            Err(BackendError::AlreadyExists(synth_dir_note(path)))
         } else {
             self.inner.mkdir(path).await
         }
@@ -274,6 +308,10 @@ impl KernelBackend for VirtualOverlayBackend {
             }
             self.vfs.remove(path).await?;
             Ok(())
+        } else if self.is_shared_ancestor(path) {
+            // Refuse even `rm -rf /v`: the node holds kaish-managed mounts that
+            // don't live on the embedder's backend, so it can't be removed.
+            Err(BackendError::InvalidOperation(format!("cannot remove: {}", synth_dir_note(path))))
         } else {
             self.inner.remove(path, recursive).await
         }
@@ -289,6 +327,13 @@ impl KernelBackend for VirtualOverlayBackend {
             ));
         }
 
+        if self.is_shared_ancestor(from) || self.is_shared_ancestor(to) {
+            return Err(BackendError::InvalidOperation(format!(
+                "cannot rename: {} is a synthesized directory",
+                if self.is_shared_ancestor(from) { from.display() } else { to.display() }
+            )));
+        }
+
         if from_virtual {
             self.vfs.rename(from, to).await?;
             Ok(())
@@ -301,9 +346,9 @@ impl KernelBackend for VirtualOverlayBackend {
         if self.is_virtual_path(path) {
             self.vfs.exists(path).await
         } else {
-            // A shared ancestor of kaish mounts (e.g. `/v`) exists even when the
-            // embedder has nothing there.
-            self.inner.exists(path).await || self.vfs.has_mount_under(path)
+            // A shared ancestor (e.g. `/v`) exists as a directory regardless of
+            // the embedder — consistent with `stat`/`list`.
+            self.is_shared_ancestor(path) || self.inner.exists(path).await
         }
     }
 
@@ -314,19 +359,24 @@ impl KernelBackend for VirtualOverlayBackend {
     async fn lstat(&self, path: &Path) -> BackendResult<DirEntry> {
         if self.is_virtual_path(path) {
             Ok(self.vfs.lstat(path).await?)
-        } else {
+        } else if self.is_shared_ancestor(path) {
             match self.inner.lstat(path).await {
-                Err(BackendError::NotFound(_)) if self.vfs.has_mount_under(path) => {
-                    Ok(DirEntry::directory(dir_basename(path)))
-                }
-                other => other,
+                Ok(entry) if entry.is_dir() => Ok(entry),
+                _ => Ok(DirEntry::directory(dir_basename(path))),
             }
+        } else {
+            self.inner.lstat(path).await
         }
     }
 
     async fn read_link(&self, path: &Path) -> BackendResult<PathBuf> {
         if self.is_virtual_path(path) {
             Ok(self.vfs.read_link(path).await?)
+        } else if self.is_shared_ancestor(path) {
+            Err(BackendError::InvalidOperation(format!(
+                "{} is a directory, not a symlink",
+                path.display()
+            )))
         } else {
             self.inner.read_link(path).await
         }
@@ -336,6 +386,8 @@ impl KernelBackend for VirtualOverlayBackend {
         if self.is_virtual_path(link) {
             self.vfs.symlink(target, link).await?;
             Ok(())
+        } else if self.is_shared_ancestor(link) {
+            Err(BackendError::AlreadyExists(synth_dir_note(link)))
         } else {
             self.inner.symlink(target, link).await
         }
@@ -655,5 +707,98 @@ mod tests {
             .collect();
         assert!(names.iter().any(|n| n == "v"), "{names:?}");
         assert!(names.iter().any(|n| n == "dev"), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn test_shared_ancestor_is_a_directory_even_over_an_inner_file() {
+        // Embedder has a FILE at /v, but kaish mounts /v/jobs beneath it. /v is
+        // authoritatively a directory (kaish mounts live under it); stat/exists/
+        // list all agree — no file leaks from stat, no `NotADirectory` leaks
+        // from list. This branch also subsumes a non-`NotFound` inner *error*
+        // (e.g. PermissionDenied): existence/type never depend on inner here.
+        let inner_mem = MemoryFs::new();
+        inner_mem.write(Path::new("v"), b"i am a file").await.unwrap();
+        let mut inner_router = VfsRouter::new();
+        inner_router.mount("/", inner_mem);
+        let inner: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(inner_router)));
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/v/jobs", MemoryFs::new());
+        let overlay = VirtualOverlayBackend::new(inner, Arc::new(vfs));
+
+        assert!(overlay.stat(Path::new("/v")).await.unwrap().is_dir(), "kaish dir wins over inner file");
+        assert!(overlay.lstat(Path::new("/v")).await.unwrap().is_dir());
+        assert!(overlay.exists(Path::new("/v")).await);
+        let names: Vec<String> = overlay
+            .list(Path::new("/v"))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["jobs".to_string()], "lists kaish mount; no NotADirectory error");
+    }
+
+    #[cfg(feature = "localfs")]
+    #[tokio::test]
+    async fn test_listing_keeps_inner_real_metadata_for_intermediate_child() {
+        use crate::vfs::LocalFs;
+        // Embedder has a real /v directory; kaish mounts /v/jobs and /dev.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("v")).unwrap();
+
+        let mut inner_router = VfsRouter::new();
+        inner_router.mount("/", LocalFs::read_only(dir.path().to_path_buf()));
+        let inner: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(inner_router)));
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/v/jobs", MemoryFs::new());
+        vfs.mount("/dev", MemoryFs::new());
+        let overlay = VirtualOverlayBackend::new(inner, Arc::new(vfs));
+
+        let entries = overlay.list(Path::new("/")).await.unwrap();
+        let v = entries.iter().find(|e| e.name == "v").expect("v listed");
+        let dev = entries.iter().find(|e| e.name == "dev").expect("dev listed");
+        // `/v` is an *intermediate* (no kaish mount at /v), so the embedder's
+        // real dir entry — carrying real metadata — is kept, not the synthesized
+        // zero-metadata one.
+        assert!(v.is_dir());
+        assert!(v.modified.is_some(), "intermediate child keeps inner real metadata");
+        // `/dev` IS a kaish mount, so kaish's entry wins (synthesized, no mtime).
+        assert!(dev.is_dir());
+        assert!(dev.modified.is_none(), "real kaish mount shadows inner");
+    }
+
+    #[tokio::test]
+    async fn test_mutations_on_shared_ancestor_are_rejected_clearly() {
+        // Every direct mutation of the synthesized `/v` must fail with a clear
+        // error, not the misleading `NotFound` inner delegation produced — since
+        // stat/ls/exists all report it present.
+        let overlay = overlay_over_inner(false).await;
+
+        assert!(
+            matches!(overlay.mkdir(Path::new("/v")).await, Err(BackendError::AlreadyExists(_))),
+            "mkdir on an existing synthesized dir → AlreadyExists"
+        );
+        assert!(
+            matches!(overlay.remove(Path::new("/v"), true).await, Err(BackendError::InvalidOperation(_))),
+            "remove of a synthesized dir that holds kaish mounts → InvalidOperation"
+        );
+        assert!(
+            matches!(
+                overlay.set_mtime(Path::new("/v"), std::time::SystemTime::now()).await,
+                Err(BackendError::InvalidOperation(_))
+            ),
+            "set_mtime (touch) on a synthesized dir → InvalidOperation"
+        );
+        assert!(
+            matches!(
+                overlay.write(Path::new("/v"), b"x", WriteMode::Overwrite).await,
+                Err(BackendError::IsDirectory(_))
+            ),
+            "write to a synthesized dir → IsDirectory"
+        );
+        assert!(
+            matches!(overlay.read(Path::new("/v"), None).await, Err(BackendError::IsDirectory(_))),
+            "read of a synthesized dir → IsDirectory"
+        );
     }
 }

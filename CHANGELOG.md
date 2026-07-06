@@ -94,7 +94,14 @@ breaking entries are marked **BREAKING**.
   `/home` above a lone `/home/user` mount in a sandboxed kernel) now `stat`s as a
   directory and `list`s its child mounts, instead of returning `NotFound`. This
   is a general `VfsRouter` change — it fixes `cd /v`/`ls /v` for embedders and
-  makes the standalone kernel's mount tree navigable the same way.
+  makes the standalone kernel's mount tree navigable the same way. Such a
+  synthesized shared-ancestor directory behaves consistently across every
+  operation: `stat`/`lstat`/`exists`/`list` all agree it is a directory (the
+  union of the embedder's view and kaish's child mounts, preferring the
+  embedder's real metadata for a name it owns), and every direct mutation
+  (`rm`/`mkdir`/`touch`/write) is refused with a clear error instead of the
+  misleading `NotFound` a bare embedder delegation used to produce — `rm -rf /v`
+  can't delete a node that only exists because kaish mounts live beneath it.
 - **`jq -s`/`--slurp` now wraps the `.data` pipeline path in an array-of-one,
   matching real jq** (GH #93 item 2). Real `jq -s` always wraps its input in
   an array, even a single document. On kaish's structured `.data` shortcut

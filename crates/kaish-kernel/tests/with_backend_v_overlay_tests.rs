@@ -107,3 +107,41 @@ async fn unclaimed_v_write_respects_read_only_embedder() {
     let (out, code) = run(&kernel, "echo hi > /v/cas/new.bin").await;
     assert_ne!(code, 0, "write under a read-only embedder /v must fail: out={out:?}");
 }
+
+/// `rm -rf /v` must *refuse* — `/v` is a synthesized directory holding kaish's
+/// own mounts, which don't live on the embedder's backend. Before the polish it
+/// delegated straight to the embedder and could destroy the embedder's real
+/// `/v` content while leaving the kaish mounts (a misleading half-delete). Now
+/// it fails with a clear error and `/v` still lists the kaish mounts.
+#[tokio::test]
+async fn rm_rf_of_synthesized_v_is_refused() {
+    let dir = seed_v_cas();
+    let kernel = kernel_over(dir.path());
+
+    let (out, code) = run(&kernel, "rm -rf /v").await;
+    assert_ne!(code, 0, "rm -rf /v must fail: out={out:?}");
+    assert!(
+        !out.to_lowercase().contains("no such file"),
+        "must be a clear refusal, not a misleading not-found: out={out:?}"
+    );
+
+    // The kaish mounts under /v are untouched and still listable.
+    let (ls, code) = run(&kernel, "ls /v").await;
+    assert_eq!(code, 0, "ls /v still works after the refusal: out={ls:?}");
+    assert!(ls.split_whitespace().any(|t| t == "jobs"), "kaish mount survived: out={ls:?}");
+}
+
+/// `mkdir /v` reports the directory already exists, not a confusing `NotFound`
+/// from an inner delegation.
+#[tokio::test]
+async fn mkdir_of_synthesized_v_reports_exists() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let kernel = kernel_over(dir.path());
+
+    let (out, code) = run(&kernel, "mkdir /v").await;
+    assert_ne!(code, 0, "mkdir /v must fail (it exists): out={out:?}");
+    assert!(
+        !out.to_lowercase().contains("no such file"),
+        "must not be a misleading not-found: out={out:?}"
+    );
+}
