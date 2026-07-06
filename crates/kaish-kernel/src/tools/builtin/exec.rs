@@ -19,6 +19,7 @@ use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
+use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 use super::spawn::resolve_in_path;
@@ -76,10 +77,14 @@ impl Tool for Exec {
                 "exec: external commands are disabled (allow_external_commands=false)");
         }
 
-        // First positional is the command, rest are argv
-        let command_name = match args.get_string("command", 0) {
-            Some(cmd) => cmd,
-            None => return ExecResult::failure(1, "exec: missing command"),
+        // First positional is the command, rest are argv. A binary command
+        // name goes loud rather than `get_string`'s silent `None` (which would
+        // misreport it as "exec: missing command"); exec's argv loop below is
+        // already guarded, but the command word itself slipped through.
+        let command_name = match get_path_string(&args, "command", 0) {
+            Ok(Some(cmd)) => cmd,
+            Ok(None) => return ExecResult::failure(1, "exec: missing command"),
+            Err(e) => return ExecResult::failure(1, format!("exec: {e}")),
         };
 
         // Resolve command path

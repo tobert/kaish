@@ -413,6 +413,25 @@ async fn cmp_binary_first_operand_is_loud() {
     assert_loud_binary("b=$(cat src.bin); cmp $b src.bin").await;
 }
 
+/// `exec`'s command name — the argv loop was already guarded, but the command
+/// word itself read via `get_string`'s silent `None`, so `exec $BIN` used to
+/// misreport as "exec: missing command" rather than the binary-sink error
+/// (kaibo review of this PR). Gated on subprocess since exec is subprocess-only.
+#[cfg(feature = "subprocess")]
+#[tokio::test]
+async fn exec_binary_command_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); exec $b arg1").await;
+}
+
+/// `printf`'s format positional — its format *arguments* were already
+/// guarded, but the format string itself read via `get_string`'s silent
+/// `None`, so `printf $BIN` used to misreport as "printf: missing format
+/// argument" (kaibo review of this PR).
+#[tokio::test]
+async fn printf_binary_format_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); printf $b").await;
+}
+
 // `spawn`'s bareword `command=value` form actually routes through the
 // (separately tracked, #116) WordAssign-reconstruction fallback rather than a
 // named arg — `--command=`/`--cwd=` is the form that reaches `ToolArgs.named`
