@@ -2493,10 +2493,13 @@ impl Kernel {
                 Ok(ControlFlow::ok(result))
             }
             Stmt::Case(case_stmt) => {
-                // Evaluate the expression to match against
+                // Evaluate the expression to match against. Text sink: a
+                // `case $bin in ...)` pattern match on binary goes loud
+                // rather than glob-matching against the `[binary: N bytes]`
+                // placeholder (Decision E — same class as `==`/`in`).
                 let match_value = {
                     let value = self.eval_expr_async(&case_stmt.expr).await?;
-                    value_to_string(&value)
+                    value_to_text_sink(&value).map_err(|e| anyhow::anyhow!("{e}"))?
                 };
 
                 // Try each branch until we find a match
@@ -4187,7 +4190,12 @@ impl Kernel {
                     // stats the literal `~/x` and is always false.
                     let home = self.scope_home().await;
                     let path_value = apply_tilde_expansion(path_value, home.as_deref());
-                    let path_str = value_to_string(&path_value);
+                    // A binary `[[ -f $bin ]]` operand goes loud rather than
+                    // silently stat'ing a file literally named
+                    // `[binary: N bytes]` (the same path-positional guard
+                    // builtins like `stat`/`cp` use).
+                    let path_str = crate::interpreter::value_to_text_sink_named(&path_value, "a path")
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
                     // Resolve against the *session* cwd, not the process cwd, so a
                     // relative `[[ -f rel ]]` honors `cd` and agrees with the
                     // VFS-aware `test` builtin (GH #101). Backend stats a raw
@@ -5109,7 +5117,16 @@ impl Kernel {
                 return Err(anyhow::anyhow!(msg));
             }
             for (var_name, value) in exported {
-                cmd.env(var_name, value_to_string(&value));
+                // Binary can't cross the process boundary as an env var value
+                // either — loud, not the `[binary: N bytes]` placeholder
+                // silently exported in its place (kept in sync with
+                // dispatch.rs::try_external and env.rs::execute_with_env).
+                let value_str = crate::interpreter::value_to_text_sink_named(
+                    &value,
+                    "an exported environment variable value",
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                cmd.env(var_name, value_str);
             }
         }
 

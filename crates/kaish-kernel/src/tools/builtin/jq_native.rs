@@ -27,6 +27,7 @@ use jaq_std::ValT as _;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
+use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, ParamSchema, Tool, ToolArgs, ToolSchema};
 use crate::validator::{IssueCode, ValidationIssue};
 
@@ -556,58 +557,57 @@ impl Tool for JqNative {
         // pre-parsed structured data, then file, then stdin text.
         let input_json: serde_json::Value = if null_input {
             serde_json::Value::Null
-        } else if let Some(path) = args.get_string("path", 1) {
-            if !path.is_empty() {
-                // Read from backend - path takes precedence over stdin
-                let resolved = ctx.resolve_path(&path);
-                match ctx.backend.read(Path::new(&resolved), None).await {
-                    Ok(bytes) => {
-                        // Decode strictly: a non-UTF-8 file is a loud error, not
-                        // a U+FFFD mangle that then fails JSON parsing confusingly.
-                        let text = match String::from_utf8(bytes) {
-                            Ok(t) => t,
-                            Err(_) => {
-                                return ExecResult::failure(
-                                    1,
-                                    format!("jq: {}: invalid UTF-8", path),
-                                )
-                            }
-                        };
-                        if slurp {
-                            match parse_document_stream(&text) {
-                                Ok(docs) => serde_json::Value::Array(docs),
-                                Err(e) => {
-                                    return ExecResult::failure(1, format!("jq: -s: {}: {}", path, e))
-                                }
-                            }
-                        } else {
-                            match serde_json::from_str(&text) {
-                                Ok(json) => json,
-                                Err(e) => {
-                                    let hint =
-                                        jsonl_hint_for_trailing_error(&text, &e).unwrap_or_default();
+        } else {
+            // A binary `path` operand goes loud rather than silently falling
+            // through to the stdin branches below.
+            match get_path_string(&args, "path", 1) {
+                Ok(Some(path)) if !path.is_empty() => {
+                    // Read from backend - path takes precedence over stdin
+                    let resolved = ctx.resolve_path(&path);
+                    match ctx.backend.read(Path::new(&resolved), None).await {
+                        Ok(bytes) => {
+                            // Decode strictly: a non-UTF-8 file is a loud error, not
+                            // a U+FFFD mangle that then fails JSON parsing confusingly.
+                            let text = match String::from_utf8(bytes) {
+                                Ok(t) => t,
+                                Err(_) => {
                                     return ExecResult::failure(
                                         1,
-                                        format!("jq: invalid JSON in {}: {}{}", path, e, hint),
-                                    );
+                                        format!("jq: {}: invalid UTF-8", path),
+                                    )
+                                }
+                            };
+                            if slurp {
+                                match parse_document_stream(&text) {
+                                    Ok(docs) => serde_json::Value::Array(docs),
+                                    Err(e) => {
+                                        return ExecResult::failure(1, format!("jq: -s: {}: {}", path, e))
+                                    }
+                                }
+                            } else {
+                                match serde_json::from_str(&text) {
+                                    Ok(json) => json,
+                                    Err(e) => {
+                                        let hint =
+                                            jsonl_hint_for_trailing_error(&text, &e).unwrap_or_default();
+                                        return ExecResult::failure(
+                                            1,
+                                            format!("jq: invalid JSON in {}: {}{}", path, e, hint),
+                                        );
+                                    }
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        return ExecResult::failure(1, format!("jq: failed to read {}: {}", path, e))
+                        Err(e) => {
+                            return ExecResult::failure(1, format!("jq: failed to read {}: {}", path, e))
+                        }
                     }
                 }
-            } else {
-                match resolve_stdin_json(ctx, slurp).await {
+                Ok(_) => match resolve_stdin_json(ctx, slurp).await {
                     Ok(json) => json,
                     Err((code, msg)) => return ExecResult::failure(code, msg),
-                }
-            }
-        } else {
-            match resolve_stdin_json(ctx, slurp).await {
-                Ok(json) => json,
-                Err((code, msg)) => return ExecResult::failure(code, msg),
+                },
+                Err(e) => return ExecResult::failure(1, format!("jq: {e}")),
             }
         };
 

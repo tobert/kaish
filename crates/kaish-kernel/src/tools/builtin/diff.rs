@@ -16,6 +16,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
+use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::{IssueCode, ValidationIssue};
 
@@ -139,14 +140,16 @@ impl Tool for Diff {
         }
 
         // Get file paths
-        let file1 = match args.get_string("file1", 0) {
-            Some(f) => f,
-            None => return ExecResult::failure(2, "diff: missing first file"),
+        let file1 = match get_path_string(&args, "file1", 0) {
+            Ok(Some(f)) => f,
+            Ok(None) => return ExecResult::failure(2, "diff: missing first file"),
+            Err(e) => return ExecResult::failure(1, format!("diff: {e}")),
         };
 
-        let file2 = match args.get_string("file2", 1) {
-            Some(f) => f,
-            None => return ExecResult::failure(2, "diff: missing second file"),
+        let file2 = match get_path_string(&args, "file2", 1) {
+            Ok(Some(f)) => f,
+            Ok(None) => return ExecResult::failure(2, "diff: missing second file"),
+            Err(e) => return ExecResult::failure(1, format!("diff: {e}")),
         };
 
         let path1 = ctx.resolve_path(&file1);

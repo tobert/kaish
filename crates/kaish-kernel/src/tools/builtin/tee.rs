@@ -66,15 +66,18 @@ impl Tool for Tee {
 
         let append = args.has_flag("append") || args.has_flag("a");
 
+        // Resolve every operand to a path once, up front — binary goes loud
+        // rather than becoming a file literally named `[binary: N bytes]`.
+        let paths = match crate::interpreter::values_to_text_sink_named(&args.positional, "a path") {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(1, format!("tee: {e}")),
+        };
+
         // Gate truncating overwrites through latch + trash (no-op when both are
         // off). Append never gates (it doesn't destroy prior content); a new
         // file just writes. On latch this returns an exit-2 nonce result; under
         // trash the prior content is snapshotted before we write below.
-        let targets: Vec<(String, bool)> = args
-            .positional
-            .iter()
-            .map(|v| (crate::interpreter::value_to_string(v), append))
-            .collect();
+        let targets: Vec<(String, bool)> = paths.iter().map(|p| (p.clone(), append)).collect();
         let snapshots = match ctx
             .gate_overwrites("tee", &targets, parsed.confirm.as_deref(), |nonce, joined| {
                 format!("tee --confirm=\"{nonce}\" {joined}")
@@ -93,9 +96,8 @@ impl Tool for Tee {
         // per-file errors (matches POSIX `tee` semantics) and report every
         // failure so the agent sees the full picture, not just the last one.
         let mut errors: Vec<String> = Vec::new();
-        for value in &args.positional {
-            let path_str = crate::interpreter::value_to_string(value);
-            let resolved = ctx.resolve_path(&path_str);
+        for path_str in &paths {
+            let resolved = ctx.resolve_path(path_str);
             let path = Path::new(&resolved);
 
             // Overwrite writes the borrowed input directly (no clone); append

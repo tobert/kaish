@@ -134,6 +134,33 @@ pub(crate) fn read_repeatable_strings(args: &super::ToolArgs, key: &str) -> Vec<
     }
 }
 
+/// Read a path-typed positional/named arg as a string, going LOUD on a
+/// `Value::Bytes` operand rather than `ToolArgs::get_string`'s silent `None`
+/// (that method lives in the `kaish-types` leaf crate, which has no
+/// `EvalError`/rich-error machinery to report *why* it returned nothing, so it
+/// just treats any non-scalar-text value as absent).
+///
+/// A caller reading `get_string` for a *path* generally treats `None` as
+/// "operand missing" and either errors or falls back to some other input
+/// (stdin, `$HOME`, …) — exactly the silent-wrong-source shape GH #93 item 1
+/// is about, just reached through `get_string`'s catch-all instead of
+/// `value_to_string`'s placeholder. `Ok(None)` here means genuinely absent;
+/// `Err` means it was present and binary.
+pub(crate) fn get_path_string(
+    args: &super::ToolArgs,
+    name: &str,
+    positional_index: usize,
+) -> Result<Option<String>, String> {
+    use crate::ast::Value;
+    match args.get(name, positional_index) {
+        Some(v @ Value::Bytes(_)) => match crate::interpreter::value_to_text_sink_named(v, "a path") {
+            Ok(s) => Ok(Some(s)),
+            Err(e) => Err(e.to_string()),
+        },
+        _ => Ok(args.get_string(name, positional_index)),
+    }
+}
+
 /// Register all built-in tools with the registry.
 pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(alias::Alias);

@@ -804,6 +804,11 @@ channel, request on `.latch` (under the `latch` key with `--json`). `dd` confirm
 *into* a directory (and recursive `cp -r`/`mv` of a tree) gates the named
 destination, not each child file.
 
+Files under 10MB and all directories go to trash (configurable via
+`kaish-trash config max-size`); larger files are deleted permanently. Excluded
+paths (`/tmp`, `/v/*`) bypass trash. If the trash operation fails, `rm` returns
+an error — it never silently falls through to permanent delete.
+
 The `kaish-trash` builtin manages trashed files: `list`, `restore`, `empty`, `config`.
 
 When output is truncated by the limit, the result exits **3** with `did_spill: true` and `original_code` set. The spill file path is in the output. To read it in full:

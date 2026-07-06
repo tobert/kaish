@@ -65,7 +65,10 @@ impl Tool for Realpath {
         let mut last_err: Option<String> = None;
 
         for value in &args.positional {
-            let path_str = crate::interpreter::value_to_string(value);
+            let path_str = match crate::interpreter::value_to_text_sink_named(value, "a path") {
+                Ok(p) => p,
+                Err(e) => return ExecResult::failure(1, format!("realpath: {e}")),
+            };
             let resolved = ctx.resolve_path(&path_str);
 
             match canonicalize_path_full(ctx, &resolved).await {

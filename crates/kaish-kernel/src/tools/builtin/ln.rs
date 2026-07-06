@@ -8,6 +8,7 @@ use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::interpreter::ExecResult;
+use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Ln tool: create symbolic links.
@@ -62,14 +63,16 @@ impl Tool for Ln {
         };
         parsed.global.apply(ctx);
 
-        let target = match args.get_string("target", 0) {
-            Some(t) => t,
-            None => return ExecResult::failure(1, "ln: missing target argument"),
+        let target = match get_path_string(&args, "target", 0) {
+            Ok(Some(t)) => t,
+            Ok(None) => return ExecResult::failure(1, "ln: missing target argument"),
+            Err(e) => return ExecResult::failure(1, format!("ln: {e}")),
         };
 
-        let link_name = match args.get_string("link_name", 1) {
-            Some(l) => l,
-            None => return ExecResult::failure(1, "ln: missing link_name argument"),
+        let link_name = match get_path_string(&args, "link_name", 1) {
+            Ok(Some(l)) => l,
+            Ok(None) => return ExecResult::failure(1, "ln: missing link_name argument"),
+            Err(e) => return ExecResult::failure(1, format!("ln: {e}")),
         };
 
         let symbolic = parsed.symbolic;

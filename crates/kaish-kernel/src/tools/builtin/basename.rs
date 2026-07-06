@@ -7,6 +7,7 @@ use std::path::Path;
 #[cfg(test)]
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
+use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Basename tool: extract filename from path.
@@ -53,9 +54,10 @@ impl Tool for Basename {
         };
         parsed.global.apply(ctx);
 
-        let path_str = match args.get_string("path", 0) {
-            Some(p) => p,
-            None => return ExecResult::failure(1, "basename: missing path argument"),
+        let path_str = match get_path_string(&args, "path", 0) {
+            Ok(Some(p)) => p,
+            Ok(None) => return ExecResult::failure(1, "basename: missing path argument"),
+            Err(e) => return ExecResult::failure(1, format!("basename: {e}")),
         };
 
         let path = Path::new(&path_str);

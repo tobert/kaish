@@ -64,7 +64,10 @@ impl Tool for Mkdir {
         // every failure rather than just the first; exit non-zero if any failed.
         let mut last_err: Option<String> = None;
         for value in &args.positional {
-            let path = crate::interpreter::value_to_string(value);
+            let path = match crate::interpreter::value_to_text_sink_named(value, "a path") {
+                Ok(p) => p,
+                Err(e) => return ExecResult::failure(1, format!("mkdir: {e}")),
+            };
             let resolved = ctx.resolve_path(&path);
             if let Err(e) = ctx.backend.mkdir(Path::new(&resolved)).await {
                 last_err = Some(format!("mkdir: {}: {}", path, e));

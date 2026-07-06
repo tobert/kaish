@@ -95,9 +95,22 @@ impl Tool for Printf {
         };
         parsed.global.apply(ctx);
 
-        let format = match args.get_string("format", 0) {
-            Some(f) => f,
-            None => return ExecResult::failure(1, "printf: missing format argument"),
+        // The format is a text sink like the operands below: a binary
+        // (non-UTF-8) format string goes loud rather than `get_string`'s
+        // silent `None` (which would misreport it as "missing format
+        // argument"). Read the value first so a `Value::Bytes` is caught
+        // before it degrades to `None`.
+        let format = match args.get("format", 0) {
+            Some(v @ Value::Bytes(_)) => {
+                match crate::interpreter::value_to_text_sink_named(v, "a printf format string") {
+                    Ok(f) => f,
+                    Err(e) => return ExecResult::failure(1, format!("printf: {e}")),
+                }
+            }
+            _ => match args.get_string("format", 0) {
+                Some(f) => f,
+                None => return ExecResult::failure(1, "printf: missing format argument"),
+            },
         };
 
         let format_args: Vec<&Value> = args.positional.iter().skip(1).collect();

@@ -117,10 +117,10 @@ impl Tool for Find {
         let start_paths: Vec<String> = if args.positional.is_empty() {
             vec![".".to_string()]
         } else {
-            args.positional
-                .iter()
-                .map(crate::interpreter::value_to_string)
-                .collect()
+            match crate::interpreter::values_to_text_sink_named(&args.positional, "a path") {
+                Ok(p) => p,
+                Err(e) => return ExecResult::failure(1, format!("find: {e}")),
+            }
         };
 
         // Parse predicates from the parsed clap struct (kebab-case, authoritative).

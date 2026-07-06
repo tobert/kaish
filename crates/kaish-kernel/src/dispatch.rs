@@ -262,7 +262,18 @@ impl BackendDispatcher {
             return Some(ExecResult::failure(1, msg));
         }
         for (var_name, value) in exported {
-            cmd.env(var_name, crate::interpreter::value_to_string(&value));
+            // Binary can't cross the process boundary as an env var value
+            // either — loud, not the `[binary: N bytes]` placeholder (kept in
+            // sync with the production spawn site).
+            match crate::interpreter::value_to_text_sink_named(
+                &value,
+                "an exported environment variable value",
+            ) {
+                Ok(s) => {
+                    cmd.env(var_name, s);
+                }
+                Err(e) => return Some(ExecResult::failure(1, e.to_string())),
+            }
         }
 
         // Stdin: pipe_stdin or buffered string or inherit (interactive) or null
