@@ -75,6 +75,9 @@ impl Tool for Glob {
     }
 
     fn schema(&self) -> ToolSchema {
+        // glob_passthrough: the argv binder hands bare patterns through as
+        // written — without it, `glob **/*.rs` (as every example here spells
+        // it) would bind the first *matching path* as the pattern.
         schema_from_clap(
             &GlobArgs::command(),
             "glob",
@@ -82,6 +85,7 @@ impl Tool for Glob {
             [
                 ("Find all Rust files", "glob **/*.rs"),
                 ("Find in specific directory", "glob src/**/*.rs"),
+                ("Multiple patterns", "glob **/*.rs **/*.toml"),
                 ("Multiple extensions", "glob **/*.{rs,go,py}"),
                 ("With depth limit", "glob **/*.rs -d 3"),
                 ("Include hidden files", "glob **/*.rs -a"),
@@ -89,6 +93,7 @@ impl Tool for Glob {
                 ("Exclude test files", "glob **/*.rs --exclude='*_test.rs'"),
             ],
         )
+        .with_glob_passthrough()
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
@@ -127,39 +132,18 @@ impl Tool for Glob {
             Err(e) => return ExecResult::failure(2, format!("glob: {e}")),
         };
 
-        // Get the pattern
-        let pattern = match args.get_string("pattern", 0) {
-            Some(p) => p,
-            None => return ExecResult::failure(1, "glob: missing pattern argument"),
-        };
-
-        // Parse the glob pattern
-        let glob = match GlobPath::new(&pattern) {
-            Ok(g) => g,
-            Err(e) => return ExecResult::failure(1, format!("glob: invalid pattern: {}", e)),
-        };
-
-        // Names are reported relative to the conventional root — `/` for an
-        // anchored pattern, the cwd otherwise — regardless of where the walk
-        // actually starts.
-        let report_root = if glob.is_anchored() {
-            ctx.resolve_path("/")
-        } else {
-            ctx.resolve_path(".")
-        };
-
-        // Walk from the pattern's deepest static directory, not from `/`.
-        // Walking from `/` is O(filesystem) and — fatally — the walker skips
-        // hidden intermediate directories, so an anchored pattern routed
-        // through a hidden dir (e.g. tempfile's `/tmp/.tmpXXXX/*.txt`) matched
-        // nothing. `split_static_dir` peels the literal leading components into
-        // the walk root and leaves the remainder as the match pattern.
-        let (static_dir, glob) = glob.split_static_dir();
-        let root = if static_dir.as_os_str().is_empty() {
-            report_root.clone()
-        } else {
-            report_root.join(&static_dir)
-        };
+        // Every positional is a pattern. The argv binder hands bare patterns
+        // through as written (ToolSchema::glob_passthrough), so this is the
+        // whole pattern list; Value-typed positionals are read off
+        // `args.positional`, not the clap struct (to_argv is lossy).
+        let patterns: Vec<String> = args
+            .positional
+            .iter()
+            .map(crate::interpreter::value_to_string)
+            .collect();
+        if patterns.is_empty() {
+            return ExecResult::failure(1, "glob: missing pattern argument");
+        }
 
         // Parse options
         let max_depth = args.get("depth", usize::MAX).and_then(|v| match v {
@@ -216,57 +200,90 @@ impl Tool for Glob {
             filter.exclude(exc);
         }
 
-        let options = WalkOptions {
-            max_depth,
-            entry_types,
-            respect_gitignore: if no_ignore { false } else { ctx.ignore_config.auto_gitignore() },
-            include_hidden,
-            filter,
-            types: file_types.clone(),
-            ..WalkOptions::default()
-        };
-
-        // Create walker
         let fs = BackendWalkerFs(ctx.backend.as_ref());
-        let mut walker = FileWalker::new(&fs, &root)
-            .with_pattern(glob)
-            .with_options(options);
+        let mut nodes: Vec<OutputNode> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        // Inject ignore filter from config (unless --no-ignore)
-        if !no_ignore {
-            if let Some(ignore_filter) = ctx.build_ignore_filter(&root).await {
-                walker = walker.with_ignore(ignore_filter);
+        for pattern in &patterns {
+            let glob = match GlobPath::new(pattern) {
+                Ok(g) => g,
+                Err(e) => return ExecResult::failure(1, format!("glob: invalid pattern: {}", e)),
+            };
+
+            // Names are reported relative to the conventional root — `/` for an
+            // anchored pattern, the cwd otherwise — regardless of where the walk
+            // actually starts.
+            let report_root = if glob.is_anchored() {
+                ctx.resolve_path("/")
+            } else {
+                ctx.resolve_path(".")
+            };
+
+            // Walk from the pattern's deepest static directory, not from `/`.
+            // Walking from `/` is O(filesystem) and — fatally — the walker skips
+            // hidden intermediate directories, so an anchored pattern routed
+            // through a hidden dir (e.g. tempfile's `/tmp/.tmpXXXX/*.txt`) matched
+            // nothing. `split_static_dir` peels the literal leading components into
+            // the walk root and leaves the remainder as the match pattern.
+            let (static_dir, glob) = glob.split_static_dir();
+            let root = if static_dir.as_os_str().is_empty() {
+                report_root.clone()
+            } else {
+                report_root.join(&static_dir)
+            };
+
+            let options = WalkOptions {
+                max_depth,
+                entry_types,
+                respect_gitignore: if no_ignore { false } else { ctx.ignore_config.auto_gitignore() },
+                include_hidden,
+                filter: filter.clone(),
+                types: file_types.clone(),
+                ..WalkOptions::default()
+            };
+
+            let mut walker = FileWalker::new(&fs, &root)
+                .with_pattern(glob)
+                .with_options(options);
+
+            // Inject ignore filter from config (unless --no-ignore)
+            if !no_ignore {
+                if let Some(ignore_filter) = ctx.build_ignore_filter(&root).await {
+                    walker = walker.with_ignore(ignore_filter);
+                }
             }
-        }
 
-        // Collect results
-        let paths = match walker.collect().await {
-            Ok(p) => p,
-            Err(e) => return ExecResult::failure(1, format!("glob: {}", e)),
-        };
+            let paths = match walker.collect().await {
+                Ok(p) => p,
+                Err(e) => return ExecResult::failure(1, format!("glob: {}", e)),
+            };
 
-        // Strict-glob guarantee: zero matches is an error, not silent success.
-        // This is consistent with how the kernel treats a bare glob in argv
-        // position (no matches → error). The `glob` builtin must enforce the
-        // same contract so agents can rely on a non-zero exit to detect misses.
-        if paths.is_empty() {
-            return ExecResult::failure(1, format!("glob: no matches for pattern '{pattern}'"));
-        }
+            // Strict-glob guarantee, per pattern: zero matches is an error
+            // naming the pattern that missed, not silent success. This is
+            // consistent with how the kernel treats a bare glob in argv
+            // position (no matches → error). The `glob` builtin must enforce
+            // the same contract so agents can rely on a non-zero exit to
+            // detect misses.
+            if paths.is_empty() {
+                return ExecResult::failure(1, format!("glob: no matches for pattern '{pattern}'"));
+            }
 
-        // Build OutputNodes for each matched path (relative to root)
-        let nodes: Vec<OutputNode> = paths
-            .iter()
-            .map(|p| {
+            // Build OutputNodes for each matched path (relative to root),
+            // deduped across patterns by reported name.
+            for p in &paths {
                 let rel = p.strip_prefix(&report_root).unwrap_or(p);
                 let name = rel.to_string_lossy().to_string();
+                if !seen.insert(name.clone()) {
+                    continue;
+                }
                 let entry_type = if p.extension().is_none() && name.ends_with('/') {
                     EntryType::Directory
                 } else {
                     EntryType::File
                 };
-                OutputNode::new(name).with_entry_type(entry_type)
-            })
-            .collect();
+                nodes.push(OutputNode::new(name).with_entry_type(entry_type));
+            }
+        }
 
         // Build JSON array for structured pipeline flow (same pattern as seq/split/find)
         let json_array: Vec<serde_json::Value> = nodes

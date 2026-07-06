@@ -3413,6 +3413,13 @@ impl Kernel {
         let mut tool_args = ToolArgs::new();
         let home = self.scope_home().await;
 
+        // A glob-passthrough tool (`glob`) consumes patterns as data: skip
+        // argv glob expansion so the pattern reaches the tool as written —
+        // otherwise `glob **/*.rs` binds the first *matching path* as its
+        // pattern. The eval fallback turns `Expr::GlobPattern` into its
+        // literal string.
+        let glob_passthrough = schema.is_some_and(|s| s.glob_passthrough);
+
         // Raw-argv fast path (POSIX `test`): bind every argument to `positional`
         // in source order with types preserved — operators (`-f`, `=`, `!`) as
         // strings, operands keeping their `Value` — leaving `flags`/`named`
@@ -3427,7 +3434,8 @@ impl Kernel {
                 match arg {
                     Arg::Positional(expr) => {
                         let glob = if let Expr::GlobPattern(p) = expr {
-                            self.scope.read().await.glob_enabled().then(|| p.clone())
+                            (!glob_passthrough && self.scope.read().await.glob_enabled())
+                                .then(|| p.clone())
                         } else {
                             None
                         };
@@ -3549,7 +3557,7 @@ impl Kernel {
                                 let scope = self.scope.read().await;
                                 scope.glob_enabled()
                             };
-                            if glob_enabled {
+                            if glob_enabled && !glob_passthrough {
                                 let (paths, cwd) = {
                                     let ctx = self.exec_ctx.read().await;
                                     let paths = ctx.expand_glob(pattern).await

@@ -10,7 +10,22 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+- **Unquoted `glob **/*.rs` now works: the pattern reaches the builtin as
+  written.** Previously the kernel's argv glob expansion pre-expanded the bare
+  pattern into matching paths, so `glob` bound the first path as its "pattern",
+  silently ignored the rest, and printed exactly one file — after walking the
+  tree twice. The builtin's own examples (and agents following them) spell the
+  pattern unquoted. Quoted patterns behave as before.
+
 ### Added
+- **`ToolSchema::glob_passthrough` (+ `with_glob_passthrough()`)** — a tool
+  whose input *is* a glob pattern (like `glob`) can now tell the argv binder to
+  pass bare patterns through as literal text instead of expanding them.
+  Embedder tools with pattern-shaped inputs can opt in the same way.
+- **`glob` accepts multiple patterns** (`glob **/*.rs **/*.toml`): matches are
+  the deduped union in pattern order; any pattern with zero matches fails the
+  whole command (exit 1) naming the pattern that missed.
 - **A backgrounded confirmation latch is now surfaced and fulfillable** (GH
   #96). A destructive op gated under `set -o latch` and run in the background
   (`rm x &`) stored its `LatchRequest` but no consumer exposed it, so the nonce

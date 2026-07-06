@@ -841,10 +841,14 @@ Glob expansion is enabled by default (`set -o glob`). Disable it with `set +o gl
 
 If a glob matches zero files, the command fails with exit code 1 rather than passing the literal pattern through. This prevents silent bugs where a typo in a pattern goes undetected.
 
-The `glob` builtin still works for advanced options like `--exclude` and recursive `**` patterns:
+The `glob` builtin is the exception: it consumes patterns as data, so the
+binder hands them through as written — no quoting needed, and it accepts
+multiple patterns. Use it for advanced options like `--exclude` and recursive
+`**` patterns:
 
 ```sh
-glob "**/*.rs" --exclude="*_test.rs"
+glob **/*.rs --exclude="*_test.rs"   # pattern reaches glob unexpanded
+glob **/*.rs **/*.toml               # multiple patterns, deduped union
 ```
 
 ### Hidden files (dotfiles)
