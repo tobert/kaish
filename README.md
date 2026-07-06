@@ -4,17 +4,15 @@
   <img src="docs/banner.svg" alt="Kai the hermit crab — kaish mascot — looking at kaish code" width="720">
 </p>
 
-**kaish** is a predictable shell for AI agents: an embeddable Rust library with a
-reference REPL. The language is a strict subset of the `sh` that's already in your
-muscle memory — and the models' — so skills transfer from bash. Footguns
-(hopefully) don't.
+**kaish** is a predictable shell for AI agents delivered as an embeddable Rust
+library with a reference REPL. The language is a strict subset of `sh`, so most
+muscle memory and model training will transfer.
 
 The builtins — grep, sed, awk, find, and ninety-odd more — run in-process, so most
 text processing never needs `fork()` or `exec()`. All file I/O goes through a
-virtual filesystem that can pass through to the real one, stay entirely in memory,
-or overlay copy-on-write between the two. That's the sandbox story: an embedded
-kaish gives an agent a complete scripting environment without the backflips it
-takes to contain a traditional shell and parse its output.
+virtual filesystem that can pass through, stay in memory, or overlay the two.
+An embedded kaish gives an agent a complete scripting environment that can be
+constrained naturally.
 
 **Status:** 0.11, pre-1.0. The language has settled; what remains before 1.0 is
 ergonomics and correctness polish. Everything ships through
@@ -22,9 +20,11 @@ ergonomics and correctness polish. Everything ships through
 
 ## Why a shell for agents?
 
-Agents need to compose operations — filter output, transform data, iterate over
-results. One tool call per operation is atomic and chatty; a shell does it in one
-round trip:
+Agents need to compose operations such as filtering output, transforming data,
+and iterating over results. They are already good at Bourne shell idioms, and
+shell is already an ideal language for text processing. kaish inherits all of
+that, so piping, redirecting, and composing commands works like it always has,
+with just a couple changes.
 
 ```sh
 # Filter and transform in one script
@@ -39,74 +39,62 @@ done
 seq 1 10 | scatter --as N --limit 4 | echo "processing $N" | gather
 ```
 
-But handing an agent `bash -c` is a rough deal for everyone involved:
+Handing an agent `bash -c` is dangerous on many levels. It comes with
 word-splitting surprises, tools that vary by platform and version, and full host
 access by default. kaish keeps the language the models already know and swaps out
 the implementation: strict parsing with pre-execution validation, builtins that
 behave identically everywhere, and a filesystem boundary the embedder controls.
 
 Underneath, kaish's data model is JSON. A variable holds an array or a record as
-naturally as a string, `$(cmd)` substitution carries structured values — not
-text to re-split — and `--json` on any command emits the same typed data the
+naturally as a string, `$(cmd)` substitution carries structured values, so you
+can choose between old-school text parsing and using JSON-typed data. Using the
+`--json` flag on any command will get it to emit the same typed data the
 language works with internally. Structured results flow through pipes,
-subscripts, and iteration without a serialization step at every seam.
+subscripts, and iteration without extra serialization / deserialization steps.
 
-## Why kaish?
+## What's Different About kaish?
 
 Kaish is sh-like but not a full Bourne shell or bash. The idea is to preserve the
-language that's in our muscle/model memory, while providing better pre-execution
+language that's comes naturally, while providing better pre-execution
 syntax checking, easy embedding, and a VFS abstraction to help with sandboxing.
 
+- **JSON data model** — kaish's native values are JSON types: strings, numbers, booleans, arrays, and records.
+- **Single brackets are JSON** - `[` is for json arrays and records, `[[` is for branching
 - **No implicit word splitting** — `$VAR` is always one value, never split on spaces
-- **Quote to join** — kaish doesn't paste adjacent unquoted tokens; quote interpolated words: `"$dir/file.txt"`, `"out-$(date +%s).log"`
-- **Bare glob expansion** — `ls *.txt` works; opt out with `set +o glob`
-- **Structured iteration** — `for i in $(seq 1 5)` works via structured data, not word splitting
 - **Line iteration in for-loops** — `for line in $(cat file)` splits on `\n` only; whitespace within a line is never split
-- **JSON data model** — kaish's native values are JSON's: strings, numbers, booleans, arrays, records (plus raw bytes for binary data). `fromjson`/`tojson` bridge text; `${xs[0]}`, `${r[key]}`, `keys`, `values` index natively
+- **Structured iteration** — `for i in $(seq 1 5)` works via structured data, not word splitting
 - **Explicit splitting** — use `split "$VAR"` for whitespace/delimiter/regex splitting
 - **No backticks** — only `$(cmd)` substitution
 - **Strict booleans** — `TRUE` and `yes` are errors, not truthy
-- **Pre-validation** — catch errors before execution, not at runtime
+- **Pre-validation** — validation stretches down into builtins, revealing errors before execution
 
 ## Quick Tour
 
 ```sh
 #!/usr/bin/env kaish
 
-# Familiar bash-style syntax
 GREETING="Hello"
 echo "$GREETING, world!"
 
-# Control flow
+# control flow with [[ works just like bash
 if [[ -f config.json ]]; then
     echo "Config found"
 fi
 
-# For loops - no implicit *word* splitting
-for item in one two three; do      # literal items
-    echo "Processing: $item"
+# regular *.log works but glob adds modern affordances and its
+# data passes to the for loop as a JSON array
+for file in $(glob **/*.log); do
+    echo "logfile: $file"
 done
 
-for i in $(seq 1 3); do            # structured data iteration
-    echo "Count: $i"
-done
-
-for line in $(cat hosts.txt); do   # multi-line stdout splits on \n
-    echo "host: $line"
-done
-
-for file in *.txt; do              # bare glob expansion
-    echo "Found: $file"
-done
-
-# Quote to join: adjacent unquoted tokens never paste together
+# quote to join: adjacent unquoted tokens never paste together
 echo "$GREETING/world.txt"          # ✅  quote the whole word
 # echo $GREETING/world.txt          # ❌  parse error — kaish won't paste $GREETING and /world.txt
 
-# Pipes and redirects
+# pipes and redirects
 cat urls.txt | grep "https" | head -n 10 > filtered.txt
 
-# The data model is JSON: parse text into typed collections, index directly
+# the data model is JSON: parse text into typed collections, index directly
 CONFIG='{"name":"amy","langs":["rust","kaish"]}'
 C=$(fromjson <<< "$CONFIG")
 echo "${C[name]} writes ${C[langs][0]}"      # amy writes rust
@@ -116,10 +104,10 @@ for host in $(keys $SERVERS); do
     echo "$host -> ${SERVERS[$host]}"
 done
 
-# Glob patterns expand inline, or use the glob builtin for options
+# glob patterns expand inline, or use the glob builtin for options
 glob "**/*.rs" --exclude="*_test.rs"
 
-# Parallel execution with scatter/gather — --as N binds $N in each worker;
+# parallel execution with scatter/gather — --as N binds $N in each worker;
 # --limit caps concurrency; gather emits one JSONL record per worker
 seq 1 10 | scatter --as N --limit 4 | echo "processing $N" | gather
 ```
@@ -129,9 +117,7 @@ ask kaish itself — help is in-band: `help builtins`, `help syntax`, `help <too
 
 ## Getting Started
 
-You'll need a Rust toolchain ([rustup](https://rustup.rs)). Containers and
-prebuilt binaries are in future plans when things stabilize a bit more and I have
-time (or PRs!).
+You'll need a Rust toolchain ([rustup](https://rustup.rs)). For
 
 ### The REPL
 
@@ -267,11 +253,12 @@ Latch and trash semantics are covered in [docs/LANGUAGE.md](docs/LANGUAGE.md);
 the embedder-facing contract (`LatchRequest`, nonce stores, `Kernel::confirm`)
 in [docs/EMBEDDING.md](docs/EMBEDDING.md).
 
-## Why 会sh (kaish)?
+## Why build 会sh?
 
-会sh was originally prototyped as part of 会術 Kaijutsu and was separate enough
+会sh (kaish) was originally prototyped as part of 会術 Kaijutsu and was separate enough
 it made sense to split it out. Amy was also a fan of ksh and pdksh back in the 00s
-so k-ai-sh seems fun.
+so k-ai-sh seemed fun. kaish is now also used by [kaibo](https://github.com/tobert/kaibo)
+to provide agents with a read-only shell.
 
 ## Building from Source
 
@@ -291,7 +278,9 @@ exception). That said, please have your agent (or another model) review the PR
 before submitting — a few tokens on review goes a long way. Same goes for issues:
 agent-filed is fine, just make sure it makes sense.
 
-If you're working with AI coding agents, you might also be interested in:
+If you're working with AI coding agents, you might also be interested in
+[kaibo](https://github.com/tobert/kaibo), an assistant for you assistant with a
+read-only kaish shell.
 
 - [**gpal**](https://github.com/tobert/gpal) — Gemini as an MCP server (pairs well with Claude Code)
 - [**cpal**](https://github.com/tobert/cpal) — Claude as an MCP server (pairs well with Gemini CLI)
