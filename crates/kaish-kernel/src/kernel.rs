@@ -6482,16 +6482,11 @@ mod tests {
         let backend = mock.with_tool_result(|_name| {
             let mut baggage = std::collections::BTreeMap::new();
             baggage.insert("trace_id".to_string(), "abc123".to_string());
-            Ok(ToolResult {
-                code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-                data: Some(serde_json::json!({"key": "value"})),
-                output: None,
-                content_type: Some("application/json".to_string()),
-                baggage,
-                latch: None,
-            })
+            // ToolResult is #[non_exhaustive] (GH #93 item 3/hygiene pass) —
+            // construct via with_data + the with_* setters, not a struct literal.
+            Ok(ToolResult::with_data("", serde_json::json!({"key": "value"}))
+                .with_content_type("application/json")
+                .with_baggage(baggage))
         });
         let backend: Arc<dyn crate::backend::KernelBackend> = Arc::new(backend);
         let kernel = Kernel::with_backend(backend, KernelConfig::isolated(), |_| {}, |_| {})

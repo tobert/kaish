@@ -75,6 +75,66 @@ more layer of wrapping (not passed through as "already an array"), and one
 confirming plain `jq` (no `-s`) on the `.data` path is untouched. Full suite
 and `clippy --all-targets` both clean.
 
+## Hardening the job/tool-result seam (2026-07-06, GH #93 items 3, 4)
+
+`kaish-types` had adopted `#[non_exhaustive]` broadly — `ExecResult`,
+`OutputData`, `ToolSchema`, `ToolArgs`, `WriteMode`, `BackendError`,
+`CommandKind`, `DirEntryKind` — but `job.rs` was missed. That gap had just bitten
+an embedder for real: #96 added `JobStatus::Latched` and `JobInfo.latch` and had
+to call it out as **BREAKING (embedders)** in the changelog, because a bare
+`JobStatus`/`JobInfo` gave downstream `match`es and struct literals no forward
+compatibility. Closing the gap now (`JobStatus`, `JobInfo`, `ToolResult`) means
+the *next* variant/field addition is additive, not breaking — and softens that
+existing #96 bullet from `**BREAKING (embedders):**` to a plain `Embedders:`
+heads-up, matching the calmer framing Amy asked for (bug-fix-shaped changes
+toward correct behavior, first-party/coordinated dependents, don't cry wolf).
+
+`JobInfo` got a `new(id, command, status)` constructor plus
+`.with_output_file()`/`.with_pid()`/`.with_latch()`, mirroring the existing
+kaish-types builder idiom. `ToolResult` already had `success`/`failure`/
+`with_data`; it picked up `.with_output()`/`.with_content_type()`/
+`.with_baggage()`/`.with_latch()`/`.with_did_spill()`/`.with_original_code()` so
+every field has a construction path across the crate boundary. `JobStatus`
+needed no call-site changes at all — its variants are all unit variants, so
+external construction was never blocked by `#[non_exhaustive]`; only its
+(nonexistent, it turns out) external exhaustive matches would have needed a `_`
+arm. Letting the compiler drive turned up exactly three struct-literal sites to
+fix: two `JobInfo { .. }` in `scheduler/job.rs` and one test-only
+`ToolResult { .. }` in `kernel.rs` — `cargo build --all-targets` was clean
+immediately after, which is as much confirmation as this kind of attribute
+change gets.
+
+**Item 3** was a quieter bug found by reading `ExecResult` and `ToolResult`
+side by side: `ExecResult.did_spill`/`.original_code` (the output-limiter's
+"this got capped, and here's the code before the remap" signal) had no
+`ToolResult` counterpart, so a backend-registered tool's (kaijutsu, an MCP
+engine) capped result silently looked uncapped by the time it crossed back into
+the kernel — in *both* `From` directions. Added both fields, propagated them
+in both impls, and pinned it with round-trip tests in each direction.
+
+**Item 4** turned out bigger than "align a test double." The test-only
+`BackendDispatcher::dispatch` (used by `scheduler/pipeline.rs`'s unit tests, not
+by any real embedder path) hand-rolled the `ToolResult → ExecResult` conversion
+instead of calling `From<ToolResult> for ExecResult` — the exact function the
+production dispatch path in `kernel.rs` uses. The hand-rolled version wrapped
+`data` unconditionally as `Value::Json(json_data)`, which happens to coincide
+with the real conversion for object/array-shaped data (both stay `Value::Json`)
+but silently diverges for *scalar* `data` — the production path unwraps a plain
+JSON number/bool/string into the matching native `Value` variant via
+`json_to_value_no_envelope`; the old test-dispatcher path never did. It also
+never touched `did_spill`/`original_code` at all, so item 3's new fields would
+have been silently dropped on this path even after being added to `ToolResult`.
+TDD caught both: wrote a scalar-unwrap test and a did_spill/original_code test,
+confirmed each genuinely failed by temporarily reverting the dispatch.rs fix
+and rerunning (red), then swapped the hand-rolled block for
+`ExecResult::from(tool_result)` (green). A third test pins that envelope-shaped
+`data` stays structured (`Value::Json`, never auto-decoded to `Value::Bytes`) —
+it passes either way today, since neither path decoded envelopes, but it's
+worth keeping now that both paths share one conversion function: any future
+regression that adds envelope-decoding to the shared `From` impl trips it on
+both the production and test-dispatcher side at once. No `CHANGELOG.md` entry
+for item 4 — it's test-only internal churn with no embedder-visible effect.
+
 ## Interpreter allocation/stack pass (2026-07-05, GH #48)
 
 #46/#47 landed a recursion depth guard sized against a measured ~380 KB of

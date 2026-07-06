@@ -455,22 +455,15 @@ impl CommandDispatcher for BackendDispatcher {
         // Execute via backend
         let backend = ctx.backend.clone();
         let result = match backend.call_tool(&cmd.name, tool_args, ctx).await {
-            Ok(tool_result) => {
-                let mut exec = ExecResult::from_output(
-                    tool_result.code as i64,
-                    tool_result.stdout,
-                    tool_result.stderr,
-                );
-                exec.set_output(tool_result.output);
-                exec.content_type = tool_result.content_type;
-                exec.baggage = tool_result.baggage;
-                exec.latch = tool_result.latch;
-                // Restore structured data from ToolResult (preserved through backend roundtrip)
-                if let Some(json_data) = tool_result.data {
-                    exec.data = Some(Value::Json(json_data));
-                }
-                exec
-            }
+            // Route through the same `From<ToolResult> for ExecResult` the
+            // production dispatch path uses (kernel.rs) rather than
+            // hand-rolling the field-by-field copy: the old inline version
+            // wrapped `data` unconditionally as `Value::Json`, which skipped
+            // `json_to_value_no_envelope`'s scalar-unwrap (`Value::Int`/
+            // `Value::String`/…) and silently dropped `did_spill`/
+            // `original_code` — a divergence this test-only dispatcher must
+            // not have from the real path (GH #93 item 4).
+            Ok(tool_result) => ExecResult::from(tool_result),
             Err(BackendError::ToolNotFound(_)) => {
                 // Fall back to external command execution
                 match self.try_external(&cmd.name, &cmd.args, ctx).await {

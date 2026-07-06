@@ -19,9 +19,9 @@ breaking entries are marked **BREAKING**.
   `jobs` and `/v/jobs/{id}/status` report `Latched` distinctly from a plain
   failure; and a new `/v/jobs/{id}/latch` node renders the request as JSON
   (nonce, command, paths, hint) — empty when the job isn't gated. An embedder
-  fulfills it with `Kernel::confirm(&latch)`. **BREAKING (embedders):**
-  `JobStatus` gains a `Latched` variant (exhaustive matches must handle it) and
-  `JobInfo` gains a `latch: Option<LatchRequest>` field.
+  fulfills it with `Kernel::confirm(&latch)`. **Embedders:** `JobStatus` gains
+  a `Latched` variant (exhaustive matches must handle it) and `JobInfo` gains
+  a `latch: Option<LatchRequest>` field.
 - **Recursion is depth-guarded (`MAX_RECURSION_DEPTH` = 48)** (GH #46/#47, tuned
   by #48). Command substitution, shell-function calls, `.kai` script execution,
   and `source`/`.` all re-enter the statement engine on the native stack; a
@@ -59,6 +59,14 @@ breaking entries are marked **BREAKING**.
   `set_tool_schemas` still accepts a `Vec` (converts internally) and all read
   sites are unaffected (deref coercion to `&[ToolSchema]`); only direct field
   assignment/mutation of the public field needs `.into()`.
+- **Embedders:** `JobStatus`, `JobInfo`, and `ToolResult` are now
+  `#[non_exhaustive]` (GH #93, part of item 3/4 plus a hygiene pass) —
+  construct them via their constructors (`JobInfo::new()` +
+  `.with_output_file()`/`.with_pid()`/`.with_latch()`; `ToolResult::success()`/
+  `.failure()`/`.with_data()` plus the new `.with_output()`/
+  `.with_content_type()`/`.with_baggage()`/`.with_latch()`/`.with_did_spill()`/
+  `.with_original_code()`) and add a `_` arm to any exhaustive match — future
+  variants/fields won't break you.
 
 ### Fixed
 - **README install instructions pointed at a crate that doesn't exist.**
@@ -94,6 +102,12 @@ breaking entries are marked **BREAKING**.
   a model reads as "not found". `-r` now governs only how *directories* expand:
   files are searched directly, directories walked, and a mixed `grep -r p file
   dir` operand list does both.
+- **`ToolResult` no longer drops `did_spill`/`original_code` crossing the
+  backend seam** (GH #93 item 3). `ExecResult` already tracked whether the
+  output limiter capped a result and its pre-spill exit code; `ToolResult` had
+  neither field, so a backend-registered tool's (kaijutsu, an MCP engine)
+  capped result silently looked uncapped by the time it reached the kernel, in
+  both `ExecResult`↔`ToolResult` directions. Both fields now round-trip intact.
 
 ## [0.11.0] - 2026-07-04
 
