@@ -84,9 +84,11 @@ breaking entries are marked **BREAKING**.
   corrupts the value** (GH #93 item 5). `${UNSET:-"hello \"world\""}` used to
   toggle quote-tracking state on the escaped inner `"` (any `"`/`'` flipped
   state regardless of a preceding `\`), mangling the default to `hello
-  \world\`. Escaped quotes now unescape to a literal quote character without
-  toggling state, matching bash's double-quote escape rule; kaish extends the
-  same rule to single-quoted default words for symmetry.
+  \world\`. Outside single quotes, an escaped quote now unescapes to a literal
+  quote character without toggling state — matching bash's double-quote escape
+  rule and the `'it'\''s'` → `it's` embedding idiom. Single-quoted default
+  words remain a fully literal region (zero escape processing, zero
+  interpolation), per shell rules.
 
 ## [0.11.0] - 2026-07-04
 

@@ -46,21 +46,44 @@ the reported quote-toggle bug, not a full escape-processing rewrite. Recorded
 as a known gap in the PR body rather than filed as a separate issue — it's a
 narrow, pre-existing limitation, not a regression.
 
-The single-quote case forced a judgment call. Real bash has *no* escape
-mechanism inside single quotes at all — `${NAME:-'hello \'world\''}` is a
-syntax error in bash (verified: unterminated quote), not a way to embed an
-apostrophe. kaish extends the same escape rule to single-quoted default words
-anyway, symmetric with the double-quoted fix, since the alternative (bash's
-actual behavior) isn't a coherent target to match. Recorded as an explicit,
-documented `shell_compat!` divergence (`kaish_eq`/`bash_eq` pair) rather than
-silently diverging.
+The single-quote case forced a judgment call, and the *first* answer was
+wrong. The initial pass extended the same backslash-escape rule *into*
+single-quoted default words "for symmetry," reasoning that real bash's
+behavior there (`'hello \'world\''` is a syntax error — unterminated quote —
+not an embedded apostrophe) wasn't a coherent target to match. Amy overruled
+it on review, and correctly: single quotes are a *literal* region in shell,
+full stop. A model relying on shell muscle memory must get **zero** surprises
+inside `'…'` — zero interpolation, zero escape processing. A backslash there
+is a literal byte and a `'` always closes the span; it is never escaped. The
+"symmetry" argument was inventing a dialect where the whole point is fidelity
+to shell's literal-region contract.
 
-Four new `shell_compat!` cases in `shell_compat_tests.rs` (double-quoted
-escaped quotes, the single-quote divergence, an escaped-backslash-before-quote
-parity case, and a mixed single/double case), all confirmed failing against
-the pre-fix code before the fix landed, and passing after — including under
-`KAISH_BASH_COMPAT=1` against real bash for the three cases where bash and
-kaish agree.
+So the escape logic is gated to fire only *outside* single quotes (`if ch ==
+'\\' && !in_single`). Nothing is actually lost: the shell-correct way to embed
+a single quote is the `'…'\''…'` idiom — close the span, emit an **unquoted**
+escaped `\'`, reopen — and that unquoted escape still works (it's the same
+code path as the double-quote fix, just outside any quote). `${X:-'it'\''s'}`
+→ `it's`, matching bash exactly. The one behavior that stays inside single
+quotes is the pre-existing `$` → `__KAISH_ESCAPED_DOLLAR__` marking, which is
+what *implements* "zero interpolation" — it isn't escape processing, it's
+suppression.
+
+The delimiter-stripping itself (`${X:-'x'}` → `x`) was double-checked and is
+correct — that's the function's whole purpose, the quotes are syntax not data.
+Only the escape-processing-inside-single-quotes overreach was the bug.
+
+Tests in `shell_compat_tests.rs`: the double-quote fix is pinned by
+`default_word_double_quoted_escaped_quotes_literal`,
+`default_word_escaped_backslash_before_quote` (the `"a\\"` → `a\` parity
+case), and `default_word_mixed_single_and_escaped_double_quotes`. The
+shell-literal single-quote contract is pinned by four cases:
+`…_strips_delimiters` (`'x'` → `x`), `…_no_interpolation` (`'$HOME'` →
+`$HOME`), `…_backslash_literal` (`'a\b'` → `a\b`, backslash NOT collapsed),
+and `…_embed_idiom` (`'it'\''s'` → `it's`). All double-quote cases were
+confirmed failing against the pre-fix code; every case — single- and
+double-quoted alike — now passes under `KAISH_BASH_COMPAT=1` against real
+bash, with no recorded divergence, because the shell-literal rule *is* bash's
+rule.
 
 ## Interpreter allocation/stack pass (2026-07-05, GH #48)
 

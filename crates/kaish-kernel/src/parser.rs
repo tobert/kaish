@@ -62,18 +62,23 @@ fn parse_var_expr(raw: &str) -> Expr {
 /// `__KAISH_ESCAPED_DOLLAR__` marker that `parse_interpolated_string` turns
 /// back into a bare `$`). Unquoted text passes through unchanged.
 ///
-/// A backslash-escaped quote (`\"` or `\'`) is literal data: it must not
-/// toggle the quote-tracking state, and unescapes to a bare quote character
-/// in the output — matching bash's double-quote escape rule (GH #93 item 5).
-/// kaish extends the same rule to single-quoted words for symmetry, which is
-/// a deliberate divergence: bash has no escape mechanism inside single quotes
-/// at all. A run of backslashes immediately before a quote is judged by
-/// parity (bash pairs them left-to-right): an odd run escapes the quote,
-/// an even run doesn't, and either way the run collapses to half as many
-/// literal backslashes. Backslashes not immediately followed by a quote are
-/// untouched — general backslash-escape processing (`\\`, `\n`, ...) outside
-/// quote-adjacency stays out of scope for this function, unchanged from
-/// before this fix.
+/// A backslash-escaped quote (`\"` or `\'`) OUTSIDE a single-quoted region is
+/// literal data: it does not toggle the quote-tracking state and unescapes to
+/// a bare quote character — matching bash's double-quote escape rule and the
+/// unquoted `'it'\''s'` → `it's` embedding idiom (GH #93 item 5). A run of
+/// backslashes immediately before a quote is judged by parity (bash pairs them
+/// left-to-right): an odd run escapes the quote, an even run doesn't, and
+/// either way the run collapses to half as many literal backslashes.
+/// Backslashes not immediately followed by a quote are untouched — general
+/// backslash-escape processing (`\\`, `\n`, ...) outside quote-adjacency is
+/// out of scope for this function.
+///
+/// Inside a single-quoted region shell rules apply verbatim: it is a LITERAL
+/// span with zero escape processing and zero interpolation. A backslash is a
+/// literal character and a `'` always closes the region (it is never escaped);
+/// only `$` is marked (`__KAISH_ESCAPED_DOLLAR__`) so it can't interpolate
+/// downstream. Only the delimiter quotes themselves are stripped — they are
+/// syntax, not data.
 fn unquote_default_word(word: &str) -> String {
     let mut out = String::with_capacity(word.len());
     let mut in_single = false;
@@ -82,7 +87,10 @@ fn unquote_default_word(word: &str) -> String {
     let mut i = 0;
     while i < chars.len() {
         let ch = chars[i];
-        if ch == '\\' {
+        // Backslash-escape processing applies only OUTSIDE single quotes. In a
+        // single-quoted region a backslash is a literal character (handled by
+        // the `_` arm below) and a `'` always closes the span, per shell rules.
+        if ch == '\\' && !in_single {
             let run_start = i;
             while i < chars.len() && chars[i] == '\\' {
                 i += 1;

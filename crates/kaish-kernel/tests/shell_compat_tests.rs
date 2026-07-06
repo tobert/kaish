@@ -642,27 +642,15 @@ shell_compat! {
     eq: "actual",
 }
 
-// `${VAR:-default}` default-word ESCAPED quotes (GH #93 item 5). A
-// backslash-escaped quote inside the default word must not toggle the
-// quote-tracking state — it's literal data, unescaping to a bare quote
-// character, exactly like bash's double-quote escape rule.
+// `${VAR:-default}` default-word ESCAPED quotes inside DOUBLE quotes (GH #93
+// item 5). A backslash-escaped quote inside a double-quoted default word must
+// not toggle the quote-tracking state — it's literal data, unescaping to a
+// bare quote character, exactly like bash's double-quote escape rule.
 
 shell_compat! {
     name: default_word_double_quoted_escaped_quotes_literal,
     script: r#"echo ${NAME:-"hello \"world\""}"#,
     eq: "hello \"world\"",
-}
-
-// kaish divergence (documented): kaish deliberately extends the same
-// backslash-escape rule to single-quoted default words for symmetry with the
-// double-quoted case above. Real bash has no escape mechanism inside single
-// quotes at all — a `\'` there ends the quoted string, so the equivalent
-// bash script is a syntax error (unterminated quote), never reaching stdout.
-shell_compat! {
-    name: default_word_single_quoted_escaped_quotes_literal,
-    script: r#"echo ${NAME:-'hello \'world\''}"#,
-    kaish_eq: "hello 'world'",
-    bash_eq: "",
 }
 
 shell_compat! {
@@ -675,6 +663,38 @@ shell_compat! {
     name: default_word_mixed_single_and_escaped_double_quotes,
     script: r#"echo ${NAME:-"it's \"quoted\""}"#,
     eq: "it's \"quoted\"",
+}
+
+// Single-quoted default words are a LITERAL region, per shell rules: zero
+// interpolation AND zero escape processing. Only the delimiter quotes are
+// stripped (syntax, not data); a backslash stays literal and a `'` always
+// closes the region — it is never escaped.
+
+shell_compat! {
+    name: default_word_single_quoted_strips_delimiters,
+    script: "echo ${NAME:-'x'}",
+    eq: "x",
+}
+
+shell_compat! {
+    name: default_word_single_quoted_no_interpolation,
+    script: "echo ${NAME:-'$HOME'}",
+    eq: "$HOME",
+}
+
+shell_compat! {
+    name: default_word_single_quoted_backslash_literal,
+    script: r#"echo ${NAME:-'a\b'}"#,
+    eq: "a\\b",
+}
+
+// The shell-correct way to embed a single quote is the `'…'\''…'` idiom:
+// close the single-quoted span, emit an UNQUOTED escaped `\'`, reopen. The
+// escape fires only outside single quotes — which this fix keeps working.
+shell_compat! {
+    name: default_word_single_quote_embed_idiom,
+    script: r#"echo ${NAME:-'it'\''s'}"#,
+    eq: "it's",
 }
 
 // =============================================================================
