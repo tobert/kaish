@@ -100,11 +100,12 @@ breaking entries are marked **BREAKING**.
   corrupts the value** (GH #93 item 5). `${UNSET:-"hello \"world\""}` used to
   toggle quote-tracking state on the escaped inner `"` (any `"`/`'` flipped
   state regardless of a preceding `\`), mangling the default to `hello
-  \world\`. Outside single quotes, an escaped quote now unescapes to a literal
-  quote character without toggling state — matching bash's double-quote escape
-  rule and the `'it'\''s'` → `it's` embedding idiom. Single-quoted default
-  words remain a fully literal region (zero escape processing, zero
-  interpolation), per shell rules.
+  \world\`. Escape handling now tracks context, matching bash: outside any
+  quotes both `\"` and `\'` unescape (so the `'it'\''s'` → `it's` embedding
+  idiom resolves); inside double quotes only `\"` unescapes while `\'` stays
+  literal (`"a\'b"` → `a\'b`, since `'` is an ordinary character there); and
+  single-quoted default words remain a fully literal region (zero escape
+  processing, zero interpolation).
 - **`ToolResult` no longer drops `did_spill`/`original_code` crossing the
   backend seam** (GH #93 item 3). `ExecResult` already tracked whether the
   output limiter capped a result and its pre-spill exit code; `ToolResult` had

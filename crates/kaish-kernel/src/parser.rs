@@ -62,16 +62,18 @@ fn parse_var_expr(raw: &str) -> Expr {
 /// `__KAISH_ESCAPED_DOLLAR__` marker that `parse_interpolated_string` turns
 /// back into a bare `$`). Unquoted text passes through unchanged.
 ///
-/// A backslash-escaped quote (`\"` or `\'`) OUTSIDE a single-quoted region is
-/// literal data: it does not toggle the quote-tracking state and unescapes to
-/// a bare quote character — matching bash's double-quote escape rule and the
-/// unquoted `'it'\''s'` → `it's` embedding idiom (GH #93 item 5). A run of
-/// backslashes immediately before a quote is judged by parity (bash pairs them
-/// left-to-right): an odd run escapes the quote, an even run doesn't, and
-/// either way the run collapses to half as many literal backslashes.
-/// Backslashes not immediately followed by a quote are untouched — general
-/// backslash-escape processing (`\\`, `\n`, ...) outside quote-adjacency is
-/// out of scope for this function.
+/// A backslash-escaped quote unescapes to a bare quote character without
+/// toggling the quote-tracking state, but *which* quote is escapable depends on
+/// context, matching bash (GH #93 item 5): OUTSIDE any quotes both `\"` and
+/// `\'` escape (this is what makes the `'it'\''s'` → `it's` embedding idiom
+/// resolve); INSIDE double quotes only `\"` escapes, since `'` is an ordinary
+/// character there — a backslash before it stays literal (`"a\'b"` → `a\'b`). A
+/// run of backslashes immediately before an escapable quote is judged by parity
+/// (bash pairs them left-to-right): an odd run escapes the quote, an even run
+/// doesn't, and either way the run collapses to half as many literal
+/// backslashes. Backslashes not immediately followed by an escapable quote are
+/// untouched — general backslash-escape processing (`\\`, `\n`, ...) outside
+/// quote-adjacency is out of scope for this function.
 ///
 /// Inside a single-quoted region shell rules apply verbatim: it is a LITERAL
 /// span with zero escape processing and zero interpolation. A backslash is a
@@ -96,7 +98,10 @@ fn unquote_default_word(word: &str) -> String {
                 i += 1;
             }
             let run_len = i - run_start;
-            let next_is_quote = chars.get(i).is_some_and(|c| *c == '"' || *c == '\'');
+            // Inside double quotes only `\"` escapes; `'` is an ordinary
+            // character there, so a preceding backslash stays literal.
+            let next_is_quote =
+                chars.get(i).is_some_and(|c| *c == '"' || (*c == '\'' && !in_double));
             if next_is_quote {
                 if run_len / 2 > 0 {
                     out.push_str(&"\\".repeat(run_len / 2));

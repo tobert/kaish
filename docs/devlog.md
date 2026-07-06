@@ -72,18 +72,30 @@ The delimiter-stripping itself (`${X:-'x'}` → `x`) was double-checked and is
 correct — that's the function's whole purpose, the quotes are syntax not data.
 Only the escape-processing-inside-single-quotes overreach was the bug.
 
+A third round, from a kaibo review of the revision, caught a subtler
+context bug: the escape predicate treated `'` and `"` identically, gated only
+on `!in_single`. So inside a *double*-quoted region a `\'` still escaped —
+`${X:-"a\'b"}` came out `a'b`. Bash disagrees: inside `"…"` a `'` is an
+ordinary character, and only `\"`, `\$`, `\\`, `` \` `` are escapes, so the
+backslash before `'` is literal and bash yields `a\'b` (verified against real
+bash). The fix is a one-line narrowing of the predicate — a `'` only counts as
+escapable when *not* `in_double` — so unquoted `\'` still powers the
+`'it'\''s'` idiom, double-quoted `\'` stays literal, and single-quoted regions
+(already fully literal) are untouched.
+
 Tests in `shell_compat_tests.rs`: the double-quote fix is pinned by
 `default_word_double_quoted_escaped_quotes_literal`,
 `default_word_escaped_backslash_before_quote` (the `"a\\"` → `a\` parity
-case), and `default_word_mixed_single_and_escaped_double_quotes`. The
+case), `default_word_mixed_single_and_escaped_double_quotes`, and
+`default_word_double_quoted_backslash_before_squote_literal` (the kaibo-caught
+`"a\'b"` → `a\'b` case, confirmed red as `a'b` before the predicate fix). The
 shell-literal single-quote contract is pinned by four cases:
 `…_strips_delimiters` (`'x'` → `x`), `…_no_interpolation` (`'$HOME'` →
 `$HOME`), `…_backslash_literal` (`'a\b'` → `a\b`, backslash NOT collapsed),
-and `…_embed_idiom` (`'it'\''s'` → `it's`). All double-quote cases were
+and `…_embed_idiom` (`'it'\''s'` → `it's`). All the newly-fixed cases were
 confirmed failing against the pre-fix code; every case — single- and
 double-quoted alike — now passes under `KAISH_BASH_COMPAT=1` against real
-bash, with no recorded divergence, because the shell-literal rule *is* bash's
-rule.
+bash, with no recorded divergence, because the shell rule *is* bash's rule.
 
 ## `jq -s` stops being a no-op on the `.data` path (2026-07-06, GH #93 item 2)
 

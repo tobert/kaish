@@ -665,6 +665,16 @@ shell_compat! {
     eq: "it's \"quoted\"",
 }
 
+// Inside DOUBLE quotes, `'` is not special, so a backslash before it is
+// literal — only `\"`, `\$`, `\\`, `` \` `` are escapes in a double-quoted
+// region. `${VAR:-"a\'b"}` therefore keeps the backslash (`a\'b`), matching
+// bash (kaibo-caught divergence: the escape used to also fire on `\'` here).
+shell_compat! {
+    name: default_word_double_quoted_backslash_before_squote_literal,
+    script: r#"echo ${NAME:-"a\'b"}"#,
+    eq: "a\\'b",
+}
+
 // Single-quoted default words are a LITERAL region, per shell rules: zero
 // interpolation AND zero escape processing. Only the delimiter quotes are
 // stripped (syntax, not data); a backslash stays literal and a `'` always
