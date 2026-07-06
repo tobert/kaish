@@ -617,14 +617,10 @@ impl JobManager {
             .map(|job| {
                 let status = job.status();
                 let latch = job.latch();
-                JobInfo {
-                    id: job.id,
-                    command: job.command.clone(),
-                    status,
-                    output_file: job.output_file.clone(),
-                    pid: job.pid,
-                    latch,
-                }
+                JobInfo::new(job.id, job.command.clone(), status)
+                    .with_output_file(job.output_file.clone())
+                    .with_pid(job.pid)
+                    .with_latch(latch)
             })
             .collect()
     }
@@ -666,14 +662,10 @@ impl JobManager {
         jobs.get_mut(&id).map(|job| {
             let status = job.status();
             let latch = job.latch();
-            JobInfo {
-                id: job.id,
-                command: job.command.clone(),
-                status,
-                output_file: job.output_file.clone(),
-                pid: job.pid,
-                latch,
-            }
+            JobInfo::new(job.id, job.command.clone(), status)
+                .with_output_file(job.output_file.clone())
+                .with_pid(job.pid)
+                .with_latch(latch)
         })
     }
 
