@@ -14,6 +14,34 @@ before it ships.
 
 ---
 
+## `jq -s` stops being a no-op on the `.data` path (2026-07-06, GH #93 item 2)
+
+Real `jq -s`/`--slurp` has one law: wrap the inputs in an array, always —
+even a single document (`printf '{"a":1}' | jq -s length` is `1`, the array
+length, not the object's key count). kaish's `jq` already got that right on
+the text path (GH #80 landed real slurp framing there). But the structured
+`.data` shortcut — the fast path used when an upstream stage like `fromjson`
+or scatter/gather already handed over a parsed value instead of raw stdin
+text — treated `-s` as a no-op, reasoning that "the pipeline is already
+slurped." That reasoning doesn't hold: `.data` carries exactly *one*
+document, the same as reading one document off stdin, and real jq wraps a
+single document too. The divergence was silent and easy to miss because it
+only shows up on scalar/record `.data` (an array `.data` piped through
+`-s length` gives a plausible-looking wrong answer instead of an error).
+
+The fix is a three-line change in `resolve_stdin_json`: wrap the `.data`
+value in a one-element JSON array when `slurp` is set, same as the text path
+already does. `docs/LANGUAGE.md`'s slurp section and the `JqArgs::slurp` doc
+comment both asserted the old no-op behavior as intentional — both corrected
+to describe the wrap. TDD: the existing `jq_slurp_is_a_noop_on_the_data_path`
+test encoded the old (wrong) behavior as a passing assertion; it now fails
+red against the fix and was rewritten in place as
+`jq_slurp_wraps_the_data_path_value_in_an_array_of_one` plus two new
+guard tests — one confirming an array-shaped `.data` value still gets one
+more layer of wrapping (not passed through as "already an array"), and one
+confirming plain `jq` (no `-s`) on the `.data` path is untouched. Full suite
+and `clippy --all-targets` both clean.
+
 ## Interpreter allocation/stack pass (2026-07-05, GH #48)
 
 #46/#47 landed a recursion depth guard sized against a measured ~380 KB of

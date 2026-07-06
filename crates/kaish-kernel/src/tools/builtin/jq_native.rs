@@ -57,7 +57,9 @@ struct JqArgs {
     /// Slurp mode (-s): read the whole input as a document stream and wrap
     /// it in one array — always, even for a single document (real jq
     /// semantics; see module docs "jq — stays one-document, gets louder").
-    /// A no-op on the `.data` path, where the pipeline is already slurped.
+    /// On the `.data` path the upstream stage already handed over one
+    /// structured value, so there's exactly one "document" to wrap —
+    /// `-s` still wraps it in a one-element array, matching real jq.
     #[arg(short = 's', long = "slurp")]
     slurp: bool,
 
@@ -756,9 +758,18 @@ fn jsonl_hint_for_trailing_error(text: &str, err: &serde_json::Error) -> Option<
 async fn resolve_stdin_json(ctx: &mut ExecContext, slurp: bool) -> Result<serde_json::Value, (i64, String)> {
     let (data, text) = ctx.resolve_stdin().await.map_err(|e| (2, format!("jq: {e}")))?;
     if let Some(data) = data {
-        // `.data` path: `-s` is a no-op — the upstream stage (scatter/gather,
-        // fromjson, …) already handed over one structured value.
-        return Ok(ast_value_to_json(&data));
+        // `.data` path: the upstream stage (scatter/gather, fromjson, …)
+        // already handed over one structured value — that's the single
+        // "document" real jq would have read. `-s`/`--slurp` still wraps it
+        // in a one-element array, exactly like `jq -s` always wraps its
+        // input regardless of document count (see GH #93 item 2 — a bare
+        // pass-through here was a kaish-only divergence from real jq).
+        let json = ast_value_to_json(&data);
+        return Ok(if slurp {
+            serde_json::Value::Array(vec![json])
+        } else {
+            json
+        });
     }
     if text.is_empty() {
         return if slurp {

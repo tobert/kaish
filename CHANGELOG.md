@@ -61,6 +61,14 @@ breaking entries are marked **BREAKING**.
   assignment/mutation of the public field needs `.into()`.
 
 ### Fixed
+- **`jq -s`/`--slurp` now wraps the `.data` pipeline path in an array-of-one,
+  matching real jq** (GH #93 item 2). Real `jq -s` always wraps its input in
+  an array, even a single document. On kaish's structured `.data` shortcut
+  (a scalar or record handed over by an upstream stage like `fromjson`),
+  `-s` was a no-op, so `<produces scalar .data> | jq -s length` diverged from
+  real jq. It now wraps the incoming value in a one-element array before
+  applying the filter, same as the text path; plain `jq` (no `-s`) on the
+  `.data` path is unchanged.
 - **Deep recursion no longer crashes the process** (GH #46). `f() { f; }; f`,
   mutual recursion, and deeply nested `$(...)` aborted with a bare stack
   overflow; they now hit the depth guard above and fail loudly.

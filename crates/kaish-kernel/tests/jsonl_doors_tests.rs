@@ -274,16 +274,51 @@ async fn jq_slurp_handles_pretty_printed_multi_doc_stream() {
 }
 
 #[tokio::test]
-async fn jq_slurp_is_a_noop_on_the_data_path() {
-    // `.data` from an upstream builtin is already one structured value —
-    // `-s` must not double-wrap it.
+async fn jq_slurp_wraps_the_data_path_value_in_an_array_of_one() {
+    // GH #93 item 2: `.data` from an upstream builtin is already one
+    // structured value (the single "document" real jq would have read from
+    // stdin) — `-s` must still wrap *that* value in a one-element array,
+    // exactly like the text path always wraps, rather than passing it
+    // through untouched. A bare array happens to make `length` ambiguous
+    // between "no-op" and "wrap" (both a 3-element array and a 1-element
+    // array-of-that-array give different answers), so use a scalar `.data`
+    // where the two behaviors are unmistakably different.
     let k = setup().await;
     // fromjson's own ExecResult carries `.data` through the pipe sideband
     // (unlike `echo $var`, which only renders text) — the same mechanism
     // scatter/gather's rows ride.
+    let (out, code, err) = run(&k, r#"fromjson '42' | jq -s 'length'"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "1", "a no-op would error (scalar has no length); wrap gives array length 1");
+
+    let (out, code, err) = run(&k, r#"fromjson '42' | jq -sc '.[0]'"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "42", ".[0] unwraps back to the original scalar");
+}
+
+#[tokio::test]
+async fn jq_slurp_still_wraps_an_array_shaped_data_value() {
+    // Same law, but the `.data` value is itself an array: `-s` wraps it one
+    // more level (`[1,2,3]` → `[[1,2,3]]`), it does not pass the array
+    // through as if already slurped.
+    let k = setup().await;
     let (out, code, err) = run(&k, r#"fromjson '[1,2,3]' | jq -sc 'length'"#).await;
     assert_eq!(code, 0, "err: {err}");
-    assert_eq!(out, "3", "-s is a no-op on .data: length is the array's, not [array]'s (1)");
+    assert_eq!(out, "1", "wrapped: outer array has one element (the inner array)");
+
+    let (out, code, err) = run(&k, r#"fromjson '[1,2,3]' | jq -sc '.[0]'"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "[1,2,3]", ".[0] unwraps back to the original array");
+}
+
+#[tokio::test]
+async fn jq_slurp_on_the_data_path_does_not_affect_plain_jq() {
+    // Guard: bare `jq` (no `-s`) on the `.data` path is untouched by this
+    // fix — only the `-s`/`--slurp` branch changed.
+    let k = setup().await;
+    let (out, code, err) = run(&k, r#"fromjson '[1,2,3]' | jq 'length'"#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "3", "plain jq still sees the array directly, unwrapped");
 }
 
 #[tokio::test]
