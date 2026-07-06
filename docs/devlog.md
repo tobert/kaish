@@ -14,6 +14,54 @@ before it ships.
 
 ---
 
+## Escaped quotes in `${VAR:-default}` (2026-07-06, GH #93 item 5)
+
+Item 5 of #93's punch list: `unquote_default_word` (the function that strips
+the syntactic quotes off a `${VAR:-"default"}` word before it's parsed for
+interpolation) toggled its `in_single`/`in_double` state on *every* `"`/`'` it
+saw, with no notion of a preceding backslash. So `${UNSET:-"hello
+\"world\""}` — a double-quoted default containing an escaped inner quote —
+had its second `"` prematurely close the quoted region, and the value came
+out as `hello \world\` instead of `hello "world"`.
+
+The fix needed to answer a harder question than "skip escaped quotes": what
+does a *run* of backslashes immediately before a quote mean? Bash's actual
+rule (verified empirically against real bash, not from memory) pairs
+backslashes left-to-right — an even run collapses to half as many literal
+backslashes and leaves the quote as a real, state-toggling delimiter; an odd
+run does the same collapse and additionally escapes the quote (literal
+character, no toggle). A naive one-token lookahead gets this wrong on 2+
+backslash runs (`"a\\"` → `a\` in real bash; a lookahead that treats each
+backslash independently would misjudge the second backslash as escaping the
+closing quote instead of pairing with the first). The fix buffers the
+contiguous backslash run and decides once it hits the terminating character.
+
+Backslashes *not* adjacent to a quote were left untouched on purpose — real
+bash also collapses `\\` inside double quotes when it's followed by an
+ordinary character (verified: `"foo\\bar"` → `foo\bar` in bash), but
+`unquote_default_word` never did general backslash-escape processing before
+this fix (confirmed by reading `parse_interpolated_string`, its downstream
+consumer, which has no backslash handling at all), and this PR is scoped to
+the reported quote-toggle bug, not a full escape-processing rewrite. Recorded
+as a known gap in the PR body rather than filed as a separate issue — it's a
+narrow, pre-existing limitation, not a regression.
+
+The single-quote case forced a judgment call. Real bash has *no* escape
+mechanism inside single quotes at all — `${NAME:-'hello \'world\''}` is a
+syntax error in bash (verified: unterminated quote), not a way to embed an
+apostrophe. kaish extends the same escape rule to single-quoted default words
+anyway, symmetric with the double-quoted fix, since the alternative (bash's
+actual behavior) isn't a coherent target to match. Recorded as an explicit,
+documented `shell_compat!` divergence (`kaish_eq`/`bash_eq` pair) rather than
+silently diverging.
+
+Four new `shell_compat!` cases in `shell_compat_tests.rs` (double-quoted
+escaped quotes, the single-quote divergence, an escaped-backslash-before-quote
+parity case, and a mixed single/double case), all confirmed failing against
+the pre-fix code before the fix landed, and passing after — including under
+`KAISH_BASH_COMPAT=1` against real bash for the three cases where bash and
+kaish agree.
+
 ## Interpreter allocation/stack pass (2026-07-05, GH #48)
 
 #46/#47 landed a recursion depth guard sized against a measured ~380 KB of

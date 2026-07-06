@@ -80,6 +80,13 @@ breaking entries are marked **BREAKING**.
   a model reads as "not found". `-r` now governs only how *directories* expand:
   files are searched directly, directories walked, and a mixed `grep -r p file
   dir` operand list does both.
+- **A backslash-escaped quote in a `${VAR:-default}` default word no longer
+  corrupts the value** (GH #93 item 5). `${UNSET:-"hello \"world\""}` used to
+  toggle quote-tracking state on the escaped inner `"` (any `"`/`'` flipped
+  state regardless of a preceding `\`), mangling the default to `hello
+  \world\`. Escaped quotes now unescape to a literal quote character without
+  toggling state, matching bash's double-quote escape rule; kaish extends the
+  same rule to single-quoted default words for symmetry.
 
 ## [0.11.0] - 2026-07-04
 

@@ -642,6 +642,41 @@ shell_compat! {
     eq: "actual",
 }
 
+// `${VAR:-default}` default-word ESCAPED quotes (GH #93 item 5). A
+// backslash-escaped quote inside the default word must not toggle the
+// quote-tracking state — it's literal data, unescaping to a bare quote
+// character, exactly like bash's double-quote escape rule.
+
+shell_compat! {
+    name: default_word_double_quoted_escaped_quotes_literal,
+    script: r#"echo ${NAME:-"hello \"world\""}"#,
+    eq: "hello \"world\"",
+}
+
+// kaish divergence (documented): kaish deliberately extends the same
+// backslash-escape rule to single-quoted default words for symmetry with the
+// double-quoted case above. Real bash has no escape mechanism inside single
+// quotes at all — a `\'` there ends the quoted string, so the equivalent
+// bash script is a syntax error (unterminated quote), never reaching stdout.
+shell_compat! {
+    name: default_word_single_quoted_escaped_quotes_literal,
+    script: r#"echo ${NAME:-'hello \'world\''}"#,
+    kaish_eq: "hello 'world'",
+    bash_eq: "",
+}
+
+shell_compat! {
+    name: default_word_escaped_backslash_before_quote,
+    script: r#"echo ${NAME:-"a\\"}"#,
+    eq: "a\\",
+}
+
+shell_compat! {
+    name: default_word_mixed_single_and_escaped_double_quotes,
+    script: r#"echo ${NAME:-"it's \"quoted\""}"#,
+    eq: "it's \"quoted\"",
+}
+
 // =============================================================================
 // `break N` / `continue N` must not discard output printed before the signal.
 // The signal used to replace the loop's accumulated result on its way up, so
