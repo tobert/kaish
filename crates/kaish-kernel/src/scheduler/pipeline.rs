@@ -1720,6 +1720,88 @@ mod tests {
         assert_eq!(call_count.load(Ordering::SeqCst), 3, "call_tool should be invoked for each command");
     }
 
+    /// GH #93 item 4: the test-only `BackendDispatcher` used to hand-roll the
+    /// `ToolResult` -> `ExecResult` conversion (wrapping `data` unconditionally
+    /// as `Value::Json`), diverging from the production path in kernel.rs,
+    /// which goes through `ExecResult::from(tool_result)` and unwraps JSON
+    /// scalars into native `Value` variants via `json_to_value_no_envelope`.
+    /// A scalar `data` payload is where the two paths visibly disagreed.
+    #[tokio::test]
+    async fn backend_dispatcher_scalar_data_matches_production_unwrap() {
+        use crate::backend::testing::MockBackend;
+        use crate::backend::ToolResult;
+
+        let (mock, _calls) = MockBackend::new();
+        let backend = mock.with_tool_result(|_name| Ok(ToolResult::with_data("", serde_json::json!(42))));
+        let backend: Arc<dyn crate::backend::KernelBackend> = Arc::new(backend);
+        let mut ctx = ExecContext::with_backend(backend);
+
+        let dispatcher = BackendDispatcher::new(Arc::new(ToolRegistry::new()));
+        let cmd = make_cmd("embedder_tool", vec![]);
+
+        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+        assert_eq!(
+            result.data,
+            Some(Value::Int(42)),
+            "a scalar ToolResult.data must unwrap to a native Value, matching \
+             the production From<ToolResult> path — not stay Value::Json(42)"
+        );
+    }
+
+    /// Companion to the scalar test above: an object shaped like the binary
+    /// byte-envelope must stay a plain structured record (`Value::Json`), not
+    /// get auto-decoded into `Value::Bytes`. Pins the same guarantee
+    /// `json_to_value_no_envelope` gives the production path, now that the
+    /// test dispatcher shares that exact conversion.
+    #[tokio::test]
+    async fn backend_dispatcher_envelope_shaped_data_stays_structured() {
+        use crate::backend::testing::MockBackend;
+        use crate::backend::ToolResult;
+
+        let envelope = kaish_types::bytes_to_envelope(&[1u8, 2, 3]);
+        let (mock, _calls) = MockBackend::new();
+        let backend = mock.with_tool_result(move |_name| Ok(ToolResult::with_data("", envelope.clone())));
+        let backend: Arc<dyn crate::backend::KernelBackend> = Arc::new(backend);
+        let mut ctx = ExecContext::with_backend(backend);
+
+        let dispatcher = BackendDispatcher::new(Arc::new(ToolRegistry::new()));
+        let cmd = make_cmd("embedder_tool", vec![]);
+
+        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+        assert!(
+            matches!(result.data, Some(Value::Json(_))),
+            "envelope-shaped external data must stay structured, not silently \
+             decode to Value::Bytes: got {:?}",
+            result.data
+        );
+    }
+
+    /// GH #93 item 3: `did_spill`/`original_code` must survive the
+    /// ToolResult <-> ExecResult seam. The old hand-rolled conversion in the
+    /// test dispatcher never touched either field, so a capped backend-tool
+    /// result silently looked uncapped by the time it reached the kernel.
+    #[tokio::test]
+    async fn backend_dispatcher_preserves_did_spill_and_original_code() {
+        use crate::backend::testing::MockBackend;
+        use crate::backend::ToolResult;
+
+        let (mock, _calls) = MockBackend::new();
+        let backend = mock.with_tool_result(|_name| {
+            Ok(ToolResult::success("truncated...")
+                .with_did_spill(true)
+                .with_original_code(Some(0)))
+        });
+        let backend: Arc<dyn crate::backend::KernelBackend> = Arc::new(backend);
+        let mut ctx = ExecContext::with_backend(backend);
+
+        let dispatcher = BackendDispatcher::new(Arc::new(ToolRegistry::new()));
+        let cmd = make_cmd("embedder_tool", vec![]);
+
+        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+        assert!(result.did_spill, "did_spill must survive the backend seam");
+        assert_eq!(result.original_code, Some(0), "original_code must survive the backend seam");
+    }
+
     // === Schema-Aware Argument Parsing Tests ===
 
     use crate::tools::{ParamSchema, ToolSchema};
