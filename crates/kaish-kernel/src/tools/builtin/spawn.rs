@@ -22,6 +22,7 @@ use tokio::process::Command;
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
+use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Spawn tool: runs an external command as a subprocess and captures output.
@@ -99,10 +100,12 @@ impl Tool for Spawn {
                 "spawn: external commands are disabled (allow_external_commands=false)");
         }
 
-        // Get command (required)
-        let command_name = match args.get_string("command", 0) {
-            Some(cmd) => cmd,
-            None => return ExecResult::failure(1, "spawn: command parameter required"),
+        // Get command (required). A binary value goes loud rather than
+        // silently being treated as "not given".
+        let command_name = match get_path_string(&args, "command", 0) {
+            Ok(Some(cmd)) => cmd,
+            Ok(None) => return ExecResult::failure(1, "spawn: command parameter required"),
+            Err(e) => return ExecResult::failure(1, format!("spawn: {e}")),
         };
 
         // Resolve command path (PATH lookup if not absolute)
@@ -140,8 +143,12 @@ impl Tool for Spawn {
             .map(extract_string_object)
             .unwrap_or_default();
 
-        // Get cwd (optional)
-        let cwd = args.get_string("cwd", usize::MAX);
+        // Get cwd (optional). A binary value goes loud rather than silently
+        // being treated as "no cwd override".
+        let cwd = match get_path_string(&args, "cwd", usize::MAX) {
+            Ok(c) => c,
+            Err(e) => return ExecResult::failure(1, format!("spawn: {e}")),
+        };
 
         // Get timeout (optional, in milliseconds)
         let timeout_ms: Option<u64> = args

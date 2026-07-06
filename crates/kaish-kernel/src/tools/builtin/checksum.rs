@@ -7,6 +7,7 @@ use std::path::Path;
 use digest::Digest;
 
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
+use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Checksum tool: compute or verify file hashes.
@@ -99,8 +100,21 @@ impl Tool for Checksum {
             );
         }
 
-        // Check mode: verify checksums from a file
-        if let Some(check_path) = parsed.check.clone().or_else(|| args.get_string("check", usize::MAX)) {
+        // Check mode: verify checksums from a file. Read the untouched typed
+        // value FIRST (not `parsed.check`) — clap's own field comes from
+        // `to_argv()`'s re-serialization, which is exactly the lossy
+        // stringify-to-`[binary: N bytes]` boundary this PR closes elsewhere,
+        // so checking it first would silently defeat the guard below. A
+        // binary `--check` value goes loud rather than silently falling
+        // through to ordinary hash mode (which would hash the files named as
+        // if `--check` was never passed at all — a silently wrong operation,
+        // not just a wrong path).
+        let check_path = match get_path_string(&args, "check", usize::MAX) {
+            Ok(Some(p)) => Some(p),
+            Ok(None) => parsed.check.clone(),
+            Err(e) => return ExecResult::failure(1, format!("checksum: {e}")),
+        };
+        if let Some(check_path) = check_path {
             return self.verify_checksums(ctx, &check_path, &algo).await;
         }
 

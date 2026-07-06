@@ -187,8 +187,14 @@ impl<'a> Evaluator<'a> {
                     match &sp.part {
                         StringPart::Literal(s) => asm.push_literal(s),
                         other => {
+                            // `eval_interpolated` already guards binary at
+                            // every `StringPart` arm internally (it always
+                            // returns `Value::String`), but reach for the
+                            // text-sink guard here too rather than leaning on
+                            // that non-local invariant — a heredoc body is a
+                            // text sink like any other.
                             let value = self.eval_interpolated(std::slice::from_ref(other))?;
-                            asm.push_interpolated(&value_to_string(&value));
+                            asm.push_interpolated(&value_to_text_sink(&value)?);
                         }
                     }
                 }
@@ -249,9 +255,12 @@ impl<'a> Evaluator<'a> {
                 RecordKey::Bare(s) | RecordKey::Quoted(s) => s.clone(),
                 // `{"$k": v}` — a double-quoted key resolves like any
                 // double-quoted string (issue found by the 2026-07-03 review:
-                // it used to silently create a literal "$k" key).
+                // it used to silently create a literal "$k" key). A record
+                // key is always textual, so route the assembled key through
+                // the text-sink guard rather than `value_to_string` — same
+                // reasoning as the heredoc-body push above.
                 RecordKey::Interpolated(parts) => {
-                    value_to_string(&self.eval_interpolated(parts)?)
+                    value_to_text_sink(&self.eval_interpolated(parts)?)?
                 }
             };
             let value = self.eval(&entry.value)?;
@@ -787,17 +796,36 @@ pub fn value_to_string(value: &Value) -> String {
 /// infallible form stays correct for semantic/internal uses where a stable
 /// placeholder is wanted and no data crosses a text boundary.
 pub fn value_to_text_sink(value: &Value) -> EvalResult<String> {
+    value_to_text_sink_named(value, "text")
+}
+
+/// Same as [`value_to_text_sink`], but `sink` names the specific boundary in
+/// the error message (e.g. "a path", "an exported environment variable
+/// value", "a redirect target") instead of the generic "text" — mirroring the
+/// `sink` parameter [`structured_boundary_error`] already uses for the
+/// collection-vs-process-boundary guard. Every remaining text sink that used
+/// to fall back to [`value_to_string`]'s `[binary: N bytes]` placeholder
+/// (path-coercing builtins, env export, redirect targets, …) routes through
+/// this so the error names what the binary data was actually being used as.
+pub fn value_to_text_sink_named(value: &Value, sink: &str) -> EvalResult<String> {
     match value {
         Value::Bytes(b) => match std::str::from_utf8(b) {
             Ok(s) => Ok(s.to_string()),
             Err(_) => Err(EvalError::Unsupported(format!(
-                "binary data ({} bytes) cannot be used as text — decode it \
+                "binary data ({} bytes) cannot be used as {sink} — decode it \
                  (base64/xxd) or redirect to a file",
                 b.len()
             ))),
         },
         other => Ok(value_to_string(other)),
     }
+}
+
+/// [`value_to_text_sink_named`] over a whole positional list — a builtin's
+/// path operands (`ls`/`find`/`grep`/`sed -i` file lists), going loud on the
+/// first binary element rather than collecting placeholders.
+pub fn values_to_text_sink_named(values: &[Value], sink: &str) -> EvalResult<Vec<String>> {
+    values.iter().map(|v| value_to_text_sink_named(v, sink)).collect()
 }
 
 /// Convert a Value to its boolean representation.
@@ -994,6 +1022,17 @@ pub fn values_equal(left: &Value, right: &Value) -> EvalResult<bool> {
                 other_kind = type_name(other),
             )))
         }
+        // Binary compared to a non-binary scalar: a loud type error, never the
+        // `value_to_string` fallback below — that would silently compare the
+        // OTHER side's text against the `[binary: N bytes]` placeholder rather
+        // than the value's real bytes (Decision E; the (Bytes, Bytes) arm above
+        // already took the real "compare the actual bytes" case).
+        (Value::Bytes(b), other) | (other, Value::Bytes(b)) => Err(EvalError::Unsupported(format!(
+            "binary data ({} bytes) cannot be used as an ==/!= operand against a {} — decode it \
+             first (base64/xxd), or compare two binary values directly",
+            b.len(),
+            type_name(other),
+        ))),
         // Mixed scalars (most commonly String vs Int/Float from a quoted variable
         // against a numeric literal): fall back to string equality.
         _ => Ok(value_to_string(left) == value_to_string(right)),
@@ -1012,8 +1051,12 @@ fn element_matches(needle: &Value, element: &Value) -> bool {
     match (needle, element) {
         (Value::Json(a), Value::Json(b)) => a == b,
         (Value::Json(_), _) | (_, Value::Json(_)) => false,
-        // Neither side is a collection here, so `values_equal` can't hit its
-        // collection-vs-scalar error arm — this can never actually error.
+        // Neither side is a collection here, so `values_equal`'s collection
+        // guard can't fire. Its binary-vs-scalar guard *can* (`$bin in
+        // $list` scanning past a non-binary element) — treated the same as a
+        // shape mismatch above: this element is simply "not a match," never
+        // an abort, so the whole scan doesn't die over one heterogeneous
+        // element.
         _ => values_equal(needle, element).unwrap_or(false),
     }
 }
@@ -1039,6 +1082,17 @@ fn eval_membership(needle: &Value, haystack: &Value) -> EvalResult<bool> {
             Ok(false)
         }
         Value::Json(serde_json::Value::Object(map)) => {
+            // Record keys are always strings; a binary needle has no sensible
+            // stringification into one, so it's a loud type error rather than
+            // silently looking up the `[binary: N bytes]` placeholder key
+            // (which would almost certainly — and silently — miss).
+            if let Value::Bytes(b) = needle {
+                return Err(EvalError::Unsupported(format!(
+                    "binary data ({} bytes) cannot be used as a record key for `in` — \
+                     decode it first (base64/xxd)",
+                    b.len()
+                )));
+            }
             Ok(map.contains_key(&value_to_string(needle)))
         }
         other => Err(EvalError::Unsupported(format!(
@@ -1291,6 +1345,102 @@ mod tests {
         assert_eq!(
             eval_expr(&expr, &mut scope),
             Ok(Value::String("Hello, World!".into()))
+        );
+    }
+
+    // `Expr::HereDocBody` and `Expr::RecordLiteral`'s `RecordKey::Interpolated`
+    // arm are unreachable from a real script through `kernel.execute()` — heredocs
+    // and record literals always resolve through the kernel's ASYNC evaluator in
+    // production (`kernel.rs::eval_expr_async`), which already composes through
+    // the guarded `eval_string_part[s]_async`. These two arms only fire when an
+    // embedder drives the sync `Evaluator` directly (or in these unit tests), so
+    // they're exercised here rather than through `kernel.execute()` per
+    // CLAUDE.md's "test through kernel.execute()" convention — that convention is
+    // about builtins reachable via the dispatch chain, and there is no such path
+    // to these two sync-only arms.
+
+    #[test]
+    fn eval_heredoc_body_binary_var_is_loud() {
+        let mut scope = Scope::new();
+        scope.set("B", Value::Bytes(vec![0xff, 0x00, 0xfe]));
+
+        let expr = Expr::HereDocBody {
+            parts: vec![
+                crate::ast::SpannedPart {
+                    part: StringPart::Literal("before ".into()),
+                    offset: 0,
+                    len: 0,
+                },
+                crate::ast::SpannedPart {
+                    part: StringPart::Var(VarPath::simple("B")),
+                    offset: 0,
+                    len: 0,
+                },
+            ],
+            strip_tabs: false,
+        };
+        let err = eval_expr(&expr, &mut scope).expect_err("binary in a heredoc body must be loud");
+        assert!(
+            matches!(err, EvalError::Unsupported(ref msg) if msg.contains("cannot be used as")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn eval_heredoc_body_text_var_is_unaffected() {
+        let mut scope = Scope::new();
+        scope.set("NAME", Value::String("World".into()));
+
+        let expr = Expr::HereDocBody {
+            parts: vec![
+                crate::ast::SpannedPart {
+                    part: StringPart::Literal("Hello, ".into()),
+                    offset: 0,
+                    len: 0,
+                },
+                crate::ast::SpannedPart {
+                    part: StringPart::Var(VarPath::simple("NAME")),
+                    offset: 0,
+                    len: 0,
+                },
+            ],
+            strip_tabs: false,
+        };
+        assert_eq!(
+            eval_expr(&expr, &mut scope),
+            Ok(Value::String("Hello, World".into()))
+        );
+    }
+
+    #[test]
+    fn eval_record_literal_interpolated_key_binary_var_is_loud() {
+        let mut scope = Scope::new();
+        scope.set("B", Value::Bytes(vec![0xff, 0x00, 0xfe]));
+
+        let expr = Expr::RecordLiteral(vec![RecordEntry {
+            key: RecordKey::Interpolated(vec![StringPart::Var(VarPath::simple("B"))]),
+            value: Expr::Literal(Value::Int(1)),
+        }]);
+        let err = eval_expr(&expr, &mut scope)
+            .expect_err("a binary record key must be loud, not a `[binary: N bytes]` key");
+        assert!(
+            matches!(err, EvalError::Unsupported(ref msg) if msg.contains("cannot be used as")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn eval_record_literal_interpolated_key_text_var_is_unaffected() {
+        let mut scope = Scope::new();
+        scope.set("K", Value::String("port".into()));
+
+        let expr = Expr::RecordLiteral(vec![RecordEntry {
+            key: RecordKey::Interpolated(vec![StringPart::Var(VarPath::simple("K"))]),
+            value: Expr::Literal(Value::Int(8080)),
+        }]);
+        assert_eq!(
+            eval_expr(&expr, &mut scope),
+            Ok(Value::Json(serde_json::json!({"port": 8080})))
         );
     }
 
@@ -1846,6 +1996,57 @@ mod tests {
         let a = Value::Json(serde_json::json!({"a": 1, "b": 2}));
         let b = Value::Json(serde_json::json!({"b": 2, "a": 1}));
         assert_eq!(values_equal(&a, &b), Ok(true));
+    }
+
+    // ── GH #93 item 1: binary at the remaining text sinks ──
+
+    #[test]
+    fn values_equal_bytes_vs_bytes_still_works() {
+        // The one case that legitimately compares binary: byte-for-byte.
+        assert_eq!(
+            values_equal(&Value::Bytes(vec![1, 2, 3]), &Value::Bytes(vec![1, 2, 3])),
+            Ok(true)
+        );
+        assert_eq!(
+            values_equal(&Value::Bytes(vec![1, 2, 3]), &Value::Bytes(vec![1, 2, 4])),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn values_equal_bytes_vs_scalar_is_loud() {
+        // Binary compared to ANY non-binary scalar must be a loud type error,
+        // never a silent stringify-then-compare against the `[binary: N
+        // bytes]` placeholder — order-independent, like the collection guard.
+        let bin = Value::Bytes(vec![0xff, 0x00]);
+        assert!(matches!(
+            values_equal(&bin, &Value::String("x".into())),
+            Err(EvalError::Unsupported(_))
+        ));
+        assert!(matches!(
+            values_equal(&Value::Int(1), &bin),
+            Err(EvalError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn eval_membership_bytes_needle_against_record_key_is_loud() {
+        let record = Value::Json(serde_json::json!({"k": 1}));
+        let bin = Value::Bytes(vec![0xff, 0x00]);
+        assert!(matches!(
+            eval_membership(&bin, &record),
+            Err(EvalError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn eval_membership_bytes_needle_against_list_is_not_a_match_not_an_abort() {
+        // Same "shape mismatch is just not-a-match" treatment as a nested
+        // collection element (`element_matches`) — the scan doesn't abort just
+        // because one element isn't binary.
+        let list = Value::Json(serde_json::json!(["a", "b"]));
+        let bin = Value::Bytes(vec![0xff, 0x00]);
+        assert_eq!(eval_membership(&bin, &list), Ok(false));
     }
 
     #[test]

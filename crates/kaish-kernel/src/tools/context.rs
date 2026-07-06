@@ -1008,6 +1008,12 @@ impl ExecContext {
     /// Used by file-processing builtins (cat, head, tail, wc) that accept
     /// glob patterns in their path arguments. Non-string values are converted
     /// to strings (matching shell conventions).
+    ///
+    /// A `Value::Bytes` operand goes LOUD (GH #93 item 1) rather than being
+    /// silently dropped from the list by the old catch-all — every caller here
+    /// falls back to reading stdin (or a generic "missing path" error) when the
+    /// path list comes back empty, so a binary path used to vanish into a wrong
+    /// data source instead of erroring.
     pub async fn expand_paths(&self, positional: &[Value]) -> Result<Vec<String>, String> {
         let mut paths = Vec::new();
         for arg in positional {
@@ -1015,6 +1021,9 @@ impl ExecContext {
                 Value::String(s) => s.clone(),
                 Value::Int(n) => n.to_string(),
                 Value::Float(f) => f.to_string(),
+                Value::Bytes(_) => {
+                    crate::interpreter::value_to_text_sink_named(arg, "a path").map_err(|e| e.to_string())?
+                }
                 _ => continue,
             };
             if crate::glob::contains_glob(&s) {

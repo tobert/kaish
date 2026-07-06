@@ -68,7 +68,14 @@ impl Tool for Mv {
             Some((last, rest)) if !rest.is_empty() => (rest, last),
             _ => return ExecResult::failure(1, "mv: missing file operand (need source and destination)"),
         };
-        let dest = crate::interpreter::value_to_string(dest_value);
+        let dest = match crate::interpreter::value_to_text_sink_named(dest_value, "a path") {
+            Ok(d) => d,
+            Err(e) => return ExecResult::failure(1, format!("mv: {e}")),
+        };
+        let sources = match crate::interpreter::values_to_text_sink_named(sources, "a path") {
+            Ok(s) => s,
+            Err(e) => return ExecResult::failure(1, format!("mv: {e}")),
+        };
         let dst_path = ctx.resolve_path(&dest);
 
         // Multiple sources require destination to be an existing directory.
@@ -101,7 +108,7 @@ impl Tool for Mv {
                 .map(|info| !info.is_dir())
                 .unwrap_or(false);
             if dst_is_existing_file {
-                let src_display = crate::interpreter::value_to_string(&sources[0]);
+                let src_display = &sources[0];
                 if let Err(blocked) = ctx
                     .gate_overwrites("mv", &[(dest.clone(), false)], parsed.confirm.as_deref(), |nonce, joined| {
                         format!("mv --confirm=\"{nonce}\" {src_display} {joined}")
@@ -114,9 +121,8 @@ impl Tool for Mv {
         }
 
         let mut last_err: Option<String> = None;
-        for src_value in sources {
-            let source = crate::interpreter::value_to_string(src_value);
-            let src_path = ctx.resolve_path(&source);
+        for source in &sources {
+            let src_path = ctx.resolve_path(source);
             if let Err(e) = move_path(&*ctx.backend, &src_path, &dst_path, no_clobber).await {
                 last_err = Some(format!("mv: {}: {}", source, e));
             }

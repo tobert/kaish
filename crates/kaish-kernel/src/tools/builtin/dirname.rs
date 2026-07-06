@@ -58,7 +58,10 @@ impl Tool for Dirname {
         // POSIX: `dirname a/b c/d` prints one parent per line.
         let mut output = String::new();
         for value in &args.positional {
-            let path_str = crate::interpreter::value_to_string(value);
+            let path_str = match crate::interpreter::value_to_text_sink_named(value, "a path") {
+                Ok(p) => p,
+                Err(e) => return ExecResult::failure(1, format!("dirname: {e}")),
+            };
             // POSIX: a path consisting entirely of slashes (e.g. `//`, `///`)
             // has itself as its own dirname — just like `/`. `Path::parent()`
             // returns `None` for such paths, so we special-case before using it.

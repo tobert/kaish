@@ -135,11 +135,11 @@ impl Tool for Ls {
         // into one positional per match, so a multi-element list is the norm
         // for `ls *.rs` / `ls a b c`. The old `get_string("path", 0)` read
         // only the first and silently dropped the rest.
-        let mut paths: Vec<String> = args
-            .positional
-            .iter()
-            .map(crate::interpreter::value_to_string)
-            .collect();
+        let mut paths: Vec<String> =
+            match crate::interpreter::values_to_text_sink_named(&args.positional, "a path") {
+                Ok(p) => p,
+                Err(e) => return ExecResult::failure(1, format!("ls: {e}")),
+            };
         if paths.is_empty() {
             paths.push(".".to_string());
         }

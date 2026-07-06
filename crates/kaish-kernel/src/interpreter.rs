@@ -39,7 +39,7 @@ mod result;
 mod scope;
 
 pub use control_flow::ControlFlow;
-pub use eval::{eval_expr, expand_tilde, is_collection, numeric_compare, resolve_default, resolve_length, scalar_test_operand_error, strip_leading_tabs, structured_boundary_error, structured_export_error, value_defaults_on_emptiness, values_equal, value_to_bool, value_to_exit_code, value_length, value_to_string, value_to_string_with_tilde, value_to_text_sink, EvalError, EvalResult, Evaluator, HeredocAssembler};
+pub use eval::{eval_expr, expand_tilde, is_collection, numeric_compare, resolve_default, resolve_length, scalar_test_operand_error, strip_leading_tabs, structured_boundary_error, structured_export_error, value_defaults_on_emptiness, values_equal, value_to_bool, value_to_exit_code, value_length, value_to_string, value_to_string_with_tilde, value_to_text_sink, value_to_text_sink_named, values_to_text_sink_named, EvalError, EvalResult, Evaluator, HeredocAssembler};
 pub use result::{apply_output_format, hex_dump, json_to_value, json_to_value_no_envelope, value_to_json, EntryType, ExecResult, LatchRequest, OutputData, OutputFormat, OutputNode, OutputPayload};
 pub use scope::{PathError, Scope};
 // Crate-internal: the reduced sync evaluator (scheduler/pipeline.rs) reuses the

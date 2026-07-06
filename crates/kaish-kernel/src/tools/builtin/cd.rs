@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
+use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Cd tool: change current working directory.
@@ -54,18 +55,25 @@ impl Tool for Cd {
         };
         parsed.global.apply(ctx);
 
-        let path_arg = args.get_string("path", 0).unwrap_or_else(|| {
-            // Consult the session HOME from the kernel scope only — never the
-            // host env (the kernel is hermetic). With no HOME in scope, bare
-            // `cd` falls back to `/` rather than leaking the host home dir.
-            ctx.scope
-                .get("HOME")
-                .and_then(|v| match v {
-                    Value::String(s) => Some(s.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| "/".to_string())
-        });
+        // A binary `path` operand goes loud rather than silently falling
+        // through to the "no operand" branch below (which would silently `cd`
+        // to $HOME/`/` instead of erroring on the path the user actually gave).
+        let path_arg = match get_path_string(&args, "path", 0) {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                // Consult the session HOME from the kernel scope only — never the
+                // host env (the kernel is hermetic). With no HOME in scope, bare
+                // `cd` falls back to `/` rather than leaking the host home dir.
+                ctx.scope
+                    .get("HOME")
+                    .and_then(|v| match v {
+                        Value::String(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "/".to_string())
+            }
+            Err(e) => return ExecResult::failure(1, format!("cd: {e}")),
+        };
 
         // Handle `cd -` for previous directory
         let resolved: PathBuf = if path_arg == "-" {

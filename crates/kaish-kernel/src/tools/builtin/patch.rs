@@ -17,6 +17,7 @@ use std::path::Path;
 use crate::ast::Value;
 use crate::backend::PatchOp;
 use crate::interpreter::{ExecResult, OutputData};
+use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Patch tool: applies unified diffs to files.
@@ -119,7 +120,17 @@ impl Tool for Patch {
 
         let reverse = parsed.reverse || args.has_flag("R");
         let dry_run = parsed.dry_run || args.has_flag("dry-run");
-        let explicit_file = parsed.file.clone().or_else(|| args.get_string("file", 0));
+        // Read the untouched typed value FIRST (not `parsed.file`) — clap's
+        // own field comes from `to_argv()`'s re-serialization, the same lossy
+        // stringify boundary this PR closes elsewhere, so checking it first
+        // would silently defeat the guard below. A binary `--file`/positional
+        // override goes loud rather than silently falling back to deriving
+        // target paths from the diff hunks.
+        let explicit_file = match get_path_string(&args, "file", 0) {
+            Ok(Some(f)) => Some(f),
+            Ok(None) => parsed.file.clone(),
+            Err(e) => return ExecResult::failure(1, format!("patch: {e}")),
+        };
 
         // Parse the unified diff
         let hunks = match parse_unified_diff(&patch_content) {

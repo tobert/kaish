@@ -160,7 +160,10 @@ impl Tool for Rm {
         }
         let mut decisions: Vec<Decision> = Vec::with_capacity(args.positional.len());
         for value in &args.positional {
-            let path = crate::interpreter::value_to_string(value);
+            let path = match crate::interpreter::value_to_text_sink_named(value, "a path") {
+                Ok(p) => p,
+                Err(e) => return ExecResult::failure(1, format!("rm: {e}")),
+            };
             let resolved = ctx.resolve_path(&path);
             // lstat, never stat: classify the link itself, so a symlink-to-dir
             // is treated as a (non-dir) symlink rather than its target. This is

@@ -14,6 +14,7 @@ use std::path::Path;
 #[cfg(test)]
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
+use crate::tools::builtin::get_path_string;
 use crate::tools::builtin::regex_dialect::{append_dialect_hint, bre_metas_to_ere};
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -111,10 +112,12 @@ impl Tool for Awk {
             .or_else(|| args.get_string("field_separator", usize::MAX))
             .or_else(|| args.get_string("F", usize::MAX));
 
-        // Get input
+        // Get input. A binary `path` operand goes loud rather than silently
+        // falling through to the "no operand" branch (which reads stdin instead
+        // of the file the user actually named).
         let file_pos = 1;
-        let input = match args.get_string("path", file_pos) {
-            Some(path) => {
+        let input = match get_path_string(&args, "path", file_pos) {
+            Ok(Some(path)) => {
                 let resolved = ctx.resolve_path(&path);
                 match ctx.backend.read(Path::new(&resolved), None).await {
                     Ok(data) => match String::from_utf8(data) {
@@ -126,10 +129,11 @@ impl Tool for Awk {
                     Err(e) => return ExecResult::failure(1, format!("awk: {}: {}", path, e)),
                 }
             }
-            None => match ctx.read_stdin_to_text().await {
+            Ok(None) => match ctx.read_stdin_to_text().await {
                 Ok(s) => s.unwrap_or_default(),
                 Err(e) => return ExecResult::failure(2, format!("awk: {e}")),
             },
+            Err(e) => return ExecResult::failure(1, format!("awk: {e}")),
         };
 
         // Build runtime with initial variables
