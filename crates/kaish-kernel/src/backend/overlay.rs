@@ -15,11 +15,19 @@
 //!
 //! # Path Routing
 //!
-//! - `/v/*` → always routed to the internal VFS, whether or not anything is
-//!   mounted there (the whole `/v` namespace is reserved, so a miss returns
-//!   `NotFound` from the VFS rather than leaking through to the embedder).
-//! - Any other path actually covered by a mount registered on the internal
-//!   VFS (e.g. `/dev`, added by `Kernel::with_backend`) → also routed there.
+//! Routing is by *mount coverage* (longest prefix), not by a lexical `/v`
+//! reservation:
+//!
+//! - Any path covered by a mount on the internal VFS (`/v/jobs`, `/v/blobs`,
+//!   `/dev`, a `configure_vfs` mount) → routed to the VFS.
+//! - An *unclaimed* path under `/v` (e.g. an embedder's own `/v/cas`) → falls
+//!   through to the custom backend, so an embedder can mount its own storage
+//!   under `/v` without kaish shadowing it. (Previously the whole `/v`
+//!   namespace was reserved and a miss returned `NotFound`.)
+//! - A shared *ancestor* directory like `/v` — no mount of its own, but sitting
+//!   above `/v/jobs` — is presented as the *union* of both layers: `list`
+//!   merges the embedder's entries with kaish's child mounts, and `stat`/
+//!   `exists` synthesize it as a directory when the embedder lacks it.
 //! - Everything else → custom backend
 
 use async_trait::async_trait;
@@ -32,6 +40,14 @@ use super::{
 };
 use crate::tools::{ToolArgs, ToolCtx};
 use crate::vfs::{DirEntry, Filesystem, MountInfo, VfsRouter};
+
+/// The final path component, used to name a synthesized directory entry for a
+/// shared ancestor (`/v` → `v`). Falls back to `/` for a component-less path.
+fn dir_basename(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/".to_string())
+}
 
 /// Backend that overlays virtual paths (`/v/*`) on top of a custom backend.
 ///
@@ -61,17 +77,18 @@ impl VirtualOverlayBackend {
         Self { inner, vfs }
     }
 
-    /// Check if a path should be handled by the VFS rather than the inner backend.
+    /// Check if a path is *covered by a kaish VFS mount* and should therefore be
+    /// handled by the VFS rather than the inner backend.
     ///
-    /// `/v` and `/v/*` are always reserved for the VFS, even where nothing is
-    /// mounted (so callers get `NotFound` from the VFS, not the embedder's
-    /// backend). Any other path is checked against the VFS's actual mount
-    /// table — this is what lets `Kernel::with_backend`'s `/dev` mount (or an
-    /// embedder's own `configure_vfs` mounts outside `/v`) take effect instead
-    /// of being silently swallowed by the inner backend.
+    /// Routing is purely by mount coverage (longest prefix) — there is no
+    /// lexical `/v` reservation. `/v/jobs`, `/dev`, and any `configure_vfs`
+    /// mount route to the VFS; an *unclaimed* path under `/v` (e.g. an embedder
+    /// CAS at `/v/cas`) falls through to the inner backend instead of returning
+    /// `NotFound`. Shared *ancestor* directories like `/v` (which have no mount
+    /// of their own but sit above `/v/jobs`) are not "virtual" by this test —
+    /// they're handled by the union/synthesis paths in `list`/`stat`/`exists`.
     fn is_virtual_path(&self, path: &Path) -> bool {
-        let path_str = path.to_string_lossy();
-        path_str == "/v" || path_str.starts_with("/v/") || self.vfs.has_mount(path)
+        self.vfs.has_mount(path)
     }
 
     /// Get the inner backend.
@@ -188,12 +205,30 @@ impl KernelBackend for VirtualOverlayBackend {
     async fn list(&self, path: &Path) -> BackendResult<Vec<DirEntry>> {
         if self.is_virtual_path(path) {
             Ok(self.vfs.list(path).await?)
-        } else if path.to_string_lossy() == "/" || path.to_string_lossy().is_empty() {
-            // Root listing: combine inner backend's root with /v
-            let mut entries = self.inner.list(path).await?;
-            // Add /v if not already present
-            if !entries.iter().any(|e| e.name == "v") {
-                entries.push(DirEntry::directory("v"));
+        } else if self.vfs.has_mount_under(path) {
+            // A shared parent of kaish mounts (`/`, `/v`, `/v/etc`, …): return
+            // the union of the embedder's view and kaish's child mounts, so
+            // both layers' entries show at the directory. kaish entries take
+            // precedence on a name clash (an explicit kaish mount wins its
+            // subtree via longest-prefix routing). A `NotFound` from the inner
+            // backend means "embedder has nothing here" — kaish-only, not an
+            // error — but any other inner error propagates.
+            let mut names = std::collections::HashSet::new();
+            let mut entries = Vec::new();
+            for entry in self.vfs.list(path).await? {
+                names.insert(entry.name.clone());
+                entries.push(entry);
+            }
+            match self.inner.list(path).await {
+                Ok(inner_entries) => {
+                    for entry in inner_entries {
+                        if names.insert(entry.name.clone()) {
+                            entries.push(entry);
+                        }
+                    }
+                }
+                Err(BackendError::NotFound(_)) => {}
+                Err(e) => return Err(e),
             }
             Ok(entries)
         } else {
@@ -205,7 +240,14 @@ impl KernelBackend for VirtualOverlayBackend {
         if self.is_virtual_path(path) {
             Ok(self.vfs.stat(path).await?)
         } else {
-            self.inner.stat(path).await
+            match self.inner.stat(path).await {
+                // A shared ancestor of kaish mounts (e.g. `/v`) the embedder
+                // doesn't have still exists as a directory on our side.
+                Err(BackendError::NotFound(_)) if self.vfs.has_mount_under(path) => {
+                    Ok(DirEntry::directory(dir_basename(path)))
+                }
+                other => other,
+            }
         }
     }
 
@@ -259,7 +301,9 @@ impl KernelBackend for VirtualOverlayBackend {
         if self.is_virtual_path(path) {
             self.vfs.exists(path).await
         } else {
-            self.inner.exists(path).await
+            // A shared ancestor of kaish mounts (e.g. `/v`) exists even when the
+            // embedder has nothing there.
+            self.inner.exists(path).await || self.vfs.has_mount_under(path)
         }
     }
 
@@ -271,7 +315,12 @@ impl KernelBackend for VirtualOverlayBackend {
         if self.is_virtual_path(path) {
             Ok(self.vfs.lstat(path).await?)
         } else {
-            self.inner.lstat(path).await
+            match self.inner.lstat(path).await {
+                Err(BackendError::NotFound(_)) if self.vfs.has_mount_under(path) => {
+                    Ok(DirEntry::directory(dir_basename(path)))
+                }
+                other => other,
+            }
         }
     }
 
@@ -354,12 +403,12 @@ mod tests {
         let (mock, _) = MockBackend::new();
         let inner: Arc<dyn KernelBackend> = Arc::new(mock);
 
-        // Create VFS with /v mounted
+        // Production-like split: kaish mounts sit at /v/*, nothing at /v itself.
         let mut vfs = VfsRouter::new();
-        let mem = MemoryFs::new();
-        mem.write(Path::new("blobs/test.bin"), b"blob data").await.unwrap();
-        mem.mkdir(Path::new("jobs")).await.unwrap();
-        vfs.mount("/v", mem);
+        let blobs = MemoryFs::new();
+        blobs.write(Path::new("test.bin"), b"blob data").await.unwrap();
+        vfs.mount("/v/blobs", blobs);
+        vfs.mount("/v/jobs", MemoryFs::new());
 
         VirtualOverlayBackend::new(inner, Arc::new(vfs))
     }
@@ -367,10 +416,17 @@ mod tests {
     #[tokio::test]
     async fn test_virtual_path_detection() {
         let overlay = make_overlay().await;
-        assert!(overlay.is_virtual_path(Path::new("/v")));
-        assert!(overlay.is_virtual_path(Path::new("/v/")));
+        // Covered by a kaish mount → virtual.
         assert!(overlay.is_virtual_path(Path::new("/v/jobs")));
+        assert!(overlay.is_virtual_path(Path::new("/v/blobs")));
         assert!(overlay.is_virtual_path(Path::new("/v/blobs/test.bin")));
+
+        // No lexical /v reservation any more: a shared ancestor with no mount of
+        // its own, and an unclaimed path under /v, are NOT virtual — they route
+        // to the union/synthesis paths or fall through to the embedder.
+        assert!(!overlay.is_virtual_path(Path::new("/v")));
+        assert!(!overlay.is_virtual_path(Path::new("/v/")));
+        assert!(!overlay.is_virtual_path(Path::new("/v/unclaimed")));
 
         assert!(!overlay.is_virtual_path(Path::new("/docs")));
         assert!(!overlay.is_virtual_path(Path::new("/g/repo")));
@@ -447,8 +503,9 @@ mod tests {
     #[tokio::test]
     async fn test_mkdir_virtual_path() {
         let overlay = make_overlay().await;
-        overlay.mkdir(Path::new("/v/newdir")).await.unwrap();
-        assert!(overlay.exists(Path::new("/v/newdir")).await);
+        // Under a covered mount (/v/blobs), so it stays in the kaish VFS.
+        overlay.mkdir(Path::new("/v/blobs/newdir")).await.unwrap();
+        assert!(overlay.exists(Path::new("/v/blobs/newdir")).await);
     }
 
     #[tokio::test]
@@ -489,5 +546,86 @@ mod tests {
         let overlay = make_overlay().await;
         // Virtual paths don't resolve to real paths
         assert!(overlay.resolve_real_path(Path::new("/v/blobs/test.bin")).is_none());
+    }
+
+    // Inner backend that serves content under /v (an embedder CAS at /v/cas),
+    // alongside kaish's own /v/jobs + /dev mounts — the production-like split
+    // (kaish mounts sit at /v/*, nothing at /v itself). `cas` toggles whether
+    // the embedder actually has content under /v.
+    async fn overlay_over_inner(cas: bool) -> VirtualOverlayBackend {
+        let mut inner_router = VfsRouter::new();
+        let inner_mem = MemoryFs::new();
+        if cas {
+            inner_mem
+                .write(Path::new("v/cas/blob.bin"), b"cas data")
+                .await
+                .unwrap();
+        }
+        inner_router.mount("/", inner_mem);
+        let inner: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(inner_router)));
+
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/v/jobs", MemoryFs::new());
+        vfs.mount("/dev", MemoryFs::new());
+        VirtualOverlayBackend::new(inner, Arc::new(vfs))
+    }
+
+    #[tokio::test]
+    async fn test_unclaimed_v_reaches_inner_backend() {
+        // /v/cas isn't mounted on kaish's side → a read must fall through to the
+        // embedder's backend instead of the old NotFound reservation.
+        let overlay = overlay_over_inner(true).await;
+        let data = overlay.read(Path::new("/v/cas/blob.bin"), None).await.unwrap();
+        assert_eq!(data, b"cas data");
+        assert!(overlay.exists(Path::new("/v/cas/blob.bin")).await);
+    }
+
+    #[tokio::test]
+    async fn test_v_listing_unions_kaish_and_inner() {
+        let overlay = overlay_over_inner(true).await;
+        let names: Vec<String> = overlay
+            .list(Path::new("/v"))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(names.iter().any(|n| n == "jobs"), "kaish mount missing: {names:?}");
+        assert!(names.iter().any(|n| n == "cas"), "embedder mount missing: {names:?}");
+    }
+
+    #[tokio::test]
+    async fn test_v_synthesized_when_inner_lacks_it() {
+        // Embedder has nothing under /v; kaish mounts /v/jobs. /v must still
+        // stat as a directory and list the kaish mount, so `cd /v` / `ls /v`
+        // work even though nothing is mounted at /v on either layer.
+        let overlay = overlay_over_inner(false).await;
+        assert!(overlay.stat(Path::new("/v")).await.unwrap().is_dir());
+        assert!(overlay.lstat(Path::new("/v")).await.unwrap().is_dir());
+        assert!(overlay.exists(Path::new("/v")).await);
+        let names: Vec<String> = overlay
+            .list(Path::new("/v"))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["jobs".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_root_lists_both_v_and_dev() {
+        // The generalized union at shared parents fixes the old root merge,
+        // which injected only a synthetic `v` and dropped `dev`.
+        let overlay = overlay_over_inner(false).await;
+        let names: Vec<String> = overlay
+            .list(Path::new("/"))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(names.iter().any(|n| n == "v"), "{names:?}");
+        assert!(names.iter().any(|n| n == "dev"), "{names:?}");
     }
 }

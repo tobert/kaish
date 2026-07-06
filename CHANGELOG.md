@@ -69,6 +69,21 @@ breaking entries are marked **BREAKING**.
   variants/fields won't break you.
 
 ### Fixed
+- **Embedders can mount their own backends under `/v`.** The overlay that gives
+  a `Kernel::with_backend` embedder kaish's virtual filesystems reserved the
+  *entire* `/v` namespace: any `/v/*` path not backed by a kaish mount returned
+  `NotFound`, silently shadowing an embedder's own content there (e.g. a CAS at
+  `/v/cas`) — and the shadow was surface-dependent, since paths served directly
+  off `kernel.vfs()` (SFTP) still saw the real content. Routing is now purely by
+  mount coverage (longest prefix), the same rule that already governs `/dev`: an
+  unclaimed `/v/*` path **delegates to the embedder's backend** — the blanket
+  reservation is gone *by design*, so `cat`/`ls`/`stat` reach the embedder's
+  storage — while a shared parent like `/v` presents the *union* of kaish's
+  mounts and the embedder's and stats as a directory. Also clears two
+  pre-existing papercuts in that path: `ls /v` returned nothing (kaish mounts sit
+  at `/v/jobs`/`/v/blobs`, not `/v`), and `ls /` dropped `dev`. Not breaking — no
+  API signatures change; the only behavior affected is an embedder that *relied*
+  on the old `/v/*`→`NotFound` reservation.
 - **`jq -s`/`--slurp` now wraps the `.data` pipeline path in an array-of-one,
   matching real jq** (GH #93 item 2). Real `jq -s` always wraps its input in
   an array, even a single document. On kaish's structured `.data` shortcut

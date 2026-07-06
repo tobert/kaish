@@ -14,6 +14,56 @@ before it ships.
 
 ---
 
+## `/v` overlay stops being kaish's private reserve (2026-07-06)
+
+`VirtualOverlayBackend` — the shim that lets a `Kernel::with_backend` embedder
+keep kaish's virtual filesystems (`/v/jobs`, `/dev`, …) while owning the rest of
+the namespace — treated the whole `/v` tree as kaish's. `is_virtual_path` grabbed
+anything matching `"/v"` or `"/v/…"` lexically *before* consulting the mount
+table, so an embedder that mounted its own storage under `/v` (kaijutsu wants a
+CAS at `/v/cas` and its CRDT config at `/v/etc/*`) found those paths shadowed to
+`NotFound` — while surfaces that bypass the overlay (SFTP over `kernel.vfs()`)
+saw the real content. Two different `/v/x` depending on the surface, silently.
+
+The fix was mostly *deletion*. `VfsRouter::has_mount` already routes by longest
+prefix and already governs `/dev` — the lexical `/v` clauses were the vestigial
+half of a migration that was already started. Dropping them (`is_virtual_path`
+is now just `has_mount`) makes one rule: covered by a kaish mount → kaish;
+otherwise → the embedder. An unclaimed `/v/cas` falls through, and its writes hit
+the embedder's *own* gate (a read-only root still rejects them) rather than a
+kaish scratch overlay.
+
+Coverage-routing alone leaves a listing gap, and chasing it turned up that the
+gap already existed. In the overlay path kaish mounts at `/v/jobs`/`/v/blobs`,
+never at `/v` itself, so `has_mount("/v")` is false — meaning `ls /v` was
+*already* `NotFound` for embedders, and the root merge injected only a synthetic
+`v`, dropping `dev`. So the real work was making an intermediate directory that
+sits *above* mounts behave like a directory. We put that in the router (approach
+C, over doing it only in the overlay): `has_mount_under` + a generalized
+`list_mount_children` (the old `list_root` first-component trick, parameterized),
+so `VfsRouter::list`/`stat`/`lstat` synthesize `/v` from the mount roster instead
+of 404ing. The overlay stays thin — for a shared parent it unions the embedder's
+listing with kaish's (a `NotFound` from the embedder means "nothing here," not an
+error; kaish entries win a name clash) and synthesizes `stat`/`exists` when the
+embedder lacks the dir. The bare router is now self-consistent too, so SFTP over
+`kernel.vfs()` and the shell agree.
+
+One correction worth recording: this is **not** a compile break for kaibo or
+kaijutsu (the initial assumption). No public signature moves — `is_virtual_path`
+is private, the router additions are `pub(crate)`. It's a pure runtime-routing
+change, which is the *more* subtle kind, but benign in practice: kaibo's inner
+backend serves nothing under `/v` (its `ls /v` actually improves), and kaijutsu
+doesn't mount under `/v` *yet* — this is the prerequisite that lets it. Filed as
+`Fixed`, not `**BREAKING:**`: pre-1.0, a visible compile break is expected and
+cheap; a behavior correction toward the obviously-right routing, affecting only
+an embedder that leaned on the reservation (none do), doesn't earn the headline.
+The kaijutsu-side counterpart — its `MountBackend` synthesizing a `/v` listing so
+the union has something to merge — is tracked in that repo; our union tolerating
+its absence (`NotFound` → empty) is what de-risks the rollout ordering. TDD
+throughout: router synthesis and overlay union each went red first (`NotFound`
+`/v`, `["v"]` missing `dev`) before the code, and five `kernel.execute`
+integration tests drive the whole dispatch chain.
+
 ## `jq -s` stops being a no-op on the `.data` path (2026-07-06, GH #93 item 2)
 
 Real `jq -s`/`--slurp` has one law: wrap the inputs in an array, always —
