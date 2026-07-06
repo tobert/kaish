@@ -25,8 +25,8 @@ use clap::{CommandFactory, Parser};
 use kaish_types::Value;
 
 use crate::interpreter::{
-    is_collection, numeric_compare, scalar_test_operand_error, value_to_string, values_equal,
-    ExecResult,
+    is_collection, numeric_compare, scalar_test_operand_error, value_to_string,
+    value_to_text_sink_named, values_equal, ExecResult,
 };
 use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
 
@@ -183,7 +183,11 @@ async fn apply_unary(ctx: &ExecContext, op: &str, operand: &Value) -> Result<boo
         "-z" => Ok(value_to_string(operand).is_empty()),
         "-n" => Ok(!value_to_string(operand).is_empty()),
         "-e" | "-f" | "-d" | "-r" | "-w" | "-x" => {
-            Ok(file_test(ctx, op, &value_to_string(operand)).await)
+            // A binary operand goes loud rather than silently stat'ing a file
+            // literally named `[binary: N bytes]` — mirrors `[[`'s `FileTest`
+            // arm (kernel.rs::eval_test_async) so the two evaluators agree.
+            let path = value_to_text_sink_named(operand, "a path").map_err(|e| format!("test: {e}"))?;
+            Ok(file_test(ctx, op, &path).await)
         }
         _ => unreachable!("apply_unary called with non-unary op {op:?}"),
     }

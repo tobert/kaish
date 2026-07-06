@@ -109,6 +109,58 @@ impl VfsRouter {
         self.find_mount(path).is_ok()
     }
 
+    /// Returns true if some mount lives strictly *below* `dir` — i.e. `dir` is a
+    /// proper ancestor of a mount point (`has_mount_under("/v")` is true when
+    /// `/v/jobs` is mounted, even though nothing is mounted at `/v` itself).
+    ///
+    /// Distinct from `has_mount`, which is true only when `dir` is *covered* by
+    /// a mount. Together they let an overlay treat an intermediate path like
+    /// `/v` as an existing directory (the union of its child mounts) while still
+    /// delegating unclaimed leaves to the embedder's backend.
+    pub(crate) fn has_mount_under(&self, dir: &Path) -> bool {
+        let dir = Self::normalize_mount_path(dir.to_path_buf());
+        let dir_str = dir.to_string_lossy();
+        self.mounts.keys().any(|mount_path| {
+            let mount_str = mount_path.to_string_lossy();
+            if dir_str == "/" {
+                mount_str != "/"
+            } else {
+                mount_str.starts_with(&format!("{}/", dir_str))
+            }
+        })
+    }
+
+    /// Synthesize the child directory entries of `dir` from the mount roster:
+    /// the first path component below `dir` of every mount that lives under it
+    /// (`/v` over mounts `/v/jobs`, `/v/blobs` → `blobs`, `jobs`). `dir` is
+    /// expected to be a non-root ancestor with no mount of its own; root is
+    /// handled by `list_root`, which also folds in a `/` mount's real contents.
+    fn list_mount_children(&self, dir: &Path) -> Vec<DirEntry> {
+        let dir = Self::normalize_mount_path(dir.to_path_buf());
+        let prefix = format!("{}/", dir.to_string_lossy());
+        let mut seen = std::collections::HashSet::new();
+        let mut entries = Vec::new();
+        for mount_path in self.mounts.keys() {
+            let mount_str = mount_path.to_string_lossy();
+            if let Some(rest) = mount_str.strip_prefix(&prefix) {
+                let first = rest.split('/').next().unwrap_or("");
+                if !first.is_empty() && seen.insert(first.to_string()) {
+                    entries.push(DirEntry::directory(first));
+                }
+            }
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        entries
+    }
+
+    /// The final path component, for naming a synthesized directory entry
+    /// (`/v` → `v`). Falls back to `/` for a path with no component.
+    fn path_basename(path: &Path) -> String {
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/".to_string())
+    }
+
     /// Find the mount point for a given path.
     ///
     /// Returns the mount and the path relative to that mount.
@@ -208,8 +260,18 @@ impl Filesystem for VfsRouter {
             return self.list_root().await;
         }
 
-        let (fs, relative) = self.find_mount(path)?;
-        fs.list(&relative).await
+        match self.find_mount(path) {
+            Ok((fs, relative)) => fs.list(&relative).await,
+            // Not covered by a mount, but an ancestor of one (e.g. `/v` above
+            // `/v/jobs`): synthesize its child mount directories rather than 404.
+            Err(e) => {
+                if self.has_mount_under(path) {
+                    Ok(self.list_mount_children(path))
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     #[tracing::instrument(level = "trace", skip(self), fields(path = %path.display()))]
@@ -230,8 +292,18 @@ impl Filesystem for VfsRouter {
             return Ok(DirEntry::directory(name));
         }
 
-        let (fs, relative) = self.find_mount(path)?;
-        fs.stat(&relative).await
+        match self.find_mount(path) {
+            Ok((fs, relative)) => fs.stat(&relative).await,
+            // Intermediate ancestor of a mount (e.g. `/v` above `/v/jobs`)
+            // exists as a synthesized directory.
+            Err(e) => {
+                if self.has_mount_under(path) {
+                    Ok(DirEntry::directory(Self::path_basename(path)))
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
@@ -261,8 +333,18 @@ impl Filesystem for VfsRouter {
             return Ok(DirEntry::directory(name));
         }
 
-        let (fs, relative) = self.find_mount(path)?;
-        fs.lstat(&relative).await
+        match self.find_mount(path) {
+            Ok((fs, relative)) => fs.lstat(&relative).await,
+            // Intermediate ancestor of a mount (e.g. `/v` above `/v/jobs`)
+            // exists as a synthesized directory.
+            Err(e) => {
+                if self.has_mount_under(path) {
+                    Ok(DirEntry::directory(Self::path_basename(path)))
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     async fn mkdir(&self, path: &Path) -> io::Result<()> {
@@ -562,5 +644,72 @@ mod tests {
         router.mount("/rw", MemoryFs::new());
 
         assert!(!router.read_only());
+    }
+
+    // An intermediate directory that has no mount of its own but sits *above*
+    // one or more mounts (e.g. `/v` over `/v/jobs`, `/v/blobs`) must present as
+    // a real, listable directory synthesized from the mount roster — not the
+    // `NotFound` the bare `find_mount` returns. This is what lets a kaish shell
+    // (and SFTP over the bare router) navigate `/v` when the mounts sit at
+    // `/v/*`, and it's the router half of the `/v` overlay-tuning fix.
+    #[tokio::test]
+    async fn test_list_synthesizes_intermediate_dir() {
+        let mut router = VfsRouter::new();
+        router.mount("/v/jobs", MemoryFs::new());
+        router.mount("/v/blobs", MemoryFs::new());
+
+        let entries = router.list(Path::new("/v")).await.unwrap();
+        let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["blobs", "jobs"]); // sorted, synthesized from mounts
+    }
+
+    #[tokio::test]
+    async fn test_stat_intermediate_dir_is_directory() {
+        let mut router = VfsRouter::new();
+        router.mount("/v/jobs", MemoryFs::new());
+
+        assert!(router.stat(Path::new("/v")).await.unwrap().is_dir());
+        assert!(router.lstat(Path::new("/v")).await.unwrap().is_dir());
+    }
+
+    #[tokio::test]
+    async fn test_deep_intermediate_dir() {
+        let mut router = VfsRouter::new();
+        router.mount("/v/etc/rc", MemoryFs::new());
+
+        let v: Vec<_> = router.list(Path::new("/v")).await.unwrap();
+        assert_eq!(v.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), vec!["etc"]);
+        let etc: Vec<_> = router.list(Path::new("/v/etc")).await.unwrap();
+        assert_eq!(etc.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), vec!["rc"]);
+        assert!(router.stat(Path::new("/v/etc")).await.unwrap().is_dir());
+    }
+
+    #[tokio::test]
+    async fn test_has_mount_under() {
+        let mut router = VfsRouter::new();
+        router.mount("/v/jobs", MemoryFs::new());
+
+        assert!(router.has_mount_under(Path::new("/v")));
+        assert!(router.has_mount_under(Path::new("/")));
+        // The mount point itself has nothing *below* it.
+        assert!(!router.has_mount_under(Path::new("/v/jobs")));
+        assert!(!router.has_mount_under(Path::new("/other")));
+    }
+
+    #[tokio::test]
+    async fn test_nonexistent_ancestor_still_notfound() {
+        let mut router = VfsRouter::new();
+        router.mount("/v/jobs", MemoryFs::new());
+
+        // A path with no mount at or below it stays NotFound — synthesis is
+        // only for genuine ancestors of a mount.
+        assert_eq!(
+            router.list(Path::new("/nope")).await.unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            router.stat(Path::new("/nope")).await.unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 }

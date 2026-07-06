@@ -642,6 +642,71 @@ shell_compat! {
     eq: "actual",
 }
 
+// `${VAR:-default}` default-word ESCAPED quotes inside DOUBLE quotes (GH #93
+// item 5). A backslash-escaped quote inside a double-quoted default word must
+// not toggle the quote-tracking state — it's literal data, unescaping to a
+// bare quote character, exactly like bash's double-quote escape rule.
+
+shell_compat! {
+    name: default_word_double_quoted_escaped_quotes_literal,
+    script: r#"echo ${NAME:-"hello \"world\""}"#,
+    eq: "hello \"world\"",
+}
+
+shell_compat! {
+    name: default_word_escaped_backslash_before_quote,
+    script: r#"echo ${NAME:-"a\\"}"#,
+    eq: "a\\",
+}
+
+shell_compat! {
+    name: default_word_mixed_single_and_escaped_double_quotes,
+    script: r#"echo ${NAME:-"it's \"quoted\""}"#,
+    eq: "it's \"quoted\"",
+}
+
+// Inside DOUBLE quotes, `'` is not special, so a backslash before it is
+// literal — only `\"`, `\$`, `\\`, `` \` `` are escapes in a double-quoted
+// region. `${VAR:-"a\'b"}` therefore keeps the backslash (`a\'b`), matching
+// bash (kaibo-caught divergence: the escape used to also fire on `\'` here).
+shell_compat! {
+    name: default_word_double_quoted_backslash_before_squote_literal,
+    script: r#"echo ${NAME:-"a\'b"}"#,
+    eq: "a\\'b",
+}
+
+// Single-quoted default words are a LITERAL region, per shell rules: zero
+// interpolation AND zero escape processing. Only the delimiter quotes are
+// stripped (syntax, not data); a backslash stays literal and a `'` always
+// closes the region — it is never escaped.
+
+shell_compat! {
+    name: default_word_single_quoted_strips_delimiters,
+    script: "echo ${NAME:-'x'}",
+    eq: "x",
+}
+
+shell_compat! {
+    name: default_word_single_quoted_no_interpolation,
+    script: "echo ${NAME:-'$HOME'}",
+    eq: "$HOME",
+}
+
+shell_compat! {
+    name: default_word_single_quoted_backslash_literal,
+    script: r#"echo ${NAME:-'a\b'}"#,
+    eq: "a\\b",
+}
+
+// The shell-correct way to embed a single quote is the `'…'\''…'` idiom:
+// close the single-quoted span, emit an UNQUOTED escaped `\'`, reopen. The
+// escape fires only outside single quotes — which this fix keeps working.
+shell_compat! {
+    name: default_word_single_quote_embed_idiom,
+    script: r#"echo ${NAME:-'it'\''s'}"#,
+    eq: "it's",
+}
+
 // =============================================================================
 // `break N` / `continue N` must not discard output printed before the signal.
 // The signal used to replace the loop's accumulated result on its way up, so

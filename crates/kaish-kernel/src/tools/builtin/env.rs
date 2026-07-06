@@ -284,8 +284,19 @@ async fn execute_with_env(
         if let Some(msg) = crate::interpreter::structured_export_error(&exported) {
             return ExecResult::failure(1, msg);
         }
+        // Binary can't cross the process boundary as an env var value either
+        // — loud, not the `[binary: N bytes]` placeholder (kept in sync with
+        // kernel.rs::try_execute_external and dispatch.rs::try_external).
         for (name, value) in exported {
-            cmd.env(&name, value_to_string(&value));
+            match crate::interpreter::value_to_text_sink_named(
+                &value,
+                "an exported environment variable value",
+            ) {
+                Ok(s) => {
+                    cmd.env(&name, s);
+                }
+                Err(e) => return ExecResult::failure(1, format!("env: {e}")),
+            }
         }
     }
 

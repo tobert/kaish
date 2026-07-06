@@ -67,7 +67,16 @@ impl Tool for Cmp {
         if parsed.paths.len() != 2 {
             return ExecResult::failure(2, "cmp: expected two file operands");
         }
-        let (name1, name2) = (parsed.paths[0].clone(), parsed.paths[1].clone());
+        // Read the operand VALUES off `args.positional`, not `parsed.paths` —
+        // `parsed.paths` came through `to_argv()`'s lossy re-serialization
+        // (a `Value::Bytes` operand would already be the `[binary: N bytes]`
+        // placeholder by the time clap saw it), so a binary path would
+        // otherwise silently name a nonexistent file instead of erroring.
+        let (name1, name2) = match crate::interpreter::values_to_text_sink_named(&args.positional, "a path") {
+            Ok(paths) if paths.len() == 2 => (paths[0].clone(), paths[1].clone()),
+            Ok(_) => return ExecResult::failure(2, "cmp: expected two file operands"),
+            Err(e) => return ExecResult::failure(2, format!("cmp: {e}")),
+        };
         if name1 == "-" && name2 == "-" {
             return ExecResult::failure(2, "cmp: only one operand may be '-' (stdin)");
         }

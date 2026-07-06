@@ -76,8 +76,8 @@ fn decide_rm_action(
 
     if trash_enabled {
         if let Some(rp) = real_path {
-            // Skip trash for excluded paths (/tmp, /v/*). Shared with the
-            // overwrite gate via `is_trash_excluded` so the list can't drift.
+            // Skip trash for excluded paths (host scratch under /tmp). Shared
+            // with the overwrite gate via `is_trash_excluded` so it can't drift.
             if !is_trash_excluded(Some(rp)) {
                 // Directories always go to trash — stat size is unreliable
                 // and trash::delete handles them atomically.
@@ -160,7 +160,10 @@ impl Tool for Rm {
         }
         let mut decisions: Vec<Decision> = Vec::with_capacity(args.positional.len());
         for value in &args.positional {
-            let path = crate::interpreter::value_to_string(value);
+            let path = match crate::interpreter::value_to_text_sink_named(value, "a path") {
+                Ok(p) => p,
+                Err(e) => return ExecResult::failure(1, format!("rm: {e}")),
+            };
             let resolved = ctx.resolve_path(&path);
             // lstat, never stat: classify the link itself, so a symlink-to-dir
             // is treated as a (non-dir) symlink rather than its target. This is
@@ -622,10 +625,14 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_rm_action_trash_excluded_v() {
-        let real = PathBuf::from("/v/jobs/something");
+    fn test_decide_rm_action_real_v_path_is_trashed() {
+        // A *real* path under /v (embedder content delegated by mount-coverage
+        // routing) is NOT trash-excluded — it must be trashed like any real
+        // file, not deleted outright. (In-memory kaish /v mounts stay `None`
+        // and are handled by the no-real-path gating, not this predicate.)
+        let real = PathBuf::from("/v/cas/blob.bin");
         let action = decide_rm_action(true, false, Some(&real), Some(100), 10_000_000, false, false);
-        assert_eq!(action, RmAction::Delete);
+        assert_eq!(action, RmAction::Trash(real));
     }
 
     // ── Directory-specific tests ──

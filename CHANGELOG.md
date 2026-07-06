@@ -84,6 +84,12 @@ breaking entries are marked **BREAKING**.
   variants/fields won't break you.
 
 ### Fixed
+- **README install instructions pointed at a crate that doesn't exist.**
+  `cargo install kaish` fails — there is no `kaish` package on crates.io; the
+  binary named `kaish` ships in the `kaish-repl` crate. The README now says
+  `cargo install kaish-repl` (and was restructured for first-time visitors
+  alongside; the exit-code table and output contract moved to
+  `docs/EMBEDDING.md`, trash thresholds to `docs/LANGUAGE.md`).
 - **`jq -s`/`--slurp` now wraps the `.data` pipeline path in an array-of-one,
   matching real jq** (GH #93 item 2). Real `jq -s` always wraps its input in
   an array, even a single document. On kaish's structured `.data` shortcut
@@ -104,6 +110,22 @@ breaking entries are marked **BREAKING**.
   that can't run `$()` and failed with "could not evaluate redirect target".
   The redirect evaluator now takes the dispatcher the runner already holds, so
   the behavior no longer depends on how the kernel was constructed.
+- **Binary (`Value::Bytes`) now goes loud at every remaining text sink** (GH
+  #93 item 1), not just the primary ones 0.11.0 fixed. A path-coercing builtin
+  positional (`mkdir`/`cp`/`rm`/`ls`/`find`/`grep`/`sed`/`uniq`/`jq`/`tree`/
+  `write`/`ln`/`patch`/`checksum`/`cmp`/`spawn`/`cd`/`awk`/etc.), a
+  `[[ -f $x ]]`/`test -f $x` file-test path, an exported env var reaching a
+  spawned process, a redirect target (`cmd > $x`), a `case $x in`/`==`/`in`
+  operand, and `exec`'s own argv all used to silently mishandle a binary
+  operand instead of erroring — most stringified it into the `[binary: N
+  bytes]` placeholder (a wrong path, a wrong env var value, a comparison
+  against placeholder text instead of the real bytes), and a few (`cat`/
+  `head`/`tail`/`wc`/`sed`/`uniq`/`jq`/`cd`/`awk`) instead silently dropped it
+  and fell back to reading stdin or `$HOME`. All now error clearly instead.
+- **`&>` (`RedirectKind::Both`) streams structured output like `>`/`>>`** (GH
+  #93 item 6) instead of building the whole output as one `String` first —
+  aligns it with the lazy `take_output_for_stream`/`write_canonical` path the
+  plain stdout redirects already use.
 - **`grep -r PATTERN FILE`** (a file operand, not a directory) now searches
   that file instead of silently finding nothing (GH #105). `-r`/`-R` used to
   treat every operand as a walk root; a file has nothing "under" it, so the
@@ -111,6 +133,16 @@ breaking entries are marked **BREAKING**.
   a model reads as "not found". `-r` now governs only how *directories* expand:
   files are searched directly, directories walked, and a mixed `grep -r p file
   dir` operand list does both.
+- **A backslash-escaped quote in a `${VAR:-default}` default word no longer
+  corrupts the value** (GH #93 item 5). `${UNSET:-"hello \"world\""}` used to
+  toggle quote-tracking state on the escaped inner `"` (any `"`/`'` flipped
+  state regardless of a preceding `\`), mangling the default to `hello
+  \world\`. Escape handling now tracks context, matching bash: outside any
+  quotes both `\"` and `\'` unescape (so the `'it'\''s'` → `it's` embedding
+  idiom resolves); inside double quotes only `\"` unescapes while `\'` stays
+  literal (`"a\'b"` → `a\'b`, since `'` is an ordinary character there); and
+  single-quoted default words remain a fully literal region (zero escape
+  processing, zero interpolation).
 - **`ToolResult` no longer drops `did_spill`/`original_code` crossing the
   backend seam** (GH #93 item 3). `ExecResult` already tracked whether the
   output limiter capped a result and its pre-spill exit code; `ToolResult` had

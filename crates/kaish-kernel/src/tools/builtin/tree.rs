@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
+use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Tree tool: display directory structure.
@@ -176,9 +177,12 @@ impl Tool for Tree {
         };
         parsed.global.apply(ctx);
 
-        let path = args
-            .get_string("path", 0)
-            .unwrap_or_else(|| ".".to_string());
+        // A binary `path` operand goes loud rather than silently defaulting to
+        // "." (the "no operand given" case).
+        let path = match get_path_string(&args, "path", 0) {
+            Ok(p) => p.unwrap_or_else(|| ".".to_string()),
+            Err(e) => return ExecResult::failure(1, format!("tree: {e}")),
+        };
 
         let resolved = ctx.resolve_path(&path).to_string_lossy().to_string();
 

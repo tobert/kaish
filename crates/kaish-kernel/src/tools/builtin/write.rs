@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
+use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Write tool: write content to a file.
@@ -64,9 +65,10 @@ impl Tool for Write {
         };
         parsed.global.apply(ctx);
 
-        let path = match args.get_string("path", 0) {
-            Some(p) => p,
-            None => return ExecResult::failure(1, "write: missing path argument"),
+        let path = match get_path_string(&args, "path", 0) {
+            Ok(Some(p)) => p,
+            Ok(None) => return ExecResult::failure(1, "write: missing path argument"),
+            Err(e) => return ExecResult::failure(1, format!("write: {e}")),
         };
 
         let resolved = ctx.resolve_path(&path);

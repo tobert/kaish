@@ -136,11 +136,23 @@ pub(crate) async fn apply_redirects(
                     Ok(p) => p,
                     Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
                 };
-                // Build the combined bytes: raw binary stdout (no lossy decode)
-                // or text stdout, followed by stderr.
-                let mut combined: Vec<u8> = match result.out_bytes() {
-                    Some(b) => b.to_vec(),
-                    None => result.text_out().into_owned().into_bytes(),
+                // Build the combined bytes: raw binary stdout (no lossy decode),
+                // or structured output streamed straight to a byte buffer via
+                // `take_output_for_stream`/`write_canonical` — same lazy path
+                // `>`/`>>` use above — instead of forcing it through one
+                // `String` first (`text_out()`'s canonical-string fallback).
+                // Falls back to the text form only when neither applies.
+                // Followed by stderr.
+                let mut combined: Vec<u8> = if let Some(b) = result.out_bytes() {
+                    b.to_vec()
+                } else if let Some(output) = result.take_output_for_stream() {
+                    let mut buf = Vec::new();
+                    if let Err(e) = output.write_canonical(&mut buf, None) {
+                        return ExecResult::failure(1, format!("redirect: {e}"));
+                    }
+                    buf
+                } else {
+                    result.text_out().into_owned().into_bytes()
                 };
                 combined.extend_from_slice(result.err.as_bytes());
                 if let Err(e) = redirect_write(ctx, &path, &combined).await {
@@ -187,7 +199,9 @@ async fn eval_redirect_target(
     if let Some(msg) = crate::interpreter::structured_boundary_error("a redirect target", &value) {
         return Err(msg);
     }
-    Ok(value_to_string(&value))
+    // Text sink: binary goes loud rather than becoming a file literally named
+    // `[binary: N bytes]` — the same guard external argv and env export use.
+    crate::interpreter::value_to_text_sink_named(&value, "a redirect target").map_err(|e| e.to_string())
 }
 
 /// Write data to a file via the VFS backend.
@@ -566,12 +580,28 @@ impl PipelineRunner {
                 // Write output to pipe for next stage (if not last).
                 // Consumer is now unblocked and can drain concurrently.
                 if let Some(mut pipe_out) = stage_ctx.pipe_stdout.take() {
-                    // A binary result flows through the pipe as raw bytes; text
-                    // results as their UTF-8 bytes. Either way the next stage
-                    // gets exactly what was produced — no lossy round-trip.
-                    let bytes: Vec<u8> = match result.out_bytes() {
-                        Some(b) => b.to_vec(),
-                        None => result.text_out().into_owned().into_bytes(),
+                    // A binary result flows through the pipe as raw bytes;
+                    // structured output serializes straight to a byte buffer
+                    // (`write_canonical`) rather than building the full
+                    // canonical `String` first — same lazy path the `>`/`>>`
+                    // file redirects use via `take_output_for_stream`. Either
+                    // way the next stage gets exactly what was produced — no
+                    // lossy round-trip.
+                    let bytes: Vec<u8> = if let Some(b) = result.out_bytes() {
+                        b.to_vec()
+                    } else if let Some(output) = result.take_output_for_stream() {
+                        let mut buf = Vec::new();
+                        // `Vec<u8>`'s `Write` impl is infallible; a serialize
+                        // error here would only come from a future non-memory
+                        // writer, so fall back to the same lossy text form the
+                        // non-streaming branch already uses rather than
+                        // dropping the stage's output outright.
+                        if output.write_canonical(&mut buf, None).is_err() {
+                            buf = output.to_canonical_string().into_bytes();
+                        }
+                        buf
+                    } else {
+                        result.text_out().into_owned().into_bytes()
                     };
                     if !bytes.is_empty() {
                         // Write result to pipe; ignore broken pipe (reader dropped early)
@@ -1060,19 +1090,6 @@ pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Result<Option<
 /// Evaluate a literal value.
 fn eval_literal(value: &Value, _ctx: &ExecContext) -> Value {
     value.clone()
-}
-
-/// Convert a value to a string for interpolation.
-fn value_to_string(value: &Value) -> String {
-    match value {
-        Value::Null => "".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Int(i) => i.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::String(s) => s.clone(),
-        Value::Json(json) => json.to_string(),
-        Value::Bytes(b) => format!("[binary: {} bytes]", b.len()),
-    }
 }
 
 /// Evaluate string parts synchronously (for pipeline context).
@@ -2404,5 +2421,102 @@ mod tests {
         let result = runner.run(&[echo_cmd, grep_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok(), "result failed: code={}, err={}", result.code, result.err);
         assert!(result.text_out().contains("output"));
+    }
+
+    // === Item 6: `&>` (RedirectKind::Both) streams structured output ===
+    //
+    // `>`/`>>` already stream a command's structured `OutputData` straight to
+    // a byte buffer via `take_output_for_stream`/`write_canonical` instead of
+    // building the whole `to_canonical_string()` `String` first. `&>` used to
+    // skip that path entirely (`result.text_out().into_owned().into_bytes()`,
+    // which forces the full-string materialization). These tests lock in that
+    // `&>` now takes the same streaming path and — since the file bytes are
+    // the only thing observable from outside — that it produces byte-for-byte
+    // the same content the old materialize-first code did.
+
+    fn big_table_output(rows: usize) -> crate::interpreter::OutputData {
+        use crate::interpreter::OutputNode;
+        let headers = vec!["id".to_string(), "name".to_string()];
+        let nodes: Vec<OutputNode> = (0..rows)
+            .map(|i| OutputNode::new(i.to_string()).with_cells(vec![format!("row-{i}")]))
+            .collect();
+        crate::interpreter::OutputData::table(headers, nodes)
+    }
+
+    #[tokio::test]
+    async fn test_both_redirect_streams_structured_output_to_file() {
+        // A result with structured `.output` and empty `.out` — exactly the
+        // shape `take_output_for_stream` requires, and the shape a real
+        // builtin (e.g. `ls`, `find`) hands back before `--json`/materialize
+        // ever runs.
+        let output = big_table_output(50);
+        let expected_stdout = output.to_canonical_string();
+        let mut result = ExecResult::with_output(output);
+        result.err = "warning: heads up\n".to_string();
+
+        let redirects = vec![Redirect {
+            kind: RedirectKind::Both,
+            target: Expr::Literal(Value::String("/out.txt".to_string())),
+        }];
+        let ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
+
+        // Both streams went to the file: stdout (incl. the sideband) and
+        // stderr are both dropped from the in-memory result.
+        assert!(result.ok());
+        assert_eq!(&*result.text_out(), "");
+        assert!(result.err.is_empty());
+        assert!(!result.has_output());
+
+        let written = ctx.backend.read(Path::new("/out.txt"), None).await.expect("file written");
+        let written = String::from_utf8(written).expect("valid utf8");
+        // Byte-for-byte the same as the pre-refactor path would have produced:
+        // the table's canonical string, followed by stderr, with nothing lost
+        // or reordered by streaming it through `write_canonical` instead.
+        assert_eq!(written, format!("{expected_stdout}warning: heads up\n"));
+    }
+
+    #[tokio::test]
+    async fn test_both_redirect_streams_large_structured_output_intact() {
+        // A much bigger table than any single test needs to *pass*, but large
+        // enough that a regression re-introducing a size-limited or
+        // truncating path (rather than genuinely streaming) would be caught:
+        // every row must survive the round-trip through `&>`.
+        let rows = 5_000;
+        let output = big_table_output(rows);
+        let expected_stdout = output.to_canonical_string();
+        let result = ExecResult::with_output(output);
+
+        let redirects = vec![Redirect {
+            kind: RedirectKind::Both,
+            target: Expr::Literal(Value::String("/big.txt".to_string())),
+        }];
+        let ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
+        assert!(result.ok());
+
+        let written = ctx.backend.read(Path::new("/big.txt"), None).await.expect("file written");
+        let written = String::from_utf8(written).expect("valid utf8");
+        assert_eq!(written, expected_stdout);
+        assert!(written.contains("row-0"));
+        assert!(written.contains(&format!("row-{}", rows - 1)));
+    }
+
+    #[tokio::test]
+    async fn test_both_redirect_still_writes_binary_stdout_raw() {
+        // Unchanged branch (`out_bytes()`), covered here so the refactor
+        // can't accidentally regress the binary path while touching the
+        // structured-output branch next to it.
+        let result = ExecResult::success_text_or_bytes(vec![0xff, 0x00, 0xfe, b'x']);
+        let redirects = vec![Redirect {
+            kind: RedirectKind::Both,
+            target: Expr::Literal(Value::String("/bin.out".to_string())),
+        }];
+        let ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
+        assert!(result.ok());
+
+        let written = ctx.backend.read(Path::new("/bin.out"), None).await.expect("file written");
+        assert_eq!(written, vec![0xff, 0x00, 0xfe, b'x']);
     }
 }

@@ -387,12 +387,11 @@ impl Tool for Grep {
             // expand, which is the only thing anyone means by it. A missing or
             // otherwise-unstattable operand falls to the walker, preserving the
             // pre-#105 behavior for a bad root.
-            let operands: Vec<String> = args
-                .positional
-                .iter()
-                .skip(1)
-                .map(crate::interpreter::value_to_string)
-                .collect();
+            let operands: Vec<String> =
+                match crate::interpreter::values_to_text_sink_named(&args.positional[1..], "a path") {
+                    Ok(p) => p,
+                    Err(e) => return ExecResult::failure(1, format!("grep: {e}")),
+                };
             let operands = if operands.is_empty() {
                 vec![".".to_string()]
             } else {
@@ -488,12 +487,11 @@ impl Tool for Grep {
         // Search ALL of them (the old single `get_string("path", 1)` searched
         // only the first and silently ignored the rest), reusing the
         // filename-prefixing multi-file renderer.
-        let file_operands: Vec<String> = args
-            .positional
-            .iter()
-            .skip(1)
-            .map(crate::interpreter::value_to_string)
-            .collect();
+        let file_operands: Vec<String> =
+            match crate::interpreter::values_to_text_sink_named(&args.positional[1..], "a path") {
+                Ok(p) => p,
+                Err(e) => return ExecResult::failure(1, format!("grep: {e}")),
+            };
         if file_operands.len() > 1 {
             let root = ctx.resolve_path(".");
             let resolved: Vec<PathBuf> = file_operands

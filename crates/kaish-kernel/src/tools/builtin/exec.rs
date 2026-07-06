@@ -19,6 +19,7 @@ use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
+use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 use super::spawn::resolve_in_path;
@@ -76,10 +77,14 @@ impl Tool for Exec {
                 "exec: external commands are disabled (allow_external_commands=false)");
         }
 
-        // First positional is the command, rest are argv
-        let command_name = match args.get_string("command", 0) {
-            Some(cmd) => cmd,
-            None => return ExecResult::failure(1, "exec: missing command"),
+        // First positional is the command, rest are argv. A binary command
+        // name goes loud rather than `get_string`'s silent `None` (which would
+        // misreport it as "exec: missing command"); exec's argv loop below is
+        // already guarded, but the command word itself slipped through.
+        let command_name = match get_path_string(&args, "command", 0) {
+            Ok(Some(cmd)) => cmd,
+            Ok(None) => return ExecResult::failure(1, "exec: missing command"),
+            Err(e) => return ExecResult::failure(1, format!("exec: {e}")),
         };
 
         // Resolve command path
@@ -107,13 +112,19 @@ impl Tool for Exec {
         // can't cross the process boundary as an argv element — refuse rather
         // than the previous silent JSON stringify (via `value_to_string`).
         // exec consumes typed Values directly (no `build_args_flat`), so the
-        // guard lives here at exec's own edge.
+        // guard lives here at exec's own edge. Binary gets the same treatment
+        // as `build_args_flat`'s argv (text sink, loud rather than the
+        // `[binary: N bytes]` placeholder) — exec's argv crosses the same
+        // process boundary as any other external command's.
         let mut argv: Vec<String> = Vec::with_capacity(args.positional.len().saturating_sub(1));
         for v in args.positional.iter().skip(1) {
             if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", v) {
                 return ExecResult::failure(1, format!("exec: {msg}"));
             }
-            argv.push(value_to_string(v));
+            match crate::interpreter::value_to_text_sink(v) {
+                Ok(s) => argv.push(s),
+                Err(e) => return ExecResult::failure(1, format!("exec: {e}")),
+            }
         }
 
         // Platform-specific: Unix replaces the process, others error

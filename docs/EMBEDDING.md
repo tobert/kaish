@@ -6,7 +6,7 @@ and output capture.
 
 ## Stability
 
-kaish is pre-1.0 (currently 0.8.x, MSRV 1.85). The language has settled;
+kaish is pre-1.0 (currently 0.11.x, MSRV 1.85). The language has settled;
 the embedding API may still change between minor versions where it improves
 both kaish and its embedders — [kaijutsu](https://github.com/tobert/kaijutsu)
 is the reference embedder. Pin a minor version and read release notes when
@@ -41,6 +41,29 @@ async fn main() -> anyhow::Result<()> {
 `ExecResult` exposes stdout via the `text_out()` accessor (it materializes
 structured output when a builtin returned a table or tree); `code`, `err`,
 and `data` are public fields.
+
+## The result contract
+
+Output is clean text by default — simple commands return plain text, structured
+builtins (`ls`, `kaish-mounts`, `kaish-vars`) render readable tab-separated
+values, and `--json` on any command emits JSON plus a parsed value (`data`) that
+builtins set explicitly — kaish never infers it by sniffing stdout. The exit
+code is something agents can branch on:
+
+| `code` | Meaning | Recovery |
+|--------|---------|----------|
+| 0 | Success | — |
+| 1 | Failure | Read `err` |
+| 2 | Confirmation required (`set -o latch`) | Re-run with `--confirm="<nonce>"` — embedders read the typed `ExecResult.latch` (or call `Kernel::confirm`); the `To confirm, run:` line shows it for humans |
+| 3 | Output truncated by the output limit | `original_code` holds the real exit code. With disk spill the message names the spill file — `cat` it, or narrow the query; memory-spill kernels (`with_backend`, `SpillMode::Memory`) truncate in place with no file |
+| 124 | Timeout (`timeout_ms`, default 30 s) | — |
+| 130 | Cancelled | — |
+
+Embedders typically run a fresh kernel per request (variables, functions,
+aliases, `set -o` options, and `cwd` reset each time) while trash and
+confirmation nonces (60 s TTL) persist across calls — share the store with
+`KernelConfig::with_nonce_store()` (see
+[Destructive-op rails](#destructive-op-rails-inspecting-and-fulfilling-the-latch)).
 
 ## Stack size — size your execution threads
 

@@ -71,7 +71,10 @@ impl Tool for Stat {
         let mut last_err: Option<String> = None;
 
         for value in &args.positional {
-            let path_str = crate::interpreter::value_to_string(value);
+            let path_str = match crate::interpreter::value_to_text_sink_named(value, "a path") {
+                Ok(p) => p,
+                Err(e) => return ExecResult::failure(1, format!("stat: {e}")),
+            };
             let resolved = ctx.resolve_path(&path_str);
             match ctx.backend.stat(Path::new(&resolved)).await {
                 Ok(info) => {

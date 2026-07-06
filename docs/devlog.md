@@ -44,7 +44,294 @@ had to stop pre-chewing glob's input. Embedder tools with pattern-shaped
 inputs get the same opt-in. The REPL's unfiltered `target/` walk (slow even
 when correct) stays open as a follow-up.
 
----
+## Escaped quotes in `${VAR:-default}` (2026-07-06, GH #93 item 5)
+
+Item 5 of #93's punch list: `unquote_default_word` (the function that strips
+the syntactic quotes off a `${VAR:-"default"}` word before it's parsed for
+interpolation) toggled its `in_single`/`in_double` state on *every* `"`/`'` it
+saw, with no notion of a preceding backslash. So `${UNSET:-"hello
+\"world\""}` — a double-quoted default containing an escaped inner quote —
+had its second `"` prematurely close the quoted region, and the value came
+out as `hello \world\` instead of `hello "world"`.
+
+The fix needed to answer a harder question than "skip escaped quotes": what
+does a *run* of backslashes immediately before a quote mean? Bash's actual
+rule (verified empirically against real bash, not from memory) pairs
+backslashes left-to-right — an even run collapses to half as many literal
+backslashes and leaves the quote as a real, state-toggling delimiter; an odd
+run does the same collapse and additionally escapes the quote (literal
+character, no toggle). A naive one-token lookahead gets this wrong on 2+
+backslash runs (`"a\\"` → `a\` in real bash; a lookahead that treats each
+backslash independently would misjudge the second backslash as escaping the
+closing quote instead of pairing with the first). The fix buffers the
+contiguous backslash run and decides once it hits the terminating character.
+
+Backslashes *not* adjacent to a quote were left untouched on purpose — real
+bash also collapses `\\` inside double quotes when it's followed by an
+ordinary character (verified: `"foo\\bar"` → `foo\bar` in bash), but
+`unquote_default_word` never did general backslash-escape processing before
+this fix (confirmed by reading `parse_interpolated_string`, its downstream
+consumer, which has no backslash handling at all), and this PR is scoped to
+the reported quote-toggle bug, not a full escape-processing rewrite. Recorded
+as a known gap in the PR body rather than filed as a separate issue — it's a
+narrow, pre-existing limitation, not a regression.
+
+The single-quote case forced a judgment call, and the *first* answer was
+wrong. The initial pass extended the same backslash-escape rule *into*
+single-quoted default words "for symmetry," reasoning that real bash's
+behavior there (`'hello \'world\''` is a syntax error — unterminated quote —
+not an embedded apostrophe) wasn't a coherent target to match. Amy overruled
+it on review, and correctly: single quotes are a *literal* region in shell,
+full stop. A model relying on shell muscle memory must get **zero** surprises
+inside `'…'` — zero interpolation, zero escape processing. A backslash there
+is a literal byte and a `'` always closes the span; it is never escaped. The
+"symmetry" argument was inventing a dialect where the whole point is fidelity
+to shell's literal-region contract.
+
+So the escape logic is gated to fire only *outside* single quotes (`if ch ==
+'\\' && !in_single`). Nothing is actually lost: the shell-correct way to embed
+a single quote is the `'…'\''…'` idiom — close the span, emit an **unquoted**
+escaped `\'`, reopen — and that unquoted escape still works (it's the same
+code path as the double-quote fix, just outside any quote). `${X:-'it'\''s'}`
+→ `it's`, matching bash exactly. The one behavior that stays inside single
+quotes is the pre-existing `$` → `__KAISH_ESCAPED_DOLLAR__` marking, which is
+what *implements* "zero interpolation" — it isn't escape processing, it's
+suppression.
+
+The delimiter-stripping itself (`${X:-'x'}` → `x`) was double-checked and is
+correct — that's the function's whole purpose, the quotes are syntax not data.
+Only the escape-processing-inside-single-quotes overreach was the bug.
+
+A third round, from a kaibo review of the revision, caught a subtler
+context bug: the escape predicate treated `'` and `"` identically, gated only
+on `!in_single`. So inside a *double*-quoted region a `\'` still escaped —
+`${X:-"a\'b"}` came out `a'b`. Bash disagrees: inside `"…"` a `'` is an
+ordinary character, and only `\"`, `\$`, `\\`, `` \` `` are escapes, so the
+backslash before `'` is literal and bash yields `a\'b` (verified against real
+bash). The fix is a one-line narrowing of the predicate — a `'` only counts as
+escapable when *not* `in_double` — so unquoted `\'` still powers the
+`'it'\''s'` idiom, double-quoted `\'` stays literal, and single-quoted regions
+(already fully literal) are untouched.
+
+Tests in `shell_compat_tests.rs`: the double-quote fix is pinned by
+`default_word_double_quoted_escaped_quotes_literal`,
+`default_word_escaped_backslash_before_quote` (the `"a\\"` → `a\` parity
+case), `default_word_mixed_single_and_escaped_double_quotes`, and
+`default_word_double_quoted_backslash_before_squote_literal` (the kaibo-caught
+`"a\'b"` → `a\'b` case, confirmed red as `a'b` before the predicate fix). The
+shell-literal single-quote contract is pinned by four cases:
+`…_strips_delimiters` (`'x'` → `x`), `…_no_interpolation` (`'$HOME'` →
+`$HOME`), `…_backslash_literal` (`'a\b'` → `a\b`, backslash NOT collapsed),
+and `…_embed_idiom` (`'it'\''s'` → `it's`). All the newly-fixed cases were
+confirmed failing against the pre-fix code; every case — single- and
+double-quoted alike — now passes under `KAISH_BASH_COMPAT=1` against real
+bash, with no recorded divergence, because the shell rule *is* bash's rule.
+
+## Binary at the remaining text sinks, and `&>` streaming (2026-07-06, GH #93)
+
+0.11.0 made `Value::Bytes` go loud at the three primary text sinks — string
+interpolation, bare-word external argv, `echo` — via `value_to_text_sink()`.
+#93 item 1 asked for the rest of the sinks that still fell through to
+`value_to_string`'s infallible `[binary: N bytes]` placeholder. Rather than a
+bespoke fix per sink, added `value_to_text_sink_named(value, sink)` (and a
+`values_to_text_sink_named` for a whole positional list) — same guard,
+parameterized so the error names the actual boundary ("a path", "an exported
+environment variable value", "a redirect target") instead of the generic
+"text", mirroring the `sink` parameter `structured_boundary_error` already
+uses for the collection-vs-process-boundary guard.
+
+**The five named sinks, and one the sweep turned up.** Builtin
+path-positional coercion touched ~17 files (`mkdir`/`cp`/`mv`/`rm`/`touch`/
+`dirname`/`cut`/`stat`/`readlink`/`realpath`/`tee`/`sort`/`find`/`grep`/`sed
+-i`/`ls`) — all the same shape, so `cp`/`mv`/`tee` also got a small cleanup:
+they were stringifying the same source value twice (once for a
+gate-overwrite preview, again in the write loop) — computed once now. Widened
+"path-positional" to cover `[[ -f $x ]]`/`test -f $x` too (kernel.rs's
+`eval_test_async` and the `test` builtin's own separate file-test impl,
+matching in comments) since a binary operand there silently stats a file
+literally named `[binary: N bytes]` — same bug, different entry point.
+Env-var export needed three call sites in sync (kernel.rs's production spawn,
+its `dispatch.rs` test-only twin, and `env`'s own `execute_with_env`), all
+already following the collection guard's precedent of a separate binary
+check after `structured_export_error`. The redirect target
+(`pipeline.rs::eval_redirect_target`) had a private, single-caller
+`value_to_string` shim living in the same file — deleted once its call site
+converted, rather than leaving it as dead code. Sweeping the codebase for the
+"bare-word external argv" pattern (already fixed in `build_args_flat`) turned
+up a fourth spawn site nobody had touched: `exec`'s own argv loop, built
+straight from typed positionals with no shared helper — same class of bug,
+now fixed the same way.
+
+**The semantic ops split three ways on inspection**, not the four the issue
+guessed. `${#…}` on binary was *already* correct (`value_length` special-cases
+`Bytes` to the byte count before ever reaching `value_to_string` — locked in
+with a regression test, no fix needed). `==`/`!=` needed a new guard arm in
+`values_equal` ahead of the generic mixed-scalar fallback: `Value::Bytes`
+against anything but another `Value::Bytes` is now a loud type error, not a
+silent compare-the-placeholder-text. `in` needed the same treatment only for
+the record-key branch of `eval_membership` (a `Value::Bytes` needle stringified
+into a lookup key); the list-membership branch (`element_matches`) keeps
+treating a shape mismatch as "not a match, not an abort" — consistent with how
+it already treats a nested-collection element, and it's what keeps `x in
+$heterogeneous_list` from dying partway through the scan. `case`-glob needed
+one line in `kernel.rs`'s `Stmt::Case` handler.
+
+**Heredoc body and record-key interpolation turned out to be a non-finding
+worth writing down anyway.** The sync `Evaluator`'s `HereDocBody` and
+`RecordKey::Interpolated` arms (`interpreter/eval.rs`) are the ones the issue
+named, but tracing every real call site of the sync `eval_expr` showed
+heredocs and record literals in an actual script always resolve through the
+kernel's *async* evaluator, which already composes through the guarded
+`eval_string_part_async` — the sync arms are unreachable with a live
+`Value::Bytes` in production (only reachable by an embedder driving the sync
+`Evaluator` directly, or by a unit test). Swapped `value_to_string` for
+`value_to_text_sink` there anyway — cheap, correct, and stops the code from
+leaning on a non-local invariant — but it's a defense-in-depth edit with no
+behavior change, not a bug fix; said so plainly rather than overclaiming a
+fourth "fixed" sink. Confirmed by literally reverting just those two lines
+and rerunning the new eval.rs unit tests: both still passed.
+
+**A test-helper trap almost hid a false pass.** The shared `assert_loud_binary`
+helper (from 0.11.0) checked `err.contains("binary")` — true of a real
+"cannot be used as a path" message, but *also* true of `rm`'s ordinary "No such
+file or directory" once the path itself is the literal string `[binary: N
+bytes]` (the placeholder text contains the word "binary"). `rm`'s new test
+silently passed against the *unfixed* code for exactly that reason. Caught it
+by deliberately reverting the whole PR's `src/` diff (keeping the new tests)
+and rerunning — 11 of the 21 new/touched tests failed as expected, but `rm`'s
+didn't. Tightened the helper to `contains("cannot be used as")` — the
+consistent wording all these guards now share (reworded `values_equal`'s
+message to fit) — and added a stderr placeholder-leak check alongside the
+existing stdout one. Reran the full revert to confirm: all 11 fail pre-fix,
+all pass post-fix.
+
+**Item 6 (`&>` streaming) is an honest equivalence test, not a failing one.**
+`RedirectKind::Both` now uses `take_output_for_stream`/`write_canonical`
+like `>`/`>>`, instead of forcing structured output through a full
+`to_canonical_string()` `String` first — a memory-copy optimization, not an
+output-correctness fix, so the file bytes are identical either way and a
+test can't observe the difference by content alone. Wrote it up front as
+that: byte-for-byte equivalence + a large-table completeness check, in
+`pipeline.rs`'s own `apply_redirects` test module (unit-level, not
+`kernel.execute()` — there's no builtin under test, just the redirect
+machinery, and the existing merge-redirect tests already use this pattern).
+Verified honestly by reverting just that hunk: same tests, same pass. Applied
+the identical streaming swap to the inter-stage pipe write next to it
+(`run_pipeline`) since it shares the exact `out_bytes()`/
+`text_out().into_owned().into_bytes()` shape — not `&>`-specific, but the
+same anti-pattern sitting right next to the one the issue named.
+
+**Deferred, tracked in #116, not fixed here:** a `WordAssign`→positional/named
+reconstruction cluster (`dd if=$BIN`, `awk -v a=$BIN`, `cat foo=$BIN`) across
+four call sites in `kernel.rs`/`pipeline.rs` that embeds a value into a
+`key=value` string the same lossy way — real, but a distinct code shape from
+the five named sinks, and out of scope for one PR. Also verified in passing
+that #93's two SUSPECTED findings (S3/S4: binary crossing into `fromjson`/
+`fromjsonl`) are already handled — both already reject a binary positional
+loudly and route stdin through the shared `read_stdin_to_text`, which already
+errors on invalid UTF-8.
+
+**A kaibo review of the diff (deepseek, whole-file, not just the patch) found
+a second wave the grep-for-`value_to_string` sweep missed entirely**, because
+it's a different anti-pattern: `ExecContext::expand_paths` (the shared path
+list builder behind `cat`/`head`/`tail`/`wc`/`checksum`/`file`/`base64_tool`/
+`tac`/`xxd`) matched non-string positionals with `_ => continue` — a
+`Value::Bytes` operand didn't get stringified into a placeholder, it just
+*vanished* from the list. Worse than the placeholder bug: every one of those
+callers falls back to reading stdin when the path list comes back empty, so
+`head $BIN` (say) silently read whatever was piped in instead of erroring on
+the binary path — confirmed with a test that pipes distinguishable stdin
+content through and asserts it never appears in the output. Same shape at
+`cd` (`get_string`'s silent `None` → falls back to `$HOME`) and `awk`'s input
+operand (→ falls back to stdin); `basename`/`diff` already failed loudly on
+`None`, just with a generic "missing" message, fixed for consistency.
+`get_string` itself lives in the `kaish-types` leaf crate with no
+`EvalError` machinery to explain *why* it saw nothing, so the fix is a
+`get_path_string` helper in `tools/builtin/mod.rs` that checks for
+`Value::Bytes` before falling through to `get_string`, used at each of the
+four call sites — not a change to `get_string`'s own signature, which is used
+far too broadly (for non-path args too) to safely touch here. Same
+revert-and-confirm discipline as the rest of this PR: all 7 new tests fail
+against the pre-fix code, pass after.
+
+**A second kaibo pass over the same `get_path_string`/`expand_paths` fix
+found 10 more builtins with the identical `get_string` shape** — `sed`
+(streaming-mode input) and `uniq` silently fell back to stdin exactly like
+`awk`; `jq`'s `path` positional the same; `tree` silently used `.`; `write`/
+`ln`/`patch`/`validate`/`checksum`/`spawn` already failed loudly on `None`
+(just with a generic "missing" message), converted for consistency. All
+mechanical once `get_path_string` existed: swap `args.get_string` for it, add
+the `Err` arm.
+
+**Two of those ten (`checksum --check=$BIN`, `patch --file=$BIN`) exposed a
+second, deeper bug while writing their tests — the tests kept passing against
+unfixed code, for the wrong reason.** Both builtins check their own
+clap-parsed field (`parsed.check`/`parsed.file`) *before* falling back to
+`args.get_string`, and clap's field is populated from `ToolArgs::to_argv()` —
+which stringifies `Value::Bytes` into the *exact same* `[binary: N bytes]`
+placeholder via its own `value_to_argv_token`, a separate, pre-existing,
+explicitly-commented-as-deferred gap in the `kaish-types` leaf crate. So
+`parsed.check` was never `None` for a binary `--check=$BIN` — it was
+`Some("[binary: N bytes]")`, and the `get_path_string` fallback (only reached
+on `None`) never ran. Fixed by reordering: check the untouched `ToolArgs`
+value first (via `get_path_string`), fall back to the clap field only when
+genuinely absent — correct for both the binary case and the ordinary one
+(the raw `ToolArgs` map already has whatever clap would have parsed, from
+before `to_argv()` ever ran). Audited the rest of the `parsed.foo.clone()
+.or_else(|| args.get_string(...))` sites in the codebase for the same
+ordering hazard — none of the others (`algo`, `template`, `encoding`,
+`separator`, `field_separator`, …) are path-typed, so out of *this* PR's
+reach, but the root cause (`to_argv()`/`value_to_argv_token`) is filed as
+#120 rather than silently left for the next person to rediscover the hard
+way. Every genuinely-fixed builtin (11 new tests this round) verified
+fail-first the same way as the rest of the PR.
+
+**A third pass (gemini, asked specifically to sweep for the same ordering
+hazard in every builtin touched so far) found one more: `cmp.rs`** read its
+two file operands off `parsed.paths` (the clap-parsed field) instead of
+`args.positional` — the exact CLAUDE.md gotcha ("read `Value`-typed
+positionals off `args.positional`, not the clap struct") that the other
+path-positional builtins already followed correctly. Fixed the same way as
+`mkdir`/`cp`/etc.: `values_to_text_sink_named(&args.positional, "a path")`.
+Three review passes, three distinct bug shapes (`_ => continue` drop,
+clap-field-checked-before-raw-value ordering, clap-field-read-directly) —
+each caught because the review asked "is this ACTUALLY the shape you think
+it is" against the live code rather than trusting the pattern to have been
+applied uniformly. Stopped the loop here rather than keep sweeping
+indefinitely; #116/#120 carry the remaining known-adjacent gaps forward.
+
+## The README learns to face the front door (2026-07-06)
+
+Amy asked for a first-time-visitor evaluation of README.md ahead of a rewrite.
+Two stateless outside reads (deepseek and gemini-flash via kaibo `oneshot`,
+given only the README — exactly what a visitor sees) converged with our own
+read almost point-for-point: the project thesis ("Why a shell for agents?")
+was buried as an `####` heading inside Components → Embedding at 85% document
+depth; the doc oscillated between agent-runtime and daily-driver-shell
+identities section by section; and reference-grade material (exit-code table,
+latch/trash mechanics, embedder lifecycle) clogged the middle. The accuracy
+pass found worse: the very first instruction was broken — `cargo install
+kaish` names a crate that doesn't exist (the binary ships in `kaish-repl`) —
+and "still experimental" contradicted the settled-language stance.
+
+Decisions:
+
+- **Sequence, don't interleave.** The rewrite front-loads the universal pitch
+  (hero with the "skills transfer" line both reviewers independently named the
+  strongest sentence in the file, thesis, differences-from-bash), keeps the
+  Quick Tour, then branches Getting Started into the two real journeys: REPL
+  and embedding. Six crates ship this README as their crates.io page, so the
+  embedder content stays — sequenced, not braided.
+- **Reference material moved to its homes.** Exit-code table + output contract
+  + fresh-kernel-per-request lifecycle → EMBEDDING.md (new "result contract"
+  section; its stale "0.8.x" fixed too). Trash thresholds/exclusions →
+  LANGUAGE.md — they had no home outside the README.
+- **Everything shown is verified.** Every tour example ran against the current
+  binary (including the quote-to-join parse error); the embed example was
+  compiled and run from a scratch crate against the worktree kernel. The tour
+  now shows 0.11 typed collections (`fromjson` + `${r[k]}`) instead of jq —
+  Amy may spin jq out to its own crate, so the README stops showcasing it
+  (it stays in the builtin inventory table, which tracks code).
 
 ## `jq -s` stops being a no-op on the `.data` path (2026-07-06, GH #93 item 2)
 

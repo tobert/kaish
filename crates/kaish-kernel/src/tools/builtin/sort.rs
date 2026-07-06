@@ -97,7 +97,10 @@ impl Tool for Sort {
         } else {
             let mut acc = String::new();
             for value in &args.positional {
-                let path = crate::interpreter::value_to_string(value);
+                let path = match crate::interpreter::value_to_text_sink_named(value, "a path") {
+                    Ok(p) => p,
+                    Err(e) => return ExecResult::failure(1, format!("sort: {e}")),
+                };
                 let resolved = ctx.resolve_path(&path);
                 match ctx.backend.read(Path::new(&resolved), None).await {
                     Ok(data) => match String::from_utf8(data) {

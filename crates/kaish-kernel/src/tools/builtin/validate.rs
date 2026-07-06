@@ -15,6 +15,7 @@ use std::path::Path;
 use crate::ast::ToolDef;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::parser::parse;
+use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::{Severity, Validator};
 
@@ -87,24 +88,31 @@ impl Tool for Validate {
         // parsed clap field, not the raw flag map.
         let show_warnings = parsed.warnings;
 
-        // Get input: from file, -e expression, or stdin
+        // Get input: from file, -e expression, or stdin. A binary `path`
+        // operand goes loud rather than silently falling through to stdin.
         let (source, label) = if let Some(expr) = args.get_string("expr", usize::MAX) {
             (expr, "<expr>".to_string())
-        } else if let Some(path) = args.get_string("path", 0) {
-            let resolved = ctx.resolve_path(&path);
-            match ctx.backend.read(Path::new(&resolved), None).await {
-                Ok(data) => match String::from_utf8(data) {
-                    Ok(content) => (content, path),
-                    Err(_) => return ExecResult::failure(1, format!("kaish-validate: {}: invalid UTF-8", path)),
-                },
-                Err(e) => return ExecResult::failure(1, format!("kaish-validate: {}: {}", path, e)),
-            }
         } else {
-            // stdin (pipe or buffered — `read_stdin_to_text` prefers the pipe).
-            match ctx.read_stdin_to_text().await {
-                Ok(Some(s)) => (s, "<stdin>".to_string()),
-                Ok(None) => return ExecResult::failure(1, "kaish-validate: no input provided (use path or -e)"),
-                Err(e) => return ExecResult::failure(2, format!("kaish-validate: {e}")),
+            match get_path_string(&args, "path", 0) {
+                Ok(Some(path)) => {
+                    let resolved = ctx.resolve_path(&path);
+                    match ctx.backend.read(Path::new(&resolved), None).await {
+                        Ok(data) => match String::from_utf8(data) {
+                            Ok(content) => (content, path),
+                            Err(_) => return ExecResult::failure(1, format!("kaish-validate: {}: invalid UTF-8", path)),
+                        },
+                        Err(e) => return ExecResult::failure(1, format!("kaish-validate: {}: {}", path, e)),
+                    }
+                }
+                Ok(None) => {
+                    // stdin (pipe or buffered — `read_stdin_to_text` prefers the pipe).
+                    match ctx.read_stdin_to_text().await {
+                        Ok(Some(s)) => (s, "<stdin>".to_string()),
+                        Ok(None) => return ExecResult::failure(1, "kaish-validate: no input provided (use path or -e)"),
+                        Err(e) => return ExecResult::failure(2, format!("kaish-validate: {e}")),
+                    }
+                }
+                Err(e) => return ExecResult::failure(1, format!("kaish-validate: {e}")),
             }
         };
 

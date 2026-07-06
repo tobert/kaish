@@ -61,11 +61,66 @@ fn parse_var_expr(raw: &str) -> Expr {
 /// suppress interpolation (their `$` becomes a literal, via the lexer's
 /// `__KAISH_ESCAPED_DOLLAR__` marker that `parse_interpolated_string` turns
 /// back into a bare `$`). Unquoted text passes through unchanged.
+///
+/// A backslash-escaped quote unescapes to a bare quote character without
+/// toggling the quote-tracking state, but *which* quote is escapable depends on
+/// context, matching bash (GH #93 item 5): OUTSIDE any quotes both `\"` and
+/// `\'` escape (this is what makes the `'it'\''s'` → `it's` embedding idiom
+/// resolve); INSIDE double quotes only `\"` escapes, since `'` is an ordinary
+/// character there — a backslash before it stays literal (`"a\'b"` → `a\'b`). A
+/// run of backslashes immediately before an escapable quote is judged by parity
+/// (bash pairs them left-to-right): an odd run escapes the quote, an even run
+/// doesn't, and either way the run collapses to half as many literal
+/// backslashes. Backslashes not immediately followed by an escapable quote are
+/// untouched — general backslash-escape processing (`\\`, `\n`, ...) outside
+/// quote-adjacency is out of scope for this function.
+///
+/// Inside a single-quoted region shell rules apply verbatim: it is a LITERAL
+/// span with zero escape processing and zero interpolation. A backslash is a
+/// literal character and a `'` always closes the region (it is never escaped);
+/// only `$` is marked (`__KAISH_ESCAPED_DOLLAR__`) so it can't interpolate
+/// downstream. Only the delimiter quotes themselves are stripped — they are
+/// syntax, not data.
 fn unquote_default_word(word: &str) -> String {
     let mut out = String::with_capacity(word.len());
     let mut in_single = false;
     let mut in_double = false;
-    for ch in word.chars() {
+    let chars: Vec<char> = word.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        // Backslash-escape processing applies only OUTSIDE single quotes. In a
+        // single-quoted region a backslash is a literal character (handled by
+        // the `_` arm below) and a `'` always closes the span, per shell rules.
+        if ch == '\\' && !in_single {
+            let run_start = i;
+            while i < chars.len() && chars[i] == '\\' {
+                i += 1;
+            }
+            let run_len = i - run_start;
+            // Inside double quotes only `\"` escapes; `'` is an ordinary
+            // character there, so a preceding backslash stays literal.
+            let next_is_quote =
+                chars.get(i).is_some_and(|c| *c == '"' || (*c == '\'' && !in_double));
+            if next_is_quote {
+                if run_len / 2 > 0 {
+                    out.push_str(&"\\".repeat(run_len / 2));
+                }
+                if run_len % 2 == 1 {
+                    // Odd run: the quote is escaped — literal quote, no
+                    // toggle. Consume it here; the main loop below never
+                    // sees it.
+                    out.push(chars[i]);
+                    i += 1;
+                }
+                // Even run: the quote at chars[i] is unescaped and falls
+                // through to the normal toggle logic on the next iteration.
+            } else {
+                out.push_str(&"\\".repeat(run_len));
+            }
+            continue;
+        }
+        i += 1;
         match ch {
             // A quote delimiter toggles its mode and is itself dropped; the
             // other quote kind is literal data while inside one.
