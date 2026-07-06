@@ -446,10 +446,13 @@ scalar is one document, so that's `tojson`'s job instead.
 `jq -s` / `--slurp` also reads a document stream, with real jq framing (so
 pretty multi-line documents are fine) and *always* wraps the result in an
 array — even a single document (`printf '{"a":1}' | jq -s length` → `1`, the
-array length). On the `.data` pipeline path `-s` is a no-op — the upstream
-stage already handed over one structured value. If plain `jq` (no `-s`) sees
-JSONL-shaped input, the error names the document count and points at
-`fromjsonl` or `jq -s` instead of a bare parse failure.
+array length). On the `.data` pipeline path the upstream stage has already
+handed over one structured value — that's the single "document" — so `-s`
+wraps *that* value in a one-element array, same as the text path
+(`fromjson '{"a":1}' | jq -s length` → `1`; `... | jq -s '.[0]'` → the
+original value). If plain `jq` (no `-s`) sees JSONL-shaped input, the error
+names the document count and points at `fromjsonl` or `jq -s` instead of a
+bare parse failure.
 
 ## Statement Chaining
 

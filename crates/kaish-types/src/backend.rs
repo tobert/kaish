@@ -230,6 +230,7 @@ pub enum WriteMode {
 }
 
 /// Result from tool execution via backend.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ToolResult {
     /// Exit code (0 = success).
@@ -242,6 +243,14 @@ pub struct ToolResult {
     pub data: Option<JsonValue>,
     /// Structured output data for rendering (preserved from ExecResult).
     pub output: Option<OutputData>,
+    /// True if the output limiter capped this result (propagated from
+    /// `ExecResult`). See `ExecResult.did_spill` for the full semantics (disk
+    /// spill vs. in-memory truncation, exit code remap to 3).
+    pub did_spill: bool,
+    /// The command's original exit code before spill logic overwrote it
+    /// (propagated from `ExecResult`). Present only when `did_spill` is true
+    /// and `code` was changed. See `ExecResult.original_code`.
+    pub original_code: Option<i64>,
     /// MIME content type hint (propagated from ExecResult).
     pub content_type: Option<String>,
     /// Opaque key-value context (propagated from ExecResult).
@@ -262,6 +271,8 @@ impl ToolResult {
             stderr: String::new(),
             data: None,
             output: None,
+            did_spill: false,
+            original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
             latch: None,
@@ -276,6 +287,8 @@ impl ToolResult {
             stderr: stderr.into(),
             data: None,
             output: None,
+            did_spill: false,
+            original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
             latch: None,
@@ -290,6 +303,8 @@ impl ToolResult {
             stderr: String::new(),
             data: Some(data),
             output: None,
+            did_spill: false,
+            original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
             latch: None,
@@ -299,6 +314,42 @@ impl ToolResult {
     /// Check if the tool execution succeeded.
     pub fn ok(&self) -> bool {
         self.code == 0
+    }
+
+    /// Set the structured output-data payload, returning self for chaining.
+    pub fn with_output(mut self, output: Option<OutputData>) -> Self {
+        self.output = output;
+        self
+    }
+
+    /// Set the content-type hint, returning self for chaining.
+    pub fn with_content_type(mut self, ct: impl Into<String>) -> Self {
+        self.content_type = Some(ct.into());
+        self
+    }
+
+    /// Replace the baggage map, returning self for chaining.
+    pub fn with_baggage(mut self, baggage: BTreeMap<String, String>) -> Self {
+        self.baggage = baggage;
+        self
+    }
+
+    /// Set the pending confirmation-latch request, returning self for chaining.
+    pub fn with_latch(mut self, latch: Option<LatchRequest>) -> Self {
+        self.latch = latch.map(Box::new);
+        self
+    }
+
+    /// Set the spill flag, returning self for chaining.
+    pub fn with_did_spill(mut self, did_spill: bool) -> Self {
+        self.did_spill = did_spill;
+        self
+    }
+
+    /// Set the pre-spill original exit code, returning self for chaining.
+    pub fn with_original_code(mut self, original_code: Option<i64>) -> Self {
+        self.original_code = original_code;
+        self
     }
 }
 
@@ -332,6 +383,8 @@ impl From<ExecResult> for ToolResult {
             stderr: exec.err,
             data,
             output,
+            did_spill: exec.did_spill,
+            original_code: exec.original_code,
             content_type: exec.content_type,
             baggage: exec.baggage,
             latch: exec.latch,
@@ -355,6 +408,8 @@ impl From<ToolResult> for ExecResult {
         let mut exec = ExecResult::from_output(result.code as i64, result.stdout, result.stderr);
         exec.set_output(result.output);
         exec.data = result.data.map(json_to_value_no_envelope);
+        exec.did_spill = result.did_spill;
+        exec.original_code = result.original_code;
         exec.content_type = result.content_type;
         exec.baggage = result.baggage;
         exec.latch = result.latch;
@@ -400,5 +455,77 @@ mod tests {
         let failure = ToolResult::failure(1, "err");
         assert!(failure.baggage.is_empty());
         assert!(failure.content_type.is_none());
+    }
+
+    #[test]
+    fn tool_result_constructors_default_did_spill_and_original_code() {
+        // GH #93 item 3 baseline: the new fields must not silently drift the
+        // existing constructors' defaults.
+        assert!(!ToolResult::success("ok").did_spill);
+        assert!(ToolResult::success("ok").original_code.is_none());
+        assert!(!ToolResult::failure(1, "err").did_spill);
+        assert!(!ToolResult::with_data("ok", serde_json::json!(1)).did_spill);
+    }
+
+    #[test]
+    fn tool_result_from_exec_result_preserves_did_spill_and_original_code() {
+        // GH #93 item 3: ExecResult -> ToolResult must not drop the spill
+        // metadata — an embedder reading a ToolResult off this seam needs to
+        // know the output was capped and what the code was before the remap.
+        let mut exec = ExecResult::success("hello");
+        exec.did_spill = true;
+        exec.original_code = Some(0);
+
+        let tool_result = ToolResult::from(exec);
+        assert!(tool_result.did_spill);
+        assert_eq!(tool_result.original_code, Some(0));
+    }
+
+    #[test]
+    fn exec_result_from_tool_result_preserves_did_spill_and_original_code() {
+        // The reverse direction: a backend tool that reports a capped result
+        // (e.g. an embedder fronting its own output limiter) must have that
+        // survive back into the kernel's ExecResult.
+        let tool_result = ToolResult::success("hello")
+            .with_did_spill(true)
+            .with_original_code(Some(5));
+
+        let exec = ExecResult::from(tool_result);
+        assert!(exec.did_spill);
+        assert_eq!(exec.original_code, Some(5));
+    }
+
+    #[test]
+    fn tool_result_builder_setters_chain() {
+        // Exercises the ergonomic construction surface added for
+        // `#[non_exhaustive]`: every field not covered by success/failure/
+        // with_data gets a with_* setter, matching the ExecResult style.
+        let mut baggage = BTreeMap::new();
+        baggage.insert("k".to_string(), "v".to_string());
+
+        let latch = LatchRequest {
+            nonce: "n".to_string(),
+            command: "rm".to_string(),
+            paths: vec!["f".to_string()],
+            hint: "rm --confirm=n f".to_string(),
+            tool: "rm".to_string(),
+            argv: vec!["f".to_string()],
+            ttl: 60,
+        };
+
+        let result = ToolResult::success("hi")
+            .with_output(Some(OutputData::text("hi")))
+            .with_content_type("text/plain")
+            .with_baggage(baggage.clone())
+            .with_latch(Some(latch.clone()))
+            .with_did_spill(true)
+            .with_original_code(Some(2));
+
+        assert!(result.output.is_some());
+        assert_eq!(result.content_type.as_deref(), Some("text/plain"));
+        assert_eq!(result.baggage, baggage);
+        assert_eq!(result.latch.as_deref(), Some(&latch));
+        assert!(result.did_spill);
+        assert_eq!(result.original_code, Some(2));
     }
 }
