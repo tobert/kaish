@@ -20,6 +20,12 @@ breaking entries are marked **BREAKING**.
   (`transient`/`named`/`isolated`) keep the unfiltered default.
 
 ### Fixed
+- **The REPL no longer silently swallows a failing rc-file source.** A typo'd
+  command or a failed `source` line in `~/.config/kaish/init.kai` (or
+  `~/.kaishrc`) returns `Ok(ExecResult)` with a nonzero exit code, not an
+  `Err` — `load_rc_file` only warned on the latter, so the former left the
+  user with a half-loaded environment and zero indication why. Nonzero rc-file
+  exits now print a warning with the exit code and any diagnostic text.
 - **A confirmation latch raised mid-pipeline (`set -o latch`) no longer gets
   swallowed by a later stage's success.** `rm x | echo done` used to exit 0
   with `.latch` dropped, even though `rm` genuinely gated and the file was
