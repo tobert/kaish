@@ -397,7 +397,14 @@ impl BackendDispatcher {
                 stderr_task.abort();
             }
             let stderr = stderr_task.await.unwrap_or_default();
-            let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
+            // Signal-death mapping (128+signal, e.g. SIGKILL→137) must match
+            // the production spawn site exactly — kept in sync via the shared
+            // `exit_code_from_status` helper (GH #133 item 1). A `wait_or_kill`
+            // I/O error (not a signal death) falls back to 1, same as before.
+            let code = match status {
+                Ok(s) => crate::kernel::exit_code_from_status(&s),
+                Err(_) => 1,
+            };
             // Output was streamed to pipe, so result.out is empty
             Some(ExecResult::from_output(code, String::new(), stderr))
         } else {
@@ -428,7 +435,14 @@ impl BackendDispatcher {
                 std::time::Duration::from_secs(2),
             ).await;
             if let Some(task) = stdin_task { task.abort(); }
-            let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
+            // Signal-death mapping (128+signal, e.g. SIGKILL→137) must match
+            // the production spawn site exactly — kept in sync via the shared
+            // `exit_code_from_status` helper (GH #133 item 1). A `wait_or_kill`
+            // I/O error (not a signal death) falls back to 1, same as before.
+            let code = match status {
+                Ok(s) => crate::kernel::exit_code_from_status(&s),
+                Err(_) => 1,
+            };
             // stdout came back as raw bytes: text if valid UTF-8, else a Bytes
             // result (so `curl url`, `curl url > file.bin`, etc. keep binary intact).
             let mut result = ExecResult::success_text_or_bytes(stdout).with_code(code);
@@ -506,5 +520,77 @@ impl CommandDispatcher for BackendDispatcher {
     /// BackendDispatcher is stateless, so a fork is just a clone.
     async fn fork(&self) -> Arc<dyn CommandDispatcher> {
         Arc::new(Self { tools: Arc::clone(&self.tools) })
+    }
+}
+
+/// Tests that spawn real external processes through `try_external`, to catch
+/// behavioral drift from the production spawn site (`kernel.rs::try_execute_external`)
+/// — GH #133. Unlike the `BackendDispatcher` tests in `scheduler::pipeline`,
+/// which exercise builtins over a `MemoryFs` (virtual cwd, so `try_external`
+/// never spawns), these give the dispatcher a real tempdir cwd + PATH so the
+/// external fallback actually runs a child process.
+#[cfg(all(test, feature = "subprocess"))]
+mod external_process_tests {
+    // Test-fixture helpers (not `#[test]` bodies themselves), so the
+    // workspace's usual allow-in-tests clippy.toml carve-out doesn't cover
+    // them — see CLAUDE.md's "clap builtin gotchas" / test-code conventions.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use crate::ast::{Arg, Command, Expr, Value};
+    use crate::tools::{ExecContext, ToolRegistry};
+    use crate::vfs::{LocalFs, VfsRouter};
+
+    /// A `BackendDispatcher` + `ExecContext` rooted at a real tempdir, with an
+    /// empty tool registry (every command name falls through to
+    /// `try_external`, exactly like a real external command with no matching
+    /// builtin/user tool) and PATH seeded from the test process's own OS env.
+    /// Reading OS env here is fixture code, not kaish's hermetic runtime — see
+    /// CLAUDE.md and `external_command_tests.rs::repl_kernel`.
+    fn real_cwd_dispatcher() -> (BackendDispatcher, ExecContext, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", LocalFs::new(dir.path().to_path_buf()));
+        let tools = Arc::new(ToolRegistry::new());
+        let mut ctx = ExecContext::with_vfs_and_tools(Arc::new(vfs), tools.clone());
+        // Exported (not just set): try_external's own PATH lookup reads
+        // ctx.scope directly, but the CHILD process only inherits exported
+        // vars (cmd.env_clear() + exported_vars()) — a script that shells
+        // out further (`sh -c "yes | head"`) needs PATH in ITS env too,
+        // not just kaish's resolver.
+        ctx.scope.set_exported(
+            "PATH",
+            Value::String(std::env::var("PATH").unwrap_or_default()),
+        );
+        let dispatcher = BackendDispatcher::new(tools);
+        (dispatcher, ctx, dir)
+    }
+
+    /// `sh -c <script>` as a `Command`, matching how the parser would build it
+    /// from `sh -c 'script'` (a short flag, then a positional literal).
+    fn sh_cmd(script: &str) -> Command {
+        Command {
+            name: "sh".to_string(),
+            args: vec![
+                Arg::ShortFlag("c".to_string()),
+                Arg::Positional(Expr::Literal(Value::String(script.to_string()))),
+            ],
+            redirects: vec![],
+        }
+    }
+
+    /// GH #133 item 1: production maps a signal-killed child to `128 + signal`
+    /// (SIGKILL -> 137); the twin used to hardcode `code().unwrap_or(1)` -> 1,
+    /// so a cancel/timeout test run through this dispatcher observed an exit
+    /// code production never actually produces. Fails at `code == 1` pre-fix.
+    #[tokio::test]
+    async fn signal_killed_child_maps_to_128_plus_signal() {
+        let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
+        let cmd = sh_cmd("kill -KILL $$");
+        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+        assert_eq!(
+            result.code, 137,
+            "SIGKILL should map to 128+9=137 (production's mapping), got {}",
+            result.code
+        );
     }
 }
