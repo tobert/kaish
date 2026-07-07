@@ -305,6 +305,7 @@ async fn confirm_without_captured_invocation_errors() {
         tool: String::new(),
         argv: vec![],
         ttl: 60,
+        job_id: None,
     };
     let r = kernel.confirm(&bare).await.expect("confirm returns");
     assert_eq!(r.code, 2, "must not silently succeed: {r:?}");

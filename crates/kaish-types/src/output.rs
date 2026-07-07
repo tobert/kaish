@@ -926,6 +926,7 @@ mod tests {
             tool: "rm".to_string(),
             argv: vec!["precious.txt".to_string()],
             ttl: 60,
+            job_id: None,
         }));
 
         let formatted = apply_output_format(result, OutputFormat::Json);

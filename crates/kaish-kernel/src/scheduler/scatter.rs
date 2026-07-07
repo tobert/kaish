@@ -966,6 +966,7 @@ mod tests {
             tool: "rm".to_string(),
             argv: vec!["precious.txt".to_string()],
             ttl: 60,
+            job_id: None,
         }));
         let results = vec![ScatterResult { item: item("a"), result: r, timed_out: false }];
         let out = gather_results(&results, &GatherOptions::default());

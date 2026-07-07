@@ -790,6 +790,11 @@ impl ExecContext {
             tool,
             argv,
             ttl,
+            // Unknown at this dispatch-seam construction site — a
+            // *backgrounded* invocation gets this stamped later by
+            // `Job::latch()` when the job is queried through the JobManager
+            // (see scheduler/job.rs). A foreground latch never gets one.
+            job_id: None,
         }));
         result
     }

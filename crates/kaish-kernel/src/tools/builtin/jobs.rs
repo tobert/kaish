@@ -163,6 +163,7 @@ mod tests {
             tool: "rm".to_string(),
             argv: vec!["precious.txt".to_string()],
             ttl: 60,
+            job_id: Some(1),
         };
         let jobs = vec![
             JobInfo::new(JobId(1), "rm precious.txt", JobStatus::Latched).with_latch(Some(latch)),
@@ -177,6 +178,11 @@ mod tests {
         assert_eq!(
             rows[0]["latch"]["nonce"], "a3f7b2c1",
             "a latched row must carry the nonce: {}",
+            rows[0]
+        );
+        assert_eq!(
+            rows[0]["latch"]["job_id"], 1,
+            "the row's latch must carry the job_id back-reference (GH #124 part 4): {}",
             rows[0]
         );
         assert!(
