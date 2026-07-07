@@ -362,7 +362,15 @@ impl Job {
                     std::task::Poll::Ready(Err(e)) => {
                         ExecResult::failure(1, format!("job panicked: {}", e))
                     }
-                    std::task::Poll::Pending => return false, // shouldn't happen
+                    std::task::Poll::Pending => {
+                        // is_finished() promised Ready, but if the runtime
+                        // ever says Pending anyway, dropping the taken handle
+                        // would strand the job as "Running" forever with its
+                        // result silently lost. Put it back and retry on a
+                        // later poll.
+                        self.handle = Some(handle);
+                        return false;
+                    }
                 };
                 self.result = Some(result);
                 return true;
@@ -638,10 +646,15 @@ impl JobManager {
     }
 
     /// Remove completed jobs from tracking and clean up their temp files.
+    ///
+    /// A latched job is "done" but its cached result holds the only
+    /// `LatchRequest` for the gated operation — reaping it would silently
+    /// destroy the pending confirmation (GH #96). It stays until confirmed
+    /// or explicitly discarded (`kill --discard %N`).
     pub async fn cleanup(&self) {
         let mut jobs = self.jobs.lock().await;
         jobs.retain(|_, job| {
-            if job.is_done() {
+            if job.is_done() && job.latch().is_none() {
                 job.cleanup_files();
                 false
             } else {
@@ -654,6 +667,14 @@ impl JobManager {
     pub async fn exists(&self, id: JobId) -> bool {
         let jobs = self.jobs.lock().await;
         jobs.contains_key(&id)
+    }
+
+    /// Whether the job's cached result is a pending confirmation gate
+    /// (`JobStatus::Latched`). Consumers that would drop the job (`kill`,
+    /// cleanup paths) check this so a latch is never destroyed silently.
+    pub async fn is_latched(&self, id: JobId) -> bool {
+        let mut jobs = self.jobs.lock().await;
+        jobs.get_mut(&id).is_some_and(|job| job.latch().is_some())
     }
 
     /// Get info for a specific job.
@@ -830,6 +851,11 @@ impl JobManager {
     }
 
     /// Remove a job from tracking.
+    ///
+    /// NOTE: this bypasses the latch guard — a caller that might hit a
+    /// latched job must check [`is_latched`](Self::is_latched) first (see
+    /// the `kill` builtin), or the job's pending confirmation is destroyed
+    /// with it. `cleanup()` is the latch-safe bulk path.
     pub async fn remove(&self, id: JobId) {
         let mut jobs = self.jobs.lock().await;
         if let Some(mut job) = jobs.remove(&id) {
