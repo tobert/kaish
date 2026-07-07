@@ -365,6 +365,65 @@ async fn latch_off_by_default_rm_deletes_directly() {
     assert!(!dir.path().join("plain.txt").exists());
 }
 
+#[tokio::test]
+async fn latch_in_a_pipeline_stage_overrides_later_success() {
+    // GH #125: a confirmation gate raised by an EARLIER pipeline stage must
+    // survive a later stage's nominal success. `rm x | echo done` used to exit
+    // 0 with the latch dropped (only the last stage's result survived), so an
+    // agent gating on exit codes saw success while `rm` never ran. The gate is a
+    // control-plane fact about the whole pipeline: exit 2, `.latch` present, and
+    // the file untouched.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("precious.txt"), "data").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    run(&kernel, "set -o latch").await;
+    let piped = run(&kernel, "rm precious.txt | echo done").await;
+
+    assert_eq!(
+        piped.code, 2,
+        "an earlier stage's gate must set the pipeline exit code, not the last \
+         stage's 0: {}",
+        piped.err
+    );
+    let req = piped
+        .latch_request()
+        .expect("the earlier stage's latch must ride the pipeline result");
+    assert_eq!(req.command, "rm", "the gated command is rm, not echo");
+    assert!(!req.nonce.is_empty(), "a usable nonce must be present");
+    assert!(
+        dir.path().join("precious.txt").exists(),
+        "the gated file must survive — the gate held, the op never ran"
+    );
+}
+
+#[tokio::test]
+async fn latch_first_stage_wins_when_two_stages_gate() {
+    // Two gated stages in one pipeline: first latch wins (matches wait.rs
+    // classify()'s first-latch-wins). `rm a | rm b` under latch surfaces a's
+    // gate, and BOTH files survive (each stage gated independently).
+    let dir = tempdir();
+    std::fs::write(dir.path().join("a.txt"), "a").expect("write");
+    std::fs::write(dir.path().join("b.txt"), "b").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    run(&kernel, "set -o latch").await;
+    let piped = run(&kernel, "rm a.txt | rm b.txt").await;
+
+    assert_eq!(piped.code, 2, "err: {}", piped.err);
+    let req = piped.latch_request().expect("a latch must ride the result");
+    // First stage's gate authorizes a.txt; the surfaced nonce must be usable to
+    // confirm it (the FIRST gate, not the last stage's).
+    let confirm_a = run(&kernel, &format!("rm --confirm={} a.txt", req.nonce)).await;
+    assert_eq!(
+        confirm_a.code, 0,
+        "the surfaced nonce must confirm the FIRST stage's path: {}",
+        confirm_a.err
+    );
+    assert!(!dir.path().join("a.txt").exists(), "a.txt confirmed and removed");
+    assert!(dir.path().join("b.txt").exists(), "b.txt still gated, untouched");
+}
+
 // ============================================================================
 // Trash-on-delete — mock TrashBackend covering the RmAction::Trash arm
 // ============================================================================

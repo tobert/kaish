@@ -20,6 +20,12 @@ breaking entries are marked **BREAKING**.
   (`transient`/`named`/`isolated`) keep the unfiltered default.
 
 ### Fixed
+- **A confirmation latch raised mid-pipeline (`set -o latch`) no longer gets
+  swallowed by a later stage's success.** `rm x | echo done` used to exit 0
+  with `.latch` dropped, even though `rm` genuinely gated and the file was
+  never touched — only the last pipeline stage's result used to survive. Any
+  gated stage now overrides the pipeline's exit code (2) and carries its
+  structured `.latch` through; first latch wins if more than one stage gates.
 - **`kaish-ignore` changes now persist past their own statement.** Every
   runtime ignore mutation (`add`/`clear`/`defaults`/`scope`) was silently
   dropped at the end of the statement that made it — the per-command context
