@@ -20,6 +20,13 @@ breaking entries are marked **BREAKING**.
   (`transient`/`named`/`isolated`) keep the unfiltered default.
 
 ### Fixed
+- **The REPL's interactive table and column output align CJK/emoji cells
+  correctly** (GH #130). Column widths were computed from UTF-8 byte length
+  (`cell.len()`), not display width — a CJK cell like "你好" is 6 bytes but
+  only 4 display columns, so byte-length padding under-padded it and
+  misaligned every column after it. Width math now uses the `unicode-width`
+  crate's `UnicodeWidthStr::width()`. Cosmetic/interactive-only; `--json` and
+  other structured output are unaffected.
 - **A confirmation latch raised mid-pipeline (`set -o latch`) no longer gets
   swallowed by a later stage's success.** `rm x | echo done` used to exit 0
   with `.latch` dropped, even though `rm` genuinely gated and the file was
