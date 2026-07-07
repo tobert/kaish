@@ -1146,6 +1146,7 @@ mod tests {
             tool: "rm".to_string(),
             argv: vec!["precious.txt".to_string()],
             ttl: 60,
+            job_id: None,
         }));
         tx.send(gated).expect("send gated result");
         tokio::time::sleep(Duration::from_millis(10)).await;
