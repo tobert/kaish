@@ -4015,15 +4015,25 @@ impl Kernel {
                 }
             },
             Expr::CommandSubst(stmts) => {
-                // Snapshot scope+cwd before running — only output escapes,
-                // not side effects like `cd` or variable assignments.
+                // Snapshot scope, cwd, and session config before running —
+                // only output escapes, not side effects like `cd`, variable
+                // assignments, or config mutations (`kaish-ignore`,
+                // `kaish-output-limit`, `alias`/`unalias`) — matching how
+                // every other execution context (background forks, scatter
+                // workers) already isolates mutations (GH #139).
                 // Boxed: this ~470 B scope snapshot is held across the nested
                 // `$(…)` recursion await below, so inlining it grows every
                 // command-substitution level's future (GH #48, item 4).
                 let saved_scope = Box::new(self.scope.read().await.clone());
-                let saved_cwd = {
+                let saved_ec = {
                     let ec = self.exec_ctx.read().await;
-                    (ec.cwd.clone(), ec.prev_cwd.clone())
+                    (
+                        ec.cwd.clone(),
+                        ec.prev_cwd.clone(),
+                        ec.aliases.clone(),
+                        ec.ignore_config.clone(),
+                        ec.output_limit.clone(),
+                    )
                 };
 
                 // Capture result without `?` — restore state unconditionally
@@ -4039,8 +4049,12 @@ impl Kernel {
                 }
                 {
                     let mut ec = self.exec_ctx.write().await;
-                    ec.cwd = saved_cwd.0;
-                    ec.prev_cwd = saved_cwd.1;
+                    let (cwd, prev_cwd, aliases, ignore_config, output_limit) = saved_ec;
+                    ec.cwd = cwd;
+                    ec.prev_cwd = prev_cwd;
+                    ec.aliases = aliases;
+                    ec.ignore_config = ignore_config;
+                    ec.output_limit = output_limit;
                 }
 
                 // Now propagate the error
@@ -4385,15 +4399,26 @@ impl Kernel {
                 }
             }
             StringPart::CommandSubst(stmts) => {
-                // Snapshot scope+cwd — command substitution in strings must
-                // not leak side effects (e.g., `"dir: $(cd /; pwd)"` must not change cwd).
+                // Snapshot scope, cwd, and session config — command
+                // substitution in strings must not leak side effects (e.g.,
+                // `"dir: $(cd /; pwd)"` must not change cwd, and
+                // `"$(kaish-ignore clear)"` must not change the session's
+                // ignore config) — matching how every other execution
+                // context (background forks, scatter workers) already
+                // isolates mutations (GH #139).
                 // Boxed: this ~470 B scope snapshot is held across the nested
                 // `$(…)` recursion await below, so inlining it grows every
                 // command-substitution level's future (GH #48, item 4).
                 let saved_scope = Box::new(self.scope.read().await.clone());
-                let saved_cwd = {
+                let saved_ec = {
                     let ec = self.exec_ctx.read().await;
-                    (ec.cwd.clone(), ec.prev_cwd.clone())
+                    (
+                        ec.cwd.clone(),
+                        ec.prev_cwd.clone(),
+                        ec.aliases.clone(),
+                        ec.ignore_config.clone(),
+                        ec.output_limit.clone(),
+                    )
                 };
 
                 // Capture result without `?` — restore state unconditionally
@@ -4409,8 +4434,12 @@ impl Kernel {
                 }
                 {
                     let mut ec = self.exec_ctx.write().await;
-                    ec.cwd = saved_cwd.0;
-                    ec.prev_cwd = saved_cwd.1;
+                    let (cwd, prev_cwd, aliases, ignore_config, output_limit) = saved_ec;
+                    ec.cwd = cwd;
+                    ec.prev_cwd = prev_cwd;
+                    ec.aliases = aliases;
+                    ec.ignore_config = ignore_config;
+                    ec.output_limit = output_limit;
                 }
 
                 // Now propagate the error
