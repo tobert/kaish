@@ -30,6 +30,12 @@ breaking entries are marked **BREAKING**.
   parsed the job argument with a bare numeric parse, so the standard `%N`
   jobspec (already accepted by `kill`/`wait`) failed with "invalid job id: %1".
   `bg`/`fg` now strip a leading `%` before parsing, matching `kill`/`wait`.
+- **`expand_paths` now goes loud on a list/record/bool/null path operand**
+  (GH #121), closing the gap the `Value::Bytes` guard (#117) left in the same
+  function's catch-all. `cat`/`head`/`tail`/`wc`/etc. silently dropped a
+  structured, bool, or null path argument and fell back to reading stdin
+  instead of erroring on the operand actually given — the same silent-fallback
+  class #93/#117 set out to kill.
 - **`kaish-ignore` changes now persist past their own statement.** Every
   runtime ignore mutation (`add`/`clear`/`defaults`/`scope`) was silently
   dropped at the end of the statement that made it — the per-command context
