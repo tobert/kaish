@@ -447,7 +447,9 @@ impl KernelConfig {
             cwd,
             skip_validation: false,
             interactive: false,
-            ignore_config: crate::ignore_config::IgnoreConfig::none(),
+            // Ignore-aware by default (GH #134): .gitignore + default ignores
+            // at Advisory scope — `--no-ignore` / `kaish-ignore clear` recover.
+            ignore_config: crate::ignore_config::IgnoreConfig::interactive(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: cfg!(feature = "subprocess"),
             latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
@@ -3269,6 +3271,11 @@ impl Kernel {
             // dropped here and never reaches dispatch_command's read-back, so
             // it would not survive past the current statement.
             ec.output_limit = ctx.output_limit.clone();
+            // Same for `kaish-ignore` (add/clear/defaults/scope): this field
+            // was missing from this sync, so every runtime ignore mutation
+            // silently died at the end of its own statement — including the
+            // documented `kaish-ignore add .gitignore` rc-file recipe.
+            ec.ignore_config = ctx.ignore_config.clone();
             ec.pipe_stdin = ctx.pipe_stdin.take();
             ec.pipe_stdout = ctx.pipe_stdout.take();
         }

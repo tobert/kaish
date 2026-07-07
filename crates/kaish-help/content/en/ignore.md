@@ -6,8 +6,9 @@ Controls which files are filtered by file-walking tools (glob, tree, ls -R, grep
 
 | Mode | Scope | Defaults | Auto-gitignore | Effect |
 |------|-------|----------|----------------|--------|
-| REPL | Advisory | off | off | No filtering. `find` always unrestricted. |
+| REPL | Advisory | on | on | Polite tools filter (.gitignore + defaults); `find` unrestricted. Recover per call with `--no-ignore`, per session with `kaish-ignore clear`. |
 | Agent | Enforced | on | on | All tools filter. Prevents context flooding. |
+| Embedded | Advisory | off | off | No filtering unless the embedder configures it. |
 
 ## Scope
 
@@ -32,12 +33,13 @@ kaish-ignore auto on|off              # toggle nested .gitignore loading
 kaish-ignore scope advisory|enforced  # change scope
 ```
 
-## REPL Setup
+## REPL Opt-Out
 
-Add to `~/.kaishrc` for filtering in interactive mode:
+Interactive mode filters by default. To see everything, add to
+`~/.config/kaish/init.kai` (or run ad hoc):
 
 ```sh
-kaish-ignore add .gitignore
-kaish-ignore defaults on
-kaish-ignore auto on
+kaish-ignore clear      # this session: no filtering at all
 ```
+
+or reach past the filter per call: `glob '**/*' --no-ignore`.

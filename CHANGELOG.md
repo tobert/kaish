@@ -10,7 +10,21 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Changed
+- **The reference REPL is ignore-aware by default** (GH #134). Interactive,
+  `-c`, and script modes now load `.gitignore` and the default ignore list
+  (`.git`, `target`, `node_modules`, …) at Advisory scope: glob/tree/grep/ls
+  filter, `find` stays POSIX-unrestricted, and the unfiltered view is one
+  `--no-ignore` (per call) or `kaish-ignore clear` (per session) away. A new
+  `IgnoreConfig::interactive()` preset carries this; bare embedded kernels
+  (`transient`/`named`/`isolated`) keep the unfiltered default.
+
 ### Fixed
+- **`kaish-ignore` changes now persist past their own statement.** Every
+  runtime ignore mutation (`add`/`clear`/`defaults`/`scope`) was silently
+  dropped at the end of the statement that made it — the per-command context
+  sync copied back cwd/aliases/output-limit but not the ignore config — so
+  the documented `kaish-ignore add .gitignore` rc-file recipe did nothing.
 - **`glob --include` now actually filters.** It was a complete no-op: the
   walker consulted only exclude rules, so `glob '*' --include='*.rs'` listed
   everything. Include semantics are now rg-like: when include patterns exist a

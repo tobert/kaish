@@ -1,8 +1,10 @@
 //! Configurable ignore file policy for file-walking tools.
 //!
 //! Controls which gitignore-format files are loaded and how broadly
-//! ignore rules apply. Per-mode defaults protect sandboxed agents from
-//! context flooding while leaving REPL users unrestricted.
+//! ignore rules apply. Per-mode defaults: sandboxed agents get `Enforced`
+//! filtering (context-flood protection), the interactive REPL gets the same
+//! filters at `Advisory` scope (recoverable per call via `--no-ignore` or
+//! per session via `kaish-ignore`), and bare embedded/test kernels get none.
 
 use std::path::{Path, PathBuf};
 
@@ -41,7 +43,7 @@ pub struct IgnoreConfig {
 }
 
 impl IgnoreConfig {
-    /// No filtering — REPL/embedded/test default.
+    /// No filtering — embedded/test default.
     pub fn none() -> Self {
         Self {
             scope: IgnoreScope::Advisory,
@@ -50,6 +52,18 @@ impl IgnoreConfig {
             auto_gitignore: false,
             use_global_gitignore: false,
             global_gitignore_path_override: None,
+        }
+    }
+
+    /// Interactive-REPL defaults (GH #134): the same filters as `agent()` —
+    /// `.gitignore` loaded, default ignore list on — but at **Advisory**
+    /// scope, so `find` stays POSIX-unrestricted and a human can recover the
+    /// unfiltered view per call (`--no-ignore`) or per session
+    /// (`kaish-ignore clear`).
+    pub fn interactive() -> Self {
+        Self {
+            scope: IgnoreScope::Advisory,
+            ..Self::agent()
         }
     }
 

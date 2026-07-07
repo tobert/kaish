@@ -14,6 +14,30 @@ before it ships.
 
 ---
 
+## The REPL learns to read .gitignore — and kaish-ignore learns to persist (2026-07-06)
+
+Amy's call on #134: default to ignore-aware. The reference REPL had always run
+`IgnoreConfig::none()` — zero filtering — so every interactive `glob '**/*'`
+or `grep -r` walked `target/`, `.git/`, and `node_modules/` in full (it was
+half of the "glob walked forever" repro behind #122). The new
+`IgnoreConfig::interactive()` preset is `agent()`'s filters at **Advisory**
+scope: `.gitignore` plus the default ignore list for the polite walkers,
+`find` still POSIX-unrestricted, and two escape hatches — `--no-ignore` per
+call, `kaish-ignore clear` per session. Bare embedded kernels keep `none()`;
+the choice is per-frontend, not global.
+
+The trap discovered while testing the opt-out: `kaish-ignore clear` printed a
+cleared config and then the very next statement saw the old one. The
+per-command context sync in `execute_command` copied back cwd, aliases, and
+output-limit — with a comment documenting exactly this bug class for
+output-limit — but never `ignore_config`, so every runtime ignore mutation
+died at the end of its own statement. The documented `.kaishrc` recipe
+(`kaish-ignore add .gitignore`) had been a no-op the whole time. One line in
+the sync closes it, and the missing-field-in-a-manual-sync class gets another
+tally mark for the "extract the ctx-sync helper" backlog entry.
+
+---
+
 ## The latch survives its consumers (2026-07-06)
 
 A pre-release "fishing expedition" — Amy's cross-model combo, a gemini-pro
