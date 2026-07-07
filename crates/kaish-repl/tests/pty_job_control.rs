@@ -234,6 +234,45 @@ fn test_fg_resumes_stopped_job() {
 }
 
 #[test]
+fn test_fg_with_percent_jobspec() {
+    // GH #126 part A: `fg %1` (the POSIX jobspec form) must be accepted, not
+    // rejected with "invalid job id: %1".
+    let mut session = PtySession::new();
+
+    session.send_line("sh -c 'sleep 60'");
+    std::thread::sleep(Duration::from_millis(300));
+    session.send_ctrl_z();
+    session
+        .wait_for("会sh> ", Duration::from_secs(3))
+        .expect("prompt after Ctrl-Z");
+
+    // Resume with fg "%1", then Ctrl-C to kill it. The output captured by the
+    // next wait_for includes whatever `fg "%1"` printed immediately (an error,
+    // pre-fix) as well as anything printed after Ctrl-C.
+    session.send_line("fg \"%1\"");
+    std::thread::sleep(Duration::from_millis(300));
+    session.send_ctrl_c();
+
+    let output = session
+        .wait_for("会sh> ", Duration::from_secs(3))
+        .expect("prompt after fg \"%1\" + Ctrl-C");
+    assert!(
+        !output.contains("invalid job id"),
+        "fg \"%1\" should be accepted as a jobspec, got:\n{}",
+        output
+    );
+
+    // Job should be gone now — this also fails pre-fix, since a rejected
+    // `fg "%1"` never touches the stopped job at all.
+    let output = session.run_command("jobs");
+    assert!(
+        output.contains("no jobs"),
+        "jobs should be empty after fg \"%1\" + Ctrl-C, got:\n{}",
+        output
+    );
+}
+
+#[test]
 fn test_bg_resumes_in_background() {
     let mut session = PtySession::new();
 
@@ -250,6 +289,35 @@ fn test_bg_resumes_in_background() {
     assert!(
         output.contains("&"),
         "bg should print job with &, got:\n{}",
+        output
+    );
+
+    // Kill it to clean up
+    session.run_command("kill \"%1\"");
+}
+
+#[test]
+fn test_bg_with_percent_jobspec() {
+    // GH #126 part A: `bg %1` (the POSIX jobspec form, not just a bare job
+    // number) must be accepted — `kill`/`wait` already strip the leading `%`.
+    let mut session = PtySession::new();
+
+    session.send_line("sh -c 'sleep 60'");
+    std::thread::sleep(Duration::from_millis(300));
+    session.send_ctrl_z();
+    session
+        .wait_for("会sh> ", Duration::from_secs(3))
+        .expect("prompt after Ctrl-Z");
+
+    let output = session.run_command("bg \"%1\"");
+    assert!(
+        !output.contains("invalid job id"),
+        "bg \"%1\" should be accepted as a jobspec, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("&"),
+        "bg \"%1\" should print job with &, got:\n{}",
         output
     );
 
