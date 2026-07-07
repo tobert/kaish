@@ -30,6 +30,12 @@ breaking entries are marked **BREAKING**.
   parsed the job argument with a bare numeric parse, so the standard `%N`
   jobspec (already accepted by `kill`/`wait`) failed with "invalid job id: %1".
   `bg`/`fg` now strip a leading `%` before parsing, matching `kill`/`wait`.
+- **Shebang'd `.kai` scripts now report correct parse-error line numbers** (GH
+  #127). `run_script` used to strip the shebang line entirely
+  (`.lines().skip(1)`), which deleted a line and shifted every subsequent
+  line's reported number down by one — a syntax error on line 43 was reported
+  at line 42. The shebang line is now blanked out instead of removed, so line
+  accounting stays correct.
 - **`kaish-ignore` changes now persist past their own statement.** Every
   runtime ignore mutation (`add`/`clear`/`defaults`/`scope`) was silently
   dropped at the end of the statement that made it — the per-command context
