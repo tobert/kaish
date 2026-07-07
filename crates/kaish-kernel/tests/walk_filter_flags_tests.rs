@@ -164,11 +164,11 @@ async fn spawn_bad_timeout_is_loud() {
     let kernel = kernel_at(tmp.path());
 
     // The parse error fires before any process is spawned.
-    let r = run(&kernel, r#"spawn command="/bin/true" timeout=abc"#).await;
+    let r = run(&kernel, "spawn --command=/bin/true --timeout=abc").await;
     assert_eq!(r.code, 2, "bad timeout refuses instead of running unbounded: {r:?}");
     assert!(r.err.contains("timeout"), "names the flag: {}", r.err);
 
-    let neg = run(&kernel, r#"spawn command="/bin/true" timeout=-5"#).await;
+    let neg = run(&kernel, "spawn --command=/bin/true --timeout=-5").await;
     assert_eq!(neg.code, 2, "negative timeout refused, not u64-wrapped: {neg:?}");
 }
 

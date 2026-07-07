@@ -99,7 +99,7 @@ impl Tool for Head {
         let bytes: Option<usize> = match parsed.bytes {
             Some(b) if b < 0 => {
                 return ExecResult::failure(
-                    1,
+                    2,
                     format!("head: invalid byte count {b}: negative -c is not supported"),
                 )
             }

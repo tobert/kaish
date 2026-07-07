@@ -31,6 +31,11 @@ breaking entries are marked **BREAKING**.
   All now fail loudly, and negative values are refused rather than wrapped.
   `glob --type=<unknown>` similarly errored silently into "files only" and is
   now a usage error.
+- **`spawn`'s own help examples didn't work.** `help spawn` taught
+  `spawn command="cargo" argv=["build"]`, but that word-assign form never
+  binds for spawn — the whole token became the program name and exited 127.
+  The examples now show the working flag form (`spawn --command cargo --argv
+  build`).
 - **Unquoted `glob **/*.rs` now works: the pattern reaches the builtin as
   written.** Previously the kernel's argv glob expansion pre-expanded the bare
   pattern into matching paths, so `glob` bound the first path as its "pattern",

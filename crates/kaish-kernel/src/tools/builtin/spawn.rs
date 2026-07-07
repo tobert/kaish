@@ -7,11 +7,10 @@
 //! # Examples
 //!
 //! ```kaish
-//! spawn command="/usr/bin/jq" argv=["-r", ".foo"]
-//! spawn command="/bin/echo" argv=["hello", "world"]
-//! spawn command="/usr/bin/env" env={"MY_VAR": "value"}
-//! spawn command="cargo" cwd="/workspace"             # with working directory
-//! spawn command="sleep" argv=["10"] timeout=1000     # with 1 second timeout
+//! spawn --command /usr/bin/jq --argv '["-r", ".foo"]'
+//! spawn --command /bin/echo --argv '["hello", "world"]'
+//! spawn --command cargo --cwd /workspace              # with working directory
+//! spawn --command sleep --argv 10 --timeout 1000      # with 1 second timeout
 //! ```
 
 use async_trait::async_trait;
@@ -75,8 +74,8 @@ impl Tool for Spawn {
             "spawn",
             "Spawn an external command as a subprocess",
             [
-                ("Run a command", "spawn command=\"cargo\" argv=[\"build\"]"),
-                ("With timeout", "spawn command=\"sleep\" argv=[\"10\"] timeout=1000"),
+                ("Run a command", "spawn --command cargo --argv build"),
+                ("With timeout", "spawn --command sleep --argv 10 --timeout 1000"),
             ],
         )
     }
