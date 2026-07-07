@@ -1562,6 +1562,15 @@ impl Kernel {
     /// Errors (exit 2) if the latch carries no captured invocation — a latch
     /// produced outside a dispatch seam (a direct `tool.execute` in a unit
     /// test). Those are confirmable only by re-running with `--confirm=<nonce>`.
+    ///
+    /// If `latch.job_id` is set (the gate came from a *backgrounded* job —
+    /// `rm x &` reaching its gate), a successful replay also retires that job
+    /// from the `JobManager` (GH #124 part 4) — mirroring the existing manual
+    /// discard path (`kill --discard %N`), automated. A failed replay leaves
+    /// the job in place for inspection/retry. Guarded by `is_latched` so a
+    /// stale/foreign `job_id` can never remove an unrelated running job;
+    /// idempotent on a repeat confirm (nonces are reusable within TTL, and
+    /// removing an already-absent job is a no-op).
     pub async fn confirm(&self, latch: &LatchRequest) -> Result<ExecResult> {
         if latch.tool.is_empty() {
             return Ok(ExecResult::failure(
@@ -1575,7 +1584,18 @@ impl Kernel {
         let mut argv: Vec<Value> = Vec::with_capacity(latch.argv.len() + 1);
         argv.push(Value::String(format!("--confirm={}", latch.nonce)));
         argv.extend(latch.argv.iter().map(|a| Value::String(a.clone())));
-        self.execute_argv(&latch.tool, &argv).await
+        let result = self.execute_argv(&latch.tool, &argv).await?;
+
+        if result.ok()
+            && let Some(id) = latch.job_id
+        {
+            let job_id = crate::scheduler::JobId(id);
+            if self.jobs.is_latched(job_id).await {
+                self.jobs.remove(job_id).await;
+            }
+        }
+
+        Ok(result)
     }
 
     /// Run `work` under the movable-deadline watchdog for `timeout`, shared by the

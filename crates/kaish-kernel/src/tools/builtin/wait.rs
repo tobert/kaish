@@ -80,7 +80,7 @@ impl Tool for Wait {
 
                 match manager.wait(id).await {
                     Some(result) => {
-                        let status = classify(&result, &mut any_failed, &mut latch);
+                        let status = classify(id, &result, &mut any_failed, &mut latch);
                         output.push_str(&format!("[{}] {}\n", id, status));
                     }
                     None => return ExecResult::failure(1, format!("wait: job {} not found", id)),
@@ -101,7 +101,7 @@ impl Tool for Wait {
             let mut latch: Option<LatchRequest> = None;
 
             for (id, result) in results {
-                let status = classify(&result, &mut any_failed, &mut latch);
+                let status = classify(id, &result, &mut any_failed, &mut latch);
                 output.push_str(&format!("[{}] {}\n", id, status));
             }
 
@@ -115,14 +115,22 @@ impl Tool for Wait {
 /// job (`set -o latch`, exit 2 with a stored request) is `Latched`, *not*
 /// `Failed` — the op is held, and the request must reach the caller so a
 /// backgrounded gate is fulfillable (GH #96).
+///
+/// `wait` reads the job's raw cached `ExecResult` straight from
+/// `JobManager::wait`/`wait_all`, bypassing `Job::latch()` (the chokepoint
+/// that stamps `job_id` for `jobs`/`/v/jobs/{id}/latch`) — so this stamps it
+/// here too (GH #124 part 4), or a latch surfaced via `wait` would carry no
+/// back-reference for `Kernel::confirm` to retire the job with.
 fn classify(
+    id: JobId,
     result: &ExecResult,
     any_failed: &mut bool,
     latch: &mut Option<LatchRequest>,
 ) -> &'static str {
     if result.ok() {
         "Done"
-    } else if let Some(lr) = result.latch_request() {
+    } else if let Some(mut lr) = result.latch_request() {
+        lr.job_id = Some(id.0);
         // First latch wins if several jobs are gated — `.latch` holds one, and
         // an embedder waiting on multiple gated jobs is an unusual pattern.
         latch.get_or_insert(lr);

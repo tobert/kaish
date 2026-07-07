@@ -214,9 +214,19 @@ impl Job {
     /// The job's pending confirmation-latch request, if it is gated
     /// (`JobStatus::Latched`). `None` otherwise. Backs `JobInfo.latch` and the
     /// `/v/jobs/{id}/latch` node so a backgrounded gate is fulfillable (#96).
+    ///
+    /// Stamps `job_id` with this job's own id (GH #124 part 4) — the ONE
+    /// chokepoint every latch-reading path (`list`/`get`/`get_latch`/
+    /// `is_latched`/`cleanup`) goes through, so `Kernel::confirm` can later
+    /// retire the originating job after a successful replay without every
+    /// caller having to thread the id through separately.
     pub fn latch(&mut self) -> Option<kaish_types::result::LatchRequest> {
         self.try_poll();
-        self.result.as_ref().and_then(|r| r.latch_request())
+        let id = self.id;
+        self.result.as_ref().and_then(|r| r.latch_request()).map(|mut lr| {
+            lr.job_id = Some(id.0);
+            lr
+        })
     }
 
     /// Get the stdout stream (if attached).
@@ -984,6 +994,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn latch_stamps_job_id_back_reference() {
+        // GH #124 part 4: Job::latch() is the ONE chokepoint every latch-reading
+        // path (list/get/get_latch/is_latched/cleanup) goes through, so it must
+        // stamp the job's own id onto the surfaced LatchRequest -- otherwise
+        // Kernel::confirm has no way to know which job to retire after a
+        // successful replay.
+        let manager = JobManager::new();
+
+        let id = manager.spawn("gated".to_string(), async {
+            let mut result = ExecResult::failure(2, "confirmation required");
+            result.latch = Some(Box::new(kaish_types::result::LatchRequest {
+                nonce: "a3f7b2c1".to_string(),
+                command: "rm".to_string(),
+                paths: vec!["x".to_string()],
+                hint: "rm --confirm=a3f7b2c1 x".to_string(),
+                tool: "rm".to_string(),
+                argv: vec!["x".to_string()],
+                ttl: 60,
+                job_id: None, // unset at construction -- Job::latch() must fill it in
+            }));
+            result
+        }).await;
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let latch = manager.get_latch(id).await.expect("job must be latched");
+        assert_eq!(
+            latch.job_id,
+            Some(id.0),
+            "Job::latch() must stamp this job's own id onto the surfaced request"
+        );
+    }
+
+    #[tokio::test]
     async fn test_job_status_after_completion() {
         let manager = JobManager::new();
 
@@ -1102,6 +1146,7 @@ mod tests {
             tool: "rm".to_string(),
             argv: vec!["precious.txt".to_string()],
             ttl: 60,
+            job_id: None,
         }));
         tx.send(gated).expect("send gated result");
         tokio::time::sleep(Duration::from_millis(10)).await;

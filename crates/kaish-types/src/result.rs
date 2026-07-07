@@ -98,6 +98,21 @@ pub struct LatchRequest {
     pub argv: Vec<String>,
     /// Seconds until the nonce expires.
     pub ttl: u64,
+    /// The id of the *backgrounded* job that raised this latch, if any —
+    /// `Some` only when the gate came from a job the `JobManager` is tracking
+    /// (`rm x &` reaching its gate), `None` for a foreground latch (the common
+    /// case: `rm x` gated directly at the dispatch seam, no job involved).
+    ///
+    /// Deliberately a bare `u64`, not a `JobId`: this crate (`kaish-types`) is
+    /// a dependency-light leaf with no notion of `JobId` — that type lives in
+    /// `kaish-kernel`'s scheduler module, which depends on `kaish-types`, not
+    /// the other way around. `kaish-kernel` re-wraps this as `JobId(id)` at
+    /// the two call sites that care ([`JobManager`]'s `Job::latch()` stamps
+    /// it; `Kernel::confirm` reads it back to retire the originating job
+    /// after a successful replay). Skipped on the wire when absent, so a
+    /// foreground latch's `--json` shape is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<u64>,
 }
 
 /// Returned when a binary result is asked to behave as text.
@@ -919,6 +934,7 @@ mod tests {
             tool: "rm".to_string(),
             argv: paths.iter().map(|p| (*p).to_string()).collect(),
             ttl: 60,
+            job_id: None,
         }
     }
 
@@ -946,6 +962,7 @@ mod tests {
             tool: "kaish-trash".to_string(),
             argv: vec!["--".to_string(), "empty".to_string()],
             ttl: 60,
+            job_id: None,
         }));
 
         let req = result.latch_request().expect("a latch request");

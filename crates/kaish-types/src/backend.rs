@@ -511,6 +511,7 @@ mod tests {
             tool: "rm".to_string(),
             argv: vec!["f".to_string()],
             ttl: 60,
+            job_id: None,
         };
 
         let result = ToolResult::success("hi")

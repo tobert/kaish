@@ -305,6 +305,7 @@ async fn confirm_without_captured_invocation_errors() {
         tool: String::new(),
         argv: vec![],
         ttl: 60,
+        job_id: None,
     };
     let r = kernel.confirm(&bare).await.expect("confirm returns");
     assert_eq!(r.code, 2, "must not silently succeed: {r:?}");
@@ -1193,6 +1194,71 @@ async fn backgrounded_latch_is_reachable_and_confirmable() {
     assert!(!precious.exists(), "file removed after confirm");
 }
 
+/// GH #124 part 4: a successful `confirm` of a *backgrounded* latch retires
+/// the originating job — it no longer lingers in `jobs` forever as `Latched`,
+/// disconnected from the fact its gate was just fulfilled. Mirrors the
+/// existing manual `kill --discard %N` path, automated.
+#[tokio::test]
+async fn confirm_retires_the_originating_backgrounded_job() {
+    use kaish_kernel::scheduler::JobId;
+
+    let dir = tempdir();
+    let kernel = kernel_at(dir.path());
+    let precious = dir.path().join("precious.txt");
+    std::fs::write(&precious, "keep me").expect("write");
+
+    run(&kernel, "set -o latch").await;
+    run(&kernel, "rm precious.txt &").await;
+    let waited = run(&kernel, "wait 1").await;
+    let latch = waited.latch_request().expect("a backgrounded LatchRequest");
+    assert_eq!(
+        latch.job_id,
+        Some(1),
+        "the surfaced latch must carry the originating job's id"
+    );
+    assert!(
+        kernel.jobs().get(JobId(1)).await.is_some(),
+        "job must still be tracked (Latched) before confirm"
+    );
+
+    let confirmed = kernel.confirm(&latch).await.expect("confirm");
+    assert_eq!(confirmed.code, 0, "confirm deletes: {}", confirmed.err);
+    assert!(!precious.exists(), "file removed after confirm");
+    assert!(
+        kernel.jobs().get(JobId(1)).await.is_none(),
+        "the originating job must be retired after a successful confirm"
+    );
+}
+
+/// A repeat `confirm` of an already-retired job is a safe no-op — nonces are
+/// reusable within TTL (not consumed on validate), so the second replay still
+/// succeeds (idempotent delete-of-already-deleted via rm's own semantics is
+/// out of scope here; what matters is `confirm` itself doesn't panic/error
+/// trying to retire a job that's already gone).
+#[tokio::test]
+async fn confirm_of_an_already_retired_job_does_not_error() {
+    use kaish_kernel::scheduler::JobId;
+
+    let dir = tempdir();
+    let kernel = kernel_at(dir.path());
+    std::fs::write(dir.path().join("precious.txt"), "keep me").expect("write");
+
+    run(&kernel, "set -o latch").await;
+    run(&kernel, "rm precious.txt &").await;
+    let waited = run(&kernel, "wait 1").await;
+    let latch = waited.latch_request().expect("a backgrounded LatchRequest");
+
+    let first = kernel.confirm(&latch).await.expect("confirm");
+    assert_eq!(first.code, 0, "err: {}", first.err);
+    assert!(kernel.jobs().get(JobId(1)).await.is_none(), "job retired");
+
+    // Second confirm with the same (still-valid, reusable) nonce: rm's own
+    // idempotent-retry story applies to the replay itself; the job-retirement
+    // step must not error just because the job is already gone.
+    let second = kernel.confirm(&latch).await;
+    assert!(second.is_ok(), "confirm must not error on an already-retired job");
+}
+
 /// `jobs` and `/v/jobs/{id}/status` name the latched state distinctly, not
 /// the generic "Failed".
 #[tokio::test]
@@ -1211,6 +1277,33 @@ async fn backgrounded_latch_shows_distinct_status() {
 
     let status = run(&kernel, "cat /v/jobs/1/status").await;
     assert_eq!(status.text_out().trim(), "latched", "status node: {}", status.text_out());
+}
+
+/// GH #124 part 2: `jobs --json` rows carry the latch object itself for a
+/// Latched job, not just the STATUS column's word — a caller can act on the
+/// gate straight from the row instead of a second `/v/jobs/N/latch` read.
+#[tokio::test]
+async fn jobs_json_row_carries_the_latch_object() {
+    let dir = tempdir();
+    let kernel = kernel_at(dir.path());
+    std::fs::write(dir.path().join("precious.txt"), "keep me").expect("write");
+
+    run(&kernel, "set -o latch").await;
+    run(&kernel, "rm precious.txt &").await;
+    run(&kernel, "wait 1").await; // let the background job reach the gate
+
+    let jobs = run(&kernel, "jobs --json").await;
+    assert_eq!(jobs.code, 0, "err: {}", jobs.err);
+    let rows: serde_json::Value =
+        serde_json::from_str(jobs.text_out().trim()).expect("a JSON array of job rows");
+    let row = rows.as_array().and_then(|a| a.first()).expect("at least one job row");
+    assert_eq!(row["status"], "Latched", "row: {row}");
+    assert_eq!(row["latch"]["command"], "rm", "row: {row}");
+    assert!(
+        !row["latch"]["nonce"].as_str().unwrap_or("").is_empty(),
+        "row must carry a usable nonce: {row}"
+    );
+    assert!(dir.path().join("precious.txt").exists());
 }
 
 /// `/v/jobs/{id}/latch` renders the stored LatchRequest as JSON carrying the

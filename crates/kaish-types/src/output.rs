@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::result::ExecResult;
+use crate::result::{ExecResult, LatchRequest};
 
 // ============================================================
 // Structured Output (Tree-of-Tables Model)
@@ -530,6 +530,37 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Build the `--json` error/latch envelope for a result carrying a pending
+/// confirmation latch (`.latch` is `Some`) — `{"error", "code", "data"?,
+/// "latch"}`. The ONE place a latch gets folded into `--json` output, so a
+/// latched `wait` (which carries text output, e.g. `"[1] Latched\n"`) and a
+/// latched `rm` (bare exit-2 failure, no output at all) converge on the same
+/// shape instead of diverging by which branch of [`apply_output_format`] they
+/// happen to take. `error` is `result.err` if non-empty, else the rendered
+/// text — a latch result is always diagnostic-shaped, so something readable
+/// belongs under `error` either way. A tool that also attached structured
+/// data to the result keeps it reachable under `data`, alongside (never
+/// clobbered by) the latch.
+fn latch_envelope(result: &ExecResult, latch: &LatchRequest) -> serde_json::Value {
+    let error = if !result.err.is_empty() {
+        result.err.clone()
+    } else {
+        result.text_out().into_owned()
+    };
+    let mut obj = serde_json::json!({
+        "error": error,
+        "code": result.code,
+    });
+    if let Some(data) = &result.data {
+        obj["data"] = crate::result::value_to_json(data);
+    }
+    // Infallible: LatchRequest is String/Vec<String>/u64 fields only.
+    if let Ok(v) = serde_json::to_value(latch) {
+        obj["latch"] = v;
+    }
+    obj
+}
+
 /// Transform an ExecResult into the requested output format.
 ///
 /// Serializes regardless of exit code — commands like `diff` (exit 1 = files differ)
@@ -551,6 +582,25 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
         }
         return result;
     }
+    // A confirmation-latch request is control-plane, not stdout data — surface
+    // it under its own `latch` key in ONE canonical envelope regardless of
+    // whether the result ALSO carries text output. Handled here, before the
+    // has-output/no-output branches below, because `wait %1`'s result sets
+    // `OutputData::text` alongside `.latch` and so used to take the has_output()
+    // branch below, which never looked at `.latch` at all — the nonce was
+    // completely unreachable from `wait %1 --json` (GH #124 part 1). `rm`'s bare
+    // exit-2 failure (no output) hits this same branch too, so both converge on
+    // `latch_envelope` and can't diverge a third time.
+    if let Some(latch) = &result.latch {
+        let obj = match format {
+            OutputFormat::Json => latch_envelope(&result, latch),
+        };
+        let out = serde_json::to_string(&obj).unwrap_or_else(|_| "null".to_string());
+        result.data = Some(crate::result::json_to_value(obj));
+        result.set_out(out);
+        result.set_output(None);
+        return result;
+    }
     if !result.has_output() && result.text_out().is_empty() {
         // No stdout to format. A failure that carries a diagnostic message must
         // still honor --json — otherwise the message leaks out as plain text
@@ -570,15 +620,6 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
                     // truth instead of clobbering one with the other.
                     if let Some(data) = &result.data {
                         obj["data"] = crate::result::value_to_json(data);
-                    }
-                    // A confirmation-latch request is control-plane, not stdout
-                    // data — surface it under its own `latch` key (the nonce the
-                    // caller re-runs with `--confirm=<nonce>`), never folded into
-                    // `data`. Infallible: LatchRequest is String/Vec<String>/u64.
-                    if let Some(latch) = &result.latch {
-                        if let Ok(v) = serde_json::to_value(latch) {
-                            obj["latch"] = v;
-                        }
                     }
                     let out =
                         serde_json::to_string(&obj).unwrap_or_else(|_| "null".to_string());
@@ -863,6 +904,48 @@ mod tests {
             Some(crate::value::Value::Json(v)) => assert_eq!(v["data"]["nonce"], "a3f7b2c1"),
             other => panic!("expected nested JSON data, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn apply_output_format_surfaces_latch_even_when_result_has_output() {
+        // GH #124 part 1: `wait %1`'s gate result carries BOTH text output
+        // (the "[1] Latched\n" status line, via `.output`/`.out`) AND `.latch`
+        // — unlike `rm`'s bare exit-2 failure, which has no output at all. The
+        // old code only merged `.latch` into the JSON envelope on the
+        // no-output error branch, so a result with output (like wait's) took
+        // the has_output() branch instead and the nonce never appeared under
+        // `--json`. Mirrors wait.rs::finish()'s exact construction.
+        let mut result = ExecResult::from_output(2, "[1] Latched\n", "");
+        result.set_output(Some(OutputData::text("[1] Latched\n")));
+        assert!(result.has_output(), "precondition: this result DOES have output");
+        result.latch = Some(Box::new(LatchRequest {
+            nonce: "a3f7b2c1".to_string(),
+            command: "rm".to_string(),
+            paths: vec!["precious.txt".to_string()],
+            hint: "rm --confirm=\"a3f7b2c1\" precious.txt".to_string(),
+            tool: "rm".to_string(),
+            argv: vec!["precious.txt".to_string()],
+            ttl: 60,
+            job_id: None,
+        }));
+
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let out = formatted.text_out().into_owned();
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(
+            parsed["latch"]["nonce"], "a3f7b2c1",
+            "the nonce must be reachable from a latched result that also has \
+             output, not just the no-output error path: {parsed}"
+        );
+        assert_eq!(parsed["latch"]["command"], "rm");
+        assert_eq!(parsed["code"], 2);
+        // No .err was set (mirrors wait.rs), so the rendered text becomes the
+        // diagnostic `error` field.
+        assert_eq!(parsed["error"], "[1] Latched\n");
+        assert!(
+            formatted.latch_request().is_some(),
+            "the typed latch must survive --json formatting"
+        );
     }
 
     #[test]

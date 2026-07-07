@@ -4,7 +4,33 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
+use crate::scheduler::JobInfo;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+
+/// Build `jobs --json` rows: `{"id", "status", "command", "path", "latch"?}`.
+/// `latch` (nonce/paths/hint/ttl) is present only for a `Latched` row — a
+/// caller can act on a gated job straight from `jobs --json` instead of a
+/// second `/v/jobs/N/latch` read (GH #124 part 2). A pure function so the
+/// row shape is unit-testable without a `JobManager`/kernel round trip.
+fn job_rows_json(jobs: &[JobInfo]) -> Vec<serde_json::Value> {
+    jobs.iter()
+        .map(|job| {
+            let mut row = serde_json::json!({
+                "id": job.id.0,
+                "status": job.status.to_string(),
+                "command": job.command,
+                "path": format!("/v/jobs/{}/", job.id),
+            });
+            // Infallible: LatchRequest is String/Vec<String>/u64 fields only.
+            if let Some(latch) = &job.latch
+                && let Ok(v) = serde_json::to_value(latch)
+            {
+                row["latch"] = v;
+            }
+            row
+        })
+        .collect()
+}
 
 /// Jobs tool: list and manage background jobs.
 pub struct Jobs;
@@ -94,7 +120,11 @@ impl Tool for Jobs {
             "PATH".to_string(),
         ];
 
-        let output = OutputData::table(headers, nodes);
+        // rich_json rows carry `latch` for a `Latched` row (GH #124 part 2) —
+        // computed from `&jobs` before the text loop below consumes it by value.
+        let rows = job_rows_json(&jobs);
+        let output = OutputData::table(headers, nodes)
+            .with_rich_json(serde_json::Value::Array(rows));
         let mut text = String::new();
         for job in jobs {
             text.push_str(&format!(
@@ -118,6 +148,48 @@ mod tests {
         let mut vfs = VfsRouter::new();
         vfs.mount("/", MemoryFs::new());
         ExecContext::new(Arc::new(vfs))
+    }
+
+    #[test]
+    fn job_rows_json_carries_latch_only_on_latched_rows() {
+        use crate::interpreter::LatchRequest;
+        use crate::scheduler::{JobId, JobStatus};
+
+        let latch = LatchRequest {
+            nonce: "a3f7b2c1".to_string(),
+            command: "rm".to_string(),
+            paths: vec!["precious.txt".to_string()],
+            hint: "rm --confirm=\"a3f7b2c1\" precious.txt".to_string(),
+            tool: "rm".to_string(),
+            argv: vec!["precious.txt".to_string()],
+            ttl: 60,
+            job_id: Some(1),
+        };
+        let jobs = vec![
+            JobInfo::new(JobId(1), "rm precious.txt", JobStatus::Latched).with_latch(Some(latch)),
+            JobInfo::new(JobId(2), "sleep 5", JobStatus::Running),
+        ];
+
+        let rows = job_rows_json(&jobs);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["id"], 1);
+        assert_eq!(rows[0]["status"], "Latched");
+        assert_eq!(rows[0]["path"], "/v/jobs/1/");
+        assert_eq!(
+            rows[0]["latch"]["nonce"], "a3f7b2c1",
+            "a latched row must carry the nonce: {}",
+            rows[0]
+        );
+        assert_eq!(
+            rows[0]["latch"]["job_id"], 1,
+            "the row's latch must carry the job_id back-reference (GH #124 part 4): {}",
+            rows[0]
+        );
+        assert!(
+            rows[1].get("latch").is_none(),
+            "a non-latched row must NOT carry a latch key: {}",
+            rows[1]
+        );
     }
 
     #[tokio::test]
