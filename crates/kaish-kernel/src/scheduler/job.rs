@@ -851,6 +851,11 @@ impl JobManager {
     }
 
     /// Remove a job from tracking.
+    ///
+    /// NOTE: this bypasses the latch guard — a caller that might hit a
+    /// latched job must check [`is_latched`](Self::is_latched) first (see
+    /// the `kill` builtin), or the job's pending confirmation is destroyed
+    /// with it. `cleanup()` is the latch-safe bulk path.
     pub async fn remove(&self, id: JobId) {
         let mut jobs = self.jobs.lock().await;
         if let Some(mut job) = jobs.remove(&id) {

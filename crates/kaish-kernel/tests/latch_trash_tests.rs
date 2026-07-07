@@ -1272,3 +1272,36 @@ async fn kill_discard_abandons_latch_loudly() {
     );
     assert!(precious.exists(), "the gated rm never ran — file survives the discard");
 }
+
+/// `kill --discard` on a job that doesn't exist fails loudly, and on a
+/// running (non-latched) job it degrades to a plain kill — pinned so the
+/// flag never becomes a silent no-op or a silent success.
+#[tokio::test]
+async fn kill_discard_edge_cases() {
+    let dir = tempdir();
+    let kernel = kernel_at(dir.path());
+
+    let missing = run(&kernel, "kill --discard %7").await;
+    assert_eq!(missing.code, 1, "nonexistent job is loud: {missing:?}");
+    assert!(missing.err.contains("not found"), "names the problem: {}", missing.err);
+
+    // A running, non-latched job: --discard is a no-op qualifier; the job
+    // is killed normally.
+    run(&kernel, "sleep 30 &").await;
+    let killed = run(&kernel, "kill --discard %1").await;
+    assert_eq!(killed.code, 0, "plain kill still works under --discard: {killed:?}");
+    let jobs = run(&kernel, "jobs").await;
+    assert!(
+        !jobs.text_out().contains("Running"),
+        "job gone after kill: {}",
+        jobs.text_out()
+    );
+
+    // --discard conflicts with --signal: discarding delivers nothing.
+    std::fs::write(dir.path().join("p.txt"), "x").expect("write");
+    run(&kernel, "set -o latch").await;
+    run(&kernel, "rm p.txt &").await;
+    run(&kernel, "wait 2").await;
+    let conflict = run(&kernel, "kill --discard --signal STOP %2").await;
+    assert_eq!(conflict.code, 2, "--discard + --signal is a usage error: {conflict:?}");
+}

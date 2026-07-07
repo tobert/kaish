@@ -29,8 +29,9 @@ struct KillArgs {
     signal: String,
 
     /// Abandon a latched (confirmation-pending) job. Without this flag, kill
-    /// refuses to destroy a job's pending confirmation gate.
-    #[arg(long)]
+    /// refuses to destroy a job's pending confirmation gate. Conflicts with
+    /// --signal: discarding a gate delivers nothing to anyone.
+    #[arg(long, conflicts_with = "signal")]
     discard: bool,
 
     #[command(flatten)]
@@ -105,6 +106,12 @@ impl Tool for Kill {
             // A latched job's cached result is the only handle to its pending
             // confirmation — killing it would silently destroy the gate
             // (GH #96). Refuse unless the caller explicitly discards.
+            //
+            // TOCTOU note: a Running job can race into Latched between this
+            // check and kill_job's cancel+remove. That's acceptable — the
+            // guard protects an already-visible confirmation request from
+            // accidental destruction; a job killed while still running is the
+            // caller's stated intent, whatever it was about to become.
             if manager.is_latched(job_id).await {
                 if !parsed.discard {
                     return ExecResult::failure(
