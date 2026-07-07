@@ -519,6 +519,15 @@ fn result_row(i: usize, r: &ScatterResult) -> serde_json::Value {
     if let Some(data) = &r.result.data {
         row.insert("data".into(), kaish_types::value_to_json(data));
     }
+    // A latched worker (exit 2 under `set -o latch`) is otherwise
+    // indistinguishable from a plain failure in the row — carry the nonce so a
+    // caller can act on the gate straight from the row (GH #124 part 3).
+    // Infallible: LatchRequest is String/Vec<String>/u64 fields only.
+    if let Some(latch) = &r.result.latch
+        && let Ok(v) = serde_json::to_value(latch)
+    {
+        row.insert("latch".into(), v);
+    }
     if r.timed_out {
         row.insert("timed_out".into(), serde_json::json!(true));
     }
@@ -939,6 +948,36 @@ mod tests {
         let row: serde_json::Value = serde_json::from_str(out.text_out().lines().next().unwrap()).unwrap();
         assert_eq!(row["data"]["k"], 1, "worker .data lands typed in the row");
         assert_eq!(row["out"], "text", "out stays alongside data");
+    }
+
+    #[test]
+    fn test_gather_results_worker_latch_rides_the_row() {
+        // GH #124 part 3: a latched worker (exit 2 under `set -o latch`) is
+        // otherwise indistinguishable from a plain failure in the row — the
+        // nonce must ride along so a caller can act on the gate from the row.
+        use kaish_types::result::LatchRequest;
+
+        let mut r = ExecResult::failure(2, "rm: confirmation required (latch enabled)");
+        r.latch = Some(Box::new(LatchRequest {
+            nonce: "a3f7b2c1".to_string(),
+            command: "rm".to_string(),
+            paths: vec!["precious.txt".to_string()],
+            hint: "rm --confirm=\"a3f7b2c1\" precious.txt".to_string(),
+            tool: "rm".to_string(),
+            argv: vec!["precious.txt".to_string()],
+            ttl: 60,
+        }));
+        let results = vec![ScatterResult { item: item("a"), result: r, timed_out: false }];
+        let out = gather_results(&results, &GatherOptions::default());
+        assert_eq!(out.code, 123, "a latched worker still counts as failed for gather's exit code");
+        let row: serde_json::Value = serde_json::from_str(out.text_out().lines().next().unwrap()).unwrap();
+        assert_eq!(row["ok"], false);
+        assert_eq!(row["code"], 2);
+        assert_eq!(
+            row["latch"]["nonce"], "a3f7b2c1",
+            "the latch nonce must ride the row: {row}"
+        );
+        assert_eq!(row["latch"]["command"], "rm");
     }
 
     #[test]
