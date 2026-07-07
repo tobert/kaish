@@ -20,6 +20,12 @@ breaking entries are marked **BREAKING**.
   (`transient`/`named`/`isolated`) keep the unfiltered default.
 
 ### Fixed
+- **A confirmation latch raised mid-pipeline (`set -o latch`) no longer gets
+  swallowed by a later stage's success.** `rm x | echo done` used to exit 0
+  with `.latch` dropped, even though `rm` genuinely gated and the file was
+  never touched — only the last pipeline stage's result used to survive. Any
+  gated stage now overrides the pipeline's exit code (2) and carries its
+  structured `.latch` through; first latch wins if more than one stage gates.
 - **`bg %1` / `fg %1` no longer reject the POSIX jobspec form.** Both builtins
   parsed the job argument with a bare numeric parse, so the standard `%N`
   jobspec (already accepted by `kill`/`wait`) failed with "invalid job id: %1".
