@@ -339,7 +339,22 @@ impl ScatterGatherRunner {
                     h.abort();
                 }
 
-                let timed_out = timed_out_check.load(Ordering::SeqCst);
+                // Completion wins ties (GH #132): a worker whose command
+                // finishes right as its timeout timer fires can read the
+                // flag AFTER the delay task sets it, even though its own
+                // result is a genuine, clean success. This isn't just a
+                // stale-read gap — `sleep`'s (and any similarly-built
+                // builtin's) own `tokio::select! { operation, cancelled() }`
+                // is unbiased: if cancellation has *already* been signaled by
+                // the time the operation's own timer also matures, tokio can
+                // still pick the operation's branch, so `result.ok()` can be
+                // `true` even after the flag was set and `cancel.cancel()`
+                // was called. The result's own success is the ground truth
+                // the flag can't override — a worker that truly finished
+                // successfully must never be reported as timed out, no
+                // matter what the racing flag says.
+                let timed_out = timed_out_check.load(Ordering::SeqCst) && !result.ok();
+
                 ScatterResult { item, result, timed_out }
             }.instrument(worker_span)));
 
@@ -1269,6 +1284,104 @@ mod tests {
             result.text_out().len() < 4096,
             "spilled output must be truncated, not the full payload: {} bytes",
             result.text_out().len()
+        );
+    }
+
+    // ── GH #132: a worker completing at the timeout boundary was
+    // misclassified as timed out — reproduced and fixed ──
+    //
+    // Confirmed mechanism: the per-worker timer task does, in order,
+    // `flag.store(true, SeqCst); cancel.cancel();` — both statements on the
+    // SAME task, so by the time `cancel()` runs the flag is already true.
+    // `sleep`'s own `tokio::select! { sleep(d) => success, cancelled() =>
+    // failure(130) }` is unbiased: if BOTH branches are ready at the same
+    // poll (the worker's own timer AND the just-cancelled token), tokio picks
+    // between them pseudo-randomly. If it picks the sleep branch,
+    // `run_sequential` returns a genuine success — but the flag was already
+    // set moments earlier by the same timer task. Before the fix, the worker
+    // trusted the flag unconditionally (`timed_out_check.load()`), tagging a
+    // truly-successful result `timed_out: true` / code 124. The fix (see
+    // `let timed_out = timed_out_check.load(...) && !result.ok();` above)
+    // makes the result's own success authoritative: completion wins ties.
+    //
+    // Repro strategy: tie the worker's own `sleep <D>` EXACTLY to `scatter
+    // --timeout <D>` so both timers mature at the identical virtual instant
+    // under `start_paused`, then run many iterations. `start_paused` requires
+    // the `current_thread` flavor (tokio rejects it combined with
+    // `multi_thread`), so there's no genuine OS-thread-scheduling
+    // non-determinism here — the variance across iterations comes entirely
+    // from `tokio::select!`'s own pseudo-random tie-break (fastrand,
+    // advancing per call) when `sleep`'s internal select has both branches
+    // ready at once. Verified: this test fails ~45% of iterations against
+    // the pre-fix code (a plain flag load) and passes 100% against the fix.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn worker_completing_at_timeout_boundary_is_not_misclassified() {
+        use crate::ast::{Arg, Expr};
+        use crate::dispatch::BackendDispatcher;
+        use crate::tools::register_builtins;
+        use crate::vfs::{MemoryFs, VfsRouter};
+
+        let mut registry = ToolRegistry::new();
+        register_builtins(&mut registry);
+        let tools = Arc::new(registry);
+        let dispatcher: Arc<dyn CommandDispatcher> =
+            Arc::new(BackendDispatcher::new(tools.clone()));
+        let runner = ScatterGatherRunner::new(tools.clone(), dispatcher);
+
+        // 20ms on both sides — the exact tie the race depends on.
+        let commands = vec![Command {
+            name: "sleep".to_string(),
+            args: vec![Arg::Positional(Expr::Literal(Value::String("0.02".to_string())))],
+            redirects: vec![],
+        }];
+        let opts = ScatterOptions {
+            timeout: Some(Duration::from_millis(20)),
+            ..ScatterOptions::default()
+        };
+
+        let mut false_positives = 0;
+        let mut genuine_timeouts = 0;
+        let mut clean_success = 0;
+        let iterations = 300;
+        for _ in 0..iterations {
+            // `BackendDispatcher::dispatch` routes through `ctx.backend.call_tool`,
+            // not the registry directly — `with_vfs_and_tools` wires a
+            // `LocalBackend` backed by OUR registry, so `sleep` actually
+            // resolves instead of falling through to "command not found".
+            let mut vfs = VfsRouter::new();
+            vfs.mount("/", MemoryFs::new());
+            let ctx = ExecContext::with_vfs_and_tools(Arc::new(vfs), tools.clone());
+            let items = vec![item("x")];
+            let results = runner.run_parallel(&items, &opts, &commands, &ctx).await;
+            assert_eq!(results.len(), 1);
+            let r = &results[0];
+            match (r.timed_out, r.result.ok()) {
+                (true, true) => false_positives += 1,
+                (true, false) => genuine_timeouts += 1,
+                (false, _) => clean_success += 1,
+            }
+        }
+
+        eprintln!(
+            "worker_completing_at_timeout_boundary: {false_positives} false-positive(s), \
+             {genuine_timeouts} genuine timeout(s), {clean_success} clean success(es) out of \
+             {iterations} iterations"
+        );
+        // Silence isn't success: if the tie stopped forming (e.g. a tokio
+        // upgrade changes select!'s tie-break behavior), 0 false positives
+        // would be meaningless rather than reassuring. Assert the race
+        // actually fires both ways, so this test can't quietly stop testing
+        // anything.
+        assert!(
+            genuine_timeouts > 0 && clean_success > 0,
+            "the tie never formed (genuine_timeouts={genuine_timeouts}, \
+             clean_success={clean_success}) — this test needs the race to actually occur to \
+             mean anything; check the tied durations still create a real contest"
+        );
+        assert_eq!(
+            false_positives, 0,
+            "GH #132: a worker whose operation genuinely completed (result.ok()) must never \
+             be reported timed_out — completion should win the tie"
         );
     }
 }

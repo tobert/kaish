@@ -31,6 +31,15 @@ breaking entries are marked **BREAKING**.
   (`transient`/`named`/`isolated`) keep the unfiltered default.
 
 ### Fixed
+- **`scatter --timeout` no longer misclassifies a worker that completes right
+  at the timeout boundary as timed out.** A worker whose command finished at
+  (or a hair before) the deadline could read the timeout flag after the
+  delay task set it — `sleep`'s own internal cancellation race could still
+  pick the "genuine success" branch even after the flag was set and the
+  cancel signal sent, so a worker that truly finished successfully was
+  reported `timed_out: true` / exit 124, and `gather` penalized the whole
+  run with exit 123. The worker's own result is now authoritative:
+  completion wins ties.
 - **The REPL's interactive table and column output align CJK/emoji cells
   correctly** (GH #130). Column widths were computed from UTF-8 byte length
   (`cell.len()`), not display width — a CJK cell like "你好" is 6 bytes but
