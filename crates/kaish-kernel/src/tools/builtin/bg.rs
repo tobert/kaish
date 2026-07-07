@@ -73,10 +73,16 @@ impl Tool for Bg {
             let job_id = if let Some(val) = args.get_positional(0) {
                 match val {
                     Value::Int(i) => JobId(*i as u64),
-                    Value::String(s) => match s.parse::<u64>() {
-                        Ok(i) => JobId(i),
-                        Err(_) => return ExecResult::failure(1, format!("bg: invalid job id: {}", s)),
-                    },
+                    Value::String(s) => {
+                        // Accept the bash jobspec form `%N` as well as a bare
+                        // number; the `%` is a job marker, not part of the id
+                        // (mirrors `kill`/`wait`).
+                        let digits = s.strip_prefix('%').unwrap_or(s);
+                        match digits.parse::<u64>() {
+                            Ok(i) => JobId(i),
+                            Err(_) => return ExecResult::failure(1, format!("bg: invalid job id: {}", s)),
+                        }
+                    }
                     _ => return ExecResult::failure(1, "bg: job id must be a number"),
                 }
             } else {

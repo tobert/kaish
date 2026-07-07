@@ -26,6 +26,10 @@ breaking entries are marked **BREAKING**.
   never touched — only the last pipeline stage's result used to survive. Any
   gated stage now overrides the pipeline's exit code (2) and carries its
   structured `.latch` through; first latch wins if more than one stage gates.
+- **`bg %1` / `fg %1` no longer reject the POSIX jobspec form.** Both builtins
+  parsed the job argument with a bare numeric parse, so the standard `%N`
+  jobspec (already accepted by `kill`/`wait`) failed with "invalid job id: %1".
+  `bg`/`fg` now strip a leading `%` before parsing, matching `kill`/`wait`.
 - **`kaish-ignore` changes now persist past their own statement.** Every
   runtime ignore mutation (`add`/`clear`/`defaults`/`scope`) was silently
   dropped at the end of the statement that made it — the per-command context
