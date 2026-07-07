@@ -1009,11 +1009,15 @@ impl ExecContext {
     /// glob patterns in their path arguments. Non-string values are converted
     /// to strings (matching shell conventions).
     ///
-    /// A `Value::Bytes` operand goes LOUD (GH #93 item 1) rather than being
-    /// silently dropped from the list by the old catch-all — every caller here
-    /// falls back to reading stdin (or a generic "missing path" error) when the
-    /// path list comes back empty, so a binary path used to vanish into a wrong
-    /// data source instead of erroring.
+    /// A `Value::Bytes` operand goes LOUD (GH #93 item 1), and `Value::Json`
+    /// (list/record), `Value::Bool`, and `Value::Null` operands go LOUD too
+    /// (GH #121) — none is silently dropped by a catch-all anymore. Every
+    /// caller here falls back to reading stdin (or a generic "missing path"
+    /// error) when the path list comes back empty, so a structured, bool, or
+    /// null path used to vanish into a wrong data source instead of erroring.
+    /// The match is exhaustive over all 7 `Value` variants on purpose: a
+    /// future new variant fails to compile here until handled, rather than
+    /// silently falling through a wildcard arm.
     pub async fn expand_paths(&self, positional: &[Value]) -> Result<Vec<String>, String> {
         let mut paths = Vec::new();
         for arg in positional {
@@ -1024,7 +1028,12 @@ impl ExecContext {
                 Value::Bytes(_) => {
                     crate::interpreter::value_to_text_sink_named(arg, "a path").map_err(|e| e.to_string())?
                 }
-                _ => continue,
+                Value::Json(_) => {
+                    return Err(crate::interpreter::structured_boundary_error("a path", arg)
+                        .unwrap_or_else(|| "cannot use this value as a path".to_string()));
+                }
+                Value::Bool(b) => return Err(format!("cannot use a bool ({b}) as a path")),
+                Value::Null => return Err("cannot use null as a path".to_string()),
             };
             if crate::glob::contains_glob(&s) {
                 let expanded = self.expand_glob(&s).await?;

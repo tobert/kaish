@@ -230,9 +230,14 @@ fn run_script(path: &str, overlay: bool) -> Result<ExitCode> {
     let source = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read script: {path}"))?;
 
-    // Skip shebang if present
+    // Blank out the shebang line (rather than removing it) so every
+    // subsequent line keeps its original 1-based line number for error
+    // reporting (GH #127).
     let source = if source.starts_with("#!") {
-        source.lines().skip(1).collect::<Vec<_>>().join("\n")
+        match source.find('\n') {
+            Some(idx) => format!("\n{}", &source[idx + 1..]),
+            None => String::new(), // whole file is a single shebang line
+        }
     } else {
         source
     };

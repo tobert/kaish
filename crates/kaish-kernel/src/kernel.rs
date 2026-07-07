@@ -4015,15 +4015,25 @@ impl Kernel {
                 }
             },
             Expr::CommandSubst(stmts) => {
-                // Snapshot scope+cwd before running — only output escapes,
-                // not side effects like `cd` or variable assignments.
+                // Snapshot scope, cwd, and session config before running —
+                // only output escapes, not side effects like `cd`, variable
+                // assignments, or config mutations (`kaish-ignore`,
+                // `kaish-output-limit`, `alias`/`unalias`) — matching how
+                // every other execution context (background forks, scatter
+                // workers) already isolates mutations (GH #139).
                 // Boxed: this ~470 B scope snapshot is held across the nested
                 // `$(…)` recursion await below, so inlining it grows every
                 // command-substitution level's future (GH #48, item 4).
                 let saved_scope = Box::new(self.scope.read().await.clone());
-                let saved_cwd = {
+                let saved_ec = {
                     let ec = self.exec_ctx.read().await;
-                    (ec.cwd.clone(), ec.prev_cwd.clone())
+                    (
+                        ec.cwd.clone(),
+                        ec.prev_cwd.clone(),
+                        ec.aliases.clone(),
+                        ec.ignore_config.clone(),
+                        ec.output_limit.clone(),
+                    )
                 };
 
                 // Capture result without `?` — restore state unconditionally
@@ -4039,8 +4049,12 @@ impl Kernel {
                 }
                 {
                     let mut ec = self.exec_ctx.write().await;
-                    ec.cwd = saved_cwd.0;
-                    ec.prev_cwd = saved_cwd.1;
+                    let (cwd, prev_cwd, aliases, ignore_config, output_limit) = saved_ec;
+                    ec.cwd = cwd;
+                    ec.prev_cwd = prev_cwd;
+                    ec.aliases = aliases;
+                    ec.ignore_config = ignore_config;
+                    ec.output_limit = output_limit;
                 }
 
                 // Now propagate the error
@@ -4385,15 +4399,26 @@ impl Kernel {
                 }
             }
             StringPart::CommandSubst(stmts) => {
-                // Snapshot scope+cwd — command substitution in strings must
-                // not leak side effects (e.g., `"dir: $(cd /; pwd)"` must not change cwd).
+                // Snapshot scope, cwd, and session config — command
+                // substitution in strings must not leak side effects (e.g.,
+                // `"dir: $(cd /; pwd)"` must not change cwd, and
+                // `"$(kaish-ignore clear)"` must not change the session's
+                // ignore config) — matching how every other execution
+                // context (background forks, scatter workers) already
+                // isolates mutations (GH #139).
                 // Boxed: this ~470 B scope snapshot is held across the nested
                 // `$(…)` recursion await below, so inlining it grows every
                 // command-substitution level's future (GH #48, item 4).
                 let saved_scope = Box::new(self.scope.read().await.clone());
-                let saved_cwd = {
+                let saved_ec = {
                     let ec = self.exec_ctx.read().await;
-                    (ec.cwd.clone(), ec.prev_cwd.clone())
+                    (
+                        ec.cwd.clone(),
+                        ec.prev_cwd.clone(),
+                        ec.aliases.clone(),
+                        ec.ignore_config.clone(),
+                        ec.output_limit.clone(),
+                    )
                 };
 
                 // Capture result without `?` — restore state unconditionally
@@ -4409,8 +4434,12 @@ impl Kernel {
                 }
                 {
                     let mut ec = self.exec_ctx.write().await;
-                    ec.cwd = saved_cwd.0;
-                    ec.prev_cwd = saved_cwd.1;
+                    let (cwd, prev_cwd, aliases, ignore_config, output_limit) = saved_ec;
+                    ec.cwd = cwd;
+                    ec.prev_cwd = prev_cwd;
+                    ec.aliases = aliases;
+                    ec.ignore_config = ignore_config;
+                    ec.output_limit = output_limit;
                 }
 
                 // Now propagate the error
@@ -5437,17 +5466,7 @@ impl Kernel {
                 }
             };
 
-            let code = status.code().unwrap_or_else(|| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::ExitStatusExt;
-                    128 + status.signal().unwrap_or(0)
-                }
-                #[cfg(not(unix))]
-                {
-                    -1
-                }
-            }) as i64;
+            let code = exit_code_from_status(&status);
 
             // stdout/stderr already went to the terminal
             Ok(Some(ExecResult::from_output(code, String::new(), String::new())))
@@ -5504,17 +5523,7 @@ impl Kernel {
                 }
             }
 
-            let code = status.code().unwrap_or_else(|| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::ExitStatusExt;
-                    128 + status.signal().unwrap_or(0)
-                }
-                #[cfg(not(unix))]
-                {
-                    -1
-                }
-            }) as i64;
+            let code = exit_code_from_status(&status);
 
             // Read stdout as RAW bytes: text if valid UTF-8, else a Bytes
             // result, so `curl url`, `curl url > file.bin`, etc. keep binary
@@ -6008,8 +6017,9 @@ fn classify_argv_token(token: &Value) -> Arg {
     }
 
     // Long flag: the lexer requires `--[a-zA-Z]…`. `---`, `--=v`, `--1` are NOT
-    // long-flag words (the string door tokenizes them differently and often
-    // errors), so they fall through to a literal positional rather than a
+    // long-flag words — the lexer now tokenizes each as one `DoubleDashBare`
+    // literal word (GH #137), matching this classifier's own literal
+    // fallback — so they fall through to a literal positional rather than a
     // silently-misbound `LongFlag("-")` / empty-key `Named{ key: "" }`.
     if let Some(rest) = s.strip_prefix("--") {
         if rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
@@ -6121,6 +6131,30 @@ pub(crate) fn bind_glued_short_value(
             .insert(canonical.to_string(), Value::String(value));
         Ok(())
     }
+}
+
+/// Map a child's exit status to a shell-style exit code.
+///
+/// `ExitStatus::code()` is `None` when the process died from a signal rather
+/// than exiting normally; in that case this maps to POSIX's `128 + signal`
+/// convention (SIGKILL → 137, SIGTERM → 143, …) instead of losing the signal
+/// number. Shared by both external-command spawn sites — production
+/// (`try_execute_external`, below) and the test-only twin
+/// (`dispatch.rs::BackendDispatcher::try_external`) — so they can't drift on
+/// this mapping again (GH #133 item 1).
+#[cfg(feature = "subprocess")]
+pub(crate) fn exit_code_from_status(status: &std::process::ExitStatus) -> i64 {
+    status.code().unwrap_or_else(|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            128 + status.signal().unwrap_or(0)
+        }
+        #[cfg(not(unix))]
+        {
+            -1
+        }
+    }) as i64
 }
 
 /// Wait for a child to exit, killing it if `cancel` fires first.
@@ -6294,7 +6328,8 @@ mod argv_classify_tests {
     #[test]
     fn double_dash_only_matches_exactly() {
         // `--` is the marker; `--x` is a long flag. `---` is not a flag word
-        // (the lexer splits it `--` + `-`); as a single argv token it's literal.
+        // (the lexer lexes it as one `DoubleDashBare` literal word, GH #137);
+        // as a single argv token here it's likewise literal.
         assert_eq!(classify("--"), Arg::DoubleDash);
         assert_eq!(classify("--x"), Arg::LongFlag("x".into()));
         assert_eq!(classify("---"), Arg::Positional(Expr::Literal(Value::String("---".into()))));
