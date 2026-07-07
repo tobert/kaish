@@ -256,6 +256,68 @@ async fn wc_binary_path_positional_is_loud() {
     assert_loud_binary("b=$(cat src.bin); wc $b").await;
 }
 
+// ── `expand_paths` again — GH #121: the same `_ => continue` catch-all also
+// silently dropped `Value::Json` (list/record), `Value::Bool`, and
+// `Value::Null` path operands (only `Value::Bytes` was fixed above, by #117).
+// These land via `fromjson`, mirroring the `$(cat src.bin)` capture idiom the
+// Bytes tests above use.
+
+#[tokio::test]
+async fn cat_list_path_positional_is_loud() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute("xs=$(fromjson '[1,2,3]'); cat $xs").await.unwrap();
+    assert_ne!(result.code, 0);
+    assert!(result.err.contains("cannot use a list as a path"), "err={:?}", result.err);
+}
+
+#[tokio::test]
+async fn cat_record_path_positional_is_loud() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute(r#"r=$(fromjson '{"k":1}'); cat $r"#).await.unwrap();
+    assert_ne!(result.code, 0);
+    assert!(result.err.contains("cannot use a record as a path"), "err={:?}", result.err);
+}
+
+#[tokio::test]
+async fn cat_bool_path_positional_is_loud() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute("b=$(fromjson true); cat $b").await.unwrap();
+    assert_ne!(result.code, 0);
+    assert!(result.err.contains("cannot use a bool (true) as a path"), "err={:?}", result.err);
+}
+
+#[tokio::test]
+async fn cat_null_path_positional_is_loud() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute("n=$(fromjson null); cat $n").await.unwrap();
+    assert_ne!(result.code, 0);
+    assert!(result.err.contains("cannot use null as a path"), "err={:?}", result.err);
+}
+
+#[tokio::test]
+async fn head_list_path_does_not_silently_fall_back_to_stdin() {
+    // Same "prove it's not just loud, it genuinely refuses the stdin
+    // fallback" shape as `head_binary_path_does_not_silently_fall_back_to_stdin`
+    // above, but for a list operand instead of binary.
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute("xs=$(fromjson '[1,2,3]'); echo from-stdin | head $xs")
+        .await
+        .unwrap();
+    assert_ne!(result.code, 0, "err={}", result.err);
+    assert!(result.err.contains("cannot use a list as a path"), "err={:?}", result.err);
+    assert!(
+        !result.text_out().contains("from-stdin"),
+        "must not silently read stdin instead of erroring on the list path: {:?}",
+        result.text_out()
+    );
+}
+
 // ── `cd`/`awk`/`basename`/`diff` — `ToolArgs::get_string`-based path reads
 // (found via the same review) ──
 //
