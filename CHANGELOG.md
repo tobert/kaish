@@ -10,6 +10,17 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`jobs --json` rows and scatter/gather rows carry the confirmation-latch
+  object** for a `Latched` entry (nonce/paths/hint/ttl) — a caller can act on
+  a gate straight from the row instead of a second `/v/jobs/N/latch` read.
+- **`Kernel::confirm` retires the originating background job after a
+  successful confirm.** `LatchRequest` gains an optional `job_id` back-
+  reference (set when the gate came from a backgrounded job, e.g. `rm x &`);
+  a successfully-replayed confirm now removes that job from `jobs` instead of
+  leaving it lingering as `Latched` forever, mirroring the existing manual
+  `kill --discard %N` path.
+
 ### Changed
 - **The reference REPL is ignore-aware by default** (GH #134). Interactive,
   `-c`, and script modes now load `.gitignore` and the default ignore list
@@ -30,6 +41,11 @@ breaking entries are marked **BREAKING**.
   parsed the job argument with a bare numeric parse, so the standard `%N`
   jobspec (already accepted by `kill`/`wait`) failed with "invalid job id: %1".
   `bg`/`fg` now strip a leading `%` before parsing, matching `kill`/`wait`.
+- **`wait %1 --json` on a latched background job now surfaces the
+  confirmation nonce under a `latch` key** instead of rendering a bare
+  `"[1] Latched\n"` JSON string with no way to fulfill the gate. A latched
+  result's `--json` handling is now one canonical path (`apply_output_format`)
+  regardless of whether the result also carries text output.
 - **`kaish-ignore` changes now persist past their own statement.** Every
   runtime ignore mutation (`add`/`clear`/`defaults`/`scope`) was silently
   dropped at the end of the statement that made it — the per-command context
