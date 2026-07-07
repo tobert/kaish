@@ -14,6 +14,42 @@ before it ships.
 
 ---
 
+## `--include` learns to filter; the family goes loud (2026-07-06)
+
+The same fishing sweep grep-trawled for siblings of #122's bug classes —
+flags read off the raw ToolArgs map instead of the parsed clap struct,
+`Option<String>` numerics with `parse().ok()` fallbacks — and the walk-filter
+family turned out worse than the deferred nits suggested. The headline:
+`glob --include` had never filtered anything. `IncludeExclude` pushed Include
+rules into its list, but `should_exclude` only ever acted on Exclude matches;
+the "strict mode" its own doc comment promised was never written, and the
+walker only asked the exclude question. grep's `--include` merely *looked*
+functional because it separately baked the single include into its walk
+pattern as `**/{inc}`. On top of that, repeating `--include`/`--exclude`
+silently kept only the last value (glob's help said "can be repeated"), so
+`grep -r TODO . --include='*.rs' --include='*.toml'` answered with a silent
+false negative — the worst shape of wrong for an agent. And the numeric
+cousins all failed toward danger: `--depth=abc`/`-L abc`/`-maxdepth xyz`
+walked unlimited at exit 0, `spawn timeout=abc` silently *disabled* the
+timeout.
+
+The include semantics decision: rg-like. When include rules exist a file must
+match one — checked against the relative path, then the basename, first
+Include/Exclude verdict wins — but a directory is never excluded by
+include-miss, so traversal still reaches included files below it; excludes
+keep pruning subtrees. That distinction (files strict, dirs traversable) is
+the part the old two-call walker check could never express: the basename call
+would have rescued `src/lib.rs` against `*.rs` only *after* the relative-path
+call had already dropped it. One entry-aware `excludes_entry()` replaced the
+pair, `should_exclude` was deleted rather than kept as a shim, and grep's
+pattern hack went with it. Repeatables became `Vec<String>` +
+`read_repeatable_strings` — the ftype pattern that was ten lines away all
+along — and every numeric in the family now refuses bad and negative values
+loudly. Eleven kernel-routed tests pin it, including the
+include-doesn't-block-recursion case.
+
+---
+
 ## `glob **/*.rs` stops eating its own pattern (2026-07-06)
 
 Amy hit it live at the REPL: `glob **/*.rs` at the kaish repo root took a long
