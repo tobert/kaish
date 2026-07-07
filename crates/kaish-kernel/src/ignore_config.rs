@@ -68,6 +68,10 @@ impl IgnoreConfig {
     }
 
     /// Sandboxed-agent defaults: enforced scope, .gitignore loaded, defaults on.
+    ///
+    /// NOTE: `interactive()` inherits every field but `scope` from here via
+    /// struct-update syntax — a new field added to this preset carries into
+    /// the REPL preset unless `interactive()` overrides it.
     pub fn agent() -> Self {
         Self {
             scope: IgnoreScope::Enforced,
