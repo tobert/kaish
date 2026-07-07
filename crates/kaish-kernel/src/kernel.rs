@@ -6037,8 +6037,9 @@ fn classify_argv_token(token: &Value) -> Arg {
     }
 
     // Long flag: the lexer requires `--[a-zA-Z]…`. `---`, `--=v`, `--1` are NOT
-    // long-flag words (the string door tokenizes them differently and often
-    // errors), so they fall through to a literal positional rather than a
+    // long-flag words — the lexer now tokenizes each as one `DoubleDashBare`
+    // literal word (GH #137), matching this classifier's own literal
+    // fallback — so they fall through to a literal positional rather than a
     // silently-misbound `LongFlag("-")` / empty-key `Named{ key: "" }`.
     if let Some(rest) = s.strip_prefix("--") {
         if rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
@@ -6323,7 +6324,8 @@ mod argv_classify_tests {
     #[test]
     fn double_dash_only_matches_exactly() {
         // `--` is the marker; `--x` is a long flag. `---` is not a flag word
-        // (the lexer splits it `--` + `-`); as a single argv token it's literal.
+        // (the lexer lexes it as one `DoubleDashBare` literal word, GH #137);
+        // as a single argv token here it's likewise literal.
         assert_eq!(classify("--"), Arg::DoubleDash);
         assert_eq!(classify("--x"), Arg::LongFlag("x".into()));
         assert_eq!(classify("---"), Arg::Positional(Expr::Literal(Value::String("---".into()))));

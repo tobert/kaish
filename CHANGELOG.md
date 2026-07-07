@@ -72,6 +72,13 @@ breaking entries are marked **BREAKING**.
   silently ignored the rest, and printed exactly one file — after walking the
   tree twice. The builtin's own examples (and agents following them) spell the
   pattern unquoted. Quoted patterns behave as before.
+- **A dash-only operand no longer loses its leading dashes.** `echo ---`
+  printed `-` instead of `---`: the lexer's plain `--` literal always won a
+  length tie against any `--`-prefixed word whose 3rd character wasn't a
+  letter, silently truncating the word and swallowing the rest as a spurious
+  end-of-flags marker. Also broke `echo --=x` (→ `= x`), `echo --1` (→ `1`),
+  and made `echo -- ---` a parse error (the spurious marker collided with the
+  real `--`). All now lex as one literal word (#137).
 
 ### Added
 - **`ToolSchema::glob_passthrough` (+ `with_glob_passthrough()`)** — a tool

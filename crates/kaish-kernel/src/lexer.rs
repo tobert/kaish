@@ -452,8 +452,10 @@ pub enum Token {
     /// internal hyphens like `-not-a-flag`. Internal hyphens are part of the
     /// single shell word — without them the word fragments into separate flag
     /// tokens, which breaks `echo -- -not-a-flag` and the like. A leading `--`
-    /// is still `DoubleDash` (the second char must be a letter here), and
-    /// whether the word is a flag or a literal is the binding layer's call.
+    /// is still `DoubleDash` (the second char must be a letter here) unless
+    /// the third char isn't a letter either, in which case it's
+    /// `DoubleDashBare` — see below — and whether the word is a flag or a
+    /// literal is the binding layer's call.
     #[regex(r"-[a-zA-Z][a-zA-Z0-9-]*", lex_short_flag, priority = 3)]
     ShortFlag(String),
 
@@ -461,9 +463,26 @@ pub enum Token {
     #[regex(r"\+[a-zA-Z][a-zA-Z0-9]*", lex_plus_flag, priority = 3)]
     PlusFlag(String),
 
-    /// Double dash: `--` alone marks end of flags
+    /// Double dash: `--` alone marks end of flags. Only matches when nothing
+    /// else follows (a longer match always wins) — a `--`-prefixed word with
+    /// more characters after it either lexes as `LongFlag` (3rd char is a
+    /// letter) or `DoubleDashBare` (3rd char is anything else).
     #[token("--")]
     DoubleDash,
+
+    /// Bare word starting with `--` whose continuation isn't a valid
+    /// long-flag name: `---`, `----`, `--=x`, `--1`, etc. Without this, the
+    /// plain `--` literal above always won the length tie against a lone
+    /// `--`, silently truncating a dash-only operand to its trailing
+    /// remainder (`echo ---` printed `-` instead of `---` — GH #137). Mirrors
+    /// `MinusBare`/`PlusBare` (bare-word fallback for an unrecognized
+    /// flag-shaped prefix), just generalized to the `--` prefix. A standalone
+    /// `--` (followed by whitespace/EOF) still lexes as `DoubleDash` — this
+    /// regex requires at least one more non-whitespace character, so the two
+    /// never tie in match length and no priority tiebreak is load-bearing;
+    /// `priority = 2` is set for consistency with `PlusBare`'s tier.
+    #[regex(r"--[^a-zA-Z\s][^\s]*", lex_double_dash_bare, priority = 2)]
+    DoubleDashBare(String),
 
     /// Bare word starting with + followed by non-letter: `+%s`, `+%Y-%m-%d`
     /// For date format strings and similar. Lower priority than PlusFlag.
@@ -778,6 +797,7 @@ impl Token {
             Token::Ident(_)
             | Token::PlusBare(_)
             | Token::MinusBare(_)
+            | Token::DoubleDashBare(_)
             | Token::MinusAlone
             | Token::NumberIdent(_)
             | Token::DashNumWord(_)
@@ -926,6 +946,12 @@ fn lex_minus_bare(lex: &mut logos::Lexer<Token>) -> String {
     lex.slice().to_string()
 }
 
+/// Lex a double-dash bare word: `---` → `---`, `--=x` → `--=x` (keep the
+/// full string; see GH #137).
+fn lex_double_dash_bare(lex: &mut logos::Lexer<Token>) -> String {
+    lex.slice().to_string()
+}
+
 /// Lex a job specifier: `%1` → `%1` (keep the leading `%`).
 fn lex_job_spec(lex: &mut logos::Lexer<Token>) -> String {
     lex.slice().to_string()
@@ -1027,6 +1053,7 @@ impl fmt::Display for Token {
             Token::ShortFlag(s) => write!(f, "-{}", s),
             Token::PlusFlag(s) => write!(f, "+{}", s),
             Token::DoubleDash => write!(f, "--"),
+            Token::DoubleDashBare(s) => write!(f, "{}", s),
             Token::PlusBare(s) => write!(f, "{}", s),
             Token::MinusBare(s) => write!(f, "{}", s),
             Token::JobSpec(s) => write!(f, "{}", s),

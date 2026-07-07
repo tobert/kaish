@@ -562,6 +562,60 @@ mod echo_realworld {
         assert_eq!(out, "---");
     }
 
+    // GH #137: an *unquoted* dash-only operand used to lose its leading `--`
+    // (the lexer's plain `--` literal always won the length tie against a
+    // 3rd non-letter char), so `echo ---` printed `-` instead of `---`.
+    #[tokio::test]
+    async fn test_echo_separator_unquoted() {
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "echo ---").await;
+        assert_eq!(code, 0, "echo --- failed: {out:?}");
+        assert_eq!(out, "---");
+    }
+
+    // GH #137: the spurious second `--` token from mis-lexing `---` used to
+    // collide with the real end-of-flags `--`, and `post_dash_arg` had no
+    // production for it — the whole statement parse-errored.
+    #[tokio::test]
+    async fn test_echo_double_dash_then_dash_run() {
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "echo -- ---").await;
+        assert_eq!(code, 0, "echo -- --- failed: {out:?}");
+        assert_eq!(out, "---");
+    }
+
+    // GH #137 sibling: `--=x` isn't a valid long flag (3rd char is `=`, not a
+    // letter), so it must lex/print as one literal word, not fragment into
+    // a swallowed `--` plus stray `=`/`x` positionals.
+    #[tokio::test]
+    async fn test_echo_double_dash_equals() {
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "echo --=x").await;
+        assert_eq!(code, 0, "echo --=x failed: {out:?}");
+        assert_eq!(out, "--=x");
+    }
+
+    // GH #137 sibling found during investigation: same root cause as `---`
+    // (3rd char after `--` is a digit, not a letter).
+    #[tokio::test]
+    async fn test_echo_double_dash_digit() {
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "echo --1").await;
+        assert_eq!(code, 0, "echo --1 failed: {out:?}");
+        assert_eq!(out, "--1");
+    }
+
+    // GH #137 "also check" sibling: a lone `-` (unquoted, the `cat -` stdin
+    // convention) was already correct before this fix — pinned here as a
+    // regression guard, not a behavior change.
+    #[tokio::test]
+    async fn test_echo_lone_dash_unquoted() {
+        let (_dir, kernel) = fixture();
+        let (out, code) = run(&kernel, "echo -").await;
+        assert_eq!(code, 0, "echo - failed: {out:?}");
+        assert_eq!(out, "-");
+    }
+
     // Pattern: echo "" (empty string)
     #[tokio::test]
     async fn test_echo_empty() {
