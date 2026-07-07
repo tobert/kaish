@@ -5437,17 +5437,7 @@ impl Kernel {
                 }
             };
 
-            let code = status.code().unwrap_or_else(|| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::ExitStatusExt;
-                    128 + status.signal().unwrap_or(0)
-                }
-                #[cfg(not(unix))]
-                {
-                    -1
-                }
-            }) as i64;
+            let code = exit_code_from_status(&status);
 
             // stdout/stderr already went to the terminal
             Ok(Some(ExecResult::from_output(code, String::new(), String::new())))
@@ -5504,17 +5494,7 @@ impl Kernel {
                 }
             }
 
-            let code = status.code().unwrap_or_else(|| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::ExitStatusExt;
-                    128 + status.signal().unwrap_or(0)
-                }
-                #[cfg(not(unix))]
-                {
-                    -1
-                }
-            }) as i64;
+            let code = exit_code_from_status(&status);
 
             // Read stdout as RAW bytes: text if valid UTF-8, else a Bytes
             // result, so `curl url`, `curl url > file.bin`, etc. keep binary
@@ -6121,6 +6101,30 @@ pub(crate) fn bind_glued_short_value(
             .insert(canonical.to_string(), Value::String(value));
         Ok(())
     }
+}
+
+/// Map a child's exit status to a shell-style exit code.
+///
+/// `ExitStatus::code()` is `None` when the process died from a signal rather
+/// than exiting normally; in that case this maps to POSIX's `128 + signal`
+/// convention (SIGKILL → 137, SIGTERM → 143, …) instead of losing the signal
+/// number. Shared by both external-command spawn sites — production
+/// (`try_execute_external`, below) and the test-only twin
+/// (`dispatch.rs::BackendDispatcher::try_external`) — so they can't drift on
+/// this mapping again (GH #133 item 1).
+#[cfg(feature = "subprocess")]
+pub(crate) fn exit_code_from_status(status: &std::process::ExitStatus) -> i64 {
+    status.code().unwrap_or_else(|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            128 + status.signal().unwrap_or(0)
+        }
+        #[cfg(not(unix))]
+        {
+            -1
+        }
+    }) as i64
 }
 
 /// Wait for a child to exit, killing it if `cancel` fires first.
