@@ -287,6 +287,29 @@ impl BackendDispatcher {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
+        // On Unix, always put the child in its own process group so a
+        // cancel can `killpg` the whole tree (the child plus any
+        // grandchildren) — matching the production spawn site
+        // (kernel.rs::try_execute_external) exactly. Without this, `killpg`
+        // targets a group nobody is actually in (an ESRCH no-op), and a
+        // grandchild spawned by the child survives cancellation — the exact
+        // gap GH #133 item 4 closes. This dispatcher has no job-control
+        // terminal integration (no `terminal_state`), so unlike production
+        // there is no signal-handler restoration to gate here.
+        #[cfg(unix)]
+        {
+            // SAFETY: setpgid is async-signal-safe per POSIX; safe to call
+            // between fork and exec.
+            #[allow(unsafe_code)]
+            unsafe {
+                cmd.pre_exec(|| {
+                    nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))
+                        .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+                    Ok(())
+                });
+            }
+        }
+
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => return Some(ExecResult::failure(127, format!("{}: {}", name, e))),
@@ -506,5 +529,141 @@ impl CommandDispatcher for BackendDispatcher {
     /// BackendDispatcher is stateless, so a fork is just a clone.
     async fn fork(&self) -> Arc<dyn CommandDispatcher> {
         Arc::new(Self { tools: Arc::clone(&self.tools) })
+    }
+}
+
+/// Tests that spawn real external processes through `try_external`, to catch
+/// behavioral drift from the production spawn site (`kernel.rs::try_execute_external`)
+/// — GH #133. Unlike the `BackendDispatcher` tests in `scheduler::pipeline`,
+/// which exercise builtins over a `MemoryFs` (virtual cwd, so `try_external`
+/// never spawns), these give the dispatcher a real tempdir cwd + PATH so the
+/// external fallback actually runs a child process.
+#[cfg(all(test, feature = "subprocess"))]
+mod external_process_tests {
+    // Test-fixture helpers (not `#[test]` bodies themselves), so the
+    // workspace's usual allow-in-tests clippy.toml carve-out doesn't cover
+    // them — see CLAUDE.md's "clap builtin gotchas" / test-code conventions.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use crate::ast::{Arg, Command, Expr, Value};
+    use crate::tools::{ExecContext, ToolRegistry};
+    use crate::vfs::{LocalFs, VfsRouter};
+
+    /// A `BackendDispatcher` + `ExecContext` rooted at a real tempdir, with an
+    /// empty tool registry (every command name falls through to
+    /// `try_external`, exactly like a real external command with no matching
+    /// builtin/user tool) and PATH seeded from the test process's own OS env.
+    /// Reading OS env here is fixture code, not kaish's hermetic runtime — see
+    /// CLAUDE.md and `external_command_tests.rs::repl_kernel`.
+    fn real_cwd_dispatcher() -> (BackendDispatcher, ExecContext, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", LocalFs::new(dir.path().to_path_buf()));
+        let tools = Arc::new(ToolRegistry::new());
+        let mut ctx = ExecContext::with_vfs_and_tools(Arc::new(vfs), tools.clone());
+        // Exported (not just set): try_external's own PATH lookup reads
+        // ctx.scope directly, but the CHILD process only inherits exported
+        // vars (cmd.env_clear() + exported_vars()) — a script that shells
+        // out further (`sh -c "yes | head"`) needs PATH in ITS env too,
+        // not just kaish's resolver.
+        ctx.scope.set_exported(
+            "PATH",
+            Value::String(std::env::var("PATH").unwrap_or_default()),
+        );
+        let dispatcher = BackendDispatcher::new(tools);
+        (dispatcher, ctx, dir)
+    }
+
+    /// `sh -c <script>` as a `Command`, matching how the parser would build it
+    /// from `sh -c 'script'` (a short flag, then a positional literal).
+    fn sh_cmd(script: &str) -> Command {
+        Command {
+            name: "sh".to_string(),
+            args: vec![
+                Arg::ShortFlag("c".to_string()),
+                Arg::Positional(Expr::Literal(Value::String(script.to_string()))),
+            ],
+            redirects: vec![],
+        }
+    }
+
+    /// GH #133 item 4: production always puts the spawned child in its own
+    /// process group (`setpgid(0,0)` in `pre_exec`) so a cancel's `killpg`
+    /// reaches the whole tree — the direct child AND any grandchildren it
+    /// spawns. Pre-fix, this dispatcher never called `setpgid`, so `killpg`
+    /// targeted a process group nobody was actually in (an ESRCH no-op): a
+    /// grandchild survived cancellation even though the direct child died.
+    /// Any existing test asserting "grandchild cleanup" against this
+    /// dispatcher was passing trivially, verifying nothing real.
+    ///
+    /// # Why this test checks the structural fact, not an end-to-end kill
+    ///
+    /// The most faithful reproduction of the issue would background a
+    /// grandchild (`sleep N &`), cancel mid-flight, and assert the
+    /// grandchild dies too — pinning the exact "existing test passes
+    /// trivially" symptom. That reproduction turns out to be **blocked by a
+    /// separate, pre-existing ordering issue** in this dispatcher, not
+    /// introduced by this PR: `try_external`'s output collection
+    /// (`spill_aware_collect`) runs to completion BEFORE `wait_or_kill` is
+    /// even called, so cancellation has no observable effect until the
+    /// child's stdout closes on its own — which, for a `sh -c '... & wait'`
+    /// script producing no stdout, only happens once the whole script
+    /// naturally finishes. Cancelling earlier does nothing, and a test built
+    /// on top of it would either hang for the sleep's full duration or (with
+    /// a bounded timeout) fail even with this PR's `setpgid` fix correctly in
+    /// place — a false negative caused by an unrelated bug, not evidence the
+    /// fix doesn't work.
+    ///
+    /// This is exactly what GH #133 item 2 (a separate PR in this same
+    /// batch) restructures: it moves collection to run *concurrently* with
+    /// `wait_or_kill`, matching production, which spawns its drain tasks and
+    /// immediately awaits `wait_or_kill` rather than draining to completion
+    /// first. Once item 2 lands alongside this fix, cancellation reaches a
+    /// still-running child promptly and an end-to-end grandchild-kill test
+    /// becomes meaningful (and fast) — worth adding as a follow-up at that
+    /// point. Until then, this test pins the concrete, fast, unconfounded
+    /// consequence of *this* PR's diff: the spawned child's own pgid equals
+    /// its own pid, i.e. `setpgid(0, 0)` in `pre_exec` actually took effect.
+    /// `ps -p $$` runs and exits almost immediately, producing no stdout for
+    /// kaish to block draining — so the ordering issue above never enters
+    /// into it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawned_child_becomes_its_own_process_group_leader() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let out_file = tmp.path().join("pgid_info");
+
+        let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
+
+        // `$$` is the running shell's own PID; `ps -o pid=,pgid= -p $$`
+        // reports that shell's pid and process-group id. If setpgid(0,0)
+        // took effect in pre_exec (before `ps` even execs), the two must be
+        // equal. Redirected straight to a file — sh's own captured stdout
+        // (what kaish pipes) stays empty, so collection returns immediately.
+        let script = format!("ps -o pid=,pgid= -p $$ > {}", out_file.display());
+        let cmd = sh_cmd(&script);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            dispatcher.dispatch(&cmd, &mut ctx),
+        )
+        .await
+        .expect("dispatch timed out")
+        .expect("dispatch");
+        assert_eq!(result.code, 0, "err: {}", result.err);
+
+        let contents = std::fs::read_to_string(&out_file).expect("read pgid info");
+        let mut fields = contents.split_whitespace();
+        let pid: i32 = fields.next().expect("pid field").parse().expect("pid parse");
+        let pgid: i32 = fields.next().expect("pgid field").parse().expect("pgid parse");
+
+        assert_eq!(
+            pid, pgid,
+            "the spawned child's pgid must equal its own pid — setpgid(0,0) \
+             in pre_exec should make it its own process-group leader (so a \
+             later killpg reaches it and any of its own children), matching \
+             production (kernel.rs::try_execute_external); got pid={pid} \
+             pgid={pgid}"
+        );
     }
 }
