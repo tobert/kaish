@@ -13,6 +13,7 @@ use std::io::IsTerminal;
 
 use kaish_kernel::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use kaish_kernel::tools::OutputContext;
+use unicode_width::UnicodeWidthStr;
 
 /// Format an ExecResult for display based on the output context.
 ///
@@ -134,11 +135,14 @@ fn format_table_from_output_data(output: &OutputData) -> String {
     let num_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
     let mut col_widths = vec![0; num_cols];
 
-    // Include headers in width calculation
+    // Include headers in width calculation. Widths are display columns
+    // (`UnicodeWidthStr::width`), not UTF-8 byte counts — a CJK cell like
+    // "你好" is 6 bytes but 4 display columns, and byte-length padding would
+    // misalign every column after it (GH #130).
     if let Some(ref headers) = output.headers {
         for (i, header) in headers.iter().enumerate() {
             if i < col_widths.len() {
-                col_widths[i] = col_widths[i].max(header.len());
+                col_widths[i] = col_widths[i].max(header.width());
             }
         }
     }
@@ -147,7 +151,7 @@ fn format_table_from_output_data(output: &OutputData) -> String {
     for row in &rows {
         for (i, cell) in row.iter().enumerate() {
             if i < col_widths.len() {
-                col_widths[i] = col_widths[i].max(cell.len());
+                col_widths[i] = col_widths[i].max(cell.width());
             }
         }
     }
@@ -162,7 +166,7 @@ fn format_table_from_output_data(output: &OutputData) -> String {
             }
             result.push_str(header);
             if i < headers.len() - 1 {
-                let padding = col_widths[i].saturating_sub(header.len());
+                let padding = col_widths[i].saturating_sub(header.width());
                 for _ in 0..padding {
                     result.push(' ');
                 }
@@ -189,7 +193,7 @@ fn format_table_from_output_data(output: &OutputData) -> String {
 
             // Only add padding if not the last column
             if i < row.len() - 1 {
-                let padding = col_widths[i].saturating_sub(cell.len());
+                let padding = col_widths[i].saturating_sub(cell.width());
                 for _ in 0..padding {
                     result.push(' ');
                 }
@@ -214,9 +218,10 @@ fn format_columns_from_output_data(output: &OutputData) -> String {
 
     let items: Vec<_> = output.root.iter().collect();
 
-    // Find the longest item
+    // Find the longest item. Display width, not byte length (GH #130) — see
+    // the aligned-table renderer above for why.
     let max_len = items.iter()
-        .map(|n| n.display_name().len())
+        .map(|n| n.display_name().width())
         .max()
         .unwrap_or(0);
 
@@ -239,7 +244,7 @@ fn format_columns_from_output_data(output: &OutputData) -> String {
         if col > 0 {
             // Pad previous item to column width
             let prev_len = items.get(i.saturating_sub(1))
-                .map(|n| n.display_name().len())
+                .map(|n| n.display_name().width())
                 .unwrap_or(0);
             let padding = col_width.saturating_sub(prev_len);
             for _ in 0..padding {
@@ -405,5 +410,76 @@ mod tests {
         let output_data = OutputData::text("direct test");
         let formatted = format_output_data(&output_data, OutputContext::Interactive);
         assert_eq!(formatted, "direct test");
+    }
+
+    /// GH #130: table column widths must use display width, not UTF-8 byte
+    /// length — "你好" is 6 bytes but 4 display columns, so byte-length
+    /// padding under-pads it and misaligns every column after it.
+    #[test]
+    fn test_table_alignment_uses_display_width_not_byte_length() {
+        let nodes = vec![
+            OutputNode::new("你好")
+                .with_cells(vec!["1".to_string()])
+                .with_entry_type(EntryType::File),
+            OutputNode::new("ab")
+                .with_cells(vec!["22".to_string()])
+                .with_entry_type(EntryType::File),
+        ];
+        let output_data = OutputData::table(
+            vec!["Name".to_string(), "Val".to_string()],
+            nodes,
+        );
+        let result = ExecResult::with_output(output_data);
+        let formatted = format_output(&result, OutputContext::Interactive);
+
+        let lines: Vec<&str> = formatted.lines().collect();
+        assert_eq!(lines.len(), 3, "header + 2 data rows: {formatted:?}");
+
+        // The second column must start at the same DISPLAY column on every
+        // row — that's what "aligned" means. Byte-length padding put the CJK
+        // row's second column 2 display-columns earlier than the ASCII row's.
+        let second_col_display_start = |line: &str| -> usize {
+            let sep = line.rfind("  ").expect("a two-space column separator");
+            UnicodeWidthStr::width(&line[..sep])
+        };
+        let header_start = second_col_display_start(lines[0]);
+        let cjk_row_start = second_col_display_start(lines[1]);
+        let ascii_row_start = second_col_display_start(lines[2]);
+        assert_eq!(
+            cjk_row_start, header_start,
+            "CJK row's second column misaligned with the header: {formatted:?}"
+        );
+        assert_eq!(
+            ascii_row_start, header_start,
+            "ASCII row's second column misaligned with the header: {formatted:?}"
+        );
+    }
+
+    /// GH #130: the `ls`-style multi-column layout has the same byte-length
+    /// bug in its own width calculation.
+    #[test]
+    fn test_columns_alignment_uses_display_width_not_byte_length() {
+        // "1234567" is 7 bytes / 7 display columns (ASCII). "你好你好" is 12
+        // bytes but only 8 display columns (4 CJK chars x 2 cols each). Byte
+        // length picks it as the widest item at 12; display width picks it at
+        // 8 — same item, different column budget, so the padding after the
+        // FIRST (all-ASCII) item comes out different depending which metric
+        // sizes the column, exposing the bug even though "你好你好" itself
+        // isn't the item being padded.
+        let nodes = vec![
+            OutputNode::new("1234567").with_entry_type(EntryType::File),
+            OutputNode::new("你好你好").with_entry_type(EntryType::File),
+        ];
+        let output_data = OutputData::nodes(nodes);
+        let formatted = format_columns_from_output_data(&output_data);
+
+        let sep_start = formatted.find("1234567").expect("first item present");
+        let second_start = formatted.find("你好你好").expect("second item present");
+        let between = &formatted[sep_start + "1234567".len()..second_start];
+        assert_eq!(
+            UnicodeWidthStr::width(between),
+            3, // col_width (8 + 2 padding = 10) - display width of "1234567" (7) = 3
+            "gap between columns should be display-width-aware: {formatted:?}"
+        );
     }
 }

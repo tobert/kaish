@@ -31,6 +31,19 @@ breaking entries are marked **BREAKING**.
   (`transient`/`named`/`isolated`) keep the unfiltered default.
 
 ### Fixed
+- **The REPL's interactive table and column output align CJK/emoji cells
+  correctly** (GH #130). Column widths were computed from UTF-8 byte length
+  (`cell.len()`), not display width — a CJK cell like "你好" is 6 bytes but
+  only 4 display columns, so byte-length padding under-padded it and
+  misaligned every column after it. Width math now uses the `unicode-width`
+  crate's `UnicodeWidthStr::width()`. Cosmetic/interactive-only; `--json` and
+  other structured output are unaffected.
+- **The REPL no longer silently swallows a failing rc-file source.** A typo'd
+  command or a failed `source` line in `~/.config/kaish/init.kai` (or
+  `~/.kaishrc`) returns `Ok(ExecResult)` with a nonzero exit code, not an
+  `Err` — `load_rc_file` only warned on the latter, so the former left the
+  user with a half-loaded environment and zero indication why. Nonzero rc-file
+  exits now print a warning with the exit code and any diagnostic text.
 - **A confirmation latch raised mid-pipeline (`set -o latch`) no longer gets
   swallowed by a later stage's success.** `rm x | echo done` used to exit 0
   with `.latch` dropped, even though `rm` genuinely gated and the file was
@@ -46,11 +59,29 @@ breaking entries are marked **BREAKING**.
   `"[1] Latched\n"` JSON string with no way to fulfill the gate. A latched
   result's `--json` handling is now one canonical path (`apply_output_format`)
   regardless of whether the result also carries text output.
+- **Shebang'd `.kai` scripts now report correct parse-error line numbers** (GH
+  #127). `run_script` used to strip the shebang line entirely
+  (`.lines().skip(1)`), which deleted a line and shifted every subsequent
+  line's reported number down by one — a syntax error on line 43 was reported
+  at line 42. The shebang line is now blanked out instead of removed, so line
+  accounting stays correct.
+- **`expand_paths` now goes loud on a list/record/bool/null path operand**
+  (GH #121), closing the gap the `Value::Bytes` guard (#117) left in the same
+  function's catch-all. `cat`/`head`/`tail`/`wc`/etc. silently dropped a
+  structured, bool, or null path argument and fell back to reading stdin
+  instead of erroring on the operand actually given — the same silent-fallback
+  class #93/#117 set out to kill.
 - **`kaish-ignore` changes now persist past their own statement.** Every
   runtime ignore mutation (`add`/`clear`/`defaults`/`scope`) was silently
   dropped at the end of the statement that made it — the per-command context
   sync copied back cwd/aliases/output-limit but not the ignore config — so
   the documented `kaish-ignore add .gitignore` rc-file recipe did nothing.
+- **Command substitution (`$(...)`) no longer leaks session-config
+  mutations.** `x=$(kaish-ignore clear)`, `$(kaish-output-limit off)`, or
+  `$(unalias name)` used to silently mutate the persistent kernel session
+  past the end of the `$(...)` — command substitution already isolated `cd`
+  and variable assignments but not `aliases`/`ignore_config`/`output_limit`,
+  the same missing-field class #138 just fixed for the plain-statement path.
 - **`glob --include` now actually filters.** It was a complete no-op: the
   walker consulted only exclude rules, so `glob '*' --include='*.rs'` listed
   everything. Include semantics are now rg-like: when include patterns exist a
@@ -82,8 +113,21 @@ breaking entries are marked **BREAKING**.
   silently ignored the rest, and printed exactly one file — after walking the
   tree twice. The builtin's own examples (and agents following them) spell the
   pattern unquoted. Quoted patterns behave as before.
+- **A dash-only operand no longer loses its leading dashes.** `echo ---`
+  printed `-` instead of `---`: the lexer's plain `--` literal always won a
+  length tie against any `--`-prefixed word whose 3rd character wasn't a
+  letter, silently truncating the word and swallowing the rest as a spurious
+  end-of-flags marker. Also broke `echo --=x` (→ `= x`), `echo --1` (→ `1`),
+  and made `echo -- ---` a parse error (the spurious marker collided with the
+  real `--`). All now lex as one literal word (#137).
 
 ### Added
+- **The REPL announces finished background jobs at the next prompt and reaps
+  them automatically** (GH #131). `sleep 5 &` used to complete silently — no
+  `[1] Done sleep 5`-style line, and the completed job stayed in the
+  `JobManager` until an explicit `jobs --cleanup`. A `Latched` job (gated on a
+  pending confirmation under `set -o latch`) is never auto-reaped or reported
+  as finished — it stays tracked until confirmed or explicitly discarded.
 - **`ToolSchema::glob_passthrough` (+ `with_glob_passthrough()`)** — a tool
   whose input *is* a glob pattern (like `glob`) can now tell the argv binder to
   pass bare patterns through as literal text instead of expanding them.
