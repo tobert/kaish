@@ -1213,6 +1213,33 @@ async fn backgrounded_latch_shows_distinct_status() {
     assert_eq!(status.text_out().trim(), "latched", "status node: {}", status.text_out());
 }
 
+/// GH #124 part 2: `jobs --json` rows carry the latch object itself for a
+/// Latched job, not just the STATUS column's word — a caller can act on the
+/// gate straight from the row instead of a second `/v/jobs/N/latch` read.
+#[tokio::test]
+async fn jobs_json_row_carries_the_latch_object() {
+    let dir = tempdir();
+    let kernel = kernel_at(dir.path());
+    std::fs::write(dir.path().join("precious.txt"), "keep me").expect("write");
+
+    run(&kernel, "set -o latch").await;
+    run(&kernel, "rm precious.txt &").await;
+    run(&kernel, "wait 1").await; // let the background job reach the gate
+
+    let jobs = run(&kernel, "jobs --json").await;
+    assert_eq!(jobs.code, 0, "err: {}", jobs.err);
+    let rows: serde_json::Value =
+        serde_json::from_str(jobs.text_out().trim()).expect("a JSON array of job rows");
+    let row = rows.as_array().and_then(|a| a.first()).expect("at least one job row");
+    assert_eq!(row["status"], "Latched", "row: {row}");
+    assert_eq!(row["latch"]["command"], "rm", "row: {row}");
+    assert!(
+        !row["latch"]["nonce"].as_str().unwrap_or("").is_empty(),
+        "row must carry a usable nonce: {row}"
+    );
+    assert!(dir.path().join("precious.txt").exists());
+}
+
 /// `/v/jobs/{id}/latch` renders the stored LatchRequest as JSON carrying the
 /// nonce, so a VFS consumer can read (and then confirm) it.
 #[tokio::test]
