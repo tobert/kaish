@@ -59,9 +59,17 @@ impl Tool for Jobs {
         if parsed.cleanup {
             let before = manager.list().await.len();
             manager.cleanup().await;
-            let after = manager.list().await.len();
-            let removed = before - after;
-            return ExecResult::with_output(OutputData::text(format!("Cleaned up {} completed job(s)\n", removed)));
+            let remaining = manager.list().await;
+            let removed = before - remaining.len();
+            let latched = remaining.iter().filter(|j| j.latch.is_some()).count();
+            let mut msg = format!("Cleaned up {} completed job(s)\n", removed);
+            if latched > 0 {
+                msg.push_str(&format!(
+                    "Kept {latched} latched job(s) awaiting confirmation — \
+                     confirm via the nonce or abandon with kill --discard %N\n"
+                ));
+            }
+            return ExecResult::with_output(OutputData::text(msg));
         }
 
         let jobs = manager.list().await;

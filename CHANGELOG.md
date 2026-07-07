@@ -84,6 +84,14 @@ breaking entries are marked **BREAKING**.
   variants/fields won't break you.
 
 ### Fixed
+- **A backgrounded confirmation latch can no longer be destroyed silently**
+  (GH #96 follow-up). `jobs --cleanup` used to reap a latched job like any
+  completed one, and `kill %N` removed it outright — both silently dropped the
+  stored `LatchRequest`, leaving the gated operation permanently
+  unconfirmable. `jobs --cleanup` now keeps latched jobs and says so; `kill
+  %N` on a latched job refuses with a pointer to the nonce; the new `kill
+  --discard %N` abandons the gate explicitly and loudly (the gated operation
+  never runs).
 - **README install instructions pointed at a crate that doesn't exist.**
   `cargo install kaish` fails — there is no `kaish` package on crates.io; the
   binary named `kaish` ships in the `kaish-repl` crate. The README now says

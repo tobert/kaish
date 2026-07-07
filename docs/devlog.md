@@ -14,6 +14,43 @@ before it ships.
 
 ---
 
+## The latch survives its consumers (2026-07-06)
+
+A pre-release "fishing expedition" — Amy's cross-model combo, a gemini-pro
+batch over the whole scheduler/jobs/REPL surface as whole files plus a
+deepseek consult over the same waters, no diff so the models read the code
+cold — converged independently on the same finding: the backgrounded latch
+that #96 had just made *reachable* was still *destructible*, silently, by
+both of its housekeeping consumers. `jobs --cleanup` reaped a latched job
+because `is_done()` counts Latched as done; `kill %N` ran cancel+remove
+unconditionally. Both verified against the binary before believing the
+models: "Cleaned up 1 completed job(s)", gate gone, the destructive op
+permanently unconfirmable. The stored LatchRequest is the *only* handle to a
+backgrounded gate — dropping the job drops the contract.
+
+The decisions: cleanup keeps latched jobs and says so ("Kept 1 latched
+job(s)…"), because a silently-retained job is just a differently-shaped
+surprise. `kill %N` refuses with a pointer to `/v/jobs/N/latch` — kill is
+not repurposed as the discard path, since fat-fingering kill at a gate you
+meant to confirm was precisely the found failure mode. The explicit path is
+`kill --discard %N`: loud about what it abandoned, conflicts with `--signal`
+at the clap layer (discarding delivers nothing to anyone). Review (deepseek,
+worktree checkout) mapped every other job-dropping path — fg/bg structurally
+can't reach a latched job (no pid/pgid, not stopped), shutdown waits but
+never removes — and flagged the one unguarded seam, `JobManager::remove`,
+now documented as latch-bypassing with `cleanup()` named as the safe bulk
+path. Rider from the same sweep: `Job::try_poll`'s "shouldn't happen"
+Pending branch had already taken the JoinHandle and would have dropped it,
+stranding the job as Running forever with its result silently lost; it puts
+the handle back now.
+
+The latch-visibility residuals the sweep also surfaced (wait --json renders
+`"[1] Latched\n"` with no nonce; jobs --json rows omit the latch; scatter
+rows can't carry one; mid-pipeline gates lose their exit code) were filed as
+#124/#125 rather than stretched into this PR.
+
+---
+
 ## `glob **/*.rs` stops eating its own pattern (2026-07-06)
 
 Amy hit it live at the REPL: `glob **/*.rs` at the kaish repo root took a long
