@@ -21,7 +21,7 @@ pub struct Glob;
 struct GlobArgs {
     /// Maximum depth to recurse.
     #[arg(short = 'd', long = "depth")]
-    depth: Option<String>,
+    depth: Option<i64>,
 
     /// Include ignored files like .git, node_modules.
     #[arg(long = "no-ignore", visible_alias = "no_ignore")]
@@ -53,13 +53,14 @@ struct GlobArgs {
     #[arg(short = '0', long = "null")]
     null: bool,
 
-    /// Include pattern (can be repeated).
+    /// Include pattern: only matches also matching one of these are kept
+    /// (repeatable).
     #[arg(long = "include")]
-    include: Option<String>,
+    include: Vec<String>,
 
-    /// Exclude pattern (can be repeated).
+    /// Exclude pattern: matches are dropped, directories pruned (repeatable).
     #[arg(long = "exclude")]
-    exclude: Option<String>,
+    exclude: Vec<String>,
 
     #[command(flatten)]
     global: GlobalFlags,
@@ -145,59 +146,45 @@ impl Tool for Glob {
             return ExecResult::failure(1, "glob: missing pattern argument");
         }
 
-        // Parse options
-        let max_depth = args.get("depth", usize::MAX).and_then(|v| match v {
-            Value::Int(i) => Some(*i as usize),
-            Value::String(s) => s.parse().ok(),
-            _ => None,
-        });
+        // Parse options off the clap struct. A non-numeric `--depth` was
+        // already a loud clap error; a negative one is refused here rather
+        // than wrapping to "effectively unlimited".
+        let max_depth: Option<usize> = match parsed.depth {
+            Some(d) if d < 0 => {
+                return ExecResult::failure(
+                    2,
+                    format!("glob: invalid --depth {d}: must be >= 0"),
+                )
+            }
+            other => other.map(|d| d as usize),
+        };
 
-        // Also check short flags
-        let max_depth = max_depth.or_else(|| {
-            args.get("d", usize::MAX).and_then(|v| match v {
-                Value::Int(i) => Some(*i as usize),
-                Value::String(s) => s.parse().ok(),
-                _ => None,
-            })
-        });
+        let no_ignore = parsed.no_ignore;
+        let include_hidden = parsed.hidden;
+        let null_sep = parsed.null;
 
-        let no_ignore = args.has_flag("no-ignore") || args.has_flag("no-ignore");
-        let include_hidden = args.has_flag("hidden") || args.has_flag("a");
-        let null_sep = args.has_flag("null") || args.has_flag("0");
-
-        // Entry types
-        let entry_types = match args.get_string("type", usize::MAX).as_deref() {
+        // Entry types: f=files (default), d=dirs, a=all. Anything else used
+        // to silently mean "files"; now it's a usage error.
+        let entry_types = match parsed.type_.as_deref() {
+            None | Some("f") => EntryTypes::files_only(),
             Some("d") => EntryTypes::dirs_only(),
             Some("a") => EntryTypes::all(),
-            _ => {
-                // Check -t flag
-                if args.has_flag("t") {
-                    if let Some(Value::String(t)) = args.get("t", usize::MAX) {
-                        match t.as_str() {
-                            "d" => EntryTypes::dirs_only(),
-                            "a" => EntryTypes::all(),
-                            _ => EntryTypes::files_only(),
-                        }
-                    } else {
-                        EntryTypes::files_only()
-                    }
-                } else {
-                    EntryTypes::files_only()
-                }
+            Some(other) => {
+                return ExecResult::failure(
+                    2,
+                    format!("glob: invalid --type '{other}': expected f, d, or a"),
+                )
             }
         };
 
-        // Build include/exclude filter
+        // Build the include/exclude filter. Repeatable value flags arrive as
+        // `Json(Array)`; read them off the raw args like `--ftype` above.
         let mut filter = IncludeExclude::new();
-
-        // Handle include patterns
-        if let Some(Value::String(inc)) = args.get("include", usize::MAX) {
-            filter.include(inc);
+        for pattern in read_repeatable_strings(&args, "include") {
+            filter.include(&pattern);
         }
-
-        // Handle exclude patterns
-        if let Some(Value::String(exc)) = args.get("exclude", usize::MAX) {
-            filter.exclude(exc);
+        for pattern in read_repeatable_strings(&args, "exclude") {
+            filter.exclude(&pattern);
         }
 
         let fs = BackendWalkerFs(ctx.backend.as_ref());

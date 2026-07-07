@@ -11,6 +11,26 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Fixed
+- **`glob --include` now actually filters.** It was a complete no-op: the
+  walker consulted only exclude rules, so `glob '*' --include='*.rs'` listed
+  everything. Include semantics are now rg-like: when include patterns exist a
+  file must match one of them (by relative path or basename); directories are
+  still traversed so included files below them are reached; exclude patterns
+  still prune whole subtrees. (`grep --include` half-worked through a separate
+  walk-pattern hack, now removed in favor of the same filter.)
+- **Repeated `--include`/`--exclude` accumulate in `glob` and `grep`.** Both
+  were bound single-valued, so repeating the flag silently kept only the LAST
+  pattern — `glob` while its help said "can be repeated", and `grep -r TODO .
+  --include='*.rs' --include='*.toml'` silently searched only the toml files
+  (a false negative). Repeats now accumulate like `--ftype` always has.
+- **A malformed numeric flag value errors instead of silently meaning
+  "unlimited"/"disabled".** `glob --depth=abc`, `tree -L abc`, and
+  `find -maxdepth xyz` all exited 0 and walked without a depth limit;
+  `spawn timeout=abc` silently DISABLED the timeout (unbounded child);
+  `split --limit` and `head -c` wrapped negative values through `usize`.
+  All now fail loudly, and negative values are refused rather than wrapped.
+  `glob --type=<unknown>` similarly errored silently into "files only" and is
+  now a usage error.
 - **Unquoted `glob **/*.rs` now works: the pattern reaches the builtin as
   written.** Previously the kernel's argv glob expansion pre-expanded the bare
   pattern into matching paths, so `glob` bound the first path as its "pattern",

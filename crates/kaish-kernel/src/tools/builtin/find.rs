@@ -136,11 +136,20 @@ impl Tool for Find {
             None => EntryTypes::all(),
         };
 
-        // -maxdepth: parse from the clap struct.
-        let max_depth: Option<usize> = parsed
-            .maxdepth
-            .as_deref()
-            .and_then(|s| s.parse().ok());
+        // -maxdepth: parse from the clap struct. A malformed value is refused
+        // rather than silently walking unlimited.
+        let max_depth: Option<usize> = match parsed.maxdepth.as_deref() {
+            None => None,
+            Some(s) => match s.parse() {
+                Ok(d) => Some(d),
+                Err(_) => {
+                    return ExecResult::failure(
+                        1,
+                        format!("find: invalid -maxdepth '{s}': expected a non-negative integer"),
+                    )
+                }
+            },
+        };
 
         // -mindepth: parse from the clap struct.
         //
@@ -150,10 +159,18 @@ impl Tool for Find {
         // "entries inside the root dir" — so a 1-based GNU depth maps to
         // (N-1)-based walker depth.  Translation: GNU N → walker N-1 (clamped
         // at 0 / None for N <= 1, since the start dir is never emitted anyway).
-        let gnu_mindepth: Option<usize> = parsed
-            .mindepth
-            .as_deref()
-            .and_then(|s| s.parse().ok());
+        let gnu_mindepth: Option<usize> = match parsed.mindepth.as_deref() {
+            None => None,
+            Some(s) => match s.parse() {
+                Ok(d) => Some(d),
+                Err(_) => {
+                    return ExecResult::failure(
+                        1,
+                        format!("find: invalid -mindepth '{s}': expected a non-negative integer"),
+                    )
+                }
+            },
+        };
         let min_depth: Option<usize> = match gnu_mindepth {
             None | Some(0) | Some(1) => None, // walker already skips the start dir
             Some(n) => Some(n - 1),

@@ -92,6 +92,20 @@ impl Tool for Head {
             Err(e) => return ExecResult::failure(1, format!("head: {}", e)),
         };
 
+        // Byte count (-c) off the clap struct: clap already rejected
+        // non-numeric values loudly; negative (GNU's "all but the last N
+        // bytes") is unsupported and refused rather than usize-wrapped into
+        // a huge count.
+        let bytes: Option<usize> = match parsed.bytes {
+            Some(b) if b < 0 => {
+                return ExecResult::failure(
+                    1,
+                    format!("head: invalid byte count {b}: negative -c is not supported"),
+                )
+            }
+            other => other.map(|b| b as usize),
+        };
+
         // Multiple files: show each with header
         if paths.len() > 1 {
             return self.head_files(ctx, &args, &paths).await;
@@ -100,11 +114,6 @@ impl Tool for Head {
         // Streaming path: read from pipe_stdin line by line, stop after N lines
         // This enables early termination — `seq 1 1000000 | head -5` stops after 5 lines
         if paths.is_empty() && let Some(pipe_in) = ctx.pipe_stdin.take() {
-            let bytes = args.get("bytes", usize::MAX).and_then(|v| match v {
-                Value::Int(i) => Some(*i as usize),
-                Value::String(s) => s.parse().ok(),
-                _ => None,
-            });
             let (count, all_but_last) = Self::line_spec(&args);
             if bytes.is_some() || all_but_last {
                 // Bytes mode and `-n -N` (all but last N) both need the whole
@@ -116,16 +125,11 @@ impl Tool for Head {
             }
         }
 
-        // Byte count (-c) is resolved up front so a single-file read can ask
-        // the backend for exactly that many bytes. That keeps `head -c N` from
-        // pulling whole files into memory and, crucially, lets it read endless
-        // devices like /dev/zero — a whole-file read of those is a hard error.
-        let bytes = args.get("bytes", usize::MAX).and_then(|v| match v {
-            Value::Int(i) => Some(*i as usize),
-            Value::String(s) => s.parse().ok(),
-            _ => None,
-        });
-
+        // Byte count (-c) is resolved up front (see `bytes` above) so a
+        // single-file read can ask the backend for exactly that many bytes.
+        // That keeps `head -c N` from pulling whole files into memory and,
+        // crucially, lets it read endless devices like /dev/zero — a
+        // whole-file read of those is a hard error.
         // Single-file byte mode: request exactly N bytes via the read range.
         if let (Some(byte_count), Some(path)) = (bytes, paths.first()) {
             let resolved = ctx.resolve_path(path);

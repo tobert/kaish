@@ -12,7 +12,6 @@ use grep_searcher::{BinaryDetection, Encoding, SearcherBuilder};
 use regex::RegexBuilder;
 use std::path::{Path, PathBuf};
 
-use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::grep_engine::{AccumulatorSink, ContextKind, SearchEvent};
@@ -98,13 +97,13 @@ struct GrepArgs {
     #[arg(short = 'C', long = "context")]
     context: Option<String>,
 
-    /// Include only files matching pattern.
+    /// Include only files matching pattern (repeatable).
     #[arg(long = "include")]
-    include: Option<String>,
+    include: Vec<String>,
 
-    /// Exclude files matching pattern.
+    /// Exclude files matching pattern (repeatable).
     #[arg(long = "exclude")]
-    exclude: Option<String>,
+    exclude: Vec<String>,
 
     /// Force a specific text encoding.
     #[arg(long = "encoding")]
@@ -416,20 +415,19 @@ impl Tool for Grep {
                 let fs = BackendWalkerFs(ctx.backend.as_ref());
                 let mut files: Vec<PathBuf> = Vec::new();
                 for root in &dir_roots {
-                    // include/exclude + glob are walk-only (see the validation
-                    // note above); rebuilt per root since `with_options` moves.
+                    // include/exclude are walk-only (see the validation note
+                    // above); rebuilt per root since `with_options` moves.
+                    // Repeatable value flags arrive as `Json(Array)` — read
+                    // them off the raw args like `--ftype`; the filter itself
+                    // enforces include semantics (a file must match one).
                     let mut filter = IncludeExclude::new();
-                    if let Some(Value::String(inc)) = args.get("include", usize::MAX) {
-                        filter.include(inc);
+                    for pattern in read_repeatable_strings(&args, "include") {
+                        filter.include(&pattern);
                     }
-                    if let Some(Value::String(exc)) = args.get("exclude", usize::MAX) {
-                        filter.exclude(exc);
+                    for pattern in read_repeatable_strings(&args, "exclude") {
+                        filter.exclude(&pattern);
                     }
-                    let glob = if let Some(Value::String(inc)) = args.get("include", usize::MAX) {
-                        GlobPath::new(&format!("**/{}", inc)).ok()
-                    } else {
-                        GlobPath::new("**/*").ok()
-                    };
+                    let glob = GlobPath::new("**/*").ok();
 
                     let options = WalkOptions {
                         max_depth: None,

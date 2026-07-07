@@ -150,14 +150,31 @@ impl Tool for Spawn {
             Err(e) => return ExecResult::failure(1, format!("spawn: {e}")),
         };
 
-        // Get timeout (optional, in milliseconds)
-        let timeout_ms: Option<u64> = args
-            .get_named("timeout")
-            .and_then(|v| match v {
-                Value::Int(i) => Some(*i as u64),
-                Value::String(s) => s.parse().ok(),
-                _ => None,
-            });
+        // Get timeout (optional, in milliseconds). A malformed or negative
+        // value is a usage error — the old parse().ok() fallback silently
+        // DISABLED the timeout, the worst possible reading of a typo.
+        let timeout_ms: Option<u64> = match args.get_named("timeout") {
+            None => None,
+            Some(Value::Int(i)) if *i >= 0 => Some(*i as u64),
+            Some(Value::String(s)) => match s.parse::<u64>() {
+                Ok(ms) => Some(ms),
+                Err(_) => {
+                    return ExecResult::failure(
+                        2,
+                        format!("spawn: invalid timeout '{s}': expected non-negative milliseconds"),
+                    )
+                }
+            },
+            Some(other) => {
+                return ExecResult::failure(
+                    2,
+                    format!(
+                        "spawn: invalid timeout '{}': expected non-negative milliseconds",
+                        crate::interpreter::value_to_string(other)
+                    ),
+                )
+            }
+        };
 
         // Get clear_env flag
         let clear_env = args.has_flag("clear-env");

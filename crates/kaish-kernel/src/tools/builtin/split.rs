@@ -114,13 +114,17 @@ impl Tool for Split {
         let delimiter = args.get_string("delimiter", delim_idx);
         let regex_pat = args.get_string("regex", usize::MAX)
             .or_else(|| args.get_string("r", usize::MAX));
-        let limit = args.get("limit", usize::MAX)
-            .and_then(|v| match v {
-                Value::Int(i) => Some(*i as usize),
-                Value::String(s) => s.parse().ok(),
-                _ => None,
-            })
-            .unwrap_or(0);
+        // `--limit` off the clap struct (clap already rejected non-numeric
+        // values loudly); negative is refused rather than usize-wrapped.
+        let limit: usize = match parsed.limit {
+            Some(l) if l < 0 => {
+                return ExecResult::failure(
+                    2,
+                    format!("split: invalid --limit {l}: must be >= 0"),
+                )
+            }
+            other => other.unwrap_or(0) as usize,
+        };
 
         // Perform the split
         let parts: Vec<&str> = if let Some(pattern) = regex_pat {

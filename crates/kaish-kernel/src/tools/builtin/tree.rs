@@ -5,7 +5,6 @@ use clap::{CommandFactory, Parser};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::ast::Value;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
@@ -19,7 +18,7 @@ pub struct Tree;
 struct TreeArgs {
     /// Maximum depth to display.
     #[arg(short = 'L', long = "level")]
-    level: Option<String>,
+    level: Option<i64>,
 
     /// Traditional tree format with box-drawing.
     #[arg(long = "traditional")]
@@ -192,27 +191,24 @@ impl Tool for Tree {
             return ExecResult::failure(1, format!("tree: {}: No such file or directory", path));
         }
 
-        // Parse options
-        let max_depth = args
-            .get("level", usize::MAX)
-            .and_then(|v| match v {
-                Value::Int(i) => Some(*i as usize),
-                Value::String(s) => s.parse().ok(),
-                _ => None,
-            })
-            .or_else(|| {
-                args.get("L", usize::MAX).and_then(|v| match v {
-                    Value::Int(i) => Some(*i as usize),
-                    Value::String(s) => s.parse().ok(),
-                    _ => None,
-                })
-            });
+        // Parse options off the clap struct. A non-numeric `-L`/`--level` was
+        // already a loud clap error; a negative one is refused here rather
+        // than wrapping to "effectively unlimited".
+        let max_depth: Option<usize> = match parsed.level {
+            Some(l) if l < 0 => {
+                return ExecResult::failure(
+                    2,
+                    format!("tree: invalid --level {l}: must be >= 0"),
+                )
+            }
+            other => other.map(|l| l as usize),
+        };
 
-        let traditional = args.has_flag("traditional");
-        let flat = args.has_flag("flat");
-        let files_only = args.has_flag("files-only") || args.has_flag("f");
-        let show_hidden = args.has_flag("all") || args.has_flag("a");
-        let no_ignore = args.has_flag("no-ignore") || args.has_flag("no-ignore");
+        let traditional = parsed.traditional;
+        let flat = parsed.flat;
+        let files_only = parsed.files_only;
+        let show_hidden = parsed.all;
+        let no_ignore = parsed.no_ignore;
 
         // Build tree by walking directory
         let mut tree = TreeNode::default();

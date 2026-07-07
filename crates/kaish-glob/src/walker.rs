@@ -288,21 +288,20 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
                         continue;
                     }
 
-                // Check include/exclude filter
+                // Check include/exclude filter. Both the relative path and the
+                // bare filename are offered (patterns like "*_test.rs" are
+                // written against filenames); a directory is only pruned by an
+                // explicit exclude — an include list must not stop traversal.
                 if !self.options.filter.is_empty() {
                     let relative = self.relative_path(&full_path);
-                    if self.options.filter.should_exclude(&relative) {
+                    let name = full_path.file_name().map(Path::new);
+                    if self
+                        .options
+                        .filter
+                        .excludes_entry(&relative, name, entry_is_dir)
+                    {
                         continue;
                     }
-                    // Also check filename only for patterns like "*_test.rs"
-                    if let Some(name) = full_path.file_name()
-                        && self
-                            .options
-                            .filter
-                            .should_exclude(Path::new(name))
-                        {
-                            continue;
-                        }
                 }
 
                 if entry_is_dir {
