@@ -80,6 +80,12 @@ breaking entries are marked **BREAKING**.
   structured, bool, or null path argument and fell back to reading stdin
   instead of erroring on the operand actually given — the same silent-fallback
   class #93/#117 set out to kill.
+- **`bg` no longer marks a job Running when its `SIGCONT` fails.** `resume_job()`
+  (clearing the job's Stopped flag) ran *before* the `killpg(SIGCONT)` call, so
+  a failed signal (e.g. the process already died) left the job looking
+  Running in `jobs`/`wait` with no live process and no reaper ever spawned to
+  clean it up. `bg` now only marks the job Running after a confirmed
+  successful `SIGCONT`.
 - **`kaish-ignore` changes now persist past their own statement.** Every
   runtime ignore mutation (`add`/`clear`/`defaults`/`scope`) was silently
   dropped at the end of the statement that made it — the per-command context
