@@ -395,3 +395,37 @@ fn test_multiple_stopped_jobs() {
     // Clean up
     session.run_command("kill \"%1\"");
 }
+
+#[test]
+fn test_background_job_completion_is_notified_and_reaped() {
+    // GH #131: a completed background job used to vanish silently — no
+    // `[1]... Done` line before the next prompt, and its entry stayed in the
+    // JobManager until an explicit `jobs --cleanup`. It should now announce
+    // itself and be gone from `jobs` without any manual cleanup.
+    let mut session = PtySession::new();
+
+    session.send_line("sleep 0.2 &");
+    session
+        .wait_for("会sh> ", Duration::from_secs(3))
+        .expect("prompt right after backgrounding");
+
+    // Let the job actually finish before the next prompt render checks for it.
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Any command triggers the next prompt render, which is where the
+    // notification is printed (before the prompt itself).
+    let output = session.run_command("true");
+    assert!(
+        output.contains("Done") && output.contains("sleep 0.2"),
+        "expected a completion notification for the finished job, got:\n{}",
+        output
+    );
+
+    // The job must have been reaped automatically — no leftover entry.
+    let output = session.run_command("jobs");
+    assert!(
+        output.contains("no jobs"),
+        "the finished job should have been auto-reaped, got:\n{}",
+        output
+    );
+}

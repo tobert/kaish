@@ -735,6 +735,22 @@ fn resolve_prompt(repl: &Repl) -> String {
     "会sh> ".to_string()
 }
 
+/// Check the JobManager for jobs that finished since the last prompt, print a
+/// one-line notification for each (matching the `jobs` builtin's own
+/// `[id] status command` line), and reap them.
+///
+/// A `Latched` job is excluded by `reap_finished` itself — it's "done" in the
+/// sense that its future resolved, but it's awaiting confirmation of a
+/// pending destructive-operation gate (`set -o latch`) and must stay tracked
+/// until confirmed or explicitly discarded (GH #96), not be silently
+/// destroyed by an automatic background sweep (GH #131).
+fn notify_finished_jobs(repl: &Repl) {
+    let manager = repl.client.kernel().jobs();
+    for info in repl.runtime.block_on(manager.reap_finished()) {
+        println!("[{}] {} {}", info.id, info.status, info.command);
+    }
+}
+
 // ── Entry points ────────────────────────────────────────────────────
 
 /// Run the REPL with optional overlay mode.
@@ -771,6 +787,7 @@ pub fn run_with_overlay(overlay: bool) -> Result<()> {
     let history_path = load_history(&mut rl);
 
     loop {
+        notify_finished_jobs(&repl);
         let prompt_string = resolve_prompt(&repl);
         let prompt: &str = &prompt_string;
 
@@ -843,6 +860,7 @@ pub fn run() -> Result<()> {
     let history_path = load_history(&mut rl);
 
     loop {
+        notify_finished_jobs(&repl);
         // Dynamic prompt: call kaish_prompt() if defined, else default
         let prompt_string = resolve_prompt(&repl);
         let prompt: &str = &prompt_string;

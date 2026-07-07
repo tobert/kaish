@@ -87,6 +87,12 @@ breaking entries are marked **BREAKING**.
   real `--`). All now lex as one literal word (#137).
 
 ### Added
+- **The REPL announces finished background jobs at the next prompt and reaps
+  them automatically** (GH #131). `sleep 5 &` used to complete silently — no
+  `[1] Done sleep 5`-style line, and the completed job stayed in the
+  `JobManager` until an explicit `jobs --cleanup`. A `Latched` job (gated on a
+  pending confirmation under `set -o latch`) is never auto-reaped or reported
+  as finished — it stays tracked until confirmed or explicitly discarded.
 - **`ToolSchema::glob_passthrough` (+ `with_glob_passthrough()`)** — a tool
   whose input *is* a glob pattern (like `glob`) can now tell the argv binder to
   pass bare patterns through as literal text instead of expanding them.

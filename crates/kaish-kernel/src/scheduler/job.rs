@@ -645,22 +645,44 @@ impl JobManager {
         count
     }
 
-    /// Remove completed jobs from tracking and clean up their temp files.
+    /// Remove completed jobs from tracking and clean up their temp files,
+    /// returning info for each job removed.
     ///
     /// A latched job is "done" but its cached result holds the only
     /// `LatchRequest` for the gated operation — reaping it would silently
     /// destroy the pending confirmation (GH #96). It stays until confirmed
     /// or explicitly discarded (`kill --discard %N`).
-    pub async fn cleanup(&self) {
+    ///
+    /// Shared by `jobs --cleanup` (which only needs a count) and the REPL's
+    /// pre-prompt notification (GH #131, which needs the id/command/status of
+    /// each job so it can print `[N]+ Done ...` before reaping it) — one rule
+    /// for "is this job safe to reap", not two copies that could drift.
+    pub async fn reap_finished(&self) -> Vec<JobInfo> {
         let mut jobs = self.jobs.lock().await;
-        jobs.retain(|_, job| {
-            if job.is_done() && job.latch().is_none() {
-                job.cleanup_files();
-                false
-            } else {
-                true
-            }
-        });
+        let done_ids: Vec<JobId> = jobs
+            .iter_mut()
+            .filter_map(|(id, job)| (job.is_done() && job.latch().is_none()).then_some(*id))
+            .collect();
+
+        let mut removed = Vec::with_capacity(done_ids.len());
+        for id in done_ids {
+            let Some(mut job) = jobs.remove(&id) else {
+                continue;
+            };
+            let status = job.status();
+            let info = JobInfo::new(job.id, job.command.clone(), status).with_pid(job.pid);
+            job.cleanup_files();
+            removed.push(info);
+        }
+        removed
+    }
+
+    /// Remove completed jobs from tracking and clean up their temp files.
+    ///
+    /// See [`reap_finished`](Self::reap_finished) for the latch-safety rule;
+    /// this is the count-only form `jobs --cleanup` reports.
+    pub async fn cleanup(&self) {
+        self.reap_finished().await;
     }
 
     /// Check if a specific job exists.
@@ -1031,6 +1053,72 @@ mod tests {
             !path.exists(),
             "temp file should be removed after cleanup: {}",
             path.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reap_finished_returns_removed_job_info() {
+        // GH #131: the REPL's pre-prompt notification needs the id/command/
+        // status of each reaped job, not just a count.
+        let manager = JobManager::new();
+        manager.set_persist_output_files(false);
+
+        let id = manager
+            .spawn("sleep 0.1".to_string(), async { ExecResult::success("") })
+            .await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let _ = manager.wait(id).await;
+
+        let removed = manager.reap_finished().await;
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].id, id);
+        assert_eq!(removed[0].command, "sleep 0.1");
+        assert_eq!(removed[0].status, JobStatus::Done);
+
+        // And it's actually gone from tracking.
+        assert!(manager.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_reap_finished_never_reaps_latched_jobs() {
+        // GH #131 / GH #96: a Latched job is "done" in the sense that its
+        // future resolved, but it's awaiting confirmation of a pending
+        // destructive-operation gate — reaping it would silently destroy the
+        // only copy of the LatchRequest. Must never be auto-reaped or
+        // reported as a finished job.
+        use kaish_types::result::LatchRequest;
+
+        let manager = JobManager::new();
+        manager.set_persist_output_files(false);
+        let (tx, rx) = oneshot::channel();
+        let id = manager.register("rm precious.txt".to_string(), rx).await;
+
+        let mut gated = ExecResult::failure(2, "rm: confirmation required (latch enabled)");
+        gated.latch = Some(Box::new(LatchRequest {
+            nonce: "a3f7b2c1".to_string(),
+            command: "rm".to_string(),
+            paths: vec!["precious.txt".to_string()],
+            hint: "rm --confirm=\"a3f7b2c1\" precious.txt".to_string(),
+            tool: "rm".to_string(),
+            argv: vec!["precious.txt".to_string()],
+            ttl: 60,
+        }));
+        tx.send(gated).expect("send gated result");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Confirm it's actually seen as Latched before reaping.
+        let info = manager.get(id).await.expect("job exists");
+        assert_eq!(info.status, JobStatus::Latched);
+
+        let removed = manager.reap_finished().await;
+        assert!(
+            removed.is_empty(),
+            "a latched job must never be auto-reaped: {removed:?}"
+        );
+        assert_eq!(
+            manager.list().await.len(),
+            1,
+            "the latched job must still be tracked so its gate can be fulfilled"
         );
     }
 
