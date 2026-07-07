@@ -348,21 +348,62 @@ impl BackendDispatcher {
         let Some(child_stdout) = child.stdout.take() else {
             return Some(ExecResult::failure(1, "internal: stdout not available"));
         };
-        let Some(child_stderr) = child.stderr.take() else {
+        let Some(mut child_stderr) = child.stderr.take() else {
             return Some(ExecResult::failure(1, "internal: stderr not available"));
         };
 
-        // Always use spill_aware_collect — it handles both limited and
-        // unlimited modes, and correctly streams stderr to ctx.stderr.
-        // (wait_with_output would bypass stderr streaming.)
-        let (stdout, stderr, did_spill) = crate::output_limit::spill_aware_collect(
-            child_stdout,
-            child_stderr,
-            ctx.stderr.clone(),
-            &ctx.output_limit,
-        ).await;
+        // Capture stdout into a fixed 10MB tail-evicting ring (`BoundedStream`
+        // + `drain_to_stream`) — the SAME capture primitive the production
+        // spawn site uses (kernel.rs::try_execute_external), not the
+        // limit-aware `spill_aware_collect` this used to call. Production
+        // does not spill-check an external command's own capture inline; the
+        // pipeline-level post-hoc `spill_if_needed`
+        // (`Kernel::execute_pipeline`) is what applies `ctx.output_limit`
+        // afterward. `did_spill` is intentionally left `false`; a caller
+        // wanting the post-hoc behavior applies it separately, same as the
+        // real pipeline path (GH #133 item 2).
+        let stdout_stream = Arc::new(crate::scheduler::BoundedStream::new(
+            crate::scheduler::DEFAULT_STREAM_MAX_SIZE,
+        ));
+        let stdout_clone = stdout_stream.clone();
+        let stdout_task = tokio::spawn(async move {
+            crate::scheduler::drain_to_stream(child_stdout, stdout_clone).await;
+        });
+
+        // Stderr streaming is intentionally left as-is (live to
+        // `ctx.stderr` when present, else buffered) — production instead
+        // caps stderr into its own 10MB ring with no live streaming. That
+        // divergence is out of scope for this PR; see GH #133 follow-ups.
+        let stderr_stream_handle = ctx.stderr.clone();
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                match child_stderr.read(&mut chunk).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Some(ref stream) = stderr_stream_handle {
+                            stream.write(&chunk[..n]);
+                        } else {
+                            buf.extend_from_slice(&chunk[..n]);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            if stderr_stream_handle.is_some() {
+                String::new()
+            } else {
+                String::from_utf8_lossy(&buf).into_owned()
+            }
+        });
 
         let cancel = ctx.cancel.clone();
+        // Mirror production's cancel-aware drain handling: spawn the
+        // drains concurrently with the wait (not after collection
+        // completes) so a cancel can actually interrupt a still-running,
+        // still-silent child instead of blocking until it produces EOF.
+        let cancelled_before_wait = cancel.is_cancelled();
         let status = crate::kernel::wait_or_kill(
             &mut child,
             kill_target.as_ref(),
@@ -370,12 +411,31 @@ impl BackendDispatcher {
             std::time::Duration::from_secs(2),
         ).await;
         if let Some(task) = stdin_task { task.abort(); }
-        let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
+        let stderr = if cancelled_before_wait || cancel.is_cancelled() {
+            // The child's pipes are gone; late output is lost but
+            // predictable death beats partial capture (same tradeoff
+            // production makes).
+            stdout_task.abort();
+            stderr_task.abort();
+            String::new()
+        } else {
+            let _ = stdout_task.await;
+            stderr_task.await.unwrap_or_default()
+        };
+
+        // Signal-death mapping (128+signal, e.g. SIGKILL→137) must match
+        // the production spawn site exactly — kept in sync via the shared
+        // `exit_code_from_status` helper (GH #133 item 1). A `wait_or_kill`
+        // I/O error (not a signal death) falls back to 1, same as before.
+        let code = match status {
+            Ok(s) => crate::kernel::exit_code_from_status(&s),
+            Err(_) => 1,
+        };
+        let stdout = stdout_stream.read().await;
         // stdout came back as raw bytes: text if valid UTF-8, else a Bytes
         // result (so `curl url`, `curl url > file.bin`, etc. keep binary intact).
         let mut result = ExecResult::success_text_or_bytes(stdout).with_code(code);
         result.err = stderr;
-        result.did_spill = did_spill;
         Some(result)
     }
 }
@@ -572,20 +632,22 @@ mod external_process_tests {
 
     /// GH #133 item 3, large-payload consequence: before this fix, a pipeline
     /// stage's stdout went through the hand-rolled full-fidelity streamer,
-    /// which ignored `ctx.output_limit` entirely and forwarded byte-for-byte
-    /// no matter the size — an intermediate stage had NO size cap at all, of
-    /// any kind. Post-fix, every stage (pipe or not) goes through the same
-    /// capture path a non-pipeline external uses, which DOES respect
-    /// `ctx.output_limit`.
+    /// which ignored any size cap entirely and forwarded byte-for-byte no
+    /// matter the size — an intermediate stage had NO cap at all, of any
+    /// kind. Post-fix, every stage (pipe or not) goes through the same
+    /// capture path a non-pipeline external uses.
     ///
-    /// Note on scope: this test uses `ctx.output_limit` (in-memory mode, no
-    /// disk writes — CLAUDE.md) as the size trigger, since GH #133 item 2 (a
-    /// separate PR) is what additionally makes captures respect an
-    /// *unconditional* ~10MB ring regardless of `output_limit` configuration,
-    /// matching production's actual memory-safety net exactly. Once both
-    /// land, the same loss reproduces even with limiting disabled. This test
-    /// pins the piece item 3 alone is responsible for: a pipeline stage is no
-    /// longer special-cased into a no-cap-of-any-kind fast path.
+    /// Updated for GH #133 item 2 (landed since this test was written): the
+    /// shared capture path now caps via an *unconditional* ~10MB
+    /// `BoundedStream` ring regardless of `ctx.output_limit` configuration —
+    /// production never spill-checks its own capture inline, deferring that
+    /// to the pipeline-level, post-hoc `spill_if_needed`. So `ctx.output_limit`
+    /// is configured below only to prove it's inert here (matching item 2's
+    /// contract); the actual size trigger is the payload exceeding the fixed
+    /// ring, and `did_spill` correctly stays `false` — this dispatcher never
+    /// flags it, same as production. This test still pins the piece item 3
+    /// alone is responsible for: a pipeline stage is no longer special-cased
+    /// into a no-cap-of-any-kind fast path.
     #[tokio::test]
     async fn oversized_pipeline_stage_output_is_no_longer_forwarded_losslessly() {
         let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
@@ -628,15 +690,71 @@ mod external_process_tests {
             result.text_out().len() < 11_000_000,
             "an oversized (~11MB) pipeline stage's output must now be capped, \
              not forwarded byte-for-byte losslessly — the pre-fix special \
-             case ignored ctx.output_limit entirely; post-fix it goes \
-             through the same capped capture a non-pipeline external uses. \
-             got {} bytes",
+             case ignored any cap entirely; post-fix it goes through the same \
+             capped capture (the unconditional ~10MB ring) a non-pipeline \
+             external uses. got {} bytes",
             result.text_out().len()
         );
         assert!(
-            result.did_spill,
-            "the size cap should flag did_spill, same as a non-pipeline \
-             external's capture over the configured limit"
+            !result.did_spill,
+            "try_external itself must not set did_spill — that's \
+             Kernel::execute_pipeline's post-hoc spill_if_needed's job, \
+             matching production, even for a pipeline stage's capture"
+        );
+    }
+
+    /// GH #133 item 2: the twin used to call the limit-aware
+    /// `spill_aware_collect` in its non-pipe capture branch, applying
+    /// `ctx.output_limit` inline and setting `did_spill` itself. Production's
+    /// `try_execute_external` never spill-checks its own capture that way —
+    /// spill is a pipeline-level, post-hoc step (`Kernel::execute_pipeline`
+    /// calls `spill_if_needed` AFTER the dispatcher returns). So even with a
+    /// tiny `output_limit` configured, `try_external` itself must return the
+    /// full (up to the 10MB ring) captured output with `did_spill == false`.
+    /// Pre-fix, the twin truncated inline and set `did_spill = true` here.
+    #[tokio::test]
+    async fn output_limit_is_not_applied_inline_matching_production() {
+        let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
+        // A tiny in-memory limit (no disk spill file — CLAUDE.md: no real
+        // system paths in tests) — if try_external still spill-checked
+        // inline (the bug), this would trigger truncation right here.
+        ctx.output_limit = crate::output_limit::OutputLimitConfig::agent().in_memory();
+        ctx.output_limit.set_limit(Some(64));
+
+        let cmd = sh_cmd("yes x | head -c 1000");
+        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+
+        assert_eq!(result.code, 0, "err: {}", result.err);
+        assert_eq!(
+            result.text_out().len(),
+            1000,
+            "try_external must return the full captured output — production \
+             defers spill to the post-hoc pipeline step, not its own capture; \
+             got {} bytes: {:?}",
+            result.text_out().len(),
+            result.text_out()
+        );
+        assert!(
+            !result.did_spill,
+            "try_external itself must not set did_spill — that's \
+             Kernel::execute_pipeline's post-hoc spill_if_needed's job, \
+             matching production"
+        );
+    }
+
+    /// GH #133 item 1: production maps a signal-killed child to `128 + signal`
+    /// (SIGKILL -> 137); the twin used to hardcode `code().unwrap_or(1)` -> 1,
+    /// so a cancel/timeout test run through this dispatcher observed an exit
+    /// code production never actually produces. Fails at `code == 1` pre-fix.
+    #[tokio::test]
+    async fn signal_killed_child_maps_to_128_plus_signal() {
+        let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
+        let cmd = sh_cmd("kill -KILL $$");
+        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+        assert_eq!(
+            result.code, 137,
+            "SIGKILL should map to 128+9=137 (production's mapping), got {}",
+            result.code
         );
     }
 }

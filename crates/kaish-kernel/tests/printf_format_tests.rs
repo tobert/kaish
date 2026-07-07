@@ -363,3 +363,27 @@ async fn printf_little_g_large_number() {
     let result = k.execute("printf '%g' 1234567").await.expect("execute");
     assert_eq!(result.text_out(), "1.23457e+06", "printf '%g' 1234567 should produce 1.23457e+06");
 }
+
+// ---------------------------------------------------------------------------
+// Dash-only format operand (GH #137 sibling — same lexer bug as `echo ---`)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn printf_dash_only_literal() {
+    // printf --- (unquoted) → literal "---" as the format string, no
+    // conversions. Used to print "-" (the lexer's plain `--` literal
+    // swallowed the leading two dashes as a spurious end-of-flags marker).
+    let k = kernel();
+    let result = k.execute("printf ---").await.expect("execute");
+    assert_eq!(result.text_out(), "---", "printf --- should produce ---");
+}
+
+#[tokio::test]
+async fn printf_dash_only_after_double_dash() {
+    // printf -- --- : a real `--` end-of-flags marker followed by the
+    // dash-only operand. Used to parse-error (a spurious second `--` token
+    // fell out of mis-lexing `---`, with no grammar production for it).
+    let k = kernel();
+    let result = k.execute("printf -- ---").await.expect("execute");
+    assert_eq!(result.text_out(), "---", "printf -- --- should produce ---");
+}

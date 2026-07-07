@@ -2456,11 +2456,14 @@ where
     }
     .map(|s| Expr::Literal(Value::String(s.to_string())));
 
-    // Bare words starting with + or - (e.g., date +%s, cat -)
+    // Bare words starting with + or - (e.g., date +%s, cat -), and a
+    // `--`-prefixed word that isn't a valid long flag (`echo ---`,
+    // `echo --=x`, GH #137).
     let plus_minus_bare = select! {
         Token::PlusBare(s) => Expr::Literal(Value::String(s)),
         Token::MinusBare(s) => Expr::Literal(Value::String(s)),
         Token::MinusAlone => Expr::Literal(Value::String("-".to_string())),
+        Token::DoubleDashBare(s) => Expr::Literal(Value::String(s)),
     };
 
     // Glob patterns: merged GlobWord tokens and bare Star/Question

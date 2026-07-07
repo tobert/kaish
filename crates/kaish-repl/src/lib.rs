@@ -690,6 +690,35 @@ fn load_history(rl: &mut Editor<KaishHelper, DefaultHistory>) -> Option<PathBuf>
 
 // ── RC file and prompt ──────────────────────────────────────────────
 
+/// Build the warning line for a `source <rc-file>` outcome, if it's worth
+/// surfacing to the user — `None` when the rc file sourced cleanly.
+///
+/// A nonzero exit (a typo'd command, a failed source line) is not an `Err` —
+/// `execute()` still returns `Ok` with the failure folded into the
+/// `ExecResult`. Silently discarding that used to leave the user with a
+/// half-loaded rc environment and zero indication why (GH #129); this now
+/// reports the exit code and any diagnostic text, matching the style of the
+/// pre-existing hard-`Err` warning below it.
+fn rc_file_warning(path: &std::path::Path, outcome: &kaish_client::ClientResult<ExecResult>) -> Option<String> {
+    match outcome {
+        Ok(result) if !result.ok() => {
+            let err = result.err.trim_end();
+            Some(if err.is_empty() {
+                format!("kaish: warning: {} exited with code {}", path.display(), result.code)
+            } else {
+                format!(
+                    "kaish: warning: {} exited with code {}: {}",
+                    path.display(),
+                    result.code,
+                    err
+                )
+            })
+        }
+        Ok(_) => None,
+        Err(e) => Some(format!("kaish: warning: error sourcing {}: {}", path.display(), e)),
+    }
+}
+
 /// Load the RC file for interactive sessions.
 ///
 /// Search order: `$KAISH_INIT` → `~/.config/kaish/init.kai` → `~/.kaishrc`
@@ -708,8 +737,9 @@ fn load_rc_file(repl: &Repl) {
     for path in &candidates {
         if path.is_file() {
             let cmd = format!(r#"source "{}""#, path.display());
-            if let Err(e) = repl.runtime.block_on(repl.client.execute(&cmd)) {
-                eprintln!("kaish: warning: error sourcing {}: {}", path.display(), e);
+            let outcome = repl.runtime.block_on(repl.client.execute(&cmd));
+            if let Some(warning) = rc_file_warning(path, &outcome) {
+                eprintln!("{warning}");
             }
             return;
         }
@@ -1165,5 +1195,46 @@ mod tests {
             "expected `$MYVAR` among variable candidates, got {:?}",
             candidates.iter().map(|p| &p.replacement).collect::<Vec<_>>()
         );
+    }
+
+    // GH #129: an rc-file source that returns `Ok(ExecResult)` with a nonzero
+    // exit code used to be silently discarded — only a hard `Err` warned.
+    #[test]
+    fn rc_file_warning_none_when_source_succeeds() {
+        let path = std::path::Path::new("/home/user/.config/kaish/init.kai");
+        let outcome: kaish_client::ClientResult<ExecResult> = Ok(ExecResult::success("ok"));
+        assert_eq!(rc_file_warning(path, &outcome), None);
+    }
+
+    #[test]
+    fn rc_file_warning_reports_nonzero_exit_with_stderr() {
+        let path = std::path::Path::new("/home/user/.config/kaish/init.kai");
+        let outcome: kaish_client::ClientResult<ExecResult> =
+            Ok(ExecResult::failure(127, "source: unknown-command: command not found"));
+        let warning = rc_file_warning(path, &outcome).expect("nonzero exit must warn");
+        assert!(warning.contains("exited with code 127"), "{warning}");
+        assert!(warning.contains("unknown-command: command not found"), "{warning}");
+    }
+
+    #[test]
+    fn rc_file_warning_reports_nonzero_exit_with_no_stderr() {
+        // A failing result with no diagnostic text must still report the exit
+        // code (no dangling ": " with nothing after it).
+        let path = std::path::Path::new("/home/user/.kaishrc");
+        let outcome: kaish_client::ClientResult<ExecResult> =
+            Ok(ExecResult::failure(1, ""));
+        let warning = rc_file_warning(path, &outcome).expect("nonzero exit must warn");
+        assert!(warning.contains("exited with code 1"), "{warning}");
+        assert!(!warning.trim_end().ends_with(':'), "{warning}");
+    }
+
+    #[test]
+    fn rc_file_warning_reports_hard_err() {
+        let path = std::path::Path::new("/home/user/.config/kaish/init.kai");
+        let outcome: kaish_client::ClientResult<ExecResult> =
+            Err(kaish_client::ClientError::Execution("recursion limit exceeded".to_string()));
+        let warning = rc_file_warning(path, &outcome).expect("hard Err must warn");
+        assert!(warning.contains("error sourcing"), "{warning}");
+        assert!(warning.contains("recursion limit exceeded"), "{warning}");
     }
 }

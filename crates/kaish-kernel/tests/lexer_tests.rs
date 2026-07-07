@@ -106,6 +106,7 @@ fn format_token(token: &Token) -> String {
         // Bare words starting with + or -
         Token::PlusBare(s) => format!("PLUSBARE({})", s),
         Token::MinusBare(s) => format!("MINUSBARE({})", s),
+        Token::DoubleDashBare(s) => format!("DOUBLEDASHBARE({})", s),
         Token::JobSpec(s) => format!("JOBSPEC({})", s),
         Token::MinusAlone => "MINUSALONE".to_string(),
 
@@ -565,11 +566,19 @@ fn lexer_double_dash(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
 
-// Note: Single dash "-" is now valid as MinusAlone (for cat - stdin indicator)
-// Triple dash "---" is DoubleDash + MinusAlone
+// Note: Single dash "-" is now valid as MinusAlone (for cat - stdin indicator).
+// A `--`-prefixed word whose 3rd char isn't a letter is ONE `DoubleDashBare`
+// token — it used to fragment into `DoubleDash` + a leftover token, silently
+// truncating a dash-only operand (`echo ---` printed `-` instead of `---`,
+// GH #137). A lone `--` (nothing following) is unaffected: it still lexes as
+// plain `DOUBLEDASH`.
 #[rstest]
 #[case::single_dash("-", &["MINUSALONE"])]
-#[case::triple_dash("---", &["DOUBLEDASH", "MINUSALONE"])]
+#[case::triple_dash("---", &["DOUBLEDASHBARE(---)"])]
+#[case::quad_dash("----", &["DOUBLEDASHBARE(----)"])]
+#[case::double_dash_equals("--=x", &["DOUBLEDASHBARE(--=x)"])]
+#[case::double_dash_digit("--1", &["DOUBLEDASHBARE(--1)"])]
+#[case::double_dash_then_word("---foo", &["DOUBLEDASHBARE(---foo)"])]
 fn lexer_dash_variants(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
