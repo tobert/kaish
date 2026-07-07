@@ -35,6 +35,12 @@ breaking entries are marked **BREAKING**.
   dropped at the end of the statement that made it — the per-command context
   sync copied back cwd/aliases/output-limit but not the ignore config — so
   the documented `kaish-ignore add .gitignore` rc-file recipe did nothing.
+- **Command substitution (`$(...)`) no longer leaks session-config
+  mutations.** `x=$(kaish-ignore clear)`, `$(kaish-output-limit off)`, or
+  `$(unalias name)` used to silently mutate the persistent kernel session
+  past the end of the `$(...)` — command substitution already isolated `cd`
+  and variable assignments but not `aliases`/`ignore_config`/`output_limit`,
+  the same missing-field class #138 just fixed for the plain-statement path.
 - **`glob --include` now actually filters.** It was a complete no-op: the
   walker consulted only exclude rules, so `glob '*' --include='*.rs'` listed
   everything. Include semantics are now rg-like: when include patterns exist a
