@@ -168,6 +168,11 @@ breaking entries are marked **BREAKING**.
   124 exit — a real leak for a long-lived agent that repeatedly times out
   spawned commands. `kill_on_drop(true)` is now set at command construction,
   mirroring the existing precedent in `dispatch.rs`/`kernel.rs`.
+- **`jq -n -s` now wraps the synthetic null input in an array.** `-n`/
+  `--null-input` short-circuited straight to a bare `Value::Null` before the
+  `-s`/`--slurp` branch was ever consulted, so `jq -n -s '.'` produced `null`
+  instead of real jq's `[null]` — `-s` unconditionally wraps its input, even
+  the `-n` synthetic document (GH #111).
 
 ### Added
 - **The REPL announces finished background jobs at the next prompt and reaps

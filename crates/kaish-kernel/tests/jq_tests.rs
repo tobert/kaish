@@ -200,6 +200,54 @@ async fn jq_null_input_long() {
 }
 
 #[tokio::test]
+async fn jq_null_input_with_slurp_wraps_null_in_array() {
+    // GH #111: real jq always wraps -s/--slurp's input in an array, even the
+    // synthetic `null` that -n/--null-input feeds in when there's no stdin
+    // document: `jq -n -s '.'` -> `[null]`. kaish's -n branch short-circuited
+    // straight to a bare `Value::Null` before the slurp branch was ever
+    // consulted, so `.` printed `null` instead of `[null]`.
+    let k = setup().await;
+    let r = k.execute(r#"jq -n -s -c '.'"#).await.expect("script ran");
+    assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "[null]");
+}
+
+#[tokio::test]
+async fn jq_null_input_with_slurp_long_flags() {
+    let k = setup().await;
+    let r = k
+        .execute(r#"jq --null-input --slurp --compact '.'"#)
+        .await
+        .expect("script ran");
+    assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "[null]");
+}
+
+#[tokio::test]
+async fn jq_null_input_without_slurp_stays_bare_null() {
+    // Regression guard: -n without -s must keep feeding a bare null, not an
+    // array -- only -s triggers the wrap.
+    let k = setup().await;
+    let r = k.execute(r#"jq -n -c '.'"#).await.expect("script ran");
+    assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "null");
+}
+
+#[tokio::test]
+async fn jq_null_input_with_slurp_length_is_one() {
+    // Complements the array-shape assertions above: `length` on `[null]` is
+    // 1, not 0 -- confirms the wrap is a genuine one-element array, not an
+    // empty one.
+    let k = setup().await;
+    let r = k
+        .execute(r#"jq -n -s 'length'"#)
+        .await
+        .expect("script ran");
+    assert!(r.ok(), "exit: {} err: {}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "1");
+}
+
+#[tokio::test]
 async fn jq_arg_binds_string() {
     let k = setup().await;
     let r = k

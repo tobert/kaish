@@ -556,7 +556,17 @@ impl Tool for JqNative {
         // `null` to the filter — same as real jq. Otherwise: fast path through
         // pre-parsed structured data, then file, then stdin text.
         let input_json: serde_json::Value = if null_input {
-            serde_json::Value::Null
+            // -n/--null-input feeds the filter a synthetic `null` "document"
+            // in place of stdin. Real jq's -s/--slurp still wraps that
+            // synthetic document in a one-element array like it wraps any
+            // other input stream (GH #111: `jq -n -s '.'` -> `[null]`) —
+            // this branch bypasses resolve_stdin_json entirely, so it needs
+            // its own slurp handling rather than inheriting one.
+            if slurp {
+                serde_json::Value::Array(vec![serde_json::Value::Null])
+            } else {
+                serde_json::Value::Null
+            }
         } else {
             // A binary `path` operand goes loud rather than silently falling
             // through to the stdin branches below.
