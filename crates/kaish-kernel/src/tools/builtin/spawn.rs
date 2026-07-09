@@ -181,6 +181,15 @@ impl Tool for Spawn {
         // Build command
         let mut cmd = Command::new(&command);
         cmd.args(&argv);
+        // Ensure the OS process is killed if this Command/Child is dropped
+        // before we've waited on it. This is exactly what happens on the
+        // timeout arm below: tokio::time::timeout drops the owned
+        // wait_with_output() future (and the Child inside it) when it fires,
+        // and without kill_on_drop the process was silently left running
+        // past the timeout — a real leak for a long-lived agent that
+        // repeatedly hits spawn timeouts. Mirrors the same call in
+        // dispatch.rs and the "backstop" kill_on_drop in kernel.rs.
+        cmd.kill_on_drop(true);
 
         // Set working directory if specified
         if let Some(ref dir) = cwd {
@@ -238,8 +247,9 @@ impl Tool for Spawn {
                 Ok(Ok(output)) => capture_to_result(output.status.code(), output.stdout, output.stderr),
                 Ok(Err(e)) => ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
                 Err(_) => {
-                    // Timeout - process is still running but we can't kill it
-                    // because wait_with_output took ownership. Return timeout error.
+                    // Timeout — dropping this future drops the owned Child;
+                    // kill_on_drop (set above) kills and reaps the process
+                    // as part of that drop, so it does not outlive us.
                     ExecResult::failure(124, format!("spawn: {}: timed out after {}ms", command, ms))
                 }
             }

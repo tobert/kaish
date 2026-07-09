@@ -150,6 +150,12 @@ breaking entries are marked **BREAKING**.
   end-of-flags marker. Also broke `echo --=x` (→ `= x`), `echo --1` (→ `1`),
   and made `echo -- ---` a parse error (the spurious marker collided with the
   real `--`). All now lex as one literal word (#137).
+- **`spawn --timeout` no longer leaks the child process.** On timeout, the
+  `wait_with_output()` future (and the `Child` it owned) was dropped without
+  `kill_on_drop` set on the `Command`, so the OS process kept running past the
+  124 exit — a real leak for a long-lived agent that repeatedly times out
+  spawned commands. `kill_on_drop(true)` is now set at command construction,
+  mirroring the existing precedent in `dispatch.rs`/`kernel.rs`.
 
 ### Added
 - **The REPL announces finished background jobs at the next prompt and reaps
