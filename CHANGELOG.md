@@ -31,13 +31,18 @@ breaking entries are marked **BREAKING**.
   (`transient`/`named`/`isolated`) keep the unfiltered default.
 
 ### Fixed
-- **`seq --separator` now errors loudly on a binary value instead of splicing
-  the `[binary: N bytes]` placeholder between the generated numbers** (GH
-  #120). `seq` read its own clap-parsed field before the untouched raw
-  `ToolArgs` value — `to_argv()`'s re-serialization had already stringified
-  the binary into the placeholder by the time clap saw it, so the guarded
-  fallback branch never ran. Reordered to check the raw value first, mirroring
-  the `checksum --check`/`patch --file` fix from the #93 item-1 PR.
+- **`seq --separator`, `cut --fields`/`--characters`, and `awk
+  --field-separator` now error loudly on a binary value** instead of
+  silently misbehaving (GH #120). All three read their own clap-parsed field
+  before the untouched raw `ToolArgs` value — `to_argv()`'s re-serialization
+  had already stringified the binary into a `[binary: N bytes]` placeholder
+  by the time clap saw it, so a guard added only on the raw-value fallback
+  never ran. `seq` spliced the placeholder text between the generated
+  numbers; `cut` silently parsed it as zero valid field/character indices and
+  emitted one blank line per input line; `awk` set it as the literal `FS`,
+  so every line silently became a single field. Reordered all three to check
+  the raw value first, mirroring the `checksum --check`/`patch --file` fix
+  from the #93 item-1 PR.
 - **`scatter --timeout` no longer misclassifies a worker that completes right
   at the timeout boundary as timed out.** A worker whose command finished at
   (or a hair before) the deadline could read the timeout flag after the

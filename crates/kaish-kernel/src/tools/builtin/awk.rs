@@ -105,12 +105,39 @@ impl Tool for Awk {
             Err(e) => return ExecResult::failure(1, format!("awk: {}", e)),
         };
 
-        // Get field separator (clap value first, then legacy named fallback)
-        let field_sep = parsed
-            .field_separator
-            .clone()
-            .or_else(|| args.get_string("field_separator", usize::MAX))
-            .or_else(|| args.get_string("F", usize::MAX));
+        // Read the raw ToolArgs value FIRST, not `parsed.field_separator`
+        // (GH #120): `to_argv()` stringifies a `Value::Bytes` into the
+        // `[binary: N bytes]` placeholder before clap ever parses it, so
+        // checking the clap field first would hide a binary `-F`/
+        // `--field-separator` value entirely. There's no downstream
+        // validation to catch it either — the placeholder would just become
+        // awk's literal `FS`, which never matches real input, so every line
+        // silently becomes a single field instead of erroring (found via
+        // kaibo review of this PR). Mirrors the `seq --separator` fix.
+        //
+        // The raw `ToolArgs.named` key is whatever the user literally typed
+        // (kernel.rs's `Arg::Named` binder inserts under the token's own flag
+        // name, not a canonicalized one) — check every spelling the schema
+        // accepts (kebab long name, its `field_separator` visible_alias, and
+        // the short `-F`), not just the one the pre-existing legacy fallback
+        // below happened to check.
+        let field_sep = match args
+            .get("field-separator", usize::MAX)
+            .or_else(|| args.get("field_separator", usize::MAX))
+            .or_else(|| args.get("F", usize::MAX))
+        {
+            Some(v @ crate::ast::Value::Bytes(_)) => {
+                match crate::interpreter::value_to_text_sink_named(v, "a field separator") {
+                    Ok(s) => Some(s),
+                    Err(e) => return ExecResult::failure(1, format!("awk: {e}")),
+                }
+            }
+            _ => parsed
+                .field_separator
+                .clone()
+                .or_else(|| args.get_string("field_separator", usize::MAX))
+                .or_else(|| args.get_string("F", usize::MAX)),
+        };
 
         // Get input. A binary `path` operand goes loud rather than silently
         // falling through to the "no operand" branch (which reads stdin instead

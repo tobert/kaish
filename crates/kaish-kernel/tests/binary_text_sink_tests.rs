@@ -477,6 +477,54 @@ async fn seq_separator_binary_is_loud() {
     assert_loud_binary("b=$(cat src.bin); seq --separator=$b 1 3").await;
 }
 
+/// `cut --fields=$BIN` (GH #120, found via kaibo review of this PR's own
+/// audit): my first pass wrongly classified `fields`/`characters` as
+/// already-loud like `delimiter` — in fact `select_indices` silently parses
+/// the `[binary: N bytes]` placeholder as zero valid indices (no digits, no
+/// `-`), so `cut` would silently emit one blank line per input line instead
+/// of erroring. Same clap-field-first ordering hazard as `seq --separator`.
+#[tokio::test]
+async fn cut_fields_binary_is_loud_not_blank_output() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute(r#"b=$(cat src.bin); echo "a,b,c" | cut --fields=$b -d,"#)
+        .await
+        .unwrap();
+    assert_ne!(result.code, 0, "err={}", result.err);
+    assert!(result.err.contains("cannot be used as"), "err={:?}", result.err);
+    assert!(
+        !result.text_out().contains('\n') || result.text_out().is_empty(),
+        "must not silently emit blank output lines: {:?}",
+        result.text_out()
+    );
+}
+
+/// `cut --characters=$BIN` — same class as `fields` above.
+#[tokio::test]
+async fn cut_characters_binary_is_loud_not_blank_output() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute("b=$(cat src.bin); echo abcdef | cut --characters=$b")
+        .await
+        .unwrap();
+    assert_ne!(result.code, 0, "err={}", result.err);
+    assert!(result.err.contains("cannot be used as"), "err={:?}", result.err);
+}
+
+/// `awk --field-separator=$BIN` (GH #120, missed in the original audit, found
+/// via kaibo review): the placeholder would silently become awk's literal
+/// `FS` — since it never matches real input, every line becomes a single
+/// field instead of erroring. Same clap-field-first ordering hazard.
+#[tokio::test]
+async fn awk_field_separator_binary_is_loud() {
+    assert_loud_binary(r#"b=$(cat src.bin); echo "a:b:c" | awk --field-separator=$b '{print $2}'"#)
+        .await;
+}
+
 /// `cmp`'s two file operands used to be read off `parsed.paths` (the
 /// clap-parsed, `to_argv()`-serialized field) instead of `args.positional` —
 /// found via a third kaibo pass over this PR. A binary first operand silently
