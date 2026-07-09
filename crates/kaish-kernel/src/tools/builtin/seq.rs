@@ -124,10 +124,28 @@ impl Tool for Seq {
             return ExecResult::failure(1, "seq: increment cannot be zero");
         }
 
-        let separator = parsed.separator.clone()
-            .or_else(|| args.get_string("separator", usize::MAX))
-            .or_else(|| args.get_string("s", usize::MAX))
-            .unwrap_or_else(|| "\n".to_string());
+        // Read the untouched raw value FIRST, not `parsed.separator` (GH #120):
+        // `parsed.separator` comes from `to_argv()`'s re-serialization, which
+        // stringifies a `Value::Bytes` into the `[binary: N bytes]` placeholder
+        // before clap ever sees it — checking the clap field first would let
+        // that placeholder silently win as the separator, spliced verbatim
+        // between the generated numbers with no validation to catch it
+        // (unlike e.g. `checksum --algo`, whose downstream allowlist check
+        // happens to make a placeholder loud-but-confusing rather than
+        // silent). Mirrors the `checksum --check`/`patch --file` reorder from
+        // the #93 item-1 PR.
+        let separator = match args.get("separator", usize::MAX).or_else(|| args.get("s", usize::MAX)) {
+            Some(v @ Value::Bytes(_)) => {
+                match crate::interpreter::value_to_text_sink_named(v, "a separator") {
+                    Ok(s) => s,
+                    Err(e) => return ExecResult::failure(1, format!("seq: {e}")),
+                }
+            }
+            _ => parsed.separator.clone()
+                .or_else(|| args.get_string("separator", usize::MAX))
+                .or_else(|| args.get_string("s", usize::MAX))
+                .unwrap_or_else(|| "\n".to_string()),
+        };
 
         let pad_width = parsed.width;
 

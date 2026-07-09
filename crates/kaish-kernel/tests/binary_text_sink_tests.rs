@@ -465,6 +465,18 @@ async fn checksum_binary_check_override_is_loud() {
     assert_loud_binary("b=$(cat src.bin); checksum --check=$b").await;
 }
 
+/// `seq --separator=$BIN` (GH #120): `parsed.separator` comes from clap's
+/// re-parse of `to_argv()`'s output, which already stringified the binary
+/// value into the `[binary: N bytes]` placeholder by the time clap sees it —
+/// checking the clap field before the untouched raw `ToolArgs` value hides a
+/// binary separator entirely, silently splicing the placeholder text between
+/// the generated numbers instead of erroring. Mirrors the checksum/patch
+/// reorder fix from the #93 item-1 PR.
+#[tokio::test]
+async fn seq_separator_binary_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); seq --separator=$b 1 3").await;
+}
+
 /// `cmp`'s two file operands used to be read off `parsed.paths` (the
 /// clap-parsed, `to_argv()`-serialized field) instead of `args.positional` —
 /// found via a third kaibo pass over this PR. A binary first operand silently
