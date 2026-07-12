@@ -10,6 +10,8 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-12
+
 ### Added
 - **`jobs --json` rows and scatter/gather rows carry the confirmation-latch
   object** for a `Latched` entry (nonce/paths/hint/ttl) — a caller can act on
@@ -173,6 +175,24 @@ breaking entries are marked **BREAKING**.
   `-s`/`--slurp` branch was ever consulted, so `jq -n -s '.'` produced `null`
   instead of real jq's `[null]` — `-s` unconditionally wraps its input, even
   the `-n` synthetic document (GH #111).
+- **`VirtualOverlayBackend` no longer reserves the whole `/v` tree — an
+  embedder can mount its own storage under it** (GH #118). `is_virtual_path`
+  matched any `/v`/`/v/…` path lexically before consulting the mount table, so
+  an embedder mounting under `/v` (e.g. kaijutsu's CAS at `/v/cas`) found its
+  own paths shadowed to `NotFound`, while surfaces that bypass the overlay saw
+  the real content — two different `/v/x` depending on the surface, silently.
+  Routing is now purely mount-coverage based: an unclaimed `/v/*` path
+  delegates to the embedder's backend and hits the embedder's own
+  read-only/write gate. A synthesized shared-ancestor directory (a path like
+  `/v` that sits above kaish's mounts but isn't itself one) is now handled
+  consistently everywhere — `stat`/`lstat`/`exists`/`list` all agree it's a
+  read-only union directory (a real kaish mount shadows a same-named embedder
+  entry), and any direct mutation (`rm`/`mkdir`/`touch`/write/rename/…) is
+  refused with a clear error instead of a misleading `NotFound` (closing a
+  `rm -rf /v` half-delete risk). Also fixes `ls /v` returning nothing, `ls /`
+  dropping `dev`, and a stale `is_trash_excluded` `/v` clause that would have
+  silently exempted an embedder's newly-reachable real content under `/v`
+  from trash/latch protection.
 
 ### Added
 - **The REPL announces finished background jobs at the next prompt and reaps
@@ -1355,7 +1375,8 @@ Initial public release of **kaish** (会sh) — a predictable Bourne-like shell 
 - **REPL** (`kaish-repl`) with multi-line input, completion, and history; **MCP server** (`kaish-mcp`) exposing `kaish_execute` with help resources and structured + plain-text content blocks.
 - **`KernelClient` trait** + `EmbeddedClient` for in-process embedding; topic-based help system; `kaish-wasi` `wasm32-wasip1` target.
 
-[Unreleased]: https://github.com/tobert/kaish/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/tobert/kaish/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/tobert/kaish/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/tobert/kaish/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/tobert/kaish/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/tobert/kaish/compare/v0.9.0...v0.9.1

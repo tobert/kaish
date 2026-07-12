@@ -875,6 +875,27 @@ The `glob` builtin's `-a`/`--hidden` flag (and any hidden-inclusive walk) acts
 like `shopt -s dotglob`: bare wildcards then match dotfiles too. `find` includes
 hidden entries by default.
 
+### Ignore-aware filtering (`.gitignore`, `kaish-ignore`)
+
+The reference REPL is ignore-aware by default: interactive, `-c`, and script
+modes load `.gitignore` plus a default ignore list (`.git`, `node_modules`,
+`target`, `__pycache__`, `.venv`, `venv`, `dist`, `build`, `.next`) at
+**Advisory** scope. "Polite" file-walking tools (`glob`, `tree`, `grep -r`,
+`ls -R`) filter these out; `find` stays POSIX-unrestricted and always sees
+everything. A bare embedded kernel (`transient`/`named`/`isolated`) keeps the
+unfiltered default — only the reference REPL opts in.
+
+```sh
+glob '**/*.rs'                  # skips target/, .git/, etc. by default
+glob '**/*.rs' --no-ignore      # this call only: no filtering
+kaish-ignore clear              # this session: no filtering at all
+kaish-ignore                    # show current config
+```
+
+See `help ignore` for the full `kaish-ignore` builtin (`add`/`remove`/`clear`/
+`defaults`/`auto`/`scope`) and the Agent-mode Enforced scope, where `find`
+filters too.
+
 ## Error Handling
 
 ```sh
@@ -1225,6 +1246,7 @@ These are documented limitations of the current implementation:
 
 - **Scatter results in completion order** — The 散 (scatter) construct returns results in the order jobs complete, not input order. This is inherent to parallel execution—first done, first returned.
 - **Redirect targets are a single word** — Command substitution *works* in redirect targets and here-doc bodies (`cmd > $(gen-path)`, `cat < $(find-cfg)`). Because the target is one word and kaish doesn't paste adjacent tokens, quote any target that mixes literal text with an expansion: `> "/tmp/$(id -u).log"`, not the unquoted `> /tmp/$(id -u).log` (which is a parse error). See [Quoting](#quoting).
+- **Recursion is depth-guarded** — Command substitution (`$(...)`), shell-function calls, `.kai` script execution, and `source`/`.` all re-enter the interpreter on the native stack; a runaway or mutually recursive script (`f() { f; }; f`) hits a cap (`MAX_RECURSION_DEPTH`, 48 levels) and fails loudly with `maximum recursion depth exceeded` instead of overflowing the stack. See `docs/EMBEDDING.md` for the embedder-side stack-sizing contract.
 
 ### Performance
 
