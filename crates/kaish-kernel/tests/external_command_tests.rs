@@ -541,9 +541,11 @@ async fn non_interactive_stdin_is_dev_null() {
     let kernel = repl_kernel();
     // Use /bin/readlink to bypass the builtin — we need an external process
     // to introspect its own fd/0, since the builtin reads kaish's fd/0.
+    // A bare `readlink` resolves to the builtin and only ever "passed" when
+    // the test runner itself had stdin=/dev/null (CI gave it a pipe: PR #169).
     // Linux-specific: requires /proc/self/fd/0.
     let result = kernel
-        .execute("readlink /proc/self/fd/0")
+        .execute("/bin/readlink /proc/self/fd/0")
         .await
         .unwrap();
     assert!(result.ok(), "readlink should succeed: {:?}", result);
@@ -564,9 +566,10 @@ async fn interactive_stdin_is_not_dev_null() {
     // so we pipe through cat to capture output. Readlink is First in
     // the pipeline: stdout is captured for the pipe, but stdin still inherits
     // from the terminal (no piped input for the first command).
+    // /bin/readlink, not the builtin — same reason as the test above.
     // Linux-specific: requires /proc/self/fd/0.
     let result = kernel
-        .execute("readlink /proc/self/fd/0 | cat")
+        .execute("/bin/readlink /proc/self/fd/0 | cat")
         .await
         .unwrap();
     assert!(result.ok(), "readlink should succeed: {:?}", result);

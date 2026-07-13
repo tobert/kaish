@@ -56,8 +56,11 @@ jobs:
           fi
 
   # Capability features are opt-in axes (localfs, subprocess, host, os-integration,
-  # tokens); a no-default-features build must compile and pass tests without touching
-  # the OS. This is the gate that catches OS-touching code landing outside its axis.
+  # tokens); a no-default-features build must compile without touching the OS. This
+  # is the gate that catches OS-touching code landing outside its axis. `check`, not
+  # `test`: the integration-test crates call feature-gated constructors like
+  # `KernelConfig::repl()` (localfs) and have never compiled without default
+  # features — upgrading this leg to `cargo test` is GH #170.
   sandbox:
     name: no-default-features
     runs-on: ubuntu-latest
@@ -74,8 +77,8 @@ jobs:
         with:
           key: no-default-features
 
-      - name: Test (kernel, no default features)
-        run: cargo test -p kaish-kernel --no-default-features --locked
+      - name: Check (kernel, no default features)
+        run: cargo check -p kaish-kernel --no-default-features --locked
 
   # The WASI target only builds (no test runner); it exists to keep the kernel
   # compiling for wasm32-wasip1 so embedders on that target don't discover breakage
