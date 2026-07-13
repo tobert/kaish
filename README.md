@@ -273,7 +273,7 @@ cargo test --all
 cargo clippy --all --all-targets   # must be warning-free
 ```
 
-CI runs these same gates on every PR and push to `main` — plus a
+CI runs the test and clippy gates on every PR and push to `main` — plus a
 no-default-features check of the kernel (the capability-feature sandbox) and a
 `wasm32-wasip1` build of `kaish-wasi`. See
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml); releases to crates.io
