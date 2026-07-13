@@ -313,10 +313,8 @@ fn rebase_gitignore_line(line: &str, prefix: &str) -> Option<String> {
             return None;
         }
         let prefix_with_slash = format!("{prefix}/");
-        match body.strip_prefix(&prefix_with_slash) {
-            Some(stripped) => format!("/{stripped}"),
-            None => return None,
-        }
+        let stripped = body.strip_prefix(&prefix_with_slash)?;
+        format!("/{stripped}")
     };
 
     let mut out = String::new();
