@@ -14,6 +14,49 @@ before it ships.
 
 ---
 
+## kaish gets CI, and CI immediately earns its keep (2026-07-13)
+
+Three years of shell projects say the first CI run never passes; kaish kept the
+streak. PR #169 added the repo's first GitHub Actions workflow — modeled on
+kaibo's (pinned-SHA actions, minimal permissions, per-ref concurrency) but
+encoding kaish's own CLAUDE.md gates: `cargo test --all --locked` + clippy
+`-D warnings` with `--all-targets`, the kernel's no-default-features leg, the
+`kaish-wasi` wasm32-wasip1 build, and a tripwire for committed `.snap.new`
+files. No release workflow on purpose: kaish ships crates, publishing stays the
+manual `/release` runbook, and kaibo's TLS-invariant guard didn't come along
+because kaish has no TLS surface.
+
+The first live run failed two of three jobs, and every failure was a
+pre-existing repo bug, not a workflow bug:
+
+- `non_interactive_stdin_is_dev_null` had been silently testing the wrong
+  process for who-knows-how-long. Its comment said "/bin/readlink to bypass the
+  builtin"; its code ran bare `readlink` — the kaish builtin — which resolves
+  the *test process's* fd/0. It only ever passed where the test runner itself
+  had stdin=/dev/null; GitHub's runner hands the step a pipe. Reproduced red
+  locally with `echo poke | cargo test …`, fixed by making code match comment.
+- The no-default-features leg was written as `cargo test`, which has **never
+  compiled** — `KernelConfig::repl()` is localfs-gated and ~25 test files call
+  it. The embarrassing part: local "verification" had piped cargo through
+  `tail`, reading tail's exit code. The documented invariant is "sandbox-mode
+  *compiles*", so the leg became `cargo check`; the test upgrade is GH #170.
+- Run two found a third class: CI's stable (1.97) out-lints local (1.96) —
+  `clippy::question_mark` got smarter and flagged a strip_prefix match in
+  ignore_config.rs. Fixed the code, didn't pin the toolchain; catching
+  toolchain drift is a feature, not a flake.
+
+A kaibo (deepseek) review of the workflow pre-push contributed the fourth fix:
+`.gitignore` had no `*.snap.new` entry, so the exact mistake the CI tripwire
+catches could still be staged locally by `git add .`.
+
+The doc sweep that followed (this PR) wired CI into the contributor story:
+README badge + gates in "Building from Source"/"Contributing" (and the stale
+"Status: 0.11" became badge-driven instead of hand-maintained), CLAUDE.md's
+gates section now names ci.yml as the enforcement point and warns about
+runner-vs-local clippy drift.
+
+---
+
 ## The REPL learns to read .gitignore — and kaish-ignore learns to persist (2026-07-06)
 
 Amy's call on #134: default to ignore-aware. The reference REPL had always run

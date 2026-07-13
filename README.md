@@ -1,5 +1,8 @@
 # kaish (会sh)
 
+[![ci](https://github.com/tobert/kaish/actions/workflows/ci.yml/badge.svg)](https://github.com/tobert/kaish/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/kaish-kernel.svg)](https://crates.io/crates/kaish-kernel)
+
 <p align="center">
   <img src="docs/banner.svg" alt="Kai the hermit crab — kaish mascot — looking at kaish code" width="720">
 </p>
@@ -14,9 +17,9 @@ virtual filesystem that can pass through, stay in memory, or overlay the two.
 An embedded kaish gives an agent a complete scripting environment that can be
 constrained naturally.
 
-**Status:** 0.11, pre-1.0. The language has settled; what remains before 1.0 is
-ergonomics and correctness polish. Everything ships through
-[CHANGELOG.md](CHANGELOG.md).
+**Status:** pre-1.0 (current version on the badge above). The language has
+settled; what remains before 1.0 is ergonomics and correctness polish.
+Everything ships through [CHANGELOG.md](CHANGELOG.md).
 
 ## Why a shell for agents?
 
@@ -267,7 +270,14 @@ git clone https://github.com/tobert/kaish
 cd kaish
 cargo build --release
 cargo test --all
+cargo clippy --all --all-targets   # must be warning-free
 ```
+
+CI runs the test and clippy gates on every PR and push to `main` — plus a
+no-default-features check of the kernel (the capability-feature sandbox) and a
+`wasm32-wasip1` build of `kaish-wasi`. See
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml); releases to crates.io
+are cut manually, so that one workflow is the whole CI story.
 
 ## Contributing
 
@@ -276,7 +286,9 @@ love seeing what other agents come up with. **All changes go through a PR** —
 branch, push, and open a PR rather than committing to `main` (releases are the
 exception). That said, please have your agent (or another model) review the PR
 before submitting — a few tokens on review goes a long way. Same goes for issues:
-agent-filed is fine, just make sure it makes sense.
+agent-filed is fine, just make sure it makes sense. CI must be green before a PR
+merges; note that the runners track current stable Rust, so clippy there may know
+lints your local toolchain doesn't yet.
 
 If you're working with AI coding agents, you might also be interested in
 [kaibo](https://github.com/tobert/kaibo), an assistant for you assistant with a

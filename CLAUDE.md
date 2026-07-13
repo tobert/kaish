@@ -50,6 +50,15 @@ cargo insta test --check                 # CI mode (fails on pending snapshots)
 cargo insta review                       # Interactive review of pending snapshots
 ```
 
+CI (`.github/workflows/ci.yml`) runs the gates on every PR and push to `main`:
+`cargo test --all --locked`, clippy with `-D warnings`, a committed-`.snap.new`
+tripwire, `cargo check -p kaish-kernel --no-default-features` (upgrading that
+leg to `cargo test` is GH #170), and the `kaish-wasi` wasm32-wasip1 build.
+When a gate changes, change ci.yml in the same PR. The runners track current
+stable Rust, which may be newer than local toolchains — CI clippy can fire
+lints local clippy doesn't have yet; fix the code rather than pinning the
+toolchain.
+
 The workspace denies `clippy::unwrap_used` and warns `clippy::expect_used` (see
 `[workspace.lints]` in the root `Cargo.toml`) to keep production code propagating
 errors. `clippy.toml` sets `allow-{unwrap,expect}-in-tests = true` so those
@@ -102,6 +111,8 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
   - `cargo clippy --all --all-targets` — zero errors **and** zero warnings
     (`--all-targets` so test code is linted too; see Build Commands for the
     test-code allow convention)
+  CI enforces these (plus the sandbox and WASI legs) on the PR — run them
+  locally first anyway; the feedback loop is minutes faster.
 
 ### Commit messages
 
