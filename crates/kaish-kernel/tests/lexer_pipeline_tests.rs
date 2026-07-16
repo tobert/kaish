@@ -10,6 +10,7 @@
 
 use kaish_kernel::lexer::{tokenize, LexerError, Token};
 use kaish_kernel::parser::parse;
+use kaish_kernel::{Kernel, KernelConfig};
 
 fn toks(src: &str) -> Vec<Token> {
     tokenize(src)
@@ -409,6 +410,37 @@ fn arg_count_does_not_open_a_comment() {
             Token::Arithmetic("1+2".into()),
         ]
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Nested braced references in bare default words (GH #173)
+// ═══════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn bare_nested_varref_default_evaluates() {
+    // `${X:-${Y}}` outside quotes used to be a parse error (the VarRef
+    // regex stopped at the first `}`); the quoted form always worked.
+    // Both now evaluate, matching bash.
+    let kernel = Kernel::new(KernelConfig::isolated().with_skip_validation(true))
+        .expect("kernel")
+        .into_arc();
+    let result = kernel
+        .execute("Y=fallback; echo ${X:-${Y}}")
+        .await
+        .expect("bare nested default evaluates");
+    assert_eq!(result.text_out().trim(), "fallback");
+
+    let result = kernel
+        .execute("Y=inner; echo ${A:-${B:-${Y}}}")
+        .await
+        .expect("doubly nested default evaluates");
+    assert_eq!(result.text_out().trim(), "inner");
+
+    let result = kernel
+        .execute("X=set; Y=fallback; echo ${X:-${Y}}")
+        .await
+        .expect("set variable wins over default");
+    assert_eq!(result.text_out().trim(), "set");
 }
 
 // ═══════════════════════════════════════════════════════════════════

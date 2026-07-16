@@ -10,6 +10,14 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+- **Bare `${X:-${Y}}` works** (GH #173) — a nested braced reference in a
+  default word outside quotes was a parse error (the `VarRef` token stopped at
+  the first `}`); the reference now extends to the balanced closing brace,
+  matching the quoted form and bash. Defaults nest to any depth
+  (`${A:-${B:-${C}}}`); an unbalanced reference is a loud
+  `unterminated variable reference` error.
+
 ### Added
 - **GitHub Actions CI** (`.github/workflows/ci.yml`): every PR and push to `main`
   runs the workspace test suite, clippy with warnings denied (test targets
