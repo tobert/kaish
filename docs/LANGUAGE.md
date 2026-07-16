@@ -160,6 +160,7 @@ cfg=$(fromjson '{"port":9000}')
 echo ${cfg[port]:-8080}       # 9000  (present)
 echo ${cfg[host]:-localhost}  # localhost  (missing key → default)
 echo ${cfg[flag]:-on}         # if flag is false/0/[]/{} you get that value, not "on"
+echo ${X:-${Y:-fallback}}     # defaults nest — first set value wins
 ```
 
 A **shape** error (integer index on a record, string key on a list, subscripting

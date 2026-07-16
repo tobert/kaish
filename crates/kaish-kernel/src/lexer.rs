@@ -509,8 +509,14 @@ pub enum Token {
     #[regex(r"'[^']*'", lex_single_string)]
     SingleString(String),
 
-    /// Braced variable reference: `${VAR}` or `${VAR.field}` - value is the raw inner content
-    #[regex(r"\$\{[^}]+\}", lex_varref)]
+    /// Braced variable reference: `${VAR}`, `${VAR.field}`, or a default
+    /// form with a NESTED reference like `${X:-${Y}}` — value is the raw
+    /// `${...}` text. The regex matches only the `${` opener; the callback
+    /// extends the token to the BALANCED closing brace (GH #173 — a plain
+    /// `[^}]+` regex stopped at the first `}` and split nested references).
+    /// `${#VAR}` still lexes as `VarLength`: its full regex out-matches this
+    /// two-character opener, so logos selects it first.
+    #[regex(r"\$\{", lex_varref)]
     VarRef(String),
 
     /// Simple variable reference: `$NAME` - just the identifier
@@ -816,9 +822,37 @@ fn lex_single_string(lex: &mut logos::Lexer<Token>) -> String {
 }
 
 /// Lex a braced variable reference, extracting the inner content.
-fn lex_varref(lex: &mut logos::Lexer<Token>) -> String {
-    // Keep the full ${...} for later parsing of path segments
-    lex.slice().to_string()
+/// Extend a `${` match across the remainder to the balanced closing `}`
+/// and return the full `${...}` text for later parsing of path segments
+/// and default words. Brace depth counts raw `{`/`}` characters, matching
+/// the scanner's `${...}` region tracking (quote-blind, like the old
+/// first-`}` regex — a quoted `}` inside a default word still closes; see
+/// GH #173). An empty `${}` stays an error (as it was when the regex
+/// required at least one inner character); a reference that never closes
+/// is a loud `UnterminatedVarRef`.
+fn lex_varref(lex: &mut logos::Lexer<Token>) -> Result<String, LexerError> {
+    let mut depth = 1usize;
+    let mut extra = 0usize;
+    for c in lex.remainder().chars() {
+        extra += c.len_utf8();
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    if extra == 1 {
+                        // `${}` — empty reference, same error class the
+                        // old non-matching regex produced.
+                        return Err(LexerError::UnexpectedCharacter);
+                    }
+                    lex.bump(extra);
+                    return Ok(lex.slice().to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(LexerError::UnterminatedVarRef)
 }
 
 /// Lex a simple variable reference: `$NAME` → `NAME`
@@ -3076,6 +3110,29 @@ mod tests {
         assert_eq!(lex("${VAR}"), vec![Token::VarRef("${VAR}".to_string())]);
         assert_eq!(lex("${VAR.field}"), vec![Token::VarRef("${VAR.field}".to_string())]);
         assert_eq!(lex("${VAR[0]}"), vec![Token::VarRef("${VAR[0]}".to_string())]);
+    }
+
+    #[test]
+    fn var_ref_nested_default_is_one_token() {
+        // GH #173: the balanced-brace callback keeps a nested reference in
+        // a default word as ONE VarRef token (the old first-`}` regex split
+        // it into VarRef + RBrace).
+        assert_eq!(
+            lex("${X:-${Y}}"),
+            vec![Token::VarRef("${X:-${Y}}".to_string())]
+        );
+        assert_eq!(
+            lex("${A:-${B:-${C}}}"),
+            vec![Token::VarRef("${A:-${B:-${C}}}".to_string())]
+        );
+        // VarLength still out-matches the two-character `${` opener.
+        assert_eq!(lex("${#X}"), vec![Token::VarLength("X".to_string())]);
+    }
+
+    #[test]
+    fn var_ref_unterminated_and_empty_are_errors() {
+        assert!(tokenize("${X:-${Y}").is_err(), "unbalanced nesting is loud");
+        assert!(tokenize("${}").is_err(), "empty reference is loud");
     }
 
     // ═══════════════════════════════════════════════════════════════════
