@@ -14,6 +14,66 @@ before it ships.
 
 ---
 
+## The lexer becomes one machine (2026-07-16)
+
+GH #95 sat locked since 2026-07-04: two cross-model batch reviews (gemini-pro,
+fable) had independently concluded that `lexer.rs`'s four-stage pipeline — two
+string-rewriting preprocessors → logos → marker re-threading → three fusion
+passes — was architecturally overdue, its stages communicating through in-band
+marker strings, span adjacency, and pass ordering that nothing checked. Amy's
+call was aggressive: full rewrite, single PR, trust the ~4,100-test suite as
+the spec. It held up — the entire workspace suite passed the new engine after
+exactly one fix (bare-CR heredoc terminators, a Mac-classic edge the old code
+normalized as a side effect of its rewriting).
+
+The census phase did the heavy lifting. Tracing the seams before writing code
+settled the two questions #95 left open and overturned one of its assumptions:
+multiline list/record literals are legal (the parser eats interior newlines),
+so the context stack must NOT reset at newline inside an open literal — and
+nested `$((..))` inside `$( )` was never "the subcommand's problem" because
+substitution bodies are lexed inline; the old skip just left inner arithmetic
+raw and unparseable. The census also found two corruption bugs #95 didn't
+list: `${X:-$((1+2))}` leaked raw `__KAISH_ARITH_…__` marker text into the
+AST, and the `#` of `$#` opened comment state in the preprocessor. And it
+found that the grammar accepts *spaced* assignment (`x = [a b]`), which
+reshaped the bug-5 fix from "require span adjacency" to a small statement-head
+DFA that models the real assignment shapes (glued, spaced, `local`,
+subscripted lvalues, env-prefix chains) — an argv `=` opens nothing.
+
+The engine: one composed scanner with explicit quote/escape/comment state
+extracts heredocs and arithmetic together and records a complete replacement
+table in both coordinate systems — heredocs included, which kills the span
+drift the old pipeline documented in its own comments (`body_start_offset` is
+now exact). Markers resolve back to tokens positionally, keyed by table
+ranges; a word glued onto a marker splits into `Arithmetic` plus re-lexed
+fragments so the parser's no-pasting guard fires loudly where marker garbage
+used to leak (`echo $((1+2))abc`; bash's `3abc` interpolation stays rejected
+as scope creep, but `echo "$((1+2))abc"` works). Fusion slices its text
+verbatim from the source, so `a:007` and `007*` finally keep their zeros. The
+context pass is an explicit frame stack — `$( )` pushes a fresh scope, which
+is what fixes `[[ -n $(x=[a]) ]]` leaking test depth into the substitution.
+The logos vocabulary and `Token` enum were not touched: ~60 shipped idiom
+decisions live in those regexes and none of the bugs did.
+
+One deviation from #95's locked sketch: the three fusion passes stayed three
+passes (sharing the one new context walker) instead of collapsing into one.
+Their alphabets differ deliberately — `Float` colon-fuses but doesn't
+glob-fuse (`1.5:x*` fuses; `1.5*` stays split) — and a union-alphabet single
+pass would have changed tokenization in corners the suite pins. Composition
+preserved the interactions; the bugs weren't in the pass structure anyway.
+
+Review pair per house style, pointed at the worktree: the deepseek consult's
+one HIGH finding (line continuations corrupting heredoc collection) didn't
+reproduce — the scanner's behavior is bash's (continuation joins the
+introducer line; `cat <<EOF \` + `| tr a-z A-Z` uppercases the body),
+verified end-to-end and pinned as a test — but its four smaller cleanups were
+real and landed. The gemini-pro batch leg came back truncated mid-thought;
+its one visible finding was the documented spaced-lvalue trade-off. 25 new
+characterization tests in `lexer_pipeline_tests.rs` keep all eight corruption
+classes dead.
+
+---
+
 ## kaish gets CI, and CI immediately earns its keep (2026-07-13)
 
 Three years of shell projects say the first CI run never passes; kaish kept the

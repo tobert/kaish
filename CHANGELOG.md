@@ -16,6 +16,47 @@ breaking entries are marked **BREAKING**.
   included), the kernel's no-default-features check, and the `wasm32-wasip1`
   build. Publishing to crates.io stays manual (the `/release` runbook).
 
+### Changed
+- **Lexer pipeline rewritten around one composed scanner** (GH #95). One
+  quote/escape/comment-aware pass extracts heredocs and arithmetic together
+  and records a complete replacement table, so every token span — including
+  everything after a heredoc — is an exact original-source byte range. The
+  token vocabulary is unchanged.
+- **Arithmetic glued to a word is now a loud parse error** with a quoting
+  hint (`echo $((1+2))abc` used to print raw internal marker text). kaish
+  does not interpolate bash's `3abc` here — quote the word instead.
+- **`$((expr))` inside a bare `${...}` reference is a new loud lexer error**
+  (`ArithmeticInVarRef`, e.g. `${X:-$((1+2))}`) instead of silently leaking
+  marker text into the default value. The same construct inside a
+  double-quoted string keeps working via string interpolation.
+- **Heredoc delimiter words take bash-style whole-word quote removal**
+  (`<<EO"F"` is delimiter `EOF`, literal), instead of stopping at the first
+  closing quote.
+
+### Fixed
+- **`echo "a << b"` and `# see <<EOF` no longer misfire heredoc collection**
+  — the heredoc scanner now understands quotes and comments.
+- **An apostrophe in a heredoc body no longer poisons later arithmetic**
+  (`don't` in a body used to swallow every following `$((..))`); a literal
+  `$((` in a `<<'EOF'` body is prose, not an unterminated-arithmetic error.
+- **Arithmetic inside command substitution works** — `echo $(echo $((1+2)))`
+  prints `3` (bash parity); it was previously a parse error because
+  substitution bodies were skipped by the arithmetic pass but never re-lexed.
+- **Fused words keep their exact source text**: `a:007` no longer collapses
+  to `a:7`, and `007*` globs as `007*` (leading zeros survived nowhere in
+  fusion before).
+- **An argv `=` no longer suppresses glob fusion** — `grep -E = [a-z]*` sees
+  `GlobWord("[a-z]*")`; only real assignments (`x = [a b]`, `local x = [ab]`,
+  subscripted lvalues, env-prefix chains) put their RHS at value position.
+- **`$( )` bodies get fresh lexer context** — `[[ -n $(x=[a]) ]]` no longer
+  leaks test-expression state into the substitution, and an unterminated
+  literal inside `$( )` no longer poisons the enclosing statement.
+- **`$#` before arithmetic** — the `#` of `$#` no longer opens comment state
+  in the scanner (`echo $# $((1+2))` works).
+- **Two heredocs on one line both collect their bodies**; the parser then
+  rejects the ambiguous stdin with its own clear message (the second heredoc
+  previously vanished into a mangled token stream).
+
 ## [0.12.0] - 2026-07-12
 
 ### Added
