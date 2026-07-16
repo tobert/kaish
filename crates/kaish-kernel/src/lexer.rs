@@ -1,12 +1,32 @@
 //! Lexer for kaish source code.
 //!
-//! Converts source text into a stream of tokens using the logos lexer generator.
-//! The lexer is designed to be unambiguous: every valid input produces exactly
-//! one token sequence, and invalid input produces clear errors.
+//! Converts source text into a stream of tokens using the logos lexer
+//! generator. The lexer is designed to be unambiguous: every valid input
+//! produces exactly one token sequence, and invalid input produces clear
+//! errors.
+//!
+//! # Pipeline (GH #95)
+//!
+//! 1. **Scan** — one composed source-order pass with explicit
+//!    quote/escape/comment state extracts heredoc bodies and `$((expr))`
+//!    arithmetic, producing a rewritten buffer plus a complete
+//!    replacement table (both coordinate systems).
+//! 2. **logos** — the regex vocabulary below classifies the rewritten
+//!    buffer into tokens.
+//! 3. **Marker resolution** — scanner markers become `Arithmetic` /
+//!    `HereDoc` tokens, matched POSITIONALLY against the replacement
+//!    table (never by fishing identifier text); a word glued onto a
+//!    marker is split so the parser can reject it loudly.
+//! 4. **Span correction** — every token span maps back to exact
+//!    original-source byte ranges via the replacement table.
+//! 5. **Fusion** — flag-metachar, colon, and glob merges join
+//!    span-adjacent runs, with fused text sliced VERBATIM from the
+//!    source; `compute_value_context` (an explicit frame stack plus a
+//!    statement-head DFA) decides where fusion is suppressed.
 //!
 //! # Token Categories
 //!
-//! - **Keywords**: `set`, `tool`, `if`, `then`, `else`, `fi`, `for`, `in`, `do`, `done`
+//! - **Keywords**: `set`, `if`, `then`, `else`, `fi`, `for`, `in`, `do`, `done`
 //! - **Literals**: strings, integers, floats, booleans (`true`/`false`)
 //! - **Operators**: `=`, `|`, `&`, `>`, `>>`, `<`, `2>`, `&>`, `&&`, `||`
 //! - **Punctuation**: `;`, `:`, `,`, `.`, `{`, `}`, `[`, `]`
@@ -25,50 +45,6 @@ static MARKER_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Prevents stack overflow from pathologically nested inputs like $((((((...
 const MAX_PAREN_DEPTH: usize = 256;
 
-/// Tracks a text replacement for span correction.
-/// When preprocessing replaces text (like `$((1+2))` with a marker),
-/// we need to adjust subsequent spans to account for the length change.
-#[derive(Debug, Clone)]
-struct SpanReplacement {
-    /// Position in the preprocessed text where the marker starts.
-    preprocessed_pos: usize,
-    /// Length of the marker in preprocessed text.
-    marker_len: usize,
-    /// Length of the original text that was replaced.
-    original_len: usize,
-}
-
-/// Corrects a span from preprocessed-text coordinates back to original-text coordinates.
-fn correct_span(span: Span, replacements: &[SpanReplacement]) -> Span {
-    let mut start_adjustment: isize = 0;
-    let mut end_adjustment: isize = 0;
-
-    for r in replacements {
-        // Calculate the length difference (positive = original was longer, negative = marker is longer)
-        let delta = r.original_len as isize - r.marker_len as isize;
-
-        // If the span starts after this replacement, adjust the start
-        if span.start > r.preprocessed_pos + r.marker_len {
-            start_adjustment += delta;
-        } else if span.start > r.preprocessed_pos {
-            // Span starts inside the marker - map to original position
-            // (this shouldn't happen often, but handle it gracefully)
-            start_adjustment += delta;
-        }
-
-        // If the span ends after this replacement, adjust the end
-        if span.end > r.preprocessed_pos + r.marker_len {
-            end_adjustment += delta;
-        } else if span.end > r.preprocessed_pos {
-            // Span ends inside the marker - map to end of original
-            end_adjustment += delta;
-        }
-    }
-
-    let new_start = (span.start as isize + start_adjustment).max(0) as usize;
-    let new_end = (span.end as isize + end_adjustment).max(new_start as isize) as usize;
-    new_start..new_end
-}
 
 /// Generate a unique marker ID that's extremely unlikely to collide with user code.
 /// Uses a combination of timestamp, counter, and process ID.
@@ -126,6 +102,12 @@ pub enum LexerError {
     /// We surface this as a dedicated error (rather than `UnexpectedCharacter`)
     /// so the message can point users at the `$(cmd)` replacement.
     BackticksNotSupported,
+    /// `$((expr))` inside a bare `${...}` reference (e.g. `${X:-$((1+2))}`).
+    /// There is no representation for arithmetic inside a variable
+    /// reference — the pre-#95 pipeline silently leaked internal marker
+    /// text here — so it is a loud error instead. (Inside double-quoted
+    /// strings the same construct works via string interpolation.)
+    ArithmeticInVarRef,
 }
 
 impl fmt::Display for LexerError {
@@ -155,6 +137,13 @@ impl fmt::Display for LexerError {
             LexerError::BackticksNotSupported => {
                 write!(f, "backticks are not supported in kaish; use $(cmd) instead")
             }
+            LexerError::ArithmeticInVarRef => {
+                write!(
+                    f,
+                    "arithmetic expansion inside ${{...}} is not supported; \
+                     assign it to a variable first, e.g. N=$((expr)); ${{X:-$N}}"
+                )
+            }
         }
     }
 }
@@ -175,12 +164,13 @@ impl fmt::Display for LexerError {
 ///   each body line are stripped at materialization time. Stripping happens
 ///   downstream of the parser so byte offsets in `content` stay aligned with
 ///   their original-source positions for span-tracking purposes.
-/// - `body_start_offset` is the byte offset of the first character of `content`
-///   in the source string fed into the lexer's `tokenize`. This lets the parser
-///   compute absolute spans for parts found inside the body during interpolation.
-///   In sources without arithmetic preprocessing rewrites, this equals the
-///   original-source offset; with arithmetic before the heredoc, line numbers
-///   may shift slightly until full preprocessing-layer composition lands.
+/// - `body_start_offset` is the exact byte offset of the first character of
+///   `content` in the original source passed to `tokenize`. This lets the
+///   parser compute absolute spans for parts found inside the body during
+///   interpolation. (For interpolated bodies containing `$((..))`, spans of
+///   parts AFTER the rewritten expression drift by the rewrite's length
+///   difference — the body-local `${__ARITH:expr__}` form is longer than
+///   the source text; see `rewrite_body_arithmetic`.)
 #[derive(Debug, Clone, PartialEq)]
 pub struct HereDocData {
     pub content: String,
@@ -1171,721 +1161,1288 @@ impl Token {
     }
 }
 
-/// Result of preprocessing arithmetic expressions.
-struct ArithmeticPreprocessResult {
-    /// Preprocessed source with markers replacing $((expr)).
-    text: String,
-    /// Vector of (marker, expression_content) pairs.
-    arithmetics: Vec<(String, String)>,
-    /// Span replacements for correcting token positions.
-    replacements: Vec<SpanReplacement>,
-}
+// ═══════════════════════════════════════════════════════════════════
+// Lexing pipeline (GH #95 rewrite)
+//
+// One composed source-order scanner extracts heredocs and arithmetic in
+// a single quote/escape/comment-aware pass, producing a rewritten buffer
+// plus a COMPLETE replacement table (heredocs included — the pre-#95
+// pipeline recorded no replacements for heredocs, so every span after a
+// heredoc drifted). logos then lexes the rewritten buffer; markers are
+// resolved back to `Arithmetic`/`HereDoc` tokens POSITIONALLY (keyed by
+// the replacement table, never by fishing identifier names); and finally
+// the fusion passes merge span-adjacent runs using VERBATIM source
+// slices (leading zeros survive — `Int(007)` never round-trips through
+// `to_string()`).
+// ═══════════════════════════════════════════════════════════════════
 
-/// Skip a `$(...)` command substitution with quote-aware paren matching.
-///
-/// Copies the entire command substitution verbatim to `result`, handling
-/// single quotes, double quotes, and backslash escapes inside the sub so
-/// that parentheses within strings don't confuse the depth counter.
-///
-/// On entry, `i` points to the `$` of `$(`. On exit, `i` points past the
-/// closing `)`.
-fn skip_command_substitution(
-    chars: &[char],
-    i: &mut usize,
-    source_pos: &mut usize,
-    result: &mut String,
-) {
-    // Copy $(
-    result.push('$');
-    result.push('(');
-    *i += 2;
-    *source_pos += 2;
-
-    let mut depth: usize = 1;
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-
-    while *i < chars.len() && depth > 0 {
-        let c = chars[*i];
-
-        if in_single_quote {
-            result.push(c);
-            *source_pos += c.len_utf8();
-            *i += 1;
-            if c == '\'' {
-                in_single_quote = false;
-            }
-            continue;
-        }
-
-        if in_double_quote {
-            if c == '\\' && *i + 1 < chars.len() {
-                let next = chars[*i + 1];
-                if next == '"' || next == '\\' || next == '$' || next == '`' {
-                    result.push(c);
-                    result.push(next);
-                    *source_pos += c.len_utf8() + next.len_utf8();
-                    *i += 2;
-                    continue;
-                }
-            }
-            if c == '"' {
-                in_double_quote = false;
-            }
-            result.push(c);
-            *source_pos += c.len_utf8();
-            *i += 1;
-            continue;
-        }
-
-        // Outside quotes
-        match c {
-            '\'' => {
-                in_single_quote = true;
-                result.push(c);
-                *source_pos += c.len_utf8();
-                *i += 1;
-            }
-            '"' => {
-                in_double_quote = true;
-                result.push(c);
-                *source_pos += c.len_utf8();
-                *i += 1;
-            }
-            '\\' if *i + 1 < chars.len() => {
-                result.push(c);
-                result.push(chars[*i + 1]);
-                *source_pos += c.len_utf8() + chars[*i + 1].len_utf8();
-                *i += 2;
-            }
-            '(' => {
-                depth += 1;
-                result.push(c);
-                *source_pos += c.len_utf8();
-                *i += 1;
-            }
-            ')' => {
-                depth -= 1;
-                result.push(c);
-                *source_pos += c.len_utf8();
-                *i += 1;
-            }
-            _ => {
-                result.push(c);
-                *source_pos += c.len_utf8();
-                *i += 1;
-            }
-        }
-    }
-}
-
-/// Preprocess arithmetic expressions in source code.
-///
-/// Finds `$((expr))` patterns and replaces them with markers.
-/// Returns the preprocessed source, arithmetic contents, and span replacement info.
-///
-/// Example:
-///   `X=$((1 + 2))`
-/// Becomes:
-///   `X=__KAISH_ARITH_{id}__`
-/// With arithmetics[0] = ("__KAISH_ARITH_{id}__", "1 + 2")
-///
-/// # Errors
-/// Returns `LexerError::NestingTooDeep` if parentheses are nested beyond MAX_PAREN_DEPTH.
-fn preprocess_arithmetic(source: &str) -> Result<ArithmeticPreprocessResult, LexerError> {
-    let mut result = String::with_capacity(source.len());
-    let mut arithmetics: Vec<(String, String)> = Vec::new();
-    let mut replacements: Vec<SpanReplacement> = Vec::new();
-    let mut source_pos: usize = 0;
-    let chars_vec: Vec<char> = source.chars().collect();
-    let mut i = 0;
-
-    // Whether we're currently inside double quotes. Single quotes inside
-    // double quotes are literal characters, not quote delimiters.
-    let mut in_double_quote = false;
-
-    while i < chars_vec.len() {
-        let ch = chars_vec[i];
-
-        // Backslash escape outside quotes — skip both chars verbatim
-        if !in_double_quote && ch == '\\' && i + 1 < chars_vec.len() {
-            result.push(ch);
-            result.push(chars_vec[i + 1]);
-            source_pos += ch.len_utf8() + chars_vec[i + 1].len_utf8();
-            i += 2;
-            continue;
-        }
-
-        // Single quote — only starts quote mode when NOT inside double quotes
-        if ch == '\'' && !in_double_quote {
-            result.push(ch);
-            i += 1;
-            source_pos += 1;
-            while i < chars_vec.len() && chars_vec[i] != '\'' {
-                result.push(chars_vec[i]);
-                source_pos += chars_vec[i].len_utf8();
-                i += 1;
-            }
-            if i < chars_vec.len() {
-                result.push(chars_vec[i]); // closing quote
-                source_pos += 1;
-                i += 1;
-            }
-            continue;
-        }
-
-        // Double quote — toggle state (arithmetic is still expanded inside)
-        if ch == '"' {
-            in_double_quote = !in_double_quote;
-            result.push(ch);
-            i += 1;
-            source_pos += 1;
-            continue;
-        }
-
-        // Backslash escape inside double quotes — only \" and \\ are special
-        if in_double_quote && ch == '\\' && i + 1 < chars_vec.len() {
-            let next = chars_vec[i + 1];
-            if next == '"' || next == '\\' || next == '$' || next == '`' {
-                result.push(ch);
-                result.push(next);
-                source_pos += ch.len_utf8() + next.len_utf8();
-                i += 2;
-                continue;
-            }
-        }
-
-        // Comment — copy verbatim from `#` through end-of-line so apostrophes
-        // and `$((..))` inside the comment body don't get processed. Logos's
-        // own comment regex `#[^\n\r]*` doesn't require a word boundary, so
-        // we match that: any `#` outside double quotes (and outside single
-        // quotes — those are consumed above as a single run) starts a comment.
-        // The newline is left for the next iteration so newline-significance
-        // and span tracking are preserved.
-        if ch == '#' && !in_double_quote {
-            while i < chars_vec.len() && chars_vec[i] != '\n' && chars_vec[i] != '\r' {
-                result.push(chars_vec[i]);
-                source_pos += chars_vec[i].len_utf8();
-                i += 1;
-            }
-            continue;
-        }
-
-        // Skip $(...) command substitutions — inner arithmetic belongs to the subcommand
-        if ch == '$' && i + 1 < chars_vec.len() && chars_vec[i + 1] == '('
-            && !(i + 2 < chars_vec.len() && chars_vec[i + 2] == '(')
-        {
-            skip_command_substitution(&chars_vec, &mut i, &mut source_pos, &mut result);
-            continue;
-        }
-
-        // Look for $(( (potential arithmetic)
-        if ch == '$' && i + 2 < chars_vec.len() && chars_vec[i + 1] == '(' && chars_vec[i + 2] == '(' {
-            let arith_start_pos = result.len();
-            let original_start = source_pos;
-
-            // Skip $((
-            i += 3;
-            source_pos += 3;
-
-            // Collect expression until matching ))
-            let mut expr = String::new();
-            let mut paren_depth: usize = 0;
-            let mut closed = false;
-
-            while i < chars_vec.len() {
-                let c = chars_vec[i];
-                match c {
-                    '(' => {
-                        paren_depth += 1;
-                        if paren_depth > MAX_PAREN_DEPTH {
-                            return Err(LexerError::NestingTooDeep);
-                        }
-                        expr.push('(');
-                        i += 1;
-                        source_pos += c.len_utf8();
-                    }
-                    ')' => {
-                        if paren_depth > 0 {
-                            paren_depth -= 1;
-                            expr.push(')');
-                            i += 1;
-                            source_pos += 1;
-                        } else if i + 1 < chars_vec.len() && chars_vec[i + 1] == ')' {
-                            // Found closing ))
-                            i += 2;
-                            source_pos += 2;
-                            closed = true;
-                            break;
-                        } else {
-                            // Single ) inside - keep going
-                            expr.push(')');
-                            i += 1;
-                            source_pos += 1;
-                        }
-                    }
-                    _ => {
-                        expr.push(c);
-                        i += 1;
-                        source_pos += c.len_utf8();
-                    }
-                }
-            }
-
-            // Reached EOF without the closing `))` — don't silently evaluate the
-            // partial expression (`$(( 1 + 2` must not become `3`).
-            if !closed {
-                return Err(LexerError::UnterminatedArithmetic);
-            }
-
-            // Calculate original length: from $$(( to ))
-            let original_len = source_pos - original_start;
-
-            // Create a unique marker for this arithmetic (collision-resistant)
-            let marker = format!("__KAISH_ARITH_{}__", unique_marker_id());
-            let marker_len = marker.len();
-
-            // Record the replacement for span correction
-            replacements.push(SpanReplacement {
-                preprocessed_pos: arith_start_pos,
-                marker_len,
-                original_len,
-            });
-
-            arithmetics.push((marker.clone(), expr));
-            result.push_str(&marker);
-        } else {
-            result.push(ch);
-            i += 1;
-            source_pos += ch.len_utf8();
-        }
-    }
-
-    Ok(ArithmeticPreprocessResult {
-        text: result,
-        arithmetics,
-        replacements,
-    })
-}
-
-/// Per-heredoc metadata collected during preprocessing.
-///
-/// Stored verbatim alongside the substituted marker so the parser, validator,
-/// and interpreter can reconstitute the body with correct semantics:
-/// - `body` is the raw body bytes; tab stripping for `<<-` is applied later
-///   (at materialization), so byte offsets stay aligned with the original
-///   source for span tracking.
-/// - `strip_tabs` records whether the `<<-` form was used.
-/// - `literal` records whether the delimiter was quoted (no interpolation).
-/// - `body_start_offset` is the byte offset of the first body character in
-///   the source string passed to `preprocess_heredocs`. When heredocs are
-///   preprocessed AFTER arithmetic, this is in arith-preprocessed coordinates;
-///   in the common case (no arithmetic before the heredoc) this equals the
-///   original-source offset. See span-correction notes in `tokenize`.
+/// A text replacement performed by the scanner, in both coordinate
+/// systems. `orig_*` addresses the original source; `new_*` addresses the
+/// rewritten buffer fed to logos. The table is ordered by position and is
+/// the single source of truth for span correction and marker resolution.
 #[derive(Debug, Clone)]
-struct HeredocReplacement {
-    marker: String,
+struct Replacement {
+    orig_start: usize,
+    orig_len: usize,
+    new_start: usize,
+    new_len: usize,
+    kind: ReplacementKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ReplacementKind {
+    /// `$((expr))` → arithmetic marker; index into `ScanOutput::arithmetics`.
+    Arith(usize),
+    /// Heredoc delimiter word → heredoc marker; index into `ScanOutput::heredocs`.
+    HeredocIntro(usize),
+    /// Heredoc body + terminating delimiter line, elided from the buffer.
+    Elision,
+}
+
+/// Map a position from rewritten-buffer coordinates back to original-source
+/// coordinates. `is_end` selects the boundary policy for half-open spans:
+/// an END sitting exactly on a zero-width elision point must NOT be pushed
+/// past the elided region, while a START there must be.
+fn map_position(p: usize, is_end: bool, replacements: &[Replacement]) -> usize {
+    let mut delta: isize = 0;
+    for r in replacements {
+        let r_end = r.new_start + r.new_len;
+        let past = if is_end {
+            p >= r_end && p > r.new_start
+        } else {
+            p >= r_end
+        };
+        if past {
+            delta += r.orig_len as isize - r.new_len as isize;
+        } else if p > r.new_start {
+            // Strictly inside a replacement (a token glued onto a marker):
+            // clamp into the original range.
+            return r.orig_start + (p - r.new_start).min(r.orig_len);
+        } else {
+            break; // table is ordered; nothing further can affect p
+        }
+    }
+    ((p as isize) + delta).max(0) as usize
+}
+
+fn map_span(span: &Span, replacements: &[Replacement]) -> Span {
+    let start = map_position(span.start, false, replacements);
+    let end = map_position(span.end, true, replacements).max(start);
+    start..end
+}
+
+/// Per-heredoc data collected by the scanner.
+///
+/// `body` is the raw body bytes (tab stripping for `<<-` happens at
+/// materialization). `body_start_offset` is the byte offset of the first
+/// body character **in the original source** — exact, since the scanner
+/// records every rewrite in the replacement table.
+#[derive(Debug, Clone)]
+struct HeredocExtract {
     body: String,
     literal: bool,
     strip_tabs: bool,
     body_start_offset: usize,
 }
 
-/// Preprocess here-docs in source code.
-///
-/// Finds `<<WORD` patterns and collects content until the delimiter line.
-/// Returns the preprocessed source and a vector of replacement records.
-///
-/// Example:
-///   `cat <<EOF\nhello\nworld\nEOF`
-/// Becomes:
-///   `cat <<__HEREDOC_0__`
-/// With heredocs[0] = HeredocReplacement { marker: "__HEREDOC_0__",
-/// body: "hello\nworld", literal: false, strip_tabs: false }
-fn preprocess_heredocs(source: &str) -> Result<(String, Vec<HeredocReplacement>), Spanned<LexerError>> {
-    let mut result = String::with_capacity(source.len());
-    let mut heredocs: Vec<HeredocReplacement> = Vec::new();
-    let chars_vec: Vec<char> = source.chars().collect();
+/// A heredoc whose introducer has been scanned but whose body hasn't been
+/// collected yet — bodies start after the next unescaped newline, in
+/// introducer order (`cat <<A <<B` queues two).
+struct PendingHeredoc {
+    delimiter: String,
+    literal: bool,
+    strip_tabs: bool,
+    /// Span of the introducer (`<<` through the delimiter word) in
+    /// original coordinates, for unterminated-heredoc errors.
+    intro_span: Span,
+}
+
+/// Scanner output: the rewritten buffer plus everything needed to resolve
+/// markers and correct spans.
+struct ScanOutput {
+    text: String,
+    /// (marker, expression) pairs, indexed by `ReplacementKind::Arith`.
+    arithmetics: Vec<(String, String)>,
+    /// Heredoc extracts, indexed by `ReplacementKind::HeredocIntro`.
+    heredocs: Vec<HeredocExtract>,
+    replacements: Vec<Replacement>,
+}
+
+/// The one composed scanner: a single pass over the original source with
+/// explicit quote/escape/comment state. Extracts `$((expr))` arithmetic
+/// and `<<WORD` heredocs; everything else is copied verbatim. Because one
+/// state machine owns all the context, the pre-#95 mutual-blindness bugs
+/// (apostrophes in heredoc bodies poisoning arithmetic, `<<` inside
+/// strings or comments misfiring heredoc collection) are structurally
+/// impossible.
+fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
+    let chars: Vec<(usize, char)> = source.char_indices().collect();
+    let n = chars.len();
+    let total_len = source.len();
+    let byte_at = |i: usize| -> usize {
+        if i < n { chars[i].0 } else { total_len }
+    };
+
+    let mut out = String::with_capacity(source.len());
+    let mut arithmetics: Vec<(String, String)> = Vec::new();
+    let mut heredocs: Vec<HeredocExtract> = Vec::new();
+    let mut replacements: Vec<Replacement> = Vec::new();
+    let mut pending: Vec<PendingHeredoc> = Vec::new();
+
     let mut i = 0;
-    // `pos` tracks the byte offset into `source` corresponding to chars_vec[i].
-    // `result` accumulates output; we record body offsets in `pos` (input-side)
-    // and emit positions via `result.len()` (output-side) where needed.
-    let mut pos: usize = 0;
+    // Tracks the previously copied character so `$#` (arg count) isn't
+    // mistaken for a comment introducer.
+    let mut prev_char: Option<char> = None;
 
-    while i < chars_vec.len() {
-        let ch = chars_vec[i];
+    while i < n {
+        let (pos, ch) = chars[i];
 
-        // Pass <<< through verbatim so the logos tokenizer sees the here-string
-        // operator. If we fell through naively, the next iteration would see
-        // the remaining `<<` and misfire heredoc preprocessing.
-        if ch == '<'
-            && chars_vec.get(i + 1) == Some(&'<')
-            && chars_vec.get(i + 2) == Some(&'<')
-        {
-            result.push_str("<<<");
-            i += 3;
-            pos += 3;
+        // Backslash escape: copy both characters verbatim. This also
+        // covers line continuations (`\` + newline) — the escaped newline
+        // does not trigger heredoc body collection, matching how logos
+        // treats it as a continuation, not a statement boundary.
+        if ch == '\\' && i + 1 < n {
+            out.push(ch);
+            out.push(chars[i + 1].1);
+            prev_char = Some(chars[i + 1].1);
+            i += 2;
             continue;
         }
 
-        // Look for << (potential here-doc).
-        if ch == '<' && chars_vec.get(i + 1) == Some(&'<') {
-            // Remember where the `<<` started so an unterminated-heredoc
-            // error can point back at the introducer rather than at EOF.
-            let introducer_start = pos;
-            i += 2; // consume both '<'
-            pos += 2;
-
-            // Check for optional - (strip leading tabs)
-            let strip_tabs = chars_vec.get(i) == Some(&'-');
-            if strip_tabs {
+        match ch {
+            // Single-quoted string: opaque. No heredocs, no arithmetic,
+            // no comments inside.
+            '\'' => {
+                out.push(ch);
                 i += 1;
-                pos += 1;
-            }
-
-            // Skip whitespace before delimiter
-            while let Some(&c) = chars_vec.get(i) {
-                if c == ' ' || c == '\t' {
+                while i < n && chars[i].1 != '\'' {
+                    out.push(chars[i].1);
                     i += 1;
-                    pos += 1;
-                } else {
-                    break;
                 }
+                if i < n {
+                    out.push('\''); // closing quote
+                    i += 1;
+                }
+                prev_char = Some('\'');
             }
 
-            // Collect the delimiter word
-            let mut delimiter = String::new();
-            let quoted = chars_vec.get(i) == Some(&'\'') || chars_vec.get(i) == Some(&'"');
-            let quote_char = if quoted {
-                let q = chars_vec.get(i).copied();
+            // Double-quoted string: arithmetic still expands inside;
+            // heredocs and comments do not.
+            '"' => {
+                out.push(ch);
                 i += 1;
-                pos += 1;
-                q
-            } else {
-                None
-            };
-
-            while let Some(&c) = chars_vec.get(i) {
-                if quoted {
-                    if Some(c) == quote_char {
-                        i += 1; // consume closing quote
-                        pos += 1;
+                while i < n {
+                    let (dpos, dch) = chars[i];
+                    if dch == '\\' && i + 1 < n {
+                        let next = chars[i + 1].1;
+                        if next == '"' || next == '\\' || next == '$' || next == '`' {
+                            out.push(dch);
+                            out.push(next);
+                            i += 2;
+                            continue;
+                        }
+                    }
+                    if dch == '"' {
+                        out.push(dch);
+                        i += 1;
                         break;
                     }
-                } else if c.is_whitespace() || c == '\n' || c == '\r' {
-                    break;
-                }
-                delimiter.push(c);
-                i += 1;
-                pos += c.len_utf8();
-            }
-
-            if delimiter.is_empty() {
-                // Not a valid here-doc, output << literally
-                result.push_str("<<");
-                if strip_tabs {
-                    result.push('-');
-                }
-                continue;
-            }
-
-            // Buffer text after delimiter word (e.g., " | jq" in "cat <<EOF | jq")
-            // This must be emitted AFTER the heredoc marker, not before.
-            let mut after_delimiter = String::new();
-            while let Some(&c) = chars_vec.get(i) {
-                if c == '\n' {
+                    if dch == '$'
+                        && i + 2 < n
+                        && chars[i + 1].1 == '('
+                        && chars[i + 2].1 == '('
+                    {
+                        extract_arithmetic(
+                            &chars,
+                            &mut i,
+                            dpos,
+                            total_len,
+                            &mut out,
+                            &mut arithmetics,
+                            &mut replacements,
+                        )?;
+                        continue;
+                    }
+                    out.push(dch);
                     i += 1;
-                    pos += 1;
-                    break;
-                } else if c == '\r' {
-                    i += 1;
-                    pos += 1;
-                    if chars_vec.get(i) == Some(&'\n') {
-                        i += 1;
-                        pos += 1;
-                    }
-                    break;
                 }
-                after_delimiter.push(c);
-                i += 1;
-                pos += c.len_utf8();
+                prev_char = Some('"');
             }
 
-            // Collect content until delimiter on its own line.
-            // `body_start_offset` is the byte position of the first char of
-            // the body in the source — first char after the newline that
-            // ended the delimiter line. See HeredocReplacement docs for
-            // coordinate-system caveat (arith-preprocessed, not original).
-            let body_start_offset = pos;
-            let mut content = String::new();
-            let mut current_line = String::new();
+            // Comment: copy verbatim through end-of-line (logos tokenizes
+            // and drops it). The `$` guard keeps `$#` (arg count) intact.
+            '#' if prev_char != Some('$') => {
+                while i < n && chars[i].1 != '\n' && chars[i].1 != '\r' {
+                    out.push(chars[i].1);
+                    i += 1;
+                }
+                prev_char = Some('#');
+            }
 
-            loop {
-                let next = chars_vec.get(i).copied();
-                match next {
-                    Some('\n') => {
-                        i += 1;
-                        pos += 1;
-                        // Check if this line is the delimiter
-                        let trimmed = if strip_tabs {
-                            current_line.trim_start_matches('\t')
-                        } else {
-                            &current_line
-                        };
-                        if trimmed == delimiter {
-                            // Found end of here-doc
-                            break;
-                        }
-                        // Add line to content (including empty lines)
-                        content.push_str(&current_line);
-                        content.push('\n');
-                        current_line.clear();
-                    }
-                    Some('\r') => {
-                        i += 1;
-                        pos += 1;
-                        // Detect CRLF vs bare CR. We strip the line ending
-                        // for delimiter matching (so `EOF\r` still matches
-                        // `EOF`) but preserve the original byte sequence in
-                        // the body content — the user's input is honored
-                        // verbatim.
-                        let crlf = chars_vec.get(i) == Some(&'\n');
-                        if crlf {
-                            i += 1;
-                            pos += 1;
-                        }
-                        let trimmed = if strip_tabs {
-                            current_line.trim_start_matches('\t')
-                        } else {
-                            &current_line
-                        };
-                        if trimmed == delimiter {
-                            break;
-                        }
-                        content.push_str(&current_line);
-                        content.push_str(if crlf { "\r\n" } else { "\r" });
-                        current_line.clear();
-                    }
-                    Some(c) => {
-                        current_line.push(c);
-                        i += 1;
-                        pos += c.len_utf8();
-                    }
-                    None => {
-                        // EOF — check if current line is the delimiter (matches
-                        // when the source ends without a trailing newline).
-                        let trimmed = if strip_tabs {
-                            current_line.trim_start_matches('\t')
-                        } else {
-                            &current_line
-                        };
-                        if trimmed == delimiter {
-                            break;
-                        }
-                        // Not a delimiter — the heredoc was never closed.
-                        // Crash rather than silently using whatever we
-                        // collected: missing data is exactly the failure
-                        // mode where silent fallback masks the bug.
-                        let span_end = introducer_start
-                            + 2
-                            + if strip_tabs { 1 } else { 0 }
-                            + delimiter.len();
+            // `<<<` here-string passes through; `<<` starts a heredoc.
+            '<' if i + 1 < n && chars[i + 1].1 == '<' => {
+                if i + 2 < n && chars[i + 2].1 == '<' {
+                    out.push_str("<<<");
+                    i += 3;
+                    prev_char = Some('<');
+                    continue;
+                }
+                let heredoc_index = heredocs.len() + pending.len();
+                scan_heredoc_introducer(
+                    &chars,
+                    &mut i,
+                    pos,
+                    &mut out,
+                    &mut pending,
+                    &mut replacements,
+                    heredoc_index,
+                );
+                prev_char = Some('_'); // marker text ends with '_'
+            }
+
+            // `$((` arithmetic; `${...}` variable reference region.
+            '$' if i + 2 < n && chars[i + 1].1 == '(' && chars[i + 2].1 == '(' => {
+                extract_arithmetic(
+                    &chars,
+                    &mut i,
+                    pos,
+                    total_len,
+                    &mut out,
+                    &mut arithmetics,
+                    &mut replacements,
+                )?;
+                prev_char = Some('_');
+            }
+            '$' if i + 1 < n && chars[i + 1].1 == '{' => {
+                // Copy the ${...} region verbatim, tracking brace depth.
+                // Arithmetic inside a bare ${...} cannot be represented
+                // (the marker would leak into the reference text — the
+                // pre-#95 pipeline silently corrupted this), so it is a
+                // loud error instead.
+                out.push('$');
+                out.push('{');
+                i += 2;
+                let mut depth = 1usize;
+                while i < n && depth > 0 {
+                    let (vpos, vch) = chars[i];
+                    if vch == '$'
+                        && i + 2 < n
+                        && chars[i + 1].1 == '('
+                        && chars[i + 2].1 == '('
+                    {
                         return Err(Spanned::new(
-                            LexerError::UnterminatedHeredoc {
-                                delimiter: delimiter.clone(),
-                            },
-                            introducer_start..span_end,
+                            LexerError::ArithmeticInVarRef,
+                            vpos..(byte_at(i + 3)),
                         ));
                     }
+                    match vch {
+                        '{' => depth += 1,
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                    out.push(vch);
+                    i += 1;
+                }
+                prev_char = Some('}');
+            }
+
+            // Unescaped newline: copy it, then collect any pending
+            // heredoc bodies (in introducer order).
+            '\n' => {
+                out.push('\n');
+                i += 1;
+                prev_char = Some('\n');
+                if !pending.is_empty() {
+                    collect_heredoc_bodies(
+                        &chars,
+                        &mut i,
+                        total_len,
+                        out.len(),
+                        &mut pending,
+                        &mut heredocs,
+                        &mut replacements,
+                    )?;
                 }
             }
 
-            // Create a unique marker for this here-doc (collision-resistant)
-            let marker = format!("__KAISH_HEREDOC_{}__", unique_marker_id());
-            heredocs.push(HeredocReplacement {
-                marker: marker.clone(),
-                body: content,
-                literal: quoted,
-                strip_tabs,
-                body_start_offset,
-            });
+            // Bare `\r` (Mac-classic line ending) terminating a heredoc
+            // introducer line: normalize to `\n` (same byte length, so
+            // spans are unaffected) so logos sees a real Newline, and
+            // collect the pending bodies. A CRLF pair falls through to
+            // the `\n` arm via the default copy of `\r`; a stray bare
+            // `\r` with no heredoc pending stays verbatim (and stays a
+            // lexer error, as before).
+            '\r' if !pending.is_empty()
+                && chars.get(i + 1).map(|c| c.1) != Some('\n') =>
+            {
+                out.push('\n');
+                i += 1;
+                prev_char = Some('\n');
+                collect_heredoc_bodies(
+                    &chars,
+                    &mut i,
+                    total_len,
+                    out.len(),
+                    &mut pending,
+                    &mut heredocs,
+                    &mut replacements,
+                )?;
+            }
 
-            // Output <<marker first, then any text that followed the delimiter
-            // (e.g., " | jq") so the heredoc attaches to the correct command.
-            result.push_str("<<");
-            result.push_str(&marker);
-            result.push_str(&after_delimiter);
-            result.push('\n');
-        } else {
-            result.push(ch);
-            i += 1;
-            pos += ch.len_utf8();
+            _ => {
+                out.push(ch);
+                i += 1;
+                prev_char = Some(ch);
+            }
         }
     }
 
-    Ok((result, heredocs))
-}
-
-/// Extract the text contribution of a token for colon-adjacent merging.
-///
-/// Returns `Some(text)` for token types that can participate in word-like
-/// merging, `None` for everything else.
-fn mergeable_text(token: &Token) -> Option<String> {
-    match token {
-        Token::Ident(s) => Some(s.clone()),
-        Token::NumberIdent(s) => Some(s.clone()),
-        Token::DashNumWord(s) => Some(s.clone()),
-        Token::AtWord(s) => Some(s.clone()),
-        Token::DottedIdent(s) => Some(s.clone()),
-        Token::Colon => Some(":".to_string()),
-        Token::Int(n) => Some(n.to_string()),
-        Token::Path(p) => Some(p.clone()),
-        Token::Float(f) => Some(f.to_string()),
-        _ => None,
+    // EOF with heredoc introducers whose bodies never started (no newline
+    // after the introducer line).
+    if let Some(p) = pending.first() {
+        return Err(Spanned::new(
+            LexerError::UnterminatedHeredoc {
+                delimiter: p.delimiter.clone(),
+            },
+            p.intro_span.clone(),
+        ));
     }
+
+    Ok(ScanOutput {
+        text: out,
+        arithmetics,
+        heredocs,
+        replacements,
+    })
 }
 
-/// Per-token context computed ahead of the colon-merge and glob-merge passes:
-/// is this token part of a *value*-position collection literal (assignment
-/// RHS, `in`/`not in` RHS)? Both merge passes suppress their fusion there so
-/// `x=[dog]` / `{port:8080}` reach the parser as primitive tokens instead of
-/// a fused `GlobWord`/`Ident` — see docs/arrays-and-hashes.md
-/// ("Implementation notes: Glob-merge is the big lexer collision" and the
-/// colon-fusion note right after it).
+/// Extract `$((expr))` starting at `chars[*i]` (the `$`). Emits a unique
+/// marker into `out` and records the replacement. Single `)` characters
+/// inside the expression are kept (only a `))` pair at depth zero closes),
+/// matching the pre-#95 collector.
+fn extract_arithmetic(
+    chars: &[(usize, char)],
+    i: &mut usize,
+    start_pos: usize,
+    total_len: usize,
+    out: &mut String,
+    arithmetics: &mut Vec<(String, String)>,
+    replacements: &mut Vec<Replacement>,
+) -> Result<(), Spanned<LexerError>> {
+    let n = chars.len();
+    *i += 3; // consume `$((`
+
+    let mut expr = String::new();
+    let mut depth = 0usize;
+    let mut closed = false;
+
+    while *i < n {
+        let c = chars[*i].1;
+        match c {
+            '(' => {
+                depth += 1;
+                if depth > MAX_PAREN_DEPTH {
+                    return Err(Spanned::new(
+                        LexerError::NestingTooDeep,
+                        start_pos..chars[*i].0,
+                    ));
+                }
+                expr.push('(');
+                *i += 1;
+            }
+            ')' => {
+                if depth > 0 {
+                    depth -= 1;
+                    expr.push(')');
+                    *i += 1;
+                } else if *i + 1 < n && chars[*i + 1].1 == ')' {
+                    *i += 2;
+                    closed = true;
+                    break;
+                } else if *i + 1 == n {
+                    // Lone `)` at EOF can never be followed by its pair.
+                    break;
+                } else {
+                    expr.push(')');
+                    *i += 1;
+                }
+            }
+            _ => {
+                expr.push(c);
+                *i += 1;
+            }
+        }
+    }
+
+    if !closed {
+        // Don't silently evaluate a partial expression (`$(( 1 + 2` must
+        // not become `3`).
+        return Err(Spanned::new(
+            LexerError::UnterminatedArithmetic,
+            start_pos..total_len,
+        ));
+    }
+
+    let end_pos = if *i < n { chars[*i].0 } else { total_len };
+    let marker = format!("__KAISH_ARITH_{}__", unique_marker_id());
+    replacements.push(Replacement {
+        orig_start: start_pos,
+        orig_len: end_pos - start_pos,
+        new_start: out.len(),
+        new_len: marker.len(),
+        kind: ReplacementKind::Arith(arithmetics.len()),
+    });
+    arithmetics.push((marker.clone(), expr));
+    out.push_str(&marker);
+    Ok(())
+}
+
+/// Scan a heredoc introducer starting at `chars[*i]` (the first `<`).
+/// Collects the delimiter word bash-style (whole word, quote removal,
+/// `literal` if any part was quoted), emits `<<` plus a unique marker, and
+/// queues the body for collection at the next unescaped newline. If no
+/// delimiter word follows, `<<` is copied verbatim (logos will surface
+/// the syntax error).
+fn scan_heredoc_introducer(
+    chars: &[(usize, char)],
+    i: &mut usize,
+    intro_start: usize,
+    out: &mut String,
+    pending: &mut Vec<PendingHeredoc>,
+    replacements: &mut Vec<Replacement>,
+    heredoc_index: usize,
+) {
+    let n = chars.len();
+    *i += 2; // consume `<<`
+
+    let strip_tabs = *i < n && chars[*i].1 == '-';
+    if strip_tabs {
+        *i += 1;
+    }
+
+    // Skip horizontal whitespace before the delimiter word.
+    while *i < n && (chars[*i].1 == ' ' || chars[*i].1 == '\t') {
+        *i += 1;
+    }
+
+    // Collect the delimiter word with bash-style quote removal: the word
+    // runs until unquoted whitespace; single/double quotes are stripped
+    // and any quoting makes the heredoc literal (`<<'EOF'` and `<<EO"F"`
+    // both suppress interpolation).
+    let mut delimiter = String::new();
+    let mut literal = false;
+    while *i < n {
+        let c = chars[*i].1;
+        match c {
+            '\'' | '"' => {
+                literal = true;
+                let quote = c;
+                *i += 1;
+                while *i < n && chars[*i].1 != quote {
+                    delimiter.push(chars[*i].1);
+                    *i += 1;
+                }
+                if *i < n {
+                    *i += 1; // closing quote
+                }
+            }
+            c if c.is_whitespace() => break,
+            c => {
+                delimiter.push(c);
+                *i += 1;
+            }
+        }
+    }
+    let word_end = if *i < n { chars[*i].0 } else { chars[n - 1].0 + chars[n - 1].1.len_utf8() };
+
+    if delimiter.is_empty() {
+        // Not a heredoc after all — emit what we consumed verbatim.
+        out.push_str("<<");
+        if strip_tabs {
+            out.push('-');
+        }
+        return;
+    }
+
+    let marker = format!("__KAISH_HEREDOC_{}__", unique_marker_id());
+    out.push_str("<<");
+    replacements.push(Replacement {
+        // The replaced original region runs from just after `<<` (the
+        // optional `-` and whitespace included) through the delimiter
+        // word; the marker stands in for all of it.
+        orig_start: intro_start + 2,
+        orig_len: word_end - (intro_start + 2),
+        new_start: out.len(),
+        new_len: marker.len(),
+        kind: ReplacementKind::HeredocIntro(heredoc_index),
+    });
+    out.push_str(&marker);
+    pending.push(PendingHeredoc {
+        delimiter,
+        literal,
+        strip_tabs,
+        intro_span: intro_start..word_end,
+    });
+}
+
+/// Collect the bodies of all pending heredocs, in introducer order,
+/// starting at `chars[*i]` (the character after the newline that ended
+/// the introducer line). Bodies (and their terminating delimiter lines)
+/// are elided from the rewritten buffer; each elision is recorded so
+/// spans after the heredoc stay exact.
+fn collect_heredoc_bodies(
+    chars: &[(usize, char)],
+    i: &mut usize,
+    total_len: usize,
+    out_len: usize,
+    pending: &mut Vec<PendingHeredoc>,
+    heredocs: &mut Vec<HeredocExtract>,
+    replacements: &mut Vec<Replacement>,
+) -> Result<(), Spanned<LexerError>> {
+    let n = chars.len();
+
+    for p in pending.drain(..) {
+        let body_start = if *i < n { chars[*i].0 } else { total_len };
+        let mut body = String::new();
+        let mut found = false;
+
+        while !found {
+            if *i >= n {
+                // EOF: a final unterminated line was already checked below;
+                // reaching here means the delimiter never appeared.
+                return Err(Spanned::new(
+                    LexerError::UnterminatedHeredoc {
+                        delimiter: p.delimiter.clone(),
+                    },
+                    p.intro_span.clone(),
+                ));
+            }
+
+            // Read one line and its terminator (`\n`, `\r\n`, bare `\r`,
+            // or EOF). The terminator is preserved verbatim in the body;
+            // delimiter comparison strips it.
+            let mut line = String::new();
+            let mut terminator = "";
+            let mut at_eof = false;
+            loop {
+                if *i >= n {
+                    at_eof = true;
+                    break;
+                }
+                let c = chars[*i].1;
+                if c == '\n' {
+                    *i += 1;
+                    terminator = "\n";
+                    break;
+                }
+                if c == '\r' {
+                    *i += 1;
+                    if *i < n && chars[*i].1 == '\n' {
+                        *i += 1;
+                        terminator = "\r\n";
+                    } else {
+                        terminator = "\r";
+                    }
+                    break;
+                }
+                line.push(c);
+                *i += 1;
+            }
+
+            let compare = if p.strip_tabs {
+                line.trim_start_matches('\t')
+            } else {
+                line.as_str()
+            };
+            if compare == p.delimiter {
+                found = true;
+            } else if at_eof {
+                // The source ended without the closing delimiter. Crash
+                // rather than silently using what was collected — missing
+                // data is exactly where a silent fallback masks the bug.
+                return Err(Spanned::new(
+                    LexerError::UnterminatedHeredoc {
+                        delimiter: p.delimiter.clone(),
+                    },
+                    p.intro_span.clone(),
+                ));
+            } else {
+                body.push_str(&line);
+                body.push_str(terminator);
+            }
+        }
+
+        let elide_end = if *i < n { chars[*i].0 } else { total_len };
+        replacements.push(Replacement {
+            orig_start: body_start,
+            orig_len: elide_end - body_start,
+            new_start: out_len,
+            new_len: 0,
+            kind: ReplacementKind::Elision,
+        });
+
+        // For interpolated (non-literal) bodies, rewrite arithmetic to the
+        // `${__ARITH:expr__}` form the interpolation parser understands
+        // (see `parse_interpolated_string`). Literal bodies stay verbatim
+        // — a `$((` there is prose, never an expression (this is the
+        // pre-#95 false-positive fix). Bash expands `$(( ))` in heredoc
+        // bodies regardless of quotes within the body, so the body scan
+        // is deliberately quote-blind; `\$((` escapes it.
+        let body = if p.literal {
+            body
+        } else {
+            rewrite_body_arithmetic(&body, &p)?
+        };
+
+        heredocs.push(HeredocExtract {
+            body,
+            literal: p.literal,
+            strip_tabs: p.strip_tabs,
+            body_start_offset: body_start,
+        });
+    }
+
+    Ok(())
+}
+
+/// Rewrite `$((expr))` inside an interpolated heredoc body to
+/// `${__ARITH:expr__}`. `\$((` stays literal (minus nothing — the
+/// backslash is preserved for the interpolation parser). An unterminated
+/// `$((` in the body is a loud error, matching bash (which would fail the
+/// expansion) and the shell's crash-over-corrupt stance.
+fn rewrite_body_arithmetic(
+    body: &str,
+    p: &PendingHeredoc,
+) -> Result<String, Spanned<LexerError>> {
+    if !body.contains("$((") {
+        return Ok(body.to_string());
+    }
+    let chars: Vec<char> = body.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0;
+    while i < n {
+        if chars[i] == '\\' && i + 1 < n {
+            out.push(chars[i]);
+            out.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if chars[i] == '$' && i + 2 < n && chars[i + 1] == '(' && chars[i + 2] == '(' {
+            i += 3;
+            let mut expr = String::new();
+            let mut depth = 0usize;
+            let mut closed = false;
+            while i < n {
+                let c = chars[i];
+                match c {
+                    '(' => {
+                        depth += 1;
+                        expr.push('(');
+                        i += 1;
+                    }
+                    ')' => {
+                        if depth > 0 {
+                            depth -= 1;
+                            expr.push(')');
+                            i += 1;
+                        } else if i + 1 < n && chars[i + 1] == ')' {
+                            i += 2;
+                            closed = true;
+                            break;
+                        } else {
+                            expr.push(')');
+                            i += 1;
+                        }
+                    }
+                    _ => {
+                        expr.push(c);
+                        i += 1;
+                    }
+                }
+            }
+            if !closed {
+                return Err(Spanned::new(
+                    LexerError::UnterminatedArithmetic,
+                    p.intro_span.clone(),
+                ));
+            }
+            out.push_str(&format!("${{__ARITH:{}__}}", expr));
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    Ok(out)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Marker resolution (positional)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Resolve scanner markers back into real tokens, keyed by POSITION in the
+/// replacement table (never by matching identifier text):
 ///
-/// A run is "at value position" when it opens immediately after a token that
-/// *grammatically* introduces a value — an **assignment** `=` or a
-/// **membership** `in`. The trap is that both of those tokens are reused for a
-/// non-value role: `Token::Eq` is also the `[[ ]]` comparison `=`
-/// (`[[ $x = [0-9]* ]]`), and `Token::In` is also the `for`/`case` statement
-/// head (`for f in *.txt`, `case 5 in [0-9]*)`). In every one of those
-/// non-value uses the following word is argv-shaped (a glob / char-class
-/// pattern) and must keep fusing, so getting this discrimination wrong breaks
-/// real syntax.
+/// - an `Ident` exactly covering an arithmetic marker becomes `Arithmetic`;
+/// - a `String` containing marker text (arithmetic inside a double-quoted
+///   string) gets the `${__ARITH:expr__}` content swap the interpolation
+///   parser understands;
+/// - a word token GLUED onto a marker (`$((1+2))abc`) is SPLIT into the
+///   `Arithmetic` plus re-lexed word fragments — span-adjacent, so the
+///   parser's no-token-pasting guard rejects it loudly with a quoting hint
+///   (the pre-#95 pipeline leaked raw marker text here);
+/// - the `Ident` after a `HereDocStart` covering a heredoc marker becomes
+///   the `HereDoc` token.
 ///
-/// The discrimination is **grammar-exact by `[[ ]]` test depth**, which needs
-/// no per-keyword special-casing:
-/// - membership `in` occurs ONLY inside `[[ ]]`; a `for`/`case` head `in`
-///   occurs ONLY outside. So `Token::In` opens value position **iff
-///   `test_depth > 0`**.
-/// - an assignment `=` occurs outside `[[ ]]`; a comparison `=` occurs inside.
-///   So `Token::Eq` opens value position **iff `test_depth == 0`**.
-///
-/// Tracking `test_depth` in the same forward pass also dissolves two `$()`
-/// leaks a hand-rolled keyword counter suffered: a bareword `in`/`for`/`case`
-/// inside `$(…)` sits at `test_depth == 0` and never opens value position (nor
-/// leaks any state past `RParen`), while a real sub-shell assignment
-/// `$(x=[a b])` is still `test_depth == 0` and correctly does. This replaces
-/// the earlier pending-`for`/`case` counter entirely.
-///
-/// `bracket_depth`/`brace_depth` are simple counters, not a real stack, but
-/// that's sufficient here: the `!currently_value` guard on `[[` detection
-/// above means a glued nested literal (`x=[[a] [b]]`) never gets mistaken for
-/// a `[[ ]]` test opener once bracket_depth is already > 0, so deeply-nested
-/// *glued* literals parse identically to spaced nesting (`[ [a] [b] ]`) at any
-/// depth — see `deeply_nested_glued_list_literal_matches_spaced_nesting` in
-/// `collection_literals_tests.rs`.
+/// Tokens carry rewritten-buffer spans on entry and exit; the caller maps
+/// them to original coordinates afterwards.
+fn resolve_markers(
+    tokens: Vec<Spanned<Token>>,
+    scan: &ScanOutput,
+) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerError>>> {
+    let markers: Vec<&Replacement> = scan
+        .replacements
+        .iter()
+        .filter(|r| !matches!(r.kind, ReplacementKind::Elision))
+        .collect();
+
+    let mut result = Vec::with_capacity(tokens.len());
+    let mut mi = 0usize;
+
+    for spanned in tokens {
+        let span = spanned.span.clone();
+        while mi < markers.len() && markers[mi].new_start + markers[mi].new_len <= span.start {
+            mi += 1;
+        }
+
+        // Collect the markers contained in this token's span.
+        let mut contained = Vec::new();
+        let mut mj = mi;
+        while mj < markers.len() {
+            let m = markers[mj];
+            if m.new_start >= span.end {
+                break;
+            }
+            if m.new_start >= span.start && m.new_start + m.new_len <= span.end {
+                contained.push(m);
+            }
+            mj += 1;
+        }
+
+        if contained.is_empty() {
+            result.push(spanned);
+            continue;
+        }
+
+        match (&spanned.token, contained.as_slice()) {
+            // Exact cover by a single arithmetic marker → Arithmetic token.
+            (Token::Ident(_), [m])
+                if matches!(m.kind, ReplacementKind::Arith(_))
+                    && m.new_start == span.start
+                    && m.new_start + m.new_len == span.end =>
+            {
+                let ReplacementKind::Arith(idx) = m.kind else {
+                    unreachable!("guarded by matches! above")
+                };
+                result.push(Spanned::new(
+                    Token::Arithmetic(scan.arithmetics[idx].1.clone()),
+                    span,
+                ));
+            }
+
+            // Exact cover by a heredoc marker → HereDoc token (the parser
+            // pairs it with the preceding HereDocStart).
+            (Token::Ident(_), [m])
+                if matches!(m.kind, ReplacementKind::HeredocIntro(_))
+                    && m.new_start == span.start
+                    && m.new_start + m.new_len == span.end =>
+            {
+                let ReplacementKind::HeredocIntro(idx) = m.kind else {
+                    unreachable!("guarded by matches! above")
+                };
+                let hd = &scan.heredocs[idx];
+                result.push(Spanned::new(
+                    Token::HereDoc(HereDocData {
+                        content: hd.body.clone(),
+                        literal: hd.literal,
+                        strip_tabs: hd.strip_tabs,
+                        body_start_offset: hd.body_start_offset,
+                    }),
+                    span,
+                ));
+            }
+
+            // Arithmetic inside a double-quoted string: swap each marker's
+            // text in the CONTENT for the interpolation form. Escape
+            // processing never alters marker text (alphanumerics and
+            // underscores), so a plain replace is exact.
+            (Token::String(s), ms) => {
+                let mut content = s.clone();
+                for m in ms {
+                    let ReplacementKind::Arith(idx) = m.kind else {
+                        // A heredoc marker inside a string would mean the
+                        // scanner rewrote inside a quoted region — it
+                        // never does.
+                        unreachable!("heredoc marker inside string content")
+                    };
+                    let (marker, expr) = &scan.arithmetics[idx];
+                    content = content.replace(marker, &format!("${{__ARITH:{}__}}", expr));
+                }
+                result.push(Spanned::new(Token::String(content), span));
+            }
+
+            // A word token glued onto marker(s): split into fragments and
+            // Arithmetic tokens. The fragments are re-lexed so `007` or
+            // `-3` keep their real token identities; span adjacency then
+            // triggers the parser's no-pasting guard — a loud error where
+            // the old pipeline leaked marker text.
+            _ => {
+                let mut cursor = span.start;
+                for m in &contained {
+                    if m.new_start > cursor {
+                        relex_fragment(
+                            &scan.text[cursor..m.new_start],
+                            cursor,
+                            &mut result,
+                        )?;
+                    }
+                    match m.kind {
+                        ReplacementKind::Arith(idx) => {
+                            result.push(Spanned::new(
+                                Token::Arithmetic(scan.arithmetics[idx].1.clone()),
+                                m.new_start..m.new_start + m.new_len,
+                            ));
+                        }
+                        ReplacementKind::HeredocIntro(_) | ReplacementKind::Elision => {
+                            // Heredoc markers are always delimited by the
+                            // `<<` before them and line layout after; they
+                            // can't glue into a larger word.
+                            unreachable!("heredoc marker glued into word token")
+                        }
+                    }
+                    cursor = m.new_start + m.new_len;
+                }
+                if cursor < span.end {
+                    relex_fragment(&scan.text[cursor..span.end], cursor, &mut result)?;
+                }
+            }
+        }
+
+        mi = mj;
+    }
+
+    Ok(result)
+}
+
+/// Re-lex a fragment of a split word token, offsetting spans by `base`.
+fn relex_fragment(
+    fragment: &str,
+    base: usize,
+    result: &mut Vec<Spanned<Token>>,
+) -> Result<(), Vec<Spanned<LexerError>>> {
+    let mut errors = Vec::new();
+    for (tok, span) in Token::lexer(fragment).spanned() {
+        let span = base + span.start..base + span.end;
+        match tok {
+            Ok(t) => result.push(Spanned::new(t, span)),
+            Err(e) => errors.push(Spanned::new(e, span)),
+        }
+    }
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Value-context analysis (one pass, explicit stack)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Per-token context for the fusion passes: is this token part of a
+/// value-position collection literal? Both merge passes suppress fusion
+/// there so `x=[dog]` / `{port:8080}` reach the parser as primitive
+/// tokens instead of a fused `GlobWord`/`Ident` — see
+/// docs/arrays-and-hashes.md ("Implementation notes").
 #[derive(Clone, Copy, Default)]
 struct ValueContext {
     /// Inside (or opening) a value-position `[`/`{` literal — suppresses
     /// glob-merge bracket-pair fusion.
     in_literal: bool,
-    /// Inside a value-position `{` literal specifically — suppresses
-    /// colon-merge fusion. Narrower than `in_literal` on purpose: a plain
-    /// scalar assignment like `x=foo:bar` must keep fusing into one `Ident`.
+    /// Inside a value-position `{` record literal specifically —
+    /// suppresses colon-merge fusion. Narrower than `in_literal` on
+    /// purpose: a plain scalar assignment `x=foo:bar` must keep fusing.
     in_brace: bool,
+}
+
+/// Structural frames tracked by the context walker. The stack replaces the
+/// pre-#95 bare counters: mismatched closers become detectable, `$( )`
+/// bodies get fresh statement context (no more `[[ -n $(x=[a]) ]]`
+/// test-depth leaks), and dangling literal state can be dropped at
+/// statement boundaries instead of poisoning the rest of the buffer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Frame {
+    /// `[[ ... ]]` test expression: `=` is comparison, `in` is membership.
+    Test,
+    /// Value-position `[ ... ]` list literal: bracket fusion suppressed.
+    List,
+    /// Value-position `{ ... }` record literal: colon fusion suppressed.
+    Record,
+    /// `$( ... )` command substitution: a fresh statement scope.
+    Subst,
+    /// Plain `( ... )` grouping (function parameter lists): inert, tracked
+    /// only so `)` pops the right frame.
+    Paren,
+}
+
+/// Statement-head DFA: decides whether an `=` is an ASSIGNMENT (which puts
+/// the following tokens at value position — `x = [a b]` is a legal spaced
+/// assignment with a list-literal RHS) or an argv-position literal
+/// (`grep -E = [a-z]*` must keep glob-fusing). The pre-#95 pipeline
+/// treated EVERY `=` outside `[[ ]]` as value-opening; the DFA follows the
+/// grammar instead: an assignment's LHS is the first word of a statement
+/// (after optional `local`), an identifier root plus optionally glued
+/// `[subscript]` groups. After an assignment's value completes the DFA
+/// returns to statement-head state, covering env-prefix chains
+/// (`A=1 B=2 cmd`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum StmtHead {
+    /// At a statement start: the next identifier could be an lvalue root.
+    Start,
+    /// Consumed `local`; still expecting the lvalue root.
+    AfterLocal,
+    /// Consumed an identifier root (and any glued subscript groups);
+    /// `usize` is the byte offset just past the last consumed token, for
+    /// subscript-gluing checks.
+    Lvalue(usize),
+    /// Inside a glued `[subscript]` group on the LHS; `usize` is bracket
+    /// depth within the group.
+    LvalueSubscript(usize),
+    /// The `=` fired; consuming the RHS value (frames may open and close
+    /// during it). Returns to `Start` when the value completes.
+    Value,
+    /// Past the command word: `=` here is argv text, never an assignment.
+    Argv,
+}
+
+/// Tokens that terminate a statement (or arm/branch) and reset the
+/// statement-head DFA. `Newline` is deliberately absent from the FRAME
+/// reset set (multiline list/record literals are legal — the parser
+/// consumes interior newlines) but does reset the DFA when no literal is
+/// open, and pops dangling `Test` frames (kaish's `[[ ]]` grammar is
+/// single-line).
+fn is_statement_boundary(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Newline
+            | Token::Semi
+            | Token::DoubleSemi
+            | Token::And
+            | Token::Or
+            | Token::Pipe
+            | Token::Amp
+            | Token::LBrace
+            | Token::RBrace
+            | Token::If
+            | Token::Then
+            | Token::Elif
+            | Token::Else
+            | Token::Fi
+            | Token::While
+            | Token::Do
+            | Token::Done
+            | Token::For
+            | Token::Case
+            | Token::Esac
+            | Token::In
+    )
 }
 
 fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
     let mut ctx = vec![ValueContext::default(); tokens.len()];
-    let mut bracket_depth: usize = 0;
-    let mut brace_depth: usize = 0;
-    // `[[ ]]` nesting depth. `[[` is two `Token::LBracket`, `]]` two
-    // `Token::RBracket` (kaish has no compound bracket token). This is what
-    // tells an assignment `=` from a comparison `=`, and a membership `in`
-    // from a `for`/`case` head `in`.
-    let mut test_depth: usize = 0;
+
+    // Frame stack plus per-scope statement DFA. `scopes` parallels the
+    // Subst frames: scopes[0] is the top-level statement scope; pushing a
+    // Subst pushes a fresh scope.
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut scopes: Vec<StmtHead> = vec![StmtHead::Start];
     let mut expect_value = false;
-    // Set after consuming the first `[`/`]` of a `[[`/`]]` pair so the paired
-    // bracket is skipped for depth accounting (it's a pure test delimiter).
+    // Set after consuming the first token of a `[[`/`]]` pair so the
+    // partner bracket has no structural effect.
     let mut skip_paired_bracket = false;
+
+    // Number of frames below the current scope's floor (frames belonging
+    // to enclosing scopes, frozen while this scope is active).
+    let mut scope_floors: Vec<usize> = vec![0];
 
     for i in 0..tokens.len() {
         let tok = &tokens[i].token;
+        let span = &tokens[i].span;
 
-        let currently_value = expect_value || bracket_depth > 0 || brace_depth > 0;
+        let floor = *scope_floors.last().unwrap_or(&0);
+        let top = frames.last().copied();
+        let in_open_literal = frames.len() > floor
+            && matches!(top, Some(Frame::List) | Some(Frame::Record));
+
         ctx[i] = ValueContext {
-            in_literal: currently_value,
-            in_brace: brace_depth > 0,
+            in_literal: expect_value || in_open_literal,
+            in_brace: matches!(top, Some(Frame::Record)),
         };
+
+        // `in` membership: value position only inside a `[[ ]]` test in
+        // the current scope (a `for`/`case` head `in` sits outside any
+        // Test frame and opens nothing).
+        let in_test = frames[floor..].contains(&Frame::Test);
+
+        let opens_value = expect_value;
+        expect_value = false;
 
         if skip_paired_bracket {
-            // Second `[` of `[[` or second `]` of `]]`: already accounted for
-            // by its partner, no depth effect.
             skip_paired_bracket = false;
-        } else {
-            match tok {
-                Token::LBracket => {
-                    let next_is_lbracket =
-                        matches!(tokens.get(i + 1).map(|t| &t.token), Some(Token::LBracket));
-                    if next_is_lbracket && !currently_value {
-                        // `[[` opens a test — NOT a value literal. The
-                        // `!currently_value` guard keeps a glued nested value
-                        // list (`x=[[a] [b]]`) as literal brackets, not a bogus
-                        // test.
-                        test_depth += 1;
-                        skip_paired_bracket = true;
-                    } else if currently_value {
-                        bracket_depth += 1;
-                    }
-                    // A lone `[` outside any value literal (argv `ls [dog]`,
-                    // a `[0-9]` char-class) neither opens a test nor a literal.
-                }
-                Token::RBracket => {
-                    let next_is_rbracket =
-                        matches!(tokens.get(i + 1).map(|t| &t.token), Some(Token::RBracket));
-                    if bracket_depth > 0 {
-                        // Close an open value-literal bracket first — in
-                        // `[[ x in [a b] ]]` the `[a b]`'s own `]` closes here
-                        // (bracket_depth 1→0) before the trailing `]]`.
-                        bracket_depth -= 1;
-                    } else if test_depth > 0 && next_is_rbracket {
-                        test_depth -= 1;
-                        skip_paired_bracket = true;
-                    }
-                }
-                Token::LBrace if currently_value => brace_depth += 1,
-                Token::RBrace if brace_depth > 0 => brace_depth -= 1,
-                _ => {}
-            }
+            continue;
         }
 
-        // Grammar-exact: assignment `=` (outside `[[ ]]`) and membership `in`
-        // (inside `[[ ]]`) open value position; comparison `=` and for/case
-        // head `in` do not. `Token::EqEq` (`==`) is a distinct token and never
-        // opens value position at all.
-        expect_value = match tok {
-            Token::Eq => test_depth == 0,
-            Token::In => test_depth > 0,
-            _ => false,
-        };
+        match tok {
+            Token::LBracket => {
+                let next_adjacent_lbracket = tokens.get(i + 1).is_some_and(|t| {
+                    matches!(t.token, Token::LBracket) && t.span.start == span.end
+                });
+                let dfa = scopes.last_mut().unwrap_or_else(|| unreachable!("scopes never empty"));
+                if let StmtHead::Lvalue(end) = *dfa {
+                    // A glued `[` after an lvalue root starts a subscript
+                    // group, not a literal or a test.
+                    if span.start == end {
+                        *dfa = StmtHead::LvalueSubscript(1);
+                        continue;
+                    }
+                }
+                if let StmtHead::LvalueSubscript(depth) = *dfa {
+                    *dfa = StmtHead::LvalueSubscript(depth + 1);
+                    continue;
+                }
+                if opens_value || in_open_literal {
+                    frames.push(Frame::List);
+                } else if next_adjacent_lbracket {
+                    // `[[` opens a test. The value/literal guards above
+                    // keep a glued nested list (`x=[[a] [b]]`) as literal
+                    // brackets rather than a bogus test.
+                    frames.push(Frame::Test);
+                    skip_paired_bracket = true;
+                }
+                // A lone `[` in argv position (`ls [dog]`, a `[0-9]`
+                // char-class) has no structural effect.
+            }
+            Token::RBracket => {
+                let dfa = scopes.last_mut().unwrap_or_else(|| unreachable!("scopes never empty"));
+                if let StmtHead::LvalueSubscript(depth) = *dfa {
+                    *dfa = if depth == 1 {
+                        StmtHead::Lvalue(span.end)
+                    } else {
+                        StmtHead::LvalueSubscript(depth - 1)
+                    };
+                    continue;
+                }
+                let next_adjacent_rbracket = tokens.get(i + 1).is_some_and(|t| {
+                    matches!(t.token, Token::RBracket) && t.span.start == span.end
+                });
+                if frames.len() > floor && top == Some(Frame::List) {
+                    frames.pop();
+                    if frames.len() == floor {
+                        // The literal was an assignment's RHS: the value
+                        // is complete, back to statement-head state
+                        // (`x=[a] y=[b]` chains).
+                        let dfa = scopes
+                            .last_mut()
+                            .unwrap_or_else(|| unreachable!("scopes never empty"));
+                        if *dfa == StmtHead::Value {
+                            *dfa = StmtHead::Start;
+                        }
+                    }
+                } else if frames.len() > floor
+                    && top == Some(Frame::Test)
+                    && next_adjacent_rbracket
+                {
+                    frames.pop();
+                    skip_paired_bracket = true;
+                }
+            }
+            Token::LBrace => {
+                if opens_value || in_open_literal {
+                    frames.push(Frame::Record);
+                } else {
+                    // Block-open `{` (function bodies): new statement.
+                    *scopes.last_mut().unwrap_or_else(|| unreachable!("scopes never empty")) =
+                        StmtHead::Start;
+                }
+            }
+            Token::RBrace => {
+                if frames.len() > floor && top == Some(Frame::Record) {
+                    frames.pop();
+                    if frames.len() == floor {
+                        let dfa = scopes
+                            .last_mut()
+                            .unwrap_or_else(|| unreachable!("scopes never empty"));
+                        if *dfa == StmtHead::Value {
+                            *dfa = StmtHead::Start;
+                        }
+                    }
+                } else {
+                    *scopes.last_mut().unwrap_or_else(|| unreachable!("scopes never empty")) =
+                        StmtHead::Start;
+                }
+            }
+            Token::CmdSubstStart => {
+                frames.push(Frame::Subst);
+                scope_floors.push(frames.len());
+                scopes.push(StmtHead::Start);
+            }
+            Token::LParen => {
+                frames.push(Frame::Paren);
+            }
+            Token::RParen => {
+                // Pop through any dangling literal/test frames to the
+                // nearest Subst/Paren — an unterminated literal inside
+                // `$( )` must not leak into the enclosing scope.
+                while let Some(f) = frames.last() {
+                    match f {
+                        Frame::Subst => {
+                            frames.pop();
+                            scope_floors.pop();
+                            scopes.pop();
+                            if scopes.is_empty() {
+                                scopes.push(StmtHead::Start);
+                            }
+                            if scope_floors.is_empty() {
+                                scope_floors.push(0);
+                            }
+                            // The substitution may have been an
+                            // assignment's RHS in the enclosing scope
+                            // (`x=$(cmd) y=2`): its value is complete.
+                            let enclosing_floor = *scope_floors.last().unwrap_or(&0);
+                            if frames.len() == enclosing_floor {
+                                let dfa = scopes
+                                    .last_mut()
+                                    .unwrap_or_else(|| unreachable!("scopes never empty"));
+                                if *dfa == StmtHead::Value {
+                                    *dfa = StmtHead::Start;
+                                }
+                            }
+                            break;
+                        }
+                        Frame::Paren => {
+                            frames.pop();
+                            break;
+                        }
+                        _ => {
+                            frames.pop();
+                        }
+                    }
+                }
+            }
+            Token::Eq => {
+                let dfa = scopes.last_mut().unwrap_or_else(|| unreachable!("scopes never empty"));
+                if matches!(*dfa, StmtHead::Lvalue(_)) && !in_test {
+                    // Assignment `=`: the RHS is at value position.
+                    expect_value = true;
+                    *dfa = StmtHead::Value;
+                } else if matches!(*dfa, StmtHead::Value) {
+                    // `=` while consuming a value (e.g. `x = a=b`): argv
+                    // text from here on.
+                    *dfa = StmtHead::Argv;
+                }
+                // Comparison `=` inside `[[ ]]` and argv `=` open nothing.
+            }
+            Token::In if in_test => {
+                expect_value = true;
+            }
+            t if is_statement_boundary(t) => {
+                // Reset the statement DFA; pop dangling literal frames at
+                // hard separators. Newline keeps List/Record open
+                // (multiline literals are legal) but closes Test (the
+                // `[[ ]]` grammar is single-line).
+                *scopes.last_mut().unwrap_or_else(|| unreachable!("scopes never empty")) =
+                    StmtHead::Start;
+                match t {
+                    Token::Newline => {
+                        while frames.len() > floor && frames.last() == Some(&Frame::Test) {
+                            frames.pop();
+                        }
+                    }
+                    Token::Semi
+                    | Token::DoubleSemi
+                    | Token::Pipe
+                    | Token::Amp
+                    | Token::And
+                    | Token::Or => {
+                        while frames.len() > floor
+                            && matches!(
+                                frames.last(),
+                                Some(Frame::Test) | Some(Frame::List) | Some(Frame::Record)
+                            )
+                        {
+                            frames.pop();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {
+                // Ordinary token: advance the statement DFA when no
+                // literal frame is open in this scope.
+                if !in_open_literal {
+                    let dfa =
+                        scopes.last_mut().unwrap_or_else(|| unreachable!("scopes never empty"));
+                    *dfa = match (*dfa, tok) {
+                        (StmtHead::Start, Token::Local) => StmtHead::AfterLocal,
+                        (StmtHead::Start, Token::Ident(_)) => StmtHead::Lvalue(span.end),
+                        (StmtHead::AfterLocal, Token::Ident(_)) => StmtHead::Lvalue(span.end),
+                        (StmtHead::LvalueSubscript(d), _) => StmtHead::LvalueSubscript(d),
+                        (StmtHead::Value, _) => StmtHead::Start,
+                        _ => StmtHead::Argv,
+                    };
+                }
+            }
+        }
     }
 
     ctx
 }
 
-/// Merge span-adjacent token runs containing `Token::Colon` into single `Ident` tokens.
+// ═══════════════════════════════════════════════════════════════════
+// Fusion passes
+//
+// All fused text is a VERBATIM slice of the original source — never
+// rebuilt from token values — so `a:007` stays `a:007` and `007*` globs
+// as `007*` (the pre-#95 passes rebuilt through `Int::to_string()` and
+// dropped leading zeros). Runs are span-adjacent by construction, so the
+// slice is exact; a replacement boundary can never sit inside a run
+// because marker-derived tokens (`Arithmetic`, `HereDoc`) are not
+// mergeable.
+// ═══════════════════════════════════════════════════════════════════
+
+/// True for token types that can participate in colon-adjacent merging.
+fn is_colon_mergeable(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Ident(_)
+            | Token::NumberIdent(_)
+            | Token::DashNumWord(_)
+            | Token::AtWord(_)
+            | Token::DottedIdent(_)
+            | Token::Colon
+            | Token::Int(_)
+            | Token::Path(_)
+            | Token::Float(_)
+    )
+}
+
+/// Merge span-adjacent token runs containing `Token::Colon` into single
+/// `Ident` tokens.
 ///
-/// In bash, `:` is a regular character in unquoted words. kaish tokenizes it
-/// separately, which breaks Rust paths (`foo::bar`), URLs (`host:8080`), etc.
-///
-/// This pass fuses span-adjacent mergeable tokens (Ident, Colon, Int, Path, Float)
-/// into a single `Ident` when the run contains at least one `Colon`. Runs without
-/// colons or standalone tokens pass through unchanged. A run that opens inside a
-/// value-position record literal (`{port:8080}`) is exempted — see
-/// `ValueContext`/`compute_value_context` above — so the record parser sees the
-/// `Colon` as its own token.
-fn merge_colon_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
+/// In bash, `:` is a regular character in unquoted words. kaish tokenizes
+/// it separately, which breaks Rust paths (`foo::bar`), URLs
+/// (`host:8080`), etc. This pass fuses span-adjacent mergeable tokens
+/// into a single `Ident` when the run contains at least one `Colon`.
+/// A run that opens inside a value-position record literal
+/// (`{port:8080}`) is exempted — see `compute_value_context` — so the
+/// record parser sees the `Colon` as its own token.
+fn merge_colon_adjacent(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned<Token>> {
     if tokens.is_empty() {
         return tokens;
     }
@@ -1897,7 +2454,7 @@ fn merge_colon_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
 
     for (idx, token) in tokens.iter().enumerate() {
         if run.is_empty() {
-            if mergeable_text(&token.token).is_some() {
+            if is_colon_mergeable(&token.token) {
                 run.push(token);
                 run_start = idx;
             } else {
@@ -1906,16 +2463,15 @@ fn merge_colon_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
             continue;
         }
 
-        // Check span adjacency: previous run's last token ends where this one starts
         // Safety: run is non-empty (checked above)
         let Some(last) = run.last() else { unreachable!() };
         let adjacent = last.span.end == token.span.start;
 
-        if adjacent && mergeable_text(&token.token).is_some() {
+        if adjacent && is_colon_mergeable(&token.token) {
             run.push(token);
         } else {
-            flush_colon_run(&mut run, &mut result, value_ctx[run_start].in_brace);
-            if mergeable_text(&token.token).is_some() {
+            flush_colon_run(&mut run, &mut result, value_ctx[run_start].in_brace, source);
+            if is_colon_mergeable(&token.token) {
                 run.push(token);
                 run_start = idx;
             } else {
@@ -1924,16 +2480,21 @@ fn merge_colon_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
         }
     }
 
-    flush_colon_run(&mut run, &mut result, value_ctx[run_start].in_brace);
+    flush_colon_run(&mut run, &mut result, value_ctx[run_start].in_brace, source);
 
     result
 }
 
-/// Flush a run of mergeable tokens: merge if it contains a colon, otherwise emit
-/// individually. `suppress` (true when the run opened inside a value-position
-/// record literal) forces individual emission even when `has_colon` would
-/// otherwise fuse — see `ValueContext`.
-fn flush_colon_run(run: &mut Vec<&Spanned<Token>>, result: &mut Vec<Spanned<Token>>, suppress: bool) {
+/// Flush a run of colon-mergeable tokens: merge to a single `Ident` (text
+/// sliced verbatim from the source) if it contains a colon, otherwise emit
+/// individually. `suppress` (true when the run opened inside a
+/// value-position record literal) forces individual emission.
+fn flush_colon_run(
+    run: &mut Vec<&Spanned<Token>>,
+    result: &mut Vec<Spanned<Token>>,
+    suppress: bool,
+    source: &str,
+) {
     if run.is_empty() {
         return;
     }
@@ -1941,13 +2502,9 @@ fn flush_colon_run(run: &mut Vec<&Spanned<Token>>, result: &mut Vec<Spanned<Toke
     let has_colon = run.iter().any(|t| matches!(t.token, Token::Colon));
 
     if !suppress && run.len() >= 2 && has_colon {
-        let text: String = run
-            .iter()
-            .filter_map(|t| mergeable_text(&t.token))
-            .collect();
-        // Safety: run.len() >= 2 so first/last exist
         let start = run.first().map(|t| t.span.start).unwrap_or(0);
         let end = run.last().map(|t| t.span.end).unwrap_or(0);
+        let text = source.get(start..end).unwrap_or_default().to_string();
         result.push(Spanned::new(Token::Ident(text), start..end));
     } else {
         for t in run.iter() {
@@ -1958,65 +2515,46 @@ fn flush_colon_run(run: &mut Vec<&Spanned<Token>>, result: &mut Vec<Spanned<Toke
     run.clear();
 }
 
-/// Extract the text contribution of a token that can participate in a glob word.
-///
-/// Returns `Some(text)` for tokens that can be part of a glob pattern (identifiers,
-/// wildcard chars, brackets, paths, etc.), `None` for structural tokens.
-fn glob_mergeable_text(token: &Token) -> Option<String> {
-    match token {
-        Token::Star => Some("*".to_string()),
-        Token::Question => Some("?".to_string()),
-        Token::Dot => Some(".".to_string()),
-        Token::DotDot => Some("..".to_string()),
-        Token::Ident(s) => Some(s.clone()),
-        Token::NumberIdent(s) => Some(s.clone()),
-        Token::DashNumWord(s) => Some(s.clone()),
-        Token::AtWord(s) => Some(s.clone()),
-        Token::DottedIdent(s) => Some(s.clone()),
-        Token::Path(s) => Some(s.clone()),
-        Token::Int(n) => Some(n.to_string()),
-        Token::LBracket => Some("[".to_string()),
-        Token::RBracket => Some("]".to_string()),
-        Token::Bang => Some("!".to_string()),
-        Token::DotSlashPath(s) => Some(s.clone()),
-        Token::RelativePath(s) => Some(s.clone()),
-        Token::TildePath(s) => Some(s.clone()),
-        Token::Tilde => Some("~".to_string()),
-        Token::LBrace => Some("{".to_string()),
-        Token::RBrace => Some("}".to_string()),
-        Token::Comma => Some(",".to_string()),
-        _ => None,
-    }
+/// True for token types that can participate in a glob word.
+fn is_glob_mergeable(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Star
+            | Token::Question
+            | Token::Dot
+            | Token::DotDot
+            | Token::Ident(_)
+            | Token::NumberIdent(_)
+            | Token::DashNumWord(_)
+            | Token::AtWord(_)
+            | Token::DottedIdent(_)
+            | Token::Path(_)
+            | Token::Int(_)
+            | Token::LBracket
+            | Token::RBracket
+            | Token::Bang
+            | Token::DotSlashPath(_)
+            | Token::RelativePath(_)
+            | Token::TildePath(_)
+            | Token::Tilde
+            | Token::LBrace
+            | Token::RBrace
+            | Token::Comma
+    )
 }
 
 /// Merge a span-adjacent metacharacter onto a flag token.
 ///
-/// Handles the `awk -F:` idiom: the kaish lexer emits `-F` as `ShortFlag("F")` and
-/// `:` as `Token::Colon` (an operator). When the two tokens are span-adjacent (no
-/// whitespace between them), the `:` is part of the flag value, not a shell operator.
-/// This pass fuses them so `ShortFlag("F:")` reaches the arg-binding layer, which
-/// already handles the glued-value form (the same mechanism used for `cut -f1`).
+/// Handles the `awk -F:` idiom: the lexer emits `-F` as `ShortFlag("F")`
+/// and `:` as `Token::Colon`. When span-adjacent, the `:` is part of the
+/// flag value, not a shell operator, so they fuse into `ShortFlag("F:")`
+/// for the arg-binding layer (the same mechanism used for `cut -f1`).
+/// Consecutive colons are all absorbed (`-F::` → `ShortFlag("F::")`).
 ///
-/// Metachars handled: `:` (Colon) only.
-///
-/// `;` (Semi) and `|` (Pipe) are shell operators and must NOT be fused even when
-/// span-adjacent — `cmd -p; cmd2` and `ls -l|cat` must produce real Semi/Pipe
-/// tokens so the shell grammar can treat them as statement separators and pipes.
-/// In bash, `-F;` and `-F|` require quoting (`-F';'`), so kaish matches that
-/// contract.
-///
-/// **Safety**: the fuse is guarded by span adjacency (`last.span.end == token.span.start`),
-/// which is only true when there is no whitespace between the flag and the metachar.
-/// A space-separated `cmd -F :` leaves a gap and never reaches this merge.
-///
-/// **Colon-run fusion**: consecutive span-adjacent colons after the flag are all
-/// absorbed in one pass, so `-F::` becomes `ShortFlag("F::")` rather than
-/// `ShortFlag("F:") + Colon`.
-///
-/// Only `ShortFlag` is handled here. `LongFlag` with a bare `=:` form (e.g.
-/// `--field-separator=:`) is handled by the parser's `long_flag_with_value` rule
-/// via `primary_expr_parser`, which accepts the merged `Ident` that
-/// `merge_colon_adjacent` already produces from `=:` runs.
+/// `;` (Semi) and `|` (Pipe) are shell operators and must NOT be fused
+/// even when span-adjacent — in bash, `-F;` and `-F|` require quoting
+/// (`-F';'`), and kaish matches that contract. Space-separated `cmd -F :`
+/// leaves a span gap and never reaches this merge.
 fn merge_flag_metachar_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
     if tokens.len() < 2 {
         return tokens;
@@ -2028,9 +2566,7 @@ fn merge_flag_metachar_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Toke
     while i < tokens.len() {
         let token = &tokens[i];
 
-        // Only short flags can be followed by a glued colon.
         if let Token::ShortFlag(flag_name) = &token.token {
-            // Absorb a run of span-adjacent colons into the flag name.
             let mut fused = flag_name.clone();
             let mut end_span = token.span.end;
             let mut j = i + 1;
@@ -2048,7 +2584,6 @@ fn merge_flag_metachar_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Toke
             }
 
             if j > i + 1 {
-                // At least one colon was absorbed.
                 let span = token.span.start..end_span;
                 result.push(Spanned::new(Token::ShortFlag(fused), span));
                 i = j;
@@ -2063,30 +2598,25 @@ fn merge_flag_metachar_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Toke
     result
 }
 
-/// Merge span-adjacent token runs containing glob metacharacters into `GlobWord` tokens.
+/// Merge span-adjacent token runs containing glob metacharacters into
+/// `GlobWord` tokens.
 ///
-/// A run is merged into `GlobWord` when it contains at least one `Star`, `Question`,
-/// or a `LBracket`+`RBracket` pair. Runs without glob chars pass through unchanged.
+/// A run is merged when it contains at least one `Star`, `Question`, or a
+/// `LBracket`+`RBracket` pair. Runs after colon merge: `foo::bar` stays
+/// `Ident("foo::bar")` because colon merge already fused it.
 ///
-/// Runs after colon merge: `foo::bar` stays as `Ident("foo::bar")` because colon merge
-/// already fused it before this pass sees it.
+/// A run that opens at *value position* (`x=[dog]`, `[[ $a in [dog] ]]`)
+/// is exempted from bracket-pair fusion — see `compute_value_context` —
+/// so the list-literal parser sees primitive `LBracket`/`RBracket`
+/// tokens. Argv-position brackets (`ls [dog]`, `for x in [a]`) fuse as
+/// before.
 ///
-/// A run that opens at *value position* (`x=[dog]`, `[[ $a in [dog] ]]`) is exempted
-/// from the `[`/`]` bracket-pair fusion — see `ValueContext`/`compute_value_context`
-/// above — so the list-literal parser sees primitive `LBracket`/`RBracket` tokens
-/// instead of a fused `GlobWord`. Argv-position brackets (`ls [dog]`, `for x in [a]`)
-/// are untouched.
-///
-/// A SEPARATE trigger suppresses fusion for an **assignment lvalue**:
-/// `fruits[0]=kiwi`, `user[email]=x`, `services[web][port]=9090`. This run sits
-/// at *argv/LHS position* (before `=`), not value position, so
-/// `ValueContext::in_literal` is false for it — the lvalue grammar needs its
-/// own peek-ahead: a bracket-pair run (no `*`/`?`) immediately followed by
-/// `Token::Eq` is a subscripted assignment target, not a glob, so it is
-/// suppressed the same way regardless of whitespace before the `=` (see
-/// `flush_glob_run`'s `followed_by_eq` parameter). See
+/// A SEPARATE trigger suppresses fusion for an **assignment lvalue**
+/// (`fruits[0]=kiwi`, `services[web][port]=9090`): a bracket-pair run
+/// (no `*`/`?`) led by an `Ident` and immediately followed by `Token::Eq`
+/// is a subscripted assignment target, not a glob — see
 /// `docs/arrays-and-hashes.md` ("Assignment lvalues").
-fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
+fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned<Token>> {
     if tokens.is_empty() {
         return tokens;
     }
@@ -2098,7 +2628,7 @@ fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
 
     for (idx, token) in tokens.iter().enumerate() {
         if run.is_empty() {
-            if glob_mergeable_text(&token.token).is_some() {
+            if is_glob_mergeable(&token.token) {
                 run.push(token);
                 run_start = idx;
             } else {
@@ -2111,21 +2641,21 @@ fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
         let Some(last) = run.last() else { unreachable!() };
         let adjacent = last.span.end == token.span.start;
 
-        if adjacent && glob_mergeable_text(&token.token).is_some() {
+        if adjacent && is_glob_mergeable(&token.token) {
             run.push(token);
         } else {
             // `token` is whatever broke the run — an lvalue's `=` is never
-            // glob-mergeable, so it always lands here (not in the `if` arm
-            // above) regardless of whether whitespace separates it from the
-            // run (`fruits[0]=kiwi` and `fruits[0] = kiwi` both see it).
+            // glob-mergeable, so it always lands here regardless of
+            // whitespace (`fruits[0]=kiwi` and `fruits[0] = kiwi` both).
             let followed_by_eq = matches!(token.token, Token::Eq);
             flush_glob_run(
                 &mut run,
                 &mut result,
                 value_ctx[run_start].in_literal,
                 followed_by_eq,
+                source,
             );
-            if glob_mergeable_text(&token.token).is_some() {
+            if is_glob_mergeable(&token.token) {
                 run.push(token);
                 run_start = idx;
             } else {
@@ -2134,38 +2664,38 @@ fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
         }
     }
 
-    // End of input: no token follows the final run, so it can't be an lvalue
-    // (an assignment always has a value after `=`).
-    flush_glob_run(&mut run, &mut result, value_ctx[run_start].in_literal, false);
+    // End of input: no token follows the final run, so it can't be an
+    // lvalue (an assignment always has a value after `=`).
+    flush_glob_run(
+        &mut run,
+        &mut result,
+        value_ctx[run_start].in_literal,
+        false,
+        source,
+    );
 
     result
 }
 
-/// Flush a run of glob-mergeable tokens: merge if it contains glob metacharacters.
+/// Flush a run of glob-mergeable tokens: merge to a `GlobWord` (text
+/// sliced verbatim from the source) if it contains glob metacharacters.
 ///
-/// `value_position_suppress` (true when the run opened at value position — see
-/// `ValueContext`) forces individual emission for a run that contains an
-/// `LBracket`, so a `[`-leading run at value position always reaches the
-/// parser as primitive tokens for the list-literal grammar, never a
-/// `GlobWord`. A pure `Star`/`Question` glob with no brackets (`X=*.txt`) is
-/// untouched by `value_position_suppress` — it keeps fusing to a `GlobWord`,
-/// which evaluates to a literal string at value position exactly as it did
-/// before collection literals existed (see `test_glob_in_assignment_is_literal`);
-/// only bracket-shaped runs are reinterpreted as list-literal syntax.
+/// `value_position_suppress` (run opened at value position) forces
+/// individual emission for bracket-bearing runs, so a `[`-leading run at
+/// value position always reaches the parser as primitive tokens for the
+/// list-literal grammar. A pure `Star`/`Question` glob with no brackets
+/// (`X=*.txt`) keeps fusing — it evaluates to a literal string at value
+/// position exactly as before collection literals existed.
 ///
-/// `followed_by_eq` (true when the token right after this run — in stream
-/// order, whitespace or not — is `Token::Eq`) is the SEPARATE lvalue trigger:
-/// a bracket-pair run with no `*`/`?` immediately before `=` is a subscripted
-/// assignment target (`fruits[0]=kiwi`), not a glob, so it is suppressed too
-/// — even though it sits at argv/LHS position, not value position. The
-/// `has_star_or_question` guard keeps a real glob pattern that happens to
-/// precede an `=` (vanishingly rare, but not this run's job to reinterpret)
-/// out of the suppression.
+/// `followed_by_eq` is the SEPARATE lvalue trigger: an `Ident`-led
+/// bracket-pair run with no `*`/`?` immediately before `=` is a
+/// subscripted assignment target (`fruits[0]=kiwi`), not a glob.
 fn flush_glob_run(
     run: &mut Vec<&Spanned<Token>>,
     result: &mut Vec<Spanned<Token>>,
     value_position_suppress: bool,
     followed_by_eq: bool,
+    source: &str,
 ) {
     if run.is_empty() {
         return;
@@ -2178,29 +2708,20 @@ fn flush_glob_run(
         .any(|t| matches!(t.token, Token::Star | Token::Question));
     let has_glob = has_star_or_question || has_bracket_pair;
 
-    // An lvalue subscript run is a ROOT IDENTIFIER followed by brackets, so the
-    // run STARTS with an `Ident` (`arr[0]=` → run is `arr [ 0 ]`, glued, so
-    // `arr` is the first token OF the run — a lvalue root parses via
-    // `ident_parser()`, i.e. `Token::Ident`). A bare char-class comparison
-    // operand starts with `[` instead (`[[ [a] = b ]]` → the suppressible run
-    // is `[ a ]`, since the leading `[[` was flushed separately), so requiring
-    // an `Ident`-led run keeps `[[ [a] = b ]]` fusing-and-comparing as before
-    // while still catching every real lvalue.
-    let run_starts_with_ident = matches!(
-        run.first().map(|t| &t.token),
-        Some(Token::Ident(_))
-    );
+    // An lvalue subscript run is a ROOT IDENTIFIER followed by brackets
+    // (`arr[0]=` → run is `arr [ 0 ]`). A bare char-class comparison
+    // operand starts with `[` instead (`[[ [a] = b ]]`), so requiring an
+    // `Ident`-led run keeps that fusing-and-comparing while still
+    // catching every real lvalue.
+    let run_starts_with_ident = matches!(run.first().map(|t| &t.token), Some(Token::Ident(_)));
     let lvalue_suppress =
         followed_by_eq && has_bracket_pair && !has_star_or_question && run_starts_with_ident;
     let suppress = (value_position_suppress && has_bracket_pair) || lvalue_suppress;
 
     if !suppress && run.len() >= 2 && has_glob {
-        let text: String = run
-            .iter()
-            .filter_map(|t| glob_mergeable_text(&t.token))
-            .collect();
         let start = run.first().map(|t| t.span.start).unwrap_or(0);
         let end = run.last().map(|t| t.span.end).unwrap_or(0);
+        let text = source.get(start..end).unwrap_or_default().to_string();
         result.push(Spanned::new(Token::GlobWord(text), start..end));
     } else {
         for t in run.iter() {
@@ -2211,166 +2732,78 @@ fn flush_glob_run(
     run.clear();
 }
 
-/// Tokenize source code into a vector of spanned tokens.
+// ═══════════════════════════════════════════════════════════════════
+// Pipeline entry points
+// ═══════════════════════════════════════════════════════════════════
+
+/// Tokenize kaish source into spanned tokens.
 ///
-/// Skips whitespace and comments (unless you need them for formatting).
-/// Returns errors with their positions for nice error messages.
-///
-/// Handles:
-/// - Arithmetic: `$((expr))` becomes `Arithmetic("expr")`
-/// - Here-docs: `<<EOF\nhello\nEOF` becomes `HereDocStart` + `HereDoc("hello")`
-/// - Colon merge: span-adjacent `foo::bar` becomes `Ident("foo::bar")`
+/// Pipeline: one composed scan (heredocs + arithmetic extracted with full
+/// quote/escape/comment awareness, complete replacement table) → logos →
+/// positional marker resolution → span correction back to original
+/// coordinates → fusion passes (flag-metachar, colon, glob) with
+/// verbatim-slice text. All spans — including `HereDoc` tokens and
+/// everything after them — are exact original-source byte ranges.
 pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerError>>> {
-    // Preprocess arithmetic first (before heredocs because heredoc content might contain $((
-    let arith_result = preprocess_arithmetic(source)
-        .map_err(|e| vec![Spanned::new(e, 0..source.len())])?;
+    tokenize_impl(source, false)
+}
 
-    // Then preprocess here-docs. Spans inside the heredoc preprocessor are in
-    // arith-preprocessed coords; correct back to original-source coords before
-    // surfacing the error to keep parser diagnostics aligned with source.
-    let span_replacements = arith_result.replacements;
-    let (preprocessed, heredocs) = preprocess_heredocs(&arith_result.text)
-        .map_err(|e| {
-            let span = correct_span(e.span, &span_replacements);
-            vec![Spanned::new(e.token, span)]
-        })?;
+/// Tokenize, preserving `Comment` and `LineContinuation` tokens.
+///
+/// Runs the SAME pipeline as `tokenize` (pre-#95 this was a divergent
+/// second pipeline with no preprocessing or merges). Useful for
+/// pretty-printing and formatting tools.
+pub fn tokenize_with_comments(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerError>>> {
+    tokenize_impl(source, true)
+}
 
-    let lexer = Token::lexer(&preprocessed);
+fn tokenize_impl(
+    source: &str,
+    keep_comments: bool,
+) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerError>>> {
+    let scan_output = scan(source).map_err(|e| vec![e])?;
+
     let mut tokens = Vec::new();
     let mut errors = Vec::new();
-
-    for (result, span) in lexer.spanned() {
-        // Correct the span from preprocessed coordinates to original coordinates
-        let corrected_span = correct_span(span, &span_replacements);
+    for (result, span) in Token::lexer(&scan_output.text).spanned() {
         match result {
             Ok(token) => {
-                // Skip comments and line continuations - they're not needed for parsing
-                if !matches!(token, Token::Comment | Token::LineContinuation) {
-                    tokens.push(Spanned::new(token, corrected_span));
+                if !keep_comments
+                    && matches!(token, Token::Comment | Token::LineContinuation)
+                {
+                    continue;
                 }
+                // Rewritten-buffer spans here; mapped to original
+                // coordinates after marker resolution.
+                tokens.push(Spanned::new(token, span));
             }
             Err(err) => {
-                errors.push(Spanned::new(err, corrected_span));
+                errors.push(Spanned::new(err, map_span(&span, &scan_output.replacements)));
             }
         }
     }
-
     if !errors.is_empty() {
         return Err(errors);
     }
 
-    // Post-process: replace markers with actual token content
-    let mut final_tokens = Vec::with_capacity(tokens.len());
-    let mut i = 0;
+    let resolved = resolve_markers(tokens, &scan_output).map_err(|errs| {
+        errs.into_iter()
+            .map(|e| Spanned::new(e.token, map_span(&e.span, &scan_output.replacements)))
+            .collect::<Vec<_>>()
+    })?;
 
-    while i < tokens.len() {
-        // Check for arithmetic marker (unique format: __KAISH_ARITH_{id}__)
-        if let Token::Ident(ref name) = tokens[i].token
-            && name.starts_with("__KAISH_ARITH_") && name.ends_with("__")
-                && let Some((_, expr)) = arith_result.arithmetics.iter().find(|(marker, _)| marker == name) {
-                    final_tokens.push(Spanned::new(Token::Arithmetic(expr.clone()), tokens[i].span.clone()));
-                    i += 1;
-                    continue;
-                }
+    let mapped: Vec<Spanned<Token>> = resolved
+        .into_iter()
+        .map(|s| {
+            let span = map_span(&s.span, &scan_output.replacements);
+            Spanned::new(s.token, span)
+        })
+        .collect();
 
-        // Check for heredoc (unique format: __KAISH_HEREDOC_{id}__)
-        if matches!(tokens[i].token, Token::HereDocStart) {
-            // Check if next token is a heredoc marker
-            if i + 1 < tokens.len()
-                && let Token::Ident(ref name) = tokens[i + 1].token
-                    && name.starts_with("__KAISH_HEREDOC_") && name.ends_with("__") {
-                        // Find the corresponding content
-                        if let Some(hd) = heredocs.iter().find(|h| h.marker == *name) {
-                            // Re-thread arithmetic markers that the arith
-                            // preprocessor planted in the source — without
-                            // this, `<<EOF\n$((1+2))\nEOF` materializes the
-                            // marker text instead of `3`. Mirrors the
-                            // String-content translation a few lines below.
-                            // - Literal heredocs (no expansion): restore the
-                            //   original `$((expr))` text verbatim.
-                            // - Interpolated heredocs: wrap as
-                            //   `${__ARITH:expr__}` so the spanned
-                            //   interpolation parser turns it into a
-                            //   StringPart::Arithmetic.
-                            let mut content = hd.body.clone();
-                            for (marker, expr) in &arith_result.arithmetics {
-                                if content.contains(marker) {
-                                    let replacement = if hd.literal {
-                                        format!("$(({}))", expr)
-                                    } else {
-                                        format!("${{__ARITH:{}__}}", expr)
-                                    };
-                                    content = content.replace(marker, &replacement);
-                                }
-                            }
-                            final_tokens.push(Spanned::new(Token::HereDocStart, tokens[i].span.clone()));
-                            final_tokens.push(Spanned::new(
-                                Token::HereDoc(HereDocData {
-                                    content,
-                                    literal: hd.literal,
-                                    strip_tabs: hd.strip_tabs,
-                                    body_start_offset: hd.body_start_offset,
-                                }),
-                                tokens[i + 1].span.clone(),
-                            ));
-                            i += 2;
-                            continue;
-                        }
-                    }
-        }
-
-        // Check for arithmetic markers inside string content
-        let token = if let Token::String(ref s) = tokens[i].token {
-            // Check if string contains any arithmetic markers
-            let mut new_content = s.clone();
-            for (marker, expr) in &arith_result.arithmetics {
-                if new_content.contains(marker) {
-                    // Replace marker with the special format that parse_interpolated_string can detect
-                    // Use ${__ARITH:expr__} format so it gets parsed as StringPart::Arithmetic
-                    new_content = new_content.replace(marker, &format!("${{__ARITH:{}__}}", expr));
-                }
-            }
-            if new_content != *s {
-                Spanned::new(Token::String(new_content), tokens[i].span.clone())
-            } else {
-                tokens[i].clone()
-            }
-        } else {
-            tokens[i].clone()
-        };
-        final_tokens.push(token);
-        i += 1;
-    }
-
-    Ok(merge_glob_adjacent(merge_colon_adjacent(
-        merge_flag_metachar_adjacent(final_tokens),
-    )))
-}
-
-/// Tokenize source code, preserving comments.
-///
-/// Useful for pretty-printing or formatting tools that need to preserve comments.
-pub fn tokenize_with_comments(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerError>>> {
-    let lexer = Token::lexer(source);
-    let mut tokens = Vec::new();
-    let mut errors = Vec::new();
-
-    for (result, span) in lexer.spanned() {
-        match result {
-            Ok(token) => {
-                tokens.push(Spanned::new(token, span));
-            }
-            Err(err) => {
-                errors.push(Spanned::new(err, span));
-            }
-        }
-    }
-
-    if errors.is_empty() {
-        Ok(tokens)
-    } else {
-        Err(errors)
-    }
+    Ok(merge_glob_adjacent(
+        merge_colon_adjacent(merge_flag_metachar_adjacent(mapped), source),
+        source,
+    ))
 }
 
 /// Extract the string content from a string token (removes quotes, processes escapes).
