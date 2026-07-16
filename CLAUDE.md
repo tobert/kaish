@@ -156,9 +156,8 @@ Tests live in `crates/kaish-kernel/tests/`. Snapshots in `crates/kaish-kernel/te
 - `crates/kaish-help/src/` — composition surface: `fragments.rs` (the English
   fragment registry, concept-organized) + `compose.rs` (recipes). Design:
   `docs/composable-help.md`.
-- `docs/issues.md` — open work only (P1–P4). `docs/devlog.md` — a durable narrative
-  from the agent's perspective; write your story there. Keep history out of
-  `issues.md` so it stays cheap to read for actual open work. **Write the devlog
+- `docs/devlog.md` — a durable narrative from the agent's perspective; write your
+  story there. Open work lives in GitHub Issues. **Write the devlog
   entry late — just before signoff or opening a PR**, so it carries with the PR
   and reflects the work as actually landed. Don't write it early or mid-flight:
   the decisions aren't settled yet, and an entry written ahead of the change it
@@ -200,10 +199,10 @@ Hard-won rules that aren't obvious from the code. Violating these silently break
 - **Defer out-of-scope work to GitHub Issues**, not inline `TODO`s in code or
   scratch notes. New deferrals discovered *outside* an active PR go to
   `gh issue create` (GH is the transparent surface contributors see); scoped
-  deferrals found *while building a PR* may still be recorded in `docs/issues.md`
-  (or the PR body) so they carry with the change. `docs/issues.md` is being phased
-  out — its remaining P1–P4 entries are unmigrated backlog, not the place for new
-  items.
+  deferrals found *while building a PR* go in the PR body so they carry with the
+  change, then to GH Issues if they outlive it. (`docs/issues.md`, the old backlog
+  file, was verified entry-by-entry, migrated to GH Issues #175–#203, and deleted
+  on 2026-07-16.)
 - **Test builtins through `kernel.execute(...)`, not a builtin's direct
   `.execute()`.** Direct calls skip the dispatch chain (arg binding, `--json`,
   output limits) and pass while the real path is broken.

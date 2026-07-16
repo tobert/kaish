@@ -1,7 +1,8 @@
 # kaish devlog
 
 Narrative history of landed work and the decisions behind it — the "how we got
-here" color that used to clutter [issues.md](issues.md) and tax every read of it.
+here" color that used to clutter the old issues.md backlog (verified and migrated
+to GitHub Issues #175–#203, 2026-07-16) and tax every read of it.
 This is *not* the authoritative record: `CHANGELOG.md` (per-version, user-facing)
 and `git log` (commits, SHAs) are canonical. This is the story.
 

@@ -318,4 +318,4 @@ for a human reader. Visibility lives at build/introspection time instead:
 
 *Sibling design docs: [arrays-and-hashes.md](arrays-and-hashes.md),
 [designing-syntax-with-llms.md](designing-syntax-with-llms.md). Follow-up tracking:
-[issues.md](issues.md).*
+[GH #185](https://github.com/tobert/kaish/issues/185).*

@@ -4242,8 +4242,8 @@ mod tests {
 
     #[test]
     fn backtick_in_heredoc_body_is_preserved() {
-        // Heredoc bodies are extracted by preprocess_heredocs before
-        // logos runs, so backticks inside them survive as content.
+        // Heredoc bodies are extracted by the scanner before logos
+        // runs, so backticks inside them survive as content.
         let source = "cat <<EOF\n`date`\nEOF\n";
         let tokens = lex(source);
         let heredoc = tokens.iter().find(|t| matches!(t, Token::HereDoc(_)));
