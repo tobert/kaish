@@ -3132,7 +3132,22 @@ mod tests {
     #[test]
     fn var_ref_unterminated_and_empty_are_errors() {
         assert!(tokenize("${X:-${Y}").is_err(), "unbalanced nesting is loud");
+        assert!(tokenize("${a{b}").is_err(), "extra open brace is loud");
         assert!(tokenize("${}").is_err(), "empty reference is loud");
+    }
+
+    #[test]
+    fn var_ref_closes_at_first_balanced_brace() {
+        // Trailing `b}` after the balanced close is separate tokens — the
+        // early-close contract (kaibo review, GH #173).
+        assert_eq!(
+            lex("${a}b}"),
+            vec![
+                Token::VarRef("${a}".to_string()),
+                Token::Ident("b".to_string()),
+                Token::RBrace,
+            ]
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════
