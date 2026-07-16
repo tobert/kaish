@@ -1653,7 +1653,14 @@ fn scan_heredoc_introducer(
             }
         }
     }
-    let word_end = if *i < n { chars[*i].0 } else { chars[n - 1].0 + chars[n - 1].1.len_utf8() };
+    let word_end = if *i < n {
+        chars[*i].0
+    } else {
+        chars
+            .last()
+            .map(|(pos, c)| pos + c.len_utf8())
+            .unwrap_or(intro_start + 2)
+    };
 
     if delimiter.is_empty() {
         // Not a heredoc after all — emit what we consumed verbatim.
@@ -1986,7 +1993,8 @@ fn resolve_markers(
                         unreachable!("heredoc marker inside string content")
                     };
                     let (marker, expr) = &scan.arithmetics[idx];
-                    content = content.replace(marker, &format!("${{__ARITH:{}__}}", expr));
+                    content =
+                        content.replacen(marker, &format!("${{__ARITH:{}__}}", expr), 1);
                 }
                 result.push(Spanned::new(Token::String(content), span));
             }
@@ -2128,6 +2136,9 @@ enum StmtHead {
 /// open, and pops dangling `Test` frames (kaish's `[[ ]]` grammar is
 /// single-line).
 fn is_statement_boundary(token: &Token) -> bool {
+    // `LBrace`/`RBrace` also reset the DFA, but they have dedicated match
+    // arms (record-literal vs block-brace discrimination) that run before
+    // the boundary wildcard, so they are deliberately absent here.
     matches!(
         token,
         Token::Newline
@@ -2137,8 +2148,6 @@ fn is_statement_boundary(token: &Token) -> bool {
             | Token::Or
             | Token::Pipe
             | Token::Amp
-            | Token::LBrace
-            | Token::RBrace
             | Token::If
             | Token::Then
             | Token::Elif
@@ -2762,6 +2771,17 @@ fn tokenize_impl(
     keep_comments: bool,
 ) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerError>>> {
     let scan_output = scan(source).map_err(|e| vec![e])?;
+
+    // map_position's early `break` depends on the table being ordered by
+    // rewritten-buffer position; the scanner appends in scan order, which
+    // guarantees it.
+    debug_assert!(
+        scan_output
+            .replacements
+            .windows(2)
+            .all(|w| w[0].new_start <= w[1].new_start),
+        "replacement table must be ordered by new_start"
+    );
 
     let mut tokens = Vec::new();
     let mut errors = Vec::new();

@@ -412,6 +412,31 @@ fn arg_count_does_not_open_a_comment() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Line continuation on a heredoc introducer line (bash semantics: the
+// continuation joins the introducer line; the body starts after the
+// first UNESCAPED newline)
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn line_continuation_joins_heredoc_introducer_line() {
+    let src = "cat <<EOF \\\n| tr a-z A-Z\nbody\nEOF\n";
+    let spanned = tokenize(src).expect("lex ok");
+    let tokens: Vec<&Token> = spanned.iter().map(|s| &s.token).collect();
+    let heredoc_pos = tokens
+        .iter()
+        .position(|t| matches!(t, Token::HereDoc(_)))
+        .expect("heredoc token");
+    let pipe_pos = tokens
+        .iter()
+        .position(|t| matches!(t, Token::Pipe))
+        .expect("pipe token");
+    assert!(pipe_pos > heredoc_pos, "pipe joins the introducer line");
+    if let Token::HereDoc(d) = tokens[heredoc_pos] {
+        assert_eq!(d.content, "body\n", "body starts after the unescaped newline");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Multiple heredocs on one line (previously the second one vanished)
 // ═══════════════════════════════════════════════════════════════════
 
