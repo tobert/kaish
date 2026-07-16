@@ -1220,9 +1220,15 @@ Features that ShellCheck warns about (word splitting, backticks) don't exist in 
 
 These are documented limitations of the current implementation:
 
-### Preprocessing
+### Lexing
 
-- **Context-unaware** — The preprocessor replaces arithmetic `$(( ))` and heredoc markers before parsing. This means escape sequences or special characters inside these constructs may behave unexpectedly if they look like outer-level syntax. This is an 80/20 tradeoff for implementation simplicity.
+- **Arithmetic doesn't paste onto words** — `echo $((1+2))abc` is a loud parse
+  error with a quoting hint (bash prints `3abc`; kaish never pastes adjacent
+  tokens). Quote the whole word instead: `echo "$((1+2))abc"` prints `3abc`.
+- **No arithmetic inside a bare `${...}`** — `${X:-$((1+2))}` is a loud error
+  (`ArithmeticInVarRef`); assign the expression to a variable first
+  (`N=$((expr)); ${X:-$N}`). Inside a double-quoted string the same construct
+  works via string interpolation.
 
 ### Validator
 
