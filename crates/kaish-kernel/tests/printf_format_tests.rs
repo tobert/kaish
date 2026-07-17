@@ -473,3 +473,52 @@ async fn printf_precision_multibyte_does_not_panic_or_split_char() {
         "printf '%.2s' 日本語 should truncate to the first 2 characters without splitting a char"
     );
 }
+
+#[tokio::test]
+async fn printf_zero_pad_width_cjk_counts_display_width() {
+    // apply_string_padding's zero-pad branch (`spec.zero_pad`, no left-align)
+    // prepends `pad_count` '0' chars before the value; `pad_count` must come
+    // from display width like the space-padding branches, not byte length.
+    // 日本語 is 6 display columns, so width 10 zero-pads with 10 - 6 = 4
+    // zeros, not 10 - 9 (byte length) = 1.
+    let k = kernel();
+    let result = k.execute("printf '%010s' '日本語'").await.expect("execute");
+    assert_eq!(
+        result.text_out(),
+        "0000日本語",
+        "printf '%010s' 日本語 should zero-pad to display width 10 (4 zeros + 6-wide string)"
+    );
+}
+
+#[tokio::test]
+async fn printf_width_and_precision_multibyte_pads_by_truncated_width() {
+    // Combined width + precision: truncation happens first (in apply_specifier's
+    // 's' arm), then apply_string_padding measures the ALREADY-TRUNCATED value's
+    // display width — not the original argument's width. 日本語 truncated to
+    // precision 2 is "日本" (4 display columns, 2 chars), so width 10 pads with
+    // 10 - 4 = 6 spaces, not 10 - 6 (untruncated width) = 4.
+    let k = kernel();
+    let result = k.execute("printf '%10.2s' '日本語'").await.expect("execute");
+    assert_eq!(
+        result.text_out(),
+        "      日本",
+        "printf '%10.2s' 日本語 should pad based on the truncated value's display width (6 spaces + 4-wide '日本')"
+    );
+}
+
+#[tokio::test]
+async fn printf_width_zero_width_codepoint_no_underflow() {
+    // A combining mark (U+0301 COMBINING ACUTE ACCENT) has display width 0
+    // per unicode-width. `width - display_width` must not underflow/panic
+    // when display_width is 0 — it should just pad with the full width's
+    // worth of spaces, same as an empty string would.
+    let k = kernel();
+    let arg = "\u{0301}"; // lone combining acute accent: 2 UTF-8 bytes, 1 char, 0 display columns
+    let cmd = format!("printf '%5s' '{arg}'");
+    let result = k.execute(&cmd).await.expect("execute");
+    assert_eq!(
+        result.text_out(),
+        format!("     {arg}"),
+        "printf '%5s' with a zero-width combining mark should pad with all 5 spaces, no underflow/panic"
+    );
+}
