@@ -887,3 +887,61 @@ fn lexer_push_value_after_target_still_globs() {
         &["IDENT(push)", "IDENT(xs)", "GLOB(values[0])"],
     );
 }
+
+/// A variable literally named `push`, GLUED to a bracket subscript and
+/// assigned (`push[0]=x`), is unaffected by the target tracker: seeing
+/// `push` at statement-head sets `PushTarget::AwaitingRoot`, but the very
+/// next token here is `LBracket`, not `Ident` — `AwaitingRoot`'s only
+/// transition arm requires an `Ident` — so the tracker falls through to its
+/// catch-all reset (`PushTarget::None`) and never suppresses this run.
+/// The ordinary `=`-followed lvalue trigger (`followed_by_eq`, entirely
+/// independent of `PushTarget`) still recognizes `push[0]` as an assignment
+/// lvalue on its own, exactly like any other identifier.
+#[test]
+fn lexer_push_named_variable_bracket_assignment_unaffected() {
+    run_lexer_test(
+        "push[0]=x",
+        &["IDENT(push)", "LBRACK", "INT(0)", "RBRACK", "EQ", "IDENT(x)"],
+    );
+}
+
+/// `push` immediately after a pipe is still the command word — a pipe is a
+/// statement boundary, so both `StmtHead` and the independent `PushTarget`
+/// tracker reset to `Start`/`None` there, and `push`'s target-fusion trigger
+/// re-arms cleanly on the far side.
+#[test]
+fn lexer_push_bracket_target_after_pipe() {
+    run_lexer_test(
+        "echo x | push xs[0] item",
+        &[
+            "IDENT(echo)", "IDENT(x)", "PIPE",
+            "IDENT(push)", "IDENT(xs[0])", "IDENT(item)",
+        ],
+    );
+}
+
+/// Same reset, via `;` instead of a pipe.
+#[test]
+fn lexer_push_bracket_target_after_semicolon() {
+    run_lexer_test(
+        "echo x; push xs[0] item",
+        &[
+            "IDENT(echo)", "IDENT(x)", "SEMI",
+            "IDENT(push)", "IDENT(xs[0])", "IDENT(item)",
+        ],
+    );
+}
+
+/// Same reset, via `&&` — a bareword `push` right after a chain operator is
+/// still recognized as the command word, not swallowed by whatever DFA state
+/// the left-hand command left behind.
+#[test]
+fn lexer_push_bracket_target_after_and_chain() {
+    run_lexer_test(
+        "true && push xs[0] item",
+        &[
+            "BOOL(true)", "AMPAMP",
+            "IDENT(push)", "IDENT(xs[0])", "IDENT(item)",
+        ],
+    );
+}

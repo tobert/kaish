@@ -71,6 +71,7 @@ impl Tool for Push {
             [
                 ("Append one element", "push xs date"),
                 ("Append a record value", "push xs $rec"),
+                ("Append to a nested list", "push services[web][tags] canary"),
             ],
         )
     }
