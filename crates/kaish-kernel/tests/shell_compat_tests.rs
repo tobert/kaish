@@ -302,6 +302,29 @@ shell_compat! {
     eq: "matched",
 }
 
+// ---- Dash/plus bare-word patterns in case (GH #144) ------------------------
+// `case_parser`'s `pattern_part` had no arm for the lexer's flag-shaped
+// tokens or its dash/plus bare-word fallbacks, so a case pattern that
+// happened to look like a flag (or a dash-only bareword) failed to parse.
+
+shell_compat! {
+    name: case_triple_dash_matches,
+    script: "x=\"---\"; case $x in\n    ---) echo \"match\" ;;\n    *) echo \"nope\" ;;\nesac",
+    eq: "match",
+}
+
+shell_compat! {
+    name: case_dash_alternation_matches,
+    script: "x=\"--help\"; case $x in\n    -h|--help) echo \"match\" ;;\n    *) echo \"nope\" ;;\nesac",
+    eq: "match",
+}
+
+shell_compat! {
+    name: case_dash_pattern_star_fallback_still_works,
+    script: "x=\"other\"; case $x in\n    ---) echo \"dash\" ;;\n    *) echo \"fallback\" ;;\nesac",
+    eq: "fallback",
+}
+
 // ---- Compound test expressions: [[ A && B ]], [[ A || B ]], [[ ! A ]] ----
 //
 // Use `/` and `/tmp` (universal on POSIX-ish systems) instead of

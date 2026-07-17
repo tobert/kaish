@@ -474,18 +474,27 @@ pub enum Token {
     /// regex requires at least one more non-whitespace character, so the two
     /// never tie in match length and no priority tiebreak is load-bearing;
     /// `priority = 2` is set for consistency with `PlusBare`'s tier.
-    #[regex(r"--[^a-zA-Z\s][^\s]*", lex_double_dash_bare, priority = 2)]
+    ///
+    /// Both character classes exclude the unquoted shell operator characters
+    /// `()|&;<>` in addition to whitespace (GH #144): without that exclusion
+    /// a case pattern like `---)` swallowed the closing paren into the token
+    /// text (`DoubleDashBare("---)"`), leaving no `RParen` for the branch
+    /// parser to find — the same silent-truncation failure mode as #137, just
+    /// on the other side of the word.
+    #[regex(r"--[^a-zA-Z\s()|&;<>][^\s()|&;<>]*", lex_double_dash_bare, priority = 2)]
     DoubleDashBare(String),
 
     /// Bare word starting with + followed by non-letter: `+%s`, `+%Y-%m-%d`
     /// For date format strings and similar. Lower priority than PlusFlag.
-    #[regex(r"\+[^a-zA-Z\s][^\s]*", lex_plus_bare, priority = 2)]
+    /// See `DoubleDashBare` above for why `()|&;<>` are excluded (GH #144).
+    #[regex(r"\+[^a-zA-Z\s()|&;<>][^\s()|&;<>]*", lex_plus_bare, priority = 2)]
     PlusBare(String),
 
     /// Bare word starting with - followed by non-letter/digit/dash: `-%`, etc.
     /// For rare cases. Lower priority than ShortFlag, Int, and DoubleDash.
     /// Excludes - after first - to avoid matching --name patterns.
-    #[regex(r"-[^a-zA-Z0-9\s\-][^\s]*", lex_minus_bare, priority = 1)]
+    /// See `DoubleDashBare` above for why `()|&;<>` are excluded (GH #144).
+    #[regex(r"-[^a-zA-Z0-9\s\-()|&;<>][^\s()|&;<>]*", lex_minus_bare, priority = 1)]
     MinusBare(String),
 
     /// Job specifier: `%1`, `%2` — the bash idiom for `wait`/`kill` targets.

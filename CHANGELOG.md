@@ -37,6 +37,14 @@ breaking entries are marked **BREAKING**.
   kaish-extras `kaish-web` crate is a working embedding.
 
 ### Fixed
+- **Case patterns accept dash/plus bare words** (GH #144) — `---`, `-`, `--`,
+  `-x`, `+foo`, and alternations like `-h|--help) ...` are now valid case
+  patterns; they previously failed to parse (`pattern_part` had no arm for
+  the lexer's flag-shaped and dash/plus bare-word tokens). Also fixes a
+  related lexer bug the repro surfaced: `---)` swallowed the closing paren
+  into the bare-word token text, leaving no `)` for the branch parser to
+  find — the dash/plus bare-word tokens now stop at unquoted shell operators
+  (`()|&;<>`) instead of running to the next whitespace.
 - **External-command output that overflows the 10MB capture buffer with
   output limiting off now fails loudly** (GH #191) instead of silently
   dropping the head: exit code 3, plus a stderr marker naming the bytes lost
