@@ -10,6 +10,16 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Removed
+- **BREAKING:** `output_limit::spill_aware_collect` and its private helpers
+  (`collect_stderr`, `collect_stdout_with_spill`, `handle_overflow`,
+  `drain_in_memory`, `extend_ring`, `stream_to_spill`) are gone. Dead since
+  GH #133 item 2 moved external-process capture onto `BoundedStream` /
+  `drain_to_stream`, with post-hoc spill applied at the pipeline level
+  (`Kernel::execute_pipeline` → `spill_if_needed`) instead of inline during
+  capture. `OutputLimitConfig` and the disk/memory spill machinery it still
+  drives are unaffected.
+
 ### Changed
 - **`uname -o` (and the tail of `uname -a`) now reports `kai`** instead of
   `Kaijutsu` — the shell's identity belongs to kaish itself, not to one
@@ -41,6 +51,13 @@ breaking entries are marked **BREAKING**.
   matching the quoted form and bash. Defaults nest to any depth
   (`${A:-${B:-${C}}}`); an unbalanced reference is a loud
   `unterminated variable reference` error.
+- **`printf`'s `%Ns` width now pads by display width, not UTF-8 byte length**
+  (GH #154) — a CJK or emoji argument to `printf '%10s'`/`%-10s`/`%5c` was
+  under-padded because its byte length exceeds its display width (same bug
+  class as #130's table-alignment fix); `awk`'s `sprintf` shares the fix
+  since both builtins go through the same formatter. `%.Ns` precision
+  truncation was audited too — it already truncates by character count, so
+  it cannot split a UTF-8 codepoint.
 
 ### Added
 - **GitHub Actions CI** (`.github/workflows/ci.yml`): every PR and push to `main`
