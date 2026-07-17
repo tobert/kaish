@@ -715,6 +715,34 @@ mod tests {
         assert!(result.text_out().starts_with("1\n"));
     }
 
+    /// GH #177: every other Disk-mode test in this module re-specifies
+    /// `spill_mode: SpillMode::Disk` explicitly, so none of them actually pin
+    /// that a host-backed (`Sandboxed`) kernel's *untouched* default — no
+    /// `.with_output_limit()` override at all — is `Disk`. This is the literal
+    /// "`Kernel::new` without `.in_memory()`" scenario the issue names. The
+    /// forcing logic in `Kernel::assemble` (`no_host_side_channel`) must leave
+    /// a `Sandboxed` kernel's config alone; only `NoLocal`/`with_backend`
+    /// override it to `Memory`.
+    #[tokio::test]
+    async fn test_agent_kernel_unmodified_default_spills_to_disk() {
+        use crate::kernel::{Kernel, KernelConfig};
+
+        // Untouched: OutputLimitConfig::agent() — 8K limit, SpillMode::Disk.
+        let config = KernelConfig::agent();
+        assert_eq!(config.output_limit.spill_mode(), SpillMode::Disk);
+        let kernel = Kernel::new(config).expect("kernel creation");
+
+        let big = "x".repeat(8 * 1024 + 200);
+        let result = kernel.execute(&format!("echo '{}'", big)).await.expect("execute");
+        assert_eq!(result.code, 3, "default 8K agent limit should trip the spill");
+        assert!(
+            result.text_out().contains("full output at"),
+            "an unmodified agent() default must spill to a real file, not truncate in \
+             memory: {}",
+            result.text_out()
+        );
+    }
+
     #[tokio::test]
     async fn test_spill_exits_3() {
         use crate::kernel::{Kernel, KernelConfig};
