@@ -15,6 +15,61 @@ before it ships.
 
 ---
 
+## The burndown: sixteen issues in one orchestrated day (2026-07-17)
+
+Amy asked for a backlog burndown with a specific shape: one orchestrator
+managing GitHub issues and merges, Sonnet subagents doing the coding toil in
+isolated worktrees, and kaibo providing outside review on every PR before it
+landed. Seventeen PRs merged (#207–#211, #214, #215, #219, #221, #224, #226,
+#227, #230–#232, #234) closing sixteen issues (#144, #147–#149, #154, #164,
+#170, #176, #177, #183, #188, #189, #191, #217, #218, plus the #224 fix-forward)
+— each with its own devlog/CHANGELOG story; this entry is about what the
+*orchestration* taught us.
+
+**Waves beat a queue.** Work went out in three waves sorted by diff footprint:
+small independent fixes first (parallel), wide-ripple changes (#170's test-gate
+sweep, #164's `to_argv` Result) only after the small ones merged, and
+sequenced pairs where one PR would otherwise land twice (#189's binder polish
+deliberately waited for #188's twin removal so it patched ONE binder, not two).
+CHANGELOG both-added conflicts were the only recurring merge friction —
+resolved mechanically by merge-main-in, keep both bullets.
+
+**"Worse than filed" was the day's refrain.** Three issues deepened on TDD
+contact: #144's repro was unfixable by the filed parser arms alone (the lexer
+was swallowing the case-arm's closing paren into the bare-word token); #217's
+"multi-occurrence" silent drop turned out to cover single occurrences too
+(`env -u $BIN` had NO loud path at all); #183's arithmetic-swallow had a third,
+unfiled instance in the primary async interpolation path — plain
+`echo "$((1/0))"` printed silently at exit 0. Briefing agents to verify every
+issue claim against current code before fixing is what surfaced all three;
+that brief stays.
+
+**The review pair earned its keep on the one PR where it mattered.** #230
+(bytes-typed stdin, BREAKING) had a clean deepseek diff review; the
+second-family holistic pass (or-kimi, after gemini 503'd and or-gpt's cast
+turned out broken) found a real regression the first review missed: the stdin
+gate move newly exposed `xxd -r`'s pre-existing lossy decode to binary input —
+silent corruption where the old redirect-time gate had been loud. Single
+reviews stayed fine for narrow PRs; breaking/wide PRs get a pair.
+
+**Reviews as issue factories.** Beyond the fixes themselves, kaibo reviews
+filed six follow-ups: #212 (background/scatter exit-3 remap gap), #222
+(scatter|gather pipeline bypasses finalize_output), #223 (jq --arg stringifies
+binary envelopes), #228 (/proc//etc read-only positioning, narrowed out of
+#177 so the closed issue stays accurate), #229 (dispatch twin's missing
+exit-126 checks), #233 (printf/patch lossy decodes + binary exit-code
+consistency). The backlog shrank by sixteen and grew by six — all six smaller
+and sharper than what they replaced.
+
+**Tooling lessons** (also in auto-memory): `gh pr checks --watch` and naive
+poll loops both race a fresh push — the previous head's completed checks
+read as a false ALL-PASS; wait for the new head's checks to reach *pending*
+before polling to terminal. And never read merge-conflict lists from
+`git merge | tail` — CONFLICT lines scroll out of the window (bit twice);
+`git status --short | grep '^UU'` is the authoritative list.
+
+---
+
 ## Arg-binding polish: four small gaps, one shared core (2026-07-17, GH #189)
 
 Sequenced right after #188/#231 merged the sync/async arg binders into one
