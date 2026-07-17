@@ -766,6 +766,12 @@ pub struct Kernel {
     /// needs sync access. Each `execute()` call gets a fresh child token;
     /// `cancel()` cancels the current token and replaces it.
     cancel_token: std::sync::Mutex<tokio_util::sync::CancellationToken>,
+    /// Per-call polled interrupt check (`ExecuteOptions::interrupt`),
+    /// installed for the duration of an `execute_with_options` call and
+    /// cleared on exit. Consulted by `is_cancelled()` so every existing
+    /// cancellation checkpoint gains interrupt awareness without new wiring.
+    /// std Mutex for the same sync-access reason as `cancel_token`.
+    interrupt: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>>,
     /// Terminal state for job control (interactive mode only, Unix only).
     #[cfg(all(unix, feature = "subprocess"))]
     terminal_state: Option<Arc<crate::terminal::TerminalState>>,
@@ -1215,6 +1221,7 @@ impl Kernel {
             kill_grace,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
             cancel_token: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
+            interrupt: std::sync::Mutex::new(None),
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
             self_weak: std::sync::OnceLock::new(),
@@ -1358,6 +1365,7 @@ impl Kernel {
             kill_grace: self.kill_grace,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
             cancel_token: std::sync::Mutex::new(cancel),
+            interrupt: std::sync::Mutex::new(None),
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
             self_weak: std::sync::OnceLock::new(),
@@ -1433,7 +1441,19 @@ impl Kernel {
     }
 
     /// Check if the current execution has been cancelled.
+    ///
+    /// Also the polling point for `ExecuteOptions::interrupt`: when the
+    /// embedder's check reports true, the internal token fires here, so every
+    /// call site of this method is an interrupt checkpoint for free.
     pub fn is_cancelled(&self) -> bool {
+        let interrupted = {
+            #[allow(clippy::expect_used)]
+            let check = self.interrupt.lock().expect("interrupt poisoned");
+            check.as_ref().is_some_and(|f| f())
+        };
+        if interrupted {
+            self.cancel();
+        }
         #[allow(clippy::expect_used)]
         let token = self.cancel_token.lock().expect("cancel_token poisoned");
         token.is_cancelled()
@@ -1814,6 +1834,25 @@ impl Kernel {
         // (b) re-route a later `Kernel::cancel()` into the embedder's token,
         // (c) extend the token's lifetime via the kernel's strong clone.
         let internal = self.reset_cancel();
+
+        // Install the per-call polled interrupt for `is_cancelled()` to
+        // consult. The guard clears it on every exit path — a stale check
+        // must not outlive its call and fire into a later one.
+        struct ClearInterrupt<'a>(&'a Kernel);
+        impl Drop for ClearInterrupt<'_> {
+            fn drop(&mut self) {
+                if let Ok(mut slot) = self.0.interrupt.lock() {
+                    *slot = None;
+                }
+            }
+        }
+        {
+            #[allow(clippy::expect_used)]
+            let mut slot = self.interrupt.lock().expect("interrupt poisoned");
+            *slot = opts.interrupt.clone();
+        }
+        let _interrupt_guard = ClearInterrupt(self);
+
         // Race the embedder token against the kernel's internal token via a
         // tracked watcher task. We hold the JoinHandle so we can abort the
         // task at function exit — otherwise it would wait forever for either
