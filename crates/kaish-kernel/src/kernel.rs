@@ -107,7 +107,7 @@ use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_st
 use crate::scheduler::{drain_to_stream, DEFAULT_STREAM_MAX_SIZE};
 use crate::tools::{register_builtins, ExecContext, GlobalFlags, ToolArgs, ToolRegistry};
 #[cfg(feature = "subprocess")]
-use crate::tools::resolve_in_path;
+use crate::tools::{resolve_in_path, virtual_cwd_error};
 use crate::validator::{Severity, Validator};
 #[cfg(feature = "localfs")]
 use crate::vfs::LocalFs;
@@ -5161,16 +5161,17 @@ impl Kernel {
             return Ok(None);
         }
 
-        // Get real working directory for relative path resolution and child cwd.
-        // If the CWD is virtual (no real filesystem path), skip external command
-        // execution entirely — return None so the dispatch can fall through to
-        // backend-registered tools.
-        let real_cwd = {
+        // Get the shell's cwd and its real filesystem location, if any. A
+        // `None` real path means the cwd is virtual (a CoW overlay, an
+        // in-memory VFS mount, `/dev`, …) — there's nowhere for a child OS
+        // process to run. Don't bail out here: a bare command name that isn't
+        // in PATH at all is a genuine "not found" regardless of cwd, and the
+        // virtual-cwd error would blame the wrong thing for that case. Once
+        // the command actually resolves, `real_cwd` is checked again below
+        // and the honest reason is given then (issue #181).
+        let (cwd, real_cwd) = {
             let ctx = self.exec_ctx.read().await;
-            match ctx.backend.resolve_real_path(&ctx.cwd) {
-                Some(p) => p,
-                None => return Ok(None),
-            }
+            (ctx.cwd.clone(), ctx.backend.resolve_real_path(&ctx.cwd))
         };
 
         let executable = if name.contains('/') {
@@ -5178,7 +5179,14 @@ impl Kernel {
             let resolved = if std::path::Path::new(name).is_absolute() {
                 std::path::PathBuf::from(name)
             } else {
-                real_cwd.join(name)
+                match &real_cwd {
+                    Some(real_cwd) => real_cwd.join(name),
+                    // A relative path can't be resolved without a real cwd to
+                    // join against, so we can't even tell whether it would
+                    // exist — name the actual blocker instead of a
+                    // misleading "No such file or directory".
+                    None => return Ok(Some(virtual_cwd_error(name, &cwd))),
+                }
             };
             if !resolved.exists() {
                 return Ok(Some(ExecResult::failure(
@@ -5220,6 +5228,14 @@ impl Kernel {
                 Some(path) => path,
                 None => return Ok(None), // Not found - let caller handle error
             }
+        };
+
+        // The executable resolved — found in PATH, or a path that exists and
+        // is executable — but there's still nowhere to run it without a real
+        // cwd to spawn the child process in.
+        let real_cwd = match real_cwd {
+            Some(p) => p,
+            None => return Ok(Some(virtual_cwd_error(name, &cwd))),
         };
 
         tracing::debug!(executable = %executable, "resolved external command");
