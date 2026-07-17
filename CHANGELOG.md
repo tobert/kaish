@@ -11,6 +11,21 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **Flag completion helpers in `kaish_client::completion`** —
+  `current_command(line, pos)` (which command word governs the statement
+  under the cursor) and `flag_candidates(params, word)` (canonical `--long`
+  and `-x` spellings from a tool's `ParamSchema`s; snake-case field-id
+  aliases stay reachable but aren't offered). First consumer: the
+  kaish-extras browser playground; the native REPL can adopt the same pair
+  (GH #202).
+
+### Fixed
+- `cargo test -p kaish-client` alone no longer fails the cwd test: the
+  tests assert localfs-flavored behavior and now declare `localfs` as a
+  dev-dependency feature instead of inheriting it from whichever workspace
+  sibling happened to build.
+
+### Added
 - **`kaish_client::completion`** — completion context detection
   (`CompletionContext`, `detect_completion_context`, `word_start`) extracted
   from the REPL into the client crate, so every frontend answering Tab (the

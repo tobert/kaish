@@ -34,6 +34,12 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# The runtime dep above is feature-neutral; tests assert localfs-flavored
+# behavior (transient() cwd=$HOME) and must say so themselves — without
+# this, `cargo test -p kaish-client` alone sees a no-localfs kernel while a
+# whole-workspace run gets localfs unified in by the REPL, and outcomes
+# depend on which crates happened to build.
+kaish-kernel = { path = "../kaish-kernel", version = "0.12.0", features = ["localfs"] }
 proptest = { workspace = true }
 # Tests drive the async client API; the library itself needs no runtime —
 # and must not pull one in: wasm builds (kaish-extras) break on tokio/net.

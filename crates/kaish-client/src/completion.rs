@@ -157,3 +157,127 @@ mod tests {
         assert_eq!(word_start("a | gr", 6), 4);
     }
 }
+
+// ── Flag completion ─────────────────────────────────────────────────
+
+/// Byte range of the command word governing the statement that contains
+/// `pos`, or `None` when the cursor is still inside (or before) that word —
+/// in which case command-name completion applies, not argument completion.
+///
+/// Scans back to the nearest statement boundary (`|`, `;`, `&`, `(`,
+/// newline), then walks forward past leading `VAR=…` assignments and the
+/// shell keywords that prefix a command position.
+pub fn current_command(line: &str, pos: usize) -> Option<(usize, usize)> {
+    const KEYWORDS: [&str; 7] = ["if", "then", "elif", "else", "while", "until", "do"];
+
+    let before = &line[..pos];
+    let stmt_start = before
+        .rfind(['|', ';', '&', '(', '\n'])
+        .map(|i| i + 1)
+        .unwrap_or(0);
+
+    let mut word_from = stmt_start;
+    loop {
+        // Skip whitespace to the next word.
+        let rest = &line[word_from..pos];
+        let skip = rest.len() - rest.trim_start().len();
+        let start = word_from + skip;
+        if start >= pos {
+            return None; // nothing but whitespace before the cursor
+        }
+        let end = line[start..pos]
+            .find(char::is_whitespace)
+            .map(|i| start + i)
+            .unwrap_or(pos);
+        let word = &line[start..end];
+
+        // `FOO=bar cmd` and `if cmd` — the command is still ahead.
+        if word.contains('=') || KEYWORDS.contains(&word) {
+            word_from = end;
+            continue;
+        }
+        // The cursor sitting in the command word itself is command
+        // completion's business.
+        if end >= pos {
+            return None;
+        }
+        return Some((start, end));
+    }
+}
+
+/// Flag spellings from a tool's params that extend `word` (which starts
+/// with `-`): the canonical `--long` for every non-positional param, `-x`
+/// for single-char aliases, `--alias` for visible long aliases. Snake-case
+/// field-id aliases (they contain `_`) are reachable in scripts but not
+/// offered — completion promotes canonical spellings. Sorted, deduped;
+/// display and replacement are the same string.
+pub fn flag_candidates(
+    params: &[kaish_types::tool::ParamSchema],
+    word: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in params.iter().filter(|p| !p.positional) {
+        let long = format!("--{}", p.name);
+        if long.starts_with(word) {
+            out.push(long);
+        }
+        for alias in &p.aliases {
+            if alias.contains('_') {
+                continue;
+            }
+            let spelled = if alias.chars().count() == 1 {
+                format!("-{alias}")
+            } else {
+                format!("--{alias}")
+            };
+            if spelled.starts_with(word) {
+                out.push(spelled);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[cfg(test)]
+mod flag_tests {
+    use super::*;
+    use kaish_types::tool::ParamSchema;
+
+    fn param(name: &str, aliases: &[&str], positional: bool) -> ParamSchema {
+        let mut p = ParamSchema::new(name.to_string(), "bool".to_string());
+        p.aliases = aliases.iter().map(|s| s.to_string()).collect();
+        p.positional = positional;
+        p
+    }
+
+    #[test]
+    fn test_current_command_basics() {
+        assert_eq!(current_command("uname -", 7), Some((0, 5)));
+        assert_eq!(current_command("echo hi | grep -i", 17), Some((10, 14)));
+        // Cursor still inside the command word → command completion's turf.
+        assert_eq!(current_command("unam", 4), None);
+        assert_eq!(current_command("", 0), None);
+    }
+
+    #[test]
+    fn test_current_command_skips_assignments_and_keywords() {
+        assert_eq!(current_command("FOO=1 grep -", 12), Some((6, 10)));
+        assert_eq!(current_command("if grep -q x", 12), Some((3, 7)));
+        // Nothing after the keyword/assignment yet.
+        assert_eq!(current_command("FOO=1 ", 6), None);
+    }
+
+    #[test]
+    fn test_flag_candidates_spellings() {
+        let params = vec![
+            param("no-newline", &["n", "no_newline"], false),
+            param("paths", &[], true),
+        ];
+        // Long + short offered; snake alias and positionals never.
+        assert_eq!(flag_candidates(&params, "-"), vec!["--no-newline", "-n"]);
+        assert_eq!(flag_candidates(&params, "--no"), vec!["--no-newline"]);
+        assert_eq!(flag_candidates(&params, "--x"), Vec::<String>::new());
+    }
+}
