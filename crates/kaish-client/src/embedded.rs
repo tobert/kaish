@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
 
@@ -27,7 +27,7 @@ use crate::traits::{ClientError, ClientResult, KernelClient};
 fn generate_blob_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    let timestamp = SystemTime::now()
+    let timestamp = kaish_types::clock::system_now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);

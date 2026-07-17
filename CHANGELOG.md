@@ -10,6 +10,13 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`kaish_client::completion`** — completion context detection
+  (`CompletionContext`, `detect_completion_context`, `word_start`) extracted
+  from the REPL into the client crate, so every frontend answering Tab (the
+  rustyline REPL, the kaish-extras browser playground, embedders) shares one
+  detector; the REPL now consumes it. `EmbeddedClient` is also browser-safe:
+  its blob-id timestamp goes through `kaish_types::clock`.
 ### Removed
 - **BREAKING:** `output_limit::spill_aware_collect` and its private helpers
   (`collect_stderr`, `collect_stdout_with_spill`, `handle_overflow`,
