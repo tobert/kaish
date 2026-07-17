@@ -4,8 +4,11 @@ Status: read access, `keys`/`values`, membership, shape guards, the shared
 per-hop path resolver, **list/record literals + spread**, and **bracket-path
 assignment + `push`** are SHIPPED (see `docs/LANGUAGE.md` Collections
 section). Bracket-path `push` (a subscripted target, e.g. `push
-services[web][tags] item`) remains deferred — only a top-level bareword
-target ships (see `docs/issues.md`). **The Teaching note #8 pre-sign-off panel
+services[web][tags] item`) **shipped 2026-07-17 (GH #183)** — the lexer
+recognizes `push`'s target with its own independent trigger (the target has
+no trailing `=` to key off the way an assignment lvalue does; see
+`lexer::PushTarget`), and `Scope::walk_append` walks the path the same way
+`walk_write` does (no autoviv, same bounds/shape rules). **The Teaching note #8 pre-sign-off panel
 re-test against the FINAL surface is DONE (2026-07-03)** — 18/18 clean across
 DeepSeek, Gemini, and Claude Haiku, including immediate, unprompted
 convergence on `$(keys $servers)`/`$(values ...)` in the for-head (the
@@ -182,20 +185,15 @@ docs/issues.md entries were simply never updated:
   pre-existing, general arithmetic gap unrelated to path-nesting — see `docs/issues.md`
   P4). `$(( xs[i] ))` variable-subscript reads work fine; only the `${#…}` spelling is
   unsupported there.
-- **Bracket-path `push` target** (`push services[web][tags] item`) — **confirmed, still
-  open.** `push` only accepts a top-level bareword target; a bracket path fuses into a
-  glob word and fails loudly (`no matches: services[web][tags]`) before `push` runs.
-  Workaround — read the nested list out, push, assign it back:
-  ```sh
-  tmp=${services[web][tags]}
-  push tmp item
-  services[web][tags]=$tmp
-  ```
-  Tracked as a real gap in `docs/issues.md` (P3, "Bracket-path `push` target"); needs its
-  own lexer/parser pass (a `push`-aware trigger, or routing `push`'s target through the
-  argv-position bracket-path grammar) before it can close.
-
-See also `help collections` for the same limitation in cheat-sheet form.
+- **Bracket-path `push` target** (`push services[web][tags] item`) — **FIXED (GH #183,
+  2026-07-17).** The lexer recognizes `push`'s target with its own independent trigger
+  (`lexer::PushTarget`) — parallel to, but never integrated into, the assignment DFA, so a
+  variable literally named `push` (`push=5`) still works unchanged — and fuses
+  `services[web][tags]` verbatim into a path instead of a glob word.
+  `Scope::walk_append` now accepts a full `VarPath`: a bareword target still appends to a
+  top-level list; a bracket-path target walks to the nested container the same way
+  `walk_write` does (no autoviv on intermediates) and appends at the resolved leaf. The
+  old read/push/assign-back workaround is no longer necessary but still works.
 
 ## Decisions, and the evidence behind them
 

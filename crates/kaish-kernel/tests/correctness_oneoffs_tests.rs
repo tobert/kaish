@@ -102,3 +102,42 @@ async fn jq_finite_division_still_works() {
     assert_eq!(code, 0, "got: {out}");
     assert_eq!(out, "3");
 }
+
+// ──────────── interpolated arithmetic error swallow (GH #183) ────────────
+
+#[tokio::test]
+async fn interpolated_arithmetic_division_by_zero_is_loud() {
+    // `"$((1/0))"` inside a double-quoted string used to silently splice in
+    // an EMPTY string — the async string-interpolation evaluator's
+    // `StringPart::Arithmetic` arm discarded the error entirely
+    // (`Err(_) => Ok(String::new())`) — so `echo "value: $((1/0))"` printed
+    // "value: " at exit 0 instead of failing. The bare (non-string) form
+    // `echo $((1/0))` already failed loud; this brought the interpolated
+    // form in line with it.
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(tmp.path());
+    let result = kernel
+        .execute(r#"echo "value: $((1/0))""#)
+        .await
+        .expect("kernel execute");
+    assert_ne!(
+        result.code, 0,
+        "division by zero inside a string must fail loudly, not silently splice in \"\""
+    );
+    assert!(
+        result.err.contains("division by zero"),
+        "got: {}",
+        result.err
+    );
+}
+
+#[tokio::test]
+async fn interpolated_arithmetic_still_works_for_valid_expressions() {
+    // Regression guard: the loud-error fix must not disturb the ordinary
+    // (non-erroring) interpolated-arithmetic path.
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(tmp.path());
+    let (out, code) = run(&kernel, r#"echo "value: $((2 + 2))""#).await;
+    assert_eq!(code, 0, "got: {out}");
+    assert_eq!(out, "value: 4");
+}

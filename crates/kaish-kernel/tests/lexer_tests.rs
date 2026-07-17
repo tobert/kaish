@@ -842,3 +842,106 @@ fn lexer_bare_char_class_operand_before_eq_still_fuses() {
         "LBRACK", "LBRACK", "GLOB([a])", "EQ", "IDENT(b)", "RBRACK", "RBRACK",
     ]);
 }
+
+// =============================================================================
+// `push`'s bracket-path TARGET (`push services[web][tags] item`): fused
+// verbatim into a single `Ident` — never a `GlobWord` to glob-expand — by a
+// THIRD, independent trigger (`PushTarget`, `flush_glob_run`'s `push_target`
+// parameter). The target has no trailing `=` to key off the way an
+// assignment lvalue does, so it needs its own recognition. See GH #183,
+// docs/arrays-and-hashes.md ("Append — push").
+// =============================================================================
+
+#[rstest]
+#[case::nested_keys(
+    "push services[web][tags] item",
+    &["IDENT(push)", "IDENT(services[web][tags])", "IDENT(item)"]
+)]
+#[case::single_index("push xs[0]", &["IDENT(push)", "IDENT(xs[0])"])]
+#[case::bareword_target_unaffected("push xs c", &["IDENT(push)", "IDENT(xs)", "IDENT(c)"])]
+fn lexer_push_bracket_target_fused_verbatim(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+/// `push` used as a plain variable name (`push=5`) is unaffected — the
+/// tracker is independent of the assignment DFA and never steals its
+/// lvalue-root slot.
+#[test]
+fn lexer_push_as_variable_name_unaffected() {
+    run_lexer_test("push=5", &["IDENT(push)", "EQ", "INT(5)"]);
+}
+
+/// `push` as a plain bareword ARGUMENT to another command (not the command
+/// word itself, so not at statement head) must not trigger the tracker.
+#[test]
+fn lexer_push_as_bareword_argument_unaffected() {
+    run_lexer_test("echo push xs", &["IDENT(echo)", "IDENT(push)", "IDENT(xs)"]);
+}
+
+/// A pushed VALUE that itself looks like a bracket path keeps globbing as
+/// before — only the first word right after `push` is the target.
+#[test]
+fn lexer_push_value_after_target_still_globs() {
+    run_lexer_test(
+        "push xs values[0]",
+        &["IDENT(push)", "IDENT(xs)", "GLOB(values[0])"],
+    );
+}
+
+/// A variable literally named `push`, GLUED to a bracket subscript and
+/// assigned (`push[0]=x`), is unaffected by the target tracker: seeing
+/// `push` at statement-head sets `PushTarget::AwaitingRoot`, but the very
+/// next token here is `LBracket`, not `Ident` — `AwaitingRoot`'s only
+/// transition arm requires an `Ident` — so the tracker falls through to its
+/// catch-all reset (`PushTarget::None`) and never suppresses this run.
+/// The ordinary `=`-followed lvalue trigger (`followed_by_eq`, entirely
+/// independent of `PushTarget`) still recognizes `push[0]` as an assignment
+/// lvalue on its own, exactly like any other identifier.
+#[test]
+fn lexer_push_named_variable_bracket_assignment_unaffected() {
+    run_lexer_test(
+        "push[0]=x",
+        &["IDENT(push)", "LBRACK", "INT(0)", "RBRACK", "EQ", "IDENT(x)"],
+    );
+}
+
+/// `push` immediately after a pipe is still the command word — a pipe is a
+/// statement boundary, so both `StmtHead` and the independent `PushTarget`
+/// tracker reset to `Start`/`None` there, and `push`'s target-fusion trigger
+/// re-arms cleanly on the far side.
+#[test]
+fn lexer_push_bracket_target_after_pipe() {
+    run_lexer_test(
+        "echo x | push xs[0] item",
+        &[
+            "IDENT(echo)", "IDENT(x)", "PIPE",
+            "IDENT(push)", "IDENT(xs[0])", "IDENT(item)",
+        ],
+    );
+}
+
+/// Same reset, via `;` instead of a pipe.
+#[test]
+fn lexer_push_bracket_target_after_semicolon() {
+    run_lexer_test(
+        "echo x; push xs[0] item",
+        &[
+            "IDENT(echo)", "IDENT(x)", "SEMI",
+            "IDENT(push)", "IDENT(xs[0])", "IDENT(item)",
+        ],
+    );
+}
+
+/// Same reset, via `&&` — a bareword `push` right after a chain operator is
+/// still recognized as the command word, not swallowed by whatever DFA state
+/// the left-hand command left behind.
+#[test]
+fn lexer_push_bracket_target_after_and_chain() {
+    run_lexer_test(
+        "true && push xs[0] item",
+        &[
+            "BOOL(true)", "AMPAMP",
+            "IDENT(push)", "IDENT(xs[0])", "IDENT(item)",
+        ],
+    );
+}
