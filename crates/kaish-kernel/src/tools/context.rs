@@ -640,28 +640,10 @@ impl ExecContext {
         self.prev_cwd.as_ref()
     }
 
-    /// Read all stdin (pipe or buffered bytes) into a String, lossily
-    /// decoding invalid UTF-8 with `U+FFFD` rather than erroring.
-    ///
-    /// Prefers pipe_stdin if set (streaming pipeline), otherwise falls back
-    /// to the buffered stdin bytes. Consumes the source. Most text-only
-    /// builtins should prefer [`Self::read_stdin_to_text`] instead, which
-    /// refuses binary loudly rather than mangling it.
-    pub async fn read_stdin_to_string(&mut self) -> Option<String> {
-        if let Some(mut reader) = self.pipe_stdin.take() {
-            use tokio::io::AsyncReadExt;
-            let mut buf = Vec::new();
-            reader.read_to_end(&mut buf).await.ok()?;
-            Some(String::from_utf8_lossy(&buf).into_owned())
-        } else {
-            self.stdin.take().map(|b| String::from_utf8_lossy(&b).into_owned())
-        }
-    }
-
     /// Read stdin as text, erroring on non-UTF-8 instead of silently
     /// lossy-decoding it (which corrupts binary with `U+FFFD`).
     ///
-    /// The strict counterpart to [`Self::read_stdin_to_string`], for text-only
+    /// The strict counterpart to [`Self::read_stdin_to_bytes`], for text-only
     /// builtins (`grep`, `sed`, `awk`, `cut`, `sort`, `jq`, …): a binary stream
     /// is a loud error, not a mangle. Returns `Ok(None)` when there is no stdin
     /// at all. The `Err` is a ready-to-use message; callers prefix their name.
@@ -679,7 +661,7 @@ impl ExecContext {
 
     /// Read all of stdin as raw bytes, preserving binary intact.
     ///
-    /// The byte-clean counterpart to [`Self::read_stdin_to_string`], for
+    /// The byte-clean counterpart to [`Self::read_stdin_to_text`], for
     /// binary-aware builtins (`base64`, `xxd`, `checksum`, `wc -c`, `cmp`, …).
     /// Returns `None` when there is no stdin at all (no pipe and no buffer);
     /// an empty pipe yields `Some(vec![])`. The buffered source is already

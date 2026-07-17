@@ -152,3 +152,56 @@ async fn execute_options_with_stdin_text_str_is_unaffected() {
     assert!(result.ok(), "err={}", result.err);
     assert_eq!(result.text_out(), "hello\n");
 }
+
+// ── `xxd -r` regression: a `< file` redirect newly reaches binary content
+// (see above), and `xxd -r` must refuse it loudly rather than lossy-decoding
+// it — found via a second review pass over this PR. ──
+
+#[tokio::test]
+async fn redirect_stdin_binary_file_xxd_reverse_errors_loud_not_lossy() {
+    // `xxd -r` consumes hex TEXT. Before this PR's stdin fix, a `< file`
+    // redirect over binary content couldn't even reach `xxd` (redirect setup
+    // itself rejected non-UTF-8, so this exact bug was unreachable). Now that
+    // redirects carry bytes through intact, `xxd -r` must refuse loud on its
+    // own instead of `String::from_utf8_lossy`-ing BIN into `U+FFFD` and
+    // silently mis-decoding the (wrong) "hex".
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let result = kernel.execute("xxd -r -p < src.bin").await.unwrap();
+    assert!(!result.ok(), "xxd -r on binary input must fail loud, not lossy-decode it");
+    assert!(
+        result.err.contains("not valid UTF-8"),
+        "error should name the binary problem, got err={:?}",
+        result.err
+    );
+}
+
+#[tokio::test]
+async fn xxd_reverse_file_path_binary_input_errors_loud() {
+    // Same guard, exercised via a binary *file path* operand rather than
+    // stdin — both sources funnel through the same `data: Vec<u8>` read in
+    // `xxd.rs` before the reverse-mode decode, so this was an equally live
+    // (pre-existing, not GH #176-introduced) lossy-decode hazard.
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let result = kernel.execute("xxd -r -p src.bin").await.unwrap();
+    assert!(!result.ok(), "xxd -r on a binary file must fail loud, not lossy-decode it");
+    assert!(result.err.contains("not valid UTF-8"), "err={:?}", result.err);
+}
+
+#[tokio::test]
+async fn xxd_forward_reverse_round_trip_is_unaffected() {
+    // Happy-path pin: an ordinary forward-then-reverse round trip through a
+    // pipeline (valid hex text, not a binary source) must keep working
+    // exactly as before the strict-decode guard was added.
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let result = kernel.execute("echo -n hello | xxd -p | xxd -r -p").await.unwrap();
+    assert!(result.ok(), "err={}", result.err);
+    assert_eq!(result.text_out(), "hello");
+}

@@ -275,7 +275,7 @@ impl BackendDispatcher {
             }
         }
 
-        // Stdin: pipe_stdin or buffered string or inherit (interactive) or null
+        // Stdin: pipe_stdin or buffered bytes or inherit (interactive) or null
         cmd.stdin(if has_pipe_stdin || has_buffered_stdin {
             std::process::Stdio::piped()
         } else if ctx.interactive && matches!(ctx.pipeline_position, PipelinePosition::First | PipelinePosition::Only) {

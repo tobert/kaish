@@ -119,8 +119,23 @@ impl Tool for Xxd {
         };
 
         if reverse {
-            // Hex input is ASCII; a lossy view is lossless here. Output is bytes.
-            return reverse_hex(&String::from_utf8_lossy(&data), plain);
+            // Reverse mode consumes hex TEXT, not raw bytes: a loud error on
+            // invalid UTF-8, never a lossy decode. `String::from_utf8_lossy`
+            // here would turn an invalid byte run into `U+FFFD`, which
+            // `reverse_hex` then silently drops as non-hex filler — real
+            // binary fed to `-r` (a `< binfile` redirect, or a binary file
+            // path) would corrupt or truncate the decoded bytes without ever
+            // raising an error. This applies uniformly to both input sources
+            // above (file path and stdin), since both funnel into the same
+            // `data: Vec<u8>` before this check.
+            return match std::str::from_utf8(&data) {
+                Ok(s) => reverse_hex(s, plain),
+                Err(_) => ExecResult::failure(
+                    2,
+                    "xxd: -r input is not valid UTF-8 (binary data, not a hex dump?) \
+                     — -r expects hex text, not raw bytes",
+                ),
+            };
         }
 
         // Forward: produce hex dump from the raw bytes.

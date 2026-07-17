@@ -1698,15 +1698,15 @@ impl Kernel {
 
     /// Execute with a **lazy** standard input fed as a [`PipeReader`].
     ///
-    /// Unlike [`ExecuteOptions::with_stdin`] (a pre-read `String`), this never
+    /// Unlike [`ExecuteOptions::with_stdin`] (a pre-read buffer), this never
     /// forces the input to be drained before execution: the reader seeds the
     /// first top-level command's `pipe_stdin`, and a command that does not read
     /// stdin (`echo`) returns without touching it. This is the seam a
     /// non-interactive frontend uses to forward an *open* process stdin without
     /// hanging on a pipe that never sends EOF (`sleep 10 | kaish -c 'echo hi'`).
     ///
-    /// Embedders that already hold a complete buffer should prefer the simpler
-    /// [`ExecuteOptions::with_stdin`] String path.
+    /// Embedders that already hold a complete buffer (text or binary) should
+    /// prefer the simpler [`ExecuteOptions::with_stdin`] path instead.
     pub async fn execute_with_pipe_stdin(
         &self,
         input: &str,
