@@ -45,6 +45,14 @@ breaking entries are marked **BREAKING**.
   into the bare-word token text, leaving no `)` for the branch parser to
   find — the dash/plus bare-word tokens now stop at unquoted shell operators
   (`()|&;<>`) instead of running to the next whitespace.
+- **External-command output that overflows the 10MB capture buffer with
+  output limiting off now fails loudly** (GH #191) instead of silently
+  dropping the head: exit code 3, plus a stderr marker naming the bytes lost
+  and total written. Previously `BoundedStream`'s ring tracked the eviction
+  internally but nothing ever surfaced it, so a >10MB external stdout (the
+  repl/embedded/test default has output limiting off) reported clean success
+  with its head quietly gone. The marker always lands in stderr, never
+  prepended into stdout, since stdout may be binary.
 - **Bare `${X:-${Y}}` works** (GH #173) — a nested braced reference in a
   default word outside quotes was a parse error (the `VarRef` token stopped at
   the first `}`); the reference now extends to the balanced closing brace,

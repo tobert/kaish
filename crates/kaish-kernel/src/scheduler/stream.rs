@@ -146,6 +146,18 @@ impl BoundedStream {
         self.len().await == 0
     }
 
+    /// Whether this stream has ever evicted data due to overflow.
+    ///
+    /// `write` silently drops the oldest bytes once the ring fills — this is
+    /// the hot-path check capture sites use to detect that loss so they can
+    /// surface it instead of reporting clean success (GH #191). Equivalent to
+    /// `stats().await.bytes_evicted > 0`, but avoids building the full
+    /// `StreamStats` when the caller only needs the boolean.
+    pub async fn has_overflowed(&self) -> bool {
+        let inner = self.inner.read().await;
+        inner.bytes_evicted > 0
+    }
+
     /// Get stream statistics.
     pub async fn stats(&self) -> StreamStats {
         let inner = self.inner.read().await;
@@ -180,6 +192,28 @@ pub struct StreamStats {
     pub bytes_evicted: u64,
     /// Whether the stream is closed.
     pub closed: bool,
+}
+
+impl StreamStats {
+    /// Build a loud marker describing this stream's overflow. Call only when
+    /// `bytes_evicted > 0` — the caller is expected to gate on
+    /// [`BoundedStream::has_overflowed`] first.
+    ///
+    /// `label` names the stream ("stdout"/"stderr") in the marker text.
+    /// Centralized here — not hand-written at each capture site — so the two
+    /// external-command spawn sites that must stay in sync
+    /// (`kernel.rs::try_execute_external` and the test-only twin
+    /// `dispatch.rs::BackendDispatcher::try_external`, see CLAUDE.md's "two
+    /// spawn sites" gotcha) can't drift in wording (GH #191).
+    pub fn overflow_marker(&self, label: &str) -> String {
+        let max_mb = self.max_size as f64 / (1024.0 * 1024.0);
+        format!(
+            "[{label} truncated: output exceeded the {max_mb:.0}MB capture buffer \
+             — first {} bytes lost ({} bytes total written); enable output-limit \
+             to spill to disk]\n",
+            self.bytes_evicted, self.total_written,
+        )
+    }
 }
 
 /// Drain an async reader into a bounded stream.
@@ -332,5 +366,40 @@ mod tests {
         let stream = BoundedStream::default_size();
         let stats = stream.stats().await;
         assert_eq!(stats.max_size, DEFAULT_STREAM_MAX_SIZE);
+    }
+
+    #[tokio::test]
+    async fn test_has_overflowed() {
+        let stream = BoundedStream::new(10);
+        assert!(!stream.has_overflowed().await, "empty stream has not overflowed");
+
+        stream.write(b"1234567890").await;
+        assert!(
+            !stream.has_overflowed().await,
+            "exactly filling the buffer is not an overflow"
+        );
+
+        stream.write(b"more").await; // forces eviction of the oldest 4 bytes
+        assert!(
+            stream.has_overflowed().await,
+            "writing past capacity must flip has_overflowed"
+        );
+    }
+
+    #[test]
+    fn test_overflow_marker_wording() {
+        let stats = StreamStats {
+            current_size: 10 * 1024 * 1024,
+            max_size: 10 * 1024 * 1024,
+            total_written: 15 * 1024 * 1024,
+            bytes_evicted: 5 * 1024 * 1024,
+            closed: true,
+        };
+        let marker = stats.overflow_marker("stdout");
+        assert!(marker.starts_with("[stdout truncated:"), "got: {marker}");
+        assert!(marker.contains("10MB"), "got: {marker}");
+        assert!(marker.contains(&(5 * 1024 * 1024).to_string()), "got: {marker}");
+        assert!(marker.contains(&(15 * 1024 * 1024).to_string()), "got: {marker}");
+        assert!(marker.contains("output-limit"), "got: {marker}");
     }
 }

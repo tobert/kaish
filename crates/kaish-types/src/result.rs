@@ -170,10 +170,13 @@ pub struct ExecResult {
     /// the public accessors below hand back plain `OutputData`/`&OutputData`, so
     /// the boxing never leaks (GH #48, item 5).
     output: Option<Box<OutputData>>,
-    /// True if the output limiter capped this result. Either the overflow was
-    /// written to a disk spill file (the `out` message carries the path) or it
-    /// was truncated in memory (Memory spill mode — head+tail only, no
-    /// recoverable file). Both cases remap the exit code to 3.
+    /// True if output was capped and lost data. Either the output limiter
+    /// spilled the overflow to disk (the `out` message carries the path),
+    /// truncated it in memory (Memory spill mode — head+tail only, no
+    /// recoverable file), or an external command's stdout overflowed its
+    /// fixed-size capture ring with output limiting off (GH #191) — the
+    /// capture buffer evicted its head with no spill file at all. All cases
+    /// remap the exit code to 3.
     pub did_spill: bool,
     /// The command's original exit code before spill logic overwrote it with 2 or 3.
     /// Present only when `did_spill` is true and `code` was changed.

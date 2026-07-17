@@ -5577,8 +5577,36 @@ impl Kernel {
             // result, so `curl url`, `curl url > file.bin`, etc. keep binary
             // intact. stderr stays text. See docs/binary-data.md.
             let stdout = stdout_stream.read().await;
-            let stderr = stderr_stream.read_string().await;
+            let mut stderr = stderr_stream.read_string().await;
             let mut result = ExecResult::success_text_or_bytes(stdout).with_code(code);
+
+            // Both streams are fixed-size rings regardless of `ctx.output_limit`
+            // (that machinery only runs post-hoc, in `execute_pipeline`, and only
+            // when enabled). With the limit disabled — the repl/embedded/test
+            // default — an overflow here used to be silent: `write` evicted the
+            // oldest bytes and bumped `bytes_evicted`, but nothing ever read that
+            // counter, so a >10MB stdout reported clean success with its head
+            // quietly gone (GH #191). Surface it loudly instead.
+            if stderr_stream.has_overflowed().await {
+                let stats = stderr_stream.stats().await;
+                stderr = format!("{}{stderr}", stats.overflow_marker("stderr"));
+            }
+            if stdout_stream.has_overflowed().await {
+                // The marker goes in stderr, never prepended into `result`'s
+                // stdout payload: stdout may be binary
+                // (`success_text_or_bytes` yields a `Bytes` result for
+                // non-UTF-8 data — e.g. `curl` fetching a >10MB binary), and
+                // string-formatting a marker into it would lossily reinterpret
+                // bytes as text, introducing a SECOND, different kind of
+                // corruption on top of the eviction itself.
+                //
+                // Only stdout overflow flips `did_spill` — exit-code integrity
+                // tracks stdout, matching the enabled-limit path's contract
+                // (stderr overflow alone doesn't remap the exit code).
+                let stats = stdout_stream.stats().await;
+                stderr = format!("{}{stderr}", stats.overflow_marker("stdout"));
+                result.did_spill = true;
+            }
             result.err = stderr;
             Ok(Some(result))
         }
@@ -7589,17 +7617,50 @@ AFTER="yes"'"#)
         // Schedule cancel after a short delay from a background OS thread
         schedule_cancel(&kernel, std::time::Duration::from_millis(10));
 
-        let result = kernel
-            .execute("for i in $(seq 1 100000); do X=$i; done")
+        // #149: a bare `X=$i` body has no await point, so the for-loop's
+        // cancellation checkpoint (checked once per iteration, see the
+        // `Stmt::For` arm above) never gets a chance to run mid-body — under
+        // host load, 100_000 trivial iterations could complete and return
+        // before the background thread's 10ms sleep ever elapsed, racing a
+        // natural exit-0 completion against the scheduled cancel. Rather than
+        // widen the margin (there's no bound on how slow "under load" can be),
+        // make completion deterministically impossible inside the test
+        // window: `sleep` is a real interruptible await point (it races
+        // `tokio::time::sleep` against the same cancellation token — see
+        // `tools/builtin/sleep.rs`), so a per-iteration sleep both gives
+        // cancellation somewhere to land almost immediately AND, at enough
+        // iterations, makes natural completion take far longer than the
+        // bounded wait below. The outer timeout is the "must not hang CI if
+        // cancellation is broken" backstop: it fails loudly well before the
+        // loop could ever finish on its own.
+        const ITERATIONS: u32 = 2000;
+        const PER_ITERATION_SLEEP_SECS: f64 = 0.05;
+        let bound = std::time::Duration::from_secs(10);
+        let script = format!("for i in $(seq 1 {ITERATIONS}); do X=$i; sleep {PER_ITERATION_SLEEP_SECS}; done");
+
+        let result = tokio::time::timeout(bound, kernel.execute(&script))
             .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "for-loop did not return within {bound:?} — cancellation support looks \
+                     broken (an uncancelled loop needs ~{:.0}s to finish on its own, far \
+                     longer than this bound)",
+                    ITERATIONS as f64 * PER_ITERATION_SLEEP_SECS
+                )
+            })
             .expect("execute failed");
 
         assert_eq!(result.code, 130, "cancelled execution should exit with code 130");
 
-        // The loop variable should be set to something < 100000
+        // The loop variable should be set to something well short of the full
+        // iteration count — i.e. cancellation landed long before the loop
+        // could complete on its own.
         let x = kernel.get_var("X").await;
         if let Some(Value::Int(n)) = x {
-            assert!(n < 100000, "loop should have been interrupted before finishing, got X={n}");
+            assert!(
+                n < i64::from(ITERATIONS),
+                "loop should have been interrupted before finishing, got X={n}"
+            );
         }
     }
 
