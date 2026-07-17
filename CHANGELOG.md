@@ -10,6 +10,12 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Changed
+- **`uname -o` (and the tail of `uname -a`) now reports `kai`** instead of
+  `Kaijutsu` — the shell's identity belongs to kaish itself, not to one
+  embedder. Scripts detecting the platform should match `kai` (sysname is
+  still `kaish`, unchanged).
+
 ### Fixed
 - **Bare `${X:-${Y}}` works** (GH #173) — a nested braced reference in a
   default word outside quotes was a parse error (the `VarRef` token stopped at
