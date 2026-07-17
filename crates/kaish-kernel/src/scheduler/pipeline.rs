@@ -1851,6 +1851,143 @@ mod tests {
         );
     }
 
+    /// GH #189 item 1: pin the CURRENT (pre-`--`) behavior first — a
+    /// word-assign-accepting tool (`export`, keyed off the root schema name)
+    /// binds a bare `key=value` as a named assignment. This is unchanged by
+    /// the fix below; only the post-`--` case changes.
+    #[tokio::test]
+    async fn word_assign_before_double_dash_binds_named_for_export() {
+        let args = vec![Arg::WordAssign {
+            key: "A".to_string(),
+            value: Expr::Literal(Value::String("1".to_string())),
+        }];
+        let schema = ToolSchema::new("export", "export");
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
+        assert_eq!(tool_args.named.get("A"), Some(&Value::String("1".to_string())));
+        assert!(tool_args.positional.is_empty());
+    }
+
+    /// GH #189 item 1: `export -- A=1` must NOT bind `A=1` as a named
+    /// assignment — `--` marks everything after it as literal data, and the
+    /// WordAssign arm used to ignore `past_double_dash` entirely (only the
+    /// flag arms checked it). Before the fix, this test's ONLY visible
+    /// difference from the one above was replacing `WordAssign` with
+    /// `[DoubleDash, WordAssign]` — the fix degrades the value to a
+    /// stringified `"A=1"` positional instead, matching how every other
+    /// tool treats a `key=value` after `--`.
+    #[tokio::test]
+    async fn word_assign_after_double_dash_is_positional_even_for_export() {
+        let args = vec![
+            Arg::DoubleDash,
+            Arg::WordAssign {
+                key: "A".to_string(),
+                value: Expr::Literal(Value::String("1".to_string())),
+            },
+        ];
+        let schema = ToolSchema::new("export", "export");
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
+        assert!(
+            tool_args.named.is_empty(),
+            "past `--`, A=1 must not become a named assignment: {:?}",
+            tool_args.named
+        );
+        assert_eq!(tool_args.positional, vec![Value::String("A=1".to_string())]);
+    }
+
+    /// GH #189 item 3: `--flag=true` on an UNDECLARED flag (this is exactly
+    /// `--json`'s situation — `clap_schema::is_skipped` deliberately excludes
+    /// it from every builtin's reflected schema) must flagify at bind time:
+    /// land in `flags`, not `named` as a literal `Value::Bool` a clap `bool`
+    /// field's `SetTrue` action rejects (`seq --json=true` used to exit 2).
+    /// Before this fix, only the ~20 builtins that called
+    /// `ToolArgs::flagify_bool_named` themselves got this normalization.
+    #[tokio::test]
+    async fn named_true_on_undeclared_flag_flagifies() {
+        let args = vec![Arg::Named {
+            key: "json".to_string(),
+            value: Expr::Literal(Value::Bool(true)),
+        }];
+        let schema = make_test_schema(); // declares query/limit/verbose/output, not "json"
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
+        assert!(tool_args.flags.contains("json"), "flags: {:?}", tool_args.flags);
+        assert!(!tool_args.named.contains_key("json"), "named: {:?}", tool_args.named);
+    }
+
+    /// `--flag=false` on an undeclared flag drops entirely — absence and
+    /// explicit false are the same thing, matching `ToolArgs::flagify_bool_named`.
+    #[tokio::test]
+    async fn named_false_on_undeclared_flag_drops() {
+        let args = vec![Arg::Named {
+            key: "json".to_string(),
+            value: Expr::Literal(Value::Bool(false)),
+        }];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
+        assert!(!tool_args.flags.contains("json"));
+        assert!(!tool_args.named.contains_key("json"));
+    }
+
+    /// A schema-DECLARED bool param (`verbose`) behaves the same as an
+    /// undeclared one: `--verbose=true` flagifies instead of landing in
+    /// `named`.
+    #[tokio::test]
+    async fn named_true_on_declared_bool_param_flagifies() {
+        let args = vec![Arg::Named {
+            key: "verbose".to_string(),
+            value: Expr::Literal(Value::Bool(true)),
+        }];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
+        assert!(tool_args.flags.contains("verbose"));
+        assert!(!tool_args.named.contains_key("verbose"));
+    }
+
+    /// A schema-declared VALUE-taking flag's own `=true` literal
+    /// (`spawn --command=true`, `output` here — both string-typed in
+    /// `make_test_schema`) must NOT flagify — `true` is the flag's actual
+    /// value, not a bool-flag presence marker, and clap's `Option<String>`
+    /// field for it accepts `--output=true` fine.
+    #[tokio::test]
+    async fn named_true_on_declared_value_flag_keeps_value() {
+        let args = vec![Arg::Named {
+            key: "output".to_string(),
+            value: Expr::Literal(Value::Bool(true)),
+        }];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
+        assert_eq!(tool_args.named.get("output"), Some(&Value::Bool(true)));
+        assert!(!tool_args.flags.contains("output"));
+    }
+
+    /// The fix must not depend on a schema being present at all — a
+    /// completely schemaless invocation (`schema=None`, e.g. a shell
+    /// function call) sees an empty `param_lookup`, so `--flag=true` still
+    /// flagifies rather than landing in `named`.
+    #[tokio::test]
+    async fn named_true_with_no_schema_flagifies() {
+        let args = vec![Arg::Named {
+            key: "verbose".to_string(),
+            value: Expr::Literal(Value::Bool(true)),
+        }];
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, None).await.expect("build_tool_args");
+        assert!(tool_args.flags.contains("verbose"));
+        assert!(!tool_args.named.contains_key("verbose"));
+    }
+
     #[tokio::test]
     async fn test_no_schema_fallback() {
         // Without schema, all --flags are treated as bool flags
@@ -1918,6 +2055,77 @@ mod tests {
             tool_args.named.get("query"),
             Some(&Value::String("value".to_string()))
         );
+    }
+
+    /// GH #189 item 4: the SAME ambiguity guard as
+    /// `test_unknown_flag_ambiguous_space_value_now_errors_loud` above, but
+    /// for an undeclared SHORT flag. Before the fix, an undeclared short
+    /// flag under a `map_positionals` schema always defaulted to a bare bool
+    /// (`is_bool = lookup.map(...).unwrap_or(true)`), silently divorcing the
+    /// following positional's value (`-t explorer` → flag "t" set, "explorer"
+    /// mapped onto the first unfilled param instead of "t"'s value) — the
+    /// long-flag half of this was closed by GH #188; this closes the
+    /// short-flag half.
+    #[tokio::test]
+    async fn test_unknown_short_flag_ambiguous_space_value_now_errors_loud() {
+        let args = vec![
+            Arg::ShortFlag("t".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("value".to_string()))),
+        ];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let err = build_tool_args(&args, &ctx, Some(&schema))
+            .await
+            .expect_err("an undeclared short flag immediately before a positional must be ambiguous, not silently bool");
+        assert!(
+            err.contains("-t is not a declared flag"),
+            "got: {err}"
+        );
+    }
+
+    /// The unambiguous half: an undeclared short flag with nothing after it
+    /// can't be silently swallowing a positional, so it still defaults to a
+    /// bare bool flag.
+    #[tokio::test]
+    async fn test_unknown_short_bool_flag_with_no_following_positional_is_fine() {
+        let args = vec![
+            Arg::Positional(Expr::Literal(Value::String("value".to_string()))),
+            Arg::ShortFlag("t".to_string()),
+        ];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
+
+        assert!(tool_args.flags.contains("t"));
+        assert!(tool_args.positional.is_empty(), "value consumed as query param");
+        assert_eq!(
+            tool_args.named.get("query"),
+            Some(&Value::String("value".to_string()))
+        );
+    }
+
+    /// The guard is specific to `map_positionals` (backend/MCP) schemas — a
+    /// builtin (no `map_positionals`) keeps the pre-existing behavior of
+    /// treating an undeclared short flag as bare bool, since a builtin
+    /// handles its own positionals rather than relying on this ambiguity
+    /// class at all.
+    #[tokio::test]
+    async fn test_unknown_short_flag_not_ambiguous_without_map_positionals() {
+        let args = vec![
+            Arg::ShortFlag("t".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("value".to_string()))),
+        ];
+        // A builtin-shaped schema: same params as make_test_schema but no
+        // positional mapping.
+        let schema = ToolSchema::new("test-tool", "A test tool")
+            .param(ParamSchema::required("query", "string", "Search query"));
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
+        assert!(tool_args.flags.contains("t"));
+        assert_eq!(tool_args.positional, vec![Value::String("value".to_string())]);
     }
 
     #[tokio::test]

@@ -15,6 +15,76 @@ before it ships.
 
 ---
 
+## Arg-binding polish: four small gaps, one shared core (2026-07-17, GH #189)
+
+Sequenced right after #188/#231 merged the sync/async arg binders into one
+`bind_tool_args` core specifically so this punch list would land once instead
+of twice. Each of the four items was re-verified against the merged code
+before touching anything, since the issue predated #215/#221/#224 too — two
+of the four turned out to need a different fix than the issue's own text
+suggested, and one uncovered a sharper bug than expected.
+
+**Post-`--` `WordAssign`.** The `Arg::WordAssign` arm checked `accepts_word_assign`
+(the export/alias/unalias allowlist) but never `past_double_dash` — only the
+flag arms checked that. `export -- A=1` still bound `A=1` as a named
+assignment. Chasing down whether this was actually *observable* (export and
+alias both defensively read `args.named` **and** `args.positional`, so the
+export/alias examples in the issue text turn out functionally harmless either
+way) led to `unalias`, which is on the same allowlist for symmetry but never
+reads `args.named` at all — it reconstructs argv via `to_argv()` and re-parses
+with clap. A lingering named entry renders as a flag token (`--foo=bar`)
+`UnaliasArgs` never declares, so `unalias -- foo=bar` crashed with clap's
+"unexpected argument" error instead of treating `foo=bar` as a literal (if
+odd) alias name to remove. Fix: `accepts_word_assign && !past_double_dash`.
+
+**`--flag=true` flagify.** Confirmed live: `seq --json=true 1 3` exits 2
+today. The issue's own suggested fix ("flagify once in the kernel before
+dispatch") pointed at a post-hoc pass over the built `ToolArgs`, but that
+would also catch `export A=true` (a `WordAssign`, not a `--flag=` token) and
+silently turn a real assignment into a bare flag — a regression the pipeline
+tests would never have caught since none exercise that shape. Scoping the
+fix to the `Arg::Named` arm specifically (the only place `--flag=value`
+syntax actually binds) avoids that: a `Value::Bool` lands in `flags`/gets
+dropped only when the key isn't a declared *value-taking* param, mirroring
+`ToolArgs::flagify_bool_named`'s logic without needing a schema object
+(`param_lookup`, already assembled for the rest of the binder, has enough).
+This also fixes `--json` itself — deliberately excluded from every builtin's
+reflected schema (`clap_schema::is_skipped`), so no per-builtin
+`flagify_bool_named` call ever normalized it; only the shared binder can.
+
+**Short space-flag guard.** The long-flag ambiguity guard (`--type explorer`
+under a `map_positionals` schema) was a straight port to the single-char
+`ShortFlag` arm — same "fail loud, don't guess" logic, minus the `--flag=value`
+escape-hatch suggestion in the error message, since kaish has no `-f=value`
+form for short flags (confirmed: it's a parse error today, the no-pasting
+guard's own turf).
+
+**Pasting hints.** This one had a real landmine. Extending the no-pasting
+guard from "adjacent `Positional`s" to "adjacent `Positional`s or `LongFlag`s"
+(so `--flag$(echo x)` errors instead of silently splitting into a bare flag
+plus a stray positional) seemed safe — until `cargo test --all` turned up
+`cut_bare_comma_delimiter_glued` failing. `cut -d,` is `-d` (a `ShortFlag`)
+glued to a bare `,` (a `Positional`, zero source-gap) — exactly the
+getopt-style glued-short-value idiom (`cut -d,`, `head -c5`) the binder
+already supports, and a comma isn't in the flag char class so it can't fuse
+into one lexer token the way `-f1` does. `ShortFlag` stayed out of the glue
+check entirely; `LongFlag` went in (there's no long-flag glued-value idiom to
+protect). The redirect-target half (`> /tmp/$(echo x).txt`, previously a
+generic chumsky "expected ..." error with zero quoting hint) needed its own
+peek-and-reject wrapper around `redirect_parser`'s `target` parser — first
+draft called a fresh `primary_expr_parser()` for the peek and blew the stack
+immediately, because the module's own doc comment already warns why: `target`
+is threaded in specifically so `$(cmd > file)` doesn't reconstruct
+`redirect → primary_expr → cmd_subst → redirect` forever. Reusing the
+caller's own `target.clone()` for the peek (chumsky's `rewind()`, no
+consumption) fixed it — the grammar was already built once by the caller, so
+cloning the *value* is cheap and doesn't re-enter construction.
+
+Full `cargo test --all --locked` / `cargo clippy --all --all-targets` /
+`cargo check -p kaish-kernel --no-default-features` clean throughout. GH #189.
+
+---
+
 ## Eliminating the sync `build_tool_args` twin (2026-07-17, GH #188)
 
 The scheduler had a second, hand-rolled arg binder living next to the real

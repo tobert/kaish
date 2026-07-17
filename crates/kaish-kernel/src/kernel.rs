@@ -5836,8 +5836,34 @@ pub(crate) async fn bind_tool_args(
                     // would silently keep only B, and mixing with the `-e` space
                     // form would clobber the array. Route it through the same
                     // accumulator the space form uses.
+                    let is_declared_value_flag = param_lookup
+                        .get(key.as_str())
+                        .is_some_and(|(_, typ, ..)| !is_bool_type(typ));
                     if let Some(&(canonical, _, _, true)) = param_lookup.get(key.as_str()) {
                         push_repeatable_value(&mut tool_args, key, canonical, val)?;
+                    } else if matches!(val, Value::Bool(_)) && !is_declared_value_flag {
+                        // Flagify at bind time (GH #189): `--flag=true`/
+                        // `--flag=false` binds the same way the bare
+                        // `--flag`/its absence already do (true → flag
+                        // presence, false → dropped) instead of landing in
+                        // `named` as a literal `Value::Bool` that a clap
+                        // `bool` field's `SetTrue` action rejects
+                        // (`seq --json=true` used to exit 2 with a clap
+                        // parse error). Covers both a schema-declared bool
+                        // param AND an undeclared flag — `--json` itself is
+                        // deliberately excluded from every builtin's schema
+                        // (`clap_schema::is_skipped`), so this is what makes
+                        // `--json=true` work universally instead of only for
+                        // the builtins that happen to call
+                        // `ToolArgs::flagify_bool_named` themselves. A
+                        // declared VALUE-taking flag's own `=true` literal
+                        // (`spawn --command=true`) is excluded by
+                        // `is_declared_value_flag` and still falls to
+                        // `named` below.
+                        if let Value::Bool(true) = val {
+                            tool_args.flags.insert(key.clone());
+                        }
+                        // Value::Bool(false): absent == false, nothing to insert.
                     } else {
                         tool_args.named.insert(key.clone(), val);
                     }
@@ -5852,7 +5878,13 @@ pub(crate) async fn bind_tool_args(
                 }
                 if let Some(val) = source.eval(value).await? {
                     let val = apply_tilde_expansion(val, home.as_deref());
-                    if accepts_word_assign {
+                    // Past `--`, EVERY token is raw data — including for
+                    // export/alias, whose `key=value` is normally a shell
+                    // assignment (GH #189). `export -- A=1` must bind `A=1`
+                    // as a literal positional, not silently re-enter the
+                    // named-assignment path `past_double_dash` exists to
+                    // suppress for flags right above this arm.
+                    if accepts_word_assign && !past_double_dash {
                         tool_args.named.insert(key.clone(), val);
                     } else {
                         // Stringify "key=value" and pass as a positional.
@@ -5875,6 +5907,40 @@ pub(crate) async fn bind_tool_args(
                 } else if name.len() == 1 {
                     let flag_name = name.as_str();
                     let lookup = param_lookup.get(flag_name);
+
+                    // Same ambiguity guard as the `LongFlag` arm below (GH
+                    // #189 item 4): an undeclared short flag immediately
+                    // followed by an unconsumed positional under a
+                    // map_positionals (backend/MCP) schema is exactly as
+                    // ambiguous as the long-flag case — kaish can't tell a
+                    // space-form value (`-t explorer`) from a bool flag
+                    // sitting before a real positional (`-f file.txt`).
+                    // Unlike `--flag`, there is no `-f=value` escape hatch to
+                    // suggest: a glued `-f=val` is two tokens with a dangling
+                    // `=` that the parser's no-token-pasting guard already
+                    // rejects — the only fix is declaring the flag.
+                    let ambiguous_value = (lookup.is_none()
+                        && leaf.is_some_and(|s| s.map_positionals)
+                        && !consumed.contains(&(i + 1)))
+                        .then(|| match args.get(i + 1) {
+                            Some(Arg::Positional(Expr::Literal(Value::String(s)))) => {
+                                Some(s.clone())
+                            }
+                            Some(Arg::Positional(_)) => Some("VALUE".to_string()),
+                            _ => None,
+                        })
+                        .flatten();
+                    if let Some(val) = ambiguous_value {
+                        let tool = leaf.map(|s| s.name.as_str()).unwrap_or("command");
+                        anyhow::bail!(
+                            "{tool}: -{name} is not a declared flag, so the \
+                             space-separated value ({val:?}) would be silently \
+                             dropped. Have {tool} declare -{name} in its schema \
+                             (short flags have no -{name}=value form to fall \
+                             back on)."
+                        );
+                    }
+
                     let is_bool = lookup.map(|(_, typ, ..)| is_bool_type(typ)).unwrap_or(true);
 
                     if is_bool {
@@ -9046,6 +9112,40 @@ AFTER="yes"'"#)
         let args = vec![Arg::LongFlag("frob".into()), pos("value")];
         let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
         assert!(built.flags.contains("frob"));
+    }
+
+    // ── GH #189 item 4: the short-flag half of the same ambiguity guard ──
+    //
+    // The long-flag guard above was closed by GH #188; an undeclared SHORT
+    // flag under a map_positionals schema was still silently defaulting to
+    // bare bool, divorcing a space-form value (`kj -t explorer`) exactly the
+    // same way the long-flag case used to.
+
+    #[tokio::test]
+    async fn build_args_undeclared_short_space_flag_errors_under_map_positionals() {
+        let kernel = Kernel::transient().expect("kernel");
+        let schema = kj_like_schema();
+        // kj exp -t explorer
+        let args = vec![pos("exp"), Arg::ShortFlag("t".into()), pos("explorer")];
+        let err = kernel
+            .build_args_async(&args, Some(&schema))
+            .await
+            .expect_err("undeclared -t with a space value must fail loud");
+        let msg = err.to_string();
+        assert!(msg.contains("-t"), "message should name the flag: {msg}");
+        assert!(msg.contains("kj"), "message should name the tool: {msg}");
+    }
+
+    #[tokio::test]
+    async fn build_args_undeclared_short_space_flag_ok_for_builtin_schema() {
+        let kernel = Kernel::transient().expect("kernel");
+        // Builtins set map_positionals=false; the ambiguity guard must not
+        // fire there.
+        let schema = ToolSchema::new("frobnicate", "builtin-style")
+            .param(ParamSchema::optional("name", "string", Value::Null, "name"));
+        let args = vec![Arg::ShortFlag("t".into()), pos("value")];
+        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        assert!(built.flags.contains("t"));
     }
 
     // ── subcommand-aware binding (select_leaf wired into build_args_async) ──

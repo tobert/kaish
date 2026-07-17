@@ -1733,6 +1733,65 @@ fn is_comma_literal_arg(arg: &Arg) -> bool {
     matches!(arg, Arg::Positional(Expr::Literal(Value::String(s))) if s == ",")
 }
 
+/// True for the argv-fragment `Arg` shapes eligible for the no-token-pasting
+/// glue check below: bareword/expr positionals AND long flags.
+///
+/// `ShortFlag` is deliberately EXCLUDED: a single-char short flag glued
+/// straight to its value with no space (`cut -d,`, `grep -A$n`) is the
+/// getopt-style glued-value idiom the kernel binder (`consume_flag_positionals`
+/// / `bind_glued_short_value`) already supports and tests rely on — the flag
+/// char class covers alnum/dash so a purely-textual glued value (`-f1`,
+/// `-C3`) is already ONE lexer token, but a punctuation/subst value (`-d,`,
+/// `-d$(cmd)`) genuinely arrives as two adjacent `Arg`s and must NOT be
+/// rejected here. `--flag` has no such glued-value idiom (only the explicit
+/// `--flag=value` form, which fuses into `Named` before reaching this list),
+/// so a `LongFlag` glued to a following fragment is always a pasting
+/// accident, not a feature.
+///
+/// `Named`/`WordAssign` are excluded too — those already fuse a span-adjacent
+/// `--key=value`/`key=value` pair into ONE `Arg` before reaching this list
+/// (see `long_flag_with_value`/`word_assign_arg_parser`'s own adjacency
+/// checks), so back-to-back adjacency there is by design, not a pasting
+/// accident.
+fn is_glue_candidate(arg: &Arg) -> bool {
+    matches!(arg, Arg::Positional(_) | Arg::LongFlag(_))
+}
+
+/// Reject a run of argv fragments produced by glued (zero source-gap)
+/// tokens — kaish does no token pasting, so an unquoted `/tmp/$(echo
+/// x).txt` lexes into three fragments (`/tmp/`, the substitution, `.txt`)
+/// that would otherwise silently bind as THREE separate args, and
+/// `--flag$(echo x)` glues a flag straight to the next fragment with no
+/// error at all. Shared by the pre-`--` and post-`--` argument grammars
+/// (GH #189: the post-`--` half of this used to be unchecked entirely — a
+/// script relying on `--` to end flag parsing got a silent argv-splat
+/// instead of this same helpful error).
+fn reject_glued_args<'src>(
+    args: Vec<(Arg, Span)>,
+) -> Result<Vec<Arg>, Rich<'src, Token, Span>> {
+    for pair in args.windows(2) {
+        let (prev, prev_span) = &pair[0];
+        let (next, next_span) = &pair[1];
+        if is_glue_candidate(prev) && is_glue_candidate(next) && prev_span.end == next_span.start {
+            // A bare `,` lexes as its own token, so a comma-bearing word
+            // (`cut -f1,3`, `sort -k2,2n`, `echo a,b`) trips this guard.
+            // It isn't token pasting — `,` is reserved (brace expansion,
+            // lists) — so give a comma-specific hint that teaches quoting.
+            let msg = if is_comma_literal_arg(prev) || is_comma_literal_arg(next) {
+                "an unquoted comma splits this into separate words — kaish reserves \
+                 `,` (brace expansion, lists); quote a comma-bearing argument to keep \
+                 it one word, e.g. cut -f \"1,3\", sort -k \"2,2n\", or echo \"a,b\""
+            } else {
+                "adjacent words with no space between them are not joined into one \
+                 argument (kaish does no token pasting); quote the whole word, e.g. \
+                 \"/tmp/$(echo x).txt\" or \"$dir/out.txt\""
+            };
+            return Err(Rich::custom(*next_span, msg));
+        }
+    }
+    Ok(args.into_iter().map(|(arg, _)| arg).collect())
+}
+
 /// Arguments list parser that handles `--` flag terminator.
 ///
 /// After `--`, all subsequent flags are converted to positional string arguments.
@@ -1742,41 +1801,18 @@ where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
     // Arguments before `--` (normal parsing). Each arg is captured with its
-    // source span so we can reject the silent argv-splat: two positional words
-    // with no whitespace between them (`/tmp/$(echo x).txt` → 3 args). kaish does
-    // no token pasting, so an unquoted interpolated word fragments into separate
-    // args; the fix is to quote the whole word. Single-token words (`file.txt`,
-    // `v1.2.3`) are one arg and never trigger this. See docs/issues.md #2.
+    // source span so we can reject the silent argv-splat: two argv fragments
+    // with no whitespace between them (`/tmp/$(echo x).txt` → 3 args,
+    // `--flag$(echo x)` → a flag glued to one). kaish does no token pasting,
+    // so an unquoted interpolated word fragments into separate args; the fix
+    // is to quote the whole word. Single-token words (`file.txt`, `v1.2.3`)
+    // are one arg and never trigger this. See `reject_glued_args` and
+    // docs/issues.md #2.
     let pre_dash = arg_before_double_dash_parser()
         .map_with(|arg, e| -> (Arg, Span) { (arg, e.span()) })
         .repeated()
         .collect::<Vec<(Arg, Span)>>()
-        .try_map(|args, _span| {
-            for pair in args.windows(2) {
-                let (prev, prev_span) = &pair[0];
-                let (next, next_span) = &pair[1];
-                if matches!(prev, Arg::Positional(_))
-                    && matches!(next, Arg::Positional(_))
-                    && prev_span.end == next_span.start
-                {
-                    // A bare `,` lexes as its own token, so a comma-bearing word
-                    // (`cut -f1,3`, `sort -k2,2n`, `echo a,b`) trips this guard.
-                    // It isn't token pasting — `,` is reserved (brace expansion,
-                    // lists) — so give a comma-specific hint that teaches quoting.
-                    let msg = if is_comma_literal_arg(prev) || is_comma_literal_arg(next) {
-                        "an unquoted comma splits this into separate words — kaish reserves \
-                         `,` (brace expansion, lists); quote a comma-bearing argument to keep \
-                         it one word, e.g. cut -f \"1,3\", sort -k \"2,2n\", or echo \"a,b\""
-                    } else {
-                        "adjacent words with no space between them are not joined into one \
-                         argument (kaish does no token pasting); quote the whole word, e.g. \
-                         \"/tmp/$(echo x).txt\" or \"$dir/out.txt\""
-                    };
-                    return Err(Rich::custom(*next_span, msg));
-                }
-            }
-            Ok(args.into_iter().map(|(arg, _)| arg).collect::<Vec<Arg>>())
-        });
+        .try_map(|args, _span| reject_glued_args(args));
 
     // The `--` marker itself
     let double_dash = select! {
@@ -1803,7 +1839,14 @@ where
         primary_expr_parser().map(Arg::Positional),
     ));
 
-    let post_dash = post_dash_arg.repeated().collect::<Vec<_>>();
+    // Same glue guard as `pre_dash` (GH #189): before this, a post-`--`
+    // glued word silently split into separate positionals instead of
+    // erroring — the pre-`--` guard never ran over these tokens at all.
+    let post_dash = post_dash_arg
+        .map_with(|arg, e| -> (Arg, Span) { (arg, e.span()) })
+        .repeated()
+        .collect::<Vec<(Arg, Span)>>()
+        .try_map(|args, _span| reject_glued_args(args));
 
     // Combine: args_before ++ [--] ++ args_after
     pre_dash
@@ -1982,6 +2025,33 @@ where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
     T: Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
 {
+    // `target` only ever parses ONE expression. An unquoted target that
+    // spans multiple lexical fragments with no gap between them
+    // (`/tmp/$(echo x).txt` lexes as three tokens: "/tmp/", the command
+    // substitution, ".txt") only binds its first fragment as the target —
+    // the rest dangle, and the surrounding statement grammar rejects them
+    // with a generic chumsky "expected ..." message that never mentions
+    // quoting (GH #189). Peek (`rewind`, consumes nothing) for an
+    // immediately-adjacent further expr fragment and turn that into the same
+    // "quote it" hint `reject_glued_args` gives positional args, worded for a
+    // redirect target. The peek reuses the caller's own `target` clone
+    // (never a fresh `primary_expr_parser()` built here) — see the
+    // construction-cycle note in this function's doc comment above.
+    let target = target
+        .clone()
+        .map_with(|expr, e| -> (Expr, Span) { (expr, e.span()) })
+        .then(target.clone().map_with(|_, e| e.span()).rewind().or_not())
+        .try_map(|((expr, span), glued), _| match glued {
+            Some(next_span) if next_span.start == span.end => Err(Rich::custom(
+                next_span,
+                "adjacent words with no space between them are not joined into the redirect \
+                 target (kaish does no token pasting); quote the whole target, e.g. \
+                 \"/tmp/$(echo x).txt\"",
+            )),
+            _ => Ok(expr),
+        })
+        .boxed();
+
     // Regular redirects: >, >>, <, 2>, &>
     let regular_redirect = select! {
         Token::GtGt => RedirectKind::StdoutAppend,

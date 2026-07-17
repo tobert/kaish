@@ -1165,3 +1165,88 @@ fn angle_brackets_stay_redirection() {
         "`>` must remain a redirect, not become a positional: {sexpr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GH #189 (arg-binding polish): the no-token-pasting guard used to cover
+// pre-`--` positional args only. A glued redirect target fell through to a
+// generic chumsky "expected ..." error with no quoting hint, and args glued
+// together AFTER `--` (or a flag glued straight to a following fragment)
+// silently split into separate args instead of erroring at all.
+// ---------------------------------------------------------------------------
+
+fn parse_err_message(input: &str) -> String {
+    match parse(input) {
+        Ok(program) => panic!(
+            "expected a parse error for {input:?}, got: {}",
+            format_program(&program)
+        ),
+        Err(errors) => errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "),
+    }
+}
+
+/// A redirect target that fragments into multiple glued lexical pieces
+/// (`/tmp/$(echo x).txt`) used to fail with a generic, unhelpful chumsky
+/// error. It now gets the same "quote it" hint the plain-positional glue
+/// guard gives, worded for a redirect target.
+#[test]
+fn glued_redirect_target_hints_to_quote() {
+    let msg = parse_err_message("echo > /tmp/$(echo x).txt");
+    assert!(msg.contains("redirect target"), "should name the redirect target: {msg}");
+    assert!(msg.to_lowercase().contains("quote"), "should hint to quote: {msg}");
+}
+
+/// The same guard applies to `<` (stdin) redirect targets, not just `>`.
+#[test]
+fn glued_stdin_redirect_target_hints_to_quote() {
+    let msg = parse_err_message("cat < /tmp/$(echo x).txt");
+    assert!(msg.contains("redirect target"), "got: {msg}");
+}
+
+/// A single-fragment redirect target (no glue) is unaffected.
+#[test]
+fn unglued_redirect_target_still_parses() {
+    one_stmt_sexpr(r#"echo > "/tmp/$(echo x).txt""#);
+    one_stmt_sexpr("echo > /tmp/out.txt");
+}
+
+/// The pre-`--` guard already rejected glued positionals; the post-`--` half
+/// used to be unchecked entirely, silently splitting `/tmp/$(echo x).txt`
+/// into three positionals instead of erroring.
+#[test]
+fn glued_positional_after_double_dash_is_rejected() {
+    let msg = parse_err_message("echo hi -- /tmp/$(echo x).txt");
+    assert!(msg.to_lowercase().contains("quote"), "should hint to quote: {msg}");
+}
+
+/// A spaced (non-glued) positional after `--` is unaffected.
+#[test]
+fn spaced_positional_after_double_dash_still_parses() {
+    let sexpr = one_stmt_sexpr("echo hi -- --this-is-data");
+    assert!(sexpr.contains("(doubledash)"), "got: {sexpr}");
+    assert!(
+        sexpr.contains(r#"(pos (string "--this-is-data"))"#),
+        "got: {sexpr}"
+    );
+}
+
+/// `--flag` has no glued-value idiom (only the explicit `--flag=value` form
+/// does) — a long flag glued straight to a following expression fragment
+/// with no `=` (`--flag$(echo x)`) is always a pasting accident, not a
+/// feature, and must be rejected rather than silently splitting into a bare
+/// `--flag` bool plus a stray positional.
+#[test]
+fn glued_long_flag_then_fragment_is_rejected() {
+    let msg = parse_err_message("echo --flag$(echo x)");
+    assert!(msg.to_lowercase().contains("quote"), "should hint to quote: {msg}");
+}
+
+/// The short-flag glued-value idiom (`cut -d,`, `grep -A1`, `head -c5`) must
+/// keep working: a `ShortFlag` glued to exactly one following fragment is a
+/// deliberate feature (`consume_flag_positionals`/`bind_glued_short_value`
+/// in the kernel binder), not a pasting accident, so it must NOT trip the
+/// guard above.
+#[test]
+fn glued_short_flag_then_single_fragment_still_parses() {
+    one_stmt_sexpr("echo -f$(echo x)");
+    one_stmt_sexpr("cut -d, -f2");
+}

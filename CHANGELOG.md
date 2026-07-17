@@ -10,6 +10,34 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+- **Arg-binding polish** (GH #189): four small gaps in the shared arg binder
+  (`kernel::bind_tool_args`), verified against current code post-#188/#231:
+  - `export -- A=1`/`alias -- ll=val` no longer bind `A=1`/`ll=val` as a named
+    shell assignment past `--` — every word-assign-accepting builtin now
+    treats a `key=value` after `--` as literal data, like every other tool
+    already did. `unalias -- foo=bar` no longer crashes with a clap
+    "unexpected argument" error (the lingering named entry used to render as
+    a `--foo=bar` flag token `UnaliasArgs` never declares).
+  - `--flag=true`/`--flag=false` now flagifies at bind time instead of
+    landing in `named` as a literal `Value::Bool` — a clap `bool` field's
+    `SetTrue` action rejected it (`seq --json=true` used to exit 2). This
+    fixes every schema-aware builtin uniformly, including `--json` itself
+    (deliberately excluded from every builtin's own schema, so no
+    per-builtin `ToolArgs::flagify_bool_named` call ever covered it).
+  - An undeclared SHORT flag (`-t explorer`) immediately before an unconsumed
+    positional under a `map_positionals` (backend/MCP) schema is now the same
+    loud "ambiguous, would silently drop the value" error the long-flag form
+    (`--type explorer`) already gave since GH #188 — previously it silently
+    defaulted to a bare bool flag and misrouted the value.
+  - A glued redirect target (`> /tmp/$(echo x).txt`, unquoted) now gets a
+    "quote the redirect target" parse-error hint instead of a generic
+    chumsky "expected ..." message, and the no-token-pasting guard now also
+    covers args after `--` and a flag glued straight to a following fragment
+    (`--flag$(echo x)`) — previously both silently split into multiple
+    positionals instead of erroring. The short-flag glued-value idiom
+    (`cut -d,`, `grep -A1`) is unaffected.
+
 ### Added
 - **`ExecuteOptions::interrupt`** — a polled interrupt check for embedders
   whose thread cannot fire `cancel_token` while execution runs (the browser:
