@@ -422,6 +422,12 @@ async fn test_short_flag_with_value_tail() {
 // Command-substitution cwd isolation — depends on host process cwd
 // ============================================================================
 
+// Without `localfs`, `Kernel::transient()` falls back to `KernelConfig::isolated()`
+// (NoLocal), whose cwd is always literally "/" — the "pwd should not leak back to
+// the subshell's cd /" assertion below is structurally unsatisfiable there since
+// the kernel's own starting cwd already is "/". Needs a real (non-"/") starting
+// cwd, which only `localfs`'s sandbox root provides.
+#[cfg(feature = "localfs")]
 #[tokio::test]
 async fn test_cmd_subst_cwd_isolation() {
     let kernel = Kernel::transient().unwrap();
@@ -448,6 +454,8 @@ pwd
     );
 }
 
+// Same NoLocal-cwd-is-always-"/" reasoning as `test_cmd_subst_cwd_isolation` above.
+#[cfg(feature = "localfs")]
 #[tokio::test]
 async fn test_cmd_subst_in_string_cwd_isolation() {
     let kernel = Kernel::transient().unwrap();

@@ -7,6 +7,7 @@
 //! Both flags must apply when there is NO positional command, not only when a
 //! command is specified.
 
+#![cfg(feature = "localfs")]
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

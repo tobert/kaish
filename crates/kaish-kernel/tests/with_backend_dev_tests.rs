@@ -4,6 +4,7 @@
 //! instead of silently discarding the write, because `/dev` was never
 //! kernel-owned in the `with_backend` path.
 
+#![cfg(feature = "localfs")]
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

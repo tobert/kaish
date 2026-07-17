@@ -52,9 +52,9 @@ cargo insta review                       # Interactive review of pending snapsho
 
 CI (`.github/workflows/ci.yml`) runs the gates on every PR and push to `main`:
 `cargo test --all --locked`, clippy with `-D warnings`, a committed-`.snap.new`
-tripwire, `cargo check -p kaish-kernel --no-default-features` (upgrading that
-leg to `cargo test` is GH #170), and the `kaish-wasi` wasm32-wasip1 build.
-When a gate changes, change ci.yml in the same PR. The runners track current
+tripwire, `cargo test -p kaish-kernel --no-default-features --locked` (see the
+integration-test feature-gating convention below), and the `kaish-wasi`
+wasm32-wasip1 build. When a gate changes, change ci.yml in the same PR. The runners track current
 stable Rust, which may be newer than local toolchains — CI clippy can fire
 lints local clippy doesn't have yet; fix the code rather than pinning the
 toolchain.
@@ -247,5 +247,19 @@ Hard-won rules that aren't obvious from the code. Violating these silently break
   not spawn subprocesses. `full`/`native` are aliases for all five. New OS-touching
   code must sit behind the right axis and compile out cleanly without it (the
   `--no-default-features` gates in Build Commands enforce this).
+- **Feature-gate integration-test files that need a capability, not just the
+  production code.** A test file that constructs a kernel via `KernelConfig::repl()`,
+  touches a real host path (`tempfile`, `common::kernel_at`), or mounts `LocalFs`
+  directly needs `#![cfg(feature = "localfs")]` at the top (the `external_command_tests.rs`
+  pattern: `#![cfg(feature = "subprocess")]`, or `#![cfg(all(feature = "localfs",
+  feature = "subprocess"))]` when both apply). Prefer the narrowest gate that
+  compiles+passes: if only a few tests in an otherwise-featureless file need it,
+  gate just those `#[cfg(feature = "localfs")] #[tokio::test]` functions instead of
+  the whole file (`vfs_budget_tests.rs`, `validation_tests.rs` do this). Watch for
+  tests that *compile* featureless but *fail at runtime* — e.g. `Kernel::transient()`
+  falls back to `KernelConfig::isolated()` (`NoLocal`, cwd `"/"`, no real
+  filesystem) without `localfs`, so a test asserting cwd-isolation against a non-`/`
+  starting cwd, or reading a real tempfile path, needs the same gate even though
+  nothing failed to compile.
 
 

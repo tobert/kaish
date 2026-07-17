@@ -19,6 +19,7 @@
 //!
 //! Real-FS via `tempfile::tempdir()` per the no-hardcoded-system-paths rule.
 
+#![cfg(feature = "localfs")]
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

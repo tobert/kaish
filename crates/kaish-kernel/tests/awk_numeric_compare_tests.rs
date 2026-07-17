@@ -10,6 +10,7 @@
 //! and `$1 == 0` (with input "0") to compare strings ("0" == "0" = EQ only
 //! accidentally, but "0.0" != "0" would be NE instead of the correct EQ).
 
+#![cfg(feature = "localfs")]
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
