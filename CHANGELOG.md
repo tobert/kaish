@@ -10,6 +10,16 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Removed
+- **BREAKING:** `output_limit::spill_aware_collect` and its private helpers
+  (`collect_stderr`, `collect_stdout_with_spill`, `handle_overflow`,
+  `drain_in_memory`, `extend_ring`, `stream_to_spill`) are gone. Dead since
+  GH #133 item 2 moved external-process capture onto `BoundedStream` /
+  `drain_to_stream`, with post-hoc spill applied at the pipeline level
+  (`Kernel::execute_pipeline` → `spill_if_needed`) instead of inline during
+  capture. `OutputLimitConfig` and the disk/memory spill machinery it still
+  drives are unaffected.
+
 ### Changed
 - **`uname -o` (and the tail of `uname -a`) now reports `kai`** instead of
   `Kaijutsu` — the shell's identity belongs to kaish itself, not to one
