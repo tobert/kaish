@@ -20,6 +20,15 @@ breaking entries are marked **BREAKING**.
   (GH #202).
 
 ### Fixed
+- **Friendlier error when an external command can't be spawned under a
+  virtual working directory** (CoW overlay, in-memory VFS mount, `/dev`, …):
+  a resolvable command used to fall all the way through to the generic
+  `command not found` (127), which blamed the wrong thing. Now it names the
+  real cause and suggests a fix (a kaish builtin, `cd` to a real path, or
+  `kaish-vfs commit` to materialize a CoW overlay) — exit code is unchanged.
+  A command that genuinely isn't in PATH still gets the plain
+  `command not found` (GH #181; cross-layer symlink/whiteout/mtime
+  semantics remain parked, tracked in the same issue).
 - `cargo test -p kaish-client` alone no longer fails the cwd test: the
   tests assert localfs-flavored behavior and now declare `localfs` as a
   dev-dependency feature instead of inheriting it from whichever workspace

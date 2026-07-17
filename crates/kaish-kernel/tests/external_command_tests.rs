@@ -819,3 +819,98 @@ async fn external_stdout_within_limit_is_unaffected() {
         result.err
     );
 }
+
+// ============================================================================
+// #181: friendly error when an external command hits a virtual (overlay/VFS)
+// working directory — the cwd has no location on the real filesystem, so
+// there's nowhere for a child OS process to run.
+// ============================================================================
+
+#[cfg(feature = "overlay")]
+#[tokio::test]
+async fn external_command_under_overlay_gives_friendly_virtual_cwd_error() {
+    // `OverlayFs::real_path` always returns `None` (it's a CoW view, never a
+    // real filesystem location), so an overlay-backed kernel's cwd trips the
+    // "nowhere to spawn" guard in `try_execute_external` unconditionally —
+    // even for `true`, a command that unquestionably exists in PATH. Before
+    // the #181 fix this fell all the way through the dispatch chain to the
+    // generic "command not found" 127, which is actively misleading: the
+    // command was never the problem, the virtual cwd was.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    let mut vars = HashMap::new();
+    vars.insert(
+        "PATH".to_string(),
+        Value::String(std::env::var("PATH").unwrap_or_default()),
+    );
+    let config = KernelConfig::agent_with_root(root.to_path_buf())
+        .with_overlay(true)
+        .with_latch(false)
+        .with_trash(false)
+        .with_allow_external_commands(true)
+        .with_initial_vars(vars);
+    let kernel = Kernel::new(config).expect("overlay kernel");
+
+    // `printenv` is a real external (not a kaish builtin, unlike `true` —
+    // see `external_resolution_is_hermetic_no_os_path_fallback` above), so
+    // this actually exercises `try_execute_external` rather than resolving
+    // to a builtin before the guard is ever reached.
+    let result = kernel.execute("printenv").await.expect("execute");
+
+    // Exit code is unchanged (127, same class as the old "not found") — only
+    // the wording changes; scripts checking `$?` see no behavior difference.
+    assert_eq!(
+        result.code, 127,
+        "exit code stays 127 — this is a wording-only fix: {result:?}"
+    );
+    let msg = format!("{}{}", result.text_out(), result.err);
+    assert!(msg.contains("printenv"), "error should name the command: {msg}");
+    assert!(
+        msg.contains("real filesystem"),
+        "error should explain the actual cause (no real filesystem location \
+         for the cwd), not a generic not-found: {msg}"
+    );
+    assert!(
+        !msg.contains("command not found"),
+        "must not fall back to the generic 'command not found' message \
+         anymore — `printenv` really is on PATH: {msg}"
+    );
+}
+
+#[cfg(feature = "overlay")]
+#[tokio::test]
+async fn external_command_not_in_path_under_overlay_stays_generic_not_found() {
+    // The reordering that lets a *resolvable* command get the friendly
+    // virtual-cwd error must NOT reclassify a genuinely missing command: a
+    // bare name that isn't in PATH at all is "not found" regardless of cwd,
+    // and blaming the virtual cwd for that would point at the wrong cause.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    let mut vars = HashMap::new();
+    vars.insert(
+        "PATH".to_string(),
+        Value::String(std::env::var("PATH").unwrap_or_default()),
+    );
+    let config = KernelConfig::agent_with_root(root.to_path_buf())
+        .with_overlay(true)
+        .with_latch(false)
+        .with_trash(false)
+        .with_allow_external_commands(true)
+        .with_initial_vars(vars);
+    let kernel = Kernel::new(config).expect("overlay kernel");
+
+    let result = kernel
+        .execute("definitely-not-a-real-command-181")
+        .await
+        .expect("execute");
+
+    assert_eq!(result.code, 127, "unresolvable command should still be 127: {result:?}");
+    let msg = format!("{}{}", result.text_out(), result.err);
+    assert!(
+        msg.contains("command not found"),
+        "a command that isn't in PATH at all must keep the generic \
+         not-found message, not the virtual-cwd one: {msg}"
+    );
+}
