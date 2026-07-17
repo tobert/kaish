@@ -1509,6 +1509,23 @@ where
         select! { Token::Path(p) => p },
         select! { Token::VarRef(v) => v },
         select! { Token::SimpleVarRef(v) => format!("${}", v) },
+        // Dash/plus bare words and flag-shaped tokens (GH #144): a case
+        // pattern that happens to look like a flag (`-h`, `--help`, `+x`) or
+        // an unrecognized dash/plus prefix (`---`, `-%`, `+%s`) is still a
+        // literal glob pattern in case position, not a flag — the lexer
+        // strips the leading dash/plus off `ShortFlag`/`LongFlag`/`PlusFlag`,
+        // so put it back. Grouped in a nested `choice()` to stay under
+        // chumsky's 26-element tuple limit for the outer `choice()`.
+        choice((
+            select! { Token::DoubleDashBare(s) => s },
+            select! { Token::PlusBare(s) => s },
+            select! { Token::MinusBare(s) => s },
+            select! { Token::MinusAlone => "-".to_string() },
+            select! { Token::DoubleDash => "--".to_string() },
+            select! { Token::ShortFlag(s) => format!("-{}", s) },
+            select! { Token::LongFlag(s) => format!("--{}", s) },
+            select! { Token::PlusFlag(s) => format!("+{}", s) },
+        )),
         // Character class: [a-z], [!abc], [^abc], etc.
         just(Token::LBracket)
             .ignore_then(

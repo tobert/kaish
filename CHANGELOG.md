@@ -27,6 +27,14 @@ breaking entries are marked **BREAKING**.
   kaish-extras `kaish-web` crate is a working embedding.
 
 ### Fixed
+- **Case patterns accept dash/plus bare words** (GH #144) — `---`, `-`, `--`,
+  `-x`, `+foo`, and alternations like `-h|--help) ...` are now valid case
+  patterns; they previously failed to parse (`pattern_part` had no arm for
+  the lexer's flag-shaped and dash/plus bare-word tokens). Also fixes a
+  related lexer bug the repro surfaced: `---)` swallowed the closing paren
+  into the bare-word token text, leaving no `)` for the branch parser to
+  find — the dash/plus bare-word tokens now stop at unquoted shell operators
+  (`()|&;<>`) instead of running to the next whitespace.
 - **Bare `${X:-${Y}}` works** (GH #173) — a nested braced reference in a
   default word outside quotes was a parse error (the `VarRef` token stopped at
   the first `}`); the reference now extends to the balanced closing brace,

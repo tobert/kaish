@@ -821,6 +821,88 @@ fn parser_case_with_varref_pattern() {
     parse_and_snapshot("case_varref_pattern", "case $input in\n    $expected) echo \"match\" ;;\nesac");
 }
 
+// -----------------------------------------------------------------------------
+// Dash/plus bare-word and flag-shaped patterns (GH #144)
+// -----------------------------------------------------------------------------
+// `pattern_part` had no arm for the lexer's flag-shaped tokens (`ShortFlag`,
+// `LongFlag`, `PlusFlag`) or its dash/plus bare-word fallbacks
+// (`DoubleDashBare`, `PlusBare`, `MinusBare`, `MinusAlone`, `DoubleDash`), so
+// a case pattern that happened to look like a flag (or a dash/plus-only
+// bareword) failed to parse at all.
+
+#[test]
+fn parser_case_triple_dash_pattern() {
+    // `---` lexes as `DoubleDashBare`.
+    parse_and_snapshot(
+        "case_triple_dash_pattern",
+        "case \"$x\" in\n    ---) echo \"match\" ;;\n    *) echo \"nope\" ;;\nesac",
+    );
+}
+
+#[test]
+fn parser_case_single_dash_pattern() {
+    // A lone `-` lexes as `MinusAlone`.
+    parse_and_snapshot(
+        "case_single_dash_pattern",
+        "case \"$x\" in\n    -) echo \"match\" ;;\n    *) echo \"nope\" ;;\nesac",
+    );
+}
+
+#[test]
+fn parser_case_double_dash_pattern() {
+    // A standalone `--` lexes as `DoubleDash`, distinct from `DoubleDashBare`.
+    parse_and_snapshot(
+        "case_double_dash_pattern",
+        "case \"$x\" in\n    --) echo \"match\" ;;\n    *) echo \"nope\" ;;\nesac",
+    );
+}
+
+#[test]
+fn parser_case_minus_bare_pattern() {
+    // `-%` lexes as `MinusBare`.
+    parse_and_snapshot(
+        "case_minus_bare_pattern",
+        "case \"$x\" in\n    -%) echo \"match\" ;;\n    *) echo \"nope\" ;;\nesac",
+    );
+}
+
+#[test]
+fn parser_case_plus_bare_pattern() {
+    // `+%s` lexes as `PlusBare` (the `date +%s` format-string shape).
+    parse_and_snapshot(
+        "case_plus_bare_pattern",
+        "case \"$x\" in\n    +%s) echo \"match\" ;;\n    *) echo \"nope\" ;;\nesac",
+    );
+}
+
+#[test]
+fn parser_case_plus_flag_pattern() {
+    // `+foo` lexes as `PlusFlag` (letters after `+`), distinct from `PlusBare`.
+    parse_and_snapshot(
+        "case_plus_flag_pattern",
+        "case \"$x\" in\n    +foo) echo \"match\" ;;\n    *) echo \"nope\" ;;\nesac",
+    );
+}
+
+#[test]
+fn parser_case_short_flag_pattern() {
+    // `-x` lexes as `ShortFlag`, same as it would in argument position.
+    parse_and_snapshot(
+        "case_short_flag_pattern",
+        "case \"$x\" in\n    -x) echo \"match\" ;;\n    *) echo \"nope\" ;;\nesac",
+    );
+}
+
+#[test]
+fn parser_case_dash_alternation_pattern() {
+    // `-h|--help`: a `ShortFlag` and a `LongFlag` on either side of a pipe
+    // alternation, the idiom this bug most visibly broke.
+    parse_and_snapshot(
+        "case_dash_alternation_pattern",
+        "case \"$x\" in\n    -h|--help) echo \"match\" ;;\n    *) echo \"nope\" ;;\nesac",
+    );
+}
+
 // =============================================================================
 // KNOWN FAILURES - Issues to be fixed
 // =============================================================================

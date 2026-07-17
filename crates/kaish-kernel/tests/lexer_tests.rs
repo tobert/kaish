@@ -590,6 +590,37 @@ fn lexer_plus_bare(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
 
+// GH #144: `DoubleDashBare`/`PlusBare`/`MinusBare` used to match a trailing
+// `[^\s]*`, which happily swallowed an immediately-adjacent shell operator
+// with no whitespace in between — `---)` lexed as the single token
+// `DoubleDashBare("---)")`, leaving no separate `RParen` for the case-branch
+// parser to find. This is the same silent-truncation failure family as #137
+// (`---` losing its dashes), just the operator disappearing into the bare
+// word instead of the word losing characters to the operator. The fix
+// excludes `()|&;<>` from both the differentiator char and the trailing run,
+// so these tokens stop exactly where an unquoted operator starts, same as
+// `Ident`/`ShortFlag`/`LongFlag` already do.
+#[rstest]
+#[case::triple_dash_before_rparen("---)", &["DOUBLEDASHBARE(---)", "RPAREN"])]
+#[case::triple_dash_before_semi("---;", &["DOUBLEDASHBARE(---)", "SEMI"])]
+#[case::triple_dash_before_pipe("---|", &["DOUBLEDASHBARE(---)", "PIPE"])]
+#[case::triple_dash_before_amp("---&", &["DOUBLEDASHBARE(---)", "AMP"])]
+#[case::minus_bare_before_rparen("-%)", &["MINUSBARE(-%)", "RPAREN"])]
+#[case::minus_bare_before_semi("-%;", &["MINUSBARE(-%)", "SEMI"])]
+#[case::plus_bare_before_rparen("+%s)", &["PLUSBARE(+%s)", "RPAREN"])]
+#[case::plus_bare_before_semi("+%s;", &["PLUSBARE(+%s)", "SEMI"])]
+// A lone `-` immediately before an operator (no differentiator char left
+// over) falls back all the way to `MinusAlone`, same as a lone `-` before
+// whitespace/EOF.
+#[case::lone_dash_before_rparen("-)", &["MINUSALONE", "RPAREN"])]
+// `--` immediately before an operator stays plain `DoubleDash`: the bare-word
+// regex's differentiator char would have to BE the operator, which is now
+// excluded, so the two-char exact-match token wins instead.
+#[case::double_dash_before_rparen("--)", &["DOUBLEDASH", "RPAREN"])]
+fn lexer_dash_plus_bare_stops_at_operators(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
 // =============================================================================
 // Flags vs Negative Numbers
 // =============================================================================
