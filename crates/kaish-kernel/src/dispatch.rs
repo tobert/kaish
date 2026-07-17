@@ -379,12 +379,16 @@ impl BackendDispatcher {
         // + `drain_to_stream`) — the SAME capture primitive the production
         // spawn site uses (kernel.rs::try_execute_external), not the
         // limit-aware `spill_aware_collect` this used to call. Production
-        // does not spill-check an external command's own capture inline; the
-        // pipeline-level post-hoc `spill_if_needed`
-        // (`Kernel::execute_pipeline`) is what applies `ctx.output_limit`
-        // afterward. `did_spill` is intentionally left `false`; a caller
-        // wanting the post-hoc behavior applies it separately, same as the
-        // real pipeline path (GH #133 item 2).
+        // does not spill-check an external command's own capture inline
+        // against `ctx.output_limit`; the pipeline-level post-hoc
+        // `spill_if_needed` (`Kernel::execute_pipeline`) is what applies that
+        // afterward, and `did_spill` is left `false` here for THAT reason — a
+        // caller wanting the limit-aware post-hoc behavior applies it
+        // separately, same as the real pipeline path (GH #133 item 2).
+        // Independently, `did_spill` CAN still end up `true` below: if the
+        // ring itself overflows (unconditionally, regardless of
+        // `ctx.output_limit`), that's the GH #191 loud-overflow signal, not
+        // the limit-aware spill this comment is about.
         let stdout_stream = Arc::new(crate::scheduler::BoundedStream::new(
             crate::scheduler::DEFAULT_STREAM_MAX_SIZE,
         ));
@@ -434,7 +438,7 @@ impl BackendDispatcher {
             std::time::Duration::from_secs(2),
         ).await;
         if let Some(task) = stdin_task { task.abort(); }
-        let stderr = if cancelled_before_wait || cancel.is_cancelled() {
+        let mut stderr = if cancelled_before_wait || cancel.is_cancelled() {
             // The child's pipes are gone; late output is lost but
             // predictable death beats partial capture (same tradeoff
             // production makes).
@@ -458,6 +462,22 @@ impl BackendDispatcher {
         // stdout came back as raw bytes: text if valid UTF-8, else a Bytes
         // result (so `curl url`, `curl url > file.bin`, etc. keep binary intact).
         let mut result = ExecResult::success_text_or_bytes(stdout).with_code(code);
+
+        // Mirror production's overflow signaling (GH #191) for the piece this
+        // twin actually shares with `kernel.rs::try_execute_external`: the
+        // stdout `BoundedStream` ring. Stderr here is captured differently
+        // from production (live-streamed to `ctx.stderr` when set, else an
+        // unbounded `Vec` — see the comment above `stderr_stream_handle`,
+        // GH #133 follow-up), so there is no stderr `BoundedStream` overflow
+        // to mirror; only the stdout side applies. `did_spill` stays `false`
+        // otherwise, matching `output_limit_is_not_applied_inline_matching_production`
+        // below — this is the fixed-ring overflow signal, not the
+        // limit-aware post-hoc spill Kernel::execute_pipeline applies.
+        if stdout_stream.has_overflowed().await {
+            let stats = stdout_stream.stats().await;
+            stderr = format!("{}{stderr}", stats.overflow_marker("stdout"));
+            result.did_spill = true;
+        }
         result.err = stderr;
         Some(result)
     }
@@ -718,14 +738,22 @@ mod external_process_tests {
     /// Updated for GH #133 item 2 (landed since this test was written): the
     /// shared capture path now caps via an *unconditional* ~10MB
     /// `BoundedStream` ring regardless of `ctx.output_limit` configuration —
-    /// production never spill-checks its own capture inline, deferring that
-    /// to the pipeline-level, post-hoc `spill_if_needed`. So `ctx.output_limit`
-    /// is configured below only to prove it's inert here (matching item 2's
-    /// contract); the actual size trigger is the payload exceeding the fixed
-    /// ring, and `did_spill` correctly stays `false` — this dispatcher never
-    /// flags it, same as production. This test still pins the piece item 3
-    /// alone is responsible for: a pipeline stage is no longer special-cased
-    /// into a no-cap-of-any-kind fast path.
+    /// production never spill-checks its own capture inline against
+    /// `ctx.output_limit`, deferring THAT to the pipeline-level, post-hoc
+    /// `spill_if_needed`. So `ctx.output_limit` is configured below only to
+    /// prove it's inert here (matching item 2's contract) — it plays no part
+    /// in why this payload gets capped.
+    ///
+    /// Updated again for GH #191: the fixed ring overflowing IS now loud on
+    /// its own terms, independent of `ctx.output_limit`. `did_spill` flips to
+    /// `true` (this dispatcher calling `dispatch()` directly, not through
+    /// `Kernel::execute_pipeline`, is exactly why `code` stays `0` here — the
+    /// exit-3 remap lives in that caller, not in `try_external` itself), and
+    /// stderr carries a truncation marker. Stdout still comes back as a
+    /// clean, marker-free tail — the marker is never prepended into stdout
+    /// (which may be binary), only into stderr. This test still pins the
+    /// piece item 3 alone is responsible for: a pipeline stage is no longer
+    /// special-cased into a no-cap-of-any-kind fast path.
     #[tokio::test]
     async fn oversized_pipeline_stage_output_is_no_longer_forwarded_losslessly() {
         let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
@@ -763,6 +791,10 @@ mod external_process_tests {
         drop(ctx.pipe_stdout.take());
         let _ = drain.await;
 
+        // The exit-3 remap lives in `Kernel::execute_pipeline` (`if
+        // result.did_spill { code = 3 }`), which this test never calls —
+        // it drives `dispatcher.dispatch()` directly. So `code` stays the
+        // child's own exit status (0) even though `did_spill` is now `true`.
         assert_eq!(result.code, 0, "err: {}", result.err);
         assert!(
             result.text_out().len() < 11_000_000,
@@ -774,10 +806,22 @@ mod external_process_tests {
             result.text_out().len()
         );
         assert!(
-            !result.did_spill,
-            "try_external itself must not set did_spill — that's \
-             Kernel::execute_pipeline's post-hoc spill_if_needed's job, \
-             matching production, even for a pipeline stage's capture"
+            !result.text_out().contains("truncated"),
+            "the loud-overflow marker (GH #191) must never contaminate stdout \
+             — it belongs in stderr only, since stdout may be binary: got {:?}",
+            &result.text_out()[..result.text_out().len().min(80)]
+        );
+        assert!(
+            result.did_spill,
+            "the fixed ~10MB ring overflowing must set did_spill (GH #191) so \
+             a real `Kernel::execute_pipeline` caller remaps to exit 3 — this \
+             is independent of ctx.output_limit's own spill_if_needed, which \
+             stays out of scope for try_external as before"
+        );
+        assert!(
+            result.err.contains("stdout truncated"),
+            "stderr must carry the loud overflow marker (GH #191): {}",
+            result.err
         );
     }
 
