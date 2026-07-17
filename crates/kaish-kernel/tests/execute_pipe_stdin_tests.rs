@@ -1,9 +1,10 @@
 //! Kernel-routed coverage for the *lazy* stdin seam — `Kernel::execute_with_
 //! pipe_stdin(_streaming)`, which hands the kernel a `PipeReader` instead of a
-//! pre-read `String`.
+//! pre-read buffer.
 //!
 //! This is the fix for the P1.0 regression: the original `ExecuteOptions::stdin`
-//! (String) path forced the frontend to `read_to_end` process stdin *before*
+//! (a pre-read buffer, `String` at the time) path forced the frontend to
+//! `read_to_end` process stdin *before*
 //! executing, which **hangs** `kaish -c 'echo hi'` when stdin is an open pipe
 //! that never sends EOF (the subprocess-with-idle-stdin case). A lazy pipe lets
 //! a command that never reads stdin (`echo`) return immediately while the writer
@@ -117,7 +118,7 @@ async fn lazy_stdin_feeds_an_external_command() {
 #[tokio::test]
 async fn lazy_stdin_feeds_scatter_with_no_pre_scatter_command() {
     // The scatter/gather runner's no-pre-scatter branch reads stdin directly;
-    // it must see a seeded lazy pipe, not just the String buffer.
+    // it must see a seeded lazy pipe, not just the buffered bytes.
     let kernel = kernel();
     let (writer, reader) = pipe_stream_default();
     writer.write_bytes(b"a\nb\nc\n").await.unwrap();
@@ -132,8 +133,8 @@ async fn lazy_stdin_feeds_scatter_with_no_pre_scatter_command() {
         .await
         .expect("kernel execute");
     // Each line is scattered to a worker (item bound to `$ITEM`) and gathered.
-    // Before the fix the runner read only the String buffer, so scatter saw no
-    // items and returned empty.
+    // Before the fix the runner read only the buffered bytes, so scatter saw
+    // no items and returned empty.
     assert!(result.ok(), "scatter failed: {}", result.err);
     let out = result.text_out();
     assert!(out.contains("loud-a"), "missing loud-a: {out:?}");

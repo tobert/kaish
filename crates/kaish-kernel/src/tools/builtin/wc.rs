@@ -89,7 +89,10 @@ impl Tool for Wc {
         // If no files, read from stdin
         if paths.is_empty() {
             let input = ctx.read_stdin_to_bytes().await.unwrap_or_default();
-            let (lc, wc, cc, bc) = count_content(&input);
+            let (lc, wc, cc, bc, invalid_utf8) = count_content(&input);
+            if invalid_utf8 && (chars_only || words_only || show_all) {
+                return ExecResult::failure(1, format!("wc: {INVALID_UTF8_HINT}"));
+            }
             let cells = build_cells(lc, wc, cc, bc, lines_only, words_only, chars_only, bytes_only, show_all);
             let text = format_counts_text(&[("".to_string(), cells.clone())]);
             let node = OutputNode::new("").with_cells(cells);
@@ -107,11 +110,15 @@ impl Tool for Wc {
         let mut had_error = false;
         let mut error_messages = Vec::new();
 
+        let needs_text = chars_only || words_only || show_all;
+
         for path in &paths {
             let resolved = ctx.resolve_path(path);
             // Stream the file through a bounded chunk window rather than reading
-            // it whole. Counts come from raw bytes — `wc -c` is exact on binary,
-            // and there is no UTF-8 gate to reject a binary file.
+            // it whole. Byte/line counts come from raw bytes regardless of
+            // encoding (`wc -c`/`-l` are exact on binary); char/word counts need
+            // a text view, so an invalid-UTF-8 file is a loud per-file error
+            // when they're actually requested — never a lossy U+FFFD mangle.
             let mut counter = WcCounter::default();
             match ctx
                 .read_file_chunked(&resolved, ExecContext::STREAM_CHUNK_SIZE, |chunk| {
@@ -121,7 +128,13 @@ impl Tool for Wc {
                 .await
             {
                 Ok(()) => {
-                    let (lc, wc, cc, bc) = counter.finish();
+                    let (lc, wc, cc, bc, invalid_utf8) = counter.finish();
+
+                    if invalid_utf8 && needs_text {
+                        error_messages.push(format!("wc: {}: {INVALID_UTF8_HINT}", path));
+                        had_error = true;
+                        continue;
+                    }
 
                     total_lines += lc;
                     total_words += wc;
@@ -164,16 +177,27 @@ impl Tool for Wc {
     }
 }
 
+/// Shared tail of the loud error `wc` emits when `-m`/`-w`/default (any count
+/// that needs a text view) meets invalid UTF-8. `-c`/`-l` are pure byte-level
+/// operations (exact length, raw `\n` scan) and are unaffected — this only
+/// fires when a char/word count was actually requested. Mirrors the rest of
+/// the fleet's stance (`grep`/`sed`/`head`'s line mode/…): a loud error, never
+/// a lossy `U+FFFD` mangle. See `docs/binary-data.md`.
+const INVALID_UTF8_HINT: &str =
+    "invalid UTF-8 — char/word counts require text; use -c/-l for byte/line counts, \
+     or pipe through base64/xxd";
+
 /// Incremental, line-buffered counter for streaming `wc`.
 ///
 /// Fed arbitrary byte chunks via [`push`](WcCounter::push), it produces the
-/// same `(lines, words, chars, bytes)` tuple as [`count_content`] over the
-/// concatenation — without ever holding the whole input. The trick is to carry
-/// the trailing partial line (the bytes after the last `\n`) between chunks, so
-/// complete lines are only counted once their bytes are all present. Because
-/// `\n` is a word/line separator and never part of a multibyte UTF-8 sequence,
-/// splitting on it lets each line decode cleanly and keeps words, chars, and
-/// UTF-8 boundaries from ever straddling a chunk edge.
+/// same `(lines, words, chars, bytes, invalid_utf8)` tuple as
+/// [`count_content`] over the concatenation — without ever holding the whole
+/// input. The trick is to carry the trailing partial line (the bytes after the
+/// last `\n`) between chunks, so complete lines are only counted once their
+/// bytes are all present. Because `\n` is a word/line separator and never part
+/// of a multibyte UTF-8 sequence, splitting on it lets each line decode
+/// cleanly and keeps words, chars, and UTF-8 boundaries from ever straddling a
+/// chunk edge.
 #[derive(Default)]
 struct WcCounter {
     /// Bytes seen since the last newline — the in-progress line.
@@ -184,6 +208,12 @@ struct WcCounter {
     /// are added back in `finish`).
     chars: usize,
     bytes: usize,
+    /// Set once a line failed strict UTF-8 decode. Byte/line counts (`bytes`,
+    /// `newlines`) stay exact regardless; `words`/`chars` under-count once this
+    /// is set (that line's contribution is skipped), so callers that need
+    /// char/word counts must check this flag and refuse rather than trust
+    /// them.
+    invalid_utf8: bool,
 }
 
 impl WcCounter {
@@ -206,12 +236,19 @@ impl WcCounter {
     }
 
     fn count_line(&mut self, lo: usize, hi: usize) {
-        let line = String::from_utf8_lossy(&self.carry[lo..hi]);
-        self.words += line.split_whitespace().count();
-        self.chars += line.chars().count();
+        // Strict decode, not lossy: a line that isn't valid UTF-8 marks
+        // `invalid_utf8` and contributes nothing to words/chars rather than
+        // expanding each bad byte run into a counted `U+FFFD`.
+        match std::str::from_utf8(&self.carry[lo..hi]) {
+            Ok(line) => {
+                self.words += line.split_whitespace().count();
+                self.chars += line.chars().count();
+            }
+            Err(_) => self.invalid_utf8 = true,
+        }
     }
 
-    fn finish(mut self) -> (usize, usize, usize, usize) {
+    fn finish(mut self) -> (usize, usize, usize, usize, bool) {
         // The final remainder (bytes after the last `\n`) still contributes its
         // words and chars, so count it — but it is NOT a line. `wc -l` counts
         // newline characters (like GNU): an unterminated final line is not
@@ -222,23 +259,29 @@ impl WcCounter {
         let lines = self.newlines;
         // Every consumed `\n` is one character that line-splitting removed.
         let chars = self.chars + self.newlines;
-        (lines, self.words, chars, self.bytes)
+        (lines, self.words, chars, self.bytes, self.invalid_utf8)
     }
 }
 
-/// Count lines, words, chars, and bytes in content.
-fn count_content(input: &[u8]) -> (usize, usize, usize, usize) {
-    // Byte count is the raw length — exact for binary too. Lines/words/chars
-    // use a lossy text view: identical to before for valid UTF-8 (borrowed, no
-    // copy), best-effort for binary. This keeps `wc -c` honest on binary input.
+/// Count lines, words, chars, and bytes in content, plus whether the content
+/// failed strict UTF-8 decode.
+fn count_content(input: &[u8]) -> (usize, usize, usize, usize, bool) {
+    // Byte and line counts are pure byte-level operations — exact for binary
+    // too, regardless of UTF-8 validity. `wc -l` counts newline characters
+    // (GNU semantics): an unterminated final line is not a line.
     let bytes = input.len();
-    let text = String::from_utf8_lossy(input);
-    // `wc -l` counts newline characters (GNU semantics): an unterminated final
-    // line is not a line. `str::lines()` would over-count it.
     let lines = input.iter().filter(|&&b| b == b'\n').count();
-    let words = text.split_whitespace().count();
-    let chars = text.chars().count();
-    (lines, words, chars, bytes)
+    // Char/word counts need a text view: strict decode, not lossy — invalid
+    // UTF-8 is reported to the caller instead of being expanded into counted
+    // `U+FFFD` replacement characters.
+    match std::str::from_utf8(input) {
+        Ok(text) => {
+            let words = text.split_whitespace().count();
+            let chars = text.chars().count();
+            (lines, words, chars, bytes, false)
+        }
+        Err(_) => (lines, 0, 0, bytes, true),
+    }
 }
 
 /// Render wc's text output: each row is the count fields right-justified to a
@@ -554,7 +597,14 @@ mod tests {
         // split at *every* byte boundary, and compared to the whole-buffer
         // reference. The multibyte and mid-word splits are the seam this guards:
         // a 2-byte kanji or a word straddling the chunk edge must still count
-        // exactly once.
+        // exactly once. Every fixture here is valid UTF-8 by construction —
+        // see `wc_counter_invalid_utf8_flag_is_split_independent` below for the
+        // binary-input counterpart. (A mixed-validity buffer would legitimately
+        // diverge between the two paths on the *word/char* counts — whole-buffer
+        // `count_content` bails to `(0, 0)` the moment any byte is invalid,
+        // while the chunked counter still tallies the valid lines before the
+        // bad one — but both agree on the `invalid_utf8` flag that gates
+        // display, so the divergence is never user-visible.)
         let inputs: &[&[u8]] = &[
             b"hello world\nfoo bar baz\n",
             b"word",
@@ -577,6 +627,38 @@ mod tests {
                     String::from_utf8_lossy(input),
                     split
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn wc_counter_invalid_utf8_flag_is_split_independent() {
+        // The `invalid_utf8` flag is what gates wc -m/-w's loud refusal
+        // (GH #176) — if it depended on *where* the streaming reader happened
+        // to split the input, `wc -m` could silently succeed on binary
+        // depending on chunk size, exactly the class of chunk-boundary bug the
+        // line-buffering scheme must not have. Byte and line counts (pure
+        // byte-level operations) must also stay exact regardless of split
+        // point or validity.
+        let inputs: &[&[u8]] = &[
+            b"\xff\x00\xfe\x80\x01\xc0kaish\xf5",   // invalid, no newline at all
+            b"good line\n\xff\xfe bad line\nmore\n", // invalid line in the middle
+            b"\xff\xfestart\ngood\n\xc0end",         // invalid at both ends
+        ];
+        for input in inputs {
+            let (want_lines, _, _, want_bytes, want_invalid) = count_content(input);
+            assert!(want_invalid, "fixture must actually be invalid UTF-8: {input:?}");
+            for split in 0..=input.len() {
+                let mut c = WcCounter::default();
+                c.push(&input[..split]);
+                c.push(&input[split..]);
+                let (lines, _, _, bytes, invalid_utf8) = c.finish();
+                assert!(
+                    invalid_utf8,
+                    "invalid_utf8 must be true regardless of split point: input={input:?} split={split}"
+                );
+                assert_eq!(bytes, want_bytes, "byte count must stay exact: split={split}");
+                assert_eq!(lines, want_lines, "line count must stay exact: split={split}");
             }
         }
     }

@@ -131,7 +131,7 @@ impl EmbeddedClient {
     /// Execute with options + per-statement callback, feeding a **lazy** process
     /// stdin as a [`kaish_kernel::PipeReader`].
     ///
-    /// Unlike [`ExecuteOptions::with_stdin`] (a pre-read `String`), the reader is
+    /// Unlike [`ExecuteOptions::with_stdin`] (a pre-read buffer), the reader is
     /// drained only if a command actually reads stdin — so `kaish -c 'echo hi'`
     /// with an open, never-EOF pipe returns immediately instead of hanging. The
     /// non-interactive REPL frontend uses this for `-c`/script mode.

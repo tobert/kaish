@@ -72,10 +72,15 @@ pub struct ExecuteOptions {
     ///
     /// Lets a non-interactive frontend feed piped input, e.g.
     /// `printf '…' | kaish -c 'sort'`. Without it a bare top-level builtin
-    /// reading stdin has no input source and silently produces nothing. It is
-    /// `String`-typed to match `ExecContext::set_stdin`; binary stdin is fed
-    /// through files/VFS, not this knob.
-    pub stdin: Option<String>,
+    /// reading stdin has no input source and silently produces nothing.
+    /// Bytes-typed (GH #176) to match `ExecContext::set_stdin`: a byte-aware
+    /// builtin (`wc -c`, `cat`, `cmp`, `checksum`, …) sees binary content
+    /// exactly, while a text-only builtin (`grep`, `sed`, …) still refuses it
+    /// loudly at the point it asks for text (`read_stdin_to_text`), not here.
+    /// Embedders that already hold a complete buffer use this; one that wants
+    /// to avoid pre-draining an open process stdin should prefer
+    /// `Kernel::execute_with_pipe_stdin` instead.
+    pub stdin: Option<Vec<u8>>,
     /// Polled interrupt check, for embedders whose thread cannot fire
     /// `cancel_token` while execution runs — the motivating case is
     /// single-threaded wasm, where the browser's main thread flips a
@@ -156,7 +161,10 @@ impl ExecuteOptions {
     }
 
     /// Set the standard input fed to this call's first stdin-reading command.
-    pub fn with_stdin(mut self, stdin: impl Into<String>) -> Self {
+    ///
+    /// Accepts anything `Into<Vec<u8>>` — a `&str`/`String` (the common text
+    /// case) or a raw `Vec<u8>` (binary, GH #176) both work.
+    pub fn with_stdin(mut self, stdin: impl Into<Vec<u8>>) -> Self {
         self.stdin = Some(stdin.into());
         self
     }

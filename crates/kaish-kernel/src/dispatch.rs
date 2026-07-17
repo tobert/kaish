@@ -291,7 +291,7 @@ impl BackendDispatcher {
             }
         }
 
-        // Stdin: pipe_stdin or buffered string or inherit (interactive) or null
+        // Stdin: pipe_stdin or buffered bytes or inherit (interactive) or null
         cmd.stdin(if has_pipe_stdin || has_buffered_stdin {
             std::process::Stdio::piped()
         } else if ctx.interactive && matches!(ctx.pipeline_position, PipelinePosition::First | PipelinePosition::Only) {
@@ -352,14 +352,14 @@ impl BackendDispatcher {
                 })
             })
         } else if let Some(data) = ctx.stdin.take() {
-            // Buffered string stdin written from a DETACHED task, not inline:
+            // Buffered stdin bytes written from a DETACHED task, not inline:
             // an inline write deadlocks once the stdin pipe fills before the
             // output drain below has spawned (mirrors the kernel.rs fix; keeps
             // the two spawn sites in sync). Drop signals EOF; a broken pipe
             // (child closed stdin early) is fine.
             child.stdin.take().map(|mut child_stdin| {
                 tokio::spawn(async move {
-                    let _ = child_stdin.write_all(data.as_bytes()).await;
+                    let _ = child_stdin.write_all(&data).await;
                 })
             })
         } else {

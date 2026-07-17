@@ -1178,9 +1178,14 @@ output), so binary never garbles a terminal or a JSON channel.
 **Text builtins refuse binary.** `grep`, `sed`, `awk`, `sort`, `cut`, `tr`, `jq`,
 and the other text tools **error** on non-UTF-8 input instead of silently
 replacing bytes with `U+FFFD`. The byte-aware movers (`cat`, `dd`, `base64`,
-`xxd`, `checksum`, `wc`, `tee`, `head -c`, `tail -c`, `cmp`, `file`) consume
-binary directly. External commands keep binary intact in both directions, so
-`curl url > out.bin` and `... | gzip` round-trip.
+`xxd`, `checksum`, `tee`, `head -c`, `tail -c`, `cmp`, `file`) consume binary
+directly. `wc -c`/`wc -l` are pure byte-level counts (exact length, raw `\n`
+scan) and consume binary directly too; `wc -m`/`-w`/default need a text view
+and **error** on non-UTF-8 input like the other text tools rather than
+over-counting via `U+FFFD`. External commands keep binary intact in both
+directions, so `curl url > out.bin` and `... | gzip` round-trip. A `< file`
+redirect (or an embedder's `ExecuteOptions::with_stdin`) forwards binary intact
+too — only the command actually reading it decides whether that's fine.
 
 ## What's Intentionally Missing
 

@@ -11,6 +11,32 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Fixed
+- **BREAKING:** buffered stdin is bytes-typed, not `String` (GH #176) —
+  `ExecContext::stdin` and `ExecuteOptions::stdin` now carry `Vec<u8>` instead
+  of `String` (`set_stdin`/`with_stdin` accept `impl Into<Vec<u8>>`, so
+  existing `&str`/`String` call sites keep compiling unchanged). A `< binfile`
+  redirect over non-UTF-8 content — or an embedder's pre-read
+  `ExecuteOptions::with_stdin(Vec<u8>)` — now feeds a byte-aware builtin
+  (`wc -c`, `cat`, `cmp`, …) the raw bytes intact instead of erroring at
+  redirect setup; a text-only builtin (`grep`, `sed`, …) still refuses binary
+  loudly, just at the point it actually asks for text (`read_stdin_to_text`),
+  not before the command even runs. **`ExecContext::read_stdin_to_string`
+  removed** (embedder-facing) — it was a lossy `U+FFFD`-mangling counterpart
+  to `read_stdin_to_bytes`/`read_stdin_to_text` with zero remaining callers
+  once stdin itself carries bytes; use `read_stdin_to_text` (loud on binary)
+  or `read_stdin_to_bytes` (byte-clean) instead.
+- **`wc -m`/`-w`/default now refuse invalid UTF-8 loudly** (GH #176) instead
+  of lossy-decoding it — `String::from_utf8_lossy`'s `U+FFFD` expansion used to
+  over-count a binary stream's/file's chars and words. `wc -c`/`wc -l` are
+  pure byte-level counts (exact length, raw `\n` scan) and are unaffected,
+  bringing `wc` in line with the rest of the fleet's binary stance
+  (`grep`/`sed`/`head`'s line mode/…).
+- **`xxd -r` refuses invalid UTF-8 loudly instead of lossy-decoding it into
+  corrupt bytes** — found via a second review pass on the stdin fix above,
+  which newly let a `< binfile` redirect reach `xxd -r`'s existing
+  `String::from_utf8_lossy` call; a `U+FFFD`-mangled "hex" string silently
+  decoded into wrong (or truncated) bytes rather than erroring. Fixed for
+  both the stdin and file-path input sources, which share the same read path.
 - **`push` accepts a bracket-path target** (`push services[web][tags] item`),
   not just a top-level bareword — the lexer now recognizes `push`'s target
   with its own trigger and fuses it verbatim into a path instead of

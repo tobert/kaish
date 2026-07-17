@@ -229,8 +229,13 @@ async fn redirect_append(ctx: &ExecContext, path: &str, data: &[u8]) -> Result<(
 ///
 /// `< file` reads through the VFS backend (not the host filesystem) with the
 /// target resolved against `ctx.cwd`, mirroring how `cat` and the output
-/// redirects resolve their operands. A missing/unreadable file or non-UTF-8
-/// content is a hard error — we never silently feed the command empty stdin.
+/// redirects resolve their operands. A missing/unreadable file is a hard
+/// error — we never silently feed the command empty stdin. Non-UTF-8 content
+/// is NOT rejected here (GH #176): `ctx.stdin` is bytes-typed, so the raw
+/// bytes flow through to whatever the command actually does with them — a
+/// byte-aware builtin (`wc -c`, `cat`, `cmp`, …) consumes them intact, and a
+/// text-only builtin refuses loudly at the point it asks for text
+/// (`read_stdin_to_text`), not before the command even runs.
 async fn setup_stdin_redirects(
     cmd: &Command,
     ctx: &mut ExecContext,
@@ -247,9 +252,7 @@ async fn setup_stdin_redirects(
                     .read(Path::new(&resolved), None)
                     .await
                     .map_err(|e| format!("redirect: {path}: {e}"))?;
-                let content = String::from_utf8(data)
-                    .map_err(|_| format!("redirect: {path}: invalid UTF-8"))?;
-                ctx.set_stdin(content);
+                ctx.set_stdin(data);
             }
             RedirectKind::HereDoc => {
                 match &redir.target {
@@ -408,7 +411,7 @@ impl PipelineRunner {
         &self,
         cmd: &Command,
         ctx: &mut ExecContext,
-        stdin: Option<String>,
+        stdin: Option<Vec<u8>>,
         dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
         // Set up stdin from redirects (< file, <<heredoc)

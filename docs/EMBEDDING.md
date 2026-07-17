@@ -456,16 +456,19 @@ Fields:
   cascades to forks and external children (SIGTERM → grace → SIGKILL on
   the process group).
 - **`cwd`** — per-call working directory override.
-- **`stdin`** — standard input for this call as a ready `String` buffer,
+- **`stdin`** — standard input for this call as a ready, bytes-typed buffer
+  (`impl Into<Vec<u8>>` — a `&str`/`String` or a raw `Vec<u8>` both work),
   consumed by the first top-level command that reads stdin (shell draining
   semantics — a later reader sees nothing). Lets an embedder feed piped input,
-  e.g. `printf '…' | kaish -c 'sort'`. A redirect (`< file`/heredoc) on the
-  command still takes precedence. Eager: the whole buffer must exist before the
-  call. For a **lazy or binary** stream — fed only if a command reads stdin,
-  byte-clean — use `Kernel::execute_with_pipe_stdin(_streaming)` with a
+  e.g. `printf '…' | kaish -c 'sort'`, binary included — a byte-aware builtin
+  (`wc -c`, `cat`, `cmp`, …) sees it intact, while a text-only builtin still
+  refuses non-UTF-8 loudly when it asks for text. A redirect (`< file`/heredoc)
+  on the command still takes precedence. Eager: the whole buffer must exist
+  before the call. For a **lazy** stream — fed only if a command reads stdin,
+  so an open process stdin that never sends EOF doesn't block a command that
+  never reads it — use `Kernel::execute_with_pipe_stdin(_streaming)` with a
   `PipeReader` instead (this is how the non-interactive `kaish` CLI forwards its
-  open process stdin without blocking a command that never reads it, e.g.
-  `sleep 10 | kaish -c 'echo hi'`).
+  own process stdin, e.g. `sleep 10 | kaish -c 'echo hi'`).
 - **`traceparent` / `tracestate` / `baggage`** — W3C trace context;
   kaish's execution span parents onto your trace, and baggage merges back
   out through `ExecResult.baggage`.

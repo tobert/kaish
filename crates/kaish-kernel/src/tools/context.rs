@@ -59,8 +59,12 @@ pub struct ExecContext {
     pub cwd: PathBuf,
     /// Previous working directory (for `cd -`).
     pub prev_cwd: Option<PathBuf>,
-    /// Standard input for the tool (from pipeline).
-    pub stdin: Option<String>,
+    /// Standard input for the tool (from a redirect, heredoc, here-string, or
+    /// `ExecuteOptions::stdin`). Bytes-typed (GH #176) so a `< binfile`
+    /// redirect over non-UTF-8 content reaches a byte-aware builtin intact
+    /// instead of erroring at redirect setup; a text-only builtin still
+    /// refuses it loudly when it calls `read_stdin_to_text`.
+    pub stdin: Option<Vec<u8>>,
     /// Structured data from pipeline (pre-parsed JSON from previous command).
     /// Tools can check this before parsing stdin to avoid redundant JSON parsing.
     pub stdin_data: Option<Value>,
@@ -548,26 +552,30 @@ impl ExecContext {
 
     /// Set stdin for this execution.
     ///
-    /// An explicit stdin string (`< file`, heredoc, here-string, or a pipeline
+    /// An explicit stdin buffer (`< file`, heredoc, here-string, or a pipeline
     /// hand-off) supersedes any inherited lazy `pipe_stdin`. Since `read_stdin_*`
     /// prefers `pipe_stdin`, clear it here so redirect precedence holds — a
-    /// `< file` must beat a frontend-seeded piped stdin.
-    pub fn set_stdin(&mut self, stdin: String) {
-        self.stdin = Some(stdin);
+    /// `< file` must beat a frontend-seeded piped stdin. Accepts anything
+    /// `Into<Vec<u8>>` — a `String`/`&str` (heredocs, here-strings, most
+    /// callers) or a raw `Vec<u8>` (a `< binfile` redirect, GH #176) both work.
+    pub fn set_stdin(&mut self, stdin: impl Into<Vec<u8>>) {
+        self.stdin = Some(stdin.into());
         self.pipe_stdin = None;
     }
 
     /// Get stdin, consuming it.
-    pub fn take_stdin(&mut self) -> Option<String> {
+    pub fn take_stdin(&mut self) -> Option<Vec<u8>> {
         self.stdin.take()
     }
 
     /// Set both text stdin and structured data.
     ///
     /// Use this when passing output through a pipeline where the previous
-    /// command produced structured data (e.g., JSON from MCP tools).
+    /// command produced structured data (e.g., JSON from MCP tools). The text
+    /// side is always a genuine `String` here (structured-data hand-off is a
+    /// JSON-producing pipeline stage, never binary).
     pub fn set_stdin_with_data(&mut self, text: String, data: Option<Value>) {
-        self.stdin = Some(text);
+        self.stdin = Some(text.into_bytes());
         self.stdin_data = data;
     }
 
@@ -632,25 +640,10 @@ impl ExecContext {
         self.prev_cwd.as_ref()
     }
 
-    /// Read all stdin (pipe or buffered string) into a String.
-    ///
-    /// Prefers pipe_stdin if set (streaming pipeline), otherwise falls back
-    /// to the buffered stdin string. Consumes the source.
-    pub async fn read_stdin_to_string(&mut self) -> Option<String> {
-        if let Some(mut reader) = self.pipe_stdin.take() {
-            use tokio::io::AsyncReadExt;
-            let mut buf = Vec::new();
-            reader.read_to_end(&mut buf).await.ok()?;
-            Some(String::from_utf8_lossy(&buf).into_owned())
-        } else {
-            self.stdin.take()
-        }
-    }
-
     /// Read stdin as text, erroring on non-UTF-8 instead of silently
     /// lossy-decoding it (which corrupts binary with `U+FFFD`).
     ///
-    /// The strict counterpart to [`Self::read_stdin_to_string`], for text-only
+    /// The strict counterpart to [`Self::read_stdin_to_bytes`], for text-only
     /// builtins (`grep`, `sed`, `awk`, `cut`, `sort`, `jq`, …): a binary stream
     /// is a loud error, not a mangle. Returns `Ok(None)` when there is no stdin
     /// at all. The `Err` is a ready-to-use message; callers prefix their name.
@@ -668,11 +661,12 @@ impl ExecContext {
 
     /// Read all of stdin as raw bytes, preserving binary intact.
     ///
-    /// The byte-clean counterpart to [`Self::read_stdin_to_string`], for
+    /// The byte-clean counterpart to [`Self::read_stdin_to_text`], for
     /// binary-aware builtins (`base64`, `xxd`, `checksum`, `wc -c`, `cmp`, …).
     /// Returns `None` when there is no stdin at all (no pipe and no buffer);
-    /// an empty pipe yields `Some(vec![])`. A buffered text stdin is returned
-    /// as its UTF-8 bytes. See `docs/binary-data.md`.
+    /// an empty pipe yields `Some(vec![])`. The buffered source is already
+    /// bytes-typed (GH #176), so this is a plain move, never a re-encode.
+    /// See `docs/binary-data.md`.
     pub async fn read_stdin_to_bytes(&mut self) -> Option<Vec<u8>> {
         if let Some(mut reader) = self.pipe_stdin.take() {
             use tokio::io::AsyncReadExt;
@@ -680,7 +674,7 @@ impl ExecContext {
             reader.read_to_end(&mut buf).await.ok()?;
             Some(buf)
         } else {
-            self.stdin.take().map(String::into_bytes)
+            self.stdin.take()
         }
     }
 

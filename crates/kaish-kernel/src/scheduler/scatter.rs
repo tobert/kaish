@@ -161,9 +161,10 @@ impl ScatterGatherRunner {
         // Run pre-scatter commands to get input.
         // Uses run_sequential to avoid async recursion (scatter → run → scatter).
         let (text, data) = if pre_scatter.is_empty() {
-            // Use existing stdin — structured data, a String buffer, or a lazy
-            // `pipe_stdin` (a frontend-seeded process-stdin pipe). `take_stdin`
-            // alone would miss the pipe; `read_stdin_to_text` prefers it.
+            // Use existing stdin — structured data, a buffered byte vector, or
+            // a lazy `pipe_stdin` (a frontend-seeded process-stdin pipe).
+            // `take_stdin` alone would miss the pipe; `read_stdin_to_text`
+            // prefers it.
             let data = ctx.take_stdin_data();
             let text = match ctx.read_stdin_to_text().await {
                 Ok(s) => s.unwrap_or_default(),
