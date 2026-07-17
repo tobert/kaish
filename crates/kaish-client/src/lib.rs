@@ -18,5 +18,7 @@
 mod embedded;
 mod traits;
 
+pub mod completion;
+
 pub use embedded::EmbeddedClient;
 pub use traits::{KernelClient, ClientResult, ClientError};

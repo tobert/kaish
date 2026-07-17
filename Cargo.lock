@@ -970,6 +970,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "kaish-kernel",
+ "kaish-types",
  "proptest",
  "serde_json",
  "thiserror 2.0.17",

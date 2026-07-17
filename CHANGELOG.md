@@ -10,6 +10,14 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`kaish_client::completion`** — completion context detection
+  (`CompletionContext`, `detect_completion_context`, `word_start`) extracted
+  from the REPL into the client crate, so every frontend answering Tab (the
+  rustyline REPL, the kaish-extras browser playground, embedders) shares one
+  detector; the REPL now consumes it. `EmbeddedClient` is also browser-safe:
+  its blob-id timestamp goes through `kaish_types::clock`.
+
 ### Changed
 - **`uname -o` (and the tail of `uname -a`) now reports `kai`** instead of
   `Kaijutsu` — the shell's identity belongs to kaish itself, not to one

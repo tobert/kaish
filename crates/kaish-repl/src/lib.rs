@@ -24,6 +24,7 @@ use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::{Editor, Helper};
 use tokio::runtime::Runtime;
 
+use kaish_client::completion::{detect_completion_context, is_word_delimiter, CompletionContext};
 use kaish_client::{EmbeddedClient, KernelClient};
 use kaish_kernel::ast::Value;
 use kaish_kernel::interpreter::ExecResult;
@@ -274,88 +275,6 @@ fn shell_words(input: &str) -> Vec<String> {
     }
 
     words
-}
-
-// ── Completion context ──────────────────────────────────────────────
-
-/// What kind of completion to offer based on cursor context.
-enum CompletionContext {
-    /// Start of line, after |, ;, &&, || → complete command names
-    Command,
-    /// After $ or within ${ → complete variable names
-    Variable,
-    /// Everything else → complete file paths
-    Path,
-}
-
-/// Characters that delimit words for completion purposes.
-fn is_word_delimiter(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '|' | ';' | '(' | ')')
-}
-
-/// Detect the completion context by scanning backwards from cursor position.
-fn detect_completion_context(line: &str, pos: usize) -> CompletionContext {
-    let before = &line[..pos];
-
-    // Check for variable completion: look for $ before cursor
-    // Walk backwards to find if we're in a $VAR or ${VAR context
-    // But NOT $( which is command substitution
-    let bytes = before.as_bytes();
-    let mut i = pos;
-    while i > 0 {
-        i -= 1;
-        let b = bytes[i];
-        if b == b'$' {
-            // $( is command substitution, not variable
-            if i + 1 < pos && bytes[i + 1] == b'(' {
-                break;
-            }
-            return CompletionContext::Variable;
-        }
-        if b == b'{' && i > 0 && bytes[i - 1] == b'$' {
-            return CompletionContext::Variable;
-        }
-        // Stop scanning if we hit a non-identifier character
-        if !b.is_ascii_alphanumeric() && b != b'_' && b != b'{' {
-            break;
-        }
-    }
-
-    // Check for command position: start of line, or after pipe/semicolon/logical operators/$(
-    let trimmed = before.trim();
-    if trimmed.is_empty()
-        || trimmed.ends_with('|')
-        || trimmed.ends_with(';')
-        || trimmed.ends_with("&&")
-        || trimmed.ends_with("||")
-        || trimmed.ends_with("$(")
-    {
-        return CompletionContext::Command;
-    }
-
-    // Find start of current "word" (using delimiters that include parentheses)
-    let word_start = before.rfind(is_word_delimiter);
-    match word_start {
-        None => CompletionContext::Command, // First word on the line
-        Some(idx) => {
-            // Check what's before the word
-            let prefix = before[..=idx].trim();
-            if prefix.is_empty()
-                || prefix.ends_with('|')
-                || prefix.ends_with(';')
-                || prefix.ends_with("&&")
-                || prefix.ends_with("||")
-                || prefix.ends_with("$(")
-                || prefix.ends_with("then")
-                || prefix.ends_with("else")
-                || prefix.ends_with("do")
-            {
-                CompletionContext::Command
-            } else {
-                CompletionContext::Path
-            }
-        }
-    }
 }
 
 // ── Rustyline trait impls ───────────────────────────────────────────
@@ -1100,58 +1019,10 @@ mod tests {
         assert!(!helper.is_incomplete("cat <<-DONE\n\thi\n\tDONE"));
     }
 
-    #[test]
-    fn test_detect_context_command_start() {
-        assert!(matches!(
-            detect_completion_context("", 0),
-            CompletionContext::Command
-        ));
-        assert!(matches!(
-            detect_completion_context("ec", 2),
-            CompletionContext::Command
-        ));
-    }
 
-    #[test]
-    fn test_detect_context_after_pipe() {
-        assert!(matches!(
-            detect_completion_context("echo hello | gr", 15),
-            CompletionContext::Command
-        ));
-    }
 
-    #[test]
-    fn test_detect_context_variable() {
-        assert!(matches!(
-            detect_completion_context("echo $HO", 8),
-            CompletionContext::Variable
-        ));
-        assert!(matches!(
-            detect_completion_context("echo ${HO", 9),
-            CompletionContext::Variable
-        ));
-    }
 
-    #[test]
-    fn test_detect_context_path() {
-        assert!(matches!(
-            detect_completion_context("cat /etc/hos", 12),
-            CompletionContext::Path
-        ));
-    }
 
-    #[test]
-    fn test_detect_context_command_substitution() {
-        // $(cmd should complete commands, not variables
-        assert!(matches!(
-            detect_completion_context("echo $(ca", 9),
-            CompletionContext::Command
-        ));
-        assert!(matches!(
-            detect_completion_context("X=$(ec", 6),
-            CompletionContext::Command
-        ));
-    }
 
     #[test]
     fn test_shell_words_comments() {
