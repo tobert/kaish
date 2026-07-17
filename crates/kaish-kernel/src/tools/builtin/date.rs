@@ -47,10 +47,14 @@ pub trait Clock: Send + Sync {
 }
 
 /// Production clock — reads the real system time.
+///
+/// Acquisition goes through `kaish_types::clock::system_now()` so this also
+/// works on `wasm32-unknown-unknown`, where `Utc::now()` reaches std's
+/// unsupported clock and panics; the conversion into chrono is pure math.
 struct SystemClock;
 impl Clock for SystemClock {
     fn now_utc(&self) -> DateTime<Utc> {
-        Utc::now()
+        DateTime::from(kaish_types::clock::system_now())
     }
 }
 
