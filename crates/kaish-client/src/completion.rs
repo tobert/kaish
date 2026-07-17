@@ -172,7 +172,7 @@ pub fn current_command(line: &str, pos: usize) -> Option<(usize, usize)> {
 
     let before = &line[..pos];
     let stmt_start = before
-        .rfind(|c: char| matches!(c, '|' | ';' | '&' | '(' | '\n'))
+        .rfind(['|', ';', '&', '(', '\n'])
         .map(|i| i + 1)
         .unwrap_or(0);
 
