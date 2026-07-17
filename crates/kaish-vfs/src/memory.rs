@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
+use kaish_types::clock::system_now;
 use tokio::sync::RwLock;
 
 /// Entry in the memory filesystem.
@@ -58,7 +59,7 @@ impl MemoryFs {
         entries.insert(
             PathBuf::from(""),
             Entry::Directory {
-                modified: SystemTime::now(),
+                modified: system_now(),
             },
         );
         Self {
@@ -208,7 +209,7 @@ impl MemoryFs {
                     name: String::new(),
                     kind: DirEntryKind::Directory,
                     size: 0,
-                    modified: Some(SystemTime::now()),
+                    modified: Some(system_now()),
                     permissions: None,
                     symlink_target: None,
                 });
@@ -294,7 +295,7 @@ impl MemoryFs {
                     }
                     std::collections::hash_map::Entry::Vacant(e) => {
                         e.insert(Entry::Directory {
-                            modified: SystemTime::now(),
+                            modified: system_now(),
                         });
                     }
                 }
@@ -369,7 +370,7 @@ impl Filesystem for MemoryFs {
             normalized,
             Entry::File {
                 data: data.to_vec(),
-                modified: SystemTime::now(),
+                modified: system_now(),
             },
         );
         self.settle(old_len, new_len);
@@ -483,7 +484,7 @@ impl Filesystem for MemoryFs {
                 name,
                 kind: DirEntryKind::Directory,
                 size: 0,
-                modified: Some(SystemTime::now()),
+                modified: Some(system_now()),
                 permissions: None,
                 symlink_target: None,
             });
@@ -558,7 +559,7 @@ impl Filesystem for MemoryFs {
             normalized,
             Entry::Symlink {
                 target: target.to_path_buf(),
-                modified: SystemTime::now(),
+                modified: system_now(),
             },
         );
         Ok(())
@@ -586,7 +587,7 @@ impl Filesystem for MemoryFs {
         entries.insert(
             normalized,
             Entry::Directory {
-                modified: SystemTime::now(),
+                modified: system_now(),
             },
         );
         Ok(())
@@ -755,7 +756,7 @@ mod tests {
     #[tokio::test]
     async fn test_set_mtime_missing_errors() {
         let fs = MemoryFs::new();
-        let result = fs.set_mtime(Path::new("nope.txt"), SystemTime::now()).await;
+        let result = fs.set_mtime(Path::new("nope.txt"), system_now()).await;
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
     }
 

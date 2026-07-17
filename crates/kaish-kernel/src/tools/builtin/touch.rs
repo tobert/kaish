@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::path::Path;
-use std::time::SystemTime;
+use kaish_types::clock::system_now;
 
 use crate::backend::WriteMode;
 use crate::interpreter::ExecResult;
@@ -73,7 +73,7 @@ impl Tool for Touch {
             // (local + memory mounts) and rejects on read-only/virtual mounts
             // rather than silently reporting a success it didn't deliver.
             let result = if ctx.backend.exists(path).await {
-                ctx.backend.set_mtime(path, SystemTime::now()).await
+                ctx.backend.set_mtime(path, system_now()).await
             } else {
                 ctx.backend.write(path, &[], WriteMode::CreateNew).await
             };

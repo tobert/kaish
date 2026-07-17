@@ -19,6 +19,7 @@ use clap::{CommandFactory, Parser};
 use kaish_glob::glob_match;
 use std::path::Path;
 use std::time::SystemTime;
+use kaish_types::clock::system_now;
 
 use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
@@ -319,7 +320,7 @@ impl Tool for Find {
                 Err(e) => return ExecResult::failure(1, format!("find: {}", e)),
             };
 
-            let _now_secs = SystemTime::now()
+            let _now_secs = system_now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
