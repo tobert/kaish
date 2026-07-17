@@ -81,6 +81,15 @@ pub struct ExecuteOptions {
     /// to avoid pre-draining an open process stdin should prefer
     /// `Kernel::execute_with_pipe_stdin` instead.
     pub stdin: Option<Vec<u8>>,
+    /// Polled interrupt check, for embedders whose thread cannot fire
+    /// `cancel_token` while execution runs — the motivating case is
+    /// single-threaded wasm, where the browser's main thread flips a
+    /// SharedArrayBuffer flag and this closure reads it. The kernel polls at
+    /// its cancellation checkpoints (each loop iteration, among others) and,
+    /// on `true`, fires its internal cancel — the same exit-130 path as
+    /// `Kernel::cancel()`. Keep the closure cheap: it runs on the hot path.
+    /// `None` (the default) polls nothing.
+    pub interrupt: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl ExecuteOptions {
@@ -97,6 +106,15 @@ impl ExecuteOptions {
     /// Add a single variable to the overlay (extending; last write wins).
     pub fn with_var(mut self, name: impl Into<String>, value: Value) -> Self {
         self.vars.insert(name.into(), value);
+        self
+    }
+
+    /// Install a polled interrupt check (see the `interrupt` field).
+    pub fn with_interrupt(
+        mut self,
+        check: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Self {
+        self.interrupt = Some(check);
         self
     }
 

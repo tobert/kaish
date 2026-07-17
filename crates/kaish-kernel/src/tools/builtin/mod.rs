@@ -27,7 +27,7 @@ mod exec;
 #[cfg(feature = "subprocess")]
 mod spawn;
 #[cfg(feature = "subprocess")]
-pub use spawn::resolve_in_path;
+pub use spawn::{resolve_in_path, virtual_cwd_error};
 mod export;
 #[cfg(feature = "subprocess")]
 mod fg;

@@ -316,7 +316,25 @@ async fn bracket_leading_glob_at_value_position_is_a_loud_error() {
 async fn multiword_bareword_record_value_is_a_loud_error() {
     let k = setup().await;
     let result = k.execute("x={msg: hello world}").await;
-    assert!(result.is_err(), "unquoted multi-word record value must be a loud parse error");
+    let err = result.expect_err("unquoted multi-word record value must be a loud parse error");
+    // GH #183: this used to be chumsky's generic "found '}' expected ':'"
+    // (from the failed second-entry attempt: `world` gets tried as the next
+    // bareword KEY and then fails at `}`) — a `record_literal_parser`
+    // try_map guard now names the actual mistake and hints the fix.
+    let msg = err.to_string();
+    assert!(msg.contains("unexpected word \"world\""), "got: {msg}");
+    assert!(msg.contains("quoted"), "got: {msg}");
+}
+
+/// A comma-optional record entry immediately followed by another bareword
+/// KEY (not a stray word) is unaffected by the new guard — `{a: 1 b: 2}` is
+/// legal kaish (see `list_literal_commas_optional`'s record counterpart).
+#[tokio::test]
+async fn record_literal_comma_optional_entries_unaffected_by_stray_word_guard() {
+    let k = setup().await;
+    let (out, code, err) = run(&k, "u={a: 1 b: 2}; echo ${u[a]} ${u[b]}").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "1 2");
 }
 
 #[tokio::test]

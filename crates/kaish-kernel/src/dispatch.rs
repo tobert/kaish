@@ -42,7 +42,7 @@ use crate::scheduler::build_tool_args;
 #[cfg(test)]
 use crate::tools::{GlobalFlags, ToolRegistry};
 #[cfg(all(test, feature = "subprocess"))]
-use crate::tools::resolve_in_path;
+use crate::tools::{resolve_in_path, virtual_cwd_error};
 
 /// Position of a command within a pipeline.
 ///
@@ -161,12 +161,15 @@ impl BackendDispatcher {
             return None;
         }
 
-        // Get real working directory (needed for relative path resolution and child cwd).
-        // If the CWD is virtual (no real path), skip external execution entirely.
-        let real_cwd = match ctx.backend.resolve_real_path(&ctx.cwd) {
-            Some(p) => p,
-            None => return None,
-        };
+        // Real filesystem location of the shell's cwd, if any. A `None` real
+        // path means the cwd is virtual (a CoW overlay, an in-memory VFS
+        // mount, …) — there's nowhere for a child OS process to run. Don't
+        // bail out here: a bare command name that isn't in PATH at all is a
+        // genuine "not found" regardless of cwd. Once the command actually
+        // resolves, `real_cwd` is checked again below and the honest reason
+        // is given then — kept in sync with kernel.rs::try_execute_external
+        // (issue #181).
+        let real_cwd = ctx.backend.resolve_real_path(&ctx.cwd);
 
         // Resolve command: absolute/relative path or PATH lookup
         let executable = if name.contains('/') {
@@ -174,7 +177,13 @@ impl BackendDispatcher {
             let resolved = if std::path::Path::new(name).is_absolute() {
                 std::path::PathBuf::from(name)
             } else {
-                real_cwd.join(name)
+                match &real_cwd {
+                    Some(real_cwd) => real_cwd.join(name),
+                    // Can't resolve a relative path without a real cwd to
+                    // join against, so we can't even tell whether it would
+                    // exist — name the actual blocker.
+                    None => return Some(virtual_cwd_error(name, &ctx.cwd)),
+                }
             };
             if resolved.exists() {
                 resolved.to_string_lossy().into_owned()
@@ -188,6 +197,13 @@ impl BackendDispatcher {
                 .map(crate::interpreter::value_to_string)
                 .unwrap_or_default();
             resolve_in_path(name, &path_var)?
+        };
+
+        // The executable resolved — found in PATH, or a path that exists —
+        // but there's still nowhere to run it without a real cwd.
+        let real_cwd = match real_cwd {
+            Some(p) => p,
+            None => return Some(virtual_cwd_error(name, &ctx.cwd)),
         };
 
         // Build flat argv from args. A for-loop (not filter_map) so the
@@ -494,12 +510,14 @@ impl CommandDispatcher for BackendDispatcher {
             _ => {}
         }
 
-        // Build tool args with schema-aware parsing (sync — no command substitution).
+        // Build tool args through the reduced sync evaluator (no command
+        // substitution) — see `SyncEvalSource` in `scheduler::pipeline`.
         // A bad/subscripted collection access is a genuine PathError here too —
         // propagate it via `?` rather than swallowing, same as the production
         // Kernel::dispatch_command's `execute_command(..).await?`.
         let schema = self.tools.get(&cmd.name).map(|t| t.schema());
         let tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref())
+            .await
             .map_err(|e| anyhow::anyhow!(e))?;
 
         // Honor --json before the tool runs so a parse failure inside the

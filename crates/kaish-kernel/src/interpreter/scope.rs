@@ -356,6 +356,22 @@ fn apply_leaf_write(
     }
 }
 
+/// Render a mid-walk `PathError` for `push`'s error text. `Absence`/`Shape`
+/// already carry a ready-to-display `${…}` message from `resolve_step`/
+/// `descend_mut` (shared with `walk_write`); only `UndefinedRoot` needs
+/// `push`-flavored wording here — it fires for an unset `$k` dynamic
+/// subscript mid-path, not the root itself (`walk_append` checks the root
+/// exists before ever starting the walk).
+fn push_path_error_message(err: PathError, root_name: &str) -> String {
+    match err {
+        PathError::UndefinedRoot(msg) if msg.is_empty() => {
+            format!("push: {root_name} is not defined")
+        }
+        PathError::UndefinedRoot(msg) => format!("push: {msg}"),
+        PathError::Absence(msg) | PathError::Shape(msg) => msg,
+    }
+}
+
 /// Variable scope with nested frames and last-result tracking.
 ///
 /// Variables are looked up from innermost to outermost frame.
@@ -840,25 +856,70 @@ impl Scope {
         Ok(())
     }
 
-    /// Append value(s) to a top-level list variable, in place (`push xs val`).
+    /// Append value(s) to a list variable, in place: a top-level bareword
+    /// target (`push xs val`) or a bracket-path target
+    /// (`push services[web][tags] item`).
     ///
-    /// The target must already exist and be a list — an undefined or
-    /// non-list target is a loud error, never a silent create (see
-    /// `docs/arrays-and-hashes.md`, "Append — push"). Bracket-path push
-    /// (`push services[web][tags] item`) is deferred (see `docs/issues.md`);
-    /// this only handles a top-level bareword name.
-    pub fn walk_append(&mut self, name: &str, values: Vec<Value>) -> Result<(), String> {
+    /// The target must already exist and be a list — an undefined root, a
+    /// non-list leaf, or a missing intermediate hop is a loud error, never a
+    /// silent create or autoviv (see `docs/arrays-and-hashes.md`, "Append —
+    /// push"). Intermediate hops share `walk_write`'s `resolve_step`/
+    /// `descend_mut` (no autoviv, same bounds/shape classification); the
+    /// final hop diverges — it appends instead of replacing.
+    pub fn walk_append(&mut self, path: &VarPath, values: Vec<Value>) -> Result<(), String> {
+        let Some(VarSegment::Field(root_name)) = path.segments.first() else {
+            return Err("push: target has no root".to_string());
+        };
+        let root_name = root_name.clone();
         let current = self
-            .get(name)
-            .ok_or_else(|| format!("push: {name} is not defined"))?;
-        if !matches!(current, Value::Json(serde_json::Value::Array(_))) {
-            return Err(format!("push: {name} is not a list ({})", type_name(current)));
+            .get(&root_name)
+            .ok_or_else(|| format!("push: {root_name} is not defined"))?
+            .clone();
+
+        let subscripts = &path.segments[1..];
+        if subscripts.is_empty() {
+            if !matches!(current, Value::Json(serde_json::Value::Array(_))) {
+                return Err(format!("push: {root_name} is not a list ({})", type_name(&current)));
+            }
+            let Value::Json(serde_json::Value::Array(mut arr)) = current else {
+                unreachable!("checked above")
+            };
+            arr.extend(values.iter().map(value_to_json));
+            self.set_global(root_name, Value::Json(serde_json::Value::Array(arr)));
+            return Ok(());
         }
-        let Value::Json(serde_json::Value::Array(mut arr)) = current.clone() else {
-            unreachable!("checked above")
+
+        let mut root_json = match current {
+            Value::Json(j) => j,
+            other => {
+                return Err(format!(
+                    "push: {root_name}…: cannot subscript {} — it is not a collection",
+                    type_name(&other)
+                ))
+            }
+        };
+
+        // Walk every subscript — including the last — with the shared
+        // no-autoviv intermediate walker: the container the values append
+        // into must already exist, matching `walk_write`'s policy.
+        let mut cur = &mut root_json;
+        let mut prefix = root_name.clone();
+        for seg in subscripts {
+            let step = resolve_step(cur, seg, self, &prefix)
+                .map_err(|e| push_path_error_message(e, &root_name))?;
+            cur = descend_mut(cur, step, &prefix)
+                .map_err(|e| push_path_error_message(e, &root_name))?;
+            prefix.push_str(&render_segment(seg));
+        }
+
+        let serde_json::Value::Array(arr) = cur else {
+            return Err(format!(
+                "push: {prefix} is not a list ({})",
+                type_name(&json_to_value_no_envelope(cur.clone()))
+            ));
         };
         arr.extend(values.iter().map(value_to_json));
-        self.set_global(name, Value::Json(serde_json::Value::Array(arr)));
+        self.set_global(root_name, Value::Json(root_json));
         Ok(())
     }
 
@@ -1335,7 +1396,7 @@ mod tests {
         let mut scope = Scope::new();
         scope.set("xs", Value::Json(serde_json::json!(["a", "b"])));
         scope
-            .walk_append("xs", vec![Value::String("c".into())])
+            .walk_append(&VarPath::simple("xs"), vec![Value::String("c".into())])
             .expect("push should succeed");
         assert_eq!(scope.get("xs"), Some(&Value::Json(serde_json::json!(["a", "b", "c"]))));
     }
@@ -1343,7 +1404,7 @@ mod tests {
     #[test]
     fn walk_append_undefined_target_is_a_loud_error() {
         let mut scope = Scope::new();
-        let r = scope.walk_append("nope", vec![Value::Int(1)]);
+        let r = scope.walk_append(&VarPath::simple("nope"), vec![Value::Int(1)]);
         assert!(r.is_err(), "expected a loud error for an undefined target");
     }
 
@@ -1351,7 +1412,63 @@ mod tests {
     fn walk_append_non_list_target_is_a_loud_error() {
         let mut scope = Scope::new();
         scope.set("y", Value::String("hi".into()));
-        let r = scope.walk_append("y", vec![Value::Int(1)]);
+        let r = scope.walk_append(&VarPath::simple("y"), vec![Value::Int(1)]);
         assert!(r.is_err(), "expected a loud error for a non-list target");
+    }
+
+    #[test]
+    fn walk_append_bracket_path_extends_a_nested_list_in_place() {
+        let mut scope = Scope::new();
+        scope.set(
+            "services",
+            Value::Json(serde_json::json!({"web": {"tags": ["a"]}})),
+        );
+        let path = VarPath {
+            segments: vec![
+                VarSegment::Field("services".into()),
+                VarSegment::Key("web".into()),
+                VarSegment::Key("tags".into()),
+            ],
+        };
+        scope
+            .walk_append(&path, vec![Value::String("b".into())])
+            .expect("bracket-path push should succeed");
+        assert_eq!(
+            scope.get("services"),
+            Some(&Value::Json(serde_json::json!({"web": {"tags": ["a", "b"]}})))
+        );
+    }
+
+    #[test]
+    fn walk_append_bracket_path_missing_intermediate_is_a_loud_error() {
+        let mut scope = Scope::new();
+        scope.set("services", Value::Json(serde_json::json!({})));
+        let path = VarPath {
+            segments: vec![
+                VarSegment::Field("services".into()),
+                VarSegment::Key("web".into()),
+                VarSegment::Key("tags".into()),
+            ],
+        };
+        let r = scope.walk_append(&path, vec![Value::String("x".into())]);
+        assert!(r.is_err(), "expected a loud error for a missing intermediate");
+    }
+
+    #[test]
+    fn walk_append_bracket_path_non_list_leaf_is_a_loud_error() {
+        let mut scope = Scope::new();
+        scope.set(
+            "services",
+            Value::Json(serde_json::json!({"web": {"port": 8080}})),
+        );
+        let path = VarPath {
+            segments: vec![
+                VarSegment::Field("services".into()),
+                VarSegment::Key("web".into()),
+                VarSegment::Key("port".into()),
+            ],
+        };
+        let r = scope.walk_append(&path, vec![Value::Int(1)]);
+        assert!(r.is_err(), "expected a loud error for a non-list leaf");
     }
 }

@@ -334,6 +334,49 @@ vfs.mount("/", MemoryFs::with_budget(budget.clone()));
 // budget.used() / budget.remaining() are observable at any time.
 ```
 
+### Output Limits and Spill Mode (`OutputLimitConfig`)
+
+`KernelConfig::output_limit` caps how much a single command's output can grow
+before it's truncated (exit code 3 — see [the result contract](#the-result-contract)).
+Independent of the byte cap, `SpillMode` decides *where* the overflow goes:
+
+- **`SpillMode::Disk`** (the default): the full output is written to a spill
+  file under `paths::spill_dir()` — `$XDG_RUNTIME_DIR/kaish/spill` (tmpfs on
+  systemd systems, cleared on reboot) — and the result carries a head+tail
+  preview pointing at it (`cat` it to read the rest).
+- **`SpillMode::Memory`**: head+tail truncation only — no disk I/O, no
+  recoverable file. Memory stays bounded regardless of how much the command
+  produced.
+
+| Construction | `SpillMode` |
+|---|---|
+| `KernelConfig::agent()` / `.agent_with_root()` / `.named()` / `.transient()` (`Sandboxed`, real host mount) | `Disk` |
+| `KernelConfig::repl()` (`Passthrough`, real host mount) | `Disk` in principle, but moot — `repl()`'s `output_limit` is `none()` (unlimited) |
+| `KernelConfig::isolated()`, or any config `.with_vfs_mode(VfsMountMode::NoLocal)` | `Memory` — forced at construction, no host mount to spill to |
+| `Kernel::with_backend(..)` | `Memory` — forced at construction, the embedder owns the VFS and a kernel-side `std::fs` write would bypass it (see the Warning above) |
+
+Forcing beats an explicit request: setting `SpillMode::Disk` on a config that's
+`NoLocal` or headed for `with_backend` is silently overridden to `Memory` in
+`Kernel::assemble` — neither kernel shape owns a host mount to write to, so an
+explicit `Disk` request there would be nonsensical, not honored.
+
+A **host-backed** kernel (`Sandboxed`/`Passthrough`, built with `Kernel::new`)
+defaults to `Disk` because it already has a real filesystem — spilling there is
+no different from any other write it does. If you want a host-backed kernel
+that nonetheless never touches disk (e.g. the output may hold data you don't
+want recoverable from a temp file even though the kernel has host access),
+opt in explicitly:
+
+```rust
+use kaish_kernel::OutputLimitConfig;
+
+let config = KernelConfig::agent()
+    .with_output_limit(OutputLimitConfig::agent().in_memory());
+```
+
+There's no equivalent flag to force `Disk` on a `NoLocal`/`with_backend`
+kernel — by design, since neither owns a host mount to spill to.
+
 ## Initial Variables and Hermetic Subprocess Env
 
 The kernel is **hermetic by default** — it never reads `std::env::vars()`,

@@ -366,11 +366,11 @@ impl PipelineRunner {
         // "reduced sync path" entry). Mirrors run_single's dispatch-error handling.
         let scatter_schema = self.tools.get("scatter").map(|t| t.schema());
         let gather_schema = self.tools.get("gather").map(|t| t.schema());
-        let scatter_args = match build_tool_args(&scatter_cmd.args, ctx, scatter_schema.as_ref()) {
+        let scatter_args = match build_tool_args(&scatter_cmd.args, ctx, scatter_schema.as_ref()).await {
             Ok(args) => args,
             Err(e) => return ExecResult::failure(1, format!("scatter: {e}")),
         };
-        let gather_args = match build_tool_args(&gather_cmd.args, ctx, gather_schema.as_ref()) {
+        let gather_args = match build_tool_args(&gather_cmd.args, ctx, gather_schema.as_ref()).await {
             Ok(args) => args,
             Err(e) => return ExecResult::failure(1, format!("gather: {e}")),
         };
@@ -817,242 +817,77 @@ pub fn is_bool_type(param_type: &str) -> bool {
     matches!(param_type.to_lowercase().as_str(), "bool" | "boolean")
 }
 
-/// Build ToolArgs from AST Args, evaluating expressions.
+/// Reduced [`crate::kernel::ArgValueSource`] for `build_tool_args` below:
+/// evaluates via this module's own synchronous `eval_simple_expr` (no
+/// recursion into the async pipeline, so no command substitution) and never
+/// expands globs or tilde — `build_tool_args`'s historical "reduced sync"
+/// contract (see its doc comment), preserved exactly. Only the STRUCTURAL
+/// flag/positional binding now comes from the one shared
+/// `crate::kernel::bind_tool_args` core (GH #188).
+struct SyncEvalSource<'a> {
+    ctx: &'a ExecContext,
+}
+
+#[async_trait::async_trait]
+impl crate::kernel::ArgValueSource for SyncEvalSource<'_> {
+    async fn eval(&self, expr: &Expr) -> anyhow::Result<Option<Value>> {
+        eval_simple_expr(expr, self.ctx).map_err(|e| anyhow::anyhow!(e))
+    }
+
+    async fn expand_glob(&self, _pattern: &str) -> anyhow::Result<Option<Vec<String>>> {
+        // This reduced context has never expanded globs (bare patterns bind
+        // as literal text via `eval_simple_expr`'s `GlobPattern` arm) —
+        // scatter/gather's own flag values (`--as`, `--limit`, `--timeout`)
+        // are never file globs, so there's nothing to fix here (GH #188
+        // scoped this out; see the PR description).
+        Ok(None)
+    }
+
+    async fn home(&self) -> Option<String> {
+        // No tilde expansion in this reduced context — unchanged from
+        // before GH #188 (scatter/gather's own flag values are never paths).
+        None
+    }
+}
+
+/// Build ToolArgs from AST Args, evaluating expressions — the reduced sync
+/// wrapper around the shared [`crate::kernel::bind_tool_args`] core. Used by
+/// scatter/gather's own option parsing (`run_scatter_gather`, below —
+/// before any worker forks, so it can't recurse back into
+/// `PipelineRunner::run` for command substitution) and the `#[cfg(test)]`
+/// `BackendDispatcher` (`dispatch.rs`).
 ///
-/// If a schema is provided, uses it to determine argument types:
-/// - For `--flag` where schema says type is non-bool: consume next positional as value
-/// - For `--flag` where schema says type is bool (or unknown): treat as boolean flag
-///
-/// This enables natural shell syntax like `mcp_tool --query "test" --limit 10`.
-///
-/// Fallible: a bad/subscripted collection access (`${u[nope]}` on a record
-/// without that key, a subscript on a scalar, `${#u[tags]}` on an undefined
-/// subscripted root) must fail loud here too, matching the four primary eval
-/// sites (`echo`, assignment, `$(( ))`, `"${…}"`) — see [`eval_simple_expr`].
-pub fn build_tool_args(
+/// GH #188: this used to be a hand-rolled twin of `Kernel::build_args_async`'s
+/// flag/positional-binding logic that could — and did — drift from it (no
+/// undeclared-space-flag guard, no glued-short-flag handling, no
+/// `consumes`/`repeatable` accumulation). Now it's a thin wrapper: the
+/// binding logic itself is shared via [`SyncEvalSource`], and only
+/// expression evaluation differs (this context can't run `$(...)`).
+pub async fn build_tool_args(
     args: &[Arg],
     ctx: &ExecContext,
     schema: Option<&ToolSchema>,
 ) -> Result<ToolArgs, String> {
-    let mut tool_args = ToolArgs::new();
-    let param_lookup = schema.map(schema_param_lookup).unwrap_or_default();
-    let accepts_word_assign = schema
-        .map(|s| crate::tools::accepts_word_assign(s.name.as_str()))
-        .unwrap_or(false);
-
-    // Track which positional indices have been consumed as flag values
-    let mut consumed_positionals: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let mut past_double_dash = false;
-
-    // First pass: find positional args and their indices
-    let mut positional_indices: Vec<(usize, &Expr)> = Vec::new();
-    for (i, arg) in args.iter().enumerate() {
-        if let Arg::Positional(expr) = arg {
-            positional_indices.push((i, expr));
-        }
-    }
-
-    // Second pass: process all args
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-
-        match arg {
-            Arg::DoubleDash => {
-                past_double_dash = true;
-            }
-            Arg::Positional(expr) => {
-                // Check if this positional was consumed by a preceding flag
-                if !consumed_positionals.contains(&i)
-                    && let Some(value) = eval_simple_expr(expr, ctx)?
-                {
-                    tool_args.positional.push(value);
-                }
-            }
-            Arg::Named { key, value } => {
-                if let Some(val) = eval_simple_expr(value, ctx)? {
-                    tool_args.named.insert(key.clone(), val);
-                }
-            }
-            Arg::WordAssign { key, value } => {
-                if let Some(val) = eval_simple_expr(value, ctx)? {
-                    if accepts_word_assign {
-                        tool_args.named.insert(key.clone(), val);
-                    } else {
-                        // Loud on binary (GH #116) — sync twin of the async
-                        // binder's WordAssign fallback in kernel.rs.
-                        let val_str = crate::interpreter::value_to_text_sink_named(
-                            &val,
-                            "a key=value argument",
-                        )
-                        .map_err(|e| e.to_string())?;
-                        tool_args.positional.push(Value::String(format!("{key}={val_str}")));
-                    }
-                }
-            }
-            Arg::ShortFlag(name) => {
-                if past_double_dash {
-                    tool_args.positional.push(Value::String(format!("-{name}")));
-                } else if name.len() == 1 {
-                    // Single-char short flag: look up schema to check if it takes a value.
-                    // e.g., `-n 5` where `-n` is an alias for `lines` (type: int)
-                    let flag_name = name.as_str();
-                    let lookup = param_lookup.get(flag_name);
-                    let is_bool = lookup
-                        .map(|(_, typ, ..)| is_bool_type(typ))
-                        .unwrap_or(true);
-
-                    if is_bool {
-                        tool_args.flags.insert(flag_name.to_string());
-                    } else {
-                        // Non-bool: consume next positional as value, insert under canonical name
-                        let canonical = lookup.map(|(n, ..)| *n).unwrap_or(flag_name);
-                        let next_positional = positional_indices
-                            .iter()
-                            .find(|(idx, _)| *idx > i && !consumed_positionals.contains(idx));
-
-                        if let Some((pos_idx, expr)) = next_positional {
-                            if let Some(value) = eval_simple_expr(expr, ctx)? {
-                                tool_args.named.insert(canonical.to_string(), value);
-                                consumed_positionals.insert(*pos_idx);
-                            } else {
-                                tool_args.flags.insert(flag_name.to_string());
-                            }
-                        } else {
-                            tool_args.flags.insert(flag_name.to_string());
-                        }
-                    }
-                } else if let Some(&(canonical, typ, ..)) = param_lookup.get(name.as_str()) {
-                    // Multi-char short flag matches a schema param (POSIX style: -name value)
-                    if is_bool_type(typ) {
-                        tool_args.flags.insert(canonical.to_string());
-                    } else {
-                        let next_positional = positional_indices
-                            .iter()
-                            .find(|(idx, _)| *idx > i && !consumed_positionals.contains(idx));
-                        if let Some((pos_idx, expr)) = next_positional {
-                            if let Some(value) = eval_simple_expr(expr, ctx)? {
-                                tool_args.named.insert(canonical.to_string(), value);
-                                consumed_positionals.insert(*pos_idx);
-                            } else {
-                                tool_args.flags.insert(name.clone());
-                            }
-                        } else {
-                            tool_args.flags.insert(name.clone());
-                        }
-                    }
-                } else {
-                    // Multi-char combined flags like -la: always boolean
-                    for c in name.chars() {
-                        tool_args.flags.insert(c.to_string());
-                    }
-                }
-            }
-            Arg::LongFlag(name) => {
-                if past_double_dash {
-                    tool_args.positional.push(Value::String(format!("--{name}")));
-                } else {
-                    // Look up type in schema (checks name and aliases)
-                    let lookup = param_lookup.get(name.as_str());
-                    let is_bool = lookup
-                        .map(|(_, typ, ..)| is_bool_type(typ))
-                        .unwrap_or(true); // Unknown params default to bool
-
-                    if is_bool {
-                        tool_args.flags.insert(name.clone());
-                    } else {
-                        // Non-bool: consume next positional as value, insert under canonical name
-                        // Note: the sync build_tool_args does NOT honor `consumes > 1` OR
-                        // `repeatable` (it overwrites on a repeated flag). The async
-                        // build_args_async in kernel.rs is the only path that supports multi-consume
-                        // and repeatable accumulation. Sync callers — scatter/gather option parsing
-                        // (scalar flags only) and the test-only BackendDispatcher — don't carry such
-                        // flags, so this is safe today; if they ever do, lift the logic via a shared
-                        // helper. Tracked in docs/issues.md.
-                        let canonical = lookup.map(|(n, ..)| *n).unwrap_or(name.as_str());
-                        let next_positional = positional_indices
-                            .iter()
-                            .find(|(idx, _)| *idx > i && !consumed_positionals.contains(idx));
-
-                        if let Some((pos_idx, expr)) = next_positional {
-                            if let Some(value) = eval_simple_expr(expr, ctx)? {
-                                tool_args.named.insert(canonical.to_string(), value);
-                                consumed_positionals.insert(*pos_idx);
-                            } else {
-                                tool_args.flags.insert(name.clone());
-                            }
-                        } else {
-                            tool_args.flags.insert(name.clone());
-                        }
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-
-    // Map remaining positionals to unfilled non-bool schema params (in order).
-    // This enables `drift_push "abc" "hello"` → named["target_ctx"] = "abc", named["content"] = "hello"
-    // Positionals that appeared after `--` are never mapped (they're raw data).
-    // Only for backend/external tools (map_positionals=true). Builtins handle their own positionals.
-    if let Some(schema) = schema.filter(|s| s.map_positionals) {
-        // Count how many positionals were added before `--`
-        let pre_dash_count = if past_double_dash {
-            // Find where the double-dash was in the original args to count pre-dash positionals
-            let dash_pos = args.iter().position(|a| matches!(a, Arg::DoubleDash)).unwrap_or(args.len());
-            // Count unconsumed positionals before the double-dash
-            positional_indices.iter()
-                .filter(|(idx, _)| *idx < dash_pos && !consumed_positionals.contains(idx))
-                .count()
-        } else {
-            tool_args.positional.len()
-        };
-
-        let mut remaining = Vec::new();
-        let mut positional_iter = tool_args.positional.drain(..).enumerate();
-
-        for param in &schema.params {
-            if tool_args.named.contains_key(&param.name) || tool_args.flags.contains(&param.name) {
-                continue; // Already filled by a flag or named arg
-            }
-            if is_bool_type(&param.param_type) {
-                continue; // Bool params should only be set by flags
-            }
-            // Take from pre-dash positionals only
-            loop {
-                match positional_iter.next() {
-                    Some((idx, val)) if idx < pre_dash_count => {
-                        tool_args.named.insert(param.name.clone(), val);
-                        break;
-                    }
-                    Some((_, val)) => {
-                        remaining.push(val); // Post-dash or past limit, keep as positional
-                    }
-                    None => break,
-                }
-            }
-        }
-
-        // Any leftover positionals stay positional (e.g. `cat file1 file2`)
-        remaining.extend(positional_iter.map(|(_, v)| v));
-        tool_args.positional = remaining;
-    }
-
-    Ok(tool_args)
+    crate::kernel::bind_tool_args(args, schema, &SyncEvalSource { ctx })
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Simple expression evaluation for args (without full scope access).
 ///
-/// `Ok(None)` means "not representable in this reduced sync context" (binary
-/// ops, command substitution — these need the async kernel path; callers
-/// treat that the same as before, e.g. falling back to a bare flag). `Err`
-/// means a genuine [`PathError`] — undefined-subscripted-root, a missing key,
-/// or a shape mismatch — and MUST propagate loud, the same as the async
-/// `build_args_async`/`eval_expr_async` (`kernel.rs`) and the sync
-/// interpreter (`eval.rs`) treat it. Before this, every arm here discarded
-/// the error via `.ok()`/`if let Ok(..)`, so a bad subscript in a scatter/gather
-/// flag value silently dropped the argument instead of failing (docs/issues.md,
-/// now closed).
+/// `Ok(None)` means "not representable in this reduced sync context" (only
+/// binary ops fall here now — everything else this reduced binder can't
+/// evaluate, like command substitution, has its own explicit `Err` arm
+/// below; callers treat `None` the same as before, e.g. falling back to a
+/// bare flag). `Err` means a genuine failure — a [`PathError`]
+/// (undefined-subscripted-root, a missing key, a shape mismatch), a bad
+/// `$((...))` arithmetic expansion, or an unsupported `$(...)`/`$(cmd)` — and
+/// MUST propagate loud, the same as the async `build_args_async`/
+/// `eval_expr_async` (`kernel.rs`) and the sync interpreter (`eval.rs`) treat
+/// it. Before this, every arm here discarded the error via
+/// `.ok()`/`if let Ok(..)`, so a bad subscript OR a bad arithmetic expansion
+/// in a scatter/gather flag value silently dropped the argument instead of
+/// failing (docs/issues.md, now closed; the arithmetic swallow was GH #183).
 pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Result<Option<Value>, String> {
     match expr {
         Expr::Literal(value) => Ok(Some(eval_literal(value, ctx))),
@@ -1088,6 +923,16 @@ pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Result<Option<
             }
         }
         Expr::GlobPattern(s) => Ok(Some(Value::String(s.clone()))),
+        // Bare arithmetic expansion (`scatter --limit $((1+1))`) — mirrors
+        // the async `eval_expr_async`'s `Expr::Arithmetic` arm (kernel.rs),
+        // which already propagates loud. This used to fall into the
+        // catch-all `_ => Ok(None)` below (silently "not representable
+        // here"), so a bare `$((...))` flag value never bound at all — a
+        // valid `--limit $((1+1))` silently ran unlimited, and a bad
+        // `--limit $((1/0))` silently did too, instead of failing (GH #183).
+        Expr::Arithmetic(expr_str) => arithmetic::eval_arithmetic(expr_str, &ctx.scope)
+            .map(|n| Some(Value::Int(n)))
+            .map_err(|e| format!("arithmetic error: {e}")),
         Expr::HereDocBody { parts, strip_tabs } => {
             // Heredoc body materialization for redirect targets. `<<-` tab
             // stripping applies to the literal source, not to tabs from a
@@ -1181,12 +1026,16 @@ fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -
                 result.push_str(&ctx.scope.arg_count().to_string());
             }
             crate::ast::StringPart::Arithmetic(expr) => {
-                // Arithmetic errors in this reduced sync context are a
-                // separate, pre-existing swallow (not a collection PathError)
-                // — out of scope here; tracked in docs/issues.md.
-                if let Ok(value) = arithmetic::eval_arithmetic(expr, &ctx.scope) {
-                    result.push_str(&value.to_string());
-                }
+                // Loud on purpose (GH #183): this used to be `if let Ok(..)`,
+                // silently omitting the digits on error — a quoted
+                // `--limit "$((1/0))"` used to surface only as scatter's own
+                // generic int-parse complaint on the resulting "", masking
+                // the real arithmetic error. Matches the bare
+                // `Expr::Arithmetic` arm above and the async
+                // `eval_string_part_async` (kernel.rs).
+                let value = arithmetic::eval_arithmetic(expr, &ctx.scope)
+                    .map_err(|e| format!("arithmetic error: {e}"))?;
+                result.push_str(&value.to_string());
             }
             crate::ast::StringPart::CommandSubst(_) => {
                 // Command substitution can't run in this reduced sync
@@ -1877,8 +1726,8 @@ mod tests {
         BackendDispatcher::new(Arc::new(ToolRegistry::new()))
     }
 
-    #[test]
-    fn test_schema_aware_string_arg() {
+    #[tokio::test]
+    async fn test_schema_aware_string_arg() {
         // --query "test" should become named: {"query": "test"}
         let args = vec![
             Arg::LongFlag("query".to_string()),
@@ -1887,7 +1736,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         assert!(tool_args.flags.is_empty(), "No flags should be set");
         assert!(tool_args.positional.is_empty(), "No positionals - consumed by --query");
@@ -1898,8 +1747,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_schema_aware_bool_flag() {
+    #[tokio::test]
+    async fn test_schema_aware_bool_flag() {
         // --verbose should remain a flag since schema says bool
         let args = vec![
             Arg::LongFlag("verbose".to_string()),
@@ -1907,15 +1756,15 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         assert!(tool_args.flags.contains("verbose"), "--verbose should be a flag");
         assert!(tool_args.named.is_empty(), "No named args");
         assert!(tool_args.positional.is_empty(), "No positionals");
     }
 
-    #[test]
-    fn test_schema_aware_mixed() {
+    #[tokio::test]
+    async fn test_schema_aware_mixed() {
         // mcp_tool file.txt --output out.txt --verbose
         // file.txt maps to "query" (first unfilled non-bool schema param)
         let args = vec![
@@ -1927,7 +1776,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         assert!(tool_args.positional.is_empty(), "file.txt consumed as query param");
         assert_eq!(
@@ -1941,8 +1790,8 @@ mod tests {
         assert!(tool_args.flags.contains("verbose"));
     }
 
-    #[test]
-    fn test_schema_aware_multiple_string_args() {
+    #[tokio::test]
+    async fn test_schema_aware_multiple_string_args() {
         // --query "test" --output "result.json" --verbose --limit 5
         let args = vec![
             Arg::LongFlag("query".to_string()),
@@ -1956,7 +1805,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         assert!(tool_args.positional.is_empty(), "All positionals consumed");
         assert_eq!(
@@ -1974,8 +1823,8 @@ mod tests {
         assert!(tool_args.flags.contains("verbose"));
     }
 
-    #[test]
-    fn test_schema_aware_double_dash() {
+    #[tokio::test]
+    async fn test_schema_aware_double_dash() {
         // --output out.txt -- --this-is-data
         // After --, everything is positional
         let args = vec![
@@ -1987,7 +1836,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         assert_eq!(
             tool_args.named.get("output"),
@@ -2005,8 +1854,8 @@ mod tests {
     /// the `[binary: N bytes]` placeholder into `key=value` (e.g. `dd if=$BIN`
     /// reached via a scatter/gather flag value, which routes through this sync
     /// evaluator instead of the async binder).
-    #[test]
-    fn word_assign_binary_value_is_loud_not_placeholder() {
+    #[tokio::test]
+    async fn word_assign_binary_value_is_loud_not_placeholder() {
         let args = vec![Arg::WordAssign {
             key: "if".to_string(),
             value: Expr::Literal(Value::Bytes(vec![0xff, 0x00, 0xfe])),
@@ -2015,15 +1864,15 @@ mod tests {
 
         // schema=None ⇒ accepts_word_assign is false ⇒ falls to the
         // stringify-to-positional branch under test.
-        let err = build_tool_args(&args, &ctx, None).expect_err("binary WordAssign must error");
+        let err = build_tool_args(&args, &ctx, None).await.expect_err("binary WordAssign must error");
         assert!(
             err.contains("cannot be used as"),
             "error should name the binary problem, got {err:?}"
         );
     }
 
-    #[test]
-    fn test_no_schema_fallback() {
+    #[tokio::test]
+    async fn test_no_schema_fallback() {
         // Without schema, all --flags are treated as bool flags
         let args = vec![
             Arg::LongFlag("query".to_string()),
@@ -2031,7 +1880,7 @@ mod tests {
         ];
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, None).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, None).await.expect("build_tool_args");
 
         // Without schema, --query is a flag and "test" is a positional
         assert!(tool_args.flags.contains("query"), "--query should be a flag");
@@ -2042,9 +1891,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_unknown_flag_in_schema() {
-        // --unknown-flag value: --unknown is bool (not in schema), "value" maps to query
+    /// GH #188: `--unknown value` under a `map_positionals` schema (real
+    /// MCP/backend tools) is ambiguous — kaish can't tell an undeclared
+    /// flag's space-form value from a bool flag sitting before a genuine
+    /// positional. The pre-#188 reduced sync twin silently defaulted
+    /// `--unknown` to a bool flag and mapped "value" onto the first unfilled
+    /// param (`query`) instead — exactly the "no undeclared-space-flag
+    /// guard" divergence from `Kernel::build_args_async`'s real behavior
+    /// that unifying the two binders closes. Production's ambiguous-value
+    /// guard (`kernel::bind_tool_args`) now fires here too.
+    #[tokio::test]
+    async fn test_unknown_flag_ambiguous_space_value_now_errors_loud() {
         let args = vec![
             Arg::LongFlag("unknown".to_string()),
             Arg::Positional(Expr::Literal(Value::String("value".to_string()))),
@@ -2052,7 +1909,28 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let err = build_tool_args(&args, &ctx, Some(&schema))
+            .await
+            .expect_err("an undeclared flag immediately before a positional must be ambiguous, not silently bool");
+        assert!(
+            err.contains("--unknown is not a declared flag"),
+            "got: {err}"
+        );
+    }
+
+    /// The unambiguous half of the same guard: an undeclared flag with
+    /// nothing after it can't be silently swallowing a positional, so it
+    /// still defaults to a bare bool flag — unchanged by GH #188.
+    #[tokio::test]
+    async fn test_unknown_bool_flag_with_no_following_positional_is_fine() {
+        let args = vec![
+            Arg::Positional(Expr::Literal(Value::String("value".to_string()))),
+            Arg::LongFlag("unknown".to_string()),
+        ];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         assert!(tool_args.flags.contains("unknown"));
         assert!(tool_args.positional.is_empty(), "value consumed as query param");
@@ -2062,8 +1940,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_named_args_unchanged() {
+    #[tokio::test]
+    async fn test_named_args_unchanged() {
         // key=value syntax should work regardless of schema
         let args = vec![
             Arg::Named {
@@ -2075,7 +1953,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         assert_eq!(
             tool_args.named.get("query"),
@@ -2084,8 +1962,8 @@ mod tests {
         assert!(tool_args.flags.contains("verbose"));
     }
 
-    #[test]
-    fn test_short_flags_unchanged() {
+    #[tokio::test]
+    async fn test_short_flags_unchanged() {
         // Short flags -la should expand regardless of schema; file.txt maps to query
         let args = vec![
             Arg::ShortFlag("la".to_string()),
@@ -2094,7 +1972,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         assert!(tool_args.flags.contains("l"));
         assert!(tool_args.flags.contains("a"));
@@ -2105,8 +1983,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_flag_at_end_no_value() {
+    #[tokio::test]
+    async fn test_flag_at_end_no_value() {
         // --output at end with no value available - treat as flag (lenient)
         // file.txt maps to query (first unfilled non-bool param)
         let args = vec![
@@ -2116,7 +1994,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         // output expects a value but none available after it, so it becomes a flag
         assert!(tool_args.flags.contains("output"));
@@ -2127,8 +2005,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_positional_skips_bool_params() {
+    #[tokio::test]
+    async fn test_positional_skips_bool_params() {
         // Schema: [query: string, verbose: bool, output: string]
         // Args: "val1" "val2"
         // Expected: query="val1", verbose unset, output="val2"
@@ -2153,7 +2031,7 @@ mod tests {
         ];
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         assert_eq!(
             tool_args.named.get("query"),
@@ -2167,8 +2045,8 @@ mod tests {
         assert!(tool_args.positional.is_empty());
     }
 
-    #[test]
-    fn test_positionals_fill_available_slots() {
+    #[tokio::test]
+    async fn test_positionals_fill_available_slots() {
         // Schema has query (string), limit (int), verbose (bool), output (string).
         // Three positionals fill the 3 non-bool slots.
         let args = vec![
@@ -2179,7 +2057,7 @@ mod tests {
         let schema = make_test_schema(); // query, limit(int), verbose(bool), output
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         // val1 → query, val2 → limit (int param but receives string — tool decides),
         // val3 → output
@@ -2198,8 +2076,8 @@ mod tests {
         assert!(tool_args.positional.is_empty());
     }
 
-    #[test]
-    fn test_truly_excess_positionals() {
+    #[tokio::test]
+    async fn test_truly_excess_positionals() {
         // More positionals than non-bool schema params — leftovers stay positional
         let schema = ToolSchema::new("test", "")
             .param(ParamSchema::required("name", "string", ""))
@@ -2211,7 +2089,7 @@ mod tests {
         ];
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         assert_eq!(
             tool_args.named.get("name"),
@@ -2226,8 +2104,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_double_dash_positional_not_mapped() {
+    #[tokio::test]
+    async fn test_double_dash_positional_not_mapped() {
         // `tool val1 -- val2` — val1 maps to query, val2 stays positional (post-dash)
         let args = vec![
             Arg::Positional(Expr::Literal(Value::String("val1".to_string()))),
@@ -2237,7 +2115,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         assert_eq!(
             tool_args.named.get("query"),
@@ -2250,8 +2128,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_all_params_filled_by_flags() {
+    #[tokio::test]
+    async fn test_all_params_filled_by_flags() {
         // All schema params satisfied by explicit flags — no positional mapping needed
         let args = vec![
             Arg::LongFlag("query".to_string()),
@@ -2263,7 +2141,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         assert_eq!(
             tool_args.named.get("query"),
@@ -2277,8 +2155,8 @@ mod tests {
         assert!(tool_args.positional.is_empty());
     }
 
-    #[test]
-    fn test_mixed_flags_and_positional_fill() {
+    #[tokio::test]
+    async fn test_mixed_flags_and_positional_fill() {
         // --output foo val1 — output is explicit, val1 maps to query
         let args = vec![
             Arg::LongFlag("output".to_string()),
@@ -2288,7 +2166,7 @@ mod tests {
         let schema = make_test_schema();
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         assert_eq!(
             tool_args.named.get("output"),
@@ -2301,8 +2179,8 @@ mod tests {
         assert!(tool_args.positional.is_empty());
     }
 
-    #[test]
-    fn test_alias_flag_prevents_mapping_overwrite() {
+    #[tokio::test]
+    async fn test_alias_flag_prevents_mapping_overwrite() {
         // -q "search" "out.txt" — -q is alias for query, so out.txt should map to output
         let schema = ToolSchema::new("test", "")
             .param(ParamSchema::required("query", "string", "").with_aliases(["-q"]))
@@ -2315,7 +2193,7 @@ mod tests {
         ];
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         assert_eq!(
             tool_args.named.get("query"),
@@ -2328,8 +2206,8 @@ mod tests {
         assert!(tool_args.positional.is_empty());
     }
 
-    #[test]
-    fn test_builtin_schema_no_positional_mapping() {
+    #[tokio::test]
+    async fn test_builtin_schema_no_positional_mapping() {
         // Builtins have map_positionals=false — positionals stay positional
         let schema = ToolSchema::new("echo", "")
             .param(ParamSchema::optional("args", "any", Value::Null, ""))
@@ -2341,7 +2219,7 @@ mod tests {
         ];
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         // Positionals should NOT be consumed as named params
         assert_eq!(
@@ -2354,8 +2232,8 @@ mod tests {
         assert!(!tool_args.named.contains_key("args"));
     }
 
-    #[test]
-    fn test_short_flag_with_alias_consumes_value() {
+    #[tokio::test]
+    async fn test_short_flag_with_alias_consumes_value() {
         // `-n 5` where `-n` is aliased to `lines` (type: int)
         // Should produce named: {"lines": 5}, not flags: {"n"} + positional: [5]
         let schema = ToolSchema::new("head", "Output first part of files")
@@ -2368,11 +2246,92 @@ mod tests {
         ];
         let ctx = make_minimal_ctx();
 
-        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).expect("build_tool_args");
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
 
         assert!(tool_args.flags.is_empty(), "no boolean flags: {:?}", tool_args.flags);
         assert_eq!(tool_args.named.get("lines"), Some(&Value::Int(5)), "should resolve alias to canonical name");
         assert_eq!(tool_args.positional, vec![Value::String("/tmp/file.txt".to_string())]);
+    }
+
+    // === GH #188: divergences the pre-unification sync twin couldn't handle ===
+    //
+    // The old `scheduler::pipeline::build_tool_args` hand-rolled its own
+    // flag/positional binder that never supported glued short-flag values or
+    // `consumes`/`repeatable` accumulation (see the removed comment that used
+    // to sit on the `LongFlag` arm). Scatter/gather's own schemas never
+    // exercised these (scalar flags only), so the gap was real but
+    // un-triggerable in production — these tests pin the now-shared
+    // `kernel::bind_tool_args` behavior through the reduced sync entry point
+    // so the two binders can't quietly drift apart on it again.
+
+    #[tokio::test]
+    async fn test_glued_short_flag_value_now_binds() {
+        // `-f1` (`cut -f1`-shaped): before #188 this fell to the "combined
+        // short flags" arm and produced two bogus bool flags ("f", "1")
+        // instead of resolving the declared value-flag's glued value.
+        let schema = ToolSchema::new("cut", "")
+            .param(ParamSchema::optional("fields", "string", Value::Null, "").with_aliases(["-f"]));
+        let args = vec![Arg::ShortFlag("f1".to_string())];
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
+
+        assert!(tool_args.flags.is_empty(), "no bogus bool flags: {:?}", tool_args.flags);
+        assert_eq!(tool_args.named.get("fields"), Some(&Value::String("1".to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_repeatable_flag_now_accumulates() {
+        // `-e A -e B`: before #188 the sync twin's value-flag path always
+        // overwrote `named[canonical]`, silently keeping only the last
+        // occurrence ("B"). The shared core accumulates both, matching
+        // `Kernel::build_args_async`.
+        let schema = ToolSchema::new("sed", "")
+            .param(ParamSchema::optional("expression", "string", Value::Null, "")
+                .with_aliases(["-e"])
+                .with_repeatable(true));
+        let args = vec![
+            Arg::ShortFlag("e".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("A".to_string()))),
+            Arg::ShortFlag("e".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("B".to_string()))),
+        ];
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
+
+        assert_eq!(
+            tool_args.named.get("expression"),
+            Some(&Value::Json(serde_json::json!(["A", "B"]))),
+            "both occurrences must survive, not just the last: {:?}",
+            tool_args.named
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multi_consume_flag_now_accumulates() {
+        // `--arg NAME VAL` (jq-shaped, `consumes == 2`): before #188 the sync
+        // twin only ever consumed a single positional per flag occurrence,
+        // so a `consumes: 2` param was unsupported. The shared core
+        // recognizes it and accumulates array-of-arrays occurrences.
+        let schema = ToolSchema::new("jq", "")
+            .param(ParamSchema::optional("arg", "any", Value::Null, "").consumes(2));
+        let args = vec![
+            Arg::LongFlag("arg".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("name".to_string()))),
+            Arg::Positional(Expr::Literal(Value::String("val".to_string()))),
+        ];
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema)).await.expect("build_tool_args");
+
+        assert_eq!(
+            tool_args.named.get("arg"),
+            Some(&Value::Json(serde_json::json!([["name", "val"]]))),
+            "got: {:?}",
+            tool_args.named
+        );
+        assert!(tool_args.positional.is_empty());
     }
 
     // === Redirect Execution Tests ===
