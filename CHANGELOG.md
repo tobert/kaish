@@ -17,6 +17,12 @@ breaking entries are marked **BREAKING**.
   rustyline REPL, the kaish-extras browser playground, embedders) shares one
   detector; the REPL now consumes it. `EmbeddedClient` is also browser-safe:
   its blob-id timestamp goes through `kaish_types::clock`.
+- **`ToolArgs::to_argv_excluding`** — like `to_argv()` but skips given named
+  keys entirely, so a builtin that deliberately reads one of its own named
+  params raw (to preserve a `Value::Bytes` payload past the argv/text
+  boundary) doesn't need a bespoke clone-and-remove dance. `to_argv()` now
+  delegates to it with an empty exclude list. `write`'s `content` param
+  adopts it (GH #218, a follow-up from the GH #164/#215 review).
 ### Removed
 - **BREAKING:** `output_limit::spill_aware_collect` and its private helpers
   (`collect_stderr`, `collect_stdout_with_spill`, `handle_overflow`,

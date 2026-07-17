@@ -767,6 +767,31 @@ async fn write_binary_content_positional_round_trips_byte_for_byte() {
     );
 }
 
+/// `write dest.bin --content=$(cat src.bin)`: the *named* `content` flag
+/// carries real `Value::Bytes` (GH #218). This is the scenario
+/// `ToolArgs::to_argv_excluding(&["content"])` exists for — a named
+/// `Value::Bytes` would otherwise trip `to_argv()`'s loud `BinaryNamedValue`
+/// guard (GH #164) before `write` ever got a chance to read it raw. Proves
+/// the exclusion actually reaches the kernel-routed named path, not just the
+/// positional one covered above.
+#[tokio::test]
+async fn write_binary_content_named_flag_round_trips_byte_for_byte() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute("b=$(cat src.bin); write dest.bin --content=$b")
+        .await
+        .unwrap();
+    assert!(result.ok(), "err={}", result.err);
+    let written = fs::read(dir.path().join("dest.bin")).unwrap();
+    assert_eq!(
+        written, BIN,
+        "binary content must round-trip byte-for-byte through the named --content flag, \
+         not error at the to_argv() boundary nor leak the `[binary: N bytes]` placeholder"
+    );
+}
+
 /// `push xs $(cat src.bin)`: `push`'s value positional must not be rejected
 /// by `to_argv()` just because it carries binary content. Checks list length
 /// (not byte content) — kaish's native lists are backed internally by
