@@ -7617,17 +7617,50 @@ AFTER="yes"'"#)
         // Schedule cancel after a short delay from a background OS thread
         schedule_cancel(&kernel, std::time::Duration::from_millis(10));
 
-        let result = kernel
-            .execute("for i in $(seq 1 100000); do X=$i; done")
+        // #149: a bare `X=$i` body has no await point, so the for-loop's
+        // cancellation checkpoint (checked once per iteration, see the
+        // `Stmt::For` arm above) never gets a chance to run mid-body — under
+        // host load, 100_000 trivial iterations could complete and return
+        // before the background thread's 10ms sleep ever elapsed, racing a
+        // natural exit-0 completion against the scheduled cancel. Rather than
+        // widen the margin (there's no bound on how slow "under load" can be),
+        // make completion deterministically impossible inside the test
+        // window: `sleep` is a real interruptible await point (it races
+        // `tokio::time::sleep` against the same cancellation token — see
+        // `tools/builtin/sleep.rs`), so a per-iteration sleep both gives
+        // cancellation somewhere to land almost immediately AND, at enough
+        // iterations, makes natural completion take far longer than the
+        // bounded wait below. The outer timeout is the "must not hang CI if
+        // cancellation is broken" backstop: it fails loudly well before the
+        // loop could ever finish on its own.
+        const ITERATIONS: u32 = 2000;
+        const PER_ITERATION_SLEEP_SECS: f64 = 0.05;
+        let bound = std::time::Duration::from_secs(10);
+        let script = format!("for i in $(seq 1 {ITERATIONS}); do X=$i; sleep {PER_ITERATION_SLEEP_SECS}; done");
+
+        let result = tokio::time::timeout(bound, kernel.execute(&script))
             .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "for-loop did not return within {bound:?} — cancellation support looks \
+                     broken (an uncancelled loop needs ~{:.0}s to finish on its own, far \
+                     longer than this bound)",
+                    ITERATIONS as f64 * PER_ITERATION_SLEEP_SECS
+                )
+            })
             .expect("execute failed");
 
         assert_eq!(result.code, 130, "cancelled execution should exit with code 130");
 
-        // The loop variable should be set to something < 100000
+        // The loop variable should be set to something well short of the full
+        // iteration count — i.e. cancellation landed long before the loop
+        // could complete on its own.
         let x = kernel.get_var("X").await;
         if let Some(Value::Int(n)) = x {
-            assert!(n < 100000, "loop should have been interrupted before finishing, got X={n}");
+            assert!(
+                n < i64::from(ITERATIONS),
+                "loop should have been interrupted before finishing, got X={n}"
+            );
         }
     }
 
