@@ -15,6 +15,7 @@ use std::path::Path;
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::builtin::get_path_string;
+use crate::tools::builtin::read_repeatable_strings;
 use crate::tools::builtin::regex_dialect::{append_dialect_hint, bre_metas_to_ere};
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -158,7 +159,11 @@ impl Tool for Awk {
         // `ToolArgs::to_argv()` collapses to one JSON token (it can't tell a
         // repeatable scalar array from a single array value) — same gotcha as
         // sed's `-e`. Each assignment is applied in order; later wins.
-        for var_assign in collect_vars(&args) {
+        let var_assigns = match collect_vars(&args) {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("awk: -v: {e}")),
+        };
+        for var_assign in var_assigns {
             if let Some((name, value)) = var_assign.split_once('=') {
                 // Command-line assignments are numeric strings (POSIX strnum).
                 runtime.set_var(name.trim(), AwkValue::StrNum(value.to_string()));
@@ -186,24 +191,25 @@ impl Tool for Awk {
 /// under the canonical `var` key; a single value may arrive as a bare
 /// `Value::String`. Mirrors sed's `collect_expressions` — see the repeatable
 /// gotcha in `[[arch_repeatable_flags]]`.
-fn collect_vars(args: &ToolArgs) -> Vec<String> {
-    let mut vars = Vec::new();
+///
+/// Delegates to [`read_repeatable_strings`] (GH #217) rather than a hand-rolled
+/// `filter_map`: a `-v` value that reaches here is either the `key=value`
+/// string produced by `consume_flag_positionals`'s WordAssign reassembly (see
+/// `awk_dash_v_binary_assignment_is_loud`), or a *bare* substitution with no
+/// literal `=` in the source (`-v $x`) — which skips that guard and can still
+/// carry a binary envelope. The old `if let Value::String(s) = item` filter
+/// silently dropped that entry instead of erroring, so the assignment just
+/// vanished and awk ran as if `-v` had never been given.
+fn collect_vars(args: &ToolArgs) -> Result<Vec<String>, String> {
     // Both `-v` and `--var` canonicalize to the long name `var`; `v` is
     // defensive insurance in case a future change binds under the short alias.
-    for key in ["var", "v"] {
-        match args.named.get(key) {
-            Some(crate::ast::Value::Json(serde_json::Value::Array(items))) => {
-                for item in items {
-                    if let serde_json::Value::String(s) = item {
-                        vars.push(s.clone());
-                    }
-                }
-            }
-            Some(crate::ast::Value::String(s)) => vars.push(s.clone()),
-            _ => {}
-        }
+    // Only one key is ever actually populated, so trying `var` first and
+    // falling back to `v` only when it's empty can't double-count or reorder.
+    let vars = read_repeatable_strings(args, "var")?;
+    if !vars.is_empty() {
+        return Ok(vars);
     }
-    vars
+    read_repeatable_strings(args, "v")
 }
 
 // ============================================================================
