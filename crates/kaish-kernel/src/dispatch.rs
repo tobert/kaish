@@ -510,12 +510,14 @@ impl CommandDispatcher for BackendDispatcher {
             _ => {}
         }
 
-        // Build tool args with schema-aware parsing (sync — no command substitution).
+        // Build tool args through the reduced sync evaluator (no command
+        // substitution) — see `SyncEvalSource` in `scheduler::pipeline`.
         // A bad/subscripted collection access is a genuine PathError here too —
         // propagate it via `?` rather than swallowing, same as the production
         // Kernel::dispatch_command's `execute_command(..).await?`.
         let schema = self.tools.get(&cmd.name).map(|t| t.schema());
         let tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref())
+            .await
             .map_err(|e| anyhow::anyhow!(e))?;
 
         // Honor --json before the tool runs so a parse failure inside the
