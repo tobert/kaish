@@ -735,3 +735,87 @@ async fn spawn_forwards_and_captures_binary() {
     assert!(r.is_bytes(), "binary round-trip through cat should be Bytes");
     assert_eq!(r.out_bytes(), Some(&[0xffu8][..]));
 }
+
+// ============================================================================
+// Bounded-Stream Overflow Tests (GH #191)
+//
+// `repl_kernel()` uses `KernelConfig::repl()`, whose `output_limit` is
+// `OutputLimitConfig::none()` — the repl/embedded/test default, and the exact
+// disabled path GH #191 is about. Before the fix, an external command's
+// stdout captured into `BoundedStream::new(DEFAULT_STREAM_MAX_SIZE)` (the 10MB
+// ring) would silently evict its oldest bytes past that cap and report clean
+// success with the head quietly gone — `bytes_evicted` was tracked but never
+// read. The enabled-limit path already fails loud (spill + exit 3); this pins
+// the disabled path doing the same via a stderr marker + exit 3, without ever
+// corrupting stdout (which may be binary) with marker text.
+// ============================================================================
+
+#[tokio::test]
+async fn external_stdout_overflow_is_loud_by_default() {
+    let kernel = repl_kernel();
+    // `yes x | head -c 11000000` inside a single `sh -c` external command:
+    // ~11MB of "x\n" on the child's stdout, captured whole by kaish's 10MB
+    // ring — same idiom as the dispatch.rs pinning test for this capture path.
+    let result = kernel
+        .execute(r#"sh -c "yes x | head -c 11000000""#)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.code, 3,
+        "overflow must remap to exit 3 (execute_pipeline's did_spill remap): err={}",
+        result.err
+    );
+    assert!(result.did_spill, "overflow must set did_spill for the exit-3 remap");
+    assert_eq!(
+        result.original_code,
+        Some(0),
+        "the child's own exit status (0) should be preserved as original_code"
+    );
+    assert!(
+        result.err.contains("stdout truncated"),
+        "stderr should carry a loud truncation marker: {}",
+        result.err
+    );
+    assert!(
+        result.err.contains("output-limit"),
+        "marker should point at the fix (enable output-limit to spill to disk): {}",
+        result.err
+    );
+
+    // Stdout is the tail window, capped at the ring size, and never
+    // contaminated with marker text (the marker lives in stderr only —
+    // see the binary-safety comment at the fix site in kernel.rs).
+    let out = result.text_out();
+    assert!(
+        out.len() <= kaish_kernel::DEFAULT_STREAM_MAX_SIZE,
+        "stdout should be capped at the ring size, got {} bytes",
+        out.len()
+    );
+    assert!(
+        !out.contains("truncated"),
+        "stdout must not be contaminated with marker text: {:?}",
+        &out[..out.len().min(80)]
+    );
+    assert!(
+        out.chars().all(|c| c == 'x' || c == '\n'),
+        "stdout tail should be a clean 'x\\n' repeat, unmodified by the marker"
+    );
+}
+
+#[tokio::test]
+async fn external_stdout_within_limit_is_unaffected() {
+    // A normal, small-output external command must see zero behavior change:
+    // exit 0, no did_spill, no marker anywhere in stderr.
+    let kernel = repl_kernel();
+    let result = kernel.execute(r#"sh -c "printf hello""#).await.unwrap();
+
+    assert_eq!(result.code, 0, "err: {}", result.err);
+    assert!(!result.did_spill, "small output must not trip the overflow signal");
+    assert_eq!(result.text_out(), "hello");
+    assert!(
+        result.err.is_empty(),
+        "no marker should appear for output within the capture buffer: {}",
+        result.err
+    );
+}

@@ -5577,8 +5577,36 @@ impl Kernel {
             // result, so `curl url`, `curl url > file.bin`, etc. keep binary
             // intact. stderr stays text. See docs/binary-data.md.
             let stdout = stdout_stream.read().await;
-            let stderr = stderr_stream.read_string().await;
+            let mut stderr = stderr_stream.read_string().await;
             let mut result = ExecResult::success_text_or_bytes(stdout).with_code(code);
+
+            // Both streams are fixed-size rings regardless of `ctx.output_limit`
+            // (that machinery only runs post-hoc, in `execute_pipeline`, and only
+            // when enabled). With the limit disabled — the repl/embedded/test
+            // default — an overflow here used to be silent: `write` evicted the
+            // oldest bytes and bumped `bytes_evicted`, but nothing ever read that
+            // counter, so a >10MB stdout reported clean success with its head
+            // quietly gone (GH #191). Surface it loudly instead.
+            if stderr_stream.has_overflowed().await {
+                let stats = stderr_stream.stats().await;
+                stderr = format!("{}{stderr}", stats.overflow_marker("stderr"));
+            }
+            if stdout_stream.has_overflowed().await {
+                // The marker goes in stderr, never prepended into `result`'s
+                // stdout payload: stdout may be binary
+                // (`success_text_or_bytes` yields a `Bytes` result for
+                // non-UTF-8 data — e.g. `curl` fetching a >10MB binary), and
+                // string-formatting a marker into it would lossily reinterpret
+                // bytes as text, introducing a SECOND, different kind of
+                // corruption on top of the eviction itself.
+                //
+                // Only stdout overflow flips `did_spill` — exit-code integrity
+                // tracks stdout, matching the enabled-limit path's contract
+                // (stderr overflow alone doesn't remap the exit code).
+                let stats = stdout_stream.stats().await;
+                stderr = format!("{}{stderr}", stats.overflow_marker("stdout"));
+                result.did_spill = true;
+            }
             result.err = stderr;
             Ok(Some(result))
         }
