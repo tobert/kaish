@@ -33,6 +33,13 @@ breaking entries are marked **BREAKING**.
   matching the quoted form and bash. Defaults nest to any depth
   (`${A:-${B:-${C}}}`); an unbalanced reference is a loud
   `unterminated variable reference` error.
+- **`printf`'s `%Ns` width now pads by display width, not UTF-8 byte length**
+  (GH #154) — a CJK or emoji argument to `printf '%10s'`/`%-10s`/`%5c` was
+  under-padded because its byte length exceeds its display width (same bug
+  class as #130's table-alignment fix); `awk`'s `sprintf` shares the fix
+  since both builtins go through the same formatter. `%.Ns` precision
+  truncation was audited too — it already truncates by character count, so
+  it cannot split a UTF-8 codepoint.
 
 ### Added
 - **GitHub Actions CI** (`.github/workflows/ci.yml`): every PR and push to `main`

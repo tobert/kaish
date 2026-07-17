@@ -4,6 +4,8 @@
 //! Both `Value` (printf) and `AwkValue` (awk) implement `FormatArg`
 //! so the same parser serves both builtins.
 
+use unicode_width::UnicodeWidthStr;
+
 /// Trait for values that can be formatted by printf-style specifiers.
 pub trait FormatArg {
     fn as_format_string(&self) -> String;
@@ -513,8 +515,13 @@ fn apply_padded(
 
 fn apply_string_padding(spec: &FormatSpec, val: &str, output: &mut String) {
     let width = spec.width.unwrap_or(0);
-    if width > val.len() {
-        let pad_count = width - val.len();
+    // Padding must be measured in display columns, not UTF-8 byte length —
+    // a CJK/emoji argument's byte length exceeds its display width, so
+    // byte-length comparison under-pads it (GH #154, same bug class as #130's
+    // table-alignment fix in kaish-repl/src/format.rs).
+    let display_width = val.width();
+    if width > display_width {
+        let pad_count = width - display_width;
         if spec.left_align {
             output.push_str(val);
             for _ in 0..pad_count { output.push(' '); }
