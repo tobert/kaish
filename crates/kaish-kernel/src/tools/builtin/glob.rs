@@ -105,8 +105,12 @@ impl Tool for Glob {
         // such bool-typed named entries to flag form so clap accepts them.
         args.flagify_bool_named(&self.schema());
 
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("glob: {e}")),
+        };
         let parsed = match GlobArgs::try_parse_from(
-            std::iter::once("glob".to_string()).chain(args.to_argv()),
+            std::iter::once("glob".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("glob: {e}")),

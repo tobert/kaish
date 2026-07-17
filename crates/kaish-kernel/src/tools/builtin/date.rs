@@ -188,7 +188,11 @@ impl Tool for Date {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
-        self.execute_argv(args.to_argv(), ctx).await
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("date: {e}")),
+        };
+        self.execute_argv(argv, ctx).await
     }
 }
 

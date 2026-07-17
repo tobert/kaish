@@ -79,8 +79,12 @@ impl Tool for Sort {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("sort: {e}")),
+        };
         let parsed = match SortArgs::try_parse_from(
-            std::iter::once("sort".to_string()).chain(args.to_argv()),
+            std::iter::once("sort".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("sort: {e}")),

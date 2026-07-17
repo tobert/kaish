@@ -66,8 +66,12 @@ impl Tool for Xxd {
         // bool-typed named entries into flag form.
         args.flagify_bool_named(&self.schema());
 
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("xxd: {e}")),
+        };
         let parsed = match XxdArgs::try_parse_from(
-            std::iter::once("xxd".to_string()).chain(args.to_argv()),
+            std::iter::once("xxd".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("xxd: {e}")),

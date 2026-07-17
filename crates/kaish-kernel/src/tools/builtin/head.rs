@@ -78,8 +78,12 @@ impl Tool for Head {
             }
         }
 
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("head: {e}")),
+        };
         let parsed = match HeadArgs::try_parse_from(
-            std::iter::once("head".to_string()).chain(args.to_argv()),
+            std::iter::once("head".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("head: {e}")),

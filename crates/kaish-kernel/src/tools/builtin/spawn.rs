@@ -86,8 +86,12 @@ impl Tool for Spawn {
         };
         args.flagify_bool_named(&self.schema());
 
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("spawn: {e}")),
+        };
         let parsed = match SpawnArgs::try_parse_from(
-            std::iter::once("spawn".to_string()).chain(args.to_argv()),
+            std::iter::once("spawn".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("spawn: {e}")),

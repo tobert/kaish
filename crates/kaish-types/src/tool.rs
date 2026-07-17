@@ -482,15 +482,23 @@ impl ToolArgs {
     ///
     /// kaish has already done shell parsing (variables expanded, globs expanded,
     /// `$(...)` substituted, schema-driven flag/value splitting). `to_argv`
-    /// rebuilds a flat token stream suitable for `Parser::parse_from(std::iter::once("<tool>").chain(args.to_argv()))`.
+    /// rebuilds a flat token stream suitable for `Parser::parse_from(std::iter::once("<tool>").chain(args.to_argv()?))`.
     ///
     /// Layout: flags first (as `--<name>`), then named values (as
     /// `--<name>=<value>`), then positionals — separated from earlier sections
     /// by `--` so trailing-passthrough builtins still see them as positionals
     /// even if a value happens to begin with `-`.
     ///
+    /// # Errors
+    ///
+    /// Returns [`ToolArgvError`] when a **named/flag** value is
+    /// [`Value::Bytes`] — binary can't cross the argv/text stringification
+    /// boundary (GH #164, closing the root cause behind GH #120's stringified
+    /// `[binary: N bytes]` placeholder). A **positional** `Value::Bytes` does
+    /// NOT error here; see [`value_to_argv_token`]'s doc comment for why.
+    ///
     /// See the clap builtin pattern in CLAUDE.md (Contributor conventions).
-    pub fn to_argv(&self) -> Vec<String> {
+    pub fn to_argv(&self) -> Result<Vec<String>, ToolArgvError> {
         let mut argv = Vec::with_capacity(
             self.flags.len() + self.named.len() * 2 + self.positional.len() + 1,
         );
@@ -510,7 +518,7 @@ impl ToolArgs {
         // value begins with `-`. Multi-value (`consumes > 1`) params are
         // stored as Value::Json(Array(Array(...))) — one entry per occurrence.
         for (key, value) in &self.named {
-            for rendered in render_named_value(value) {
+            for rendered in render_named_value(key, value)? {
                 argv.push(format!("{}={}", flag_token(key), rendered));
             }
         }
@@ -524,8 +532,40 @@ impl ToolArgs {
             }
         }
 
-        argv
+        Ok(argv)
     }
+}
+
+/// Error raised by [`ToolArgs::to_argv`] when a **named or flag** argument
+/// cannot cross the argv/text stringification boundary.
+///
+/// The only offending [`Value`] variant is [`Value::Bytes`] — every other
+/// variant has a lossless text form. Binary crossing this boundary used to
+/// silently render as a `[binary: N bytes]` placeholder text token, which a
+/// downstream clap-parsed field (`parsed.separator`, `parsed.algo`, …) would
+/// then see as if it were the user's real value — GH #120's root cause,
+/// deferred as "Phase 2" at the time and closed here (GH #164).
+///
+/// Deliberately does **not** cover positional `Value::Bytes` — see
+/// [`value_to_argv_token`]'s doc comment for why a positional binary value
+/// stays safe to render as a placeholder rather than error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ToolArgvError {
+    /// A named/flag argument held [`Value::Bytes`].
+    #[error(
+        "argument `{key}` holds {byte_len} binary bytes, which cannot cross the argv/text \
+         boundary — read it from the raw ToolArgs value (e.g. `args.get(\"{key}\", ..)`) \
+         instead of the clap-parsed field"
+    )]
+    BinaryNamedValue {
+        /// The named argument's key (the schema name, e.g. `"separator"` —
+        /// not the `-`/`--`-prefixed flag_token form).
+        key: String,
+        /// The number of binary bytes it held. Never the bytes themselves —
+        /// this error message must stay safe to log.
+        byte_len: usize,
+    },
 }
 
 fn flag_token(name: &str) -> String {
@@ -541,13 +581,17 @@ fn is_bool_param_type(param_type: &str) -> bool {
     param_type.eq_ignore_ascii_case("bool") || param_type.eq_ignore_ascii_case("boolean")
 }
 
-fn render_named_value(value: &Value) -> Vec<String> {
+/// Render one named argument's value into its `to_argv()` token(s).
+///
+/// `key` is only used to attribute a [`ToolArgvError`] to the argument that
+/// held it — it does not affect rendering of any other variant.
+fn render_named_value(key: &str, value: &Value) -> Result<Vec<String>, ToolArgvError> {
     match value {
         // `consumes > 1` lands as Json(Array(Array(...))) — one inner array per
         // occurrence. Flatten each inner array into space-joined tokens; clap
         // can split on `=` further if needed.
         Value::Json(serde_json::Value::Array(outer)) if outer.iter().all(|v| v.is_array()) => {
-            outer
+            Ok(outer
                 .iter()
                 .map(|inner| {
                     inner
@@ -555,12 +599,35 @@ fn render_named_value(value: &Value) -> Vec<String> {
                         .map(|a| a.iter().map(json_value_to_token).collect::<Vec<_>>().join(" "))
                         .unwrap_or_default()
                 })
-                .collect()
+                .collect())
         }
-        _ => vec![value_to_argv_token(value)],
+        // A named/flag value is commonly read straight off the clap-parsed
+        // field (`parsed.separator`, `parsed.algo`, …) rather than the raw
+        // `ToolArgs`, so silently stringifying binary here — as the old
+        // `[binary: N bytes]` placeholder did — hands a builtin's clap struct
+        // a value that looks textual but isn't the user's real data (GH #120's
+        // root cause). Loud instead: see `ToolArgvError`.
+        Value::Bytes(data) => Err(ToolArgvError::BinaryNamedValue {
+            key: key.to_string(),
+            byte_len: data.len(),
+        }),
+        _ => Ok(vec![value_to_argv_token(value)]),
     }
 }
 
+/// Render one **positional** argument's value into its `to_argv()` token.
+///
+/// `Value::Bytes` renders as a visible placeholder rather than erroring —
+/// unlike the named-value path in [`render_named_value`]. This is safe only
+/// because a clap-reflected positional field is a validation-only sink (see
+/// CLAUDE.md's clap-builtin convention): no builtin reads a positional's
+/// *value* off the parsed clap struct, every one of them reads the typed
+/// `Value` straight off `args.positional` instead (e.g. `push`'s `rest:
+/// Vec<String>` sink, or `write`'s content positional, which accepts real
+/// `Value::Bytes` content byte-for-byte via `args.positional`, never via
+/// `parsed`). A placeholder token here only has to satisfy clap's parse (argv
+/// shape / arity), never carry real data anywhere — so it can never leak
+/// unlike the named case this function's sibling guards against.
 fn value_to_argv_token(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
@@ -569,9 +636,6 @@ fn value_to_argv_token(value: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::String(s) => s.clone(),
         Value::Json(j) => j.to_string(),
-        // Splatting binary into argv is a text context; a real loud-error guard
-        // lands with the arg-building rework (Phase 2). For now mark it visibly
-        // rather than emitting raw bytes. See docs/binary-data.md.
         Value::Bytes(data) => format!("[binary: {} bytes]", data.len()),
     }
 }
@@ -689,7 +753,7 @@ mod to_argv_tests {
 
     #[test]
     fn empty_args_produce_empty_argv() {
-        assert!(ToolArgs::new().to_argv().is_empty());
+        assert!(ToolArgs::new().to_argv().unwrap().is_empty());
     }
 
     #[test]
@@ -697,7 +761,7 @@ mod to_argv_tests {
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("hello".into()));
         args.positional.push(Value::String("world".into()));
-        assert_eq!(args.to_argv(), vec!["--", "hello", "world"]);
+        assert_eq!(args.to_argv().unwrap(), vec!["--", "hello", "world"]);
     }
 
     #[test]
@@ -706,7 +770,7 @@ mod to_argv_tests {
         args.flags.insert("n".into());
         args.flags.insert("verbose".into());
         // Sorted: "n" then "verbose"
-        assert_eq!(args.to_argv(), vec!["-n", "--verbose"]);
+        assert_eq!(args.to_argv().unwrap(), vec!["-n", "--verbose"]);
     }
 
     #[test]
@@ -715,14 +779,14 @@ mod to_argv_tests {
         args.named.insert("count".into(), Value::Int(5));
         args.named.insert("name".into(), Value::String("foo".into()));
         // BTreeMap iterates in key order, so "count" before "name"
-        assert_eq!(args.to_argv(), vec!["--count=5", "--name=foo"]);
+        assert_eq!(args.to_argv().unwrap(), vec!["--count=5", "--name=foo"]);
     }
 
     #[test]
     fn single_char_named_emits_short_equals() {
         let mut args = ToolArgs::new();
         args.named.insert("n".into(), Value::Int(5));
-        assert_eq!(args.to_argv(), vec!["-n=5"]);
+        assert_eq!(args.to_argv().unwrap(), vec!["-n=5"]);
     }
 
     #[test]
@@ -730,7 +794,7 @@ mod to_argv_tests {
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("-n".into()));
         // `echo -- -n` should round-trip as `-- -n`, not be reparsed as a flag.
-        assert_eq!(args.to_argv(), vec!["--", "-n"]);
+        assert_eq!(args.to_argv().unwrap(), vec!["--", "-n"]);
     }
 
     #[test]
@@ -740,9 +804,71 @@ mod to_argv_tests {
         args.named.insert("limit".into(), Value::Int(10));
         args.positional.push(Value::String("file.txt".into()));
         assert_eq!(
-            args.to_argv(),
+            args.to_argv().unwrap(),
             vec!["--verbose", "--limit=10", "--", "file.txt"]
         );
+    }
+
+    /// GH #164: a named/flag `Value::Bytes` must error loudly instead of
+    /// silently stringifying to the `[binary: N bytes]` placeholder — that
+    /// placeholder is exactly what a downstream clap-parsed field
+    /// (`parsed.separator`, `parsed.algo`, …) would otherwise see as if it
+    /// were the user's real value (GH #120's root cause).
+    #[test]
+    fn named_bytes_value_errors_loudly() {
+        let mut args = ToolArgs::new();
+        args.named.insert("separator".into(), Value::Bytes(vec![0xff, 0x00, 0xfe]));
+
+        let err = args.to_argv().expect_err("named Bytes must error");
+        // The message must name the key and the byte count.
+        let message = err.to_string();
+        assert!(message.contains("separator"));
+        assert!(message.contains('3'));
+        let ToolArgvError::BinaryNamedValue { key, byte_len } = err;
+        assert_eq!(key, "separator");
+        assert_eq!(byte_len, 3);
+    }
+
+    /// A single-char named key (e.g. `-a`) gets the same loud treatment.
+    #[test]
+    fn single_char_named_bytes_value_errors_loudly() {
+        let mut args = ToolArgs::new();
+        args.named.insert("a".into(), Value::Bytes(vec![1, 2]));
+
+        let err = args.to_argv().expect_err("named Bytes must error");
+        let ToolArgvError::BinaryNamedValue { key, byte_len } = err;
+        assert_eq!(key, "a");
+        assert_eq!(byte_len, 2);
+    }
+
+    /// Positional `Value::Bytes`, by contrast, does NOT error — see
+    /// `value_to_argv_token`'s doc comment. The clap-reflected positional
+    /// field is a validation-only sink; no builtin ever reads its *value* off
+    /// the parsed struct (they read the typed `Value` straight off
+    /// `args.positional`), so a placeholder token here is inert, not
+    /// corruption. This is the load-bearing decision behind builtins like
+    /// `push`/`write` accepting real binary content through positionals.
+    #[test]
+    fn positional_bytes_value_renders_placeholder_not_error() {
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::Bytes(vec![0xff, 0x00, 0xfe]));
+
+        let argv = args.to_argv().expect("positional Bytes must not error");
+        assert_eq!(argv, vec!["--", "[binary: 3 bytes]"]);
+    }
+
+    /// Mixed case: a named Bytes error takes priority even when a positional
+    /// Bytes value is also present (the loud path must not be starved by
+    /// iteration order silently succeeding on the positional half first).
+    #[test]
+    fn named_bytes_errors_even_with_positional_bytes_present() {
+        let mut args = ToolArgs::new();
+        args.named.insert("check".into(), Value::Bytes(vec![9, 9]));
+        args.positional.push(Value::Bytes(vec![1, 2, 3]));
+
+        let err = args.to_argv().expect_err("named Bytes must still error");
+        let ToolArgvError::BinaryNamedValue { key, .. } = err;
+        assert_eq!(key, "check");
     }
 
     #[test]
@@ -786,7 +912,7 @@ mod to_argv_tests {
         let mut args = ToolArgs::new();
         args.named.insert("R".into(), Value::Bool(true));
         args.flagify_bool_named(&ToolSchema::new("t", ""));
-        let argv = args.to_argv();
+        let argv = args.to_argv().unwrap();
         assert!(argv.contains(&"-R".to_string()), "expected -R, got {:?}", argv);
         assert!(!argv.iter().any(|s| s.contains('=')), "no =value should appear, got {:?}", argv);
     }
@@ -805,7 +931,7 @@ mod to_argv_tests {
 
         assert!(!args.flags.contains("command"), "value flag must not collapse to a bare flag");
         assert_eq!(args.named.get("command"), Some(&Value::Bool(true)));
-        let argv = args.to_argv();
+        let argv = args.to_argv().unwrap();
         assert!(
             argv.iter().any(|s| s == "--command=true"),
             "expected --command=true, got {:?}",

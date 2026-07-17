@@ -23,15 +23,25 @@ use tempfile::tempdir;
 /// rather than a `String` — that's the path that used to reach the placeholder.
 const BIN: &[u8] = b"\xff\x00\xfe\x80\x01\xc0kaish\xf5";
 
+/// True if `msg` names a recognized loud-binary-boundary error. There are two
+/// independent guard mechanisms in play, each with its own wording:
+/// - `value_to_text_sink[_named]` (a text sink — interpolation, path
+///   positionals, redirect targets, …): `"cannot be used as"`.
+/// - `ToolArgs::to_argv()`'s `ToolArgvError::BinaryNamedValue` (a named/flag
+///   value crossing the argv/text stringification boundary, GH #164):
+///   `"cannot cross the argv/text boundary"`.
+///
+/// Checking for either exact phrase (rather than a bare `"binary"` substring)
+/// keeps the check specific — a merely-coincidental "binary" (e.g. the leaked
+/// placeholder itself embedded in an unrelated "No such file or directory"
+/// message) would false-pass a bare substring check.
+fn is_loud_binary_error(msg: &str) -> bool {
+    msg.contains("cannot be used as") || msg.contains("cannot cross the argv/text boundary")
+}
+
 /// Assert a script ran loud: either `execute` returned `Err`, or it returned a
 /// nonzero `ExecResult` whose error names the binary problem — and in NO case
 /// did the `[binary: N bytes]` placeholder leak into stdout OR stderr.
-///
-/// Checks for `"cannot be used as"` rather than a bare `"binary"` substring —
-/// every text-sink guard in this PR (`value_to_text_sink[_named]`) shares that
-/// exact wording, whereas a merely-coincidental "binary" (e.g. the leaked
-/// placeholder itself embedded in an unrelated "No such file or directory"
-/// message) would false-pass a bare substring check.
 async fn assert_loud_binary(script: &str) {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("src.bin"), BIN).unwrap();
@@ -40,7 +50,7 @@ async fn assert_loud_binary(script: &str) {
         Ok(r) => {
             assert_ne!(r.code, 0, "binary at a text sink must be a nonzero exit: {script:?}");
             assert!(
-                r.err.contains("cannot be used as"),
+                is_loud_binary_error(&r.err),
                 "error should name the binary problem, got err={:?} for {script:?}",
                 r.err
             );
@@ -59,7 +69,7 @@ async fn assert_loud_binary(script: &str) {
             // binary-data message underneath.
             let msg = format!("{:#}", e);
             assert!(
-                msg.contains("cannot be used as"),
+                is_loud_binary_error(&msg),
                 "execute error should name the binary problem, got {msg:?} for {script:?}"
             );
         }
@@ -444,7 +454,7 @@ async fn patch_binary_file_override_is_loud() {
         .await
         .unwrap();
     assert_ne!(result.code, 0, "err={}", result.err);
-    assert!(result.err.contains("cannot be used as"), "err={:?}", result.err);
+    assert!(is_loud_binary_error(&result.err), "err={:?}", result.err);
 }
 
 #[tokio::test]
@@ -465,24 +475,23 @@ async fn checksum_binary_check_override_is_loud() {
     assert_loud_binary("b=$(cat src.bin); checksum --check=$b").await;
 }
 
-/// `seq --separator=$BIN` (GH #120): `parsed.separator` comes from clap's
-/// re-parse of `to_argv()`'s output, which already stringified the binary
-/// value into the `[binary: N bytes]` placeholder by the time clap sees it —
-/// checking the clap field before the untouched raw `ToolArgs` value hides a
-/// binary separator entirely, silently splicing the placeholder text between
-/// the generated numbers instead of erroring. Mirrors the checksum/patch
-/// reorder fix from the #93 item-1 PR.
+/// `seq --separator=$BIN` (GH #120, root cause closed by GH #164):
+/// `ToolArgs::to_argv()` now rejects a `Value::Bytes` named value before
+/// `SeqArgs::try_parse_from` ever runs, so `parsed.separator` can never
+/// observe the old `[binary: N bytes]` placeholder — no per-builtin reorder
+/// needed any more.
 #[tokio::test]
 async fn seq_separator_binary_is_loud() {
     assert_loud_binary("b=$(cat src.bin); seq --separator=$b 1 3").await;
 }
 
-/// `cut --fields=$BIN` (GH #120, found via kaibo review of this PR's own
-/// audit): my first pass wrongly classified `fields`/`characters` as
-/// already-loud like `delimiter` — in fact `select_indices` silently parses
-/// the `[binary: N bytes]` placeholder as zero valid indices (no digits, no
-/// `-`), so `cut` would silently emit one blank line per input line instead
-/// of erroring. Same clap-field-first ordering hazard as `seq --separator`.
+/// `cut --fields=$BIN` (GH #120, root cause closed by GH #164): before the
+/// root-cause fix, `select_indices` would silently parse the `[binary: N
+/// bytes]` placeholder as zero valid indices (no digits, no `-`), so `cut`
+/// would silently emit one blank line per input line instead of erroring.
+/// `ToolArgs::to_argv()` now rejects the binary named value before
+/// `CutArgs::try_parse_from` ever runs, so that placeholder can no longer
+/// reach `parsed.fields` at all.
 #[tokio::test]
 async fn cut_fields_binary_is_loud_not_blank_output() {
     let dir = tempdir().unwrap();
@@ -493,7 +502,7 @@ async fn cut_fields_binary_is_loud_not_blank_output() {
         .await
         .unwrap();
     assert_ne!(result.code, 0, "err={}", result.err);
-    assert!(result.err.contains("cannot be used as"), "err={:?}", result.err);
+    assert!(is_loud_binary_error(&result.err), "err={:?}", result.err);
     assert!(
         !result.text_out().contains('\n') || result.text_out().is_empty(),
         "must not silently emit blank output lines: {:?}",
@@ -512,7 +521,7 @@ async fn cut_characters_binary_is_loud_not_blank_output() {
         .await
         .unwrap();
     assert_ne!(result.code, 0, "err={}", result.err);
-    assert!(result.err.contains("cannot be used as"), "err={:?}", result.err);
+    assert!(is_loud_binary_error(&result.err), "err={:?}", result.err);
 }
 
 /// `awk --field-separator=$BIN` (GH #120, missed in the original audit, found
@@ -724,4 +733,59 @@ async fn grep_ftype_binary_is_loud_not_silently_dropped() {
         "error should name the binary problem, got err={:?}",
         result.err
     );
+}
+
+// ── GH #164: ToolArgs::to_argv() closes the root cause behind the #120 bug
+// class (a named/flag Value::Bytes silently stringifying to the `[binary: N
+// bytes]` placeholder before a builtin's clap layer ever sees it) — named/flag
+// values now error loudly at `to_argv()` itself. Positional Value::Bytes is
+// deliberately NOT covered by that guard: a clap-reflected positional field is
+// a validation-only sink nothing ever reads (see CLAUDE.md's clap-builtin
+// convention), so builtins that legitimately accept binary content through a
+// positional (`write`, `push`) must keep working unchanged. These two tests
+// are the load-bearing proof of that design split, at the kernel level. ──
+
+/// `write DEST $(cat src.bin)`: the content positional carries a real
+/// `Value::Bytes`. `to_argv()`'s positional placeholder rendering must never
+/// leak into what actually gets written — `write` reads the typed value
+/// straight off `args.positional`, never the clap-parsed sink field.
+#[tokio::test]
+async fn write_binary_content_positional_round_trips_byte_for_byte() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute("b=$(cat src.bin); write dest.bin $b")
+        .await
+        .unwrap();
+    assert!(result.ok(), "err={}", result.err);
+    let written = fs::read(dir.path().join("dest.bin")).unwrap();
+    assert_eq!(
+        written, BIN,
+        "binary content must round-trip byte-for-byte through a positional, \
+         not the `[binary: N bytes]` placeholder"
+    );
+}
+
+/// `push xs $(cat src.bin)`: `push`'s value positional must not be rejected
+/// by `to_argv()` just because it carries binary content. Checks list length
+/// (not byte content) — kaish's native lists are backed internally by
+/// `serde_json::Value` (see `docs/binary-data.md`/`ToolArgs::to_argv`'s
+/// sibling `value_to_json`), so `Scope::walk_append` envelope-encodes a
+/// pushed `Value::Bytes` into the array the same way `fromjson`/`tojson`
+/// round-tripping already does — a pre-existing, orthogonal fact about the
+/// collections model, not something this PR changes. What this PR must
+/// guarantee is narrower: `push` doesn't error at the `to_argv()` boundary
+/// just because its second positional happens to be `Value::Bytes`.
+#[tokio::test]
+async fn push_binary_positional_value_is_not_rejected_by_to_argv() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute("xs=[]; b=$(cat src.bin); push xs $b; echo ${#xs}")
+        .await
+        .unwrap();
+    assert!(result.ok(), "err={}", result.err);
+    assert_eq!(result.text_out().trim(), "1", "push must append exactly one element");
 }

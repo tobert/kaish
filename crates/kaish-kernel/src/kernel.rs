@@ -3267,7 +3267,20 @@ impl Kernel {
         // overflow (that was the inline `LatchRequest` in `ExecResult`, now
         // boxed; the capture's temporaries don't survive into the recursive
         // `tool.execute` below).
-        ctx.current_invocation = Some(Box::new((name.to_string(), tool_args.to_argv())));
+        //
+        // `to_argv()` can now fail loud on a `Value::Bytes` named argument (GH
+        // #164). This capture is best-effort bookkeeping only, so a failure
+        // here must NOT gate whether the tool runs: not every builtin routes
+        // its own named args through `to_argv()` — `export`'s `NAME=VALUE`
+        // pairs are arbitrary user variable names, not schema flags, so
+        // `export` reads `args.named` directly and a Bytes value there is
+        // completely legitimate (see `export.rs`). A builtin that DOES call
+        // `to_argv()` internally (nearly all of them) will raise the
+        // identical loud, tool-prefixed error a few lines below inside
+        // `tool.execute()`; dropping the error here only empties this
+        // side-channel capture, never the command's real result.
+        let argv = tool_args.to_argv().unwrap_or_default();
+        ctx.current_invocation = Some(Box::new((name.to_string(), argv)));
 
         let result = tool.execute(tool_args, &mut *ctx).await;
 

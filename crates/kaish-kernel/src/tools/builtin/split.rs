@@ -84,8 +84,12 @@ impl Tool for Split {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("split: {e}")),
+        };
         let parsed = match SplitArgs::try_parse_from(
-            std::iter::once("split".to_string()).chain(args.to_argv()),
+            std::iter::once("split".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("split: {e}")),

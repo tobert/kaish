@@ -99,8 +99,12 @@ impl Tool for Ls {
             args.flags.insert("1".to_string());
         }
 
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("ls: {e}")),
+        };
         let parsed = match LsArgs::try_parse_from(
-            std::iter::once("ls".to_string()).chain(args.to_argv()),
+            std::iter::once("ls".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("ls: {e}")),

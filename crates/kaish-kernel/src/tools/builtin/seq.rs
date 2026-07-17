@@ -84,8 +84,12 @@ impl Tool for Seq {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("seq: {e}")),
+        };
         let parsed = match SeqArgs::try_parse_from(
-            std::iter::once("seq".to_string()).chain(args.to_argv()),
+            std::iter::once("seq".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("seq: {e}")),
@@ -124,28 +128,16 @@ impl Tool for Seq {
             return ExecResult::failure(1, "seq: increment cannot be zero");
         }
 
-        // Read the untouched raw value FIRST, not `parsed.separator` (GH #120):
-        // `parsed.separator` comes from `to_argv()`'s re-serialization, which
-        // stringifies a `Value::Bytes` into the `[binary: N bytes]` placeholder
-        // before clap ever sees it — checking the clap field first would let
-        // that placeholder silently win as the separator, spliced verbatim
-        // between the generated numbers with no validation to catch it
-        // (unlike e.g. `checksum --algo`, whose downstream allowlist check
-        // happens to make a placeholder loud-but-confusing rather than
-        // silent). Mirrors the `checksum --check`/`patch --file` reorder from
-        // the #93 item-1 PR.
-        let separator = match args.get("separator", usize::MAX).or_else(|| args.get("s", usize::MAX)) {
-            Some(v @ Value::Bytes(_)) => {
-                match crate::interpreter::value_to_text_sink_named(v, "a separator") {
-                    Ok(s) => s,
-                    Err(e) => return ExecResult::failure(1, format!("seq: {e}")),
-                }
-            }
-            _ => parsed.separator.clone()
-                .or_else(|| args.get_string("separator", usize::MAX))
-                .or_else(|| args.get_string("s", usize::MAX))
-                .unwrap_or_else(|| "\n".to_string()),
-        };
+        // `separator` is a named/flag value only (`-s`/`--separator`), never
+        // positional, so `ToolArgs::to_argv()` now rejects a `Value::Bytes`
+        // separator loudly before `SeqArgs::try_parse_from` ever runs (GH
+        // #164, closing the root cause behind this GH #120 fix) —
+        // `parsed.separator` can no longer silently observe the old
+        // `[binary: N bytes]` placeholder, so reading it directly is safe.
+        let separator = parsed.separator.clone()
+            .or_else(|| args.get_string("separator", usize::MAX))
+            .or_else(|| args.get_string("s", usize::MAX))
+            .unwrap_or_else(|| "\n".to_string());
 
         let pad_width = parsed.width;
 

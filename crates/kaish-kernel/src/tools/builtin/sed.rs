@@ -148,8 +148,12 @@ impl Tool for Sed {
         // rejected by clap as the unsupported glued-suffix form, as intended.)
         args.flagify_bool_named(&self.schema());
 
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("sed: {e}")),
+        };
         let parsed = match SedArgs::try_parse_from(
-            std::iter::once("sed".to_string()).chain(args.to_argv()),
+            std::iter::once("sed".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("sed: {e}")),

@@ -48,8 +48,12 @@ impl Tool for Tools {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("kaish-tools: {e}")),
+        };
         let parsed = match ToolsArgs::try_parse_from(
-            std::iter::once("kaish-tools".to_string()).chain(args.to_argv()),
+            std::iter::once("kaish-tools".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("kaish-tools: {e}")),
@@ -166,8 +170,12 @@ impl Tool for Mounts {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("kaish-mounts: {e}")),
+        };
         let parsed = match MountsArgs::try_parse_from(
-            std::iter::once("kaish-mounts".to_string()).chain(args.to_argv()),
+            std::iter::once("kaish-mounts".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("kaish-mounts: {e}")),

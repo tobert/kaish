@@ -86,8 +86,12 @@ impl Tool for Patch {
         // `Option<i64>` with short='p' handles that natively.
         args.flagify_bool_named(&self.schema());
 
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("patch: {e}")),
+        };
         let parsed = match PatchArgs::try_parse_from(
-            std::iter::once("patch".to_string()).chain(args.to_argv()),
+            std::iter::once("patch".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("patch: {e}")),

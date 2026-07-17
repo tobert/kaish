@@ -85,8 +85,12 @@ impl Tool for Awk {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("awk: {e}")),
+        };
         let parsed = match AwkArgs::try_parse_from(
-            std::iter::once("awk".to_string()).chain(args.to_argv()),
+            std::iter::once("awk".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("awk: {e}")),
@@ -105,39 +109,19 @@ impl Tool for Awk {
             Err(e) => return ExecResult::failure(1, format!("awk: {}", e)),
         };
 
-        // Read the raw ToolArgs value FIRST, not `parsed.field_separator`
-        // (GH #120): `to_argv()` stringifies a `Value::Bytes` into the
-        // `[binary: N bytes]` placeholder before clap ever parses it, so
-        // checking the clap field first would hide a binary `-F`/
-        // `--field-separator` value entirely. There's no downstream
-        // validation to catch it either — the placeholder would just become
-        // awk's literal `FS`, which never matches real input, so every line
-        // silently becomes a single field instead of erroring (found via
-        // kaibo review of this PR). Mirrors the `seq --separator` fix.
-        //
-        // The raw `ToolArgs.named` key is whatever the user literally typed
-        // (kernel.rs's `Arg::Named` binder inserts under the token's own flag
-        // name, not a canonicalized one) — check every spelling the schema
-        // accepts (kebab long name, its `field_separator` visible_alias, and
-        // the short `-F`), not just the one the pre-existing legacy fallback
-        // below happened to check.
-        let field_sep = match args
-            .get("field-separator", usize::MAX)
-            .or_else(|| args.get("field_separator", usize::MAX))
-            .or_else(|| args.get("F", usize::MAX))
-        {
-            Some(v @ crate::ast::Value::Bytes(_)) => {
-                match crate::interpreter::value_to_text_sink_named(v, "a field separator") {
-                    Ok(s) => Some(s),
-                    Err(e) => return ExecResult::failure(1, format!("awk: {e}")),
-                }
-            }
-            _ => parsed
-                .field_separator
-                .clone()
-                .or_else(|| args.get_string("field_separator", usize::MAX))
-                .or_else(|| args.get_string("F", usize::MAX)),
-        };
+        // `-F`/`--field-separator` is a named/flag value only, never
+        // positional, so `ToolArgs::to_argv()` now rejects a `Value::Bytes`
+        // field separator loudly before `AwkArgs::try_parse_from` ever runs
+        // (GH #164, closing the root cause behind this GH #120 fix) —
+        // `parsed.field_separator` can no longer silently observe the old
+        // `[binary: N bytes]` placeholder (which would otherwise become
+        // awk's literal `FS`, matching no real input and silently turning
+        // every line into a single field). Reading it directly is safe.
+        let field_sep = parsed
+            .field_separator
+            .clone()
+            .or_else(|| args.get_string("field_separator", usize::MAX))
+            .or_else(|| args.get_string("F", usize::MAX));
 
         // Get input. A binary `path` operand goes loud rather than silently
         // falling through to the "no operand" branch (which reads stdin instead

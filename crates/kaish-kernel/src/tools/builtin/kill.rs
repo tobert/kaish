@@ -64,8 +64,12 @@ impl Tool for Kill {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
 
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("kill: {e}")),
+        };
         let parsed = match KillArgs::try_parse_from(
-            std::iter::once("kill".to_string()).chain(args.to_argv()),
+            std::iter::once("kill".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("kill: {e}")),
@@ -75,18 +79,17 @@ impl Tool for Kill {
         // Signal from --signal / -s named param, or default to TERM. Prefer
         // args.named so an Int signal keeps its typing.
         //
-        // Loud on binary (GH #116): `--signal=$BIN` must not silently become
-        // the literal string `[binary: N bytes]` as the requested signal name
-        // (the positional target form below is already guarded separately).
+        // `--signal` is a named/flag value only, never positional, so
+        // `ToolArgs::to_argv()` now rejects a `Value::Bytes` signal loudly
+        // before `KillArgs::try_parse_from` ever runs (GH #164, closing the
+        // root cause behind this GH #116 guard) — a Bytes value can no
+        // longer reach this match at all (the positional target form below
+        // is guarded separately, since positional Bytes isn't covered by
+        // `to_argv()`'s guard).
         let signal_name = match args.named.get("signal") {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Int(i)) => i.to_string(),
-            Some(other) => {
-                match crate::interpreter::value_to_text_sink_named(other, "a signal name") {
-                    Ok(s) => s,
-                    Err(e) => return ExecResult::failure(1, format!("kill: {e}")),
-                }
-            }
+            Some(other) => crate::interpreter::value_to_string(other),
             None => parsed.signal,
         };
 

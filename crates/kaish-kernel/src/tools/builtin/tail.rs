@@ -64,8 +64,12 @@ impl Tool for Tail {
             }
         }
 
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("tail: {e}")),
+        };
         let parsed = match TailArgs::try_parse_from(
-            std::iter::once("tail".to_string()).chain(args.to_argv()),
+            std::iter::once("tail".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("tail: {e}")),

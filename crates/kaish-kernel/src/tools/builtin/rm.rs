@@ -130,8 +130,12 @@ impl Tool for Rm {
         };
         args.flagify_bool_named(&self.schema());
 
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("rm: {e}")),
+        };
         let parsed = match RmArgs::try_parse_from(
-            std::iter::once("rm".to_string()).chain(args.to_argv()),
+            std::iter::once("rm".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("rm: {e}")),

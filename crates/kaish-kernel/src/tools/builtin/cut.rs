@@ -63,8 +63,12 @@ impl Tool for Cut {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("cut: {e}")),
+        };
         let parsed = match CutArgs::try_parse_from(
-            std::iter::once("cut".to_string()).chain(args.to_argv()),
+            std::iter::once("cut".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("cut: {e}")),
@@ -102,38 +106,21 @@ impl Tool for Cut {
             .or_else(|| args.get_string("d", usize::MAX))
             .unwrap_or_else(|| "\t".to_string());
 
-        // Read the raw ToolArgs value FIRST for `fields`/`characters`, not
-        // `parsed.fields`/`parsed.characters` (GH #120): `to_argv()` stringifies
-        // a `Value::Bytes` into the `[binary: N bytes]` placeholder before clap
-        // ever parses it, so checking the clap field first would hide a binary
-        // spec entirely. Unlike `delimiter` (guarded by the `chars().count() >
-        // 1` check below) a binary spec here has no downstream validation to
-        // catch it: `select_indices` silently parses "[binary: N bytes]" as
-        // zero valid indices (no digits, no `-`), so cut would silently emit
-        // one blank line per input line instead of erroring (found via kaibo
-        // review of this PR — my first pass wrongly classified this as
-        // already-loud like `delimiter`). Mirrors the `seq --separator` fix.
-        let fields = match args.get("fields", usize::MAX).or_else(|| args.get("f", usize::MAX)) {
-            Some(v @ Value::Bytes(_)) => match crate::interpreter::value_to_text_sink_named(v, "a fields spec") {
-                Ok(s) => Some(s),
-                Err(e) => return ExecResult::failure(1, format!("cut: {e}")),
-            },
-            _ => parsed.fields.clone()
-                .or_else(|| args.get_string("fields", usize::MAX))
-                .or_else(|| args.get_string("f", usize::MAX)),
-        };
+        // `fields`/`characters` are named/flag values only (`-f`/`-c`), never
+        // positional, so `ToolArgs::to_argv()` now rejects a `Value::Bytes`
+        // spec loudly before `CutArgs::try_parse_from` ever runs (GH #164,
+        // closing the root cause behind this GH #120 fix) —
+        // `parsed.fields`/`parsed.characters` can no longer silently observe
+        // the old `[binary: N bytes]` placeholder (which `select_indices`
+        // used to parse as zero valid indices, emitting one blank line per
+        // input line instead of erroring). Reading them directly is safe.
+        let fields = parsed.fields.clone()
+            .or_else(|| args.get_string("fields", usize::MAX))
+            .or_else(|| args.get_string("f", usize::MAX));
 
-        // Same guard as `fields` above, same reasoning: `select_indices` on
-        // the placeholder silently yields zero character indices.
-        let characters = match args.get("characters", usize::MAX).or_else(|| args.get("c", usize::MAX)) {
-            Some(v @ Value::Bytes(_)) => match crate::interpreter::value_to_text_sink_named(v, "a characters spec") {
-                Ok(s) => Some(s),
-                Err(e) => return ExecResult::failure(1, format!("cut: {e}")),
-            },
-            _ => parsed.characters.clone()
-                .or_else(|| args.get_string("characters", usize::MAX))
-                .or_else(|| args.get_string("c", usize::MAX)),
-        };
+        let characters = parsed.characters.clone()
+            .or_else(|| args.get_string("characters", usize::MAX))
+            .or_else(|| args.get_string("c", usize::MAX));
 
         if delimiter.chars().count() > 1 {
             return ExecResult::failure(1, "cut: delimiter must be a single character");

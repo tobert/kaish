@@ -47,8 +47,12 @@ impl Tool for True {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("true: {e}")),
+        };
         let parsed = match TrueArgs::try_parse_from(
-            std::iter::once("true".to_string()).chain(args.to_argv()),
+            std::iter::once("true".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("true: {e}")),
@@ -94,8 +98,12 @@ impl Tool for False {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("false: {e}")),
+        };
         let parsed = match FalseArgs::try_parse_from(
-            std::iter::once("false".to_string()).chain(args.to_argv()),
+            std::iter::once("false".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("false: {e}")),

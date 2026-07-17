@@ -57,8 +57,25 @@ impl Tool for Write {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
+        // `--content` is never read off `parsed.content` — see below, it's
+        // always read as a raw typed `Value` off `args.named`/`args.positional`
+        // specifically so a `Value::Bytes` payload survives untouched. That
+        // makes it the same "clap sink nobody reads" case as `push`'s hidden
+        // positional (CLAUDE.md's clap-builtin convention), just on a named
+        // flag instead: `to_argv()`'s loud named-Bytes guard (GH #164) exists
+        // for keys a builtin *does* read via the clap-parsed field, so drop
+        // `content` before computing argv for clap — every other flag
+        // (`path`/`confirm`/global) still gets the full guard, and
+        // `parsed.content` simply stays `None`, which is fine since nothing
+        // reads it.
+        let mut argv_source = args.clone();
+        argv_source.named.remove("content");
+        let argv = match argv_source.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("write: {e}")),
+        };
         let parsed = match WriteArgs::try_parse_from(
-            std::iter::once("write".to_string()).chain(args.to_argv()),
+            std::iter::once("write".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("write: {e}")),

@@ -28,6 +28,16 @@ breaking entries are marked **BREAKING**.
   drives are unaffected.
 
 ### Changed
+- **BREAKING:** `ToolArgs::to_argv()` now returns `Result<Vec<String>, ToolArgvError>`
+  instead of `Vec<String>` — a named/flag argument holding `Value::Bytes` is a
+  loud error instead of silently stringifying to the `[binary: N bytes]`
+  placeholder (GH #164). This closes the root cause behind GH #120's
+  `seq --separator`/`cut --fields`/`--characters` fixes (now simplified back
+  to reading the clap-parsed field directly) and makes every other
+  clap-based builtin's named arguments loud on binary too. Positional
+  `Value::Bytes` is unaffected — a clap-reflected positional field is a
+  validation-only sink no builtin reads, so `push`/`write` and friends keep
+  accepting binary content through positionals unchanged.
 - **`uname -o` (and the tail of `uname -a`) now reports `kai`** instead of
   `Kaijutsu` — the shell's identity belongs to kaish itself, not to one
   embedder. Scripts detecting the platform should match `kai` (sysname is

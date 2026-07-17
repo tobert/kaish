@@ -62,8 +62,12 @@ impl Tool for Base64Tool {
         // they hit the clap struct via the natural short/long form.
         args.flagify_bool_named(&self.schema());
 
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("base64: {e}")),
+        };
         let parsed = match Base64Args::try_parse_from(
-            std::iter::once("base64".to_string()).chain(args.to_argv()),
+            std::iter::once("base64".to_string()).chain(argv),
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("base64: {e}")),
