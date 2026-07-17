@@ -15,6 +15,7 @@ use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
+use crate::tools::builtin::read_repeatable_strings;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Env tool: print environment or run command with modified environment.
@@ -95,7 +96,10 @@ impl Tool for Env {
         // named["u"], but `to_argv()` re-renders that as a single JSON token
         // that clap can't split back into individual strings. Read the raw map
         // directly (same approach sed uses for repeatable `-e`).
-        let unset_vars = collect_unset_vars(&args);
+        let unset_vars = match collect_unset_vars(&args) {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("env: -u: {e}")),
+        };
 
         // No positional arguments: print environment with -u/-i applied.
         // -u and -i must filter the listing even when no command is given.
@@ -185,28 +189,17 @@ impl Tool for Env {
 /// split that array back into individual `-u=NAME` tokens, so we must read the
 /// raw `ToolArgs::named` map directly — the same pattern sed uses for its
 /// repeatable `-e` expressions.
-fn collect_unset_vars(args: &ToolArgs) -> Vec<String> {
-    // The kernel canonicalises the flag to the long name; "u" is a defensive
-    // fallback in case a future change binds under the short alias.
-    for key in ["u"] {
-        match args.named.get(key) {
-            Some(Value::Json(serde_json::Value::Array(items))) => {
-                return items
-                    .iter()
-                    .filter_map(|v| {
-                        if let serde_json::Value::String(s) = v {
-                            Some(s.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-            }
-            Some(Value::String(s)) => return vec![s.clone()],
-            _ => {}
-        }
-    }
-    Vec::new()
+///
+/// Delegates to [`read_repeatable_strings`] (GH #217): `-u` never takes a
+/// `key=value` form, so every occurrence — even the first — is a bare
+/// positional that `push_repeatable_value` wraps into the array regardless of
+/// occurrence count. The old hand-rolled `filter_map` silently dropped a
+/// binary occurrence instead of erroring, so `env -u $BIN` would run as if
+/// `-u` had never been given rather than failing loudly.
+fn collect_unset_vars(args: &ToolArgs) -> Result<Vec<String>, String> {
+    // The kernel canonicalises the flag to the long name; "u" is the only key
+    // ever actually populated.
+    read_repeatable_strings(args, "u")
 }
 
 /// Print environment with overrides applied.

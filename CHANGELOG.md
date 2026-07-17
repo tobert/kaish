@@ -54,6 +54,17 @@ breaking entries are marked **BREAKING**.
   kaish-extras `kaish-web` crate is a working embedding.
 
 ### Fixed
+- **`awk -v` and `env -u` fail loudly on a binary occurrence instead of
+  silently dropping it** (GH #217) — found by a kaibo review of PR #215.
+  Both flags are repeatable-value flags, so the kernel accumulates every
+  occurrence (even the first) into a `Value::Json(Array)`; a binary
+  occurrence lands in that array as a base64 envelope, and each builtin's own
+  hand-rolled collector (`awk::collect_vars`, `env::collect_unset_vars`)
+  filtered for strings and silently skipped anything else — the assignment
+  or unset just vanished and the builtin ran as if the flag had never been
+  given. Both now delegate to the shared `read_repeatable_strings` helper
+  that `grep`/`glob` already use for `--ftype`/`--include`/`--exclude`, so a
+  binary occurrence errors instead of disappearing.
 - **Case patterns accept dash/plus bare words** (GH #144) — `---`, `-`, `--`,
   `-x`, `+foo`, and alternations like `-h|--help) ...` are now valid case
   patterns; they previously failed to parse (`pattern_part` had no arm for

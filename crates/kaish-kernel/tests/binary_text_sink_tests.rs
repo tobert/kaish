@@ -735,6 +735,94 @@ async fn grep_ftype_binary_is_loud_not_silently_dropped() {
     );
 }
 
+// ── GH #217: awk `-v` / env `-u` had their own silent-skip copy of the same
+// bug `read_repeatable_strings` fixed for grep's `--ftype` above. Found by
+// kaibo review of PR #215. `awk -v x=$BIN` (the WordAssign `key=value` form)
+// was already loud — `consume_flag_positionals`'s WordAssign arm reassembles
+// via `value_to_text_sink_named` before the value ever reaches the
+// repeatable-flag accumulator (see `awk_dash_v_binary_assignment_is_loud`
+// above). But a *bare* `-v $BIN` (no literal `=` in the source, so it's an
+// `Arg::Positional`, not a `WordAssign`) skips that guard entirely and lands
+// straight in `push_repeatable_value`, same as `env -u $BIN` always does
+// (`-u` never takes `key=value` form). Both `awk::collect_vars` and
+// `env::collect_unset_vars` had their own hand-rolled `if let
+// serde_json::Value::String(s) = item` filters that silently dropped a
+// non-string array entry instead of checking for the binary envelope first —
+// unlike `read_repeatable_strings`, which both builtins now delegate to.
+
+/// `awk -v $BIN 'BEGIN{}'` — a single *bare* occurrence (no `=` in the source)
+/// used to vanish silently rather than error.
+#[tokio::test]
+async fn awk_v_bare_single_binary_occurrence_is_loud_not_silently_dropped() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute("b=$(cat src.bin); awk -v $b 'BEGIN{}'")
+        .await
+        .unwrap();
+    assert_ne!(result.code, 0, "err={}", result.err);
+    assert!(
+        result.err.contains("cannot be used as"),
+        "error should name the binary problem, got err={:?}",
+        result.err
+    );
+}
+
+/// Two `-v` flags, only the SECOND binary: must fail loudly naming the
+/// problem, not silently drop the binary occurrence and apply only the first.
+#[tokio::test]
+async fn awk_v_multi_occurrence_binary_is_loud_not_silently_dropped() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute("b=$(cat src.bin); awk -v x=1 -v $b 'BEGIN{print x}'")
+        .await
+        .unwrap();
+    assert_ne!(result.code, 0, "err={}", result.err);
+    assert!(
+        result.err.contains("cannot be used as"),
+        "error should name the binary problem, got err={:?}",
+        result.err
+    );
+}
+
+/// `env -u $BIN` — `-u` never takes a `key=value` form, so even a single
+/// occurrence is a bare positional; it used to vanish silently.
+#[tokio::test]
+async fn env_u_single_binary_occurrence_is_loud_not_silently_dropped() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute("b=$(cat src.bin); env -u $b").await.unwrap();
+    assert_ne!(result.code, 0, "err={}", result.err);
+    assert!(
+        result.err.contains("cannot be used as"),
+        "error should name the binary problem, got err={:?}",
+        result.err
+    );
+}
+
+/// Two `-u` flags, only the SECOND binary: must fail loudly, not silently
+/// unset FOO and drop the binary occurrence.
+#[tokio::test]
+async fn env_u_multi_occurrence_binary_is_loud_not_silently_dropped() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute("b=$(cat src.bin); env -u FOO -u $b")
+        .await
+        .unwrap();
+    assert_ne!(result.code, 0, "err={}", result.err);
+    assert!(
+        result.err.contains("cannot be used as"),
+        "error should name the binary problem, got err={:?}",
+        result.err
+    );
+}
+
 // ── GH #164: ToolArgs::to_argv() closes the root cause behind the #120 bug
 // class (a named/flag Value::Bytes silently stringifying to the `[binary: N
 // bytes]` placeholder before a builtin's clap layer ever sees it) — named/flag
