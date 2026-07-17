@@ -1,6 +1,8 @@
 //! Collection lvalue WRITES: `xs[0]=9`, `user[email]=x`,
-//! `services[web][port]=9000`, and the bareword `push` builtin. See
-//! `docs/arrays-and-hashes.md`, "Assignment lvalues" and "Append — push".
+//! `services[web][port]=9000`, and the `push` builtin — bareword
+//! (`push xs val`) and bracket-path (`push services[web][tags] val`)
+//! targets alike. See `docs/arrays-and-hashes.md`, "Assignment lvalues" and
+//! "Append — push".
 //!
 //! Kernel-routed via `KernelConfig::isolated()` WITH validation ON (unlike
 //! the sibling `collection_literals_tests.rs`/`collection_access_tests.rs`,
@@ -243,20 +245,87 @@ async fn bare_char_class_comparison_operand_before_eq_is_not_an_lvalue() {
     assert_eq!(r2.code, 0, "‘[a]’ == ‘[a]’ should be true: {r2:?}");
 }
 
-// ── Deferred: bracket-path push (documented, not silent) ──────────────────
+// ── Bracket-path push target (GH #183) ──────────────────────────────────
+//
+// `push services[web][tags] item` walks a nested bracket path the same way
+// an assignment lvalue does. The lexer recognizes `push`'s target with its
+// own independent trigger (`lexer::PushTarget`) — the target has no
+// trailing `=` to key off the way an assignment lvalue does — so
+// `services[web][tags]` fuses verbatim into a path instead of glob-expanding
+// against the filesystem. See `docs/arrays-and-hashes.md`, "Append — push".
 
 #[tokio::test]
-async fn bracket_path_push_target_is_deferred_but_loud_not_a_crash() {
-    // `push services[web][tags] item` is out of scope for this PR (see
-    // docs/issues.md): the target isn't followed by `=`, so the lvalue
-    // lexer suppression never fires and `services[web][tags]` fuses into a
-    // GlobWord that glob-expands before `push` runs. Pin that it's a loud
-    // error, not silent corruption or a panic, until that's designed.
+async fn bracket_path_push_target_extends_the_nested_list() {
+    let k = setup().await;
+    let out = ok(
+        &k,
+        "services={web: {tags: []}}; push services[web][tags] canary; \
+         echo ${#services[web][tags]} ${services[web][tags][-1]}",
+    )
+    .await;
+    assert_eq!(out, "1 canary");
+}
+
+#[tokio::test]
+async fn bracket_path_push_target_does_not_disturb_sibling_keys() {
+    let k = setup().await;
+    let out = ok(
+        &k,
+        "services={web: {tags: [a], port: 8080}}; push services[web][tags] b; \
+         echo ${services[web][port]}",
+    )
+    .await;
+    assert_eq!(out, "8080", "sibling key must survive a nested push");
+}
+
+#[tokio::test]
+async fn bracket_path_push_target_single_index_works() {
+    // A single `[sub]` hop (not just chained `[a][b]`) exercises the same
+    // lexer trigger with the simplest possible bracket run.
+    let k = setup().await;
+    let out = ok(
+        &k,
+        "lists={xs: [1, 2]}; push lists[xs] 3; echo ${lists[xs]}",
+    )
+    .await;
+    assert_eq!(out, "[1,2,3]");
+}
+
+#[tokio::test]
+async fn bracket_path_push_target_missing_intermediate_is_loud_no_autoviv() {
     let k = setup().await;
     let err = loud_err(
         &k,
-        "services={web: {tags: []}}; push services[web][tags] item",
+        "services={}; push services[web][tags] item",
     )
     .await;
     assert!(!err.is_empty(), "expected a non-empty loud error");
+}
+
+#[tokio::test]
+async fn bracket_path_push_target_non_list_leaf_is_loud() {
+    let k = setup().await;
+    let err = loud_err(
+        &k,
+        "services={web: {port: 8080}}; push services[web][port] item",
+    )
+    .await;
+    assert!(err.contains("not a list"), "got: {err}");
+}
+
+#[tokio::test]
+async fn bracket_path_push_target_undefined_root_is_loud() {
+    let k = setup().await;
+    let err = loud_err(&k, "push nope[web][tags] item").await;
+    assert!(err.contains("not defined"), "got: {err}");
+}
+
+#[tokio::test]
+async fn push_as_variable_name_is_unaffected_by_the_target_tracker() {
+    // The lexer's `push`-target tracker (`PushTarget`) is independent of
+    // the assignment DFA — a variable literally named `push` must keep
+    // working as an ordinary scalar assignment.
+    let k = setup().await;
+    let out = ok(&k, "push=5; echo $push").await;
+    assert_eq!(out, "5");
 }

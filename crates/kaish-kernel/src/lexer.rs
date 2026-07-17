@@ -2123,6 +2123,36 @@ struct ValueContext {
     /// suppresses colon-merge fusion. Narrower than `in_literal` on
     /// purpose: a plain scalar assignment `x=foo:bar` must keep fusing.
     in_brace: bool,
+    /// This token is (part of) `push`'s bracket-path TARGET — see
+    /// [`PushTarget`]. Lets `flush_glob_run` fuse `services[web][tags]`
+    /// verbatim into a single `Ident` (a path to walk) instead of a
+    /// `GlobWord` (glob-expanded against the filesystem, GH #183).
+    push_target: bool,
+}
+
+/// Independent tiny tracker (parallel to, but NOT integrated into,
+/// `StmtHead` below) for the one thing `push`'s bracket-path target needs:
+/// recognizing `push`'s own target run so `flush_glob_run` can fuse it
+/// verbatim, the same way an assignment's `=`-followed lvalue is
+/// recognized. Kept separate from `StmtHead` on purpose — folding this into
+/// the Lvalue-root slot would steal it from `push`'s actual target
+/// identifier (see the GH #183 investigation) and threading a text match on
+/// `StmtHead::Start` risks regressing a variable literally named `push`
+/// (`push=5`, `push[0]=x`, both still routed entirely through the
+/// untouched `StmtHead` machinery).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PushTarget {
+    /// Not tracking a `push` target right now.
+    None,
+    /// Just saw a bareword `push` at statement-head; the very next token is
+    /// the bracket-path root, if it's an `Ident`.
+    AwaitingRoot,
+    /// Consumed the root identifier (and any glued `[...]` groups so far);
+    /// `usize` is the byte offset just past the last consumed token — used
+    /// to require the next `[` be glued (no whitespace) to extend the path.
+    Root(usize),
+    /// Inside a glued `[...]` group on the target; depth tracks nesting.
+    RootSubscript(usize),
 }
 
 /// Structural frames tracked by the context walker. The stack replaces the
@@ -2226,6 +2256,13 @@ fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
     // to enclosing scopes, frozen while this scope is active).
     let mut scope_floors: Vec<usize> = vec![0];
 
+    // Independent `push`-target tracker — see `PushTarget`. Flat (not
+    // scope-stacked like `scopes`/`frames`): a `push` inside `$( )` still
+    // gets detected via the `StmtHead::Start` check below (scoped
+    // correctly), and the tracker naturally resets once the target's
+    // glued run ends, so it never leaks past one `push` invocation.
+    let mut push_target = PushTarget::None;
+
     for i in 0..tokens.len() {
         let tok = &tokens[i].token;
         let span = &tokens[i].span;
@@ -2238,6 +2275,7 @@ fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
         ctx[i] = ValueContext {
             in_literal: expect_value || in_open_literal,
             in_brace: matches!(top, Some(Frame::Record)),
+            push_target: false, // set below once this token's transition is known
         };
 
         // `in` membership: value position only inside a `[[ ]]` test in
@@ -2252,6 +2290,44 @@ fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
             skip_paired_bracket = false;
             continue;
         }
+
+        // Independent `push`-target tracker (see `PushTarget`) — entirely
+        // separate from the `StmtHead` DFA below so a variable literally
+        // named `push` (`push=5`, `push[0]=x`) keeps going through the
+        // ordinary assignment path untouched. Computed from POST-transition
+        // state: `ctx[i].push_target` should be true only for tokens
+        // actually CONSUMED into the target path, not the token that ends
+        // it (`push xs c` — "c" must not inherit the target's context).
+        let stmt_head_is_start = matches!(scopes.last(), Some(StmtHead::Start));
+        push_target = if is_statement_boundary(tok) {
+            PushTarget::None
+        } else {
+            match (push_target, tok) {
+                (PushTarget::None, Token::Ident(s)) if stmt_head_is_start && s == "push" => {
+                    PushTarget::AwaitingRoot
+                }
+                (PushTarget::AwaitingRoot, Token::Ident(_)) => PushTarget::Root(span.end),
+                (PushTarget::Root(end), Token::LBracket) if span.start == end => {
+                    PushTarget::RootSubscript(1)
+                }
+                (PushTarget::RootSubscript(d), Token::LBracket) => {
+                    PushTarget::RootSubscript(d + 1)
+                }
+                (PushTarget::RootSubscript(d), Token::RBracket) => {
+                    if d == 1 {
+                        PushTarget::Root(span.end)
+                    } else {
+                        PushTarget::RootSubscript(d - 1)
+                    }
+                }
+                // Subscript interior (`Ident`/`Int`/`String`/`SimpleVarRef` —
+                // whatever `lvalue_subscript_parser` accepts): hold depth.
+                (PushTarget::RootSubscript(d), _) => PushTarget::RootSubscript(d),
+                _ => PushTarget::None,
+            }
+        };
+        ctx[i].push_target =
+            matches!(push_target, PushTarget::Root(_) | PushTarget::RootSubscript(_));
 
         match tok {
             Token::LBracket => {
@@ -2708,6 +2784,7 @@ fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned
                 &mut result,
                 value_ctx[run_start].in_literal,
                 followed_by_eq,
+                value_ctx[run_start].push_target,
                 source,
             );
             if is_glob_mergeable(&token.token) {
@@ -2720,12 +2797,14 @@ fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned
     }
 
     // End of input: no token follows the final run, so it can't be an
-    // lvalue (an assignment always has a value after `=`).
+    // lvalue (an assignment always has a value after `=`) — but it CAN
+    // still be a `push` target (`push xs[0]` with nothing after it).
     flush_glob_run(
         &mut run,
         &mut result,
         value_ctx[run_start].in_literal,
         false,
+        value_ctx[run_start].push_target,
         source,
     );
 
@@ -2745,11 +2824,18 @@ fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned
 /// `followed_by_eq` is the SEPARATE lvalue trigger: an `Ident`-led
 /// bracket-pair run with no `*`/`?` immediately before `=` is a
 /// subscripted assignment target (`fruits[0]=kiwi`), not a glob.
+///
+/// `push_target` is a THIRD, independent trigger (see `PushTarget`):
+/// `push`'s own bracket-path target (`push services[web][tags] item`) has
+/// no trailing `=` to key off, so it's recognized separately and fused
+/// verbatim into a single `Ident` (GH #183) — a path for `push` to walk,
+/// never a glob to expand against the filesystem.
 fn flush_glob_run(
     run: &mut Vec<&Spanned<Token>>,
     result: &mut Vec<Spanned<Token>>,
     value_position_suppress: bool,
     followed_by_eq: bool,
+    push_target: bool,
     source: &str,
 ) {
     if run.is_empty() {
@@ -2771,9 +2857,18 @@ fn flush_glob_run(
     let run_starts_with_ident = matches!(run.first().map(|t| &t.token), Some(Token::Ident(_)));
     let lvalue_suppress =
         followed_by_eq && has_bracket_pair && !has_star_or_question && run_starts_with_ident;
+    let push_target_suppress =
+        push_target && has_bracket_pair && !has_star_or_question && run_starts_with_ident;
     let suppress = (value_position_suppress && has_bracket_pair) || lvalue_suppress;
 
-    if !suppress && run.len() >= 2 && has_glob {
+    if push_target_suppress && run.len() >= 2 {
+        // `push`'s target: fuse verbatim to a single `Ident` (never a
+        // `GlobWord` — nothing here is meant to glob-expand).
+        let start = run.first().map(|t| t.span.start).unwrap_or(0);
+        let end = run.last().map(|t| t.span.end).unwrap_or(0);
+        let text = source.get(start..end).unwrap_or_default().to_string();
+        result.push(Spanned::new(Token::Ident(text), start..end));
+    } else if !suppress && run.len() >= 2 && has_glob {
         let start = run.first().map(|t| t.span.start).unwrap_or(0);
         let end = run.last().map(|t| t.span.end).unwrap_or(0);
         let text = source.get(start..end).unwrap_or_default().to_string();
@@ -2926,6 +3021,14 @@ pub fn parse_string_literal(source: &str) -> Result<String, LexerError> {
 
 /// Parse a variable reference, extracting the path segments.
 /// Input: "${VAR.field[0].nested}" → ["VAR", "field", "[0]", "nested"]
+///
+/// The `[...]` collector is quote-aware (GH #183): a subscript opening with
+/// `"` or `'` consumes verbatim up to its OWN matching closing quote before
+/// resuming the search for the subscript's terminating `]` — so an embedded
+/// `]` inside a quoted key (`${r["weird]key"]}`) is just data, not the
+/// bracket's end. Un-quoted subscripts (`[0]`, `[$k]`, `[web]`) are
+/// unaffected — the quote check only fires when the subscript's first
+/// character is actually a quote.
 pub fn parse_var_ref(source: &str) -> Result<Vec<String>, LexerError> {
     // Remove ${ and }
     if source.len() < 4 || !source.starts_with("${") || !source.ends_with('}') {
@@ -2956,8 +3059,24 @@ pub fn parse_var_ref(source: &str) -> Result<Vec<String>, LexerError> {
                     segments.push(current.clone());
                     current.clear();
                 }
-                // Collect the index
+                // Collect the index. Quote-aware: a quoted key's own
+                // matching closer is consumed FIRST, verbatim, so an
+                // embedded `]` inside it (`["weird]key"]`) can't be
+                // mistaken for the subscript's terminator (GH #183).
                 let mut index = String::from("[");
+                if let Some(&quote) = chars.peek() {
+                    if quote == '"' || quote == '\'' {
+                        if let Some(q) = chars.next() {
+                            index.push(q);
+                        }
+                        for c in chars.by_ref() {
+                            index.push(c);
+                            if c == quote {
+                                break;
+                            }
+                        }
+                    }
+                }
                 while let Some(&c) = chars.peek() {
                     if let Some(c) = chars.next() {
                         index.push(c);
@@ -3403,6 +3522,41 @@ mod tests {
         assert_eq!(
             parse_var_ref("${?}").expect("ok"),
             vec!["?"]
+        );
+    }
+
+    /// GH #183: a `]` inside a QUOTED subscript key must not be mistaken for
+    /// the subscript's own terminator. Double- and single-quoted keys alike.
+    #[test]
+    fn parse_var_quoted_subscript_with_embedded_bracket() {
+        assert_eq!(
+            parse_var_ref(r#"${r["weird]key"]}"#).expect("ok"),
+            vec!["r", r#"["weird]key"]"#]
+        );
+        assert_eq!(
+            parse_var_ref("${r['weird]key']}").expect("ok"),
+            vec!["r", "['weird]key']"]
+        );
+    }
+
+    /// A quoted key with NO embedded bracket is unaffected by the
+    /// quote-awareness — same segment shape as before.
+    #[test]
+    fn parse_var_quoted_subscript_without_embedded_bracket() {
+        assert_eq!(
+            parse_var_ref(r#"${r["normal"]}"#).expect("ok"),
+            vec!["r", r#"["normal"]"#]
+        );
+    }
+
+    /// Trailing content after a quoted subscript closes (a further chained
+    /// hop) still parses — the quote-awareness only governs the ONE
+    /// subscript it opens inside.
+    #[test]
+    fn parse_var_quoted_subscript_with_embedded_bracket_then_more_path() {
+        assert_eq!(
+            parse_var_ref(r#"${r["weird]key"][0]}"#).expect("ok"),
+            vec!["r", r#"["weird]key"]"#, "[0]"]
         );
     }
 

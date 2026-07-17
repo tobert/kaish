@@ -37,6 +37,22 @@ breaking entries are marked **BREAKING**.
     (`--flag$(echo x)`) — previously both silently split into multiple
     positionals instead of erroring. The short-flag glued-value idiom
     (`cut -d,`, `grep -A1`) is unaffected.
+- **`push` accepts a bracket-path target** (`push services[web][tags] item`),
+  not just a top-level bareword — the lexer now recognizes `push`'s target
+  with its own trigger and fuses it verbatim into a path instead of
+  glob-expanding it (GH #183).
+- **A `]` inside a quoted subscript key no longer breaks the subscript**
+  (`${r["weird]key"]}`) — the bracket collector consumes a quoted key
+  verbatim to its own closing quote before looking for the terminator (GH #183).
+- **An unquoted multi-word record value gets an actionable error** instead of
+  a generic parse-error message — `{msg: hello world}` now names the mistake
+  and shows the quoted fix (GH #183).
+- **A bad `$((...))` arithmetic expansion no longer fails silently** — this
+  used to swallow the error and splice in an empty string/drop the value in
+  three places: string interpolation (`"$((1/0))"` in ordinary command
+  execution), and a scatter/gather flag value's bare and quoted forms
+  (`scatter --limit $((1/0))`, `scatter --limit "$((1/0))"`); all three now
+  propagate the real arithmetic error (GH #183).
 
 ### Added
 - **`ExecuteOptions::interrupt`** — a polled interrupt check for embedders

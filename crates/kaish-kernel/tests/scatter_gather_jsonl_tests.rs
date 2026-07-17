@@ -524,6 +524,66 @@ async fn scatter_flag_value_command_substitution_is_loud_not_silently_dropped() 
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// A bad `$((...))` arithmetic expansion in a scatter/gather flag value
+// (`eval_simple_expr`'s bare `Expr::Arithmetic`, `eval_string_parts_sync`'s
+// `StringPart::Arithmetic` inside a quoted value) used to be silently
+// swallowed instead of propagated — `scatter --limit $((1/0))` ran at the
+// UNLIMITED default instead of failing (GH #183).
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn scatter_bare_arithmetic_flag_value_division_by_zero_is_loud() {
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(&k, "seq 1 3 | scatter --limit $((1/0)) | echo $ITEM | gather").await;
+    assert_ne!(
+        r.code, 0,
+        "a bad arithmetic scatter flag value must fail loud, not silently run unlimited: {r:?}"
+    );
+    assert!(
+        r.err.contains("arithmetic") || r.err.contains("division by zero"),
+        "got: {}",
+        r.err
+    );
+}
+
+#[tokio::test]
+async fn scatter_quoted_arithmetic_flag_value_division_by_zero_is_loud() {
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(&k, r#"seq 1 3 | scatter --limit "$((1/0))" | echo $ITEM | gather"#).await;
+    assert_ne!(
+        r.code, 0,
+        "a bad arithmetic scatter flag value must fail loud: {r:?}"
+    );
+    // Before the fix this surfaced as scatter's OWN generic int-parse
+    // complaint ("expected a positive integer, got \"\"") — technically
+    // non-zero, but masking the real cause. The fix must name the actual
+    // arithmetic error instead.
+    assert!(
+        r.err.contains("arithmetic") || r.err.contains("division by zero"),
+        "got: {}",
+        r.err
+    );
+}
+
+#[tokio::test]
+async fn scatter_bare_arithmetic_flag_value_binds_successfully() {
+    // Regression guard, pairing with the loud-error test above: a VALID bare
+    // `$((...))` flag value must actually BIND (not just fail loud on
+    // error) — before the fix, `eval_simple_expr` had no `Expr::Arithmetic`
+    // arm at all, so it fell into the catch-all "not representable here"
+    // `Ok(None)` and the flag silently became a bare boolean with no value.
+    // `--limit` caps CONCURRENT workers, not the item count (see
+    // `bare_length_in_scatter_flag_value_succeeds`'s same convention just
+    // above), so all 5 items still complete — the observable proof the arm
+    // is wired is that a bad `$((1/0))` fails loud (previous test) while
+    // this valid `$((2+2))` succeeds cleanly.
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(&k, "seq 1 5 | scatter --limit $((2+2)) | echo $ITEM | gather").await;
+    assert_eq!(r.code, 0, "{:?}", r.err);
+    assert_eq!(rows(&r.text_out()).len(), 5);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // GH #188: `scatter`/`gather`'s own option parsing used to bind through a
 // hand-rolled sync twin (`scheduler::pipeline::build_tool_args`) of the real
 // binder (`Kernel::build_args_async`). It's now a thin wrapper over the same

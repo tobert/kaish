@@ -2486,9 +2486,36 @@ where
     let single_key = select! { Token::SingleString(s) => RecordKey::Quoted(s) };
     let key = choice((double_key, single_key, bare_key)).labelled("record key");
 
+    // Guard against the classic unquoted multi-word value mistake
+    // (`{msg: hello world}`): without this, "world" is consumed by the
+    // NEXT `entry` attempt as a candidate key (kaish allows a bare
+    // space — no comma — between entries, so `{a: 1 b: 2}` is legal), which
+    // then fails at `}` expecting `:` — chumsky's generic message ("found
+    // '}' expected ':'") without ever naming the actual mistake. Peeked via
+    // `.rewind()` (consumes nothing — a legitimate following entry, comma
+    // or not, is still parsed normally by the outer `repeated()`): an
+    // `Ident` right after this value that ISN'T itself followed by `:` can
+    // only be a stray unquoted word, since a real next entry always looks
+    // like `Ident :` (or a quoted key) at this position.
+    let stray_bareword_after_value = select! { Token::Ident(s) => s }
+        .then(just(Token::Colon).or_not())
+        .rewind()
+        .or_not()
+        .try_map(|maybe, span| match maybe {
+            Some((word, None)) => Err(Rich::custom(
+                span,
+                format!(
+                    "record value: unexpected word \"{word}\" after the value — a multi-word \
+                     value must be quoted, e.g. {{key: \"hello world\"}}"
+                ),
+            )),
+            _ => Ok(()),
+        });
+
     let entry = key
         .then_ignore(just(Token::Colon))
         .then(value)
+        .then_ignore(stray_bareword_after_value)
         .map(|(key, value)| RecordEntry { key, value });
 
     let sep = choice((just(Token::Comma).to(()), just(Token::Newline).to(()))).repeated();

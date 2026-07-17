@@ -278,20 +278,25 @@ A dotted assignment target is also rejected — kaish is brackets-only, and the
 user.email=x     # error — use `user[email]=x`
 ```
 
-`push` appends to a top-level **list** variable in place. Like `read`/`unset`,
-it takes the variable **name** (bareword), not `$name` — this is what lets it
-write back to the caller:
+`push` appends to a **list** variable in place — a top-level name or a
+bracket path. Like `read`/`unset`, it takes the variable **name** (bareword),
+not `$name` — this is what lets it write back to the caller:
 
 ```sh
 xs=[a b]
-push xs c                 # xs is now [a b c] — mutated in place
-push xs $rec              # values push as typed Values, not stringified text
-echo ${#xs} ${xs[-1]}     # 3 c
+push xs c                          # xs is now [a b c] — mutated in place
+push xs $rec                       # values push as typed Values, not stringified text
+echo ${#xs} ${xs[-1]}              # 3 c
+
+services={web: {tags: []}}
+push services[web][tags] canary    # bracket-path target — same lvalue rules as an assignment
+echo ${services[web][tags]}        # ["canary"]
 ```
 
 `push` to an undefined or non-list target is a loud error, never a silent
-create. Bracket-path `push` (`push services[web][tags] item` — a subscripted
-target) isn't supported yet; only a top-level bareword target.
+create. A bracket-path target follows the same lvalue rules as an
+assignment — no autovivification: every intermediate segment must already
+exist, and the resolved leaf must be a list.
 
 ### Crossing the boundary
 

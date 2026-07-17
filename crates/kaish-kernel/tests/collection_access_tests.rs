@@ -90,6 +90,34 @@ async fn record_quoted_key() {
     assert_eq!(out, "text/plain");
 }
 
+/// GH #183: a `]` inside a QUOTED key must not be mistaken for the
+/// subscript's own terminator (`parse_var_ref`'s bracket collector is
+/// quote-aware — see `lexer::parse_var_ref`).
+#[tokio::test]
+async fn record_quoted_key_with_embedded_bracket() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"r=$(fromjson '{"weird]key":"v"}'); echo ${r["weird]key"]}"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "v");
+}
+
+/// Same, single-quoted.
+#[tokio::test]
+async fn record_quoted_key_with_embedded_bracket_single_quotes() {
+    let k = setup().await;
+    let (out, code, err) = run(
+        &k,
+        r#"r=$(fromjson '{"weird]key":"v"}'); echo ${r['weird]key']}"#,
+    )
+    .await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "v");
+}
+
 // ── Nested / chained subscripts ────────────────────────────────────────────
 
 #[tokio::test]
