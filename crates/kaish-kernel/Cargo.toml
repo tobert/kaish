@@ -37,6 +37,10 @@ serde_json = { workspace = true }
 # Optional: JSON Schema generation (used by MCP server for outputSchema)
 schemars = { version = "1", optional = true }
 
+# Display-width-aware padding for printf's %Ns width specifier (CJK/emoji are
+# wider than 1 byte/col) — same crate kaish-repl uses for table alignment (#130).
+unicode-width = "0.2"
+
 # Logging / Telemetry. opentelemetry + its SDK propagators turn the
 # embedder-supplied W3C trace context on ExecuteOptions into an OTel Context
 # that the execution span parents onto. See src/telemetry.rs.
