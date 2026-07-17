@@ -55,7 +55,9 @@ async fn wait_for_job(kernel: &Kernel, job_id: u64, timeout: Duration) -> String
 /// A kernel that owns no host filesystem must not persist job output to a host
 /// temp file — that write goes through `std::fs`, bypassing the VFS and any
 /// read-only mount. Holds for `NoLocal` (mounts nothing) and `with_backend`
-/// (the embedder owns the VFS). A host-owning kernel still persists.
+/// (the embedder owns the VFS). The host-owning counterpart lives in
+/// `test_job_output_persistence_enabled_for_host_owning_kernel` below (localfs
+/// only — see that test's doc comment for why).
 #[tokio::test]
 async fn test_job_output_persistence_disabled_for_hostless_kernels() {
     use kaish_kernel::vfs::{MemoryFs, VfsRouter};
@@ -78,8 +80,18 @@ async fn test_job_output_persistence_disabled_for_hostless_kernels() {
         !embedded.jobs().persist_output_files(),
         "with_backend kernel must not write job output to host disk"
     );
+}
 
-    // A host-owning kernel (Sandboxed) keeps the default persistence.
+/// A host-owning kernel (`Sandboxed` vfs_mode) keeps the default persistence.
+///
+/// `KernelConfig::transient()` only builds a `Sandboxed` (real host cwd)
+/// config behind the `localfs` feature; without it, `transient()` falls back
+/// to `Self::isolated()` (`NoLocal`) per `kernel.rs`, so this kernel would be
+/// hostless too and the assertion below would not hold — hence the gate,
+/// rather than folding this into the hostless test above.
+#[cfg(feature = "localfs")]
+#[tokio::test]
+async fn test_job_output_persistence_enabled_for_host_owning_kernel() {
     let host_owning = Kernel::new(KernelConfig::transient()).expect("transient kernel");
     assert!(
         host_owning.jobs().persist_output_files(),

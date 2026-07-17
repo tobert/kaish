@@ -2,6 +2,7 @@
 //! `&&`-binds-tighter. Regression for the statement-list path (`parser.rs`); the
 //! `[[ ]]` compound path was already correct.
 
+#![cfg(feature = "localfs")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kaish_kernel::{Kernel, KernelConfig};

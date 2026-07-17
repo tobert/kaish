@@ -10,6 +10,7 @@
 //! path directly via the kernel dispatch chain (not via `Scatter::execute`
 //! directly — per the no-direct-builtin-call convention).
 
+#![cfg(feature = "localfs")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kaish_kernel::{Kernel, KernelConfig};

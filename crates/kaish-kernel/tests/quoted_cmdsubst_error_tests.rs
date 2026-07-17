@@ -2,6 +2,7 @@
 //! not silently turned into literal text. Regression for `parser.rs`
 //! (`parse_interpolated_string` used to fall back to literal on parse failure).
 
+#![cfg(feature = "localfs")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kaish_kernel::{Kernel, KernelConfig};

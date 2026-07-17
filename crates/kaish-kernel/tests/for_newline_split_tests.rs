@@ -47,6 +47,14 @@ async fn for_subst_printf_multiline_iterates_per_line() {
     assert!(text.contains("count=3"), "expected 3 iterations:\n{text}");
 }
 
+// The only test in this file that touches a real host path (via
+// `tempfile::NamedTempFile` + `cat`) — `Kernel::transient()` only mounts a
+// real filesystem under the `localfs` feature; without it, `transient()`
+// falls back to `KernelConfig::isolated()` (NoLocal, in-memory `/`), so the
+// absolute tempfile path would resolve to nothing. Every other test in this
+// file only touches virtual builtins (echo/printf/seq/jq/split) and runs
+// featureless.
+#[cfg(feature = "localfs")]
 #[tokio::test]
 async fn for_subst_cat_file_iterates_per_line() {
     let kernel = Kernel::transient().unwrap();

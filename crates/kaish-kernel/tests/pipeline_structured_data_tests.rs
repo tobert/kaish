@@ -9,6 +9,7 @@
 //! current-thread runtime the producer (spawned first) always wins and hides
 //! the bug. Pre-fix this failed ~197/200; the fix makes it deterministic.
 
+#![cfg(feature = "localfs")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kaish_kernel::{Kernel, KernelConfig};

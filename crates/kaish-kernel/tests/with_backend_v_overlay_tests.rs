@@ -6,6 +6,7 @@
 //! its virtual filesystems under `/v`. It also fixes the pre-existing papercuts
 //! where `ls /v` returned nothing and `ls /` dropped `dev`.
 
+#![cfg(feature = "localfs")]
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
