@@ -842,3 +842,48 @@ fn lexer_bare_char_class_operand_before_eq_still_fuses() {
         "LBRACK", "LBRACK", "GLOB([a])", "EQ", "IDENT(b)", "RBRACK", "RBRACK",
     ]);
 }
+
+// =============================================================================
+// `push`'s bracket-path TARGET (`push services[web][tags] item`): fused
+// verbatim into a single `Ident` — never a `GlobWord` to glob-expand — by a
+// THIRD, independent trigger (`PushTarget`, `flush_glob_run`'s `push_target`
+// parameter). The target has no trailing `=` to key off the way an
+// assignment lvalue does, so it needs its own recognition. See GH #183,
+// docs/arrays-and-hashes.md ("Append — push").
+// =============================================================================
+
+#[rstest]
+#[case::nested_keys(
+    "push services[web][tags] item",
+    &["IDENT(push)", "IDENT(services[web][tags])", "IDENT(item)"]
+)]
+#[case::single_index("push xs[0]", &["IDENT(push)", "IDENT(xs[0])"])]
+#[case::bareword_target_unaffected("push xs c", &["IDENT(push)", "IDENT(xs)", "IDENT(c)"])]
+fn lexer_push_bracket_target_fused_verbatim(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+/// `push` used as a plain variable name (`push=5`) is unaffected — the
+/// tracker is independent of the assignment DFA and never steals its
+/// lvalue-root slot.
+#[test]
+fn lexer_push_as_variable_name_unaffected() {
+    run_lexer_test("push=5", &["IDENT(push)", "EQ", "INT(5)"]);
+}
+
+/// `push` as a plain bareword ARGUMENT to another command (not the command
+/// word itself, so not at statement head) must not trigger the tracker.
+#[test]
+fn lexer_push_as_bareword_argument_unaffected() {
+    run_lexer_test("echo push xs", &["IDENT(echo)", "IDENT(push)", "IDENT(xs)"]);
+}
+
+/// A pushed VALUE that itself looks like a bracket path keeps globbing as
+/// before — only the first word right after `push` is the target.
+#[test]
+fn lexer_push_value_after_target_still_globs() {
+    run_lexer_test(
+        "push xs values[0]",
+        &["IDENT(push)", "IDENT(xs)", "GLOB(values[0])"],
+    );
+}

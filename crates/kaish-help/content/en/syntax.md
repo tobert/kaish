@@ -104,17 +104,12 @@ xs[9]=x                   # error — index out of bounds (push grows lists)
 s[api][port]=1            # error — no `api` key (no autoviv; init it first)
 user.email=x              # error — brackets only, use `user[email]=x`
 
-# push appends to a top-level LIST in place — takes the NAME (like read/unset)
+# push appends to a LIST in place — takes the NAME (like read/unset), a
+# top-level name or a bracket path; same lvalue rules as assignment (no
+# autoviv on intermediates, leaf must already be a list)
 push xs date               # xs is now [...,"date"]
 push xs $rec               # values push as typed Values, not stringified text
-
-# KNOWN LIMITATION — push only takes a top-level bareword target; a bracket
-# path target fuses into a glob and fails loudly ("no matches") instead of
-# pushing. Read the nested list out, push, assign it back:
-push services[web][tags] item   # ERROR — no matches: services[web][tags]
-tmp=${services[web][tags]}      # workaround
-push tmp item
-services[web][tags]=$tmp
+push services[web][tags] canary   # bracket-path target
 ```
 
 ## Paths

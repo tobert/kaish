@@ -4453,11 +4453,15 @@ impl Kernel {
                 Ok(scope.arg_count().to_string())
             }
             StringPart::Arithmetic(expr) => {
+                // Loud on purpose (GH #183): this used to be `Err(_) =>
+                // Ok(String::new())`, silently splicing in "" for e.g.
+                // `"$((1/0))"` — `echo "value: $((1/0))"` printed "value: "
+                // at exit 0 instead of failing. Matches the bare (non-string)
+                // `Expr::Arithmetic` arm above, which already propagates.
                 let scope = self.scope.read().await;
-                match crate::arithmetic::eval_arithmetic(expr, &scope) {
-                    Ok(value) => Ok(value.to_string()),
-                    Err(_) => Ok(String::new()),
-                }
+                crate::arithmetic::eval_arithmetic(expr, &scope)
+                    .map(|value| value.to_string())
+                    .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
             }
             StringPart::CommandSubst(stmts) => {
                 // Snapshot scope, cwd, and session config — command

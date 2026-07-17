@@ -15,6 +15,77 @@ before it ships.
 
 ---
 
+## Collections residuals — bracket-path `push`, quoted `]`, record-value hint, loud arithmetic (landed 2026-07-17, GH #183)
+
+Four independent items off the collections punch list, verified fresh against
+current `main` before touching anything (the issue was written against an
+earlier commit; all four were still live, and the arithmetic item turned out
+worse than described).
+
+- **Bracket-path `push` target ships** (`push services[web][tags] item`).
+  The blocker was the lexer: `push`'s target has no trailing `=` to key off
+  the way an assignment lvalue does, so `services[web][tags]` fused into a
+  `GlobWord` and glob-expanded (loud "no matches") before `push` ever ran.
+  Fix is a THIRD, fully independent tracker (`PushTarget`) alongside the
+  existing assignment DFA in `compute_value_context` — deliberately not
+  folded into it, so a variable literally named `push` (`push=5`,
+  `push[0]=x`) keeps working untouched. It recognizes a bareword `push` at
+  statement-head, then treats the immediately-following glued `[...]` run as
+  a path to fuse verbatim into a single `Ident` (never a `GlobWord`).
+  `Scope::walk_append` now takes a full `VarPath`: a bareword target still
+  appends top-level; a bracket path walks intermediates with the same
+  no-autoviv `resolve_step`/`descend_mut` `walk_write` uses, appending at the
+  resolved leaf instead of replacing it. The old read/push/assign-back
+  workaround in the docs is gone.
+- **Quoted subscript keys can contain `]`** (`${r["weird]key"]}`).
+  `parse_var_ref`'s bracket collector scanned to the *first* `]`, quote-blind,
+  so an embedded `]` inside a quoted key ended the subscript early and
+  produced a mangled, cryptic error. Now: if a subscript opens with a quote,
+  consume verbatim to its OWN matching closer first, then resume the search
+  for the real terminating `]`. Unquoted subscripts are untouched.
+- **Unquoted multi-word record values get an actionable error.**
+  `{msg: hello world}` was already a parse error (kaish's grammar makes a
+  bare space-separated `key: value` pair without a comma legal —
+  `{a: 1 b: 2}` — so "world" gets tried as a NEW key and fails at `}`
+  expecting `:`), but the message was chumsky's generic "found '}' expected
+  ':'". A `try_map` guard in `record_literal_parser`, run right after each
+  entry's value, peeks (via `.rewind()`, consuming nothing) for exactly this
+  shape — an `Ident` not itself followed by `:` — and raises a message that
+  names the mistake and shows the quoted fix. `docs/LANGUAGE.md` already
+  described this as "a parse error with the quoted fix in the message" before
+  today; the code just didn't match the doc yet.
+- **Sync arithmetic errors stopped being silently swallowed — and it was
+  worse than the issue said.** The issue named `scheduler/pipeline.rs`'s
+  reduced sync arg binder (`eval_simple_expr`'s bare `Expr::Arithmetic` fell
+  into the generic "not representable here" `Ok(None)`, silently dropping
+  the flag entirely — even a *valid* `scatter --limit $((1+1))` never
+  bound; `eval_string_parts_sync`'s `StringPart::Arithmetic` used
+  `if let Ok(..)`, silently splicing in nothing on error). Both fixed with
+  `?`-propagation, matching the message convention (`"arithmetic error: {e}"`)
+  the two already-loud sites use. But testing turned up a THIRD, more severe
+  instance in the exact same shape sitting in the PRIMARY async
+  string-interpolation path (`kernel.rs`'s `eval_string_part_async`) —
+  `echo "value: $((1/0))"` printed `value: ` at exit 0, no error at all, in
+  completely ordinary command execution, not just the scatter/gather corner
+  the issue scoped. Left un-fixed that would have been an inconsistent,
+  worse-in-practice sibling of the very bug this item exists to kill, so it
+  got the same treatment. All three now match the sync interpreter's
+  (`eval.rs`) arm, which already propagated correctly and was never part of
+  the swallow.
+
+Kernel-routed tests throughout: `collections_lvalue_tests.rs` (bracket-path
+push, including a `push=5` regression guard that the new lexer tracker
+doesn't touch plain variable assignment), `lexer_tests.rs` (token-level
+fusion pins for the `push` target and the quote-aware bracket collector),
+`collection_access_tests.rs` (quoted-key-with-embedded-bracket reads),
+`collection_literals_tests.rs` (strengthened the existing loud-error test to
+check the actual message, added a comma-optional-entries regression guard),
+`correctness_oneoffs_tests.rs` (interpolated arithmetic), and
+`scatter_gather_jsonl_tests.rs` (the scatter-flag-value arithmetic cases,
+paired loud/happy-path per the file's existing convention).
+
+---
+
 ## The lexer becomes one machine (2026-07-16)
 
 GH #95 sat locked since 2026-07-04: two cross-model batch reviews (gemini-pro,

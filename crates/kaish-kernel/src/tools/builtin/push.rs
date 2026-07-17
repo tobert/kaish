@@ -14,19 +14,23 @@
 //! `push` to an undefined target, or a target that isn't a list, is a loud
 //! runtime error — never a silent create (see `Scope::walk_append`).
 //!
-//! **Scope note — bareword target only.** `push services[web][tags] item`
-//! (a bracket-path target) is deferred: the target isn't followed by `=`, so
-//! the lvalue lexer suppression never fires and `services[web][tags]` fuses
-//! into a `GlobWord` that glob-expands (and fails as "no matches") before
-//! `push` ever runs. Solving that needs its own lexer/parser design pass —
-//! see `docs/issues.md`.
+//! **Bracket-path targets.** `push services[web][tags] item` walks the
+//! nested path the same way an assignment lvalue does — a missing
+//! intermediate key or a non-list leaf is a loud error, never autoviv (see
+//! `Scope::walk_append`). The lexer recognizes `push`'s target with its own
+//! trigger (independent of the `=`-followed lvalue trigger an assignment
+//! uses — the target has no trailing `=` to key off) so
+//! `services[web][tags]` fuses verbatim into a path to walk instead of
+//! glob-expanding against the filesystem (GH #183); see
+//! `lexer::PushTarget`.
 //!
 //! # Examples
 //!
 //! ```kaish
 //! xs=[a b]
-//! push xs c              # xs is now [a b c]
-//! push xs $rec           # values are read as typed Values, not stringified
+//! push xs c                        # xs is now [a b c]
+//! push xs $rec                     # values are read as typed Values, not stringified
+//! push services[web][tags] canary  # bracket-path target
 //! ```
 
 use async_trait::async_trait;
@@ -106,12 +110,19 @@ impl Tool for Push {
             }
         };
 
+        // The lexer hands a bareword (`xs`) and a bracket path
+        // (`services[web][tags]`) through identically — a fused `Ident`
+        // token, verbatim — so both are parsed the same way here via the
+        // shared `${...}` path grammar (`services[web][tags]` round-trips
+        // through it exactly like `${services[web][tags]}`'s interior).
+        let path = crate::parser::parse_varpath(&format!("${{{name}}}"));
+
         let values: Vec<Value> = args.positional[1..].to_vec();
         if values.is_empty() {
             return ExecResult::failure(2, "push: usage: push NAME VALUE...");
         }
 
-        match ctx.scope.walk_append(&name, values) {
+        match ctx.scope.walk_append(&path, values) {
             Ok(()) => ExecResult::success(""),
             Err(msg) => ExecResult::failure(1, msg),
         }
@@ -193,5 +204,28 @@ mod tests {
         let result = Push.execute(args, &mut ctx).await;
         assert!(!result.ok());
         assert!(result.err.contains("not a list"), "got: {}", result.err);
+    }
+
+    /// Bracket-path target (GH #183): the target string arrives already
+    /// fused verbatim by the lexer (`lexer::PushTarget`) — this pins the
+    /// Tool→`Scope::walk_append` wiring directly, independent of lexing.
+    #[tokio::test]
+    async fn push_bracket_path_target_extends_the_nested_list() {
+        let mut ctx = make_ctx();
+        ctx.scope.set(
+            "services",
+            Value::Json(serde_json::json!({"web": {"tags": ["a"]}})),
+        );
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("services[web][tags]".into()));
+        args.positional.push(Value::String("b".into()));
+
+        let result = Push.execute(args, &mut ctx).await;
+        assert!(result.ok(), "push failed: {}", result.err);
+        assert_eq!(
+            ctx.scope.get("services"),
+            Some(&Value::Json(serde_json::json!({"web": {"tags": ["a", "b"]}})))
+        );
     }
 }

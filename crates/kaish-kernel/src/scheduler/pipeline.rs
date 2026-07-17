@@ -1040,16 +1040,19 @@ pub fn build_tool_args(
 
 /// Simple expression evaluation for args (without full scope access).
 ///
-/// `Ok(None)` means "not representable in this reduced sync context" (binary
-/// ops, command substitution — these need the async kernel path; callers
-/// treat that the same as before, e.g. falling back to a bare flag). `Err`
-/// means a genuine [`PathError`] — undefined-subscripted-root, a missing key,
-/// or a shape mismatch — and MUST propagate loud, the same as the async
-/// `build_args_async`/`eval_expr_async` (`kernel.rs`) and the sync
-/// interpreter (`eval.rs`) treat it. Before this, every arm here discarded
-/// the error via `.ok()`/`if let Ok(..)`, so a bad subscript in a scatter/gather
-/// flag value silently dropped the argument instead of failing (docs/issues.md,
-/// now closed).
+/// `Ok(None)` means "not representable in this reduced sync context" (only
+/// binary ops fall here now — everything else this reduced binder can't
+/// evaluate, like command substitution, has its own explicit `Err` arm
+/// below; callers treat `None` the same as before, e.g. falling back to a
+/// bare flag). `Err` means a genuine failure — a [`PathError`]
+/// (undefined-subscripted-root, a missing key, a shape mismatch), a bad
+/// `$((...))` arithmetic expansion, or an unsupported `$(...)`/`$(cmd)` — and
+/// MUST propagate loud, the same as the async `build_args_async`/
+/// `eval_expr_async` (`kernel.rs`) and the sync interpreter (`eval.rs`) treat
+/// it. Before this, every arm here discarded the error via
+/// `.ok()`/`if let Ok(..)`, so a bad subscript OR a bad arithmetic expansion
+/// in a scatter/gather flag value silently dropped the argument instead of
+/// failing (docs/issues.md, now closed; the arithmetic swallow was GH #183).
 pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Result<Option<Value>, String> {
     match expr {
         Expr::Literal(value) => Ok(Some(eval_literal(value, ctx))),
@@ -1085,6 +1088,16 @@ pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Result<Option<
             }
         }
         Expr::GlobPattern(s) => Ok(Some(Value::String(s.clone()))),
+        // Bare arithmetic expansion (`scatter --limit $((1+1))`) — mirrors
+        // the async `eval_expr_async`'s `Expr::Arithmetic` arm (kernel.rs),
+        // which already propagates loud. This used to fall into the
+        // catch-all `_ => Ok(None)` below (silently "not representable
+        // here"), so a bare `$((...))` flag value never bound at all — a
+        // valid `--limit $((1+1))` silently ran unlimited, and a bad
+        // `--limit $((1/0))` silently did too, instead of failing (GH #183).
+        Expr::Arithmetic(expr_str) => arithmetic::eval_arithmetic(expr_str, &ctx.scope)
+            .map(|n| Some(Value::Int(n)))
+            .map_err(|e| format!("arithmetic error: {e}")),
         Expr::HereDocBody { parts, strip_tabs } => {
             // Heredoc body materialization for redirect targets. `<<-` tab
             // stripping applies to the literal source, not to tabs from a
@@ -1178,12 +1191,16 @@ fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -
                 result.push_str(&ctx.scope.arg_count().to_string());
             }
             crate::ast::StringPart::Arithmetic(expr) => {
-                // Arithmetic errors in this reduced sync context are a
-                // separate, pre-existing swallow (not a collection PathError)
-                // — out of scope here; tracked in docs/issues.md.
-                if let Ok(value) = arithmetic::eval_arithmetic(expr, &ctx.scope) {
-                    result.push_str(&value.to_string());
-                }
+                // Loud on purpose (GH #183): this used to be `if let Ok(..)`,
+                // silently omitting the digits on error — a quoted
+                // `--limit "$((1/0))"` used to surface only as scatter's own
+                // generic int-parse complaint on the resulting "", masking
+                // the real arithmetic error. Matches the bare
+                // `Expr::Arithmetic` arm above and the async
+                // `eval_string_part_async` (kernel.rs).
+                let value = arithmetic::eval_arithmetic(expr, &ctx.scope)
+                    .map_err(|e| format!("arithmetic error: {e}"))?;
+                result.push_str(&value.to_string());
             }
             crate::ast::StringPart::CommandSubst(_) => {
                 // Command substitution can't run in this reduced sync
