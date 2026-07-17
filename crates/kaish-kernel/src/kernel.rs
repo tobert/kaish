@@ -5959,19 +5959,26 @@ impl CommandDispatcher for Kernel {
 }
 
 /// Apply the requested output format to a builtin's result, unless the tool
-/// owns its own output.
+/// owns its own output — and even then, only on success.
 ///
-/// `format` is `ctx.output_format` (set from `--json`). When `owns_output` is
-/// true the tool already rendered its bytes (bespoke JSON envelope), so the
-/// kernel leaves the result untouched rather than re-formatting its
-/// `OutputData`. Otherwise the kernel renders the typed `OutputData` uniformly.
+/// `format` is `ctx.output_format` (set from `--json`). `owns_output` means
+/// "this tool renders its own bespoke SUCCESS envelope" (scatter/gather's
+/// JSONL/array rendering), not "never touch this tool's bytes" — scatter and
+/// gather never render a structured error themselves, so a failure
+/// (`ExecResult::failure(code, msg)`, plain text, no `.data`/`.output`) was
+/// never "already rendered" by the tool. Skipping `apply_output_format` on
+/// that path just leaked the raw diagnostic under `--json` instead of the
+/// uniform `{"error","code"}` envelope every other builtin's failure gets
+/// (kaibo review finding on merged PR #215, confirmed pre-existing for the
+/// whole owns_output error-path class). Gating the skip on `result.ok()`
+/// keeps the intentional success-path opt-out while closing that gap.
 fn finalize_output(
     result: ExecResult,
     format: Option<crate::interpreter::OutputFormat>,
     owns_output: bool,
 ) -> ExecResult {
     match format {
-        Some(_) if owns_output => result,
+        Some(_) if owns_output && result.ok() => result,
         Some(format) => apply_output_format(result, format),
         None => result,
     }
@@ -8963,12 +8970,33 @@ AFTER="yes"'"#)
     }
 
     #[test]
-    fn finalize_output_skips_when_tool_owns_output() {
+    fn finalize_output_skips_when_tool_owns_output_and_succeeds() {
         use crate::interpreter::{OutputData, OutputFormat};
         let r = ExecResult::with_output(OutputData::text("RAW"));
         let out = finalize_output(r, Some(OutputFormat::Json), true);
-        // owns_output: the tool already rendered; kernel leaves bytes untouched.
+        // owns_output + success: the tool already rendered; kernel leaves bytes
+        // untouched.
         assert_eq!(out.text_out(), "RAW", "owned output must be left as-is");
+    }
+
+    #[test]
+    fn finalize_output_renders_owns_output_failure() {
+        // scatter/gather (the only owns_output tools) never render their own
+        // JSONL/array on a FAILURE path — their error returns are plain-text
+        // `ExecResult::failure(code, msg)`, identical in shape to any other
+        // builtin's. owns_output means "the tool already rendered its own
+        // SUCCESS output", not "never touch this tool's bytes" — a failure
+        // must still get the uniform --json error envelope like every other
+        // builtin (kaibo review finding on merged PR #215; confirmed
+        // pre-existing for scatter/gather's whole error-path class, including
+        // the clap-parse-failure path).
+        use crate::interpreter::OutputFormat;
+        let r = ExecResult::failure(2, "scatter: unexpected argument '--nope'");
+        let out = finalize_output(r, Some(OutputFormat::Json), true);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out.text_out()).expect("--json must always parse as JSON");
+        assert_eq!(parsed["error"], "scatter: unexpected argument '--nope'");
+        assert_eq!(parsed["code"], 2);
     }
 
     #[test]

@@ -54,6 +54,18 @@ breaking entries are marked **BREAKING**.
   kaish-extras `kaish-web` crate is a working embedding.
 
 ### Fixed
+- **`scatter`/`gather`'s error paths honor `--json`** — a bad flag or a stdin
+  read failure used to leak a plain-text `scatter: ...`/`gather: ...` message
+  under `--json` instead of the standard `{"error","code"}` envelope. Found by
+  a kaibo review pair on merged PR #215 and confirmed pre-existing for the
+  whole `owns_output` error-path class (clap-parse failures included), not
+  just the newest instance: `owns_output` opts a tool out of the kernel's
+  `--json` rendering so it can render its own bespoke SUCCESS output
+  (scatter/gather's JSONL/array), but the same opt-out was blanket-skipping
+  their FAILURE results too, even though neither tool ever renders a
+  structured error itself. `finalize_output` now only skips
+  `apply_output_format` when the tool owns its output **and** the result
+  succeeded.
 - **Case patterns accept dash/plus bare words** (GH #144) — `---`, `-`, `--`,
   `-x`, `+foo`, and alternations like `-h|--help) ...` are now valid case
   patterns; they previously failed to parse (`pattern_part` had no arm for
