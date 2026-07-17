@@ -63,14 +63,13 @@ impl Tool for Write {
         // makes it the same "clap sink nobody reads" case as `push`'s hidden
         // positional (CLAUDE.md's clap-builtin convention), just on a named
         // flag instead: `to_argv()`'s loud named-Bytes guard (GH #164) exists
-        // for keys a builtin *does* read via the clap-parsed field, so drop
-        // `content` before computing argv for clap — every other flag
-        // (`path`/`confirm`/global) still gets the full guard, and
-        // `parsed.content` simply stays `None`, which is fine since nothing
-        // reads it.
-        let mut argv_source = args.clone();
-        argv_source.named.remove("content");
-        let argv = match argv_source.to_argv() {
+        // for keys a builtin *does* read via the clap-parsed field, so
+        // exclude `content` from argv (GH #218's `to_argv_excluding` — a
+        // first-class alternative to hand-cloning `ToolArgs` and removing the
+        // key). Every other flag (`path`/`confirm`/global) still gets the
+        // full guard, and `parsed.content` simply stays `None`, which is fine
+        // since nothing reads it.
+        let argv = match args.to_argv_excluding(&["content"]) {
             Ok(v) => v,
             Err(e) => return ExecResult::failure(2, format!("write: {e}")),
         };

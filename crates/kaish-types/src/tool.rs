@@ -498,7 +498,42 @@ impl ToolArgs {
     /// NOT error here; see [`value_to_argv_token`]'s doc comment for why.
     ///
     /// See the clap builtin pattern in CLAUDE.md (Contributor conventions).
+    ///
+    /// Equivalent to [`to_argv_excluding`](Self::to_argv_excluding)`(&[])` —
+    /// same rendering path, nothing excluded.
     pub fn to_argv(&self) -> Result<Vec<String>, ToolArgvError> {
+        self.to_argv_excluding(&[])
+    }
+
+    /// Like [`to_argv`](Self::to_argv), but skips the given **named** keys
+    /// entirely — neither the key's flag token nor its value appears in the
+    /// rendered argv, and (crucially) a `Value::Bytes` under an excluded key
+    /// is never passed to [`render_named_value`], so it can never trip
+    /// [`ToolArgvError::BinaryNamedValue`].
+    ///
+    /// Use this when a builtin deliberately reads one of its own named
+    /// parameters raw off `ToolArgs` (e.g. `args.named.get("content")`)
+    /// instead of the clap-parsed field, specifically to preserve a
+    /// typed/binary value that must not cross the argv/text stringification
+    /// boundary — while still wanting the *rest* of its arguments bound
+    /// through the normal clap path. `write`'s `content` param is the
+    /// motivating case (GH #218, a follow-up from the GH #164 / #215
+    /// review): before this helper, the builtin cloned the whole `ToolArgs`
+    /// and called `named.remove("content")` by hand, which silently stops
+    /// covering a *second* Bytes-capable named param the moment one is added.
+    /// Naming the excluded keys here instead makes the exemption a
+    /// greppable, drift-resistant idiom.
+    ///
+    /// Only **named** keys are excludable — not flags or positionals, by
+    /// design. A bool flag carries no value to protect, so there is nothing
+    /// to exempt. A positional's clap-reflected field is already a
+    /// validation-only sink nobody reads (see CLAUDE.md's clap-builtin
+    /// convention), so a positional `Value::Bytes` never needed an
+    /// exemption in the first place — [`value_to_argv_token`] renders it as
+    /// an inert placeholder rather than erroring. If a future case needs to
+    /// exclude a flag or positional too, that is new design, not an
+    /// extension of this helper.
+    pub fn to_argv_excluding(&self, exclude: &[&str]) -> Result<Vec<String>, ToolArgvError> {
         let mut argv = Vec::with_capacity(
             self.flags.len() + self.named.len() * 2 + self.positional.len() + 1,
         );
@@ -517,7 +552,12 @@ impl ToolArgs {
         // for multi-char keys. `=` form keeps parsing unambiguous when the
         // value begins with `-`. Multi-value (`consumes > 1`) params are
         // stored as Value::Json(Array(Array(...))) — one entry per occurrence.
+        // An excluded key is skipped before its value is ever inspected, so a
+        // Value::Bytes there can't reach render_named_value's Bytes guard.
         for (key, value) in &self.named {
+            if exclude.contains(&key.as_str()) {
+                continue;
+            }
             for rendered in render_named_value(key, value)? {
                 argv.push(format!("{}={}", flag_token(key), rendered));
             }
@@ -869,6 +909,84 @@ mod to_argv_tests {
         let err = args.to_argv().expect_err("named Bytes must still error");
         let ToolArgvError::BinaryNamedValue { key, .. } = err;
         assert_eq!(key, "check");
+    }
+
+    // ── GH #218: ToolArgs::to_argv_excluding ────────────────────────────
+    //
+    // write.rs reads its own `content` named param raw off `ToolArgs` to
+    // preserve `Value::Bytes`, then needs the *rest* of its args through the
+    // normal clap/to_argv path — these tests pin the helper that replaces the
+    // ad hoc "clone ToolArgs, remove the key, call to_argv()" dance.
+
+    /// A named `Value::Bytes` under an excluded key must not error and must
+    /// not appear anywhere in the rendered argv — this is the whole point:
+    /// `write`'s `content` carries real binary and must never reach argv.
+    #[test]
+    fn to_argv_excluding_skips_excluded_named_bytes_without_error() {
+        let mut args = ToolArgs::new();
+        args.named.insert("content".into(), Value::Bytes(vec![0xff, 0x00, 0xfe]));
+        args.named.insert("path".into(), Value::String("dest.bin".into()));
+
+        let argv = args
+            .to_argv_excluding(&["content"])
+            .expect("excluded named Bytes must not error");
+        assert_eq!(argv, vec!["--path=dest.bin"]);
+        assert!(
+            argv.iter().all(|tok| !tok.contains("content")),
+            "excluded key must not appear in argv at all: {argv:?}"
+        );
+    }
+
+    /// A named `Value::Bytes` under a key that is NOT excluded still errors
+    /// loudly, same as plain `to_argv()` — excluding one key must not blanket
+    /// the whole named map.
+    #[test]
+    fn to_argv_excluding_still_errors_on_non_excluded_named_bytes() {
+        let mut args = ToolArgs::new();
+        args.named.insert("content".into(), Value::Bytes(vec![1, 2, 3]));
+        args.named.insert("separator".into(), Value::Bytes(vec![9, 9]));
+
+        let err = args
+            .to_argv_excluding(&["content"])
+            .expect_err("non-excluded named Bytes must still error");
+        let ToolArgvError::BinaryNamedValue { key, .. } = err;
+        assert_eq!(key, "separator");
+    }
+
+    /// Excluding a key that isn't a `Value::Bytes` at all (the common case —
+    /// most invocations of `write` carry plain string content) still drops it
+    /// from argv. The exclusion is unconditional on the key, not conditional
+    /// on the value being binary.
+    #[test]
+    fn to_argv_excluding_drops_excluded_key_regardless_of_value_type() {
+        let mut args = ToolArgs::new();
+        args.named.insert("content".into(), Value::String("hello".into()));
+        args.named.insert("path".into(), Value::String("dest.txt".into()));
+
+        let argv = args.to_argv_excluding(&["content"]).expect("no error expected");
+        assert_eq!(argv, vec!["--path=dest.txt"]);
+    }
+
+    /// An empty exclude list must behave *exactly* like `to_argv()` — same
+    /// tokens, same order — across flags, named values, and positionals, on
+    /// args that don't touch the Bytes edge case at all. `to_argv()` itself
+    /// delegates to this with an empty slice, so this is also the guard that
+    /// the delegation didn't change plain `to_argv()` behavior.
+    #[test]
+    fn to_argv_excluding_empty_list_matches_to_argv() {
+        let mut args = ToolArgs::new();
+        args.flags.insert("verbose".into());
+        args.flags.insert("n".into());
+        args.named.insert("limit".into(), Value::Int(10));
+        args.named.insert("name".into(), Value::String("foo".into()));
+        args.positional.push(Value::String("file.txt".into()));
+        args.positional.push(Value::String("-weird".into()));
+
+        assert_eq!(
+            args.to_argv_excluding(&[]).unwrap(),
+            args.to_argv().unwrap(),
+            "empty exclude list must be indistinguishable from to_argv()"
+        );
     }
 
     #[test]
