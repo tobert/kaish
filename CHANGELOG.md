@@ -11,6 +11,16 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`ExecuteOptions::interrupt`** — a polled interrupt check for embedders
+  whose thread cannot fire `cancel_token` while execution runs (the browser:
+  single-threaded wasm reading a SharedArrayBuffer flag the page's main
+  thread flips). The kernel polls at its existing cancellation checkpoints
+  and maps a firing check to the same exit-130 path as `Kernel::cancel()`;
+  session state survives the interrupt. Per-call and cleared on every exit
+  path. First consumer: state-preserving Ctrl-C in the kaish-extras
+  browser playground.
+
+### Added
 - **Flag completion helpers in `kaish_client::completion`** —
   `current_command(line, pos)` (which command word governs the statement
   under the cursor) and `flag_candidates(params, word)` (canonical `--long`
