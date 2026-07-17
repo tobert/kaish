@@ -582,3 +582,23 @@ async fn scatter_bare_arithmetic_flag_value_binds_successfully() {
     assert_eq!(r.code, 0, "{:?}", r.err);
     assert_eq!(rows(&r.text_out()).len(), 5);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// GH #188: `scatter`/`gather`'s own option parsing used to bind through a
+// hand-rolled sync twin (`scheduler::pipeline::build_tool_args`) of the real
+// binder (`Kernel::build_args_async`). It's now a thin wrapper over the same
+// shared `kernel::bind_tool_args` core — these round-trips through
+// `kernel.execute()` pin that the unification didn't change scatter/gather's
+// own observable option-binding behavior.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn scatter_as_and_limit_options_still_bind_through_the_shared_core() {
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(&k, "seq 1 3 | scatter --as N --limit 2 | echo $N | gather").await;
+    assert_eq!(r.code, 0, "{:?}", r.err);
+    let got = rows(&r.text_out());
+    let mut outs: Vec<_> = got.iter().map(|row| row["out"].as_str().unwrap().to_string()).collect();
+    outs.sort();
+    assert_eq!(outs, vec!["1", "2", "3"], "--as N must bind the item to $N: {got:?}");
+}

@@ -116,10 +116,22 @@ const CASES: &[Case] = &[
         cmd: "printf '{\"a\":1}\\n{\"a\":2}\\n' | fromjsonl --json",
         expect: Expect::Array,
     },
-    // scatter/gather own their output (`owns_output`): `--json` passes
-    // through untouched and `--format json` is the structured form.
+    // scatter/gather own their output (`owns_output`): inside a real
+    // scatter|...|gather pipeline, `--json` reaches gather directly (it
+    // renders the array itself; PipelineRunner splits the pipeline and never
+    // dispatches through Scatter::execute/Gather::execute at all here).
     Case { name: "gather", setup: &[], cmd: "seq 1 2 | scatter --as N | echo $N | gather --json", expect: Expect::Array },
     Case { name: "scatter", setup: &[], cmd: "seq 1 2 | scatter --as N | echo $N | gather --json", expect: Expect::Array },
+    // Standalone (no matching scatter/gather counterpart in the pipeline) DOES
+    // dispatch through Scatter::execute/Gather::execute, which hits the
+    // owns_output branch of finalize_output. An invalid flag fails clap
+    // parsing before the tool ever renders anything of its own — this must
+    // still honor --json with the standard error envelope, not leak the raw
+    // "scatter: unexpected argument …" text (kaibo review finding on merged
+    // PR #215; the whole owns_output error-path class was broken, not just
+    // the newest instance).
+    Case { name: "scatter", setup: &[], cmd: "scatter --nope --json", expect: Expect::FailsEnvelope(2) },
+    Case { name: "gather", setup: &[], cmd: "gather --nope --json", expect: Expect::FailsEnvelope(2) },
     Case { name: "git", setup: &["git init ."], cmd: "git status --json", expect: Expect::String },
     Case { name: "glob", setup: &[], cmd: "glob 'tmp/*.json' --json", expect: Expect::Array },
     Case { name: "grep", setup: &[], cmd: "grep INFO tmp/app.log --json", expect: Expect::Array },

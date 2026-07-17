@@ -107,7 +107,7 @@ use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_st
 use crate::scheduler::{drain_to_stream, DEFAULT_STREAM_MAX_SIZE};
 use crate::tools::{register_builtins, ExecContext, GlobalFlags, ToolArgs, ToolRegistry};
 #[cfg(feature = "subprocess")]
-use crate::tools::resolve_in_path;
+use crate::tools::{resolve_in_path, virtual_cwd_error};
 use crate::validator::{Severity, Validator};
 #[cfg(feature = "localfs")]
 use crate::vfs::LocalFs;
@@ -766,6 +766,12 @@ pub struct Kernel {
     /// needs sync access. Each `execute()` call gets a fresh child token;
     /// `cancel()` cancels the current token and replaces it.
     cancel_token: std::sync::Mutex<tokio_util::sync::CancellationToken>,
+    /// Per-call polled interrupt check (`ExecuteOptions::interrupt`),
+    /// installed for the duration of an `execute_with_options` call and
+    /// cleared on exit. Consulted by `is_cancelled()` so every existing
+    /// cancellation checkpoint gains interrupt awareness without new wiring.
+    /// std Mutex for the same sync-access reason as `cancel_token`.
+    interrupt: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>>,
     /// Terminal state for job control (interactive mode only, Unix only).
     #[cfg(all(unix, feature = "subprocess"))]
     terminal_state: Option<Arc<crate::terminal::TerminalState>>,
@@ -1215,6 +1221,7 @@ impl Kernel {
             kill_grace,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
             cancel_token: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
+            interrupt: std::sync::Mutex::new(None),
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
             self_weak: std::sync::OnceLock::new(),
@@ -1358,6 +1365,7 @@ impl Kernel {
             kill_grace: self.kill_grace,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
             cancel_token: std::sync::Mutex::new(cancel),
+            interrupt: std::sync::Mutex::new(None),
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
             self_weak: std::sync::OnceLock::new(),
@@ -1433,7 +1441,19 @@ impl Kernel {
     }
 
     /// Check if the current execution has been cancelled.
+    ///
+    /// Also the polling point for `ExecuteOptions::interrupt`: when the
+    /// embedder's check reports true, the internal token fires here, so every
+    /// call site of this method is an interrupt checkpoint for free.
     pub fn is_cancelled(&self) -> bool {
+        let interrupted = {
+            #[allow(clippy::expect_used)]
+            let check = self.interrupt.lock().expect("interrupt poisoned");
+            check.as_ref().is_some_and(|f| f())
+        };
+        if interrupted {
+            self.cancel();
+        }
         #[allow(clippy::expect_used)]
         let token = self.cancel_token.lock().expect("cancel_token poisoned");
         token.is_cancelled()
@@ -1814,6 +1834,25 @@ impl Kernel {
         // (b) re-route a later `Kernel::cancel()` into the embedder's token,
         // (c) extend the token's lifetime via the kernel's strong clone.
         let internal = self.reset_cancel();
+
+        // Install the per-call polled interrupt for `is_cancelled()` to
+        // consult. The guard clears it on every exit path — a stale check
+        // must not outlive its call and fire into a later one.
+        struct ClearInterrupt<'a>(&'a Kernel);
+        impl Drop for ClearInterrupt<'_> {
+            fn drop(&mut self) {
+                if let Ok(mut slot) = self.0.interrupt.lock() {
+                    *slot = None;
+                }
+            }
+        }
+        {
+            #[allow(clippy::expect_used)]
+            let mut slot = self.interrupt.lock().expect("interrupt poisoned");
+            *slot = opts.interrupt.clone();
+        }
+        let _interrupt_guard = ClearInterrupt(self);
+
         // Race the embedder token against the kernel's internal token via a
         // tracked watcher task. We hold the JoinHandle so we can abort the
         // task at function exit — otherwise it would wait forever for either
@@ -3333,593 +3372,22 @@ impl Kernel {
         }
     }
 
-    // (see `push_repeatable_value` below for the repeatable-flag accumulation.)
-
-    /// Pull `consumes` positional args after a non-bool flag and stash them
-    /// on `tool_args.named` under the canonical param name.
-    ///
-    /// - `consumes == 1` (non-repeatable) keeps the historical contract: a
-    ///   single scalar value (last write wins on the rare duplicate).
-    /// - `consumes == 1` + `repeatable` accumulates each occurrence as a scalar
-    ///   inside `named[canonical] = Value::Json(Array(...))`, preserving
-    ///   invocation order. This is the shape sed's `-e EXPR -e EXPR` lands in —
-    ///   a repeated single-value flag must keep every value, not silently drop
-    ///   all but the last (a "no silent corruption" violation).
-    /// - `consumes > 1` accumulates each occurrence as an inner
-    ///   `serde_json::Value::Array` inside `named[canonical] =
-    ///   Value::Json(Array(...))`, preserving invocation order. This is the
-    ///   shape jq's `--arg NAME VAL` / `--argjson NAME VAL` land in.
-    ///
-    /// Errors loudly if the flag is missing required positionals — matches
-    /// kaish's "no silent fallback" posture and mirrors real jq, which
-    /// errors on `--arg NAME` with no value.
-    #[allow(clippy::too_many_arguments)]
-    async fn consume_flag_positionals(
-        &self,
-        args: &[Arg],
-        flag_name: &str,
-        canonical: &str,
-        consumes: usize,
-        repeatable: bool,
-        positional_indices: &[usize],
-        consumed: &mut std::collections::HashSet<usize>,
-        current_idx: usize,
-        tool_args: &mut ToolArgs,
-    ) -> Result<()> {
-        let home = self.scope_home().await;
-        let mut collected: Vec<Value> = Vec::with_capacity(consumes.max(1));
-        for _ in 0..consumes.max(1) {
-            // A `key=value` (WordAssign) token is consumable only by a
-            // single-value flag (`-v a=1`). For a multi-value flag (`jq --arg
-            // NAME VAL`, consumes>1) it is NOT eligible — otherwise `--arg x=1
-            // filter` would reassemble `x=1` into the first slot and steal the
-            // filter into the second. Multi-value flags take plain positionals.
-            let allow_word_assign = consumes <= 1;
-            let next_pos = positional_indices
-                .iter()
-                .find(|idx| {
-                    **idx > current_idx
-                        && !consumed.contains(idx)
-                        && (allow_word_assign || matches!(args[**idx], Arg::Positional(_)))
-                })
-                .copied();
-            match next_pos {
-                Some(pos_idx) => match &args[pos_idx] {
-                    Arg::Positional(expr) => {
-                        let value = self.eval_expr_async(expr).await?;
-                        let value = apply_tilde_expansion(value, home.as_deref());
-                        collected.push(value);
-                        consumed.insert(pos_idx);
-                    }
-                    // `-v a=1`: reassemble the `key=value` token as the flag's
-                    // scalar value (see `positional_indices` construction).
-                    Arg::WordAssign { key, value } => {
-                        let val = self.eval_expr_async(value).await?;
-                        let val = apply_tilde_expansion(val, home.as_deref());
-                        // Loud on binary (GH #116): `-v a=$BIN` must not silently
-                        // reassemble the `[binary: N bytes]` placeholder into the
-                        // flag's value — same text-sink boundary as the primary
-                        // sinks fixed in #93 item 1.
-                        let val_str = crate::interpreter::value_to_text_sink_named(
-                            &val,
-                            "a key=value argument",
-                        )
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                        collected.push(Value::String(format!("{key}={val_str}")));
-                        consumed.insert(pos_idx);
-                    }
-                    _ => {}
-                },
-                None => {
-                    if consumes <= 1 && collected.is_empty() {
-                        // Back-compat: a flag with no follow-up positional
-                        // becomes a bare flag. `--path` with nothing after
-                        // lands in `flags`, same as before this refactor.
-                        tool_args.flags.insert(flag_name.to_string());
-                        return Ok(());
-                    }
-                    anyhow::bail!(
-                        "--{flag_name} requires {consumes} argument{}, got {}",
-                        if consumes == 1 { "" } else { "s" },
-                        collected.len()
-                    );
-                }
-            }
-        }
-
-        if consumes <= 1 {
-            if let Some(v) = collected.pop() {
-                if repeatable {
-                    push_repeatable_value(tool_args, flag_name, canonical, v)?;
-                } else {
-                    tool_args.named.insert(canonical.to_string(), v);
-                }
-            }
-            return Ok(());
-        }
-
-        // Multi-consume: accumulate under named[canonical] as array-of-arrays.
-        let occ: Vec<serde_json::Value> = collected
-            .into_iter()
-            .map(|v| crate::interpreter::value_to_json(&v))
-            .collect();
-        let entry = tool_args
-            .named
-            .entry(canonical.to_string())
-            .or_insert_with(|| Value::Json(serde_json::Value::Array(Vec::new())));
-        if let Value::Json(serde_json::Value::Array(outer)) = entry {
-            outer.push(serde_json::Value::Array(occ));
-        } else {
-            anyhow::bail!(
-                "--{flag_name}: named[{canonical}] already holds a non-array value"
-            );
-        }
-        Ok(())
-    }
-
     /// Build tool arguments from AST args.
     ///
     /// Uses async evaluation to support command substitution in arguments.
+    /// Delegates to the shared `bind_tool_args` core (GH #188): this method
+    /// now only supplies the evaluator — `self` implements `ArgValueSource`
+    /// against the kernel's own session state (full recursion through the
+    /// async pipeline, real glob expansion, tilde expansion). Before this,
+    /// `bind_tool_args`'s flag/positional-binding logic was duplicated by a
+    /// reduced sync twin (`scheduler::pipeline::build_tool_args`, used by
+    /// scatter/gather's own option parsing and the `#[cfg(test)]`
+    /// `BackendDispatcher`) that could — and did — drift from this method,
+    /// the same drift-class GH #133 fixed for the external-command spawn
+    /// sites. Now both paths call the one `bind_tool_args` core, differing
+    /// only in which `ArgValueSource` they hand it.
     async fn build_args_async(&self, args: &[Arg], schema: Option<&crate::tools::ToolSchema>) -> Result<ToolArgs> {
-        let mut tool_args = ToolArgs::new();
-        let home = self.scope_home().await;
-
-        // A glob-passthrough tool (`glob`) consumes patterns as data: skip
-        // argv glob expansion so the pattern reaches the tool as written —
-        // otherwise `glob **/*.rs` binds the first *matching path* as its
-        // pattern. The eval fallback turns `Expr::GlobPattern` into its
-        // literal string.
-        let glob_passthrough = schema.is_some_and(|s| s.glob_passthrough);
-
-        // Raw-argv fast path (POSIX `test`): bind every argument to `positional`
-        // in source order with types preserved — operators (`-f`, `=`, `!`) as
-        // strings, operands keeping their `Value` — leaving `flags`/`named`
-        // empty. A position-sensitive command needs the *true* argv: an operand
-        // that looks like a flag (`test $x = -n`, `test 0 -gt -5`) must not be
-        // hoisted into the unordered flag set the normal binder splits into.
-        // Globs still expand and `~` still resolves, matching normal positional
-        // binding — so `test -f *.rs` errors on too many args, not a literal
-        // pattern stat.
-        if schema.is_some_and(|s| s.raw_argv) {
-            for arg in args {
-                match arg {
-                    Arg::Positional(expr) => {
-                        let glob = if let Expr::GlobPattern(p) = expr {
-                            (!glob_passthrough && self.scope.read().await.glob_enabled())
-                                .then(|| p.clone())
-                        } else {
-                            None
-                        };
-                        if let Some(pattern) = glob {
-                            let (paths, cwd) = {
-                                let ctx = self.exec_ctx.read().await;
-                                let paths = ctx
-                                    .expand_glob(&pattern)
-                                    .await
-                                    .map_err(|e| anyhow::anyhow!("glob: {}", e))?;
-                                let cwd = ctx.resolve_path(".");
-                                (paths, cwd)
-                            };
-                            if paths.is_empty() {
-                                return Err(anyhow::anyhow!("no matches: {}", pattern));
-                            }
-                            for path in paths {
-                                let display = if !pattern.starts_with('/') {
-                                    path.strip_prefix(&cwd)
-                                        .unwrap_or(&path)
-                                        .to_string_lossy()
-                                        .into_owned()
-                                } else {
-                                    path.to_string_lossy().into_owned()
-                                };
-                                tool_args.positional.push(Value::String(display));
-                            }
-                        } else {
-                            let value = self.eval_expr_async(expr).await?;
-                            let value = apply_tilde_expansion(value, home.as_deref());
-                            tool_args.positional.push(value);
-                        }
-                    }
-                    Arg::ShortFlag(name) => {
-                        tool_args.positional.push(Value::String(format!("-{name}")));
-                    }
-                    Arg::LongFlag(name) => {
-                        tool_args.positional.push(Value::String(format!("--{name}")));
-                    }
-                    Arg::Named { key, value } => {
-                        let val = self.eval_expr_async(value).await?;
-                        let val = apply_tilde_expansion(val, home.as_deref());
-                        // Loud on binary (GH #116): `test --k=$BIN` must not
-                        // silently reassemble the placeholder into the raw-argv
-                        // positional stream `test` binds against.
-                        let val_str = crate::interpreter::value_to_text_sink_named(
-                            &val,
-                            "a --key=value argument",
-                        )
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                        tool_args
-                            .positional
-                            .push(Value::String(format!("--{key}={val_str}")));
-                    }
-                    Arg::WordAssign { key, value } => {
-                        let val = self.eval_expr_async(value).await?;
-                        let val = apply_tilde_expansion(val, home.as_deref());
-                        // Loud on binary (GH #116): same reasoning as the Named
-                        // arm above, for the bare `key=value` raw-argv form.
-                        let val_str = crate::interpreter::value_to_text_sink_named(
-                            &val,
-                            "a key=value argument",
-                        )
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                        tool_args
-                            .positional
-                            .push(Value::String(format!("{key}={val_str}")));
-                    }
-                    Arg::DoubleDash => {
-                        tool_args.positional.push(Value::String("--".to_string()));
-                    }
-                }
-            }
-            return Ok(tool_args);
-        }
-
-        // Subcommand-aware tools (e.g. `kj context list`) expose a tree of
-        // schemas; pick the leaf the leading positionals route to and bind
-        // flags against *its* params. Flat tools return the root. select_leaf
-        // errors (fail loud) if a computed positional sits where a subcommand
-        // selector is required.
-        let leaf = match schema {
-            Some(s) => Some(select_leaf(s, args)?),
-            None => None,
-        };
-        // Bind against the leaf's params, but MERGE the root schema's params on
-        // top as "global" flags: a value-flag declared at the tool's top level
-        // (e.g. kj's `--confirm <nonce>`) must bind at every leaf, including when
-        // it trails the subcommand path (`kj context retag a b --confirm <n>`).
-        // The leaf wins on name conflicts. For a flat tool, leaf == root, so the
-        // merge is a harmless no-op.
-        let mut param_lookup = schema.map(schema_param_lookup).unwrap_or_default();
-        if let Some(l) = leaf {
-            param_lookup.extend(schema_param_lookup(l));
-        }
-        // accepts_word_assign keys off the root tool name (the WORD_ASSIGN list),
-        // not the leaf — it's a property of the command, not the subcommand.
-        let accepts_word_assign = schema
-            .map(|s| crate::tools::accepts_word_assign(s.name.as_str()))
-            .unwrap_or(false);
-
-        // Track which positional indices have been consumed as flag values
-        let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        let mut past_double_dash = false;
-
-        // Indices a value-flag may consume as its value. Positionals always
-        // qualify. A `WordAssign` (`a=1`) also qualifies when the tool does not
-        // itself treat `key=value` as an assignment (everything but
-        // export/alias/unalias) — getopt semantics: `awk -v a=1` binds `a=1` to
-        // `-v`, rather than skipping it and grabbing the next positional (the
-        // program). Without this, the natural `-F`/`-v NAME=VALUE` form silently
-        // mis-binds. The main-loop `WordAssign` arm skips consumed indices.
-        let positional_indices: Vec<usize> = args.iter().enumerate()
-            .filter_map(|(i, a)| {
-                let consumable = matches!(a, Arg::Positional(_))
-                    || (!accepts_word_assign && matches!(a, Arg::WordAssign { .. }));
-                consumable.then_some(i)
-            })
-            .collect();
-
-        let mut i = 0;
-        while i < args.len() {
-            match &args[i] {
-                Arg::DoubleDash => {
-                    past_double_dash = true;
-                }
-                Arg::Positional(expr) => {
-                    if !consumed.contains(&i) {
-                        // Glob expansion: bare glob patterns expand to matching files
-                        if let Expr::GlobPattern(pattern) = expr {
-                            let glob_enabled = {
-                                let scope = self.scope.read().await;
-                                scope.glob_enabled()
-                            };
-                            if glob_enabled && !glob_passthrough {
-                                let (paths, cwd) = {
-                                    let ctx = self.exec_ctx.read().await;
-                                    let paths = ctx.expand_glob(pattern).await
-                                        .map_err(|e| anyhow::anyhow!("glob: {}", e))?;
-                                    let cwd = ctx.resolve_path(".");
-                                    (paths, cwd)
-                                };
-                                if paths.is_empty() {
-                                    return Err(anyhow::anyhow!("no matches: {}", pattern));
-                                }
-                                for path in paths {
-                                    let display = if !pattern.starts_with('/') {
-                                        path.strip_prefix(&cwd)
-                                            .unwrap_or(&path)
-                                            .to_string_lossy().into_owned()
-                                    } else {
-                                        path.to_string_lossy().into_owned()
-                                    };
-                                    tool_args.positional.push(Value::String(display));
-                                }
-                                i += 1;
-                                continue;
-                            }
-                        }
-                        let value = self.eval_expr_async(expr).await?;
-                        let value = apply_tilde_expansion(value, home.as_deref());
-                        tool_args.positional.push(value);
-                    }
-                }
-                Arg::Named { key, value } => {
-                    let val = self.eval_expr_async(value).await?;
-                    let val = apply_tilde_expansion(val, home.as_deref());
-                    // A repeatable flag in `--flag=value` form must accumulate too,
-                    // not overwrite — otherwise `--expression=A --expression=B`
-                    // would silently keep only B, and mixing with the `-e` space
-                    // form would clobber the array. Route it through the same
-                    // accumulator the space form uses.
-                    if let Some(&(canonical, _, _, true)) = param_lookup.get(key.as_str()) {
-                        push_repeatable_value(&mut tool_args, key, canonical, val)?;
-                    } else {
-                        tool_args.named.insert(key.clone(), val);
-                    }
-                }
-                Arg::WordAssign { key, value } => {
-                    // Already pulled in as a preceding value-flag's argument
-                    // (`awk -v a=1`); don't also emit it as a positional.
-                    if consumed.contains(&i) {
-                        i += 1;
-                        continue;
-                    }
-                    let val = self.eval_expr_async(value).await?;
-                    let val = apply_tilde_expansion(val, home.as_deref());
-                    if accepts_word_assign {
-                        tool_args.named.insert(key.clone(), val);
-                    } else {
-                        // Stringify "key=value" and pass as a positional.
-                        // Matches bash: `cat foo=bar` opens a file named `foo=bar`.
-                        // Loud on binary (GH #116): `cat foo=$BIN`/`dd if=$BIN`
-                        // must not silently become a path/operand literally named
-                        // `foo=[binary: N bytes]`.
-                        let val_str = crate::interpreter::value_to_text_sink_named(
-                            &val,
-                            "a key=value argument",
-                        )
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                        tool_args.positional.push(Value::String(format!("{key}={val_str}")));
-                    }
-                }
-                Arg::ShortFlag(name) => {
-                    if past_double_dash {
-                        tool_args.positional.push(Value::String(format!("-{name}")));
-                    } else if name.len() == 1 {
-                        let flag_name = name.as_str();
-                        let lookup = param_lookup.get(flag_name);
-                        let is_bool = lookup.map(|(_, typ, ..)| is_bool_type(typ)).unwrap_or(true);
-
-                        if is_bool {
-                            tool_args.flags.insert(flag_name.to_string());
-                        } else {
-                            // Non-bool: consume `consumes` positionals as value(s)
-                            let canonical = lookup.map(|(n, ..)| *n).unwrap_or(flag_name);
-                            let consumes = lookup.map(|(_, _, c, _)| *c).unwrap_or(1);
-                            let repeatable = lookup.map(|(_, _, _, r)| *r).unwrap_or(false);
-                            self.consume_flag_positionals(
-                                args,
-                                name,
-                                canonical,
-                                consumes,
-                                repeatable,
-                                &positional_indices,
-                                &mut consumed,
-                                i,
-                                &mut tool_args,
-                            )
-                            .await?;
-                        }
-                    } else if let Some(&(canonical, typ, consumes, repeatable)) = param_lookup.get(name.as_str()) {
-                        // Multi-char short flag matches a schema param (POSIX style: -name value)
-                        if is_bool_type(typ) {
-                            tool_args.flags.insert(canonical.to_string());
-                        } else {
-                            self.consume_flag_positionals(
-                                args,
-                                name,
-                                canonical,
-                                consumes,
-                                repeatable,
-                                &positional_indices,
-                                &mut consumed,
-                                i,
-                                &mut tool_args,
-                            )
-                            .await?;
-                        }
-                    } else if let Some(&(canonical, _, consumes, repeatable)) = param_lookup
-                        .get(&name[..1])
-                        .filter(|(_, typ, ..)| !is_bool_type(typ))
-                    {
-                        // Glued short-flag value: `cut -f1`, `head -c5`, `cut -f1-3`,
-                        // `grep -A1`, `sed -e1d`. The first char is a declared
-                        // value-taking short flag, so the rest of the token is its
-                        // value — the coreutils idiom. The lexer's flag char class is
-                        // `[a-zA-Z][a-zA-Z0-9-]*`, so the first byte is always ASCII
-                        // (safe to slice) and the tail is a plain literal.
-                        bind_glued_short_value(
-                            &mut tool_args,
-                            &name[..1],
-                            canonical,
-                            consumes,
-                            repeatable,
-                            name[1..].to_string(),
-                        )?;
-                    } else {
-                        // Multi-char combined short flags. Bool flags stack
-                        // (`-la`), but the FIRST value-taking flag reached
-                        // consumes the rest of the token as its glued value
-                        // (`-ivC3` → C=3) or, if it is the last char, the next
-                        // positional (`grep -ivC 3` → C=3). Before this, a
-                        // trailing value-flag was silently treated as a bool,
-                        // stranding its argument as a stray positional (arity
-                        // error). Undeclared/bool chars stay bare flags, so a
-                        // schemaless tool keeps the old all-boolean behavior.
-                        // The first char being value-taking is handled by the
-                        // glued arm above, so it never reaches here. The flag
-                        // char class is ASCII, so byte indexing is char indexing
-                        // (no `Vec<char>` allocation needed).
-                        let bytes = name.as_bytes();
-                        let mut p = 0;
-                        while p < bytes.len() {
-                            let key = &name[p..p + 1];
-                            match param_lookup.get(key) {
-                                Some(&(canonical, typ, consumes, repeatable))
-                                    if !is_bool_type(typ) =>
-                                {
-                                    let glued = name[p + 1..].to_string();
-                                    if glued.is_empty() {
-                                        // Value flag is the last char: take the
-                                        // next positional. `consume_flag_positionals`
-                                        // respects `consumes`.
-                                        self.consume_flag_positionals(
-                                            args,
-                                            key,
-                                            canonical,
-                                            consumes,
-                                            repeatable,
-                                            &positional_indices,
-                                            &mut consumed,
-                                            i,
-                                            &mut tool_args,
-                                        )
-                                        .await?;
-                                    } else {
-                                        bind_glued_short_value(
-                                            &mut tool_args,
-                                            key,
-                                            canonical,
-                                            consumes,
-                                            repeatable,
-                                            glued,
-                                        )?;
-                                    }
-                                    break;
-                                }
-                                _ => {
-                                    tool_args.flags.insert(key.to_string());
-                                    p += 1;
-                                }
-                            }
-                        }
-                    }
-                }
-                Arg::LongFlag(name) => {
-                    if past_double_dash {
-                        tool_args.positional.push(Value::String(format!("--{name}")));
-                    } else {
-                        let lookup = param_lookup.get(name.as_str());
-                        // An *undeclared* long flag under a `map_positionals`
-                        // (backend/MCP) schema that is immediately followed by an
-                        // unconsumed positional is ambiguous: kaish can't tell the
-                        // space-form value (`--type explorer`) from a bool flag
-                        // before a real positional (`--force file.txt`). Defaulting
-                        // to bool here silently divorces the value and misroutes it
-                        // — a privilege-escalation-by-typo against deny-by-default
-                        // embedders (docs/issues.md). Fail loud instead of guessing.
-                        let ambiguous_value = (lookup.is_none()
-                            && leaf.is_some_and(|s| s.map_positionals)
-                            && !consumed.contains(&(i + 1)))
-                            .then(|| match args.get(i + 1) {
-                                // Echo a concrete value for a copy-pasteable fix
-                                // when it's a plain literal; fall back to VALUE.
-                                Some(Arg::Positional(Expr::Literal(Value::String(s)))) => {
-                                    Some(s.clone())
-                                }
-                                Some(Arg::Positional(_)) => Some("VALUE".to_string()),
-                                _ => None,
-                            })
-                            .flatten();
-                        if let Some(val) = ambiguous_value {
-                            let tool = leaf.map(|s| s.name.as_str()).unwrap_or("command");
-                            anyhow::bail!(
-                                "{tool}: --{name} is not a declared flag, so the \
-                                 space-separated value would be silently dropped. \
-                                 Use --{name}={val}, or have {tool} declare --{name} \
-                                 in its schema."
-                            );
-                        }
-                        let is_bool = lookup.map(|(_, typ, ..)| is_bool_type(typ)).unwrap_or(true);
-
-                        if is_bool {
-                            tool_args.flags.insert(name.clone());
-                        } else {
-                            let canonical = lookup.map(|(n, ..)| *n).unwrap_or(name.as_str());
-                            let consumes = lookup.map(|(_, _, c, _)| *c).unwrap_or(1);
-                            let repeatable = lookup.map(|(_, _, _, r)| *r).unwrap_or(false);
-                            self.consume_flag_positionals(
-                                args,
-                                name,
-                                canonical,
-                                consumes,
-                                repeatable,
-                                &positional_indices,
-                                &mut consumed,
-                                i,
-                                &mut tool_args,
-                            )
-                            .await?;
-                        }
-                    }
-                }
-            }
-            i += 1;
-        }
-
-        // Map remaining positionals to unfilled non-bool schema params (in order).
-        // This enables `drift_push "abc" "hello"` → named["target_ctx"] = "abc", named["content"] = "hello"
-        // Positionals that appeared after `--` are never mapped (they're raw data).
-        // Only for backend/external tools (map_positionals=true). Builtins handle their own positionals.
-        // Keyed off the routed leaf so a subcommand tool maps against the active
-        // leaf's params (kj leaves keep map_positionals=false → block skipped).
-        if let Some(schema) = leaf.filter(|s| s.map_positionals) {
-            let pre_dash_count = if past_double_dash {
-                let dash_pos = args.iter().position(|a| matches!(a, Arg::DoubleDash)).unwrap_or(args.len());
-                positional_indices.iter()
-                    .filter(|idx| **idx < dash_pos && !consumed.contains(idx))
-                    .count()
-            } else {
-                tool_args.positional.len()
-            };
-
-            let mut remaining = Vec::new();
-            let mut positional_iter = tool_args.positional.drain(..).enumerate();
-
-            for param in &schema.params {
-                if tool_args.named.contains_key(&param.name) || tool_args.flags.contains(&param.name) {
-                    continue;
-                }
-                if is_bool_type(&param.param_type) {
-                    continue;
-                }
-                loop {
-                    match positional_iter.next() {
-                        Some((idx, val)) if idx < pre_dash_count => {
-                            tool_args.named.insert(param.name.clone(), val);
-                            break;
-                        }
-                        Some((_, val)) => {
-                            remaining.push(val);
-                        }
-                        None => break,
-                    }
-                }
-            }
-
-            remaining.extend(positional_iter.map(|(_, v)| v));
-            tool_args.positional = remaining;
-        }
-
-        Ok(tool_args)
+        bind_tool_args(args, schema, self).await
     }
 
     /// Build arguments as flat string list for external commands.
@@ -5126,16 +4594,17 @@ impl Kernel {
             return Ok(None);
         }
 
-        // Get real working directory for relative path resolution and child cwd.
-        // If the CWD is virtual (no real filesystem path), skip external command
-        // execution entirely — return None so the dispatch can fall through to
-        // backend-registered tools.
-        let real_cwd = {
+        // Get the shell's cwd and its real filesystem location, if any. A
+        // `None` real path means the cwd is virtual (a CoW overlay, an
+        // in-memory VFS mount, `/dev`, …) — there's nowhere for a child OS
+        // process to run. Don't bail out here: a bare command name that isn't
+        // in PATH at all is a genuine "not found" regardless of cwd, and the
+        // virtual-cwd error would blame the wrong thing for that case. Once
+        // the command actually resolves, `real_cwd` is checked again below
+        // and the honest reason is given then (issue #181).
+        let (cwd, real_cwd) = {
             let ctx = self.exec_ctx.read().await;
-            match ctx.backend.resolve_real_path(&ctx.cwd) {
-                Some(p) => p,
-                None => return Ok(None),
-            }
+            (ctx.cwd.clone(), ctx.backend.resolve_real_path(&ctx.cwd))
         };
 
         let executable = if name.contains('/') {
@@ -5143,7 +4612,14 @@ impl Kernel {
             let resolved = if std::path::Path::new(name).is_absolute() {
                 std::path::PathBuf::from(name)
             } else {
-                real_cwd.join(name)
+                match &real_cwd {
+                    Some(real_cwd) => real_cwd.join(name),
+                    // A relative path can't be resolved without a real cwd to
+                    // join against, so we can't even tell whether it would
+                    // exist — name the actual blocker instead of a
+                    // misleading "No such file or directory".
+                    None => return Ok(Some(virtual_cwd_error(name, &cwd))),
+                }
             };
             if !resolved.exists() {
                 return Ok(Some(ExecResult::failure(
@@ -5185,6 +4661,14 @@ impl Kernel {
                 Some(path) => path,
                 None => return Ok(None), // Not found - let caller handle error
             }
+        };
+
+        // The executable resolved — found in PATH, or a path that exists and
+        // is executable — but there's still nowhere to run it without a real
+        // cwd to spawn the child process in.
+        let real_cwd = match real_cwd {
+            Some(p) => p,
+            None => return Ok(Some(virtual_cwd_error(name, &cwd))),
         };
 
         tracing::debug!(executable = %executable, "resolved external command");
@@ -5924,6 +5408,711 @@ impl Kernel {
     }
 }
 
+/// Evaluates a single AST expression on behalf of [`bind_tool_args`], the one
+/// shared arg-binding core behind both `Kernel::build_args_async`
+/// (production: full recursion through the async pipeline, command
+/// substitution, real glob expansion) and the reduced sync evaluator behind
+/// scatter/gather's own option parsing and the `#[cfg(test)]`
+/// `BackendDispatcher` (`scheduler::pipeline::build_tool_args`'s
+/// `SyncEvalSource`). GH #188 closes the drift class between those two
+/// callers: the flag/positional-binding logic (this file's `bind_tool_args`)
+/// is now the ONLY implementation; only expression evaluation, which is
+/// capability-bound (recursing into command substitution needs a live async
+/// pipeline the reduced context doesn't have), still has two providers.
+#[async_trait]
+pub(crate) trait ArgValueSource: Send + Sync {
+    /// Evaluate `expr` to a `Value`. `Ok(None)` means "not representable by
+    /// this evaluator" — the reduced sync evaluator's bash-compatible
+    /// "coalesce" convention for an unset bare variable, or an expression
+    /// form it doesn't support (a binary op) — and the caller drops the
+    /// argument the same way an unset bare variable always has. The real
+    /// (Kernel) evaluator never returns `Ok(None)`: it can always fully
+    /// evaluate.
+    async fn eval(&self, expr: &Expr) -> Result<Option<Value>>;
+
+    /// Expand a bare glob-pattern positional to display strings, or `None`
+    /// if this evaluator doesn't expand globs here (disabled, or the reduced
+    /// sync context, which never has — matching its documented "no
+    /// filesystem walk before worker forks" limit). `bind_tool_args` falls
+    /// back to `eval` (which hands back the pattern text as a literal
+    /// string) when this returns `None`. An enabled expansion that matches
+    /// nothing is a genuine error, not `Ok(None)`.
+    async fn expand_glob(&self, pattern: &str) -> Result<Option<Vec<String>>>;
+
+    /// Session `HOME`, for tilde expansion. `None` disables tilde expansion
+    /// — the reduced sync evaluator's existing behavior (it never expanded
+    /// `~`).
+    async fn home(&self) -> Option<String>;
+}
+
+#[async_trait]
+impl ArgValueSource for Kernel {
+    async fn eval(&self, expr: &Expr) -> Result<Option<Value>> {
+        Ok(Some(self.eval_expr_async(expr).await?))
+    }
+
+    async fn expand_glob(&self, pattern: &str) -> Result<Option<Vec<String>>> {
+        let glob_enabled = self.scope.read().await.glob_enabled();
+        if !glob_enabled {
+            return Ok(None);
+        }
+        let (paths, cwd) = {
+            let ctx = self.exec_ctx.read().await;
+            let paths = ctx
+                .expand_glob(pattern)
+                .await
+                .map_err(|e| anyhow::anyhow!("glob: {}", e))?;
+            let cwd = ctx.resolve_path(".");
+            (paths, cwd)
+        };
+        if paths.is_empty() {
+            anyhow::bail!("no matches: {}", pattern);
+        }
+        let display = paths
+            .into_iter()
+            .map(|path| {
+                if !pattern.starts_with('/') {
+                    path.strip_prefix(&cwd)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    path.to_string_lossy().into_owned()
+                }
+            })
+            .collect();
+        Ok(Some(display))
+    }
+
+    async fn home(&self) -> Option<String> {
+        self.scope_home().await
+    }
+}
+
+/// Pull `consumes` positional args after a non-bool flag and stash them on
+/// `tool_args.named` under the canonical param name. Shared core behind
+/// [`bind_tool_args`]'s `ShortFlag`/`LongFlag` value-flag arms — see that
+/// function's doc comment for the unification story (GH #188).
+///
+/// - `consumes == 1` (non-repeatable) keeps the historical contract: a
+///   single scalar value (last write wins on the rare duplicate).
+/// - `consumes == 1` + `repeatable` accumulates each occurrence as a scalar
+///   inside `named[canonical] = Value::Json(Array(...))`, preserving
+///   invocation order. This is the shape sed's `-e EXPR -e EXPR` lands in —
+///   a repeated single-value flag must keep every value, not silently drop
+///   all but the last (a "no silent corruption" violation).
+/// - `consumes > 1` accumulates each occurrence as an inner
+///   `serde_json::Value::Array` inside `named[canonical] =
+///   Value::Json(Array(...))`, preserving invocation order. This is the
+///   shape jq's `--arg NAME VAL` / `--argjson NAME VAL` land in.
+///
+/// Errors loudly if the flag is missing required positionals — matches
+/// kaish's "no silent fallback" posture and mirrors real jq, which errors on
+/// `--arg NAME` with no value. A reduced evaluator's `Ok(None)` (a value it
+/// can't represent — Kernel's evaluator never returns this) falls back to a
+/// bare flag on the FIRST occurrence, matching the pre-#188 sync twin's
+/// unset-bare-var "coalesce" convention; mid-accumulation it's a genuine
+/// error rather than a silently-partial array.
+#[allow(clippy::too_many_arguments)]
+async fn consume_flag_positionals(
+    source: &dyn ArgValueSource,
+    home: Option<&str>,
+    args: &[Arg],
+    flag_name: &str,
+    canonical: &str,
+    consumes: usize,
+    repeatable: bool,
+    positional_indices: &[usize],
+    consumed: &mut std::collections::HashSet<usize>,
+    current_idx: usize,
+    tool_args: &mut ToolArgs,
+) -> Result<()> {
+    let mut collected: Vec<Value> = Vec::with_capacity(consumes.max(1));
+    for _ in 0..consumes.max(1) {
+        // A `key=value` (WordAssign) token is consumable only by a
+        // single-value flag (`-v a=1`). For a multi-value flag (`jq --arg
+        // NAME VAL`, consumes>1) it is NOT eligible — otherwise `--arg x=1
+        // filter` would reassemble `x=1` into the first slot and steal the
+        // filter into the second. Multi-value flags take plain positionals.
+        let allow_word_assign = consumes <= 1;
+        let next_pos = positional_indices
+            .iter()
+            .find(|idx| {
+                **idx > current_idx
+                    && !consumed.contains(idx)
+                    && (allow_word_assign || matches!(args[**idx], Arg::Positional(_)))
+            })
+            .copied();
+        match next_pos {
+            Some(pos_idx) => match &args[pos_idx] {
+                Arg::Positional(expr) => match source.eval(expr).await? {
+                    Some(value) => {
+                        let value = apply_tilde_expansion(value, home);
+                        collected.push(value);
+                        consumed.insert(pos_idx);
+                    }
+                    None if collected.is_empty() => {
+                        tool_args.flags.insert(flag_name.to_string());
+                        return Ok(());
+                    }
+                    None => anyhow::bail!(
+                        "--{flag_name}: could not evaluate argument {} in this context",
+                        collected.len() + 1
+                    ),
+                },
+                // `-v a=1`: reassemble the `key=value` token as the flag's
+                // scalar value (see `positional_indices` construction).
+                Arg::WordAssign { key, value } => match source.eval(value).await? {
+                    Some(val) => {
+                        let val = apply_tilde_expansion(val, home);
+                        // Loud on binary (GH #116): `-v a=$BIN` must not silently
+                        // reassemble the `[binary: N bytes]` placeholder into the
+                        // flag's value — same text-sink boundary as the primary
+                        // sinks fixed in #93 item 1.
+                        let val_str = crate::interpreter::value_to_text_sink_named(
+                            &val,
+                            "a key=value argument",
+                        )
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        collected.push(Value::String(format!("{key}={val_str}")));
+                        consumed.insert(pos_idx);
+                    }
+                    None if collected.is_empty() => {
+                        tool_args.flags.insert(flag_name.to_string());
+                        return Ok(());
+                    }
+                    None => anyhow::bail!(
+                        "--{flag_name}: could not evaluate argument {} in this context",
+                        collected.len() + 1
+                    ),
+                },
+                _ => {}
+            },
+            None => {
+                if consumes <= 1 && collected.is_empty() {
+                    // Back-compat: a flag with no follow-up positional
+                    // becomes a bare flag. `--path` with nothing after
+                    // lands in `flags`, same as before this refactor.
+                    tool_args.flags.insert(flag_name.to_string());
+                    return Ok(());
+                }
+                anyhow::bail!(
+                    "--{flag_name} requires {consumes} argument{}, got {}",
+                    if consumes == 1 { "" } else { "s" },
+                    collected.len()
+                );
+            }
+        }
+    }
+
+    if consumes <= 1 {
+        if let Some(v) = collected.pop() {
+            if repeatable {
+                push_repeatable_value(tool_args, flag_name, canonical, v)?;
+            } else {
+                tool_args.named.insert(canonical.to_string(), v);
+            }
+        }
+        return Ok(());
+    }
+
+    // Multi-consume: accumulate under named[canonical] as array-of-arrays.
+    let occ: Vec<serde_json::Value> = collected
+        .into_iter()
+        .map(|v| crate::interpreter::value_to_json(&v))
+        .collect();
+    let entry = tool_args
+        .named
+        .entry(canonical.to_string())
+        .or_insert_with(|| Value::Json(serde_json::Value::Array(Vec::new())));
+    if let Value::Json(serde_json::Value::Array(outer)) = entry {
+        outer.push(serde_json::Value::Array(occ));
+    } else {
+        anyhow::bail!(
+            "--{flag_name}: named[{canonical}] already holds a non-array value"
+        );
+    }
+    Ok(())
+}
+
+/// Build `ToolArgs` from AST `Arg`s — the single arg-binding implementation
+/// (GH #188) shared by `Kernel::build_args_async` (production) and the
+/// reduced sync path (`scheduler::pipeline::build_tool_args`, used by
+/// scatter/gather's own option parsing and the `#[cfg(test)]`
+/// `BackendDispatcher`). The two differ only in the [`ArgValueSource`] they
+/// pass: Kernel's evaluates full expressions (including `$(...)` command
+/// substitution) and expands real globs/tilde; the reduced one can't recurse
+/// into the async pipeline this early (scatter/gather's own flags bind
+/// before any worker forks) so it evaluates a smaller expression subset and
+/// never expands globs/tilde — see `SyncEvalSource` in `scheduler::pipeline`.
+///
+/// If a schema is provided, uses it to determine argument types:
+/// - For `--flag` where schema says type is non-bool: consume next
+///   positional(s) as value(s) (`consumes`/`repeatable`-aware).
+/// - For `--flag` where schema says type is bool (or unknown): treat as a
+///   boolean flag.
+///
+/// This enables natural shell syntax like `mcp_tool --query "test" --limit 10`.
+pub(crate) async fn bind_tool_args(
+    args: &[Arg],
+    schema: Option<&crate::tools::ToolSchema>,
+    source: &dyn ArgValueSource,
+) -> Result<ToolArgs> {
+    let mut tool_args = ToolArgs::new();
+    let home = source.home().await;
+
+    // A glob-passthrough tool (`glob`) consumes patterns as data: skip
+    // argv glob expansion so the pattern reaches the tool as written —
+    // otherwise `glob **/*.rs` binds the first *matching path* as its
+    // pattern. The eval fallback turns `Expr::GlobPattern` into its
+    // literal string.
+    let glob_passthrough = schema.is_some_and(|s| s.glob_passthrough);
+
+    // Raw-argv fast path (POSIX `test`): bind every argument to `positional`
+    // in source order with types preserved — operators (`-f`, `=`, `!`) as
+    // strings, operands keeping their `Value` — leaving `flags`/`named`
+    // empty. A position-sensitive command needs the *true* argv: an operand
+    // that looks like a flag (`test $x = -n`, `test 0 -gt -5`) must not be
+    // hoisted into the unordered flag set the normal binder splits into.
+    // Globs still expand and `~` still resolves, matching normal positional
+    // binding — so `test -f *.rs` errors on too many args, not a literal
+    // pattern stat.
+    if schema.is_some_and(|s| s.raw_argv) {
+        for arg in args {
+            match arg {
+                Arg::Positional(expr) => {
+                    let glob = if let Expr::GlobPattern(p) = expr {
+                        (!glob_passthrough).then(|| p.clone())
+                    } else {
+                        None
+                    };
+                    if let Some(pattern) = glob {
+                        match source.expand_glob(&pattern).await? {
+                            Some(paths) => {
+                                for path in paths {
+                                    tool_args.positional.push(Value::String(path));
+                                }
+                            }
+                            None => {
+                                let value = source.eval(expr).await?.ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "raw-argv positional could not be evaluated in this context"
+                                    )
+                                })?;
+                                let value = apply_tilde_expansion(value, home.as_deref());
+                                tool_args.positional.push(value);
+                            }
+                        }
+                    } else {
+                        let value = source.eval(expr).await?.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "raw-argv positional could not be evaluated in this context"
+                            )
+                        })?;
+                        let value = apply_tilde_expansion(value, home.as_deref());
+                        tool_args.positional.push(value);
+                    }
+                }
+                Arg::ShortFlag(name) => {
+                    tool_args.positional.push(Value::String(format!("-{name}")));
+                }
+                Arg::LongFlag(name) => {
+                    tool_args.positional.push(Value::String(format!("--{name}")));
+                }
+                Arg::Named { key, value } => {
+                    let val = source.eval(value).await?.ok_or_else(|| {
+                        anyhow::anyhow!("raw-argv --key=value could not be evaluated in this context")
+                    })?;
+                    let val = apply_tilde_expansion(val, home.as_deref());
+                    // Loud on binary (GH #116): `test --k=$BIN` must not
+                    // silently reassemble the placeholder into the raw-argv
+                    // positional stream `test` binds against.
+                    let val_str = crate::interpreter::value_to_text_sink_named(
+                        &val,
+                        "a --key=value argument",
+                    )
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    tool_args
+                        .positional
+                        .push(Value::String(format!("--{key}={val_str}")));
+                }
+                Arg::WordAssign { key, value } => {
+                    let val = source.eval(value).await?.ok_or_else(|| {
+                        anyhow::anyhow!("raw-argv key=value could not be evaluated in this context")
+                    })?;
+                    let val = apply_tilde_expansion(val, home.as_deref());
+                    // Loud on binary (GH #116): same reasoning as the Named
+                    // arm above, for the bare `key=value` raw-argv form.
+                    let val_str = crate::interpreter::value_to_text_sink_named(
+                        &val,
+                        "a key=value argument",
+                    )
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    tool_args
+                        .positional
+                        .push(Value::String(format!("{key}={val_str}")));
+                }
+                Arg::DoubleDash => {
+                    tool_args.positional.push(Value::String("--".to_string()));
+                }
+            }
+        }
+        return Ok(tool_args);
+    }
+
+    // Subcommand-aware tools (e.g. `kj context list`) expose a tree of
+    // schemas; pick the leaf the leading positionals route to and bind
+    // flags against *its* params. Flat tools return the root. select_leaf
+    // errors (fail loud) if a computed positional sits where a subcommand
+    // selector is required.
+    let leaf = match schema {
+        Some(s) => Some(select_leaf(s, args)?),
+        None => None,
+    };
+    // Bind against the leaf's params, but MERGE the root schema's params on
+    // top as "global" flags: a value-flag declared at the tool's top level
+    // (e.g. kj's `--confirm <nonce>`) must bind at every leaf, including when
+    // it trails the subcommand path (`kj context retag a b --confirm <n>`).
+    // The leaf wins on name conflicts. For a flat tool, leaf == root, so the
+    // merge is a harmless no-op.
+    let mut param_lookup = schema.map(schema_param_lookup).unwrap_or_default();
+    if let Some(l) = leaf {
+        param_lookup.extend(schema_param_lookup(l));
+    }
+    // accepts_word_assign keys off the root tool name (the WORD_ASSIGN list),
+    // not the leaf — it's a property of the command, not the subcommand.
+    let accepts_word_assign = schema
+        .map(|s| crate::tools::accepts_word_assign(s.name.as_str()))
+        .unwrap_or(false);
+
+    // Track which positional indices have been consumed as flag values
+    let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut past_double_dash = false;
+
+    // Indices a value-flag may consume as its value. Positionals always
+    // qualify. A `WordAssign` (`a=1`) also qualifies when the tool does not
+    // itself treat `key=value` as an assignment (everything but
+    // export/alias/unalias) — getopt semantics: `awk -v a=1` binds `a=1` to
+    // `-v`, rather than skipping it and grabbing the next positional (the
+    // program). Without this, the natural `-F`/`-v NAME=VALUE` form silently
+    // mis-binds. The main-loop `WordAssign` arm skips consumed indices.
+    let positional_indices: Vec<usize> = args
+        .iter()
+        .enumerate()
+        .filter_map(|(i, a)| {
+            let consumable = matches!(a, Arg::Positional(_))
+                || (!accepts_word_assign && matches!(a, Arg::WordAssign { .. }));
+            consumable.then_some(i)
+        })
+        .collect();
+
+    let mut i = 0;
+    while i < args.len() {
+        match &args[i] {
+            Arg::DoubleDash => {
+                past_double_dash = true;
+            }
+            Arg::Positional(expr) => {
+                if !consumed.contains(&i) {
+                    // Glob expansion: bare glob patterns expand to matching files
+                    if let Expr::GlobPattern(pattern) = expr {
+                        if !glob_passthrough {
+                            if let Some(paths) = source.expand_glob(pattern).await? {
+                                for path in paths {
+                                    tool_args.positional.push(Value::String(path));
+                                }
+                                i += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(value) = source.eval(expr).await? {
+                        let value = apply_tilde_expansion(value, home.as_deref());
+                        tool_args.positional.push(value);
+                    }
+                }
+            }
+            Arg::Named { key, value } => {
+                if let Some(val) = source.eval(value).await? {
+                    let val = apply_tilde_expansion(val, home.as_deref());
+                    // A repeatable flag in `--flag=value` form must accumulate too,
+                    // not overwrite — otherwise `--expression=A --expression=B`
+                    // would silently keep only B, and mixing with the `-e` space
+                    // form would clobber the array. Route it through the same
+                    // accumulator the space form uses.
+                    if let Some(&(canonical, _, _, true)) = param_lookup.get(key.as_str()) {
+                        push_repeatable_value(&mut tool_args, key, canonical, val)?;
+                    } else {
+                        tool_args.named.insert(key.clone(), val);
+                    }
+                }
+            }
+            Arg::WordAssign { key, value } => {
+                // Already pulled in as a preceding value-flag's argument
+                // (`awk -v a=1`); don't also emit it as a positional.
+                if consumed.contains(&i) {
+                    i += 1;
+                    continue;
+                }
+                if let Some(val) = source.eval(value).await? {
+                    let val = apply_tilde_expansion(val, home.as_deref());
+                    if accepts_word_assign {
+                        tool_args.named.insert(key.clone(), val);
+                    } else {
+                        // Stringify "key=value" and pass as a positional.
+                        // Matches bash: `cat foo=bar` opens a file named `foo=bar`.
+                        // Loud on binary (GH #116): `cat foo=$BIN`/`dd if=$BIN`
+                        // must not silently become a path/operand literally named
+                        // `foo=[binary: N bytes]`.
+                        let val_str = crate::interpreter::value_to_text_sink_named(
+                            &val,
+                            "a key=value argument",
+                        )
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        tool_args.positional.push(Value::String(format!("{key}={val_str}")));
+                    }
+                }
+            }
+            Arg::ShortFlag(name) => {
+                if past_double_dash {
+                    tool_args.positional.push(Value::String(format!("-{name}")));
+                } else if name.len() == 1 {
+                    let flag_name = name.as_str();
+                    let lookup = param_lookup.get(flag_name);
+                    let is_bool = lookup.map(|(_, typ, ..)| is_bool_type(typ)).unwrap_or(true);
+
+                    if is_bool {
+                        tool_args.flags.insert(flag_name.to_string());
+                    } else {
+                        // Non-bool: consume `consumes` positionals as value(s)
+                        let canonical = lookup.map(|(n, ..)| *n).unwrap_or(flag_name);
+                        let consumes = lookup.map(|(_, _, c, _)| *c).unwrap_or(1);
+                        let repeatable = lookup.map(|(_, _, _, r)| *r).unwrap_or(false);
+                        consume_flag_positionals(
+                            source,
+                            home.as_deref(),
+                            args,
+                            name,
+                            canonical,
+                            consumes,
+                            repeatable,
+                            &positional_indices,
+                            &mut consumed,
+                            i,
+                            &mut tool_args,
+                        )
+                        .await?;
+                    }
+                } else if let Some(&(canonical, typ, consumes, repeatable)) = param_lookup.get(name.as_str()) {
+                    // Multi-char short flag matches a schema param (POSIX style: -name value)
+                    if is_bool_type(typ) {
+                        tool_args.flags.insert(canonical.to_string());
+                    } else {
+                        consume_flag_positionals(
+                            source,
+                            home.as_deref(),
+                            args,
+                            name,
+                            canonical,
+                            consumes,
+                            repeatable,
+                            &positional_indices,
+                            &mut consumed,
+                            i,
+                            &mut tool_args,
+                        )
+                        .await?;
+                    }
+                } else if let Some(&(canonical, _, consumes, repeatable)) = param_lookup
+                    .get(&name[..1])
+                    .filter(|(_, typ, ..)| !is_bool_type(typ))
+                {
+                    // Glued short-flag value: `cut -f1`, `head -c5`, `cut -f1-3`,
+                    // `grep -A1`, `sed -e1d`. The first char is a declared
+                    // value-taking short flag, so the rest of the token is its
+                    // value — the coreutils idiom. The lexer's flag char class is
+                    // `[a-zA-Z][a-zA-Z0-9-]*`, so the first byte is always ASCII
+                    // (safe to slice) and the tail is a plain literal.
+                    bind_glued_short_value(
+                        &mut tool_args,
+                        &name[..1],
+                        canonical,
+                        consumes,
+                        repeatable,
+                        name[1..].to_string(),
+                    )?;
+                } else {
+                    // Multi-char combined short flags. Bool flags stack
+                    // (`-la`), but the FIRST value-taking flag reached
+                    // consumes the rest of the token as its glued value
+                    // (`-ivC3` → C=3) or, if it is the last char, the next
+                    // positional (`grep -ivC 3` → C=3). Before this, a
+                    // trailing value-flag was silently treated as a bool,
+                    // stranding its argument as a stray positional (arity
+                    // error). Undeclared/bool chars stay bare flags, so a
+                    // schemaless tool keeps the old all-boolean behavior.
+                    // The first char being value-taking is handled by the
+                    // glued arm above, so it never reaches here. The flag
+                    // char class is ASCII, so byte indexing is char indexing
+                    // (no `Vec<char>` allocation needed).
+                    let bytes = name.as_bytes();
+                    let mut p = 0;
+                    while p < bytes.len() {
+                        let key = &name[p..p + 1];
+                        match param_lookup.get(key) {
+                            Some(&(canonical, typ, consumes, repeatable))
+                                if !is_bool_type(typ) =>
+                            {
+                                let glued = name[p + 1..].to_string();
+                                if glued.is_empty() {
+                                    // Value flag is the last char: take the
+                                    // next positional. `consume_flag_positionals`
+                                    // respects `consumes`.
+                                    consume_flag_positionals(
+                                        source,
+                                        home.as_deref(),
+                                        args,
+                                        key,
+                                        canonical,
+                                        consumes,
+                                        repeatable,
+                                        &positional_indices,
+                                        &mut consumed,
+                                        i,
+                                        &mut tool_args,
+                                    )
+                                    .await?;
+                                } else {
+                                    bind_glued_short_value(
+                                        &mut tool_args,
+                                        key,
+                                        canonical,
+                                        consumes,
+                                        repeatable,
+                                        glued,
+                                    )?;
+                                }
+                                break;
+                            }
+                            _ => {
+                                tool_args.flags.insert(key.to_string());
+                                p += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            Arg::LongFlag(name) => {
+                if past_double_dash {
+                    tool_args.positional.push(Value::String(format!("--{name}")));
+                } else {
+                    let lookup = param_lookup.get(name.as_str());
+                    // An *undeclared* long flag under a `map_positionals`
+                    // (backend/MCP) schema that is immediately followed by an
+                    // unconsumed positional is ambiguous: kaish can't tell the
+                    // space-form value (`--type explorer`) from a bool flag
+                    // before a real positional (`--force file.txt`). Defaulting
+                    // to bool here silently divorces the value and misroutes it
+                    // — a privilege-escalation-by-typo against deny-by-default
+                    // embedders (docs/issues.md). Fail loud instead of guessing.
+                    let ambiguous_value = (lookup.is_none()
+                        && leaf.is_some_and(|s| s.map_positionals)
+                        && !consumed.contains(&(i + 1)))
+                        .then(|| match args.get(i + 1) {
+                            // Echo a concrete value for a copy-pasteable fix
+                            // when it's a plain literal; fall back to VALUE.
+                            Some(Arg::Positional(Expr::Literal(Value::String(s)))) => {
+                                Some(s.clone())
+                            }
+                            Some(Arg::Positional(_)) => Some("VALUE".to_string()),
+                            _ => None,
+                        })
+                        .flatten();
+                    if let Some(val) = ambiguous_value {
+                        let tool = leaf.map(|s| s.name.as_str()).unwrap_or("command");
+                        anyhow::bail!(
+                            "{tool}: --{name} is not a declared flag, so the \
+                             space-separated value would be silently dropped. \
+                             Use --{name}={val}, or have {tool} declare --{name} \
+                             in its schema."
+                        );
+                    }
+                    let is_bool = lookup.map(|(_, typ, ..)| is_bool_type(typ)).unwrap_or(true);
+
+                    if is_bool {
+                        tool_args.flags.insert(name.clone());
+                    } else {
+                        let canonical = lookup.map(|(n, ..)| *n).unwrap_or(name.as_str());
+                        let consumes = lookup.map(|(_, _, c, _)| *c).unwrap_or(1);
+                        let repeatable = lookup.map(|(_, _, _, r)| *r).unwrap_or(false);
+                        consume_flag_positionals(
+                            source,
+                            home.as_deref(),
+                            args,
+                            name,
+                            canonical,
+                            consumes,
+                            repeatable,
+                            &positional_indices,
+                            &mut consumed,
+                            i,
+                            &mut tool_args,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // Map remaining positionals to unfilled non-bool schema params (in order).
+    // This enables `drift_push "abc" "hello"` → named["target_ctx"] = "abc", named["content"] = "hello"
+    // Positionals that appeared after `--` are never mapped (they're raw data).
+    // Only for backend/external tools (map_positionals=true). Builtins handle their own positionals.
+    // Keyed off the routed leaf so a subcommand tool maps against the active
+    // leaf's params (kj leaves keep map_positionals=false → block skipped).
+    if let Some(schema) = leaf.filter(|s| s.map_positionals) {
+        let pre_dash_count = if past_double_dash {
+            let dash_pos = args.iter().position(|a| matches!(a, Arg::DoubleDash)).unwrap_or(args.len());
+            positional_indices.iter()
+                .filter(|idx| **idx < dash_pos && !consumed.contains(idx))
+                .count()
+        } else {
+            tool_args.positional.len()
+        };
+
+        let mut remaining = Vec::new();
+        let mut positional_iter = tool_args.positional.drain(..).enumerate();
+
+        for param in &schema.params {
+            if tool_args.named.contains_key(&param.name) || tool_args.flags.contains(&param.name) {
+                continue;
+            }
+            if is_bool_type(&param.param_type) {
+                continue;
+            }
+            loop {
+                match positional_iter.next() {
+                    Some((idx, val)) if idx < pre_dash_count => {
+                        tool_args.named.insert(param.name.clone(), val);
+                        break;
+                    }
+                    Some((_, val)) => {
+                        remaining.push(val);
+                    }
+                    None => break,
+                }
+            }
+        }
+
+        remaining.extend(positional_iter.map(|(_, v)| v));
+        tool_args.positional = remaining;
+    }
+
+    Ok(tool_args)
+}
+
 #[async_trait]
 impl CommandDispatcher for Kernel {
     /// Dispatch a command through the Kernel's full resolution chain.
@@ -5963,19 +6152,26 @@ impl CommandDispatcher for Kernel {
 }
 
 /// Apply the requested output format to a builtin's result, unless the tool
-/// owns its own output.
+/// owns its own output — and even then, only on success.
 ///
-/// `format` is `ctx.output_format` (set from `--json`). When `owns_output` is
-/// true the tool already rendered its bytes (bespoke JSON envelope), so the
-/// kernel leaves the result untouched rather than re-formatting its
-/// `OutputData`. Otherwise the kernel renders the typed `OutputData` uniformly.
+/// `format` is `ctx.output_format` (set from `--json`). `owns_output` means
+/// "this tool renders its own bespoke SUCCESS envelope" (scatter/gather's
+/// JSONL/array rendering), not "never touch this tool's bytes" — scatter and
+/// gather never render a structured error themselves, so a failure
+/// (`ExecResult::failure(code, msg)`, plain text, no `.data`/`.output`) was
+/// never "already rendered" by the tool. Skipping `apply_output_format` on
+/// that path just leaked the raw diagnostic under `--json` instead of the
+/// uniform `{"error","code"}` envelope every other builtin's failure gets
+/// (kaibo review finding on merged PR #215, confirmed pre-existing for the
+/// whole owns_output error-path class). Gating the skip on `result.ok()`
+/// keeps the intentional success-path opt-out while closing that gap.
 fn finalize_output(
     result: ExecResult,
     format: Option<crate::interpreter::OutputFormat>,
     owns_output: bool,
 ) -> ExecResult {
     match format {
-        Some(_) if owns_output => result,
+        Some(_) if owns_output && result.ok() => result,
         Some(format) => apply_output_format(result, format),
         None => result,
     }
@@ -8967,12 +9163,33 @@ AFTER="yes"'"#)
     }
 
     #[test]
-    fn finalize_output_skips_when_tool_owns_output() {
+    fn finalize_output_skips_when_tool_owns_output_and_succeeds() {
         use crate::interpreter::{OutputData, OutputFormat};
         let r = ExecResult::with_output(OutputData::text("RAW"));
         let out = finalize_output(r, Some(OutputFormat::Json), true);
-        // owns_output: the tool already rendered; kernel leaves bytes untouched.
+        // owns_output + success: the tool already rendered; kernel leaves bytes
+        // untouched.
         assert_eq!(out.text_out(), "RAW", "owned output must be left as-is");
+    }
+
+    #[test]
+    fn finalize_output_renders_owns_output_failure() {
+        // scatter/gather (the only owns_output tools) never render their own
+        // JSONL/array on a FAILURE path — their error returns are plain-text
+        // `ExecResult::failure(code, msg)`, identical in shape to any other
+        // builtin's. owns_output means "the tool already rendered its own
+        // SUCCESS output", not "never touch this tool's bytes" — a failure
+        // must still get the uniform --json error envelope like every other
+        // builtin (kaibo review finding on merged PR #215; confirmed
+        // pre-existing for scatter/gather's whole error-path class, including
+        // the clap-parse-failure path).
+        use crate::interpreter::OutputFormat;
+        let r = ExecResult::failure(2, "scatter: unexpected argument '--nope'");
+        let out = finalize_output(r, Some(OutputFormat::Json), true);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out.text_out()).expect("--json must always parse as JSON");
+        assert_eq!(parsed["error"], "scatter: unexpected argument '--nope'");
+        assert_eq!(parsed["code"], 2);
     }
 
     #[test]

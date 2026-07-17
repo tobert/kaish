@@ -76,8 +76,11 @@ External commands (those resolved via PATH) are **unavailable** while cwd is
 inside an overlay mount. `OverlayFs::real_path` returns `None` by design —
 returning the lower's real path would hand tools a host path that bypasses
 the overlay (git and friends write through real paths). The kernel cannot
-resolve a cwd with no real path, so external commands fail with exit 127
-("command not found: git") from inside an overlay mount.
+spawn a child process with nowhere real to run it, so external commands fail
+with exit 127 from inside an overlay mount — the message names the actual
+cause (no real filesystem location for the cwd) and suggests a fix (a kaish
+builtin, `cd` to a real path, or `kaish-vfs commit`), rather than the plain
+"command not found" a missing command gets.
 
 Under Sandboxed+overlay, `cd /tmp` moves cwd to a real LocalFs mount — from
 there, external commands work and see (and write) the real filesystem directly.

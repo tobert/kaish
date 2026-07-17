@@ -29,6 +29,16 @@ breaking entries are marked **BREAKING**.
   propagate the real arithmetic error (GH #183).
 
 ### Added
+- **`ExecuteOptions::interrupt`** — a polled interrupt check for embedders
+  whose thread cannot fire `cancel_token` while execution runs (the browser:
+  single-threaded wasm reading a SharedArrayBuffer flag the page's main
+  thread flips). The kernel polls at its existing cancellation checkpoints
+  and maps a firing check to the same exit-130 path as `Kernel::cancel()`;
+  session state survives the interrupt. Per-call and cleared on every exit
+  path. First consumer: state-preserving Ctrl-C in the kaish-extras
+  browser playground.
+
+### Added
 - **Flag completion helpers in `kaish_client::completion`** —
   `current_command(line, pos)` (which command word governs the statement
   under the cursor) and `flag_candidates(params, word)` (canonical `--long`
@@ -38,6 +48,15 @@ breaking entries are marked **BREAKING**.
   (GH #202).
 
 ### Fixed
+- **Friendlier error when an external command can't be spawned under a
+  virtual working directory** (CoW overlay, in-memory VFS mount, `/dev`, …):
+  a resolvable command used to fall all the way through to the generic
+  `command not found` (127), which blamed the wrong thing. Now it names the
+  real cause and suggests a fix (a kaish builtin, `cd` to a real path, or
+  `kaish-vfs commit` to materialize a CoW overlay) — exit code is unchanged.
+  A command that genuinely isn't in PATH still gets the plain
+  `command not found` (GH #181; cross-layer symlink/whiteout/mtime
+  semantics remain parked, tracked in the same issue).
 - `cargo test -p kaish-client` alone no longer fails the cwd test: the
   tests assert localfs-flavored behavior and now declare `localfs` as a
   dev-dependency feature instead of inheriting it from whichever workspace
@@ -93,6 +112,29 @@ breaking entries are marked **BREAKING**.
   kaish-extras `kaish-web` crate is a working embedding.
 
 ### Fixed
+- **`awk -v` and `env -u` fail loudly on a binary occurrence instead of
+  silently dropping it** (GH #217) — found by a kaibo review of PR #215.
+  Both flags are repeatable-value flags, so the kernel accumulates every
+  occurrence (even the first) into a `Value::Json(Array)`; a binary
+  occurrence lands in that array as a base64 envelope, and each builtin's own
+  hand-rolled collector (`awk::collect_vars`, `env::collect_unset_vars`)
+  filtered for strings and silently skipped anything else — the assignment
+  or unset just vanished and the builtin ran as if the flag had never been
+  given. Both now delegate to the shared `read_repeatable_strings` helper
+  that `grep`/`glob` already use for `--ftype`/`--include`/`--exclude`, so a
+  binary occurrence errors instead of disappearing.
+- **`scatter`/`gather`'s error paths honor `--json`** — a bad flag or a stdin
+  read failure used to leak a plain-text `scatter: ...`/`gather: ...` message
+  under `--json` instead of the standard `{"error","code"}` envelope. Found by
+  a kaibo review pair on merged PR #215 and confirmed pre-existing for the
+  whole `owns_output` error-path class (clap-parse failures included), not
+  just the newest instance: `owns_output` opts a tool out of the kernel's
+  `--json` rendering so it can render its own bespoke SUCCESS output
+  (scatter/gather's JSONL/array), but the same opt-out was blanket-skipping
+  their FAILURE results too, even though neither tool ever renders a
+  structured error itself. `finalize_output` now only skips
+  `apply_output_format` when the tool owns its output **and** the result
+  succeeded.
 - **Case patterns accept dash/plus bare words** (GH #144) — `---`, `-`, `--`,
   `-x`, `+foo`, and alternations like `-h|--help) ...` are now valid case
   patterns; they previously failed to parse (`pattern_part` had no arm for

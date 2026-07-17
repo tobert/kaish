@@ -86,6 +86,48 @@ paired loud/happy-path per the file's existing convention).
 
 ---
 
+## Eliminating the sync `build_tool_args` twin (2026-07-17, GH #188)
+
+The scheduler had a second, hand-rolled arg binder living next to the real
+one: `Kernel::build_args_async` (kernel.rs) is the production flag/positional
+binder — schema-aware, subcommand routing (`select_leaf`), glued short-flag
+values, `consumes`/`repeatable` accumulation, real glob/tilde expansion,
+command substitution via full async recursion. `scheduler::pipeline::build_tool_args`
+was a *reduced* sync twin of the same logic, needed because scatter/gather's
+own option parsing (`--as`, `--limit`, `--timeout`) has to bind before any
+worker forks — too early to recurse back into the async pipeline — and the
+`#[cfg(test)]` `BackendDispatcher` used it too, so pipeline/runner unit tests
+could exercise schema-aware binding without spinning up a full `Kernel`. Two
+implementations of the same flag-binding rules is exactly the drift class GH
+#133 named for the external-command spawn sites; this was its sibling in the
+arg-binding seam, and the code already carried three comments admitting the
+gap (no undeclared-space-flag guard, no glued short-flag handling, no
+`consumes`/`repeatable` accumulation) — all "currently un-triggerable" only
+because scatter/gather's own schema happens to be scalar-only.
+
+The fix extracts the structural binding logic — everything except "how do I
+evaluate one expression" — into a single `bind_tool_args` core (kernel.rs),
+parameterized over a new `ArgValueSource` trait (`eval`/`expand_glob`/`home`).
+`Kernel` implements it with its real capabilities; `build_args_async` is now
+a one-line call into the shared core. The reduced sync path gets its own
+`SyncEvalSource`, wrapping the same `eval_simple_expr` it always used (still
+no command substitution — that capability boundary is real, not laziness),
+and `scheduler::pipeline::build_tool_args` becomes a thin `async fn` wrapper
+around the shared core instead of a parallel implementation. Both the
+scatter/gather call site and the test-only `BackendDispatcher` converge on
+it unchanged in call shape (still `Result<ToolArgs, String>`), so the ~30
+direct unit tests of the old twin only needed a mechanical `#[test]` →
+`#[tokio::test]` conversion, not a rewrite. One test (`test_unknown_flag_in_schema`)
+turned out to be pinning the exact undeclared-space-flag bug the issue named —
+split into a loud-error pin and a separate unambiguous-case test, plus new
+tests proving glued short-flag values and `repeatable`/`consumes>1`
+accumulation now bind correctly through the reduced path too. No CHANGELOG
+bullet: scatter/gather's real schema is still scalar-only, so nothing
+user-observable changed today — the fix is that the next flag which needs
+any of this can't silently misbind through the reduced path anymore.
+
+---
+
 ## The lexer becomes one machine (2026-07-16)
 
 GH #95 sat locked since 2026-07-04: two cross-model batch reviews (gemini-pro,

@@ -80,16 +80,32 @@ impl Tool for Kill {
         // args.named so an Int signal keeps its typing.
         //
         // `--signal` is a named/flag value only, never positional, so
-        // `ToolArgs::to_argv()` now rejects a `Value::Bytes` signal loudly
-        // before `KillArgs::try_parse_from` ever runs (GH #164, closing the
-        // root cause behind this GH #116 guard) — a Bytes value can no
-        // longer reach this match at all (the positional target form below
-        // is guarded separately, since positional Bytes isn't covered by
-        // `to_argv()`'s guard).
+        // `ToolArgs::to_argv()` (called above) now rejects a `Value::Bytes`
+        // signal loudly before `KillArgs::try_parse_from` ever runs (GH #164,
+        // closing the root cause behind this GH #116 guard) — `Value::Bytes`
+        // can no longer reach this match at all (the positional target form
+        // below is guarded separately, since positional Bytes isn't covered
+        // by `to_argv()`'s guard). Bool/Float/Json/Null remain genuinely
+        // reachable, though: a bare `true`/`9`/`1.5` literal in argv position
+        // binds directly as `Value::Bool`/`Int`/`Float` (no `fromjson`
+        // needed — see `parser.rs`'s `literal_parser`), and Json/Null arrive
+        // via a variable holding `fromjson`'s typed result. All four
+        // stringify sensibly and fall through to `signal_is_terminating`'s
+        // (or `parse_signal`'s) existing "unknown signal" rejection below —
+        // that's real, exercised behavior, not dead code. Bytes is the one
+        // case that structurally cannot happen; per the project's
+        // error-handling rules an impossible case must panic loudly rather
+        // than silently ride the generic arm.
         let signal_name = match args.named.get("signal") {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Int(i)) => i.to_string(),
-            Some(other) => crate::interpreter::value_to_string(other),
+            Some(v @ (Value::Null | Value::Bool(_) | Value::Float(_) | Value::Json(_))) => {
+                crate::interpreter::value_to_string(v)
+            }
+            Some(Value::Bytes(_)) => unreachable!(
+                "kill: --signal held Value::Bytes past to_argv()'s guard above — that \
+                 invariant (GH #164) is broken"
+            ),
             None => parsed.signal,
         };
 

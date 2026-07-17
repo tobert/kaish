@@ -274,6 +274,30 @@ fn capture_to_result(code: Option<i32>, stdout: Vec<u8>, stderr: Vec<u8>) -> Exe
     result
 }
 
+/// Friendly, actionable error for the "nowhere to spawn" case: the shell's
+/// cwd has no location on the real filesystem (a CoW overlay, an in-memory
+/// VFS mount, `/dev`, etc.), so an external process has no real directory to
+/// run in. Shared by both external-command spawn sites
+/// (`kernel.rs::try_execute_external`, the production path, and
+/// `dispatch.rs::BackendDispatcher::try_external`, its test-only twin) so the
+/// wording can't drift between them — see CLAUDE.md's two-spawn-sites gotcha.
+///
+/// Deliberately hedges "if this is a CoW overlay" rather than asserting it:
+/// this same guard fires for any virtual cwd (a plain in-memory VFS mount
+/// too), and this call site has no way to tell which one it is.
+pub fn virtual_cwd_error(name: &str, cwd: &Path) -> ExecResult {
+    ExecResult::failure(
+        127,
+        format!(
+            "{name}: can't run external commands here — \"{}\" has no location on \
+             the real filesystem, so there's nowhere to spawn a child process. Use a \
+             kaish builtin instead, or `cd` to a real directory first; if this is a \
+             CoW overlay, `kaish-vfs commit` writes it to disk.",
+            cwd.display()
+        ),
+    )
+}
+
 /// Resolve a command name in PATH.
 ///
 /// Searches each directory in `path_var` (colon-separated) for an executable
