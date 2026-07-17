@@ -15,6 +15,16 @@ breaking entries are marked **BREAKING**.
   `Kaijutsu` — the shell's identity belongs to kaish itself, not to one
   embedder. Scripts detecting the platform should match `kai` (sysname is
   still `kaish`, unchanged).
+### Added
+- **The kernel runs in the browser** (`wasm32-unknown-unknown`) — clock
+  acquisition now routes through `kaish_types::clock` (`system_now()` plus
+  an `Instant` alias), which reads the JS clock via `web-time` on the
+  browser target and is exactly the std clock everywhere else (no new
+  dependency on native/WASI builds; types stay `std::time` in every
+  signature). Previously any wall-clock touch — including mounting a
+  `MemoryFs` — hit `std`'s unsupported-platform shim and panicked. Browser
+  embedders enable getrandom's `wasm_js` backend per its docs; the
+  kaish-extras `kaish-web` crate is a working embedding.
 
 ### Fixed
 - **Bare `${X:-${Y}}` works** (GH #173) — a nested braced reference in a

@@ -6,6 +6,7 @@
 
 pub mod backend;
 pub mod bytes;
+pub mod clock;
 pub mod command;
 pub mod dir_entry;
 pub mod job;

@@ -25,3 +25,9 @@ schema = ["dep:schemars"]
 
 [lints]
 workspace = true
+
+# Browser clock: std's SystemTime::now()/Instant::now() are unsupported
+# (panic) on wasm32-unknown-unknown; kaish_types::clock routes acquisition
+# through the JS clock there. Native and WASI builds never see this dep.
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+web-time = "1"

@@ -153,3 +153,9 @@ tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
+
+# Browser target: chrono's Local timezone math needs the JS environment
+# (wasmbind) on wasm32-unknown-unknown; every other target reads the OS
+# timezone as usual and never sees this.
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+chrono = { workspace = true, features = ["wasmbind"] }

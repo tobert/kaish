@@ -108,7 +108,7 @@ mod tests {
     use super::*;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
-    use std::time::Instant;
+    use kaish_types::clock::Instant;
 
     fn make_ctx() -> ExecContext {
         let mut vfs = VfsRouter::new();

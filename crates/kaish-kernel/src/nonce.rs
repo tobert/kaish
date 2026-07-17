@@ -11,7 +11,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::hash::{BuildHasher, Hasher};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
+
+use kaish_types::clock::{system_now, Instant};
 
 /// What a nonce authorizes: a command and a set of paths.
 #[derive(Debug, Clone)]
@@ -174,7 +176,7 @@ fn generate_nonce() -> String {
     let mut hasher = hasher_state.build_hasher();
 
     // Mix in current time for uniqueness
-    let now = SystemTime::now()
+    let now = system_now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     hasher.write_u128(now.as_nanos());

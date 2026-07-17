@@ -36,7 +36,8 @@
 use logos::{Logos, Span};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
+use kaish_types::clock::system_now;
 
 /// Global counter for generating unique markers across all tokenize calls.
 static MARKER_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -49,14 +50,16 @@ const MAX_PAREN_DEPTH: usize = 256;
 /// Generate a unique marker ID that's extremely unlikely to collide with user code.
 /// Uses a combination of timestamp, counter, and process ID.
 fn unique_marker_id() -> String {
-    let timestamp = SystemTime::now()
+    let timestamp = system_now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let counter = MARKER_COUNTER.fetch_add(1, Ordering::Relaxed);
-    #[cfg(target_os = "wasi")]
+    // No process ids on any wasm target (WASI or the browser);
+    // std::process::id() is unsupported there and panics.
+    #[cfg(target_family = "wasm")]
     let pid = 0u32;
-    #[cfg(not(target_os = "wasi"))]
+    #[cfg(not(target_family = "wasm"))]
     let pid = std::process::id();
     format!("{:x}_{:x}_{:x}", timestamp, counter, pid)
 }

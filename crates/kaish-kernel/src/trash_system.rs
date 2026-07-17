@@ -63,7 +63,7 @@ impl TrashBackend for SystemTrash {
         // process-global counter so two snapshots in the same nanosecond can't
         // race on the same staging path.
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let nanos = std::time::SystemTime::now()
+        let nanos = kaish_types::clock::system_now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
