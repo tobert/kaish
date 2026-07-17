@@ -10,8 +10,14 @@ generic `encode`/`decode` was **dropped** — `base64` and `xxd` (`-p`/`-r`) alr
 bridge text↔bytes, so a generic pair would only duplicate them and invite a
 basenc-style "tons of formats × weird flags" surface that's easy for an agent to
 misuse. The one real gap is URL/percent encoding; add a focused
-`urlencode`/`urldecode` only if web work needs it. Residual: buffered-String stdin
-(`take_stdin`) for the rare binary-heredoc case.
+`urlencode`/`urldecode` only if web work needs it. GH #176 (2026-07-17) closed
+the last two residuals: `ExecContext::stdin`/`ExecuteOptions::stdin` are
+bytes-typed, so a `< binfile` redirect (or an embedder's pre-read
+`with_stdin(Vec<u8>)`) feeds binary through intact rather than erroring at
+redirect setup; `wc -m`/`-w`/default now refuse invalid UTF-8 loudly instead of
+lossy-decoding it (see below). A heredoc/here-string body interpolating a
+binary value is unaffected and unchanged — that's text-sink territory
+(`value_to_text_sink`), correctly loud already, not a stdin-typing residual.
 
 ### Producer coercion is content-sniffing — an accepted tradeoff
 
@@ -23,8 +29,10 @@ on binary, so a tool's `--json` shape varies with content (`"out":"hi"` vs
 — always-`Bytes` — forces every `cat`/`head` through the binary envelope and breaks
 the common text path. It differs from the banned JSON *value* sniffing: content is
 never mutated, only its text-vs-binary tag is detected losslessly. Known minor
-edges: `cat` multi-file / `-n` still rejects binary with `invalid UTF-8` (single-file
-is byte-aware); `wc -m` on binary over-counts via `U+FFFD` expansion (use `-c`).
+edge: `cat` multi-file / `-n` still rejects binary with `invalid UTF-8`
+(single-file is byte-aware). `wc -m`/`-w`/default used to over-count binary via
+`U+FFFD` expansion; fixed in GH #176 (2026-07-17) to refuse invalid UTF-8
+loudly instead — `-c`/`-l` are pure byte-level counts and are unaffected.
 Author: design notes from a 2026-06-13 session (out of the synthetic-`/dev` work)
 Related: [LANGUAGE.md](LANGUAGE.md), [issues.md](issues.md), `docs/help/vfs.md`,
 `project_dev_fs.md` (auto-memory), `arch_no_json_sniffing.md` (auto-memory)

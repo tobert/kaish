@@ -1914,7 +1914,7 @@ impl Kernel {
         // from bleeding into the next call. Same RAII pattern as CwdGuard.
         struct StdinGuard<'a> {
             kernel: &'a Kernel,
-            saved: Option<String>,
+            saved: Option<Vec<u8>>,
         }
         impl Drop for StdinGuard<'_> {
             fn drop(&mut self) {
@@ -5190,17 +5190,17 @@ impl Kernel {
 
         // Get stdin sources: a streaming `pipe_stdin` (an inter-stage pipeline
         // pipe, or a frontend-seeded process-stdin pipe) and/or a buffered
-        // `String`. Take both out under the lock but do NOT drain here — a pipe
-        // read can block on its producer (a still-running upstream stage), so
-        // draining before spawn would serialize the pipeline (deadlocking
+        // byte vector. Take both out under the lock but do NOT drain here — a
+        // pipe read can block on its producer (a still-running upstream stage),
+        // so draining before spawn would serialize the pipeline (deadlocking
         // `sleep 60 | extern`). The pipe is streamed to the child *after* spawn.
-        // `set_stdin` clears `pipe_stdin`, so a redirect-set String and a pipe
+        // `set_stdin` clears `pipe_stdin`, so a redirect-set buffer and a pipe
         // are mutually exclusive in practice; prefer the pipe.
-        let (pipe_stdin, stdin_string) = {
+        let (pipe_stdin, stdin_bytes) = {
             let mut ctx = self.exec_ctx.write().await;
             (ctx.pipe_stdin.take(), ctx.take_stdin())
         };
-        let has_stdin = pipe_stdin.is_some() || stdin_string.is_some();
+        let has_stdin = pipe_stdin.is_some() || stdin_bytes.is_some();
 
         // Build and spawn the command
         use tokio::process::Command;
@@ -5338,9 +5338,8 @@ impl Kernel {
         // Feed stdin. A streaming `pipe_stdin` is copied to the child by a
         // detached task (bounded memory, no pre-drain) so an upstream stage and
         // this child run concurrently — and a child that never reads stdin (or
-        // is killed) just breaks the copy, which stops. A buffered `String` is
-        // written inline and stdin dropped to signal EOF. Bytes are copied
-        // verbatim, so binary stdin survives.
+        // is killed) just breaks the copy, which stops. A buffered byte vector
+        // is written verbatim (no text detour), so binary stdin survives.
         let stdin_task: Option<tokio::task::JoinHandle<()>> = if let Some(mut pipe_in) = pipe_stdin {
             child.stdin.take().map(|mut child_stdin| {
                 tokio::spawn(async move {
@@ -5360,8 +5359,8 @@ impl Kernel {
                     // Dropping child_stdin signals EOF to the child.
                 })
             })
-        } else if let Some(data) = stdin_string {
-            // Write the buffered String from a detached task too — NOT inline.
+        } else if let Some(data) = stdin_bytes {
+            // Write the buffered bytes from a detached task too — NOT inline.
             // An inline write blocks once the stdin pipe fills, and the output
             // drain hasn't spawned yet, so a child that emits a lot before
             // consuming all its input (every pipe buffer full) deadlocks. A
@@ -5371,7 +5370,7 @@ impl Kernel {
             child.stdin.take().map(|mut child_stdin| {
                 tokio::spawn(async move {
                     use tokio::io::AsyncWriteExt;
-                    let _ = child_stdin.write_all(data.as_bytes()).await;
+                    let _ = child_stdin.write_all(&data).await;
                 })
             })
         } else {

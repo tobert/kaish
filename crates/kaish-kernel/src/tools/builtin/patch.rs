@@ -712,7 +712,7 @@ mod tests {
     #[tokio::test]
     async fn test_patch_apply() {
         let mut ctx = make_test_ctx().await;
-        ctx.stdin = Some(simple_patch());
+        ctx.set_stdin(simple_patch());
 
         let mut args = ToolArgs::new();
         // Strip 'b/' prefix from target path
@@ -738,7 +738,7 @@ mod tests {
     #[tokio::test]
     async fn test_patch_dry_run() {
         let mut ctx = make_test_ctx().await;
-        ctx.stdin = Some(simple_patch());
+        ctx.set_stdin(simple_patch());
 
         let mut args = ToolArgs::new();
         args.named.insert("p".to_string(), Value::Int(1));
@@ -764,13 +764,13 @@ mod tests {
         let mut ctx = make_test_ctx().await;
 
         // First apply the patch
-        ctx.stdin = Some(simple_patch());
+        ctx.set_stdin(simple_patch());
         let mut args = ToolArgs::new();
         args.named.insert("p".to_string(), Value::Int(1));
         Patch.execute(args, &mut ctx).await;
 
         // Then reverse it
-        ctx.stdin = Some(simple_patch());
+        ctx.set_stdin(simple_patch());
         let mut args = ToolArgs::new();
         args.named.insert("p".to_string(), Value::Int(1));
         args.flags.insert("R".to_string());
@@ -989,7 +989,7 @@ mod tests {
             .unwrap();
         vfs.mount("/", mem);
         let mut ctx = ExecContext::new(Arc::new(vfs));
-        ctx.stdin = Some(simple_patch());
+        ctx.set_stdin(simple_patch());
 
         let mut args = ToolArgs::new();
         args.named.insert("p".to_string(), Value::Int(1));
@@ -1020,7 +1020,7 @@ mod tests {
             "+changed\n",
             " nope3\n",
         );
-        ctx.stdin = Some(bad.to_string());
+        ctx.set_stdin(bad.to_string());
         let mut args = ToolArgs::new();
         args.named.insert("p".to_string(), Value::Int(1));
         let result = Patch.execute(args, &mut ctx).await;
