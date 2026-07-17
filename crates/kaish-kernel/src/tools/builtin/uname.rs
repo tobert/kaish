@@ -18,7 +18,7 @@
 //!
 //! ```kaish
 //! uname                          # → kaish
-//! uname -a                       # → kaish myhost 0.1.0 ... x86_64 Kaijutsu
+//! uname -a                       # → kaish myhost 0.1.0 ... x86_64 kai
 //! uname -snm                     # → kaish myhost x86_64
 //! uname --host                   # → Linux (native build only)
 //! uname --host -a                # → Linux myhost 6.x.y ... x86_64 GNU/Linux
@@ -113,7 +113,7 @@ impl UnameInfo {
             release: version.to_string(),
             version: format!("kaish {version} ({git_hash} {build_date})"),
             machine: std::env::consts::ARCH.to_string(),
-            os: "Kaijutsu".to_string(),
+            os: "kai".to_string(),
         }
     }
 
@@ -339,7 +339,7 @@ mod tests {
         args.flags.insert("o".to_string());
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), "Kaijutsu");
+        assert_eq!(&*result.text_out(), "kai");
     }
 
     #[tokio::test]
@@ -379,7 +379,7 @@ mod tests {
         // At minimum 6 whitespace-separated tokens (version has parens with spaces)
         assert!(fields.len() >= 6, "expected ≥6 fields, got: {:?}", fields);
         assert_eq!(fields[0], "kaish");
-        assert_eq!(*fields.last().unwrap(), "Kaijutsu");
+        assert_eq!(*fields.last().unwrap(), "kai");
     }
 
     #[tokio::test]

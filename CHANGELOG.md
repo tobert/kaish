@@ -10,6 +10,11 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Changed
+- **`uname -o` (and the tail of `uname -a`) now reports `kai`** instead of
+  `Kaijutsu` — the shell's identity belongs to kaish itself, not to one
+  embedder. Scripts detecting the platform should match `kai` (sysname is
+  still `kaish`, unchanged).
 ### Added
 - **The kernel runs in the browser** (`wasm32-unknown-unknown`) — clock
   acquisition now routes through `kaish_types::clock` (`system_now()` plus
