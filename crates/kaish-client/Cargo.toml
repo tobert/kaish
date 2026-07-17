@@ -13,7 +13,10 @@ categories.workspace = true
 readme = "../../README.md"
 
 [dependencies]
-kaish-kernel = { path = "../kaish-kernel", version = "0.12.0" }
+# Feature-neutral on purpose: the embedder decides the kernel's feature set
+# (kaish-web builds no-default for wasm; native hosts add localfs etc.).
+# Unification means enabling defaults here would trample that choice.
+kaish-kernel = { path = "../kaish-kernel", version = "0.12.0", default-features = false }
 kaish-types = { path = "../kaish-types", version = "0.12.0" }
 
 # Async traits only — no runtime: the library spawns nothing itself, and a
