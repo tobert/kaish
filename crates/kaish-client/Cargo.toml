@@ -16,8 +16,8 @@ readme = "../../README.md"
 # Feature-neutral on purpose: the embedder decides the kernel's feature set
 # (kaish-web builds no-default for wasm; native hosts add localfs etc.).
 # Unification means enabling defaults here would trample that choice.
-kaish-kernel = { path = "../kaish-kernel", version = "0.12.0", default-features = false }
-kaish-types = { path = "../kaish-types", version = "0.12.0" }
+kaish-kernel = { path = "../kaish-kernel", version = "0.13.0", default-features = false }
+kaish-types = { path = "../kaish-types", version = "0.13.0" }
 
 # Async traits only — no runtime: the library spawns nothing itself, and a
 # tokio dep here would drag net/mio into wasm builds (kaish-extras).
@@ -39,7 +39,7 @@ tracing = { workspace = true }
 # this, `cargo test -p kaish-client` alone sees a no-localfs kernel while a
 # whole-workspace run gets localfs unified in by the REPL, and outcomes
 # depend on which crates happened to build.
-kaish-kernel = { path = "../kaish-kernel", version = "0.12.0", features = ["localfs"] }
+kaish-kernel = { path = "../kaish-kernel", version = "0.13.0", features = ["localfs"] }
 proptest = { workspace = true }
 # Tests drive the async client API; the library itself needs no runtime —
 # and must not pull one in: wasm builds (kaish-extras) break on tokio/net.

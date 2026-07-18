@@ -19,8 +19,8 @@ path = "src/main.rs"
 [dependencies]
 # The REPL is the full interactive human shell: it needs every capability
 # (external commands + job control, git, host introspection, tokens, trash).
-kaish-kernel = { path = "../kaish-kernel", version = "0.12.0", features = ["full"] }
-kaish-client = { path = "../kaish-client", version = "0.12.0" }
+kaish-kernel = { path = "../kaish-kernel", version = "0.13.0", features = ["full"] }
+kaish-client = { path = "../kaish-client", version = "0.13.0" }
 
 # Line editing
 rustyline = { workspace = true }

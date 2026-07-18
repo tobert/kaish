@@ -10,6 +10,8 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-18
+
 ### Fixed
 - **Arg-binding polish** (GH #189): four small gaps in the shared arg binder
   (`kernel::bind_tool_args`), verified against current code post-#188/#231:
@@ -1629,7 +1631,8 @@ Initial public release of **kaish** (会sh) — a predictable Bourne-like shell 
 - **REPL** (`kaish-repl`) with multi-line input, completion, and history; **MCP server** (`kaish-mcp`) exposing `kaish_execute` with help resources and structured + plain-text content blocks.
 - **`KernelClient` trait** + `EmbeddedClient` for in-process embedding; topic-based help system; `kaish-wasi` `wasm32-wasip1` target.
 
-[Unreleased]: https://github.com/tobert/kaish/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/tobert/kaish/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/tobert/kaish/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/tobert/kaish/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/tobert/kaish/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/tobert/kaish/compare/v0.9.1...v0.10.0
