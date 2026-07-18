@@ -12,6 +12,20 @@ breaking entries are marked **BREAKING**.
 
 ## [0.13.0] - 2026-07-18
 
+### Added
+- **`OutputData.rich_json` now persists through serde** (self-describing
+  formats: JSON, CBOR). The `--json` render override — set by `grep --json`,
+  available to any builtin — was `#[serde(skip)]` as a transient render hint.
+  It now serializes when `Some` (omitted when `None` via
+  `skip_serializing_if`), so an embedder can carry a builtin's rich structured
+  output onto a stored record and read it back — e.g. kaijutsu persisting a
+  `kj` command's structured output onto a CRDT block for its MCP surface. The
+  `None` (common) case is unchanged on the wire. Caveat: **decoding** a `Some`
+  value from a non-self-describing format fails — `serde_json::Value` needs
+  `deserialize_any`, which postcard/bincode lack. kaish and its embedders use
+  only self-describing formats (JSON/CBOR), so this is a documented boundary,
+  not a live path.
+
 ### Fixed
 - **Arg-binding polish** (GH #189): four small gaps in the shared arg binder
   (`kernel::bind_tool_args`), verified against current code post-#188/#231:

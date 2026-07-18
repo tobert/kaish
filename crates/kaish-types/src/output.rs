@@ -201,16 +201,23 @@ pub struct OutputData {
     pub headers: Option<Vec<String>>,
     /// Top-level nodes.
     pub root: Vec<OutputNode>,
-    /// Render-only override for `--json` consumers. When `Some`,
-    /// `to_json()` returns this verbatim instead of inferring from
-    /// `headers` / `root` / `cells`. Use it when a builtin wants its
-    /// `--json` shape to be richer than the table form (e.g. grep
-    /// emitting per-match objects with submatches and byte offsets).
+    /// Override for `--json` consumers. When `Some`, `to_json()` returns this
+    /// verbatim instead of inferring from `headers` / `root` / `cells`. Use it
+    /// when a builtin wants its `--json` shape to be richer than the table form
+    /// (e.g. grep emitting per-match objects with submatches and byte offsets).
     ///
-    /// Skipped by serde (and thus by postcard / bincode) — this is a
-    /// transient render hint, not part of the persisted shape.
-    #[serde(skip)]
-    #[cfg_attr(feature = "schema", schemars(skip))]
+    /// Serialized only when `Some` (`skip_serializing_if`), so it **persists**
+    /// through self-describing formats (JSON, CBOR): an embedder can carry a
+    /// builtin's rich `--json` payload onto a stored record and read it back.
+    /// Kept off the wire when `None` (the common case), which also keeps that
+    /// case safe for non-self-describing formats. Caveat: the risk is on
+    /// **deserialization** — `serde_json::Value`'s `Deserialize` calls
+    /// `deserialize_any`, which non-self-describing formats (postcard/bincode)
+    /// don't support, so decoding an `OutputData` whose `rich_json` is `Some`
+    /// from one of those fails. kaish and its embedders use only self-describing
+    /// formats (JSON/CBOR); don't decode `OutputData` from postcard/bincode
+    /// while `rich_json` may be set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rich_json: Option<serde_json::Value>,
 }
 
@@ -774,6 +781,39 @@ mod tests {
     fn to_json_empty() {
         let output = OutputData::new();
         assert_eq!(output.to_json(), serde_json::json!([]));
+    }
+
+    #[test]
+    fn rich_json_round_trips_through_serde() {
+        // rich_json is now a persisted field on self-describing formats: a
+        // builtin's `--json` override survives serialize -> deserialize, so an
+        // embedder can store it on a record and read it back. (It was
+        // `#[serde(skip)]` before, which silently dropped it.)
+        let rich = serde_json::json!({"matches": [{"line": 1, "text": "hi"}]});
+        let output = OutputData::new().with_rich_json(rich.clone());
+
+        let encoded = serde_json::to_string(&output).unwrap();
+        let decoded: OutputData = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            decoded.rich_json,
+            Some(rich),
+            "rich_json must survive a serde round trip"
+        );
+    }
+
+    #[test]
+    fn rich_json_none_stays_off_the_wire() {
+        // The common case (no override) keeps the serialized shape minimal via
+        // `skip_serializing_if`, leaving nothing that could trip a
+        // non-self-describing decoder.
+        let output = OutputData::nodes(vec![OutputNode::new("f")]);
+        let encoded = serde_json::to_string(&output).unwrap();
+        assert!(
+            !encoded.contains("rich_json"),
+            "a None rich_json must not serialize: {encoded}"
+        );
+        let decoded: OutputData = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.rich_json, None);
     }
 
     #[test]
