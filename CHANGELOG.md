@@ -20,9 +20,11 @@ breaking entries are marked **BREAKING**.
   `skip_serializing_if`), so an embedder can carry a builtin's rich structured
   output onto a stored record and read it back — e.g. kaijutsu persisting a
   `kj` command's structured output onto a CRDT block for its MCP surface. The
-  `None` (common) case is unchanged on the wire. Caveat: a `Some` value can't
-  round-trip through non-self-describing formats (postcard/bincode lack
-  `deserialize_any`) — kaish uses neither, and kaijutsu is CBOR.
+  `None` (common) case is unchanged on the wire. Caveat: **decoding** a `Some`
+  value from a non-self-describing format fails — `serde_json::Value` needs
+  `deserialize_any`, which postcard/bincode lack. kaish and its embedders use
+  only self-describing formats (JSON/CBOR), so this is a documented boundary,
+  not a live path.
 
 ### Fixed
 - **Arg-binding polish** (GH #189): four small gaps in the shared arg binder

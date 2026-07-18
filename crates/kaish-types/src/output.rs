@@ -210,11 +210,14 @@ pub struct OutputData {
     /// through self-describing formats (JSON, CBOR): an embedder can carry a
     /// builtin's rich `--json` payload onto a stored record and read it back.
     /// Kept off the wire when `None` (the common case), which also keeps that
-    /// case safe for non-self-describing formats. Caveat: a `Some(Value)` can't
-    /// round-trip through postcard/bincode (they have no `deserialize_any`), so
-    /// don't add such a serializer for `OutputData` while `rich_json` may be set.
+    /// case safe for non-self-describing formats. Caveat: the risk is on
+    /// **deserialization** — `serde_json::Value`'s `Deserialize` calls
+    /// `deserialize_any`, which non-self-describing formats (postcard/bincode)
+    /// don't support, so decoding an `OutputData` whose `rich_json` is `Some`
+    /// from one of those fails. kaish and its embedders use only self-describing
+    /// formats (JSON/CBOR); don't decode `OutputData` from postcard/bincode
+    /// while `rich_json` may be set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "schema", schemars(skip))]
     pub rich_json: Option<serde_json::Value>,
 }
 
