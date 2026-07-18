@@ -6,7 +6,7 @@ and output capture.
 
 ## Stability
 
-kaish is pre-1.0 (currently 0.11.x, MSRV 1.85). The language has settled;
+kaish is pre-1.0 (currently 0.13.x, MSRV 1.85). The language has settled;
 the embedding API may still change between minor versions where it improves
 both kaish and its embedders — [kaijutsu](https://github.com/tobert/kaijutsu)
 is the reference embedder. Pin a minor version and read release notes when
