@@ -21,6 +21,11 @@ constrained naturally.
 settled; what remains before 1.0 is ergonomics and correctness polish.
 Everything ships through [CHANGELOG.md](CHANGELOG.md).
 
+**Try it now:** [tobert.github.io/kaish-extras](https://tobert.github.io/kaish-extras/) —
+the kernel compiled to wasm, running entirely in your browser tab. No install,
+no server; the playground is seeded with kaish's own source so you can `grep`
+the shell's implementation from inside the shell.
+
 ## Why a shell for agents?
 
 Agents need to compose operations such as filtering output, transforming data,
@@ -204,6 +209,10 @@ about a project and answers with cited `file:line` spans.
 [**kaijutsu**](https://github.com/tobert/kaijutsu) embeds kaish behind its own MCP
 interface too. Both show the pattern: embed the kernel, then expose it however
 your agent needs.
+
+**Not embedding, just curious?** [**kaish-extras**](https://github.com/tobert/kaish-extras)
+compiles the kernel to `wasm32-unknown-unknown` and runs it in a browser tab —
+try it at [tobert.github.io/kaish-extras](https://tobert.github.io/kaish-extras/).
 
 ## Builtins
 
