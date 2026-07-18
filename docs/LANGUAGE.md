@@ -1152,6 +1152,8 @@ Git is an ordinary external command (`git status`, `git log`) that runs via the
 kaish carries binary as a first-class typed value (`Value::Bytes`) that flows
 through pipes intact. A bytes value **coerces to text only if it is valid UTF-8**;
 otherwise an operation that requires text fails loudly rather than corrupting data.
+[docs/binary-data.md](binary-data.md) is the full design writeup — this section
+is the language-level summary.
 
 ```sh
 # Produce bytes and copy them with explicit block sizing

@@ -377,6 +377,15 @@ let config = KernelConfig::agent()
 There's no equivalent flag to force `Disk` on a `NoLocal`/`with_backend`
 kernel — by design, since neither owns a host mount to spill to.
 
+> **v0.13.0:** the public `output_limit::spill_aware_collect` function (and its
+> private helpers) is removed — it was dead since external-process capture
+> moved onto `BoundedStream`/`drain_to_stream`, with spill applied post-hoc at
+> the pipeline level (`Kernel::execute_pipeline` → `spill_if_needed`, both
+> internal) instead of inline during capture. `OutputLimitConfig` and the
+> disk/memory spill behavior documented above are unaffected; there was no
+> embedder-facing replacement to migrate to because the function was never a
+> supported extension point, just a capture helper that happened to be `pub`.
+
 ## Initial Variables and Hermetic Subprocess Env
 
 The kernel is **hermetic by default** — it never reads `std::env::vars()`,
@@ -455,6 +464,16 @@ Fields:
   internal token for the duration of the call (not stored). Cancellation
   cascades to forks and external children (SIGTERM → grace → SIGKILL on
   the process group).
+- **`interrupt`** — `with_interrupt(Arc<dyn Fn() -> bool + Send + Sync>)`, a
+  polled interrupt check for embedders whose thread can't fire `cancel_token`
+  while execution runs — the motivating case is `wasm32-unknown-unknown`:
+  single-threaded, so the page's main thread can only flip a
+  `SharedArrayBuffer` flag for a Web Worker to poll, never cancel a token from
+  outside. The kernel checks the closure at its existing cancellation
+  checkpoints; a firing check takes the same exit-130 path as
+  `Kernel::cancel()`/`cancel_token`, and session state survives. Scoped to the
+  one call and cleared on every exit path — prefer `cancel_token` when your
+  embedder's threading model allows it.
 - **`cwd`** — per-call working directory override.
 - **`stdin`** — standard input for this call as a ready, bytes-typed buffer
   (`impl Into<Vec<u8>>` — a `&str`/`String` or a raw `Vec<u8>` both work),
@@ -468,7 +487,10 @@ Fields:
   so an open process stdin that never sends EOF doesn't block a command that
   never reads it — use `Kernel::execute_with_pipe_stdin(_streaming)` with a
   `PipeReader` instead (this is how the non-interactive `kaish` CLI forwards its
-  own process stdin, e.g. `sleep 10 | kaish -c 'echo hi'`).
+  own process stdin, e.g. `sleep 10 | kaish -c 'echo hi'`). See
+  [docs/binary-data.md](binary-data.md) for the full text-vs-bytes design
+  behind this (`Value::Bytes`, `read_stdin_to_text` vs `_bytes`, which
+  builtins are binary-aware).
 - **`traceparent` / `tracestate` / `baggage`** — W3C trace context;
   kaish's execution span parents onto your trace, and baggage merges back
   out through `ExecResult.baggage`.
@@ -478,9 +500,21 @@ Fields:
 `Kernel::execute(&str)` is string-native — it lexes and parses its input. If your
 embedder already holds **tokenized** arguments (a structured tool call, a
 multicall-style frontend), re-quoting them into a string just to have the lexer
-split them apart again is wasteful and **lossy**: `to_argv()` stringifies typed
-values, so a `Value::Bytes` blob or a `Value::Json` record can't survive the
-round-trip. `execute_argv` is the peer door that skips it:
+split them apart again is wasteful and **lossy**: `ToolArgs::to_argv()` — the
+argv-reconstruction step builtins use internally to feed their clap parsers —
+stringifies typed values, so a `Value::Json` record loses its structure in the
+round-trip. A `Value::Bytes` blob is worse than lossy: in a **named/flag**
+argument it's a loud error (`to_argv()` returns
+`Result<Vec<String>, ToolArgvError>`, not a bare `Vec<String>`) rather than
+silent corruption; in a **positional** argument it renders as an opaque
+`[binary: N bytes]` placeholder without erroring, since a clap-reflected
+positional field is a validation-only sink no builtin reads for its value.
+`ToolArgs::to_argv_excluding(keys)` is the same reconstruction with given
+named keys skipped entirely — for a tool that deliberately reads one of its
+own params raw off `args.named` (to preserve a `Value::Bytes` payload past the
+argv/text boundary) instead of through the round-trip (`write`'s `content`
+param does this). `execute_argv` is the peer door that skips the round-trip
+entirely:
 
 ```rust
 use kaish_kernel::ast::Value;
@@ -522,7 +556,9 @@ Semantics:
 - **Typed-passthrough caveat.** Because builtins re-parse their own `to_argv()`
   internally (the two-layer clap model), the un-stringified-value win fully lands
   only for tools that read `args.positional` directly (the documented pattern),
-  not those that trust their clap struct after a `to_argv()` round-trip.
+  not those that trust their clap struct after a `to_argv()` round-trip. A
+  `Value::Bytes` passed as a **named** argument to such a tool surfaces as the
+  tool's own `to_argv()` failure (`ExecResult::failure`), not a silent stringify.
 
 Concurrent callers serialize on the same execute lock as `execute`, and the
 kernel's configured `request_timeout` applies (a hung builtin or external is
@@ -786,6 +822,45 @@ same API as a foreground gate.
 
 The status strings are exactly `running`, `done:0`, and `failed:{code}` —
 match on those, not on `completed`.
+
+## Frontend Completion Helpers (`kaish_client::completion`)
+
+Answering Tab in a frontend (a REPL, a browser playground, any custom UI
+around the kernel) needs two things: figuring out *what* the cursor is
+completing, and turning a live kernel's schemas/vars into candidate
+spellings. Both are extracted into `kaish_client::completion` so every
+frontend shares one implementation instead of re-deriving it — the bundled
+`kaish-repl` and the kaish-extras browser playground both consume this crate
+rather than duplicating the logic.
+
+```rust
+use kaish_client::completion::{
+    detect_completion_context, word_start, current_command, flag_candidates,
+    CompletionContext,
+};
+
+// What kind of thing is being completed at `pos` in `line`?
+match detect_completion_context(line, pos) {
+    CompletionContext::Command => { /* complete a tool/alias name */ }
+    CompletionContext::Variable => { /* complete a $VAR / ${VAR */ }
+    CompletionContext::Path => { /* complete a filesystem path, or a
+                                     flag if the word starts with `-` */ }
+}
+
+let start = word_start(line, pos); // byte offset the word under the cursor begins at
+
+// Given the governing command and its ToolSchema, offer canonical flag spellings
+if let Some((cs, ce)) = current_command(line, pos) {
+    let candidates = flag_candidates(&schema.params, &line[cs..ce]);
+    // -> canonical "--long" and "-x" spellings; snake_case field-id aliases
+    //    stay reachable as input but aren't offered as candidates
+}
+```
+
+Context detection is pure (no kernel access needed); turning a
+`CompletionContext` into actual candidates is the frontend's job — walk
+`kernel.tool_schemas()` for commands/flags, `kernel.list_vars()` for
+variables, `kernel.vfs()` for paths, as `kaish-repl` and kaish-extras both do.
 
 ## Exported Types
 
