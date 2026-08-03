@@ -9,7 +9,11 @@ use crate::ast::{
     StringPart, StringTestOp, TestCmpOp, TestExpr, ToolDef, Value, VarPath, VarSegment, WhileLoop,
 };
 use crate::lexer::{self, HereDocData, Token};
-use chumsky::{input::ValueInput, prelude::*};
+use chumsky::{
+    Boxed,
+    input::{MappedInput, Stream, ValueInput},
+    prelude::*,
+};
 
 /// Span type used throughout the parser.
 pub type Span = SimpleSpan;
@@ -877,6 +881,59 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Cached combinator graph
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// `program_parser()` builds the whole grammar every time it is called, and the
+// grammar is a tree rather than a DAG: helpers that return `impl Parser` are
+// re-instantiated at every call site, so a shared nonterminal like
+// `cmd_subst_parser` was built 69 times per parse. That cost 872 allocations
+// and 165 KB per `kernel.execute()` — 62% of allocations and 69% of bytes on a
+// one-command script — all spent before a single token was consumed (GH #255).
+//
+// The graph can only be built once if its type is `'static`, and chumsky's
+// `Parser<'src, I, O, E>` takes the input lifetime as a parameter. A slice
+// input (`&'a [(Token, Span)]`) pins `'src` to the token buffer, which is why
+// this could not be hoisted before. `Stream` breaks that tie: it owns its
+// iterator, so `Stream<vec::IntoIter<_>>` implements `Input<'static>`, and its
+// cursor is a `usize` — rewinding costs no allocation.
+
+/// Token source for the parser: owns its tokens, so the input type is `'static`.
+type TokenStream = Stream<std::vec::IntoIter<(Token, Span)>>;
+
+/// The parser's input type, with real byte spans mapped over the token stream.
+///
+/// The mapper is a `fn` pointer rather than a closure so the type can be named.
+type ParserInput = MappedInput<
+    'static,
+    Token,
+    Span,
+    TokenStream,
+    fn((Token, Span)) -> (Token, Span), //
+>;
+
+/// Error type carried by the cached graph.
+type ParserError = extra::Err<Rich<'static, Token, Span>>;
+
+/// The built grammar, ready to run against any [`ParserInput`].
+type CachedProgramParser = Boxed<'static, 'static, ParserInput, Program, ParserError>;
+
+// `Boxed` wraps an `Rc`, so the graph cannot live in a `static` — it is neither
+// `Send` nor `Sync`. A `thread_local!` is the portable equivalent: each thread
+// builds the grammar on its first parse and reuses it forever after. That holds
+// on wasm too, where there is only ever one thread. Kernels and forks that parse
+// concurrently each touch their own copy, so there is no shared mutable state
+// and no lock on the parse path.
+thread_local! {
+    static PROGRAM_PARSER: CachedProgramParser = program_parser::<ParserInput>().boxed();
+}
+
+/// Identity mapper — `Stream` already yields `(Token, Span)` pairs.
+fn identity_token(pair: (Token, Span)) -> (Token, Span) {
+    pair
+}
+
 /// Parse kaish source code into a Program AST.
 pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     // Tokenize with logos
@@ -898,9 +955,10 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     // End-of-input span
     let end_span: Span = (source.len()..source.len()).into();
 
-    // Parse using slice-based input (like nano_rust example)
-    let parser = program_parser();
-    let result = parser.parse(tokens.as_slice().map(end_span, |(t, s)| (t, s)));
+    // Run the process-wide grammar (built once per thread) over an owned token
+    // stream. The stream owns the tokens, which is what keeps the graph `'static`.
+    let input = Stream::from_iter(tokens).map(end_span, identity_token as fn(_) -> _);
+    let result = PROGRAM_PARSER.with(|parser| parser.parse(input));
 
     let program = result.into_result().map_err(|errs| {
         errs.into_iter()
