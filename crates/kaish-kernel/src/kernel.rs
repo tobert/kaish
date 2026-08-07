@@ -364,6 +364,34 @@ pub struct KernelConfig {
     ///
     /// Set through [`Self::with_job_manager`].
     pub job_manager: Option<Arc<JobManager>>,
+
+    /// Arm `PR_SET_PDEATHSIG(SIGKILL)` on every external command this kernel
+    /// spawns, so the OS kills the child the instant this process dies —
+    /// **for any reason, including `kill -9`, a segfault, or an OOM kill.**
+    ///
+    /// Off by default; on for [`Self::agent`] and [`Self::agent_with_root`],
+    /// the same "protection on by default for the agent preset, opt in
+    /// elsewhere" split [`Self::vfs_budget_bytes`] uses.
+    ///
+    /// **Why not unconditional.** kaish already puts every child in its own
+    /// process group and kills through a pidfd on cancel, and drops it with
+    /// `kill_on_drop`. All three need this process to still be running code,
+    /// so none of them survive a hard kill — that is the gap this closes. But
+    /// closing it costs something a human at a REPL may not want: an armed
+    /// child cannot outlive its shell, at all, and the child has no way to
+    /// opt out from inside (unlike SIGHUP, which `nohup`/`disown` exist to
+    /// escape). A REPL user who backgrounds a long download and exits expects
+    /// it to keep going. An agent embedder expects the opposite — an
+    /// invisible orphaned `cargo build` is the failure — so the presets
+    /// differ rather than one behavior being forced on both.
+    ///
+    /// **Linux only.** macOS has no `PR_SET_PDEATHSIG` and no equivalent that
+    /// works without a live parent (`kqueue`'s `NOTE_EXIT` needs a watcher
+    /// process). This flag is accepted and has no effect there, rather than
+    /// being faked with something weaker.
+    ///
+    /// Set through [`Self::with_kill_children_on_parent_death`].
+    pub kill_children_on_parent_death: bool,
 }
 
 /// A kernel's approval-side configuration (spec §D.2), grouped so the
@@ -452,6 +480,7 @@ impl Default for KernelConfig {
                 overlay: false,
                 approval: ApprovalConfig::default(),
                 job_manager: None,
+                kill_children_on_parent_death: false,
             }
         }
         #[cfg(not(feature = "localfs"))]
@@ -477,6 +506,7 @@ impl Default for KernelConfig {
                 overlay: false,
                 approval: ApprovalConfig::default(),
                 job_manager: None,
+                kill_children_on_parent_death: false,
             }
         }
     }
@@ -508,6 +538,7 @@ impl KernelConfig {
             overlay: false,
             approval: ApprovalConfig::default(),
             job_manager: None,
+            kill_children_on_parent_death: false,
         }
     }
 
@@ -542,6 +573,7 @@ impl KernelConfig {
             overlay: false,
             approval: ApprovalConfig::default(),
             job_manager: None,
+            kill_children_on_parent_death: false,
         }
     }
 
@@ -584,6 +616,7 @@ impl KernelConfig {
             overlay: false,
             approval: ApprovalConfig::default(),
             job_manager: None,
+            kill_children_on_parent_death: false,
         }
     }
 
@@ -623,6 +656,10 @@ impl KernelConfig {
             overlay: false,
             approval: ApprovalConfig::default(),
             job_manager: None,
+            // An agent embedder must never leave an invisible `cargo build` running
+            // after its process is hard-killed; see the field doc for why this is
+            // not the default everywhere.
+            kill_children_on_parent_death: true,
         }
     }
 
@@ -655,6 +692,8 @@ impl KernelConfig {
             overlay: false,
             approval: ApprovalConfig::default(),
             job_manager: None,
+            // Same reasoning as `agent()`.
+            kill_children_on_parent_death: true,
         }
     }
 
@@ -684,6 +723,7 @@ impl KernelConfig {
             overlay: false,
             approval: ApprovalConfig::default(),
             job_manager: None,
+            kill_children_on_parent_death: false,
         }
     }
 
@@ -829,6 +869,15 @@ impl KernelConfig {
     /// Set the SIGTERM-to-SIGKILL grace period for child kills.
     pub fn with_kill_grace(mut self, grace: Duration) -> Self {
         self.kill_grace = grace;
+        self
+    }
+
+    /// Arm `PR_SET_PDEATHSIG(SIGKILL)` on external commands so a hard-killed
+    /// kaish process cannot orphan them (Linux only — read
+    /// [`Self::kill_children_on_parent_death`] for the tradeoff and the macOS
+    /// gap).
+    pub fn with_kill_children_on_parent_death(mut self, on: bool) -> Self {
+        self.kill_children_on_parent_death = on;
         self
     }
 
@@ -1528,7 +1577,7 @@ impl Kernel {
         let no_host_side_channel =
             no_host_filesystem || matches!(config.vfs_mode, VfsMountMode::NoLocal);
 
-        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_external_commands, approvals_enabled, policy_pinned, trash_enabled, ledger_config, ledger_sink, initial_vars, request_timeout, kill_grace, approval, .. } = config;
+        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_external_commands, approvals_enabled, policy_pinned, trash_enabled, ledger_config, ledger_sink, initial_vars, request_timeout, kill_grace, approval, kill_children_on_parent_death, .. } = config;
 
         let approvals = Self::build_approvals(approval, ledger_config, ledger_sink)?;
 
@@ -1559,6 +1608,7 @@ impl Kernel {
 
         let mut exec_ctx = make_ctx(&vfs, &tools);
         exec_ctx.set_cwd(cwd);
+        exec_ctx.kill_children_on_parent_death = kill_children_on_parent_death;
         exec_ctx.set_job_manager(jobs.clone());
         exec_ctx.set_tool_schemas(tools.schemas());
         exec_ctx.set_tools(tools.clone());
@@ -3698,6 +3748,8 @@ impl Kernel {
             job_manager: ec.job_manager.clone(),
             pipeline_position,
             interactive: self.interactive,
+            // The kernel-wide setting; a snapshot inherits it like `interactive`.
+            kill_children_on_parent_death: ec.kill_children_on_parent_death,
             aliases: ec.aliases.clone(),
             ignore_config: ec.ignore_config.clone(),
             output_limit: ec.output_limit.clone(),
@@ -5745,13 +5797,24 @@ impl Kernel {
         #[cfg(unix)]
         {
             let restore_jc_signals = self.terminal_state.is_some() && inherit_output;
-            // SAFETY: setpgid and sigaction(SIG_DFL) are async-signal-safe per POSIX
+            // Read before the fork: the child compares `getppid()` against it to
+            // catch a parent that died inside the fork/prctl window.
+            let kill_on_parent_death = {
+                let ec = self.exec_ctx.read().await;
+                ec.kill_children_on_parent_death
+            };
+            let parent_pid = std::process::id();
+            // SAFETY: setpgid, prctl, getppid, and sigaction(SIG_DFL) are all
+            // async-signal-safe per POSIX; safe to call between fork and exec.
             #[allow(unsafe_code)]
             unsafe {
                 cmd.pre_exec(move || {
                     // Own process group — for kill scope.
                     nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))
                         .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+                    if kill_on_parent_death {
+                        crate::dispatch::arm_parent_death_signal(parent_pid)?;
+                    }
                     if restore_jc_signals {
                         use nix::libc::{sigaction, SIGTSTP, SIGTTOU, SIGTTIN, SIGINT, SIG_DFL};
                         let mut sa: nix::libc::sigaction = std::mem::zeroed();

@@ -812,6 +812,36 @@ pattern tears down runtimes between calls, either keep one long-lived
 runtime for any kernel that backgrounds work, or avoid `&` entirely on a
 per-call runtime.
 
+### A hard-killed kaish process can orphan its external children
+
+`setpgid` + a pidfd kill, and tokio's `kill_on_drop`, all need *your* process
+to still be alive and running code. None of them fire on `kill -9`, a
+segfault, or an OOM kill — so an external command started under an embedder
+that dies that way keeps running, unreparented to anything that will stop it.
+
+`KernelConfig::with_kill_children_on_parent_death(true)` arms Linux's
+`PR_SET_PDEATHSIG(SIGKILL)` in each child's `pre_exec`, so the OS kills it the
+instant the parent dies, for any reason, with no cleanup path of ours
+involved:
+
+```rust
+let config = KernelConfig::default().with_kill_children_on_parent_death(true);
+```
+
+On by default for `KernelConfig::agent()` and `agent_with_root()`, off
+everywhere else — the same "protection on for the agent preset, opt in
+elsewhere" split `vfs_budget_bytes` uses. It is not unconditional because it
+costs something a human at a REPL may not want: an armed child cannot outlive
+its shell at all, and cannot opt out from inside (unlike SIGHUP, which
+`nohup`/`disown` exist to escape). A REPL user who backgrounds a long download
+and exits expects it to survive; an agent embedder expects the opposite.
+
+**Linux only.** macOS has no `PR_SET_PDEATHSIG`, and no equivalent that works
+without a live watcher process (`kqueue`'s `NOTE_EXIT` needs one). The flag is
+accepted and has no effect there rather than being faked with something
+weaker — a macOS embedder that needs the guarantee supplies it from outside
+the process (a process group the supervisor kills, or a container).
+
 ## Argv-Native Execution: `execute_argv`
 
 `Kernel::execute(&str)` is string-native — it lexes and parses its input. If your
