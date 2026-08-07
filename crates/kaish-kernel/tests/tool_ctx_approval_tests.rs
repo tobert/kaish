@@ -439,6 +439,17 @@ fn chain_with(
 /// observe this at all — which is why the existing patient-hold tests in
 /// `ledger_approver_tests.rs` pass. Durations are scaled down to keep the
 /// real-time cost near 400ms.
+///
+/// **Parked, not broken.** The rework already ruled on this:
+/// `docs/approval-ledger.md` §A.10 deletes `request_ttl` outright rather than
+/// reconciling the two clocks — "how long an unanswered request should live
+/// is policy" — and it names this exact confusion, that the patient hold and
+/// the lease "were only ever confused because they were measured in the same
+/// units." Lane **R2** (`refactor(kernel)!: no clock-driven decisions`)
+/// carries the deletion and lists this case among its tests. Once
+/// `request_ttl` and the request-expiry path are gone there is no lease to
+/// outlive and this passes unchanged; drop the `#[ignore]` in that lane.
+#[ignore = "parked for ledger rework lane R2: request_ttl is deleted, not reconciled — docs/approval-ledger.md §A.10"]
 #[tokio::test]
 async fn a_decision_that_outlives_the_request_lease_is_still_honored() {
     let lease = Duration::from_millis(150);

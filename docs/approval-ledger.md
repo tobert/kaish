@@ -2547,9 +2547,11 @@ production caller (the cancelled-grant undo in `ledger/approver.rs`), so job dis
 kill, session shutdown, and kernel shutdown all currently strand a held request. Expiry was
 covering for that; nothing covers it after this lane.
 
-*Tests:* the parked case on `fix/approval-lease-expiry` — a decision that takes longer than
-any lease is honored — plus a request still `Requested` after an interval that would have
-expired it; `cancel` on another principal's request is refused; a cancelled request's
+*Tests:* the parked case is in the tree, not on a branch —
+`tool_ctx_approval_tests.rs::a_decision_that_outlives_the_request_lease_is_still_honored`,
+`#[ignore]`d and red against today's kernel, proving a decision that takes longer than the
+lease is refused. This lane deletes the lease and drops the `#[ignore]`. Plus a request
+still `Requested` after an interval that would have expired it; `cancel` on another principal's request is refused; a cancelled request's
 `supersedes` chain is walkable; `Closed` is returned where `LedgerUnavailable` used to be,
 and `LedgerUnavailable` no longer describes a request's own state. And one test per row of
 §B.5's teardown table, each asserting the live count returns to zero — a discarded job, a
