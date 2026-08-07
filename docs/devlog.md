@@ -15,6 +15,91 @@ before it ships.
 
 ---
 
+## Three things an embedder needed that `&` could not do (2026-08-07)
+
+kaijutsu embeds kaish and, for background work, did not use it. Its
+`background_exec.rs` spawns `/bin/sh -c` itself and says why in module docs:
+a job started with `cmd &` "would be invisible to the *next* `shell` call —
+its `JobManager` is gone", and "the job layer discards liveness". Both were
+true. This is the work that makes them false, so that path can be deleted.
+
+The first gap was the smallest and the most disabling. `Kernel::new` and
+`Kernel::with_backend` each wrote `Arc::new(JobManager::new())` inline. The
+private `assemble` already *took* a manager and there was already a `jobs()`
+getter — every part of the seam existed except a way in. kaijutsu builds a
+kernel per tool call, so every job it started died with the kernel that
+started it. `KernelConfig::with_job_manager` is the whole fix. What it can
+not fix, and what the field doc now says out loud: `kill_grace` and
+`persist_output_files` are stamped onto the manager at construction, so on a
+shared manager the last kernel built wins for both. Per-kernel views of
+manager state would be a much larger change than the problem justifies.
+
+The second reopened a decision from two days earlier. GH #240 found
+`/v/jobs/{id}/stdout` promising a live stream in four places and delivering
+one write at completion, offered two ways out — wire the tee kaish never had,
+or remove the nodes — and Amy chose removal, because "the node bought a false
+sense of watch-it-build for an MCP caller that would poll it and see nothing
+until the build was already done." That was right while nothing needed it.
+kaijutsu needs it: an agent starts `cargo build &`, gets control back, and
+polls while it runs. So this is the other branch of the same decision, taken
+because the requirement arrived — not because the first one was wrong. The
+removal note had already sized the work correctly. `try_execute_external`
+drains each pipe per 8 KiB chunk into a `BoundedStream`; the bytes only ever
+lacked a second destination. `drain_to_stream_teed` gives them one, and
+`self.bg_job_id` — already the seam that records a job's process group — says
+which job to tee into.
+
+Three limits came out of building it, and all three are documented rather
+than smoothed over. Only a pipeline's `Only`/`Last` stage tees stdout, since
+an upstream stage's output is the next stage's stdin. The completion write
+fires only for a stream that received nothing live, because unconditional
+would duplicate every byte and never would leave `echo hi &` empty forever.
+And the one worth saying loudest: **a builtin is not a live producer.** It
+returns a value when it finishes, not a byte stream — so
+`cargo build 2>&1 | tee build.log &`, the exact command an embedder reaches
+for, is not live, because kaish's `tee` is a builtin. The guidance that falls
+out is better than the command it replaces: drop the `| tee`, the job's own
+stream *is* the log. That only became visible because a test asserted
+liveness on a pipeline and failed.
+
+Which is the shape of every test in `job_live_output_tests.rs`. A real `&`
+job emits, sleeps, emits; the assertion is that the first token is readable
+while `status` still reads `running` **and** the second has not arrived,
+sampling status before the stream so a completed job dumping its whole buffer
+cannot satisfy it. #240's own tell was that the old `job_stream_tests.rs`
+hand-wrote into a `BoundedStream` it built itself and read it straight back —
+never once drove a real job. Reverting the tee fails five of eight here.
+
+The third gap was not a kaijutsu observation but a grep: `PDEATHSIG` appeared
+nowhere in the tree. kaish's three orphan guards — `setpgid` plus a pidfd
+`killpg`, the cancellation cascade, and `kill_on_drop` — all need this process
+to still be running code, so none of them survive `kill -9`, a segfault, or an
+OOM kill. kaijutsu's own docs call `PR_SET_PDEATHSIG` "the deciding factor".
+
+It is opt-in, and the split follows `vfs_budget_bytes` exactly: on for the
+agent presets, off for `default`/`repl`/`transient`/`isolated`. An armed child
+cannot outlive its shell and cannot opt out from inside — unlike SIGHUP, which
+`nohup` and `disown` exist to escape. A human who backgrounds a long download
+and exits the REPL expects it to survive; an agent embedder expects the
+opposite. Neither is wrong, so the presets differ instead of one being
+imposed. The flag rides on `ExecContext` rather than `Kernel` because
+`dispatch.rs`'s spawn site reaches only the former, and one home is what keeps
+the two `pre_exec` blocks from drifting.
+
+`arm_parent_death_signal` also compares `getppid()` against the pid captured
+before the fork, closing PDEATHSIG's documented race: a parent dying between
+fork and `prctl` arms the signal against a parent already gone — the exact
+orphan the flag exists to prevent, in the window hardest to notice. macOS is
+documented as a gap and not faked; `kqueue`'s `NOTE_EXIT` needs a live watcher
+process, which is the same dependency that makes the existing guards
+insufficient.
+
+Testing it meant a parent that really dies. The test re-executes its own test
+binary as a helper, reads back the pid of an external the helper started,
+`SIGKILL`s the helper, and asks whether the pid is alive. The negative case is
+what makes the positive one mean anything: with the flag off the child must
+*survive*, or something other than PDEATHSIG is doing the killing.
+
 ## The statement gate: recording what was asked, before anything runs (2026-08-05)
 
 Ledger PR 10, and the first layer that watches *statements* rather than paths.
