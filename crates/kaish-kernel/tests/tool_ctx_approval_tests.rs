@@ -387,3 +387,87 @@ async fn plugin_dangerous_fixture_rejects_a_wrong_presented_confirm_token() {
     let result = tool.execute(args, &mut ctx).await;
     assert_eq!(result.code, 1, "a wrong presented token must fail closed, not proceed");
 }
+
+// ─────────────── the request lease vs. the decision budget ───────────────
+
+/// An approver that takes `delay` to make up its mind, then grants on the
+/// view's own terms (`GrantTerms::once_for_view` — an approver never holds
+/// the stamped request).
+struct SlowGranter {
+    delay: Duration,
+}
+
+#[async_trait::async_trait]
+impl kaish_kernel::ledger::Approver for SlowGranter {
+    async fn decide(
+        &self,
+        req: &kaish_types::approval::ApprovalRequestView,
+    ) -> kaish_types::approval::Decision {
+        tokio::time::sleep(self.delay).await;
+        kaish_types::approval::Decision::Grant(GrantTerms::once_for_view(
+            req,
+            SystemTime::now() + Duration::from_secs(3_600),
+        ))
+    }
+
+    fn decide_budget(&self) -> Duration {
+        Duration::from_secs(5)
+    }
+}
+
+fn chain_with(
+    approver: &kaish_kernel::ledger::ApproverHandle,
+    decider: Arc<dyn kaish_kernel::ledger::Approver>,
+) -> Arc<DecisionChain> {
+    let (_, approvals, authority) = approver.join();
+    Arc::new(DecisionChain::new(authority, approvals, Some(decider)))
+}
+
+/// A decision that takes longer than the request's lease must still be
+/// honored. The lease and the decision budget are separate clocks and the
+/// kernel's defaults disagree: `LedgerConfig::request_ttl` is 60s while
+/// `Approver::decide_budget` is 300s, so the default kernel hands an
+/// approver a five-minute budget to spend against a one-minute lease. The
+/// request expires under `decide`, and the grant that arrives afterward is
+/// refused — a human who thinks for 90 seconds loses.
+///
+/// Real time, deliberately. The lease deadline rides
+/// `kaish_types::clock::Instant`, which is `std::time::Instant` on native
+/// targets and does not follow tokio's virtual clock. Under
+/// `#[tokio::test(start_paused = true)]` the sleep below would jump the
+/// virtual clock while the lease barely moved, so a paused-time test cannot
+/// observe this at all — which is why the existing patient-hold tests in
+/// `ledger_approver_tests.rs` pass. Durations are scaled down to keep the
+/// real-time cost near 400ms.
+#[tokio::test]
+async fn a_decision_that_outlives_the_request_lease_is_still_honored() {
+    let lease = Duration::from_millis(150);
+    let think_time = Duration::from_millis(400);
+
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let mut ctx = ctx_with_memory_fs();
+    ctx.ledger_access = Some(LedgerAccess {
+        requester,
+        approvals: approvals.clone(),
+        chain: chain_with(&approver, Arc::new(SlowGranter { delay: think_time })),
+        principal: agent("agent-1"),
+        request_ttl: lease,
+        job_id: None,
+        resolvers: Arc::new(kaish_kernel::ledger::StateResolvers::default()),
+        session_authority: None,
+    });
+
+    let draft = ApprovalRequest::builder("plugin.dangerous")
+        .risk(RiskClass::Irreversible)
+        .reason("the approver thinks for longer than the lease")
+        .build()
+        .unwrap();
+
+    let outcome = ctx.request_approval(draft, None).await;
+
+    assert!(
+        matches!(outcome, ApprovalOutcome::Authorized(_)),
+        "a grant decided inside the decision budget must be honored even though \
+         it arrived after the request lease elapsed; got {outcome:?}"
+    );
+}
