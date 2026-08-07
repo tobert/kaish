@@ -104,7 +104,7 @@ use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_v
 use crate::parser::parse;
 use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_stream, JobManager, PipelineRunner, StderrReceiver};
 #[cfg(feature = "subprocess")]
-use crate::scheduler::{drain_to_stream, BoundedStream, DEFAULT_STREAM_MAX_SIZE};
+use crate::scheduler::{drain_to_stream_teed, BoundedStream, DEFAULT_STREAM_MAX_SIZE};
 use crate::tools::{register_builtins, ExecContext, GlobalFlags, ToolArgs, ToolRegistry};
 #[cfg(feature = "subprocess")]
 use crate::tools::{resolve_in_path, virtual_cwd_error};
@@ -3807,11 +3807,14 @@ impl Kernel {
     ///
     /// The command is spawned as a tokio task and registered with the
     /// JobManager. The job is observable via `/v/jobs/{id}/status`,
-    /// `/v/jobs/{id}/command`, and `/v/jobs/{id}/approval`. There is no
-    /// stdout/stderr node — GH #240 removed `/v/jobs/{id}/stdout` and
-    /// `stderr` rather than making them live (they filled only once, at
-    /// completion, while docs promised a live stream). A caller that needs
-    /// the job's output redirects it explicitly (`cmd > /tmp/out &`).
+    /// `/v/jobs/{id}/command`, `/v/jobs/{id}/approval`, and — while it is
+    /// still running — `/v/jobs/{id}/stdout` and `/stderr`.
+    ///
+    /// GH #240 removed those two nodes because they filled once, at
+    /// completion, while the docs promised a live stream. They are back on
+    /// the terms the docs always claimed: `try_execute_external` tees each
+    /// 8 KiB chunk into the job's stream as the child emits it. See
+    /// `Job::stdout_stream` for exactly which bytes reach them.
     ///
     /// Returns immediately with a job ID like "[1]".
     #[tracing::instrument(level = "debug", skip(self, pipeline), fields(command_count = pipeline.commands.len()))]
@@ -3839,6 +3842,7 @@ impl Kernel {
         // command it spawns records its process group for `kill -<sig> %N`.
         let cancel = tokio_util::sync::CancellationToken::new();
         self.jobs.set_cancel_token(job_id, cancel.clone()).await;
+        let jobs = self.jobs.clone();
         let fork = self.fork_for_background(cancel, job_id).await;
         let runner = self.runner.clone();
         let commands = pipeline.commands.clone();
@@ -3870,6 +3874,15 @@ impl Kernel {
             // code to JobManager, so `[N] done:0`/`Job::status()` silently
             // read success even though the output was capped (GH #212).
             crate::output_limit::apply_spill_contract(&mut result, &bg_ctx.output_limit).await;
+
+            // Close out `/v/jobs/{id}/stdout`/`stderr`: a stream the external
+            // drain tasks already fed live is left alone (re-writing the
+            // aggregate would duplicate every byte), an untouched one takes
+            // the captured result, and both close. Before `tx.send`, so a
+            // reader that observes a terminal `status` also observes a
+            // finished stream — never a `done:0` job whose output is still
+            // arriving.
+            jobs.finalize_streams(job_id, &result).await;
 
             // Send result to JobManager (ignore error if receiver dropped)
             let _ = tx.send(result);
@@ -5797,6 +5810,16 @@ impl Kernel {
             self.jobs.add_pgid(job_id, pid).await;
         }
 
+        // Same seam, for output: a background job's streams outlive this one
+        // command, so the drain tasks below tee into them and the job closes
+        // them itself. This is what makes `/v/jobs/{id}/stdout` grow while a
+        // `cargo build &` is still building (GH #240 removed the node rather
+        // than wire this tee; the tee is the half that was missing).
+        let job_streams = match self.bg_job_id {
+            Some(job_id) => self.jobs.streams(job_id).await,
+            None => None,
+        };
+
         // Feed stdin. A streaming `pipe_stdin` is copied to the child by a
         // detached task (bounded memory, no pre-drain) so an upstream stage and
         // this child run concurrently — and a child that never reads stdin (or
@@ -6003,15 +6026,26 @@ impl Kernel {
             let stdout_clone = stdout_stream.clone();
             let stderr_clone = stderr_stream.clone();
 
+            // Only the stage whose stdout *is* the job's stdout tees: in
+            // `a | b`, `a`'s bytes are `b`'s stdin, and teeing them would put
+            // the pipeline's intermediate data into the node alongside its
+            // real output. stderr has no such routing — every stage's stderr
+            // is the job's stderr — so it tees from any position.
+            let stdout_tee = job_streams.as_ref().and_then(|s| {
+                matches!(pipeline_position, PipelinePosition::Only | PipelinePosition::Last)
+                    .then(|| s.stdout.clone())
+            });
+            let stderr_tee = job_streams.as_ref().map(|s| s.stderr.clone());
+
             let stdout_task = stdout_pipe.map(|pipe| {
                 tokio::spawn(async move {
-                    drain_to_stream(pipe, stdout_clone).await;
+                    drain_to_stream_teed(pipe, stdout_clone, stdout_tee).await;
                 })
             });
 
             let stderr_task = stderr_pipe.map(|pipe| {
                 tokio::spawn(async move {
-                    drain_to_stream(pipe, stderr_clone).await;
+                    drain_to_stream_teed(pipe, stderr_clone, stderr_tee).await;
                 })
             });
 
@@ -9770,10 +9804,8 @@ AFTER="yes"'"#)
         let kernel = Kernel::new(KernelConfig::isolated()).expect("failed to create kernel");
 
         // Run a simple background command, redirecting its output to a
-        // memory-backed file — GH #240 removed `/v/jobs/{id}/stdout` (it
-        // filled only once, at completion, never live as four docs claimed),
-        // so a caller that wants a background job's output redirects it
-        // explicitly instead of peeking a VFS node.
+        // memory-backed file. `/v/jobs/{id}/stdout` would work too (and is
+        // live); the redirect is what this test asserts on.
         let result = kernel.execute("echo hello > /tmp/basic_out.txt &").await.expect("execution failed");
         assert!(result.ok(), "background command should succeed: {}", result.err);
         assert!(result.text_out().contains("[1]"), "should return job ID: {}", result.text_out());

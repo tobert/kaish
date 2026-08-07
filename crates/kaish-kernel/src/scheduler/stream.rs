@@ -35,6 +35,11 @@ pub const DEFAULT_STREAM_MAX_SIZE: usize = 10 * 1024 * 1024;
 #[derive(Clone)]
 pub struct BoundedStream {
     inner: Arc<RwLock<BoundedStreamInner>>,
+    /// Fires on every accepted write and on close, so a reader can await new
+    /// data instead of poll-looping — see [`BoundedStream::changed_since`].
+    /// Held beside the lock, not inside it, so a waiter can register without
+    /// contending with the writer it is waiting for.
+    notify: Arc<tokio::sync::Notify>,
 }
 
 struct BoundedStreamInner {
@@ -61,6 +66,7 @@ impl BoundedStream {
                 bytes_evicted: 0,
                 closed: false,
             })),
+            notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -74,36 +80,39 @@ impl BoundedStream {
     /// If the write would exceed capacity, the oldest data is evicted first.
     /// Writing to a closed stream is silently ignored.
     pub async fn write(&self, data: &[u8]) {
-        let mut inner = self.inner.write().await;
+        {
+            let mut inner = self.inner.write().await;
 
-        if inner.closed {
-            return;
+            if inner.closed {
+                return;
+            }
+
+            inner.total_written += data.len() as u64;
+
+            // If data itself is larger than max_size, only keep the tail
+            if data.len() >= inner.max_size {
+                let start = data.len() - inner.max_size;
+                inner.bytes_evicted += inner.buffer.len() as u64 + start as u64;
+                inner.buffer.clear();
+                inner.buffer.extend(&data[start..]);
+            } else {
+                // Evict oldest data if needed to make room
+                let needed = data.len();
+                let available = inner.max_size.saturating_sub(inner.buffer.len());
+
+                if needed > available {
+                    let to_evict = needed - available;
+                    let actual_evict = to_evict.min(inner.buffer.len());
+                    inner.buffer.drain(..actual_evict);
+                    inner.bytes_evicted += actual_evict as u64;
+                }
+
+                // Append new data
+                inner.buffer.extend(data);
+            }
         }
-
-        inner.total_written += data.len() as u64;
-
-        // If data itself is larger than max_size, only keep the tail
-        if data.len() >= inner.max_size {
-            let start = data.len() - inner.max_size;
-            inner.bytes_evicted += inner.buffer.len() as u64 + start as u64;
-            inner.buffer.clear();
-            inner.buffer.extend(&data[start..]);
-            return;
-        }
-
-        // Evict oldest data if needed to make room
-        let needed = data.len();
-        let available = inner.max_size.saturating_sub(inner.buffer.len());
-
-        if needed > available {
-            let to_evict = needed - available;
-            let actual_evict = to_evict.min(inner.buffer.len());
-            inner.buffer.drain(..actual_evict);
-            inner.bytes_evicted += actual_evict as u64;
-        }
-
-        // Append new data
-        inner.buffer.extend(data);
+        // Outside the lock: a woken waiter reads `stats()`, which takes it.
+        self.notify.notify_waiters();
     }
 
     /// Read a snapshot of the current buffer contents.
@@ -125,8 +134,13 @@ impl BoundedStream {
     ///
     /// Subsequent writes will be silently ignored.
     pub async fn close(&self) {
-        let mut inner = self.inner.write().await;
-        inner.closed = true;
+        {
+            let mut inner = self.inner.write().await;
+            inner.closed = true;
+        }
+        // A waiter blocked on `changed_since` must not park forever on a
+        // stream that will never produce another byte.
+        self.notify.notify_waiters();
     }
 
     /// Check if the stream has been closed.
@@ -156,6 +170,34 @@ impl BoundedStream {
     pub async fn has_overflowed(&self) -> bool {
         let inner = self.inner.read().await;
         inner.bytes_evicted > 0
+    }
+
+    /// Wait until this stream has written more than `seen_total_written`
+    /// lifetime bytes, or has closed. Returns the stats that ended the wait,
+    /// so the caller's next call passes back `stats.total_written`.
+    ///
+    /// This is the alternative to a poll loop for an embedder tailing a
+    /// running job's output. Pass `0` on the first call to wake on the first
+    /// byte. **A closed stream returns immediately, every time** — the caller
+    /// checks `stats.closed` and stops, rather than looping on a stream that
+    /// can never change again.
+    ///
+    /// The registration happens before the read, not after: `Notify` only
+    /// reaches waiters that are already registered, so reading first would
+    /// drop a write that landed in between and park until the *next* one.
+    pub async fn changed_since(&self, seen_total_written: u64) -> StreamStats {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            let stats = self.stats().await;
+            if stats.closed || stats.total_written > seen_total_written {
+                return stats;
+            }
+
+            notified.await;
+        }
     }
 
     /// Get stream statistics.
@@ -221,8 +263,25 @@ impl StreamStats {
 ///
 /// This is useful for capturing process output without blocking the pipe.
 /// The function reads until EOF, then closes the stream.
-pub async fn drain_to_stream<R>(mut reader: R, stream: Arc<BoundedStream>)
+pub async fn drain_to_stream<R>(reader: R, stream: Arc<BoundedStream>)
 where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    drain_to_stream_teed(reader, stream, None).await
+}
+
+/// Drain an async reader into `stream`, copying every chunk into `tee` as well.
+///
+/// The tee is what makes `/v/jobs/{id}/stdout` live: a background job's stream
+/// outlives the single command being drained here, so it receives each 8 KiB
+/// chunk as the child emits it and is **not** closed at EOF — only `stream`,
+/// which belongs to this one command, is. Closing the job's stream is the job's
+/// own business, once every command in it has finished.
+pub async fn drain_to_stream_teed<R>(
+    mut reader: R,
+    stream: Arc<BoundedStream>,
+    tee: Option<Arc<BoundedStream>>,
+) where
     R: tokio::io::AsyncRead + Unpin,
 {
     use tokio::io::AsyncReadExt;
@@ -231,7 +290,12 @@ where
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break, // EOF
-            Ok(n) => stream.write(&buf[..n]).await,
+            Ok(n) => {
+                stream.write(&buf[..n]).await;
+                if let Some(tee) = &tee {
+                    tee.write(&buf[..n]).await;
+                }
+            }
             Err(e) => {
                 tracing::warn!("drain_to_stream read error: {}", e);
                 break;
@@ -244,6 +308,82 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wake-up must reach a waiter that registered before the write —
+    /// the whole point of enabling the `Notified` future ahead of the read.
+    #[tokio::test]
+    async fn changed_since_wakes_on_a_later_write() {
+        let stream = Arc::new(BoundedStream::new(1024));
+        let writer = stream.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            writer.write(b"late").await;
+        });
+
+        let stats = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.changed_since(0),
+        )
+        .await
+        .expect("changed_since parked instead of waking on the write");
+        assert_eq!(stats.total_written, 4);
+        assert!(!stats.closed);
+    }
+
+    /// Data already present must return immediately — a caller that polls
+    /// once, then waits, must not miss what landed in between.
+    #[tokio::test]
+    async fn changed_since_returns_at_once_when_data_already_arrived() {
+        let stream = BoundedStream::new(1024);
+        stream.write(b"early").await;
+        let stats = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            stream.changed_since(0),
+        )
+        .await
+        .expect("already-written data must not block");
+        assert_eq!(stats.total_written, 5);
+    }
+
+    /// A closed stream can never change again, so waiting on one returns
+    /// rather than parking forever.
+    #[tokio::test]
+    async fn changed_since_returns_on_close() {
+        let stream = Arc::new(BoundedStream::new(1024));
+        let closer = stream.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            closer.close().await;
+        });
+
+        let stats = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.changed_since(0),
+        )
+        .await
+        .expect("close must wake a waiter");
+        assert!(stats.closed, "the caller stops on this flag, not on a timeout");
+        assert_eq!(stats.total_written, 0);
+    }
+
+    /// The tee gets every chunk the primary does, and is NOT closed at EOF —
+    /// a job's stream outlives the one command being drained into it.
+    #[tokio::test]
+    async fn drain_to_stream_teed_copies_to_both_and_closes_only_the_primary() {
+        let primary = Arc::new(BoundedStream::new(1024));
+        let tee = Arc::new(BoundedStream::new(1024));
+
+        let reader = std::io::Cursor::new(b"hello tee".to_vec());
+        drain_to_stream_teed(reader, primary.clone(), Some(tee.clone())).await;
+
+        assert_eq!(primary.read().await, b"hello tee");
+        assert_eq!(tee.read().await, b"hello tee");
+        assert!(primary.is_closed().await, "the drained command's own stream is done");
+        assert!(
+            !tee.is_closed().await,
+            "the job's stream must stay open for the next command in the job"
+        );
+    }
 
     #[tokio::test]
     async fn test_basic_write_read() {

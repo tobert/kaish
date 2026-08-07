@@ -5,10 +5,12 @@
 //! - status file reflects job state
 //! - command file contains original command
 //!
-//! GH #240: this file used to be `job_stream_tests.rs` and also drove
-//! `/v/jobs/{id}/stdout`/`stderr` — those nodes filled only once, at
-//! completion, while four docs promised a live stream. Removed rather than
-//! made live; see `crates/kaish-kernel/src/vfs/jobfs.rs`.
+//! This file used to be `job_stream_tests.rs`. GH #240 removed
+//! `/v/jobs/{id}/stdout`/`stderr` because they filled only once, at
+//! completion, while four docs promised a live stream; they are back and
+//! genuinely live. The liveness itself is pinned by
+//! `job_live_output_tests.rs` — a real `&` job, peeked mid-run. What stays
+//! here is the VFS surface: the nodes exist, list, and read.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -60,12 +62,12 @@ async fn test_jobs_creates_vfs_entry() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, id.0.to_string());
 
-    // Job directory should contain expected files — no stdout/stderr (GH #240).
+    // Job directory should contain expected files.
     let job_path = format!("/v/jobs/{}", id);
     let files = vfs.list(Path::new(&job_path)).await.unwrap();
     let names: Vec<_> = files.iter().map(|e| e.name.as_str()).collect();
-    assert!(!names.contains(&"stdout"), "stdout node removed — GH #240");
-    assert!(!names.contains(&"stderr"), "stderr node removed — GH #240");
+    assert!(names.contains(&"stdout"));
+    assert!(names.contains(&"stderr"));
     assert!(names.contains(&"status"));
     assert!(names.contains(&"command"));
     assert!(names.contains(&"approval"));
@@ -232,9 +234,9 @@ async fn test_cat_v_jobs_status() {
 }
 
 #[tokio::test]
-async fn test_cat_v_jobs_stdout_not_found() {
-    // GH #240: the stdout node is gone — reading it is a plain not-found,
-    // not an empty/never-filled read.
+async fn test_cat_v_jobs_stdout_reads_empty_before_any_output() {
+    // A registered job that has written nothing reads as empty, not an error:
+    // "nothing yet" and "no such job" have to stay distinguishable.
     let jobs = Arc::new(JobManager::new());
     let mut ctx = make_ctx(jobs.clone());
     let registry = make_registry().await;
@@ -251,5 +253,6 @@ async fn test_cat_v_jobs_stdout_not_found() {
     let cat_tool = registry.get("cat").unwrap();
     let result = cat_tool.execute(args, &mut ctx).await;
 
-    assert!(!result.ok(), "stdout node removed — GH #240");
+    assert!(result.ok(), "reading a live-but-silent job's stdout is not an error");
+    assert_eq!(result.text_out(), "", "nothing has been written yet");
 }

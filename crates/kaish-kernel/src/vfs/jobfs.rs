@@ -7,18 +7,27 @@
 //! └── {job_id}/
 //!     ├── status   ← "running" | "stopped" | "done:0" | "gated" | "killed:N" | "failed:N"
 //!     ├── command  ← the original command string
+//!     ├── stdout   ← the job's stdout so far, live while it runs
+//!     ├── stderr   ← the job's stderr so far, live while it runs
 //!     └── approval ← pending approval request (JSON) if gated, else empty
 //! ```
 //!
 //! This is a read-only, synthesized filesystem. Content is generated from
 //! the JobManager on each read.
 //!
-//! **No `stdout`/`stderr` node.** GH #240: `/v/jobs/{id}/stdout` and
-//! `/stderr` filled only once, at job completion, while four docs promised a
-//! live stream — removed rather than made live (2026-08-05). A caller that
-//! needs a background job's output redirects it explicitly to a file the job
-//! writes to (`cmd > /tmp/out &`, or `/v/blobs/...` for hermetic kernels),
-//! then reads that file after the job finishes.
+//! **`stdout`/`stderr` are live.** GH #240 removed both nodes because they
+//! filled once, at job completion, while four docs promised a live stream.
+//! They are back on the terms the docs claimed: an external command running
+//! for the job tees each 8 KiB chunk into the job's stream as the child emits
+//! it, so `cat /v/jobs/1/stdout` on a running `cargo build &` reports the
+//! build's progress. Read `Job::stdout_stream` for exactly which bytes reach
+//! them — in particular, a builtin has no byte stream to tee, so a
+//! builtin-only job's output lands in one write when the job finishes.
+//!
+//! Each node is a 10 MB ring (`DEFAULT_STREAM_MAX_SIZE`) that evicts its
+//! oldest bytes rather than growing without bound. A job that outruns the
+//! ring loses its head, not its tail; redirect to a file
+//! (`cmd > /tmp/out &`) when the whole output matters.
 
 use async_trait::async_trait;
 use std::io;
@@ -34,6 +43,7 @@ use crate::scheduler::{JobId, JobManager};
 /// - List root to see all job IDs as directories
 /// - Read `{id}/status` for job status ("running", "stopped", "done:0", "gated", "killed:N", "failed:N")
 /// - Read `{id}/command` for the original command string
+/// - Read `{id}/stdout` / `{id}/stderr` for the job's output so far — live
 /// - Read `{id}/approval` for a pending approval request (JSON), empty if not gated
 pub struct JobFs {
     jobs: Arc<JobManager>,
@@ -50,7 +60,7 @@ impl JobFs {
     /// Expected formats:
     /// - "" or "/" → root (list jobs)
     /// - "{id}" → job directory
-    /// - "{id}/{file}" → specific file (status, command, approval)
+    /// - "{id}/{file}" → specific file (status, command, stdout, stderr, approval)
     fn parse_path(path: &Path) -> Option<(Option<JobId>, Option<&str>)> {
         let path_str = path.to_str()?;
         let path_str = path_str.trim_start_matches('/');
@@ -123,6 +133,21 @@ impl Filesystem for JobFs {
                     .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "job not found"))?;
                 Ok(format!("{}\n", command).into_bytes())
             }
+            "stdout" => {
+                // Raw bytes, no trailing newline added: this is the child's
+                // output verbatim, and a synthesized "\n" would corrupt
+                // binary output and lie about text output that has none.
+                self.jobs
+                    .read_stdout(job_id)
+                    .await
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "job not found"))
+            }
+            "stderr" => {
+                self.jobs
+                    .read_stderr(job_id)
+                    .await
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "job not found"))
+            }
             "approval" => {
                 // A held job's pending approval request as JSON, so a VFS
                 // consumer can read it and fulfill a backgrounded gate (GH
@@ -184,7 +209,7 @@ impl Filesystem for JobFs {
                 Ok(entries)
             }
             Some(id) => {
-                // List job directory: status, command, approval
+                // List job directory: status, command, stdout, stderr, approval
                 if !self.jobs.exists(id).await {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
@@ -203,6 +228,25 @@ impl Filesystem for JobFs {
                     },
                     DirEntry {
                         name: "command".to_string(),
+                        kind: DirEntryKind::File,
+                        modified: None,
+                        permissions: None,
+                        size: 0,
+                        symlink_target: None,
+                    },
+                    DirEntry {
+                        name: "stdout".to_string(),
+                        kind: DirEntryKind::File,
+                        modified: None,
+                        permissions: None,
+                        // Reported as 0 like every other node here: the real
+                        // size changes between this listing and the read that
+                        // follows it, and a stale number is worse than none.
+                        size: 0,
+                        symlink_target: None,
+                    },
+                    DirEntry {
+                        name: "stderr".to_string(),
                         kind: DirEntryKind::File,
                         modified: None,
                         permissions: None,
@@ -257,7 +301,7 @@ impl Filesystem for JobFs {
                 }
 
                 // Validate file name
-                if !["status", "command", "approval"].contains(&file) {
+                if !["status", "command", "stdout", "stderr", "approval"].contains(&file) {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
                         format!("unknown file: {}", file),
@@ -345,8 +389,8 @@ mod tests {
         let entries = fs.list(Path::new(&path)).await.unwrap();
 
         let names: Vec<_> = entries.iter().map(|e| &e.name).collect();
-        assert!(!names.contains(&&"stdout".to_string()), "stdout node removed — GH #240");
-        assert!(!names.contains(&&"stderr".to_string()), "stderr node removed — GH #240");
+        assert!(names.contains(&&"stdout".to_string()), "stdout node is back, and live");
+        assert!(names.contains(&&"stderr".to_string()), "stderr node is back, and live");
         assert!(names.contains(&&"status".to_string()));
         assert!(names.contains(&&"command".to_string()));
         assert!(names.contains(&&"approval".to_string()));
@@ -421,13 +465,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stat_stdout_removed() {
+    async fn test_stat_stdout() {
         let (manager, id) = make_job_manager_with_job().await;
         let fs = JobFs::new(manager);
 
         let path = format!("{}/stdout", id);
+        let entry = fs.stat(Path::new(&path)).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::File);
+    }
+
+    /// A job that has written nothing reads as an empty node, not an error —
+    /// "nothing yet" and "no such job" stay distinguishable.
+    #[tokio::test]
+    async fn test_read_stdout_before_anything_is_written() {
+        let (manager, id) = make_job_manager_with_job().await;
+        let fs = JobFs::new(manager);
+
+        let path = format!("{}/stdout", id);
+        assert_eq!(fs.read(Path::new(&path)).await.unwrap(), Vec::<u8>::new());
+    }
+
+    /// The node reports whatever is in the stream at the moment of the read —
+    /// no waiting for the job, no synthesized trailing newline.
+    #[tokio::test]
+    async fn test_read_stdout_reflects_the_live_stream() {
+        let (manager, id) = make_job_manager_with_job().await;
+        let streams = manager.streams(id).await.unwrap();
+        streams.stdout.write(b"partial").await;
+
+        let fs = JobFs::new(manager);
+        let path = format!("{}/stdout", id);
+        assert_eq!(fs.read(Path::new(&path)).await.unwrap(), b"partial".to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_stat_unknown_file_is_still_not_found() {
+        let (manager, id) = make_job_manager_with_job().await;
+        let fs = JobFs::new(manager);
+
+        let path = format!("{}/nope", id);
         let result = fs.stat(Path::new(&path)).await;
-        assert!(result.is_err(), "stdout node removed — GH #240");
+        assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
     }
 

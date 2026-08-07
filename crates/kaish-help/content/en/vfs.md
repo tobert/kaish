@@ -34,19 +34,28 @@ Each background job gets a directory:
 ```
 /v/jobs/{id}/status    "running" | "stopped" | "done:0" | "gated" | "killed:N" | "failed:N"
 /v/jobs/{id}/command   original command string
+/v/jobs/{id}/stdout    the job's stdout so far — live while it runs
+/v/jobs/{id}/stderr    the job's stderr so far — live while it runs
 /v/jobs/{id}/approval  pending approval request (JSON) if gated, else empty
 ```
 
-There is no `stdout`/`stderr` node — a background job's output is not
-observable through `/v/jobs` at all, live or after completion. Redirect a
-background job's output to a file yourself if you need it:
-
 ```sh
-cargo build > /tmp/build.log &
+cargo build 2>&1 &
 cat /v/jobs/1/status       # running
-cat /tmp/build.log         # build output so far
+cat /v/jobs/1/stdout       # build output so far
 jobs --cleanup             # remove completed jobs
 ```
+
+`stdout` and `stderr` fill as an external command emits. A builtin does not
+stream: it returns its whole output when it finishes, so `echo hi &` fills
+the node in one write at the end — and so does `cargo build | tee log &`,
+because `tee` is a builtin. Drop the `| tee`; the job's stream is the log.
+Only the last stage of a pipeline reaches `stdout` (an earlier stage's output
+is the next stage's stdin); `stderr` takes every stage's.
+
+Each node holds at most 10MB and evicts its oldest bytes past that. Redirect
+to a file (`cargo build > /tmp/build.log 2>&1 &`) when the whole output
+matters.
 
 A destructive op backgrounded under `set -o approvals` (`rm x &`) gates in the
 background: status is `gated`, and `/v/jobs/{id}/approval` carries the JSON

@@ -9,11 +9,9 @@
 //! - Return immediately with a job ID like "[1]"
 //! - Allow polling status via /v/jobs/{id}/status
 //!
-//! GH #240 removed `/v/jobs/{id}/stdout`/`stderr` — they filled only once,
-//! at completion, while docs promised a live stream. A test that needs a
-//! background job's actual output redirects it to a file explicitly
-//! (`cmd > /tmp/out &`) and reads that back, the same pattern a caller now
-//! uses in place of the removed node.
+//! Tests here redirect a job's output to a file (`cmd > /tmp/out &`) and read
+//! that back. Reading `/v/jobs/{id}/stdout` works too and is live — see
+//! `job_live_output_tests.rs`, which is where that surface is pinned.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]

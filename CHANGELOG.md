@@ -25,6 +25,19 @@ breaking entries are marked **BREAKING**.
   pair actually opens.
 
 ### Added
+- **`/v/jobs/{id}/stdout` and `/stderr` are back, and live.** GH #240 removed
+  them because they filled once, at completion, while four docs promised a
+  live stream; the missing half — teeing an external command's drain task into
+  the job's stream per 8 KiB chunk — is now wired, so `cat /v/jobs/1/stdout`
+  reports a running `cargo build &`'s progress. A builtin still lands its
+  output in one write at completion (a builtin returns a value, not a byte
+  stream), and only a pipeline's last stage reaches `stdout`.
+- **`JobManager::streams`/`read_stdout`/`read_stderr`** — the Rust-side view of
+  those nodes. `None` for an unknown job, `Some(vec![])` for one that has
+  written nothing yet, so the two stay distinguishable.
+- **`BoundedStream::changed_since(seen_total_written)`** — await new data or
+  close instead of poll-looping a running job's output. Returns immediately on
+  a closed stream so the caller stops on `stats.closed`, not a timeout.
 - **`KernelConfig::with_job_manager(Arc<JobManager>)`** — an embedder can hand
   the kernel a `JobManager` it owns instead of the fresh one each kernel builds,
   so `cmd &` jobs survive a kernel built per request. Default is unchanged: no

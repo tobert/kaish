@@ -14,9 +14,44 @@ use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 
 use crate::interpreter::ExecResult;
+use crate::scheduler::stream::BoundedStream;
 
 // Data types re-exported from kaish-types.
 pub use kaish_types::{JobId, JobInfo, JobStatus};
+
+/// One job's live output streams.
+///
+/// Handed out by [`JobManager::streams`] so a producer (the drain task behind
+/// an external command) can write into a job that outlives the command, and so
+/// an embedder can tail a running job with
+/// [`BoundedStream::changed_since`] instead of a poll loop.
+#[derive(Clone)]
+pub struct JobStreams {
+    /// The job's stdout, written as the bytes arrive.
+    ///
+    /// Fed two ways, and never both for the same bytes:
+    ///
+    /// * **Live**, per 8 KiB chunk, by the drain task behind an external
+    ///   command running for this job — but only from the stage whose stdout
+    ///   *is* the job's stdout (`Only` or `Last` in the pipeline), so
+    ///   `a | b` streams `b` and not `a`'s bytes on their way into `b`.
+    /// * **At completion**, from the job's captured `ExecResult`, and only
+    ///   when nothing was streamed live. That covers a builtin-only job
+    ///   (`echo hi &`): a builtin returns its output as a value when it
+    ///   finishes, so there is no byte stream to tee.
+    ///
+    /// Whichever fed it, the stream is closed once the job's result is in
+    /// ([`JobManager::finalize_streams`]), so a reader can tell "no more
+    /// coming" from "nothing yet".
+    pub stdout: Arc<BoundedStream>,
+    /// The job's stderr. Same two feeds as [`Self::stdout`], except the live
+    /// one takes **every** stage's stderr, not just the last — stderr is not
+    /// piped between stages. The consequence, stated rather than papered
+    /// over: in a job mixing builtins and externals, once any external has
+    /// written stderr the completion write is skipped, so a builtin stage's
+    /// stderr stays in the job's `ExecResult` and does not reach this stream.
+    pub stderr: Arc<BoundedStream>,
+}
 
 /// A background job.
 pub struct Job {
@@ -40,12 +75,16 @@ pub struct Job {
     /// hermetic / read-only kernels (custom backend, NoLocal) whose output must
     /// never reach the real filesystem outside the VFS — see
     /// [`JobManager::set_persist_output_files`]. Stamped from the manager when
-    /// the job is registered. **When disabled, a hermetic kernel has no way to
-    /// recover a background job's output after the fact** (GH #240 removed the
-    /// `/v/jobs/{id}/stdout`/`stderr` VFS nodes that used to serve as the
-    /// in-process fallback) — a caller that needs the output redirects it to
-    /// a VFS path itself (`cmd > /tmp/out &`).
+    /// the job is registered. A hermetic kernel still reads the job's output
+    /// from its live streams (`/v/jobs/{id}/stdout`, or
+    /// [`JobManager::read_stdout`]) — the host file is a convenience, not the
+    /// only copy.
     persist_output: bool,
+    /// Live stdout of this job. Handed out as [`JobStreams::stdout`], which
+    /// documents exactly which bytes reach it.
+    stdout_stream: Arc<BoundedStream>,
+    /// Live stderr of this job. See [`JobStreams::stderr`].
+    stderr_stream: Arc<BoundedStream>,
     /// OS process ID (for stopped jobs).
     pid: Option<u32>,
     /// OS process group ID (for stopped jobs).
@@ -94,6 +133,8 @@ impl Job {
             result: None,
             output_file: None,
             persist_output: true,
+            stdout_stream: Arc::new(BoundedStream::default_size()),
+            stderr_stream: Arc::new(BoundedStream::default_size()),
             pid: None,
             pgid: None,
             stopped: false,
@@ -116,6 +157,8 @@ impl Job {
             result: None,
             output_file: None,
             persist_output: true,
+            stdout_stream: Arc::new(BoundedStream::default_size()),
+            stderr_stream: Arc::new(BoundedStream::default_size()),
             pid: None,
             pgid: None,
             stopped: false,
@@ -138,6 +181,8 @@ impl Job {
             result: None,
             output_file: None,
             persist_output: true,
+            stdout_stream: Arc::new(BoundedStream::default_size()),
+            stderr_stream: Arc::new(BoundedStream::default_size()),
             pid: Some(pid),
             pgid: Some(pgid),
             stopped: true,
@@ -156,6 +201,14 @@ impl Job {
     /// Get the output file path (if available).
     pub fn output_file(&self) -> Option<&PathBuf> {
         self.output_file.as_ref()
+    }
+
+    /// This job's live output streams (see [`JobStreams`]).
+    pub fn streams(&self) -> JobStreams {
+        JobStreams {
+            stdout: self.stdout_stream.clone(),
+            stderr: self.stderr_stream.clone(),
+        }
     }
 
     /// Check if the job has completed.
@@ -622,11 +675,11 @@ impl JobManager {
     ///
     /// Disable this for a hermetic / read-only kernel: the host write in
     /// `Job::write_output_file` uses `std::fs` directly and so bypasses the
-    /// VFS (and any read-only mount). With this off, a hermetic kernel has no
-    /// remaining way to recover a background job's output — there is no live
-    /// VFS stream to fall back to (GH #240 removed `/v/jobs/{id}/stdout` and
-    /// `stderr`, which never delivered on "live" anyway). A caller that needs
-    /// the output redirects it to a VFS path explicitly (`cmd > /tmp/out &`).
+    /// VFS (and any read-only mount). Turning it off costs a hermetic kernel
+    /// nothing it cannot get elsewhere — the job's output is in its live
+    /// streams (`/v/jobs/{id}/stdout`, or [`JobManager::read_stdout`]), bounded by a
+    /// 10 MB ring. Redirect to a VFS path (`cmd > /tmp/out &`) when a job
+    /// outruns that ring.
     ///
     /// Must be set before jobs are spawned — the flag is stamped onto each job
     /// at registration time, not consulted at completion.
@@ -678,6 +731,67 @@ impl JobManager {
         self.enforce_retention_locked(&mut jobs);
 
         id
+    }
+
+    /// A job's live output streams, or `None` if there is no such job.
+    ///
+    /// The producer side: `Kernel::try_execute_external` takes these for the
+    /// job it is running under and tees the child's pipes into them as the
+    /// bytes arrive.
+    pub async fn streams(&self, id: JobId) -> Option<JobStreams> {
+        let jobs = self.jobs.lock().await;
+        jobs.get(&id).map(|job| job.streams())
+    }
+
+    /// Snapshot a job's stdout so far, or `None` if there is no such job.
+    ///
+    /// **Readable while the job runs** — that is the point. `None` and
+    /// `Some(vec![])` are different answers: no such job, versus a job that
+    /// has not written anything yet.
+    pub async fn read_stdout(&self, id: JobId) -> Option<Vec<u8>> {
+        let stream = self.streams(id).await?.stdout;
+        Some(stream.read().await)
+    }
+
+    /// Snapshot a job's stderr so far, or `None` if there is no such job.
+    /// See [`Self::read_stdout`].
+    pub async fn read_stderr(&self, id: JobId) -> Option<Vec<u8>> {
+        let stream = self.streams(id).await?.stderr;
+        Some(stream.read().await)
+    }
+
+    /// Close out a finished job's streams: write the captured result into a
+    /// stream that received nothing live, then close both.
+    ///
+    /// The conditional is the no-double-write rule. A stream with live bytes
+    /// in it already holds exactly what the child emitted; writing
+    /// `result.text_out()` on top would repeat all of it. A stream with no
+    /// live bytes belongs to a job with nothing to tee — a builtin returns
+    /// its output as a value, not as a pipe — and would otherwise read empty
+    /// forever.
+    ///
+    /// Called by the background task that owns the job, before it hands the
+    /// result over, so a reader that sees a terminal `status` also sees a
+    /// closed, complete stream.
+    pub async fn finalize_streams(&self, id: JobId, result: &ExecResult) {
+        let Some(streams) = self.streams(id).await else {
+            return;
+        };
+
+        if streams.stdout.stats().await.total_written == 0 {
+            // Raw bytes when the payload is binary; `text_out` would decode it
+            // lossily and corrupt what a caller reads back out of the node.
+            match result.out_bytes() {
+                Some(bytes) => streams.stdout.write(bytes).await,
+                None => streams.stdout.write(result.text_out().as_bytes()).await,
+            }
+        }
+        if streams.stderr.stats().await.total_written == 0 {
+            streams.stderr.write(result.err.as_bytes()).await;
+        }
+
+        streams.stdout.close().await;
+        streams.stderr.close().await;
     }
 
     /// Wait for a specific job to complete.
