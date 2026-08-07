@@ -1102,6 +1102,38 @@ async fn capture_with_bounds() -> anyhow::Result<String> {
 }
 ```
 
+### Sharing one JobManager across kernels
+
+Each kernel builds its own `JobManager` unless you supply one. An embedder
+that builds a kernel per request loses every `cmd &` job when that kernel
+drops — ids, status, and output all live on the manager. Hand the same
+manager to every kernel and jobs survive between calls:
+
+```rust
+use std::sync::Arc;
+use kaish_kernel::scheduler::{JobId, JobManager};
+use kaish_kernel::{Kernel, KernelConfig};
+
+// Built once, held for the process's lifetime.
+let jobs = Arc::new(JobManager::new());
+
+// Every per-request kernel adopts it.
+let kernel = Kernel::new(KernelConfig::agent().with_job_manager(jobs.clone()))?;
+kernel.execute("cargo build &").await?;
+drop(kernel);
+
+// The next kernel sees job 1 — same table, same id space.
+let next = Kernel::new(KernelConfig::agent().with_job_manager(jobs.clone()))?;
+assert!(next.jobs().exists(JobId(1)).await);
+```
+
+A shared manager carries shared settings: `kill_grace` and
+`persist_output_files` are stamped onto it at kernel construction, so the
+last kernel built wins for both. A hermetic kernel (`NoLocal`, or any
+`with_backend` kernel) turns `persist_output_files` off for every kernel on
+that manager. Share a manager between kernels configured alike, or accept
+the last writer.
+
 ### JobFs for Background Job Observability
 
 The kernel automatically mounts `JobFs` at `/v/jobs`, exposing background

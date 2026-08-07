@@ -342,6 +342,28 @@ pub struct KernelConfig {
     /// (`docs/approval-ledger.md` §D.2). Defaults to no approver and no
     /// authority, which is exactly today's behavior — every gate defers.
     pub approval: ApprovalConfig,
+
+    /// The [`JobManager`] this kernel adopts. `None` — the default — builds a
+    /// fresh one, so every kernel owns its own job table.
+    ///
+    /// Supply one to share a single job table across kernels. An embedder that
+    /// builds a kernel per request (kaijutsu builds one per tool call) has no
+    /// other way to keep a `cmd &` job reachable: ids, status, and output
+    /// streams all live on the manager, so a per-kernel manager takes them
+    /// down with the kernel that made it. One manager held by the embedder and
+    /// handed to every kernel keeps `&` usable across calls, and keeps job ids
+    /// unique because they are minted from the manager's own counter.
+    ///
+    /// **A shared manager carries shared settings.** `kill_grace` and
+    /// `persist_output_files` are stamped onto the manager at kernel
+    /// construction, so the last kernel built wins for both: a hermetic kernel
+    /// (`NoLocal`, or any `with_backend` kernel) turns `persist_output_files`
+    /// off for every kernel on that manager, and each kernel's
+    /// [`Self::kill_grace`] overwrites the previous one's. Share a manager
+    /// between kernels configured alike, or accept the last writer.
+    ///
+    /// Set through [`Self::with_job_manager`].
+    pub job_manager: Option<Arc<JobManager>>,
 }
 
 /// A kernel's approval-side configuration (spec §D.2), grouped so the
@@ -429,6 +451,7 @@ impl Default for KernelConfig {
                 vfs_budget_bytes: None,
                 overlay: false,
                 approval: ApprovalConfig::default(),
+                job_manager: None,
             }
         }
         #[cfg(not(feature = "localfs"))]
@@ -453,6 +476,7 @@ impl Default for KernelConfig {
                 vfs_budget_bytes: None,
                 overlay: false,
                 approval: ApprovalConfig::default(),
+                job_manager: None,
             }
         }
     }
@@ -483,6 +507,7 @@ impl KernelConfig {
             vfs_budget_bytes: None,
             overlay: false,
             approval: ApprovalConfig::default(),
+            job_manager: None,
         }
     }
 
@@ -516,6 +541,7 @@ impl KernelConfig {
             vfs_budget_bytes: None,
             overlay: false,
             approval: ApprovalConfig::default(),
+            job_manager: None,
         }
     }
 
@@ -557,6 +583,7 @@ impl KernelConfig {
             vfs_budget_bytes: None,
             overlay: false,
             approval: ApprovalConfig::default(),
+            job_manager: None,
         }
     }
 
@@ -595,6 +622,7 @@ impl KernelConfig {
             vfs_budget_bytes: Some(64 * 1024 * 1024),
             overlay: false,
             approval: ApprovalConfig::default(),
+            job_manager: None,
         }
     }
 
@@ -626,6 +654,7 @@ impl KernelConfig {
             vfs_budget_bytes: Some(64 * 1024 * 1024),
             overlay: false,
             approval: ApprovalConfig::default(),
+            job_manager: None,
         }
     }
 
@@ -654,6 +683,7 @@ impl KernelConfig {
             vfs_budget_bytes: None,
             overlay: false,
             approval: ApprovalConfig::default(),
+            job_manager: None,
         }
     }
 
@@ -799,6 +829,15 @@ impl KernelConfig {
     /// Set the SIGTERM-to-SIGKILL grace period for child kills.
     pub fn with_kill_grace(mut self, grace: Duration) -> Self {
         self.kill_grace = grace;
+        self
+    }
+
+    /// Adopt an embedder-owned [`JobManager`] instead of building a fresh one,
+    /// so background jobs outlive the kernel that started them. Read
+    /// [`Self::job_manager`] before sharing one manager between kernels that
+    /// are configured differently.
+    pub fn with_job_manager(mut self, jobs: Arc<JobManager>) -> Self {
+        self.job_manager = Some(jobs);
         self
     }
 
@@ -1159,7 +1198,10 @@ impl Kernel {
     /// Create a new kernel with the given configuration.
     pub fn new(config: KernelConfig) -> Result<Self> {
         let mut setup = Self::setup_vfs(&config)?;
-        let jobs = Arc::new(JobManager::new());
+        // An embedder-supplied manager keeps `cmd &` jobs alive across kernels
+        // (see `KernelConfig::job_manager`); with none, this kernel owns its
+        // own job table exactly as before.
+        let jobs = config.job_manager.clone().unwrap_or_else(|| Arc::new(JobManager::new()));
         // Mirror the cascade's SIGTERM->SIGKILL grace onto the manager so the
         // kill builtin bounds its wait-for-death on the same number (GH #244).
         jobs.set_kill_grace(config.kill_grace);
@@ -1417,7 +1459,8 @@ impl Kernel {
         }
 
         let mut vfs = VfsRouter::new();
-        let jobs = Arc::new(JobManager::new());
+        // See `Kernel::new` — the embedder's manager wins here too.
+        let jobs = config.job_manager.clone().unwrap_or_else(|| Arc::new(JobManager::new()));
         // Mirror the cascade's SIGTERM->SIGKILL grace onto the manager so the
         // kill builtin bounds its wait-for-death on the same number (GH #244).
         jobs.set_kill_grace(config.kill_grace);

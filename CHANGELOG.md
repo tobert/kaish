@@ -25,6 +25,10 @@ breaking entries are marked **BREAKING**.
   pair actually opens.
 
 ### Added
+- **`KernelConfig::with_job_manager(Arc<JobManager>)`** — an embedder can hand
+  the kernel a `JobManager` it owns instead of the fresh one each kernel builds,
+  so `cmd &` jobs survive a kernel built per request. Default is unchanged: no
+  manager supplied means a private one.
 - **`kaish-help`: three missing Foundations fragments** — a compound statement
   (`for`/`while`/`if`/`case`) unable to feed a pipe, `[ … ]` not being a
   command, and bare `yes`/`no` being lexer errors. All three are real
