@@ -2753,6 +2753,7 @@ fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned
     }
 
     let value_ctx = compute_value_context(&tokens);
+    let bracket_depth = compute_bracket_depth(&tokens);
     let mut result = Vec::with_capacity(tokens.len());
     let mut run: Vec<&Spanned<Token>> = Vec::new();
     let mut run_start = 0usize;
@@ -2785,6 +2786,7 @@ fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned
                 value_ctx[run_start].in_literal,
                 followed_by_eq,
                 value_ctx[run_start].push_target,
+                bracket_depth[run_start],
                 source,
             );
             if is_glob_mergeable(&token.token) {
@@ -2805,21 +2807,92 @@ fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned
         value_ctx[run_start].in_literal,
         false,
         value_ctx[run_start].push_target,
+        bracket_depth[run_start],
         source,
     );
 
     result
 }
 
+/// Bracket depth (count of open, unmatched `[`/`{`) in effect immediately
+/// BEFORE each token — one entry per token, index-aligned with `tokens`.
+/// The sole consumer is `run_has_bare_comma` below: a comma is a
+/// literal/pattern separator while depth > 0 (`{js,ts}`, `[1, 2, 3]`,
+/// `[{a: 1}, {b: 2}]`), an ordinary bareword character at depth 0
+/// (`1,3p`, `a,b`).
+///
+/// Deliberately CRUDER than `compute_value_context`'s frame stack: it
+/// resets to 0 at every `is_statement_boundary` token, INCLUDING
+/// `Newline` (unlike the frame stack, which keeps a value-position
+/// List/Record frame open across newlines for multi-line literals). That
+/// asymmetry is safe, not a gap — multi-line value-position literals are
+/// gated by the SEPARATE `value_position_suppress` flag in
+/// `flush_glob_run`, computed from `compute_value_context` and unaffected
+/// by this counter. This counter exists only to catch the constructs
+/// `compute_value_context` doesn't track at all — argv-position brackets
+/// and case-pattern braces — and those are always single-line, so
+/// resetting on every newline both matches their grammar and guarantees a
+/// stray unclosed bracket can never wedge the comma decision past the
+/// line it's on.
+fn compute_bracket_depth(tokens: &[Spanned<Token>]) -> Vec<usize> {
+    let mut depths = Vec::with_capacity(tokens.len());
+    let mut depth: i32 = 0;
+    for t in tokens {
+        if is_statement_boundary(&t.token) {
+            depth = 0;
+        }
+        depths.push(depth.max(0) as usize);
+        match &t.token {
+            Token::LBracket | Token::LBrace => depth += 1,
+            Token::RBracket | Token::RBrace => depth = (depth - 1).max(0),
+            _ => {}
+        }
+    }
+    depths
+}
+
+/// True when `run` contains a `Token::Comma` sitting outside any
+/// `[...]`/`{...}` pair — `start_depth` (from `compute_bracket_depth`,
+/// read at the run's first token) seeds the count, since the opening
+/// bracket of a pair often lands in an earlier, whitespace-separated run
+/// (`[1, 2, 3]` is three runs: `[1,`, `2,`, `3]`). A comma still inside an
+/// open pair (`{js,ts}`, a glued `[a,b]`) is left for the grammar that
+/// consumes it — case-pattern brace expansion, or a bracket-pair run that
+/// also flushes here via `has_bracket_pair` below; a comma with no
+/// enclosing pair (`1,3p`, `a,b`) has no grammatical role outside a
+/// literal/pattern.
+fn run_has_bare_comma(run: &[&Spanned<Token>], start_depth: usize) -> bool {
+    let mut depth = start_depth as i32;
+    let mut found = false;
+    for t in run.iter() {
+        match &t.token {
+            Token::LBracket | Token::LBrace => depth += 1,
+            Token::RBracket | Token::RBrace => depth = (depth - 1).max(0),
+            Token::Comma if depth == 0 => found = true,
+            _ => {}
+        }
+    }
+    found
+}
+
 /// Flush a run of glob-mergeable tokens: merge to a `GlobWord` (text
-/// sliced verbatim from the source) if it contains glob metacharacters.
+/// sliced verbatim from the source) if it contains glob metacharacters,
+/// or to an `Ident` if its only reason to fuse is a bare comma (see
+/// below).
 ///
 /// `value_position_suppress` (run opened at value position) forces
 /// individual emission for bracket-bearing runs, so a `[`-leading run at
 /// value position always reaches the parser as primitive tokens for the
 /// list-literal grammar. A pure `Star`/`Question` glob with no brackets
 /// (`X=*.txt`) keeps fusing — it evaluates to a literal string at value
-/// position exactly as before collection literals existed.
+/// position exactly as before collection literals existed. The SAME flag
+/// also gates bare-comma folding below: a value-position run (list or
+/// record literal, tracked across whitespace/newlines by
+/// `compute_value_context`, unlike this function's own per-run bracket
+/// count) must reach the parser as primitive tokens even when the run
+/// itself contains no bracket pair — `x = [ 1,2 ]` splits into "[",
+/// "1,2", "]" runs on the spaces, and the middle run has no bracket
+/// token to see.
 ///
 /// `followed_by_eq` is the SEPARATE lvalue trigger: an `Ident`-led
 /// bracket-pair run with no `*`/`?` immediately before `=` is a
@@ -2830,12 +2903,20 @@ fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned
 /// no trailing `=` to key off, so it's recognized separately and fused
 /// verbatim into a single `Ident` (GH #183) — a path for `push` to walk,
 /// never a glob to expand against the filesystem.
+///
+/// A bare comma (`1,3p`, `cut -f 1,3`, `sort -k 2,2n`) has no
+/// grammatical role outside a `[...]`/`{...}` literal or pattern — see
+/// `run_has_bare_comma` — so a run whose only fusion trigger is such a
+/// comma folds into an `Ident`, never a `GlobWord`: nothing here should
+/// reach the filesystem glob matcher, and `Expr::GlobPattern("1,3p")`
+/// would try to `stat` a file named that and fail with "no matches".
 fn flush_glob_run(
     run: &mut Vec<&Spanned<Token>>,
     result: &mut Vec<Spanned<Token>>,
     value_position_suppress: bool,
     followed_by_eq: bool,
     push_target: bool,
+    bracket_depth_at_start: usize,
     source: &str,
 ) {
     if run.is_empty() {
@@ -2860,6 +2941,8 @@ fn flush_glob_run(
     let push_target_suppress =
         push_target && has_bracket_pair && !has_star_or_question && run_starts_with_ident;
     let suppress = (value_position_suppress && has_bracket_pair) || lvalue_suppress;
+    let has_bare_comma =
+        !value_position_suppress && run_has_bare_comma(run, bracket_depth_at_start);
 
     if push_target_suppress && run.len() >= 2 {
         // `push`'s target: fuse verbatim to a single `Ident` (never a
@@ -2873,6 +2956,11 @@ fn flush_glob_run(
         let end = run.last().map(|t| t.span.end).unwrap_or(0);
         let text = source.get(start..end).unwrap_or_default().to_string();
         result.push(Spanned::new(Token::GlobWord(text), start..end));
+    } else if run.len() >= 2 && has_bare_comma {
+        let start = run.first().map(|t| t.span.start).unwrap_or(0);
+        let end = run.last().map(|t| t.span.end).unwrap_or(0);
+        let text = source.get(start..end).unwrap_or_default().to_string();
+        result.push(Spanned::new(Token::Ident(text), start..end));
     } else {
         for t in run.iter() {
             result.push((*t).clone());
@@ -4664,5 +4752,241 @@ mod tests {
         for t in [Token::Pipe, Token::Amp, Token::Eq, Token::LBrace] {
             assert!(!t.is_keyword(), "{t:?} should not be a keyword");
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Comma significance: only inside a `[...]`/`{...}` literal or pattern
+    // (see `run_has_bare_comma`, `compute_bracket_depth`). Outside brackets
+    // a comma folds into the surrounding bareword like any other ordinary
+    // character. Kernel-level (`echo`/`sed`/`cut`/`sort` output) coverage
+    // lives in `tests/bareword_comma_tests.rs`, `tests/builtin_fidelity_tests.rs`,
+    // and `tests/sort_key_tests.rs`; these are the precise token-shape
+    // assertions that don't fit an integration test.
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn bare_comma_run_folds_to_ident() {
+        // sed -n 1,3p / cut -f 1,3 / sort -k 2,2n: no brackets anywhere, so
+        // the comma has no grammatical role and folds into one bareword.
+        assert_eq!(lex("1,3p"), vec![Token::Ident("1,3p".into())]);
+        assert_eq!(lex("1,3"), vec![Token::Ident("1,3".into())]);
+        assert_eq!(lex("2,2n"), vec![Token::Ident("2,2n".into())]);
+        assert_eq!(lex("a,b"), vec![Token::Ident("a,b".into())]);
+        assert_eq!(lex("1,2,3"), vec![Token::Ident("1,2,3".into())]);
+    }
+
+    #[test]
+    fn standalone_comma_stays_a_token() {
+        // Whitespace on both sides: nothing to fold into, stays `Comma` —
+        // this is the `cut -d , -f2` idiom (see `bareword_comma_tests.rs`).
+        assert_eq!(
+            lex("cut -d , -f2"),
+            vec![
+                Token::Ident("cut".into()),
+                Token::ShortFlag("d".into()),
+                Token::Comma,
+                Token::ShortFlag("f2".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn case_pattern_brace_comma_stays_significant() {
+        // `{js,ts}` has no `*`/`?`, so it never reaches the has_star_or_question
+        // glob-fuse path either — the comma must stay a separate token for
+        // `case_parser`'s brace-expansion grammar (parser.rs `case_parser`).
+        assert_eq!(
+            lex("{js,ts}"),
+            vec![
+                Token::LBrace,
+                Token::Ident("js".into()),
+                Token::Comma,
+                Token::Ident("ts".into()),
+                Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn glob_brace_expansion_with_star_still_fuses() {
+        // A `*` elsewhere in the word triggers the EXISTING glob-fuse path
+        // (unrelated to the new bare-comma fold) — the whole thing becomes
+        // one `GlobWord`, comma included, for the glob engine to expand.
+        assert_eq!(lex("*.{js,ts}"), vec![Token::GlobWord("*.{js,ts}".into())]);
+        assert_eq!(
+            lex("src/*.{rs,toml}"),
+            vec![Token::GlobWord("src/*.{rs,toml}".into())]
+        );
+    }
+
+    #[test]
+    fn bracket_list_with_spaces_keeps_comma_significant() {
+        // `[1, 2, 3]` splits into three whitespace-bounded runs ("[1,", "2,",
+        // "3]") — the opening `[` is in the FIRST run, not the run that owns
+        // the middle comma, so this only works with the cross-run
+        // `compute_bracket_depth` seed (a per-run-only counter would
+        // wrongly fold "2," into one bareword — see PR discussion / GH
+        // regression this test pins).
+        assert_eq!(
+            lex("[1, 2, 3]"),
+            vec![
+                Token::LBracket,
+                Token::Int(1),
+                Token::Comma,
+                Token::Int(2),
+                Token::Comma,
+                Token::Int(3),
+                Token::RBracket,
+            ]
+        );
+    }
+
+    // These use `x=...` (assignment/value position) rather than a bare
+    // statement: a bare non-value-position `[...]` run with a real bracket
+    // PAIR already fuses whole into one `GlobWord` regardless of comma (an
+    // existing, comma-unrelated rule — see `flush_glob_run`'s
+    // `has_bracket_pair` branch); list/record literals are only ever
+    // legal at value position anyway (`docs/LANGUAGE.md`, "Construction"),
+    // so that's the realistic shape to pin here.
+
+    #[test]
+    fn nested_list_of_lists_keeps_commas_significant() {
+        assert_eq!(
+            lex("x=[[1,2],[3,4]]"),
+            vec![
+                Token::Ident("x".into()),
+                Token::Eq,
+                Token::LBracket,
+                Token::LBracket,
+                Token::Int(1),
+                Token::Comma,
+                Token::Int(2),
+                Token::RBracket,
+                Token::Comma,
+                Token::LBracket,
+                Token::Int(3),
+                Token::Comma,
+                Token::Int(4),
+                Token::RBracket,
+                Token::RBracket,
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_record_in_list_keeps_commas_significant() {
+        assert_eq!(
+            lex("x=[{a:1},{b:2}]"),
+            vec![
+                Token::Ident("x".into()),
+                Token::Eq,
+                Token::LBracket,
+                Token::LBrace,
+                Token::Ident("a".into()),
+                Token::Colon,
+                Token::Int(1),
+                Token::RBrace,
+                Token::Comma,
+                Token::LBrace,
+                Token::Ident("b".into()),
+                Token::Colon,
+                Token::Int(2),
+                Token::RBrace,
+                Token::RBracket,
+            ]
+        );
+    }
+
+    #[test]
+    fn stray_unclosed_bracket_does_not_wedge_past_the_line() {
+        // A stray/unmatched `[` (no closing `]` anywhere) must not leave
+        // the bracket-depth counter elevated for the rest of the line, let
+        // alone the rest of the script — `compute_bracket_depth` resets at
+        // every `is_statement_boundary` token, including `Newline`. The
+        // comma on line 2 has no enclosing bracket of its own and must
+        // still fold into a bareword.
+        assert_eq!(
+            lex("[dog\nsed -n 1,3p"),
+            vec![
+                Token::LBracket,
+                Token::Ident("dog".into()),
+                Token::Newline,
+                Token::Ident("sed".into()),
+                Token::ShortFlag("n".into()),
+                Token::Ident("1,3p".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn stray_unmatched_closing_bracket_does_not_underflow() {
+        // A stray `]`/`}` with no opener must clamp depth at 0, not go
+        // negative (which would otherwise require an impossibly deep nest
+        // of real opens to ever recover comma significance). `RBracket` is
+        // itself glob-mergeable (character-class runs like `[0-9]*` need
+        // it to fuse), so a leading stray `]` joins the same run as the
+        // comma that follows it — the whole glued word folds into one
+        // bareword, which is exactly the safe, self-contained outcome the
+        // depth clamp is for.
+        assert_eq!(lex("]a,b"), vec![Token::Ident("]a,b".into())]);
+    }
+
+    #[test]
+    fn comma_in_double_quoted_string_is_string_content() {
+        // Quoted content never reaches `Token::Comma` at all — the whole
+        // thing lexes as one `String` token before any fusion pass runs.
+        assert_eq!(lex(r#""a,b""#), vec![Token::String("a,b".into())]);
+    }
+
+    #[test]
+    fn comma_in_single_quoted_string_is_string_content() {
+        assert_eq!(lex("'a,b'"), vec![Token::SingleString("a,b".into())]);
+    }
+
+    #[test]
+    fn comma_in_var_ref_braces_is_not_tokenized_separately() {
+        // `${...}` is captured as ONE token by `lex_varref` (balanced-brace
+        // scan) — a comma inside never reaches the fusion passes as its own
+        // `Token::Comma` at all.
+        assert_eq!(
+            lex("${X:-1,3}"),
+            vec![Token::VarRef("${X:-1,3}".into())]
+        );
+    }
+
+    #[test]
+    fn comma_inside_cmd_subst_folds_like_top_level() {
+        // `$(...)` bodies are ordinary tokens in the main stream (not
+        // extracted like heredocs/arithmetic), so a comma inside gets the
+        // same bracket-depth treatment as top-level source.
+        assert_eq!(
+            lex("$(sed -n 1,3p)"),
+            vec![
+                Token::CmdSubstStart,
+                Token::Ident("sed".into()),
+                Token::ShortFlag("n".into()),
+                Token::Ident("1,3p".into()),
+                Token::RParen,
+            ]
+        );
+    }
+
+    #[test]
+    fn non_comma_glued_pasting_is_unaffected() {
+        // The general no-token-pasting guard (`reject_glued_args`, GH #189)
+        // must still see these as separate glued fragments — this fix only
+        // changes comma, nothing else. (The parser-level rejection is
+        // covered by `builtin_fidelity_tests::non_comma_pasting_keeps_generic_message`;
+        // this pins the lexer's token shape underneath it.)
+        assert_eq!(
+            lex("--flag$(echo x)"),
+            vec![
+                Token::LongFlag("flag".into()),
+                Token::CmdSubstStart,
+                Token::Ident("echo".into()),
+                Token::Ident("x".into()),
+                Token::RParen,
+            ]
+        );
     }
 }

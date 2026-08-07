@@ -132,17 +132,6 @@ pub const FRAGMENTS: &[Fragment] = &[
     ),
     en(
         Concept::Foundations,
-        "comma-splits-word",
-        Variant::Rule,
-        Depth::Summary,
-        None,
-        "**Comma splits the word.** A bare `,` is reserved (brace expansion, lists) \
-         — `sed -n 1,3p file` parses as two words and errors. Quote it: \
-         `sed -n \"1,3p\"`, `cut -f \"1,3\"`, `sort -k \"2,2n\"`.",
-    )
-    .ranked(2),
-    en(
-        Concept::Foundations,
         "pipe-needs-capture",
         Variant::Rule,
         Depth::Summary,

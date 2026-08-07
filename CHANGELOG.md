@@ -10,16 +10,31 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING: comma is significant only inside a `[...]`/`{...}` literal or
+  pattern.** A bare `,` used to lex as its own token everywhere, so
+  `sed -n 1,3p`, `cut -f 1,3`, `sort -k 2,2n`, and `echo a,b,c` were parse
+  errors requiring a quoting workaround, even though the only real
+  grammar uses of `,` are list/record literal separators (`[a, b]`,
+  `{k: v, j: w}`) and brace expansion (`{js,ts}`) — both always inside
+  brackets. The lexer now tracks bracket depth and folds a comma into the
+  surrounding bareword whenever it isn't enclosed by an open `[`/`{`, so
+  the examples above all work unquoted; quoting still works, since it was
+  always harmless. Brace expansion, list literals, and record literals are
+  unaffected — comma stays a separate token wherever a `[...]`/`{...}`
+  pair actually opens.
+
 ### Added
-- **`kaish-help`: four missing Foundations fragments** — unquoted comma splitting
-  a word (`sed -n 1,3p`), a compound statement (`for`/`while`/`if`/`case`) unable
-  to feed a pipe, `[ … ]` not being a command, and bare `yes`/`no` being lexer
-  errors. All four are real parse/lexer errors, verified live against 0.13; the
-  comma and pipe rules were undocumented anywhere in `kaish-help`, and all four
-  were absent from the fragment registry, so none reached
+- **`kaish-help`: three missing Foundations fragments** — a compound statement
+  (`for`/`while`/`if`/`case`) unable to feed a pipe, `[ … ]` not being a
+  command, and bare `yes`/`no` being lexer errors. All three are real
+  parse/lexer errors, verified live against 0.13, and were absent from the
+  fragment registry, so none reached
   `Recipe::agent_onboarding()`/`Recipe::tool_description()` — the surfaces an
-  embedded agent actually reads. The comma and pipe rules also join
-  `content/en/limits.md`.
+  embedded agent actually reads. The pipe rule also joins `content/en/limits.md`.
+  (A fourth fragment from this same pass, unquoted comma splitting a word,
+  was retired above — the grammar was fixed instead of documenting the
+  workaround.)
 - **`Selector::with_overlay()`/`without_overlay()`** (`kaish-help`) — chainable
   opt-in/opt-out for the new `Concept::Overlay` on any `Recipe`, e.g.
   `Recipe::agent_onboarding().with_overlay()`.

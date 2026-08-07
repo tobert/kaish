@@ -455,16 +455,20 @@ mod tests {
         );
     }
 
-    /// The four syntax rules an agent session verified live against kaish 0.13 —
-    /// unquoted comma, compound-into-pipe, `[ … ]`, bare `yes`/`no` — must reach
-    /// both agent-facing recipes, since those are the surfaces an embedded agent
+    /// Three syntax rules an agent session verified live against kaish 0.13 —
+    /// compound-into-pipe, `[ … ]`, bare `yes`/`no` — must reach both
+    /// agent-facing recipes, since those are the surfaces an embedded agent
     /// actually reads (a kaijutsu session burned a 63k-token tour hitting these
-    /// with no warning in either).
+    /// with no warning in either). A fourth rule, unquoted comma, was verified
+    /// the same way and got its own fragment (`comma-splits-word`) — the
+    /// grammar itself was fixed instead (comma is significant only inside a
+    /// `[...]`/`{...}` literal or pattern; see `docs/LANGUAGE.md`,
+    /// "Construction"), so the fragment was retired rather than kept as a
+    /// warning about behavior that no longer exists.
     #[test]
     fn agent_onboarding_covers_the_verified_syntax_gaps() {
         let out = compose(&Recipe::agent_onboarding(), &no_content());
         for needle in [
-            "Comma splits the word",
             "compound statement can't feed a pipe",
             "is not a command",
             "are lexer errors",
@@ -477,7 +481,6 @@ mod tests {
     fn tool_description_covers_the_verified_syntax_gaps() {
         let out = compose(&Recipe::tool_description(), &no_content());
         for needle in [
-            "Comma splits the word",
             "compound statement can't feed a pipe",
             "is not a command",
             "are lexer errors",

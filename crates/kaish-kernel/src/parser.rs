@@ -1727,12 +1727,6 @@ fn stmt_has_ambiguous_stdin(stmt: &Stmt) -> bool {
     }
 }
 
-/// True when `arg` is the bare-comma literal positional (`Expr::Literal(",")`),
-/// produced by a lone `,` token in argument position.
-fn is_comma_literal_arg(arg: &Arg) -> bool {
-    matches!(arg, Arg::Positional(Expr::Literal(Value::String(s))) if s == ",")
-}
-
 /// True for the argv-fragment `Arg` shapes eligible for the no-token-pasting
 /// glue check below: bareword/expr positionals AND long flags.
 ///
@@ -1766,6 +1760,14 @@ fn is_glue_candidate(arg: &Arg) -> bool {
 /// (GH #189: the post-`--` half of this used to be unchecked entirely — a
 /// script relying on `--` to end flag parsing got a silent argv-splat
 /// instead of this same helpful error).
+///
+/// A comma-bearing word (`cut -f1,3`, `sort -k2,2n`, `echo a,b`) used to
+/// trip this guard and get a comma-specific "kaish reserves `,`" hint —
+/// that was never true outside a `[...]`/`{...}` literal or pattern, and
+/// the lexer now folds a bare comma into the surrounding bareword before
+/// the parser ever sees separate fragments (see `lexer::flush_glob_run`),
+/// so a comma-bearing word no longer reaches this function as two glued
+/// `Arg`s at all. Every remaining case is genuine token pasting.
 fn reject_glued_args<'src>(
     args: Vec<(Arg, Span)>,
 ) -> Result<Vec<Arg>, Rich<'src, Token, Span>> {
@@ -1773,19 +1775,9 @@ fn reject_glued_args<'src>(
         let (prev, prev_span) = &pair[0];
         let (next, next_span) = &pair[1];
         if is_glue_candidate(prev) && is_glue_candidate(next) && prev_span.end == next_span.start {
-            // A bare `,` lexes as its own token, so a comma-bearing word
-            // (`cut -f1,3`, `sort -k2,2n`, `echo a,b`) trips this guard.
-            // It isn't token pasting — `,` is reserved (brace expansion,
-            // lists) — so give a comma-specific hint that teaches quoting.
-            let msg = if is_comma_literal_arg(prev) || is_comma_literal_arg(next) {
-                "an unquoted comma splits this into separate words — kaish reserves \
-                 `,` (brace expansion, lists); quote a comma-bearing argument to keep \
-                 it one word, e.g. cut -f \"1,3\", sort -k \"2,2n\", or echo \"a,b\""
-            } else {
-                "adjacent words with no space between them are not joined into one \
+            let msg = "adjacent words with no space between them are not joined into one \
                  argument (kaish does no token pasting); quote the whole word, e.g. \
-                 \"/tmp/$(echo x).txt\" or \"$dir/out.txt\""
-            };
+                 \"/tmp/$(echo x).txt\" or \"$dir/out.txt\"";
             return Err(Rich::custom(*next_span, msg));
         }
     }
@@ -2611,11 +2603,16 @@ where
                 Token::Dot => Expr::Literal(Value::String(".".into())),
                 Token::DotDot => Expr::Literal(Value::String("..".into())),
                 // Bare comma in argument position is the literal "," — the
-                // `cut -d, -f2` / `tr -d ,` delimiter idiom. Brace expansion
-                // consumes its separator commas inside `{…}` before reaching
-                // here, and a run of comma-touching positionals (`echo 1,2,3`)
-                // is still caught by the no-token-pasting guard in
-                // `args_list_parser`. See docs/issues.md.
+                // `cut -d, -f2` / `tr -d ,` delimiter idiom. This is reached
+                // only by a comma with no adjacent bareword to fold into
+                // (whitespace on both sides, e.g. `cut -d , -f2`, or a
+                // neighbor the lexer doesn't fuse across, e.g. `,$VAR`) — a
+                // comma glued to a bareword (`echo a,b`, `sort -k 2,2n`) is
+                // already folded into ONE token before the parser runs (see
+                // `lexer::flush_glob_run`), and a comma inside a
+                // `[...]`/`{...}` literal or pattern is consumed there
+                // instead (list/record literals, brace expansion — see
+                // `docs/LANGUAGE.md`, "Construction").
                 Token::Comma => Expr::Literal(Value::String(",".into())),
                 // Bare colon in argument position is the literal ":" — the
                 // `awk -F: '{print $1}'` / `--field-separator=:` idiom and
