@@ -43,7 +43,9 @@ struct ScatterArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — option values read off args.named to preserve Value typing.
+    /// Ignored — `scatter` reads its items from the pipe.
+    // Hidden sink: option values are read off `args.named` to keep their
+    // `Value` typing.
     #[arg(hide = true)]
     rest: Vec<String>,
 }

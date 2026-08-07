@@ -155,14 +155,14 @@ impl Tool for Grep {
             "grep",
             "Search for patterns in files or stdin",
             [
-                ("Search for pattern in file", "grep pattern file.txt"),
-                ("Case-insensitive search", "grep -i ERROR log.txt"),
+                ("Search for a pattern in a file", "grep pattern file.txt"),
+                ("Match case-insensitively", "grep -i ERROR log.txt"),
                 ("Show line numbers", "grep -n TODO *.rs"),
                 ("Extract matched text only", "grep -o 'https://[^\"]*' file.html"),
-                ("Context around matches", "grep -C 2 error log.txt"),
-                ("Recursive search", "grep -r TODO src/"),
-                ("Alternation (ERE or GNU BRE)", r"grep 'foo\|bar' file.txt"),
-                ("With file filter", "grep -rn TODO . --include='*.rs'"),
+                ("Show 2 lines of context around matches", "grep -C 2 error log.txt"),
+                ("Search a directory tree", "grep -r TODO src/"),
+                ("Match either alternative", r"grep 'foo\|bar' file.txt"),
+                ("Limit a recursive search by filename", "grep -rn TODO . --include='*.rs'"),
             ],
         )
     }

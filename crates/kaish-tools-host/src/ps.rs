@@ -30,7 +30,9 @@ struct PsArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals.
+    /// Ignored — `ps` takes no operands; filter with `-p` or `-u`.
+    // clap needs a positional to bind the `--`-terminated tail that
+    // `to_argv()` always emits.
     #[arg(hide = true)]
     rest: Vec<String>,
 }

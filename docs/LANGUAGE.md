@@ -549,8 +549,8 @@ if test -f "$path"; then …; fi  # the usual home, an `if`/`while` condition
 
 Prefer `[[ ]]` — it is real grammar the validator checks before runtime, carries
 the richer tests, and expresses compound logic (`&&` / `||` / `!`) in one
-construct. Reach for `test` for muscle memory or where a plain command is wanted
-(a condition builtin, a `&&` chain). `[ expr ]` (single brackets) remains **not**
+construct. Use `test` when you want a plain command (a condition builtin, a
+`&&` chain), or when the `sh` habit is faster to type. `[ expr ]` (single brackets) remains **not**
 kaish syntax — `[` opens a list literal, so use `test` or `[[ ]]`.
 
 ## Control Flow
@@ -1332,7 +1332,7 @@ These are documented limitations of the current implementation:
   - **Chaining** multiple commands with `;` *or* repeated `-e` (applied in order); both forms compose into one program.
   - **Regex is ERE** (extended, like `egrep`) by default, with a **GNU BRE-superset**: the BRE backslash-metas `\|` (alternation), `\(…\)` (groups), `\{N,M\}` (intervals), and `\+`/`\?` (quantifiers) are rewritten to their ERE meaning, so agent-idiomatic `s/cat\|dog/X/` and `s/\(a\)\(b\)/\2\1/` work instead of silently matching a literal `|`/`(`. Pass **`-E`/`-r`** for strict ERE, where those escapes match the literal character — the escape hatch for a literal `|`/`+`. The narrow trade-off: in the default dialect a backslashed meta is the operator, never a literal (match the character with a bracket class, `[|]`/`[+]`). A pattern-side backreference (`\1` in the pattern) is still rejected — the linear-time engine has none, in any dialect. (`grep` and `awk` share this superset; `awk` has no `-E` flag, so it always rewrites.)
   - **In-place edit** `-i` rewrites one or more file operands instead of streaming to stdout (no operands is a loud error). It routes through the approvals/trash gate like `tee`/`patch`. The GNU glued backup suffix `-i.bak` is **not** supported (kaish's lexer splits it at the dot); `set -o trash` keeps a recoverable copy instead.
-  - **Out of scope** (errors loudly, never half-runs): hold space (`h`/`H`/`g`/`G`/`x`), labels/branching (`b`/`t`/`:`), `w`/`r` file I/O, the `-i.bak` backup suffix, and GNU address extensions (`1~2`, `0,/re/`, `/re/,+N`). Reach for a real `sed` (external command) when you need those.
+  - **Out of scope** (errors loudly, never half-runs): hold space (`h`/`H`/`g`/`G`/`x`), labels/branching (`b`/`t`/`:`), `w`/`r` file I/O, the `-i.bak` backup suffix, and GNU address extensions (`1~2`, `0,/re/`, `/re/,+N`). Run an external `sed` when you need those.
 
 ### Execution
 

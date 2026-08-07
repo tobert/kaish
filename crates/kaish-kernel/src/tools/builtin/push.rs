@@ -50,9 +50,9 @@ struct PushArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Target name and values. Hidden sink — the real values are read off
-    /// `args.positional` (typed `Value`s, not stringified) per the
-    /// Value-typed positional rule.
+    /// Target name, then the values to append.
+    // Hidden sink: the real values are read off `args.positional` as typed
+    // `Value`s, not stringified.
     #[arg(hide = true)]
     rest: Vec<String>,
 }

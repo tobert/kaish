@@ -71,7 +71,7 @@ printf "%-8s %3d\n", s, n   # C-style format
 
 ## Not supported (and what to do instead)
 
-Each errors loudly with a hint. Reach for the kaish form on the right.
+Each errors loudly with a hint. Use the kaish form on the right.
 
 | awk construct | Use instead |
 |---|---|

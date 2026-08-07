@@ -48,9 +48,12 @@ struct MktempArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — the positional template is the same value as `--template`;
-    /// read off args.positional so users can write `mktemp TPL.XXXX` without
-    /// the flag. The `--template` flag in the schema covers both forms.
+    /// Template whose runs of `X` become random characters, wherever they
+    /// sit: `myapp.XXX.tmp` becomes `myapp.f9d.tmp`. Same as `--template`,
+    /// so `mktemp job.XXXXXX` and `mktemp --template job.XXXXXX` are
+    /// equivalent.
+    // Hidden sink: read off `args.positional`, so the `--template` param in
+    // the schema covers both spellings.
     #[arg(hide = true)]
     rest: Vec<String>,
 }

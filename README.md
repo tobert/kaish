@@ -288,6 +288,7 @@ error messages.
 | nonce | The confirmation token a latch-gated operation requires. |
 | spill | To write oversize output to a file, or the file that results. |
 | latch | The confirmation hold that a destructive operation waits on. |
+| escape hatch | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows, single quotes out of expansion. Never a workaround: an escape hatch is part of the design, and every restriction that has one names it. |
 
 Contributors: the writing style behind this vocabulary is in
 [docs/style.md](docs/style.md).

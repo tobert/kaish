@@ -43,8 +43,8 @@ struct KeysArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// The collection. Hidden sink — the real value is read off
-    /// `args.positional` per the Value-typed positional rule.
+    /// The list or record to read keys from.
+    // Hidden sink: the real, typed value is read off `args.positional`.
     #[arg(hide = true)]
     collection: Vec<String>,
 }

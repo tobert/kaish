@@ -48,8 +48,8 @@ struct ToJsonlArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// The list to serialize. Hidden sink — the real value is read off
-    /// `args.positional` per the Value-typed positional rule.
+    /// The list to serialize.
+    // Hidden sink: the real, typed value is read off `args.positional`.
     #[arg(hide = true)]
     value: Vec<String>,
 }

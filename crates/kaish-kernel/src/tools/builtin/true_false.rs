@@ -22,8 +22,9 @@ struct TrueArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals. POSIX true
-    /// ignores any arguments; clap parses them but we never read them.
+    /// Ignored — `true` exits 0 whatever operands it is given.
+    // clap needs a positional to bind the `--`-terminated tail that
+    // `to_argv()` always emits.
     #[arg(hide = true)]
     rest: Vec<String>,
 }
@@ -73,8 +74,9 @@ struct FalseArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals. POSIX false
-    /// ignores any arguments; clap parses them but we never read them.
+    /// Ignored — `false` exits 1 whatever operands it is given.
+    // clap needs a positional to bind the `--`-terminated tail that
+    // `to_argv()` always emits.
     #[arg(hide = true)]
     rest: Vec<String>,
 }

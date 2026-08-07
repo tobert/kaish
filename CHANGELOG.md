@@ -10,7 +10,34 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING: comma is significant only inside a `[...]`/`{...}` literal or
+  pattern.** A bare `,` used to lex as its own token everywhere, so
+  `sed -n 1,3p`, `cut -f 1,3`, `sort -k 2,2n`, and `echo a,b,c` were parse
+  errors requiring a quoting workaround, even though the only real
+  grammar uses of `,` are list/record literal separators (`[a, b]`,
+  `{k: v, j: w}`) and brace expansion (`{js,ts}`) — both always inside
+  brackets. The lexer now tracks bracket depth and folds a comma into the
+  surrounding bareword whenever it isn't enclosed by an open `[`/`{`, so
+  the examples above all work unquoted; quoting still works, since it was
+  always harmless. Brace expansion, list literals, and record literals are
+  unaffected — comma stays a separate token wherever a `[...]`/`{...}`
+  pair actually opens.
+
 ### Added
+- **`kaish-help`: three missing Foundations fragments** — a compound statement
+  (`for`/`while`/`if`/`case`) unable to feed a pipe, `[ … ]` not being a
+  command, and bare `yes`/`no` being lexer errors. All three are real
+  parse/lexer errors, verified live against 0.13, and were absent from the
+  fragment registry, so none reached
+  `Recipe::agent_onboarding()`/`Recipe::tool_description()` — the surfaces an
+  embedded agent actually reads. The pipe rule also joins `content/en/limits.md`.
+  (A fourth fragment from this same pass, unquoted comma splitting a word,
+  was retired above — the grammar was fixed instead of documenting the
+  workaround.)
+- **`Selector::with_overlay()`/`without_overlay()`** (`kaish-help`) — chainable
+  opt-in/opt-out for the new `Concept::Overlay` on any `Recipe`, e.g.
+  `Recipe::agent_onboarding().with_overlay()`.
 - **`Kernel::cancel_all_jobs()`** (GH #245) — cancels every tracked background
   job's token in one call, the same lever `kill %N` uses (in-process futures
   exit at their next checkpoint, external children get SIGTERM→SIGKILL).
@@ -71,7 +98,14 @@ breaking entries are marked **BREAKING**.
 - **`Approver::decide` runs under a patient hold** bounded by `Approver::decide_budget`
   (default 300s), so a human's think time does not trip the script timeout — and a
   cancelled execution never leaves a live grant, even when the cancellation lands
-  after the decision.
+  after the decision. The hold bounds how long the kernel waits, not how long an
+  approval stays valid; nothing expires underneath it (§A.10).
+- **`Approver::policy`/`decide` take a `DecisionContext`** (`docs/approval-ledger.md`
+  §C.7) carrying the deadline, the cancellation token, and an append-only
+  `AssessmentRecorder`. A router/specialist/LLM/human pipeline inside one `Approver`
+  can attribute each judgment, with model identity, and the records survive a
+  `decide` cancelled at its budget. One `Approver` remains the kernel's
+  authorization boundary.
 - **`JobId`/`JobStatus`/`JobInfo` (kaish-types) now derive `Serialize`/`Deserialize`**
   (GH #241) — the last type family in kaish-types without serde.
 - `schemars::JsonSchema` on those types sits behind the `schema` feature, matching
@@ -136,27 +170,51 @@ breaking entries are marked **BREAKING**.
   would make "the agent can write files" mean "the agent can approve itself".
 - No projection carries a credential, because no projected type has a credential
   field — there is no redaction step to forget.
-- **`approvals` builtin** (ledger PR 7) — `list`, `show`, `log`, `renew`, `grant`,
+- **`approvals` builtin** (ledger PR 7) — `list`, `show`, `log`, `cancel`, `grant`,
   `deny`, `revoke`; the only builtin that reaches the approval side.
 - `grant`/`deny`/`revoke` exit **1** in a session with no `ApproverHandle`, naming
-  the reason — an agent can see and renew its own requests, never approve them.
-- `list`/`show`/`log`/`renew` work in every session: reading is not deciding.
+  the reason — an agent can see and cancel its own requests, never approve them.
+- `list`/`show`/`log`/`cancel` work in every session: reading is not deciding.
 - `approvals grant` defaults to a 5-minute window (`--until 30s|5m|1h` overrides);
   every grant is still good for exactly one successful settlement.
 - An empty listing is `[]` under `--json`, not a string — "nothing pending" must
   not be a different shape from "one request".
-- **`Kernel::renew(&id)` / `approvals renew <id>`** (ledger PR 7,
-  `docs/approval-ledger.md` §B.5) — an expired request is re-raised as a new one
-  linked by `supersedes`, closing the case where a backgrounded gate was both
-  unfulfillable and undiscardable.
-- Renewal takes no `ApproverHandle`: the owning principal renews without authority,
-  which is what lets a gated agent keep its own request alive. Renewing another
-  principal's request without authority exits 1.
-- Renewal re-observes the request's transitions first and exits 1 naming what
-  changed, so it never posts claims that are already false.
-- Renewal is not re-approval — the new request starts undecided.
-- `JobManager::renew_gate`/`Job::renew_gate` restamp the originating background
-  job, so `wait`, `jobs`, and `/v/jobs/{id}/approval` name the live request.
+- **`Kernel::cancel(&id, rev, reason)` / `approvals cancel <id>`** (ledger PR 7,
+  `docs/approval-ledger.md` §B.5) — closes an undecided request, since nothing
+  times one out; asking again posts a new request linked by `supersedes`.
+- Cancellation takes no `ApproverHandle`: the owning principal cancels without
+  authority, which is what lets a gated agent withdraw its own request. Cancelling
+  another principal's request without authority exits 1.
+- Asking again re-observes the transitions first and exits 1 naming what changed,
+  so it never posts claims that are already false, and starts undecided.
+- `JobManager::cancel_gate`/`Job::cancel_gate` close a backgrounded job's held
+  request, so a gated job is no longer both unfulfillable and undiscardable.
+- **Approval requests do not expire** (`docs/approval-ledger.md` §A.10) — the kernel
+  stamps records with when things happened and never reads a clock to decide
+  anything. How long an unanswered request should live is embedder policy: a bridge
+  waiting on a human, a REPL, and a batch agent want three different answers, and a
+  kernel default is silently wrong for two of them. `live_capacity` is the backstop,
+  and a full ledger says so with a number rather than discarding the request.
+- **`ApprovalRequest::deadline: Option<SystemTime>`** defaults to `None`; when an
+  embedder sets one it is compared on observation, never enforced on a timer.
+- **`ApprovalOutcome::Closed { request, state }`** distinguishes "this request is
+  over, asking again will not help" from `LedgerUnavailable`'s "the ledger could not
+  record this, retry". `LedgerUnavailable` now describes only the ledger's own
+  condition and never a request's state.
+- **Every state-changing approval call is revision-checked**
+  (`docs/approval-ledger.md` §B.6) — `grant`/`deny`/`cancel` quote the revision they
+  act on, and one quoting a stale revision is refused and recorded as
+  `RevisionRejected` rather than applied. This is what makes a late out-of-band
+  answer safe: a human answering a prompt for an already-cancelled request cannot
+  revive it, and the attempt stays readable.
+- **`ApprovalScope` on every request and record** (`docs/approval-ledger.md` §A.7) —
+  kernel, session, and actor, with `scope()` on both `ApproverHandle` and
+  `Approvals`. The read side is scoped as deliberately as the grant side: under the
+  always-on statement tap a request carries the command text that raised it.
+- **Approval listings are paginated** — `Approvals::pending`/`log` take a
+  `PageRequest` (cursor on the stable `seq`, plus scope/state/time filters) and
+  return a page. The statement tap posts an entry per top-level statement, so an
+  unbounded listing was never going to hold in a long-lived embedder.
 - **`Approvals::ids()`** lists every request the ledger still holds, decided ones
   included — the enumeration `/v/approvals` and `approvals list --all` read.
 - **`RequestId::seq()`** returns the id's allocation sequence; sorting the id text
@@ -213,12 +271,35 @@ breaking entries are marked **BREAKING**.
   ledger, and no ledger entry carries a credential. Only a literal key is affected
   (`--confirm=${key}` renders unexpanded and carries no value either way), and
   nothing is stripped from the argv that executes.
+- **`PlannedValue` and the `Redactor` seam** (`docs/approval-ledger.md` §A.8) — plan
+  values serialize as `Plain` or `Redacted { kind, fingerprint }`, never as a bare
+  string, and one normalization point runs before the plan is classified, observed,
+  captured, attached, or projected, so a sink added later inherits the redaction.
+  The kernel redacts exactly one thing — its own approval key, which it can do
+  exactly because it minted it. It does not detect credentials in general: that is
+  an embedder-installed `Redactor`, because a shell cannot define what a secret is
+  and a spec promising best-effort detection would be making a guarantee it breaks.
+  With no `Redactor` installed every value is `Plain`, and nothing pretends
+  otherwise.
 - **`KernelConfig::with_statement_classifier`** and
   `kaish_tool_api::{StatementClassifier, StatementPosture}` — the classifier
   scopes, the chain decides. `Gate { reason, risk }` runs the same four-stage
   chain a gated `rm` runs, and all-`Defer` is exit 2 with **nothing of the
   statement executed**: no substitution, no redirect target created, no first
   loop iteration. There is no deny posture — refusal is a chain decision.
+- **`classify` returns `Result<StatementAssessment, ClassificationError>` and the
+  kernel maps `Err` to `Gate`, never `Observe`** (`docs/approval-ledger.md` §C.6) —
+  `Observe` is a bypass of the statement gate, so a classifier that fails to load,
+  times out, or sees out-of-distribution input must fail toward asking. A classifier
+  may raise posture but never lower one a static rule set.
+- **Classifiers receive a `StatementClassificationInput`** carrying the plan plus an
+  `ExecutionContext` (cwd, scope, sandbox profile, mounts) — a classifier judging a
+  recursive delete of `.` cannot judge it without knowing where `.` is. Logical VFS
+  paths and mount classes only, never host paths: classifier input frequently leaves
+  the process.
+- **`StatementAssessment` carries `assessor`, `model`, and `confidence`**, recorded
+  as an `Assessed` ledger entry — "a model allowed this" is not a reproducible audit
+  statement without a version or weight identity.
 - **`CommandNameClassifier`** is the reference classifier: it gates when any
   planned command's argv0 is in a named set, which tells `rm f` from `echo 'rm f'`
   and from `grep rm log` (measured 9/9 against raw-line token matching's 6/9).
@@ -240,6 +321,28 @@ breaking entries are marked **BREAKING**.
   `write` (`fs.overwrite`), `mv` (`fs.rename`), `kaish-trash empty` (`trash.empty`).
 
 ### Changed
+- **Twenty-three builtins no longer publish clap mechanism as a parameter's
+  description** — `pwd`, `test`, `jq`, `sed`, `mktemp`, `patch`, `scatter`,
+  `gather`, `push`, `typeof`, and the rest now describe what the operand does;
+  models were being shipped `Sink — to_argv() always emits --` instead.
+- **`sed --in-place` documents the real `-i.bak` limit** and drops its pointer
+  to the deleted `docs/issues.md`; the suffix is tracked in GH #180.
+- **Example labels in `sed`, `grep`, `kill`, and `jq` are imperative**
+  ("Match either alternative", not "Alternation (ERE or GNU BRE)") — a label
+  sits next to a command and should read like one.
+- **`escape hatch` is a kaish term** (`README.md`, `CLAUDE.md`) — about thirty
+  uses across the corpus already carry one meaning, so the guide records what
+  is true instead of banning it.
+- **BREAKING: `kaish-help`'s overlay-mode guidance is opt-in.** The
+  `--overlay`/`kaish-vfs` paragraph (formerly the always-on `Foundations`
+  fragment `overlay-mode`) is now its own `Concept::Overlay` and no longer
+  appears by default in `Recipe::agent_onboarding()` or
+  `Recipe::tool_description()`. Most embedders never enable `--overlay`
+  (kaijutsu never does; kaibo's read-only sandbox was hand-stripping this same
+  paragraph out of its tool description already), and unused overlay
+  instructions are worse than silence — they invite a `kaish-vfs commit` call
+  that does nothing. An embedder that uses overlay opts back in with
+  `Recipe::agent_onboarding().with_overlay()`.
 - **BREAKING: `ObservedResource.subscription` is `Option<SubscriptionId>`**
   (ledger PR 10) — the statement tap records one `cmd` resource per planned
   command and no subscription covers any of them, because `cmd.*` never enters

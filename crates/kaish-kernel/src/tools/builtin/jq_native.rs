@@ -55,12 +55,10 @@ struct JqArgs {
     #[arg(short = 'n', long = "null-input", visible_alias = "null_input")]
     null_input: bool,
 
-    /// Slurp mode (-s): read the whole input as a document stream and wrap
-    /// it in one array — always, even for a single document (real jq
-    /// semantics; see module docs "jq — stays one-document, gets louder").
-    /// On the `.data` path the upstream stage already handed over one
-    /// structured value, so there's exactly one "document" to wrap —
-    /// `-s` still wraps it in a one-element array, matching real jq.
+    /// Slurp mode (-s): read the input as a document stream and wrap it in
+    /// one array — always, even for a single document, matching real jq. A
+    /// value arriving on `.data` is one document, so `-s` wraps it in a
+    /// one-element array.
     #[arg(short = 's', long = "slurp")]
     slurp: bool,
 
@@ -68,23 +66,24 @@ struct JqArgs {
     #[arg(long = "path")]
     path: Option<String>,
 
-    /// Bind a kaish variable as a jq string: --arg NAME VALUE → $NAME.
-    /// Accept-and-ignore: body reads from args.named (kernel pre-parses both
-    /// tokens together as a 2-value pair via `consumes=2` in the schema).
-    /// At the clap layer we accept a single string because to_argv() joins
-    /// the pair as `--arg=NAME VALUE`.
+    /// Bind a kaish variable as a jq string: `--arg NAME VALUE` sets `$NAME`.
+    /// Repeatable: `--arg a 1 --arg b 2`.
+    // Accept-and-ignore at this layer: the body reads the pairs from
+    // `args.named`, which the kernel pre-parses as `consumes=2`.
     #[arg(id = "arg", long = "arg", action = clap::ArgAction::Append, value_name = "NAME VALUE")]
     _arg: Vec<String>,
 
-    /// Bind a kaish variable as a jq JSON value: --argjson NAME JSON → $NAME.
-    /// See _arg above for the consumes=2 / clap-layer split.
+    /// Bind a kaish variable as a jq JSON value: `--argjson NAME JSON` sets
+    /// `$NAME`. Repeatable: `--argjson a '[1]' --argjson b '{}'`.
+    // Same accept-and-ignore split as `--arg` above.
     #[arg(id = "argjson", long = "argjson", action = clap::ArgAction::Append, value_name = "NAME JSON")]
     _argjson: Vec<String>,
 
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — filter + path live on args.positional.
+    /// File to read instead of stdin, given after the filter:
+    /// `jq '.name' data.json`.
     #[arg(hide = true)]
     rest: Vec<String>,
 }
@@ -437,7 +436,7 @@ impl Tool for JqNative {
              variables into the filter with `--arg` / `--argjson` plus `-n`.",
             [
                 ("Extract a field", "cat data.json | jq '.name'"),
-                ("Raw string output", "cat data.json | jq -r '.version'"),
+                ("Output raw strings", "cat data.json | jq -r '.version'"),
                 ("Filter an array", "cat items.json | jq '.[] | select(.active)'"),
                 ("Read JSON from a variable", r#"jq -r '.name' <<< "$RESULT""#),
                 (

@@ -125,8 +125,8 @@ impl Tool for Kill {
             [
                 ("Terminate a job", "kill %1"),
                 ("Kill a process by PID", "kill --signal KILL 1234"),
-                ("Bash-style signal shorthand", "kill -9 %1"),
-                ("Named shorthand (case-insensitive, SIG optional)", "kill -STOP %1"),
+                ("Send signal 9 by number", "kill -9 %1"),
+                ("Send STOP by name", "kill -STOP %1"),
             ],
         )
         .with_raw_argv()

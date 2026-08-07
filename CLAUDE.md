@@ -188,8 +188,10 @@ text you touch; we are not scheduling a rewrite.
 
 - **Subset, not slang** — keep the vocabulary small; this constrains distinct words, not
   length. Avoid metaphors that name a mental act as a physical one ("reach for"). `muscle
-  memory` and `footgun` are load-bearing and stay; do not add more. Prefer the reader's
-  word over a tool's private one ("allocations", not dhat's "blocks"). American spelling.
+  memory`, `footgun`, and `escape hatch` are load-bearing and stay. The list grows only on
+  evidence — a candidate must already be in consistent use across the corpus with one
+  meaning, never on the argument that it would read well. Prefer the reader's word over a
+  tool's private one ("allocations", not dhat's "blocks"). American spelling.
 - **One term, one meaning** — a synonym reads as a new concept. Terms that carry a
   guarantee go in the table below. Example labels are imperative. Cross-references take one
   form: ``see `help <topic>` ``, or `docs/LANGUAGE.md`, "Section name".
@@ -239,6 +241,7 @@ every entry below was verified to be in real use in the governed prose.
 | nonce | noun | The confirmation token a latch-gated operation requires. |
 | spill | verb, noun | To write oversize output to a file, or the file that results. |
 | latch | noun, verb | The confirmation hold that a destructive operation waits on. |
+| escape hatch | noun | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows, single quotes out of expansion. Never a workaround: an escape hatch is part of the design, and every restriction that has one names it. |
 
 ## Changelog
 

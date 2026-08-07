@@ -43,12 +43,19 @@ uses, not on how long the text is — a smaller vocabulary usually costs words, 
 the correct trade.
 
 The class to avoid is the metaphor that names a mental act as a physical one: "reach for,"
-"the defensive-quoting dance," "escape hatch." A reader who learned English second, or a
-model working from a partial context, cannot recover the intent from the figure.
+"the defensive-quoting dance." A reader who learned English second, or a model working
+from a partial context, cannot recover the intent from the figure.
 
 Some idiom is load-bearing and stays. `muscle memory` names the design thesis in two
-words. `footgun` names a hazard class we ship a fix for. Treat these as terms, not as
-decoration, and do not add more.
+words. `footgun` names a hazard class we ship a fix for. `escape hatch` names a design
+commitment: kaish restricts, and every restriction ships a documented way out. Treat these
+as terms, not as decoration.
+
+**The list grows only on evidence.** A candidate must already be in consistent use across
+the corpus with one meaning — never on the argument that it would read well. `escape
+hatch` was on the banned list above until we counted: about thirty uses, one sense, no
+drift. The corpus was right and the guide was wrong, so the guide changed. Count the uses
+before you argue.
 
 Borrowed jargon is a separate problem from metaphor. When a tool has a private word for
 something the reader can count, use the reader's word: `dhat` calls an allocation a
@@ -149,6 +156,18 @@ struct docs and `//` comments are both safe places for mechanism.
 >
 > After: `/// Unset a variable (-u VAR). Repeatable: -u A -u B.`
 
+A **blank `///` line** is the third safe place, and the least obvious one. clap splits a
+doc comment there: everything before the blank line becomes short help, everything after
+becomes long help, and `params_from_clap` publishes short help only. `env`'s `-u` and
+`uname`'s `--host` both keep four lines of mechanism this way, directly under the field
+they explain, and neither ships a word of it. Use it when the mechanism belongs next to
+the published line rather than below it.
+
+That split is also why you cannot audit this by reading the source. A reviewer grepping
+`env.rs` for `to_argv` finds the mechanism and reports a leak that does not exist; only
+the published surface settles it. Read `Kernel::tool_schemas()`, or run the test named
+below.
+
 **When you touch a builtin, audit every `///` on its clap struct.** Grooming alone cannot
 reach this class: the mechanism leaks sit in files nobody has reason to open, so the audit
 has to ride along with any visit to the file.
@@ -164,16 +183,47 @@ the text. Grooming keeps both together.
 ## Known debt
 
 These are real violations, found by cross-model review of this guide. They are recorded so
-that whoever next touches these files knows to fix them, not as a rewrite plan.
+that whoever next touches these files knows to fix them, not as a rewrite plan. Clear an
+entry when you fix it, and add one when you find a violation you are not fixing today.
 
-- Roughly ten builtins publish `/// Sink — to_argv() always emits -- before positionals`
-  to the model (`pwd.rs`, `vars.rs`, `hostname.rs`, `kaish_clear.rs`, `kaish_last.rs`,
-  `kaish_status.rs`, `kaish_version.rs`, `true_false.rs`, and others).
-- `jq_native.rs` publishes `consumes=2` and clap-layer mechanism; `--argjson` says
-  `See _arg above`, naming a private field.
-- `sed.rs` publishes `(clap Append → schema repeatable)`.
-- `bg.rs` and `fg.rs` publish `Job specifier (e.g. %1) or PID` — there is no PID path, so
-  the doc describes a code path that does not exist. `wait.rs` carries the same string.
-- Existing example labels and cross-references predate the rulings above. Both are now
-  decided; the corpus has not caught up.
-- `docs/LANGUAGE.md` still contains `escape hatch` — the guide's own named example.
+- Example labels have not caught up with the imperative ruling. About a hundred of the 311
+  labels in the builtin corpus are still noun phrases ("Case-insensitive", "Compact
+  notation (default)"). Fix the ones in a file you are already editing; there is no sweep
+  scheduled, deliberately — the label needs the person who understands the example.
+- Error and diagnostic strings are full weight and largely unswept — about 745 failure
+  sites. An agent reads a failure message more often than any help topic, so this is the
+  highest-value surface left. A first pass found seven that name something the reader
+  cannot act on: `exec.rs:81` and `spawn.rs:103` (`allow_external_commands=false`, a
+  `KernelConfig` field — `env.rs:180` says "sandbox mode" for the same condition and reads
+  better), `timeout.rs:134` (`into_arc()`), `kaish_vfs.rs:39` and `:410`
+  (`KernelConfig::with_overlay(true)`, the `localfs` feature), `kill.rs:518`, and
+  `uname.rs:208` (cargo feature names).
+- **Open question on those seven:** some are arguably not leaks but deliberate
+  dual-audience messages. `kaish_vfs.rs:39` names the REPL flag *and* the embedder call,
+  each labeled, and a `timeout` dispatcher error can only be fixed by an embedder — so the
+  reader who can act IS the embedder. Decide the rule before rewriting them; the guide's
+  own test ("does the reader need it to predict behavior") does not settle who the reader
+  is when a builtin fails for a reason only the host can change.
+- Two messages state a constraint without its grammar: `sleep.rs:69` ("invalid time
+  interval" — no value, no accepted forms, unlike its sibling at `:107`) and
+  `kaish_trash.rs:196` (value but no suffix rules). `timeout.rs:100` is the model to copy.
+- Tools behind a capability feature are only walked by the mechanism-leak test when the
+  build enables them. Run it with `--features full` after touching `timeout`, `tokens`,
+  or `ps`; the default CI run does not see them.
+
+Mechanism leaks in **published param descriptions** are now a test, not a rule:
+`crates/kaish-kernel/tests/published_prose_tests.rs` walks the live registry and fails on
+`to_argv`, `consumes=`, `args.positional`, `clap`, and friends. It was written to lock in
+the sweep below and immediately found thirteen builtins the hand-audit had missed — which
+is the argument for keeping it. A `///` on a **hidden positional** is published:
+`params_from_clap` keeps hidden positionals on purpose, because they are the real operand
+surface for `cat`, `mkdir`, and the rest.
+
+Cleared: twenty-three builtins' `Sink —` docs, which published clap mechanism as the
+entire description of a parameter; `jq_native.rs`'s `consumes=2`, `See _arg above`, and
+its cross-reference to Rust module docs; `sed.rs`'s `(clap Append → schema repeatable)`,
+its `-i.bak` lexer note, and its cross-reference to the deleted `issues.md`; the
+`bg`/`fg`/`wait` "or PID" string, which described a code path that does not exist; and the
+four "reach for" and one "defensive-quoting dance" sites in help content, `fragments.rs`,
+and `docs/LANGUAGE.md`. `escape hatch` left this list by becoming a term rather than by
+being rewritten — see "Subset, not slang".

@@ -16,7 +16,9 @@ struct KaishVersionArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — to_argv() always emits `--` before positionals.
+    /// Ignored — `kaish-version` takes no operands.
+    // clap needs a positional to bind the `--`-terminated tail that
+    // `to_argv()` always emits.
     #[arg(hide = true)]
     rest: Vec<String>,
 }

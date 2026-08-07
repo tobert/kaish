@@ -2,7 +2,7 @@
 //! the expected bytes for a given invocation. Covers `tail -n +N` / `head -n
 //! -N`, `cut` delimiter passthrough + `-s`, `split --limit`, `jq -c`, `wc`
 //! formatting + newline counting, `tr -c`, `sort -V`, the trailing-newline
-//! policy (tac/base64/xxd), and the unquoted-comma argv message.
+//! policy (tac/base64/xxd), and unquoted comma-bearing field lists.
 //!
 //! Driven through `kernel.execute_with_options(...)` so the full lex → parse →
 //! dispatch → builtin path runs (not a builtin's `.execute()`). Expected
@@ -287,27 +287,22 @@ async fn tr_plain_delete_still_works() {
     assert_eq!(out, "abc\n", "tr -d removes the set (newline preserved)");
 }
 
-// ────────────────── unquoted-comma message (P2.1 / P4.3) ─────────────────
-// An unquoted comma in argv is intentionally LOUD (kaish reserves `,`), but
-// the message must teach quoting — not say "token pasting" (nothing was
-// pasted). The quoted idiom must work.
+// ────────────── comma is significant only inside a literal/pattern ───────
+// `,` separates elements in a `[...]`/`{...}` list/record literal or a brace
+// expansion (`{js,ts}`) — those are its only real grammar roles. Outside
+// brackets it is an ordinary bareword character, so an unquoted comma-bearing
+// argument (`cut -d: -f 1,3`) is one word, same as its quoted spelling.
 
 #[tokio::test]
-async fn unquoted_comma_message_teaches_quoting() {
-    let err = run_err("echo a,b").await;
-    assert!(
-        err.contains("comma") && err.to_lowercase().contains("quote"),
-        "comma error should mention the comma and quoting, got: {err}"
-    );
-    assert!(
-        !err.contains("token pasting"),
-        "comma error must not use the misleading 'token pasting' text: {err}"
-    );
+async fn unquoted_comma_field_list_works() {
+    let (out, code) = run("cut -d: -f 1,3", "a:b:c\n").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out, "a:c\n");
 }
 
 #[tokio::test]
 async fn quoted_comma_field_list_works() {
-    // The fix is the message, not the grammar — quoting is how you pass a list.
+    // Quoting still works — it was never required, just always harmless.
     let (out, code) = run("cut -d: -f \"1,3\"", "a:b:c\n").await;
     assert_eq!(code, 0, "out={out:?}");
     assert_eq!(out, "a:c\n");

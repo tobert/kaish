@@ -29,6 +29,15 @@ pub enum Concept {
     Builtins,
     /// Intentionally-missing features, known limitations, ShellCheck alignment.
     Limits,
+    /// Copy-on-write overlay mode (`--overlay`, `kaish-vfs`) — opt-in, not part of
+    /// the default onboarding spine. Split out of [`Self::Foundations`] because it
+    /// teaches a mode most embedders never enable: kaijutsu materializes a fresh
+    /// kernel per call and never turns overlay on, and kaibo's read-only sandbox
+    /// used to hand-strip this paragraph out of `Recipe::tool_description()`
+    /// (paragraph-splitting on the bold heading, `strip_write_side_paragraphs`)
+    /// because it contradicted "writes are refused" one paragraph later. An
+    /// embedder that *does* use overlay opts in with [`Selector::with_overlay`].
+    Overlay,
     // Capabilities — deferred until the capability-feature split gives it a body.
 }
 
@@ -41,6 +50,7 @@ impl Concept {
             Self::Foundations => "How kaish works",
             Self::Builtins => "Builtins",
             Self::Limits => "Limitations",
+            Self::Overlay => "Overlay mode",
         }
     }
 }
@@ -154,6 +164,28 @@ pub struct Selector {
     /// Emit `## <concept title>` section headers. Markdown-rendering clients want
     /// them; a plain-terminal REPL banner does not.
     pub headers: bool,
+}
+
+impl Selector {
+    /// Opt into [`Concept::Overlay`] guidance (`--overlay`, `kaish-vfs`). Every
+    /// [`Recipe`] excludes it by default — most embedders never enable overlay
+    /// mode, and the paragraph is dead weight (or an active mixed signal for a
+    /// read-only embedder) when they don't. Chain it onto a recipe:
+    /// `Recipe::agent_onboarding().with_overlay()`. A no-op if already present.
+    pub fn with_overlay(mut self) -> Self {
+        if !self.concepts.contains(&Concept::Overlay) {
+            self.concepts.push(Concept::Overlay);
+        }
+        self
+    }
+
+    /// Drop [`Concept::Overlay`] guidance, in case a future recipe or a
+    /// caller-built [`Selector`] included it. Symmetric with
+    /// [`Self::with_overlay`]; a no-op today since no recipe defaults it in.
+    pub fn without_overlay(mut self) -> Self {
+        self.concepts.retain(|c| *c != Concept::Overlay);
+        self
+    }
 }
 
 /// Live, schema-derived content the static fragments can't hold.
@@ -423,6 +455,85 @@ mod tests {
         );
     }
 
+    /// Three syntax rules an agent session verified live against kaish 0.13 —
+    /// compound-into-pipe, `[ … ]`, bare `yes`/`no` — must reach both
+    /// agent-facing recipes, since those are the surfaces an embedded agent
+    /// actually reads (a kaijutsu session burned a 63k-token tour hitting these
+    /// with no warning in either). A fourth rule, unquoted comma, was verified
+    /// the same way and got its own fragment (`comma-splits-word`) — the
+    /// grammar itself was fixed instead (comma is significant only inside a
+    /// `[...]`/`{...}` literal or pattern; see `docs/LANGUAGE.md`,
+    /// "Construction"), so the fragment was retired rather than kept as a
+    /// warning about behavior that no longer exists.
+    #[test]
+    fn agent_onboarding_covers_the_verified_syntax_gaps() {
+        let out = compose(&Recipe::agent_onboarding(), &no_content());
+        for needle in [
+            "compound statement can't feed a pipe",
+            "is not a command",
+            "are lexer errors",
+        ] {
+            assert!(out.contains(needle), "agent_onboarding missing {needle:?}:\n{out}");
+        }
+    }
+
+    #[test]
+    fn tool_description_covers_the_verified_syntax_gaps() {
+        let out = compose(&Recipe::tool_description(), &no_content());
+        for needle in [
+            "compound statement can't feed a pipe",
+            "is not a command",
+            "are lexer errors",
+        ] {
+            assert!(out.contains(needle), "tool_description missing {needle:?}:\n{out}");
+        }
+    }
+
+    /// Overlay mode is opt-in (see `Concept::Overlay`'s doc comment): neither
+    /// default recipe should pay for a paragraph most embedders never need —
+    /// kaijutsu never enables `--overlay`, and kaibo's read-only sandbox used to
+    /// hand-strip this same paragraph out of `tool_description()` output.
+    #[test]
+    fn overlay_excluded_by_default() {
+        let onboarding = compose(&Recipe::agent_onboarding(), &no_content());
+        let tool_desc = compose(&Recipe::tool_description(), &no_content());
+        for (name, out) in [("agent_onboarding", &onboarding), ("tool_description", &tool_desc)] {
+            assert!(
+                !out.contains("Overlay mode") && !out.contains("kaish-vfs commit"),
+                "{name} must not carry overlay guidance by default:\n{out}"
+            );
+        }
+    }
+
+    /// An embedder that *does* use overlay (kaibo's planned coder workspaces, for
+    /// instance) opts in with one chained call.
+    #[test]
+    fn overlay_can_be_composed_in_with_with_overlay() {
+        let out = compose(&Recipe::agent_onboarding().with_overlay(), &no_content());
+        assert!(out.contains("Overlay mode"), "with_overlay() must add the overlay guidance:\n{out}");
+        assert!(out.contains("kaish-vfs commit"), "overlay guidance should mention kaish-vfs commit:\n{out}");
+        assert!(out.contains("How kaish works"), "with_overlay() must not drop the rest of the spine:\n{out}");
+    }
+
+    /// `without_overlay()` is symmetric with `with_overlay()` — round-tripping
+    /// removes it again, and calling it when overlay was never present is a no-op
+    /// rather than an error.
+    #[test]
+    fn without_overlay_removes_it_and_is_a_noop_when_absent() {
+        let with_it = compose(&Recipe::agent_onboarding().with_overlay(), &no_content());
+        assert!(with_it.contains("Overlay mode"));
+
+        let round_tripped = compose(&Recipe::agent_onboarding().with_overlay().without_overlay(), &no_content());
+        assert!(
+            !round_tripped.contains("Overlay mode"),
+            "without_overlay() must remove it again:\n{round_tripped}"
+        );
+
+        let baseline = compose(&Recipe::agent_onboarding(), &no_content());
+        let noop = compose(&Recipe::agent_onboarding().without_overlay(), &no_content());
+        assert_eq!(baseline, noop, "without_overlay() must be a no-op when overlay was never selected");
+    }
+
     #[test]
     fn audience_filters_human_only_from_agent() {
         let agent = compose(&Recipe::agent_onboarding(), &no_content());
@@ -477,8 +588,8 @@ mod tests {
             nws < fail,
             "the most-important rule (no-word-splitting, rank 0) must lead:\n{out}"
         );
-        // Rank overrides registry position: structured-substitution (rank 2)
-        // appears *before* structured-output (rank 5) even though the registry
+        // Rank overrides registry position: structured-substitution (rank 4)
+        // appears *before* structured-output (rank 8) even though the registry
         // lists structured-output first — proof the rank sort is doing work.
         let subst = out.find("carries structured data").expect("has structured-substitution");
         let output = out.find("Structured output").expect("has structured-output");

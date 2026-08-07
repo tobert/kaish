@@ -35,7 +35,7 @@ struct SedArgs {
     quiet: bool,
 
     /// Sed expression to execute (-e). Repeatable: each `-e` adds an
-    /// expression, applied in order (clap `Append` → schema `repeatable`).
+    /// expression, applied in order.
     #[arg(short = 'e', long = "expression")]
     expression: Vec<String>,
 
@@ -47,9 +47,11 @@ struct SedArgs {
     extended: bool,
 
     /// Edit files in place (-i) instead of streaming to stdout. Requires file
-    /// operands. (The GNU glued backup suffix `-i.bak` is not yet supported —
-    /// kaish's lexer splits `-i.bak` at the dot; the trash snapshot under
-    /// `set -o trash` already keeps a recoverable prior copy. See issues.md.)
+    /// operands. The GNU glued backup suffix `-i.bak` is not supported —
+    /// kaish splits `-i.bak` at the dot, so the suffix arrives as a separate
+    /// word. Turn on `set -o trash` for a recoverable copy of the prior
+    /// contents.
+    // Tracked in GH #180 (write-model gate residuals).
     #[arg(short = 'i', long = "in-place")]
     in_place: bool,
 
@@ -76,22 +78,22 @@ impl Tool for Sed {
             "sed",
             "Stream editor for filtering and transforming text",
             [
-                ("Basic substitution", "sed 's/old/new/' file.txt"),
-                ("Global substitution", "sed 's/old/new/g' file.txt"),
+                ("Substitute the first match on each line", "sed 's/old/new/' file.txt"),
+                ("Substitute every match", "sed 's/old/new/g' file.txt"),
                 ("Replace the 2nd match only", "sed 's/x/Y/2' file.txt"),
-                ("Case-insensitive", "sed 's/hello/hi/gi' file.txt"),
+                ("Match case-insensitively", "sed 's/hello/hi/gi' file.txt"),
                 ("Delete lines matching pattern", "sed '/error/d' log.txt"),
                 ("Print only matching lines", "sed -n '/pattern/p' file.txt"),
-                ("Multiple commands (;)", "sed 's/a/b/; s/c/d/' file.txt"),
-                ("Multiple expressions (-e)", "sed -e 's/a/b/' -e 's/c/d/' file.txt"),
+                ("Chain commands with ;", "sed 's/a/b/; s/c/d/' file.txt"),
+                ("Chain expressions with -e", "sed -e 's/a/b/' -e 's/c/d/' file.txt"),
                 ("Append a line after matches", "sed '/ERROR/a ---' log.txt"),
                 ("Insert a line at the top", "sed '1i #!/bin/sh' script.sh"),
                 ("Change matching lines", "sed '/old/c replaced' file.txt"),
                 ("Transliterate characters", "sed 'y/abc/xyz/' file.txt"),
-                ("Line range", "sed '2,5d' file.txt"),
-                ("Alternative delimiter", "sed 's|/usr|/opt|g' file.txt"),
-                ("Capture groups (ERE)", "sed 's/(\\w+) (\\w+)/\\2 \\1/' file.txt"),
-                ("Alternation (ERE or GNU BRE)", r"sed 's/cat\|dog/pet/g' file.txt"),
+                ("Delete a line range", "sed '2,5d' file.txt"),
+                ("Use a different delimiter", "sed 's|/usr|/opt|g' file.txt"),
+                ("Swap two capture groups", "sed 's/(\\w+) (\\w+)/\\2 \\1/' file.txt"),
+                ("Match either alternative", r"sed 's/cat\|dog/pet/g' file.txt"),
             ],
         )
         .with_operations([KernelOperation::FsOverwrite.as_str()])

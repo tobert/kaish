@@ -49,9 +49,8 @@ struct FromJsonlArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// JSONL text to parse (or pipe it on stdin). Hidden sink — the real
-    /// value is read off `args.positional` per the Value-typed positional
-    /// rule.
+    /// JSONL text to parse. Reads stdin when no text is given.
+    // Hidden sink: the real, typed value is read off `args.positional`.
     #[arg(hide = true)]
     input: Vec<String>,
 }

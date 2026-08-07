@@ -6,6 +6,14 @@ surface (kernel `help`, REPL welcome, and the agent-onboarding / tool-descriptio
 prompt surfaces an embedder exposes) composes from the corpus. All tests/clippy/WASI
 green. Phases 4–5 (publish + i18n) pending (§10).
 
+> **Note (2026-08-07, kaijutsu adoption):** adopting `kaish-help` surfaced a sixth
+> `Concept`, `Overlay` (§4's enum listed five) — the `--overlay`/`kaish-vfs` guidance,
+> split out of the always-on `Foundations` spine because most embedders never enable
+> overlay mode and unused instructions for it are actively misleading (kaijutsu never
+> uses it; kaibo's read-only sandbox was already hand-stripping the same paragraph out
+> of its tool description). No default `Recipe` selects it now — an embedder opts in
+> with `Selector::with_overlay()`. §4's `Concept` enum is otherwise current.
+
 > **Note (post-MCP-drop):** this design was written when kaish shipped an in-tree MCP
 > server (`kaish-mcp`). That crate has since been removed — the MCP surface now lives
 > in *embedders* (kaibo, kaijutsu). The composition design below is **unchanged**: the

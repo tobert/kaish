@@ -41,7 +41,9 @@ struct GatherArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — option values read off args.named to preserve Value typing.
+    /// Ignored — `gather` reads its rows from the pipe.
+    // Hidden sink: option values are read off `args.named` to keep their
+    // `Value` typing.
     #[arg(hide = true)]
     rest: Vec<String>,
 }

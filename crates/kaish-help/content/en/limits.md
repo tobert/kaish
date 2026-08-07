@@ -18,8 +18,9 @@ belongs to kaish — `[[ … ]]` and native list literals (`xs=[a b c]`, see
 it is real syntax the parser understands, so kaish can **validate it before
 running** (catch a malformed test, an unknown operator, an unquoted expansion),
 and it carries the richer tests (membership, regex, shape guards) plus compound
-`&&`/`||`/`!` in one construct. Reach for `test` for muscle memory or where a
-plain command is wanted — `test -f x && echo yes`, `if test "$a" = "$b"; then`.
+`&&`/`||`/`!` in one construct. Use `test` when you want a plain command, or
+when the `sh` habit is faster to type — `test -f x && echo yes`,
+`if test "$a" = "$b"; then`.
 
 ## Lexer/Parser Limitations
 
@@ -27,7 +28,8 @@ plain command is wanted — `test -f x && echo yes`, `if test "$a" = "$b"; then`
 |-----------|---------|------------|
 | `[[ ]]` parsed as two brackets | Two separate `[` tokens, not a compound keyword | Works for tests; the two-token design deliberately reserves `[ ]` for kaish's native list literals |
 | Statement-opening keywords as bare arguments | `echo if` / `echo for` / `echo while` / `echo case` are parse errors (keyword starts a statement). Closers (`done`, `then`, `fi`) are fine. | Quote: `echo "if"` |
-| No token-pasting of adjacent unquoted words | `$VAR`/`$(cmd)`/globs are separate words. Unquoted text glued to an expansion (`echo $dir/f`, `echo /tmp/$(id -u).x`, `> $dir/f`) is a **parse error**, not a silent splat. Single-token words (`file.txt`, `v1.2.3`) are fine. | **Quote the whole word**: `"$dir/f"`, `"/tmp/$(id -u).x"`. See `help syntax` → Quoting. |
+| No token-pasting of adjacent unquoted words | `$VAR`/`$(cmd)`/globs are separate words. Unquoted text glued to an expansion (`echo $dir/f`, `echo /tmp/$(id -u).x`, `> $dir/f`) is a **parse error**, not a silent splat. Single-token words (`file.txt`, `v1.2.3`) are fine. A bare `,` is NOT one of these — it's significant only inside a `[...]`/`{...}` literal or pattern, so `sed -n 1,3p file` and `sort -k 2,2n` need no quoting. | **Quote the whole word**: `"$dir/f"`, `"/tmp/$(id -u).x"`. See `help syntax` → Quoting. |
+| A compound statement can't feed a pipe | `for`/`while`/`if`/`case` can't sit on the left of `|` — `for f in a b; do echo $f; done | grep a` is a parse error (`found '|' expected '&&', '||', 'NEWLINE', ';' ...`). | Capture the block's output first, then pipe the variable: `out="$(for f in a b; do echo $f; done)"; echo "$out" | grep a` |
 
 ## Builtin Constraints
 

@@ -1,10 +1,10 @@
 # The kaish approval ledger
 
-**Status:** living design doc — spec current as of 2026-08-05; PRs 1–8 landed, statement gate (§C.6) in design.
+**Status:** living design doc — spec current as of 2026-08-07. The ledger core, the latch cutover, and the statement gate have landed; §H names what remains before 0.14.0.
 This file in kaish `docs/` is the canonical copy (migrated from kaish-extras 2026-08-01;
 the extras copy is superseded).
 **Target:** kaish kernel (post-0.13) · **Motivating embedder:** kaijutsu · **First in-kernel consumer:** kaish-git's write profile
-**Inputs:** [safety-inventory](https://github.com/tobert/kaish-extras/blob/main/docs/design/safety-inventory-2026-08.md) (problem statement), [kaish-extras git.md](https://github.com/tobert/kaish-extras/blob/main/docs/git.md) §7 (first consumer), kaish `main` @ `818ff48`
+**Inputs:** [safety-inventory](https://github.com/tobert/kaish-extras/blob/main/docs/design/safety-inventory-2026-08.md) (problem statement), [kaish-extras git.md](https://github.com/tobert/kaish-extras/blob/main/docs/git.md) §7 (first consumer)
 **Reviews:** [gemini-pro](https://github.com/tobert/kaish-extras/blob/main/docs/design/reviews/ledger-review-gemini-2026-08.md), [gpt-sol](https://github.com/tobert/kaish-extras/blob/main/docs/design/reviews/ledger-review-gpt-2026-08.md)
 **Supersedes:** the confirmation latch, which is deleted outright (see §F)
 
@@ -48,6 +48,45 @@ The confirmation latch is deleted and its behavior is re-expressed on the ledger
 operation class (`fs.*`), one policy ("ask the human"), the same `--confirm=<token>` UX,
 the same exit code 2.
 
+## 0.1 Mechanism, not policy — the line this design holds
+
+> **The kernel owns the mechanism, the invariants, and the audit record. The embedder owns
+> the policy.**
+
+The kernel's half is the part that must be correct under concurrency and identical for
+everyone: the balance rule (one grant, one successful settlement), the state machine and
+its loud illegal transitions, the append-only record and its timestamps, the seams where a
+decision is asked for, and the types that make a bypass unrepresentable. The embedder's
+half is every question whose right answer differs per deployment: how long an unanswered
+request should live, what counts as a secret, what a classifier believes, when to escalate
+to a human.
+
+Two consequences are load-bearing enough to state as rules, because they read as absences
+otherwise and someone will eventually try to fix them back:
+
+**The kernel stamps records with when things happened. The kernel never reads a clock to
+decide anything.** Every entry carries `at: SystemTime` — an audit log without timestamps
+is not an audit log. But no *decision* consults a clock: there is no request TTL, no
+expiry sweep, and no staleness deadline on an attempt. A request lives until it is decided
+or cancelled. The grant's `not_after` is the sole exception and is not a counter-example:
+it is a value the approval side *sets*, compared once at redemption, never a deadline the
+ledger wakes up to enforce. See §A.10 for why, and §B.5 for what replaced expiry.
+
+**The kernel redacts exactly one thing: its own key.** It can do that exactly, with no
+heuristics, because it minted the credential and knows the string. It does not detect
+credentials in general — no flag-name lists, no URL-userinfo parsing, no entropy scoring.
+A shell cannot win that game and a spec that promises best-effort secret detection has
+made a guarantee it cannot keep. What the kernel provides instead is one normalization
+point every sink passes through and a value type that cannot serialize an undecided value,
+so an embedder that installs a redactor gets it applied everywhere, including to sinks
+added later. See §A.8.
+
+The same line resolves the rest of this design: the kernel supplies the classifier's input
+wrapper and the rule that a classifier error means `Gate` (§C.6), and the embedder supplies
+the classifier; the kernel supplies an append-only recorder for assessments (§C.7), and the
+embedder supplies the assessors. Where this document says the kernel does not do something,
+it is this line being held, not an omission.
+
 ### Vocabulary
 
 The ledger replaces the latch's words along with its code. These are the terms this
@@ -66,6 +105,10 @@ document uses; it does not use synonyms for them.
 | **standing grant** | A rule that auto-grants matching future requests, and is itself a ledger entry (§C.4). |
 | **subscription** | A glob-scoped registration making matching operations `observe` (record only) or `enforce` (decide) — §C.5. |
 | **authority** | Holding an `ApproverHandle`: the capability to grant, deny, revoke, and retrieve a key. |
+| **scope** | Which kernel, session, and actor a request belongs to (`ApprovalScope`, §A.7). Every request carries one; handles derive scoped views from it. |
+| **binding** | The context a grant was decided against — plan digest, cwd, scope, sandbox profile (`PlanBinding`, §A.9). A replay outside its binding is a new request, not a redemption. |
+| **assessment** | One attributed judgment recorded on the way to a decision — a classifier's, a specialist's, a human's (§C.7). Assessments explain a decision; they are not themselves decisions. |
+| **cancel** | To close an undecided request from the requesting side (§B.5). What replaced expiry: the kernel does not time a request out, so something must be able to end one. |
 
 **`latch` and `nonce` retire with the mechanism.** A latch is now a request in the
 `Requested` state; a nonce is now a name plus a key. Two spellings of the retired word
@@ -73,34 +116,6 @@ survive, because the §F.2 rename table is the whole break and does not reach th
 shell option (now `set -o approvals`), and `JobStatus::Gated` (wire spelling `"gated"`), which is
 pinned. §I asks whether they should change. PR 9 updates the Terms tables in `CLAUDE.md`
 and `README.md` to match this one.
-
-### Verification notes against the tree
-
-Claims from the safety inventory re-verified at `818ff48`; refinements worth carrying:
-
-- `generate_nonce` (`crates/kaish-kernel/src/nonce.rs:174-191`) was confirmed non-CSPRNG
-  and folded to `u32`. Fixed in kaish #259: 16 bytes from `getrandom`, 32 lowercase hex.
-  The rejected-attempt limit that shipped alongside it in the original plan was
-  **deliberately deferred** there, because a wrong `--confirm` guess does not identify
-  which issued credential it was aimed at. The attempt model in §A.5 is what gives that
-  counter somewhere principled to attach; it lands with the ledger core (§H).
-- `NonceStore` uses `kaish_types::clock::Instant` for TTL (monotonic) but records no
-  wall-clock time at all, so there is nothing to audit *with* even if we added a sink.
-- The dispatch-seam capture (`crates/kaish-kernel/src/kernel.rs:3322`) is unconditional and
-  explicitly documented as such — good, because the ledger needs the invocation on *every*
-  request. It does, however, substitute an empty argv when capture is unavailable
-  (`kernel.rs:3310-3321`), which §B.4 replaces with an explicit capture status.
-- `async_trait` is already a dependency of `kaish-tool-api` and `Tool` already uses it
-  (`crates/kaish-tool-api/src/tool.rs:19`). `ToolCtx` does not, but adding `#[async_trait]`
-  to it with **defaulted** async methods is not a breaking change for existing implementors.
-- `wait`'s single-latch behavior is at `crates/kaish-kernel/src/tools/builtin/wait.rs:138-140`
-  (`latch.get_or_insert`), with the "first latch wins" comment intact.
-- `Scope` has no readonly/pin concept of any kind
-  (`crates/kaish-kernel/src/interpreter/scope.rs:602-608`) — `set +o latch` is a plain
-  setter. Confirmed.
-- Cancellation is cooperative and has no dropped-future callback (`ctx.rs:82-101`), and the
-  dispatch seam's post-execution code runs only on normal return (`kernel.rs:3324-3340`).
-  §C.1's settlement guard exists because of those two facts.
 
 ---
 
@@ -266,6 +281,18 @@ Pretending to more than that would be the worst thing we could ship.
 #[non_exhaustive]
 pub struct ApprovalRequest {
     pub id: RequestId,
+    /// Which kernel, session, and actor this request belongs to (§A.7).
+    /// Mandatory: a helper hosting several sessions must never need an
+    /// external map to answer "whose request is this?".
+    pub scope: ApprovalScope,
+    /// Set when this request was raised while another was already being
+    /// satisfied — a statement gate that reaches an `fs.*` gate underneath
+    /// it. Lets a UI show one nested prompt instead of two unrelated ones
+    /// (§A.7).
+    pub parent: Option<RequestId>,
+    /// Bumped on every recorded transition. A late decision quoting a stale
+    /// revision is refused, not applied (§B.6).
+    pub revision: u64,
     /// Dotted taxonomy. In-tree values come from a closed enum (see A.6);
     /// plugins register a namespace prefix at construction ("git.").
     pub operation: OperationId,      // "fs.remove", "trash.empty", "git.push"
@@ -286,9 +313,19 @@ pub struct ApprovalRequest {
     /// contains a credential.
     pub hint: String,
     pub requested_at: SystemTime,
-    pub ttl: Duration,
-    /// Set when this request renews an expired predecessor (§B.5).
+    /// When this request stops being answerable. `None` — the default —
+    /// means it never does: it lives until decided or cancelled. The kernel
+    /// does not enforce this field on a timer; it is compared when the
+    /// request is next observed, exactly like a grant's `not_after`. An
+    /// embedder that wants deadlines sets them and cancels what it no
+    /// longer wants (§A.5, §B.5).
+    pub deadline: Option<SystemTime>,
+    /// Set when this request replaces a closed predecessor — the operation
+    /// was cancelled, or denied, and asked again (§B.5).
     pub supersedes: Option<RequestId>,
+    /// The context this request was raised in, and the context a redemption
+    /// must still match (§A.9).
+    pub binding: PlanBinding,
     /// The parsed statement plan, present exactly when the operation is the
     /// statement gate (§C.6). Typed here and mirrored as `cmd` resources, so a
     /// classifier reads structure and a standing grant matches globs.
@@ -444,6 +481,35 @@ pub enum LedgerEntry {
     /// when it matched nothing. Carries the running count; the fifth rejection
     /// against one request voids it (§F.3).
     TokenRejected   { seq: u64, at: SystemTime, request: Option<RequestId>, attempts: u32 },
+    /// An undecided request was closed from the requesting side (§B.5).
+    Cancelled   { seq: u64, at: SystemTime, request: RequestId, by: Principal, reason: CancelReason },
+    /// An operation quoted a revision that was no longer current and was
+    /// refused (§B.6). Recorded rather than dropped, so a late human answer
+    /// to an already-closed request is a readable fact.
+    RevisionRejected { seq: u64, at: SystemTime, request: RequestId, by: Principal,
+                       quoted: u64, current: u64, attempted: TransitionKind },
+    /// One attributed judgment on the way to a decision (§C.7). Never a
+    /// decision itself — an assessment explains, a `Granted`/`Denied`
+    /// decides.
+    Assessed    { seq: u64, at: SystemTime, request: RequestId, assessment: ApprovalAssessment },
+}
+```
+
+**The record envelope.** Entries are read through a versioned wrapper, never as a bare
+`LedgerEntry`, so a consumer written against 0.14 can be handed a later ledger's output and
+know what it is holding:
+
+```rust
+#[non_exhaustive]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct LedgerRecord {
+    /// Bumped when an entry's shape changes in a way a reader must notice.
+    pub schema_version: u16,
+    pub sequence: u64,
+    pub at: SystemTime,
+    /// Which kernel/session/actor this record belongs to (§A.7).
+    pub scope: ApprovalScope,
+    pub entry: LedgerEntry,
 }
 
 /// Names a resource without its transition claim: the pair an `Observation`
@@ -467,14 +533,29 @@ pub enum LostCause { Cancelled, ExecutorLost }
 ```
 
 `seq` is monotonic per ledger. `at` is wall-clock, from `kaish_types::clock::system_now`,
-and exists purely for the record — **all expiry math uses `clock::Instant`**, so a
-wall-clock jump can neither extend nor void a live grant. This is a genuine hazard for a
-system that intends to hold approvals for minutes-to-hours across a laptop suspend; call it
-out in the doc comment so nobody "simplifies" it later.
+and exists purely for the record. Since §A.10 there is no expiry math to protect from a
+wall-clock jump: nothing in the ledger consults a clock to decide anything, and the two
+remaining deadlines (`Grant::not_after`, the request's optional `deadline`) are wall-clock
+values compared when observed. A laptop suspend can therefore make a grant look expired
+that a monotonic clock would have kept alive — which is the correct reading, because
+`not_after` is a promise about wall-clock time made by whoever set it.
 
 No entry carries a credential (§A.2), so the whole log is safe to stream to a sink, project
 into `/v/approvals`, and print. Serde is stable and internally tagged, so NDJSON is the
 obvious durable form (§D.4).
+
+**Compatibility rules, so `schema_version` is worth carrying.** A version number that
+nobody knows how to react to is decoration:
+
+- Every public type in this document is `#[non_exhaustive]`, and every field added later
+  carries a serde default.
+- A reader **must tolerate unknown object fields** — they are a newer writer's additions,
+  not corruption.
+- A reader **must not silently drop an unknown entry variant or an unrecognized
+  `schema_version`.** It surfaces the record as unknown, with its `sequence` and `scope`
+  intact, so a gap in an audit log is visible as a gap. Dropping it would let a reader
+  report a clean history it did not actually verify.
+- `schema_version` bumps when a reader must notice a change, not on every addition.
 
 ### A.6 Anti-drift for the operation taxonomy
 
@@ -491,6 +572,184 @@ Plugins get `OperationId::namespaced(prefix, rest)`, where the prefix is registe
 tool-registration time. A plugin that posts `fs.remove` gets a loud rejection — the `fs.`
 namespace belongs to the kernel. This is cheap and it keeps a policy engine's vocabulary
 honest.
+
+### A.7 Scope, parenthood, and revision
+
+One process can host many sessions. A helper bridging an agent conversation to a human
+runs one kernel per session, or one ledger behind several kernels, and in either shape the
+question "whose request is this, and may this reader see it?" has to be answerable from the
+request itself. Answering it from an external map is how a confused deputy is built.
+
+```rust
+#[non_exhaustive]
+pub struct ApprovalScope {
+    /// The kernel that raised it. Minted per kernel at construction.
+    pub kernel_id: KernelId,
+    /// The conversation, connection, or task the kernel is serving. Supplied
+    /// by the embedder; `None` for a single-session kernel like the REPL.
+    pub session_id: Option<SessionId>,
+    /// The actor on whose behalf the operation runs, when the embedder
+    /// distinguishes one from the session (a subagent under a user).
+    pub actor_id: Option<PrincipalId>,
+}
+```
+
+Scope is mandatory on the request and travels onto every entry about it (§A.5). Handles
+derive from it: `approvals.scope(session)` yields a read side that sees only that session's
+requests, and `authority.scope(session)` a grant side that can decide only within it. **The
+read side needs scoping as much as the grant side does** — under the always-on statement
+tap (§C.6) a request carries the command text that raised it, so an unscoped reader in a
+multi-session process reads every session's commands.
+
+This is API hygiene, not a process boundary. A scoped handle stops a session's code from
+reaching another session's requests by accident or by confusion; it does not stop hostile
+Rust in the same process, which can reach anything the process can. §A.2's disclaimer
+applies here unchanged.
+
+**Parenthood.** A statement gate that grants can still reach an `fs.*` gate underneath it,
+which is correct defense in depth and produces a second request. `parent` names the first,
+so a UI can render one nested prompt. Two rules keep the hierarchy honest: a grant on a
+parent never implies authority for a child unless the parent grant's own operation and
+resources cover it, and a child is never auto-approved merely for having an approved
+parent. Approval storms are a real hazard — a human shown four prompts for one command
+learns to click through them — but the fix is coalescing in the UI on top of a correct
+hierarchy, not a broader grant underneath.
+
+**Revision.** Every recorded transition bumps `revision`. Decisions quote the revision they
+were made against, and one that quotes a stale revision is refused and recorded rather than
+applied (§B.6). This is what makes a late answer safe: a human who answers a prompt after
+the operation was cancelled, superseded, or already decided cannot revive it, and the
+attempt shows in the record.
+
+### A.8 Redaction: one seam, one type, one thing the kernel does itself
+
+The statement gate is always on (§C.6), so the rendered source of every top-level statement
+reaches five sinks: the classifier's input, the `Observed` entry, `Capture::Statement`,
+tracing, and the `/v/approvals` projection. Anything typed literally on a command line
+reaches all five.
+
+**What the kernel redacts: its own key, and nothing else.** It knows that string exactly —
+it minted it — so the redaction is exact and needs no detection. The kernel does not hunt
+for credentials in general. There is no flag-name list, no URL-userinfo parsing, no entropy
+scoring. Those are heuristics; heuristics have false negatives; and a spec that promises to
+find secrets it cannot define has made a guarantee it will break. This is §0.1's line: the
+kernel supplies the mechanism, the embedder decides what a secret is.
+
+The exposure this bounds is genuinely narrow, and the spec should say so rather than imply
+more. **An approval key authorizes exactly one successful settlement** (§A.1). Once
+redeemed it is inert, and a redeemed key in an audit record is a historical fact, not a
+credential. The case that still matters is a key that leaks *before* redemption into a
+surface reaching a less-trusted reader — a model's prompt, an out-of-band approval UI —
+where it is live authorization for as long as its grant is. That case is why the kernel
+does this one redaction itself instead of leaving it to the embedder like the rest.
+
+**What the kernel provides for everything else** is the shape, not the policy:
+
+```rust
+/// One value inside a rendered plan. A sink serializes `PlannedValue`, never
+/// a bare `String`, so a value reaches a sink only after something decided
+/// whether it was a secret.
+#[non_exhaustive]
+pub enum PlannedValue {
+    Plain(String),
+    Redacted {
+        /// The embedder's own label — "bearer-token", "password". The kernel
+        /// does not interpret it.
+        kind: String,
+        /// Stable salted digest prefix, when the redactor supplies one, so an
+        /// auditor can ask "the same credential as last time?" without
+        /// holding it.
+        fingerprint: Option<String>,
+    },
+}
+
+/// Installed by the embedder at kernel construction. Runs once, at the one
+/// normalization point, before any sink sees the plan.
+pub trait Redactor: Send + Sync {
+    fn redact(&self, value: &str, site: ValueSite) -> Option<RedactionMark>;
+}
+```
+
+Two properties do the work. **One normalization point:** the plan is redacted once, before
+it is classified, observed, captured, attached to a request, or projected — so a sink added
+later inherits the redaction instead of becoming a new leak. Redaction applied per-seam
+instead is how one credential reaches three sinks through three individually-correct
+fixes. **A type that cannot hold an undecided value:** a sink cannot serialize a
+`PlannedValue` without the redaction question having been answered, so forgetting is a
+compile error rather than a review finding.
+
+No `Redactor` installed means every value is `Plain`. That is the honest default for a
+shell: the kernel is not quietly pretending to protect something.
+
+### A.9 Replay binding
+
+A grant is a decision about an operation *in a context*. `Capture::Statement` records source
+plus a statement index (§B.4), and re-parsing that source later is not the same thing as
+replaying what was approved: cwd, variables, mounts, and expansions can all have moved
+underneath it.
+
+```rust
+#[non_exhaustive]
+pub struct PlanBinding {
+    /// Digest over the redacted, rendered plan — what was actually judged.
+    pub plan_digest: PlanDigest,
+    /// The working directory it was judged in, as a logical VFS path.
+    pub cwd: VirtualPath,
+    pub scope: ApprovalScope,
+    /// Which sandbox profile was in force, when the embedder names them.
+    pub sandbox_profile: Option<SandboxProfileId>,
+}
+```
+
+> **A grant may be redeemed only by an attempt whose binding matches the one the grant was
+> decided against, and whose operation and resources the grant covers. Anything else is a
+> new request.**
+
+This does not replace the redemption-time precondition check (§B.4); the two answer
+different questions. `StateResolver` asks whether the *world* still matches what was
+claimed. The binding asks whether the *operation* is still the one that was judged. A
+resolver cannot cover a cwd change, because nothing declared the cwd as a precondition.
+
+This absorbs §I.3's open question about path canonicalization: the canonical form is
+whatever the binding records, and a redemption compares against it rather than re-deriving
+one.
+
+### A.10 What the kernel does with time
+
+The kernel stamps records. The kernel does not decide with a clock.
+
+Every entry carries `at: SystemTime` (§A.5) — an append-only record of security decisions
+with no timestamps is not auditable, so observation stays. What the kernel does not have is
+any use of a clock as an *input to a decision*:
+
+- **No request TTL.** How long an unanswered request should live is policy, and it differs
+  per deployment in a way no single default can cover: a bridge waiting on a human wants a
+  long horizon, a REPL wants to ask again at the next prompt, a batch agent wants no
+  expiry at all. A kernel default here is wrong for someone by construction, and wrong
+  silently — the request is simply gone when they look.
+- **No staleness deadline on an attempt.** A dropped attempt is reported by `AttemptGuard`'s
+  outbox (§C.1), which knows the executor went away. Inferring the same fact from elapsed
+  time would be guessing at something the kernel is already told.
+
+What the kernel keeps, and why none of it is a counter-example:
+
+- **`Grant::not_after`** is set by the approval side and compared once, when a redemption is
+  attempted. The ledger never wakes up to enforce it. A grant with no bound would be a
+  standing grant, and §C.4 already has a deliberate, separate type for that.
+- **`ApprovalRequest::deadline`** is `Option`, defaults to `None`, and behaves the same way:
+  compared when observed, never enforced on a timer.
+- **The patient hold** around `Approver::decide` (§C.2) is watchdog machinery. It keeps a
+  human's think time from tripping a script timeout. It bounds how long the *kernel* waits,
+  not how long an approval is valid, and those were only ever confused because they were
+  measured in the same units.
+
+**The cost, stated plainly.** With no expiry, an undecided request occupies a live slot
+until something closes it, so `live_capacity` and `live_capacity_per_principal` (§D.4) are
+the only backstop — an embedder that posts requests nobody answers eventually fills the
+ledger. That is the intended trade. The failure mode is *the ledger is full*, with a number,
+at a point where someone can act, rather than *your approval silently expired*; silent
+expiry is exactly the failure kaish refuses everywhere else. An embedder that wants a
+deadline sets one and cancels what it no longer wants (§B.5).
 
 ---
 
@@ -519,7 +778,8 @@ per key; a second attempt appends nothing and returns `Ok`.
 | Entry | Uniqueness key |
 |---|---|
 | `Granted` / `Denied` | `request_id` (a second decision is `LedgerError::AlreadyDecided`) |
-| `Expired` | `(request_id, what)` — one for the request TTL, one for the grant `not_after` |
+| `Expired` | `(request_id, what)` — the grant's `not_after`, or a request's optional `deadline` when one was set (§A.10) |
+| `Cancelled` | `request_id` |
 | `Voided` | `request_id` |
 | `Redeemed` | `attempt_id`, allocated by the reservation itself |
 | `Settled` / attempt-level `Abandoned` | `attempt_id` |
@@ -552,7 +812,8 @@ stateDiagram-v2
 
     Requested --> Granted   : approval side posts Grant
     Requested --> Denied    : approval side posts Denial
-    Requested --> Expired   : request TTL, nobody decided
+    Requested --> Cancelled : requester withdraws (§B.5)
+    Requested --> Expired   : optional deadline, when the embedder set one
     Requested --> Abandoned : job discarded / session shutdown
     Requested --> Voided    : 5 rejected credentials
 
@@ -563,11 +824,16 @@ stateDiagram-v2
     Granted --> Abandoned : job discarded / session shutdown
     Granted --> [*]       : an attempt settled successfully — the chain closes
 
-    Expired --> [*] : renewable — a NEW request links via `supersedes`
+    Cancelled --> [*] : ask again — a NEW request links via `supersedes`
+    Expired --> [*]   : ask again — a NEW request links via `supersedes`
     Denied --> [*]
     Voided --> [*]
     Abandoned --> [*]
 ```
+
+**`Requested` has no timeout edge.** Nothing moves a request out of `Requested` except a
+decision, a cancellation, a discarded job, a voided credential chain, or a deadline the
+embedder chose to set (§A.10). A request nobody answers stays answerable.
 
 Attempt:
 
@@ -620,7 +886,9 @@ Request level:
 | — | `post_request` | `Requested` | `Requested` | — |
 | `Requested` | `grant` | `Granted` | `Granted` | — |
 | `Requested` | `deny` | `Denied` | `Denied` | — |
-| `Requested` | TTL elapsed (observed) | `Expired` | `Expired{what: Request}` | — |
+| `Requested` | `cancel`, current revision | `Cancelled` | `Cancelled{reason}` | — |
+| `Requested` | `cancel`, stale revision | unchanged | `RevisionRejected{quoted, current}` | `LedgerError::StaleRevision` — refused and recorded, never applied (§B.6) |
+| `Requested` | optional `deadline` elapsed (observed) | `Expired` | `Expired{what: Request}` | only when the embedder set one; there is no default (§A.10) |
 | `Requested` | `redeem` before any decision | ✗ | `TokenRejected{Some}` | `LedgerError::NotAuthorized` — exit 1, loud; no grant exists, so no key does either |
 | `Requested`/`Granted` | bad key, draft matches this request | unchanged | `TokenRejected{Some, attempts: n}` | `LedgerError::NotAuthorized` — exit 1, loud |
 | `Requested`/`Granted` | 5th bad key against this request | `Voided` | `TokenRejected{Some, attempts: 5}` + `Voided` | request is dead; a later *good* key fails naming the void |
@@ -634,8 +902,9 @@ Request level:
 | `Granted` | attempt settles `Unknown` | closed | `Settled` | effects unknown — a retry needs a fresh request |
 | `Granted` | `not_after` elapsed | `Expired` | `Expired{what: Grant}` | — |
 | `Granted` | `grant` again | ✗ | none | `LedgerError::AlreadyDecided` |
-| `Denied`/`Voided`/`Abandoned` | anything | ✗ | none | `LedgerError::Terminal` |
-| `Expired` | `renew` | new `Requested` | `Requested{supersedes}` | — |
+| `Requested`/`Granted` | `grant` or `deny`, stale revision | unchanged | `RevisionRejected{quoted, current}` | `LedgerError::StaleRevision` — the late-answer rule (§B.6) |
+| `Denied`/`Voided`/`Abandoned`/`Cancelled` | anything | ✗ | none | `LedgerError::Terminal` |
+| `Cancelled`/`Expired`/`Denied` | ask again | new `Requested` | `Requested{supersedes}` | — |
 
 The `TokenRejected{Some}` rows above cover the *bearer-key* redemption form (a presented
 `--confirm=<token>` string, or its ledger-core equivalent). The internal-context form (the
@@ -760,7 +1029,7 @@ For git this is the whole story: approve `refs/heads/main: a1b2… → c3d4…`;
 to `e5f6…` while the human was thinking, the push does not happen and the record says
 exactly why.
 
-*Settled at implementation time (PR 6),* because the text above leaves them open:
+Four rules the text above leaves open, settled here:
 
 - **`StateResolver` lives in `kaish-tool-api`, not the kernel.** The party that names a
   resource kind is the party that knows how to read it, and a plugin depends on
@@ -792,38 +1061,109 @@ exactly why.
   widening. Five call sites had the bug at once, invisibly, until a request first
   declared a transition.
 
-### B.5 Expiry and renewal — the dead-nonce-forever fix
+### B.5 Cancellation
 
-Today a `Latched` background job at T+61s is unfulfillable and unkillable-without-discard.
-Under the ledger:
+**A request lives until it is decided or cancelled.** Nothing times it out (§A.10), so the
+dead-nonce problem the latch had — a held operation that becomes unfulfillable at T+61s and
+cannot be killed without discarding the job — does not arise here: at T+61s the request is
+still `Requested` and still answerable. What the ledger needs instead is a way to *end* an
+undecided request, because with no clock closing them something must.
 
-- Expiry **materializes** an `Expired` entry the first time it is observed (on any read of
-  the request's state, or on the ledger's opportunistic sweep — the same place today's GC
-  runs). It does not silently vanish. The record shows "nobody decided in 60s", which is a
-  fact worth having.
-- `Expired` is not terminal for the *thread of intent*. `Kernel::renew(request_id)` (and
-  `approvals renew <id>`, and `Job::renew_gate()`) posts a **new** `Requested` carrying the
-  original's operation, resources, capture, principal, and trace context, with `supersedes:
-  Some(old_id)`. The chain is walkable, so "this took four attempts over two hours" is
-  legible. **Renewal is a requester action, not an approval action** — the principal that
-  owns the request may renew it without holding any authority, which is what lets a gated
-  agent keep its own request alive.
-- A session holding the ledger's authority may also renew any request, not only its own: it
-  could already `grant` or `deny` that request, so withholding renewal from it would be a
-  special case with nothing behind it. Every other session renewing another principal's
-  request is refused. Either way the renewed request names the **original** requester as its
-  principal — the renewer is not separately attributed, because renewal carries the thread
-  of intent forward rather than restarting it under a new name, and who acted is already in
-  the record (§A.2).
-- Renewal re-observes the transitions before posting. If the world already moved, renewal
-  fails loud rather than posting a request whose claims are already false.
-- `JobStatus::Latched` keeps its name and meaning ("held on an unsatisfied gate"). What
-  changes is that a latched job's held request is now a ledger reference, so renewal has
-  somewhere to write.
+```rust
+impl Requester {
+    /// Close an undecided request. Refused if `expected_revision` is stale
+    /// (§B.6) or the request is already terminal.
+    pub async fn cancel(
+        &self,
+        id: RequestId,
+        expected_revision: u64,
+        reason: CancelReason,
+    ) -> Result<ApprovalRequestView, LedgerError>;
+}
 
-**Renewal is not re-approval.** A renewed request starts at `Requested` and needs a fresh
-decision. A standing grant will auto-approve it again; a human will be asked again. That is
-correct: nothing about the passage of an hour makes a stale approval better.
+#[non_exhaustive]
+pub enum CancelReason {
+    /// The requesting side stopped wanting it: job discarded, session ended,
+    /// the agent moved on.
+    Withdrawn,
+    /// An embedder's own deadline policy closed it. The kernel records this;
+    /// it never originates it (§A.10).
+    DeadlinePassed,
+    /// Superseded by a later request for the same intent.
+    Superseded { by: RequestId },
+}
+```
+
+**Cancellation is a requester action.** The principal that owns the request may cancel it
+without holding any authority — that is what lets a gated agent withdraw its own request.
+A session holding the ledger's authority may also cancel any request, not only its own: it
+could already `deny` that request, so withholding cancellation would be a special case with
+nothing behind it. Any other session cancelling another principal's request is refused.
+
+`Cancelled` is terminal for the request and not for the thread of intent. Asking again
+posts a **new** `Requested` with `supersedes: Some(old_id)`, so "this took four attempts
+over two hours" stays legible and the chain stays walkable. The
+new request re-observes its transitions before posting: if the world already moved, it
+fails loud rather than posting claims that are already false. It names the original
+requester as principal, because the thread of intent is being carried forward rather than
+restarted under a new name, and who acted is already in the record (§A.2).
+
+**Asking again is not re-approval.** A superseding request starts at `Requested` and needs
+a fresh decision. A standing grant will auto-approve it again; a human will be asked again.
+Nothing about the passage of an hour makes a stale approval better.
+
+`JobStatus::Latched` keeps its name and meaning ("held on an unsatisfied gate"). A latched
+job's held request is a ledger reference, so cancellation has somewhere to write, and a job
+discarded while latched cancels its request with `Withdrawn` rather than orphaning it.
+
+**Teardown must close what it orphans, and this is a hard requirement rather than
+housekeeping.** A request whose requester is gone — a discarded job, a shut-down session —
+cannot be cancelled by its owner, because its owner no longer exists. Nothing else will
+close it either: an authority holder *could* `deny` it, but only if a human notices. It
+therefore holds a live slot for the life of the process, and capacity (§D.4) is a backstop
+against accumulation, not a substitute for cleanup.
+
+Every teardown path that can strand a request closes it:
+
+| Teardown | Obligation |
+|---|---|
+| A job is discarded | Cancel its held request, `Withdrawn` |
+| A job is cancelled or killed | Cancel its held request, `Withdrawn` |
+| A session shuts down | Cancel every request its principal still owns |
+| A kernel shuts down | Cancel every live request in its scope (§A.7) |
+
+Under a request TTL this was invisible: an orphan expired on its own and returned its slot,
+so a missing teardown path cost sixty seconds of capacity and nothing else. Without one it
+costs a slot permanently — which is why the obligation is written here rather than left to
+each call site to remember.
+
+**What an embedder builds on this.** Deadlines are the embedder's (§A.10), and `cancel` is
+the whole mechanism they need: a bridge that wants a fifteen-minute horizon runs its own
+timer and calls `cancel(id, rev, DeadlinePassed)`; one that wants none never calls it. The
+revision check is what makes that safe against the race that matters — a deadline firing at
+the same moment a human answers cannot close a request that just got decided, because the
+decision bumped the revision the timer was holding.
+
+### B.6 Revision checks — the late-answer rule
+
+Every recorded transition bumps the request's `revision` (§A.7). Every operation that
+changes a request quotes the revision it believes it is acting on:
+
+> **A decision, cancellation, or resolution quoting a revision other than the request's
+> current one is refused and recorded — never applied, and never silently ignored.**
+
+The refusal is itself an entry, so "a human answered a prompt for a request that had
+already been cancelled" is a fact an auditor can read rather than an event that vanished.
+
+This is what makes out-of-band approval safe. An approval that travels to a human and back
+crosses an unbounded gap, and during that gap the request can be decided by a standing
+rule, cancelled by its owner, superseded, or closed by a settlement. Without the check, the
+late answer wins by arriving last. With it, the late answer is refused against the state it
+was actually made against, which is the correct outcome and also the auditable one.
+
+Idempotency and revision-checking coexist without conflict: settling an attempt twice is
+still a no-op by `AttemptId` (§A.1), because that is one operation arriving twice rather
+than two operations disagreeing about state.
 
 ---
 
@@ -845,18 +1185,52 @@ branch on *why* it may not proceed:
 pub enum ApprovalOutcome {
     /// A grant existed (or was decided inline) and an attempt is reserved.
     Authorized(AttemptHandle),
-    /// No decision yet. The view is tokenless (§A.2).
-    Pending(ApprovalRequestView),
+    /// No decision yet. Carries what a caller needs to present the request
+    /// and to resume it; the view is tokenless (§A.2).
+    Pending(Box<PendingApproval>),
     Denied { request: RequestId, reason: String },
     /// A precondition on the grant no longer holds, or could not be observed.
     /// The grant is voided and the operation must re-request (§B.4).
     Refused { request: RequestId, detail: String },
+    /// The request was closed while the decision was in flight — cancelled,
+    /// superseded, or past a deadline the embedder set. Distinct from
+    /// `LedgerUnavailable`: nothing is wrong with the ledger, and retrying
+    /// this request will never work. Ask again (§B.5).
+    Closed { request: RequestId, state: RequestState },
     /// This context has no ledger — a unit-test harness or a minimal embedder.
     Unsupported,
     /// The ledger refused to record: sink backpressure or live capacity (§D.4).
+    /// A condition of the *ledger*, and retryable. Never used to report a
+    /// request's own state.
     LedgerUnavailable { reason: String },
 }
+
+/// What a caller needs to show a pending request and to pick it back up.
+#[non_exhaustive]
+pub struct PendingApproval {
+    pub request: ApprovalRequestView,
+    pub resume: ResumeAction,
+}
+
+/// How this request continues once it is decided. Structured, because a
+/// caller must not have to infer it from the capture's shape.
+#[non_exhaustive]
+pub enum ResumeAction {
+    /// Re-run the statement with the key; the digest names what was approved
+    /// (§A.9).
+    ConfirmStatement { plan_digest: PlanDigest },
+    /// Replay the captured invocation via `Kernel::confirm`.
+    RetryOperation,
+    /// Grantable and redeemable, but the kernel cannot replay it — the
+    /// caller must re-issue the operation itself (§B.4's capture statuses).
+    NotReplayable { reason: String },
+}
 ```
+
+**`Closed` exists because `LedgerUnavailable` was answering two questions.** One says *the
+ledger could not record this, try again*; the other says *this request is over, asking
+again will not help*. Collapsing them tells an embedder to retry a healthy ledger forever,
+and tells a human nothing about what actually happened to their request.
 
 **Every non-`Authorized` variant fails closed.** `proceed()` is the convenience that maps
 them to the `ExecResult` a tool returns without inspection: `Pending` → exit 2 with the
@@ -1175,8 +1549,48 @@ cannot be recorded is not made.
 ```rust
 pub trait StatementClassifier: Send + Sync {
     /// Synchronous and non-blocking, like `Approver::policy` (§C.2). Called once
-    /// per top-level statement.
-    fn classify(&self, plan: &Plan) -> StatementPosture;
+    /// per top-level statement. An `Err` means `Gate`, never `Observe`.
+    fn classify(
+        &self,
+        input: &StatementClassificationInput<'_>,
+    ) -> Result<StatementAssessment, ClassificationError>;
+}
+
+pub struct StatementClassificationInput<'a> {
+    /// The redacted, rendered statement (§A.8) and its structure.
+    pub plan: &'a Plan,
+    pub context: &'a ExecutionContext,
+}
+
+/// What the statement would run against. A classifier judging `rm -rf .`
+/// needs to know where "." is; one judging a write needs to know whether the
+/// target is a scratch mount or the project.
+#[non_exhaustive]
+pub struct ExecutionContext {
+    /// Logical VFS path, never a host path.
+    pub cwd: VirtualPath,
+    pub scope: ApprovalScope,
+    pub sandbox_profile: Option<SandboxProfileId>,
+    pub mounts: Vec<MountDescriptor>,
+}
+
+#[non_exhaustive]
+pub struct MountDescriptor {
+    pub prefix: VirtualPath,
+    /// The embedder's classification of what lives there.
+    pub class: MountClass,   // Project | Scratch | System | External
+    pub access: MountAccess, // ReadOnly | ReadWrite
+}
+
+#[non_exhaustive]
+pub struct StatementAssessment {
+    pub posture: StatementPosture,
+    /// Who judged. Recorded on the `Assessed` entry (§C.7).
+    pub assessor: AssessorId,
+    /// Stable version or weight identity, when a model decided. "A model
+    /// allowed this" is not a reproducible audit statement without it.
+    pub model: Option<ModelIdentity>,
+    pub confidence: Option<f32>,
 }
 
 #[non_exhaustive]
@@ -1190,6 +1604,31 @@ pub enum StatementPosture {
 }
 ```
 
+**Logical paths only.** `ExecutionContext` carries VFS paths and mount classes, never host
+paths. A classifier is frequently a model, its input frequently leaves the process, and
+`/home/amy/clients/acme` says things `Project` does not.
+
+**`Observe` is a bypass, so every uncertain answer must be `Gate`.** The kernel maps `Err`
+to `Gate` — not to `Observe`, and not to a panic. A classifier that fails to load, times
+out, sees input outside its distribution, or is unsure returns the safe answer by
+construction, and the alternative is a statement gate that quietly stops gating when its
+classifier breaks. Three rules follow from the same reasoning, and belong to whoever writes
+a classifier:
+
+- A classifier may **raise** posture to `Gate` freely. It may never lower a posture the
+  kernel's own static rules set — a model is an escalation path, not an override.
+- Dangerous syntax classes keep static gate floors that no classifier can clear.
+- The statement gate is not the only enforcement. Plugin and `fs.*` gates still fire
+  underneath it (§A.7's parenthood), so a classifier's false negative costs defense in
+  depth rather than all of it.
+
+**The command text is adversarial data.** A classifier reading a statement is reading input
+an agent may have been talked into producing, and an LLM-backed one is reading it as
+*prompt*. Whoever writes that classifier owns the consequences: structure the prompt so
+command text is data rather than instruction, schema-validate what comes back, and do not
+let a high-impact allow rest on the model alone. The kernel cannot enforce any of this,
+which is exactly why it is written down here.
+
 `KernelConfig::with_statement_classifier` registers one; with none registered, every
 statement is `Observe`. A gate-classified statement enters the existing chain unchanged —
 a standing grant auto-approves it, `Approver::decide` puts it in front of a human under
@@ -1197,6 +1636,15 @@ the patient hold, and all-`Defer` is exit 2 with the request pending, which at a
 returns the line to the user (§C.3) and in a script halts execution at that statement.
 The classifier has no deny: refusal is a chain decision (`Approver::policy`), because a
 scoping seam that can refuse is a second decision chain.
+
+**The classifier stays synchronous, and that is a decision rather than an oversight.** It
+runs in front of *every* top-level statement, including the ones nobody would ever gate, so
+making it async would put optional model or network latency on the path of `ls`, and would
+let a classifier's unavailability stall ordinary execution. The escape hatch already exists
+and costs nothing: a classifier too slow for the statement path returns `Gate`, and the
+expensive judgment happens in `Approver::decide`, which is async, bounded by a budget, and
+already the place slow decisions live. A classifier belongs preloaded and bounded — no
+downloads, no queue waits, no remote calls.
 
 **Deferral holds the whole line; replay is by statement index.** The capture is
 `Capture::Statement { source, index }` (§B.4): statements carry no source spans, so the
@@ -1211,8 +1659,7 @@ enforce policy (§C.5) and neither reads nor writes statement posture. `with_pol
 already covers everything script-reachable; the classifier is embedder-registered and no
 script surface mutates it.
 
-**Settled by the design review (deepseek, 2026-08-05)** — five points the section above
-left implicit, fixed here so the implementation does not re-derive them:
+**Five tap rules the implementation must not re-derive:**
 
 - **The tap fires at exactly two sites**: the top-level statement loop and
   `execute_argv`. Never inside `execute_stmt_flow` or the nested statement loops (user
@@ -1234,7 +1681,7 @@ left implicit, fixed here so the implementation does not re-derive them:
   registry and the classifier cannot disagree. If that ever changes, the precedence
   question must be answered here first.
 
-*Settled at implementation time (PR 10),* because the text above left it open:
+And the key-handling rule, which is the kernel's one redaction (§A.8) at this seam:
 
 - **The statement gate reads a presented `--confirm=<key>` off the plan before it
   drafts, and the captured source is credential-redacted.** Both halves are one rule
@@ -1259,6 +1706,60 @@ left implicit, fixed here so the implementation does not re-derive them:
 The default tap is advisory, not a durable audit trail — an embedder that needs a
 completeness guarantee uses the sink's reliability, and `EMBEDDING.md`'s tap section
 (PR 10) carries that caveat where embedders read it.
+
+### C.7 Assessments — recording how a decision was reached
+
+A decision records *what* was decided (§A.4). An assessment records *how*, and there are
+usually several: a classifier scoped the statement, a policy rule matched, a specialist
+model scored it, a human was asked. Only the last step posts `Granted`. Without a place to
+put the rest, "why did this get approved?" is answerable only from whatever the embedder
+happened to log on the side.
+
+```rust
+/// Handed to `Approver::policy` and `Approver::decide`.
+#[non_exhaustive]
+pub struct DecisionContext {
+    /// When the patient hold expires (§C.2). Read it to bound your own work.
+    pub deadline: Instant,
+    pub cancellation: CancellationToken,
+    /// Append-only. Records survive `decide` being cancelled at its budget.
+    pub assessments: AssessmentRecorder,
+}
+
+#[non_exhaustive]
+pub struct ApprovalAssessment {
+    pub request: RequestId,
+    pub assessor: AssessorId,
+    pub stage: AssessmentStage,
+    pub outcome: AssessmentOutcome, // Allow | Deny | Abstain | Escalate
+    pub reason: String,
+    pub risk: Option<RiskClass>,
+    pub confidence: Option<f32>,
+    /// Stable version or weight identity. "The specialist allowed this" is
+    /// not reproducible without it.
+    pub model: Option<ModelIdentity>,
+    pub latency: Duration,
+}
+```
+
+**A recorder, not a return value.** An approver that returned its assessments alongside its
+decision would lose them in exactly the case they matter most: a `decide` that overran its
+budget and was cancelled, or an LLM call that timed out, has no return path but has already
+learned something worth recording. Appending as it goes means the record survives the
+cancellation.
+
+**Assessments are not decisions.** An `Assessed` entry authorizes nothing; only `Granted`
+does. This keeps the balance rule (§A.1) intact no matter how many layers an embedder
+stacks inside its one `Approver`.
+
+**One `Approver` remains the kernel's authorization boundary.** A router feeding
+specialists feeding an LLM feeding a human is a routed pipeline *inside* an embedder's impl,
+not a chain the kernel composes. The kernel taking a list of approvers would have to answer
+whether deny overrides allow, whether allow short-circuits, whether a timeout is abstention
+or denial, and whether the human is always last — security-sensitive semantics that differ
+per deployment and that nobody should get by default. `DecisionContext` is what makes such
+a pipeline auditable without the kernel knowing its topology; reusable combinators can be
+written later, above this seam, without changing it.
 
 ---
 
@@ -1327,8 +1828,9 @@ let req = ApprovalRequest::builder("git.push")
 ```
 
 `ApprovalRequest` lives in `kaish-types`, so the builder produces a *draft* and
-`request_approval` stamps `id`, `principal`, `capture`, `context`, `requested_at`, and
-`ttl` from the context. A plugin cannot forge a principal or an invocation, and it cannot
+`request_approval` stamps `id`, `scope`, `parent`, `revision`, `principal`, `capture`,
+`context`, `binding`, and `requested_at` from the context — everything a plugin must not be
+able to choose. A plugin cannot forge a principal or an invocation, and it cannot
 put a credential in the `hint` because it has no way to obtain one — the literal `<token>`
 placeholder is substituted by a frontend holding an `ApproverHandle` (§D.3).
 
@@ -1353,7 +1855,10 @@ placeholder is substituted by a frontend holding an `ApproverHandle` (§D.3).
 // Kernel — construction mints exactly one authority capability
 fn build(config: KernelConfig) -> (Kernel, ApproverHandle);
 fn approvals(&self) -> Approvals;                          // read side, no authority
-async fn renew(&self, id: &RequestId) -> Result<ApprovalRequestView>;  // requester action
+/// Close an undecided request (§B.5). Requester action: no authority needed
+/// for your own request. Revision-checked (§B.6).
+async fn cancel(&self, id: &RequestId, rev: u64, why: CancelReason)
+    -> Result<ApprovalRequestView>;
 /// Reserve an attempt and replay the captured invocation. The handle is a
 /// required argument: replay is an execution (kernel) authorized by the
 /// approval side (handle), and the signature is what enforces that (§B.4).
@@ -1361,20 +1866,54 @@ async fn confirm(&self, by: &ApproverHandle, id: &RequestId) -> Result<ExecResul
 
 // ApproverHandle — the approval side. Not constructible any other way.
 // Pure-record operations only; nothing here dispatches an execution.
-async fn grant(&self, id: &RequestId, terms: GrantTerms) -> Result<()>;
-async fn deny(&self, id: &RequestId, reason: &str) -> Result<()>;
+// Every state-changing call is revision-checked (§B.6): a decision quoting a
+// stale revision is refused and recorded, never applied.
+async fn grant(&self, id: &RequestId, rev: u64, terms: GrantTerms) -> Result<()>;
+async fn deny(&self, id: &RequestId, rev: u64, reason: &str) -> Result<()>;
 async fn grant_standing(&self, g: StandingGrant) -> Result<StandingId>;
 async fn revoke_standing(&self, id: &StandingId, reason: &str) -> Result<()>;
 async fn subscribe(&self, s: Subscription) -> Result<SubscriptionId>;   // §C.5
 fn token_for(&self, id: &RequestId) -> Option<Token>;      // appends KeyRetrieved (§A.2)
+/// A view of this handle restricted to one session (§A.7). The derived
+/// handle can decide only within that scope.
+fn scope(&self, session: SessionId) -> ApproverHandle;
 
 // Approvals (read side)
-fn pending(&self) -> Vec<ApprovalRequestView>;    // the primitive the inventory asks for
+fn pending(&self, page: PageRequest) -> ApprovalPage;
 fn state(&self, id: &RequestId) -> Option<RequestState>;
 fn get(&self, id: &RequestId) -> Option<RequestChain>;  // request + decision + attempts
 fn standing(&self) -> Vec<StandingGrant>;
-fn log(&self, since: u64) -> Vec<LedgerEntry>;          // seq-cursored
+fn log(&self, since: u64, limit: usize) -> LedgerPage;  // seq-cursored, bounded
+/// A read side restricted to one session. Needed as much as the grant side
+/// is: a request carries the command text that raised it (§A.7).
+fn scope(&self, session: SessionId) -> Approvals;
 ```
+
+**Listings are paginated and filterable, not bare vectors.** The statement tap posts an
+`Observed` entry per top-level statement (§C.6), so in a long-lived embedder the log and
+the pending set are both unbounded in principle:
+
+```rust
+#[non_exhaustive]
+pub struct PageRequest {
+    pub cursor: Option<LedgerCursor>,
+    pub limit: usize,
+    /// Restrict to one session/actor. Independent of handle scoping — this
+    /// filters, that constrains.
+    pub scope: Option<ApprovalScope>,
+    pub state: Option<RequestState>,
+    pub since: Option<SystemTime>,
+}
+
+#[non_exhaustive]
+pub struct ApprovalPage {
+    pub items: Vec<ApprovalRequestView>,
+    pub next: Option<LedgerCursor>,
+}
+```
+
+The cursor is the stable `seq`, so a reader that stops and resumes cannot miss an entry or
+see one twice.
 
 **Where the handle comes from.** `Kernel::build` mints exactly one `ApproverHandle` and
 returns it to the embedder, which decides which sessions get a clone. A session that should
@@ -1405,7 +1944,7 @@ differs is what a frontend can *retrieve*:
   placeholder. Today's human UX, unchanged.
 - A session **without** the handle (the `agent()` / `agent_with_root()` / `isolated()`
   default) has no method that returns a credential. Its exit-2 message is `pending approval
-  <request-id> — an operator must grant it`. The agent can see, renew, and reason about its
+  <request-id> — an operator must grant it`. The agent can see, cancel, and reason about its
   pending requests; it cannot redeem them.
 - Exactly one builtin bridges to the approval side — `approvals` — and only through a
   handle installed on the session. Every other builtin has no path to `grant`, and a test
@@ -1427,15 +1966,15 @@ pattern):
 |---|---|
 | `approvals list [--pending\|--all\|--standing]` | typed `OutputData`, `--json` via the kernel |
 | `approvals show <id>` | full request + decision + attempt chain |
-| `approvals log [--since <seq>]` | the retained entries, seq-ordered; the record §E reads |
-| `approvals renew <id>` | post a superseding request; loud if the world already moved |
+| `approvals log [--since <seq>] [--limit N]` | the retained entries, seq-ordered and bounded; the record §E reads |
+| `approvals cancel <id>` | close your own undecided request (§B.5); no authority needed |
 | `approvals grant <id> [--until <duration>]` | **requires an `ApproverHandle` on the session**; there is no `--once` flag, because every grant is once (§A.1) |
 | `approvals deny <id> [--reason R]` | requires the handle |
 | `approvals revoke <standing-id>` | requires the handle |
 
 **The authority check is the single most important new property.** Without a handle,
 `approvals grant` fails with exit 1 and a message naming the reason. The agent can *see*
-what is pending and *renew* it; it cannot approve itself. Anything else makes the whole
+what is pending and *cancel* its own; it cannot approve itself. Anything else makes the whole
 exercise theater, given that the agent's whole job is running shell commands.
 
 **Multi-pending gates.** `ExecResult.approval` stays a single `Option<Box<…>>` — one
@@ -1484,8 +2023,10 @@ pub struct LedgerConfig {
     pub retained_entries: usize,
     /// Bounded sink queue. Default 1024 entries.
     pub sink_queue: usize,
-    pub request_ttl: Duration,        // default 60s — today's nonce TTL
     pub max_token_attempts: u32,      // default 5
+    /// Refuse a grant whose issuing principal is the request's own (§E.7).
+    /// Default false: a solo human at the REPL is legitimately both.
+    pub deny_self_approval: bool,
 }
 
 pub trait LedgerSink: Send + Sync {
@@ -1506,6 +2047,14 @@ memory pressure, and it is a real
 scenario for a long-running agent that gates thousands of operations and never settles
 them. Per-principal quotas and a `ledger.live_requests` metric make the DoS case visible
 before it becomes an outage.
+
+**These limits carry more weight than they look like they do.** Since nothing expires
+(§A.10), the live index is relieved only by decisions, settlements, and cancellations —
+capacity is the sole backstop against an embedder that asks and never answers. That is the
+deliberate trade: a full ledger says so, with a number and a remedy, where a silent expiry
+would have quietly discarded the request instead. An embedder holding requests open for
+long human latencies should raise `live_capacity` to match its own concurrency and watch
+the metric.
 
 **Sink backpressure fails closed, and never blocks the reactor.** The sink is fed by a
 bounded async queue of 1024 entries. When the queue is full, the ledger does not block the
@@ -1543,7 +2092,7 @@ The old latch nonce was one string doing two jobs: it *identified* the request a
 
 - **`RequestId`** is the request's **name**. Public by design — safe to print, put in a
   tool result, hand to anyone. Everything about the request except redemption works by
-  name: inspect it, renew it, approve it, deny it.
+  name: inspect it, cancel it, approve it, deny it.
 - **`Token`** is the **key**. A secret credential the kernel holds; no public type has a
   field for it, and only a session holding an `ApproverHandle` can retrieve it (§D.3). An
   authority-less session never sees it — not redacted out, never present. It is a **bearer**
@@ -1948,235 +2497,94 @@ unknown) · `approval.voided` (warn) · `approval.standing_issued` (info) ·
 
 ## H. Kaish PR breakdown
 
-**Landed:** `security(kernel): CSPRNG confirmation nonces` — kaish #259, merged 2026-08-02.
-It replaced the 32-bit non-CSPRNG generator and made entropy failure loud. Its
-rejected-attempt half was deferred for want of an attempt-identity model; that model is
-§A.5 and the counter lands with PR 2 below.
+Dependency order; each PR carries its own tests, docs, and changelog bullets. No
+compatibility steps and no parallel old/new types — the ledger is unreleased, so a change
+to it is a rewrite rather than a migration.
 
-The plan is aggressive-clean: no compatibility step, one cutover. The latch-pin PR that
-originally sat here is folded into PR 5 — building hardening on `NonceStore` when
-`NonceStore` is about to be deleted is wasted motion. Dependency order; each PR carries its
-own tests, docs, and changelog bullets.
+**Landed.** PRs 1–8 built the ledger and cut the latch over to it; PR 10 built the
+statement gate (§C.6). Their contents are the body of this document, and their
+decision records are in `git log`. What each one carried:
 
----
+| PR | Carried |
+|---|---|
+| 1 | `kaish-types::approval` — the vocabulary (§A) |
+| 2 | The ledger core: state machine, credential index, partitioned retention, sink backpressure (§A, §B, §D.4) |
+| 3 | `ToolCtx::request_approval`/`approvals`/`settle_with` and the drop-safe `AttemptGuard` (§C.1) |
+| 4 | The decision chain, the authority capability, standing grants (§C.2, §C.4) |
+| 5 | The cutover: the latch deleted, `fs.*` gate sites moved to the ledger (§F) |
+| 6 | Redemption-time precondition verification (§B.4) |
+| 7 | `/v/approvals`, the `approvals` builtin (§D.3) |
+| 8 | `fs.*` observability subscriptions (§C.5) |
+| 10 | The statement gate: `Plan`, the classifier seam, the two-site tap, `Capture::Statement` replay (§C.6) |
 
-**PR 1 — `feat(types): approval-ledger vocabulary`**
-
-Add `kaish-types::approval`: `RequestId`, `Token`, `AttemptId`, `OperationId`, `RiskClass`,
-`Resource`, `StateClaim`, `Transition`, `Principal`, `Capture`, `Invocation`,
-`RequestContext`, `ApprovalRequest` + builder, `ApprovalRequestView`, `Grant`, `GrantTerms`,
-`Grounds`, `Condition`, `Observation`, `StandingGrant`, `ResourcePattern`, `Subscription`,
-`Decision`, `Outcome`, `LostCause`, `LedgerEntry`, `RequestState`, `AttemptState`
-(`Reserved`/`Settled`/`Abandoned`), `ResourceRef` (kind + id), plus the id newtypes
-(`StandingId`, `SubscriptionId`) and the small enums they name (`PrincipalKind`, `Expiring`,
-`OperationPattern`). Pure data plus serde; no behavior. Additive, not breaking. Pattern
-*matching* stays out (it needs `kaish-glob`, which `kaish-types` must not depend on) — only
-the pattern data lives here.
-
-*Tests that prove it:* serde round-trip for every `LedgerEntry` variant including the
-internal tag; **no public type in the module has a field of type `Token`** (an API-surface
-snapshot test — this is the §A.2 boundary, and it is checkable); `Grant` has no redemption-
-limit field (the single-success rule is structural, not configurable — §A.1); a `RequestId`
-renders as `req_<8hex>_<seq>` and contains no hyphen, and a short form is rejected on parse;
-an `ApprovalRequest` with an empty operation fails to build; `OperationId::namespaced`
-rejects the reserved `fs.`/`trash.` prefixes; `StateClaim::Unspecified` never compares equal
-to a concrete claim; builder-drafted requests carry no principal and no capture (proving
-those are kernel-stamped).
+Also landed: `security(kernel): CSPRNG confirmation nonces` (kaish #259), which replaced
+the 32-bit non-CSPRNG generator and made entropy failure loud.
 
 ---
 
-**PR 2 — `feat(kernel): the approval ledger core`**
+### Remaining work
 
-`Ledger`, the `Requester`/`Approvals`/`ApproverHandle` split, both state machines, the
-§B.1 linearization contract, attempt reservation and idempotent settlement, the credential
-index with `KeyRetrieved`, the rejected-attempt limit #259 deferred, partitioned retention,
-`LedgerSink` with bounded-queue backpressure, `LedgerConfig`, the invariant checks, and the
-recovery sweep. The `ApproverHandle`'s **pure-record** methods land here — `grant`, `deny`,
-`grant_standing`, `revoke_standing`, `token_for`. `Kernel::confirm(&handle, id)` does
-**not**: it dispatches an execution, and there is nothing to replay until gate sites exist,
-so it lands with the cutover (PR 5). Wired to **no gate sites** — a self-contained subsystem
-with no observable behavior change. Additive, not breaking.
+**R1 — `refactor(kernel)!: identity, binding, and the versioned record`**
 
-*Tests:* the §B.3 transition tables as an rstest matrix, with every illegal transition
-asserted to return the specific `LedgerError` **and** to leave the state unchanged; two
-concurrent redemptions of one grant produce exactly one `Redeemed` and one
-`AttemptInFlight`; after an attempt settles non-zero a second redemption succeeds, and after
-one settles `Exit(0)` a second presentation reports the settled outcome without a new
-`Redeemed`; a second successful settlement against one grant is `InvariantViolated`;
-settling the same `AttemptId` twice appends one entry and returns `Ok`; a derived event
-posted twice appends once; the live index fails loud rather than evicting a live chain, and
-a full sink queue returns `LedgerUnavailable` rather than blocking or dropping; `Requester`
-has no method producing a `Grant` and `ApproverHandle` has no public constructor
-(compile-fail tests via `trybuild`); `token_for` appends `KeyRetrieved` naming the retriever,
-and a key redeems from a principal other than the requester's (bearer, by design — §A.2);
-wall-clock jumps forward and backward neither extend nor void a grant; `seq` is gap-free
-under concurrent posts from 16 tasks; the recovery sweep closes a `Redeemed` with no
-successor as `Abandoned`; the **fifth** bad credential presentation voids the request and a
-subsequent *good* one fails naming the void, while five bad presentations matching no live
-request void nothing.
+§A.7, §A.9, and §A.5's envelope: `ApprovalScope` on every request and record, `parent`,
+`revision`, `PlanBinding`, `LedgerRecord` with `schema_version`, and `scope()` on both
+`ApproverHandle` and `Approvals`. The widest of these lanes and the one everything else
+sits on, so it goes first.
 
----
+*Tests:* a request raised under a scoped handle is invisible to another session's
+`Approvals`; a nested `fs.*` gate under a statement gate names the statement's request as
+`parent`; a grant whose binding disagrees with the replay's cwd is refused and a new
+request is posted; an unknown entry variant round-trips as unknown rather than being
+dropped.
 
-**PR 3 — `feat(tool-api): ToolCtx::request_approval — plugins as first-class gate producers`**
+**R2 — `refactor(kernel)!: no clock-driven decisions`**
 
-`#[async_trait]` on `ToolCtx`; defaulted `request_approval` / `approvals` / `settle_with`;
-`ApprovalOutcome` and its `proceed()`; the `AttemptHandle`; the dispatcher's `AttemptGuard`
-with its synchronous outbox; `ExecContext`'s real implementations. Defaulted methods mean
-existing implementors compile unchanged — additive, not breaking. **This is the PR
-kaish-git is blocked on.**
+§A.10 and §B.5: delete `request_ttl`, the request-expiry path, and `attempt_stale_after`;
+`ApprovalRequest::deadline` becomes `Option`, defaulting to `None`; add `Requester::cancel`
+and `CancelReason`; add `ApprovalOutcome::Closed`; and **wire the teardown obligations in
+§B.5's table**, which is the lane's real risk — `abandon_request` today has exactly one
+production caller (the cancelled-grant undo in `ledger/approver.rs`), so job discard, job
+kill, session shutdown, and kernel shutdown all currently strand a held request. Expiry was
+covering for that; nothing covers it after this lane.
 
-*Tests:* a bare `ToolCtx` impl using the defaults returns `Unsupported` → exit 1 and posts
-nothing (fails closed); the kernel's impl round-trips a request through the ledger; a
-dropped tool future settles its attempt as `Outcome::Unknown{Cancelled}` and never as an
-exit code (the test that would have caught the after-return design); a panicking tool
-settles the same way; an in-tree fixture tool that depends on **only `kaish-tool-api`**
-gates a synthetic `plugin.dangerous` operation end to end — request, defer, exit 2,
-out-of-band grant, `confirm` replay, settle. That fixture is the acceptance criterion: if it
-needs `kaish-kernel` or `as_any_mut`, the PR is not done.
+*Tests:* the parked case on `fix/approval-lease-expiry` — a decision that takes longer than
+any lease is honored — plus a request still `Requested` after an interval that would have
+expired it; `cancel` on another principal's request is refused; a cancelled request's
+`supersedes` chain is walkable; `Closed` is returned where `LedgerUnavailable` used to be,
+and `LedgerUnavailable` no longer describes a request's own state. And one test per row of
+§B.5's teardown table, each asserting the live count returns to zero — a discarded job, a
+killed job, a shut-down session, and `Kernel::shutdown` with a gated job outstanding.
 
----
+**R3 — `refactor(kernel)!: revision checks on every transition`**
 
-**PR 4 — `feat(kernel): Approver chain, authority capability, and standing grants`**
+§B.6: `revision` quoted by `grant`/`deny`/`cancel`, `LedgerError::StaleRevision`, and the
+`RevisionRejected` entry.
 
-The four-stage chain (standing → `policy` → `decide` → defer), `KernelConfig::with_approver`
-/ `with_principal` / `with_approver_handle`, `Kernel::build` returning the handle,
-`StandingGrant` matching against `kaish-glob`, the patient-hold wrapper around `decide`.
-Additive; default behavior (no approver configured) is exactly today's defer-to-exit-2. Not
-breaking.
+*Tests:* a decision quoting a stale revision is refused **and** recorded; a cancel racing a
+grant leaves exactly one winner and one `RevisionRejected`; settling twice is still a
+silent no-op, since idempotency and revision-checking must not be confused.
 
-*Tests:* stages fire in order and a non-`Defer` short-circuits; `Defer` through all four
-yields exit 2 with a pending view; a standing grant covering 3 of 4 resources **Defers**
-(all-or-nothing); kind must match exactly, only `id` globs; a standing grant copies the
-request's transitions into the grant's conditions; `max_uses` consumption is exact under 8
-concurrent matching requests; `decide` runs under a patient hold so a 90-second decision
-does not trip a 30-second script timeout; cancellation during `decide` posts nothing and
-never grants; `Approver::decide` is never invoked while the ledger lock is held (a
-deadlock-shaped test: `decide` calls `ctx.approvals().pending()`); an `Approver` receives an
-`ApprovalRequestView` and has no path to a credential.
+**R4 — `refactor(kernel)!: the classifier contract and assessments`**
 
----
+§C.6's `StatementClassificationInput`/`ExecutionContext`/`StatementAssessment` and the
+`Err` → `Gate` mapping; §C.7's `DecisionContext`, `AssessmentRecorder`, and the `Assessed`
+entry.
 
-**PR 5 — `refactor(kernel)!: the latch becomes the ledger` — BREAKING, the cutover**
+*Tests:* a classifier returning `Err` gates and does not observe; a panicking classifier
+gates rather than unwinding into the statement loop; a classifier cannot lower a static
+floor; assessments appended before a `decide` cancellation survive it; `ExecutionContext`
+carries no host path.
 
-One PR, no compatibility step. Delete `NonceStore` and `NonceScope` and every latch type.
-Reimplement `latch_result`, `gate_overwrites`, `rm`'s `decide_rm_action`, and `kaish-trash
-empty` on `request_approval` — ten gate sites, rewritten in ledger vocabulary. Apply the
-§F.2 rename table across `ExecResult`, `JobInfo`, the `--json` envelope, and the VFS path.
-`set -o latch` becomes `set -o approvals`, the whole-namespace `fs.*` enforce policy (no
-glob, no `observe` — those are PR 8); `set +o approvals` removes it and is refused under a
-pin. `JobStatus::Latched` becomes `JobStatus::Gated` (wire `"gated"`). Land
-`Kernel::confirm(&handle, &id)` here — this is the first PR with something to replay — along
-with `RedemptionContext` correlation and the `Capture` status, so replay stops substituting
-an empty argv. Carry the §F.3 hardening that belongs with the cutover: the policy pin, and
-the end of reusable redemption (one successful settlement per grant, a key presented after
-success reporting the settled outcome instead of re-running it). Insta snapshots updated in
-the same PR.
+**R5 — `refactor(kernel)!: redaction seam and pagination`**
 
-**Write the operation matrix first** — operation × trash × approval × reversible ×
-foreground/background/direct → expected entries and expected failure behavior — and land it
-as the test table. The invariant "a trash failure is loud, never falls through to an
-unprotected overwrite" is a row in it that must not change.
+§A.8's `PlannedValue`, the single normalization point, and the `Redactor` trait, with the
+approval key as the one in-kernel redaction; §D.2's `PageRequest`/`ApprovalPage` and the
+bounded `log`.
 
-*Tests:* **the entire existing `latch_trash_tests.rs` suite, ported and green** — including
-the capstone `backgrounded_latch_is_reachable_and_confirmable`,
-`confirm_retires_the_originating_backgrounded_job`, `jobs_cleanup_keeps_latched_job`,
-`kill_refuses_latched_job`, `confirm_replays_a_path_with_spaces_the_hint_cannot`, and
-`latch_in_a_pipeline_stage_overrides_later_success`. New: the operation matrix; with no
-subscription and no policy, an `rm` posts **nothing** and the ledger is empty (§C.5's
-free-when-unsubscribed rule); under an `enforce` subscription the same `rm` produces
-`Requested`→`Granted`→`Redeemed`→`Settled{Exit(0)}`; `kaish-trash empty` gates regardless of
-any subscription; a session with no `ApproverHandle` has no reachable path to `grant` (a
-test that walks the builtin registry and asserts `approvals` is the only bridge); the pin
-survives a `$(…)` cmdsub, a pipeline stage, a background job, and a `.kai` script, and both
-the `set +o latch` and `flags=["o"] positional=["latch"]` parse paths are refused; a replay
-whose fresh draft does not match the granted operation fails `DraftMismatch` rather than
-posting a second request; `confirm` on a `Capture::Unavailable` request fails naming the
-variant; **re-presenting a key after a successful `rm` reports the settled outcome and the
-file is deleted exactly once** (the behavior change the latch's reusable nonce hid — this
-test is the point of the item); trash still wins over the gate per `decide_mutation_action`.
-
-Changelog: one `**BREAKING:**` bullet per renamed surface, plus the mapping table.
-
----
-
-**PR 6 — `feat(kernel): redemption-time precondition verification`**
-
-`StateResolver`, the kernel's `path` resolver (digest through the backend), condition
-evaluation outside the critical section with the observation carried into it (§B.1),
-`Refused` + grant voiding. `cas_overwrite` is re-expressed as a ledger condition; the
-byte-snapshot stays where it is (the ledger stores the digest, not the content). Kept
-separate from PR 5 so the cutover stays a pure migration with no semantic additions.
-
-*Tests:* a file changed between grant and redemption produces `Refused` + `Voided` and a
-loud `ExecResult`, and the file is not written (the existing CAS test, re-expressed against
-the ledger); a `Refused` redemption reserves no `AttemptId`; a resolver I/O error refuses
-rather than passing (the hazard `context.rs:276-280` already documents); the `Redeemed`
-entry records what was observed and when; a stub `git.ref` resolver proves a non-path kind
-works end to end; a grant with all-`Unspecified` conditions redeems and the record shows it
-was unconditioned.
-
----
-
-**PR 7 — `feat(kernel): /v/approvals, the approvals builtin, and gate renewal` — BREAKING (VFS path)**
-
-The `/v/approvals` mount (read-only; writes `Unsupported`), the `approvals` builtin with the
-authority check, `Kernel::renew` / `Job::renew_gate()`, and `wait`'s "N pending" message.
-
-*Tests:* `/v/approvals/pending` enumerates gates across multiple background jobs; every
-write path under `/v/approvals` returns `Unsupported`; no VFS projection contains a
-credential (asserted by scanning the serialized bytes for the issued token); `approvals
-grant` is refused with exit 1 in a session without a handle and permitted in one with it;
-an authority-less session *can* renew its own request and cannot renew another principal's;
-a background job whose request expired is renewable and then confirmable — the
-dead-nonce-forever case, closed; `wait` on two gated jobs reports both in its message while
-surfacing one on `.approval`.
-
----
-
-**PR 8 — `feat(kernel): fs.* observability subscriptions`**
-
-The subscription registry, the atomic any-subscription fast path, and the glob filter
-(§C.5), generalizing PR 5's whole-namespace enforce policy into a scoped subscription.
-Additive and deliberately after the cutover: it changes no default posture, and the
-unsubscribed path must be provably free before it is worth shipping.
-
-*As landed (PR 8 + the tap refinement that followed its review):* PR 8 shipped observe as
-a chain — `Requested` + auto-`Granted{Grounds::Observe}` per covered batch, matched a
-second time inside the decision chain. Its two-family review found three bugs in exactly
-that second matching (a resolved-vs-display mismatch, an all-or-nothing batch grouping,
-and an enforce request auto-granted by an overlapping observe rule), and the follow-up PR
-replaced the chain with the chainless `Observed` entry §C.5 now describes — the
-subscription registry and filter were unchanged; the auto-grant machinery was deleted
-rather than repaired.
-
-*Tests:* with nothing subscribed, a 10,000-path `rm -rf` posts zero entries and allocates no
-`ApprovalRequest` (a counter on the constructor); an `observe` subscription over
-`/workspace/**` posts one `Observed` entry naming matching paths and nothing for
-`/tmp/**`; an `observe` subscription never blocks and never returns exit 2; a relative
-path is recorded under both spellings; one batch spanning two observe subscriptions
-records both paths; an `enforce` subscription over the same glob does gate, including
-when an observe subscription also covers it; subscription and revocation are themselves
-ledger entries.
-
----
-
-**PR 10 — `feat(kernel): the statement gate — cmd.execute observe-all and the classifier`**
-
-§C.6 in full: `Plan`/`PlannedCommand`/`PlannedRedirect` and `StatementClassifier`/
-`StatementPosture` in the API crates, `KernelOperation::CmdExecute`, the plan renderer
-(extending `format_pipeline` toward faithful unexpanded rendering), the top-level-loop
-tap and gate, `Capture::Statement` with `confirm`'s parse-and-execute-index replay,
-`execute_argv` coverage, and `Observed.plan`/`ApprovalRequest.plan`.
-
-*Tests:* every top-level statement posts exactly one `Observed{plan}` entry and a
-1,000-iteration loop posts one; a gate-classified statement defers to exit 2 with
-nothing executed (no substitution side effects, no redirect target created); a standing
-grant over `cmd` resources auto-approves and all-or-nothing holds when one command of
-three is uncovered; `confirm` on a `Capture::Statement` replays exactly the held
-statement with earlier statements' variables visible; `execute_argv` posts the same
-entry the statement loop would; a sink-backpressured tap warns and runs while a
-backpressured *gate* still fails closed; rendering truncates at 8 KiB with the marker;
-the plan-vs-raw-line discrimination measurement for the reference classifier.
+*Tests:* a value reaches no sink as a bare `String`; an installed `Redactor` covers all
+five sinks including one added by the test; with no `Redactor`, values are `Plain` and
+nothing pretends otherwise; a listing over more entries than one page returns a cursor that
+neither repeats nor skips.
 
 ---
 
@@ -2212,15 +2620,14 @@ permanent home.
 
 ## I. Open questions
 
-1. **Retention defaults.** 1024 live requests and 256 per principal are guesses. What a live
-   chain now costs is bounded on both ends: a chain closes on its first successful
-   settlement (§A.1, §B.2), and one that never settles expires at `not_after`. So the
-   numbers bind only on a session holding many *undecided* requests at once, which is the
-   case worth measuring. Open until a real workload says otherwise; the metric
-   (`ledger.live_requests`) exists so the answer is measurable rather than argued.
-
-   *Dissolved by the single-success rule:* the earlier worry that an unlimited grant would
-   occupy the live index until `not_after` no matter what. There is no unlimited grant.
+1. **Retention defaults.** 1024 live requests and 256 per principal are guesses, and they
+   now carry the weight expiry used to share: a chain closes on its first successful
+   settlement (§A.1, §B.2), a grant stops authorizing at `not_after`, and an undecided
+   request is relieved only by a decision or a cancel (§A.10). So the numbers bind on a
+   session holding many undecided requests at once — which is precisely the ACP-style
+   workload, where a human may be slow and several asks may stack up. Open until a real
+   workload says otherwise; the metric (`ledger.live_requests`) exists so the answer is
+   measurable rather than argued.
 2. **Standing-grant matching semantics.** §C.4 fixes all-or-nothing, exact-kind, and
    globbed-id, and the gpt review's remaining questions have no recorded answer: set versus
    multiset semantics for duplicate resources; whether one pattern may match several
@@ -2229,11 +2636,16 @@ permanent home.
    be safer. PR 4 cannot ship without answers, because they are its contract.
 3. **Requirements raised in review with no decision recorded.** Resource canonicalization
    before matching and before recording — path symlinks, ref normalization, encoding, case
-   sensitivity. Partial multi-resource effects: one approved request may mutate two of four
-   resources before failing, so a `Settled{Exit(1)}` must not be read as "nothing landed".
-   Privacy and retention of captured argv and resource names, which can carry secrets into
-   a sink. Tenant isolation if a ledger is ever shared across principals that should not
-   read each other's records.
+   sensitivity. `PlanBinding` (§A.9) settles the *replay* half of this by recording the
+   canonical form rather than re-deriving one; the matching half is still open. Partial
+   multi-resource effects: one approved request may mutate two of four resources before
+   failing, so a `Settled{Exit(1)}` must not be read as "nothing landed".
+
+   *Resolved since:* privacy of captured argv and resource names is §A.8's seam — the
+   kernel redacts its own key and provides the chokepoint and the type; what else counts as
+   a secret is the embedder's to decide. Tenant isolation is §A.7's scoped handles, with
+   the standing caveat that scoping is API hygiene and not a boundary against hostile code
+   in the same process.
 4. ~~**The two surviving spellings of the retired word.**~~ **Resolved 2026-08-02 (Amy):
    the latch is completely retired — the ledger gets its own grammar in code, docs, and
    help text.** `set -o latch` becomes `set -o approvals` (with `KAISH_LATCH` →

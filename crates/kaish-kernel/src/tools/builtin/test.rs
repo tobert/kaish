@@ -42,7 +42,8 @@ struct TestArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Sink — the expression is read from `args.positional`, not here.
+    /// The expression to evaluate, as in `test -f file.txt`.
+    // Hidden sink: the expression is read from `args.positional`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
     rest: Vec<String>,
 }
