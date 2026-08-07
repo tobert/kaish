@@ -1,12 +1,15 @@
 //! Bare comma as an argument bareword, and the no-token-pasting guard for
 //! adjacent words / numeric ranges.
 //!
-//! `cut -d,` / `tr -d ,` reach for a lone comma as a delimiter/set argument —
-//! a comma now lexes-and-parses as the literal `","` in argument position, so
-//! the common `cut -d, -f2` idiom works without quoting. The no-pasting rule
-//! still guards the genuinely ambiguous cases: `echo 1,2,3` (a run of
-//! comma-touching positional words) is a loud parse error with a "quote the
-//! whole word" hint.
+//! `,` is significant only inside a `[...]`/`{...}` literal or pattern (list
+//! literals, record literals, brace expansion) — outside brackets it is an
+//! ordinary bareword character, same as any other punctuation the lexer
+//! doesn't special-case. `cut -d,` / `tr -d ,` reach for a lone comma as a
+//! delimiter/set argument, and `echo 1,2,3` / `cut -f 1,3` / `sort -k 2,2n`
+//! are one word each, matching bash/GNU — none of these need quoting
+//! anymore. The no-pasting rule still guards genuinely separate adjacent
+//! fragments, e.g. `--flag$(echo x)` or `/tmp/$(echo x).txt`, with a "quote
+//! the whole word" hint.
 //!
 //! A digit range like `0-9` / `1-3` is a *single contiguous word* the user
 //! typed, so it now lexes as one bareword (`DashNumWord`) and reaches the tool
@@ -52,14 +55,15 @@ async fn tr_deletes_bare_comma() {
 }
 
 #[tokio::test]
-async fn adjacent_commas_are_loud_not_pasted() {
-    // `echo 1,2,3` is a run of touching positional words; the no-pasting guard
-    // rejects it loudly rather than silently joining or dropping pieces.
+async fn adjacent_commas_fuse_into_one_word() {
+    // `echo 1,2,3` used to be a loud no-pasting error (a bare `,` lexed as
+    // its own token, so `1,2,3` looked like three touching positional
+    // words). Comma has no grammatical role outside a `[...]`/`{...}`
+    // literal or pattern, so it folds into the surrounding bareword like
+    // any other ordinary character — one word, matching bash/GNU.
     let kernel = Kernel::new(KernelConfig::transient()).expect("kernel");
-    let result = kernel.execute("echo 1,2,3").await;
-    assert!(result.is_err(), "adjacent words must be a loud error");
-    let msg = format!("{:#}", result.unwrap_err());
-    assert!(msg.contains("quote"), "should hint to quote: {msg}");
+    let result = kernel.execute("echo 1,2,3").await.expect("should succeed");
+    assert_eq!(result.text_out(), "1,2,3\n");
 }
 
 #[tokio::test]

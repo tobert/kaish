@@ -5,7 +5,9 @@
 //! and trip the no-token-pasting guard (a loud-but-wrong parse error). A
 //! contiguous word the user typed is one word — kaish now lexes these as a
 //! single bareword, matching bash/GNU. The no-pasting guard still fires on
-//! genuinely separate adjacent tokens (`echo 1,2,3`).
+//! genuinely separate adjacent tokens (`--flag$(echo x)`); a run of
+//! comma-touching positional words (`echo 1,2,3`) is no longer one of them —
+//! see `bareword_comma_tests`.
 
 #![cfg(feature = "localfs")]
 
@@ -131,13 +133,13 @@ async fn find_size_negative_suffix_parses_and_runs() {
 }
 
 #[tokio::test]
-async fn adjacent_commas_still_loud() {
-    // Unchanged: commas are not part of the digit-hyphen word; a run of
-    // touching positional words is still a loud no-pasting error.
+async fn adjacent_commas_fuse_into_one_word() {
+    // Commas are not part of the digit-hyphen word (`DashNumWord`), but they
+    // still fold into a plain bareword outside `[...]`/`{...}` — see
+    // `bareword_comma_tests::adjacent_commas_fuse_into_one_word`.
     let tmp = tempfile::tempdir().unwrap();
     let kernel = kernel_at(tmp.path());
-    let result = kernel.execute("echo 1,2,3").await;
-    assert!(result.is_err(), "adjacent comma words must stay a loud error");
-    let msg = format!("{:#}", result.unwrap_err());
-    assert!(msg.contains("quote"), "should hint to quote: {msg}");
+    let (out, code) = run(&kernel, "echo 1,2,3").await;
+    assert_eq!(code, 0, "got: {out}");
+    assert_eq!(out, "1,2,3");
 }

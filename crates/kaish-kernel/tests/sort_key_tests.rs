@@ -75,11 +75,29 @@ async fn sort_k2_comma_2_sorts_by_field2_only() {
     let dir = tempdir().unwrap();
     write_file(dir.path(), "data.txt", "b 10 x\na 20 y\nc 10 z\n");
     let kernel = kernel_at(dir.path());
-    // Comma in key spec must be quoted (kaish reserves bare commas for brace expansion).
+    // Quoting the key spec still works — it was never required.
     let (out, code) = run(&kernel, r#"sort -k "2,2" data.txt"#).await;
     assert_eq!(code, 0, "sort -k \"2,2\" should succeed: {out:?}");
     let lines: Vec<&str> = out.lines().collect();
     // field 2 only → "10" < "20", ties in "10" break by full line
+    assert_eq!(lines[2], "a 20 y", "a 20 y has highest field-2 key: {out:?}");
+    assert!(
+        lines[0] == "b 10 x" || lines[0] == "c 10 z",
+        "first two lines are the '10' rows: {out:?}"
+    );
+}
+
+#[tokio::test]
+async fn sort_k2_comma_2_unquoted_sorts_by_field2_only() {
+    // Comma is significant only inside a `[...]`/`{...}` literal or
+    // pattern — outside brackets it's an ordinary bareword character, so
+    // the unquoted key spec works identically to the quoted spelling above.
+    let dir = tempdir().unwrap();
+    write_file(dir.path(), "data.txt", "b 10 x\na 20 y\nc 10 z\n");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "sort -k 2,2 data.txt").await;
+    assert_eq!(code, 0, "sort -k 2,2 should succeed: {out:?}");
+    let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines[2], "a 20 y", "a 20 y has highest field-2 key: {out:?}");
     assert!(
         lines[0] == "b 10 x" || lines[0] == "c 10 z",
@@ -124,9 +142,23 @@ async fn sort_k2_comma_2n_numeric_stop() {
     let dir = tempdir().unwrap();
     write_file(dir.path(), "data.txt", "alice 10\nbob 9\ncarol 2\n");
     let kernel = kernel_at(dir.path());
-    // Comma in key spec must be quoted (kaish reserves bare commas for brace expansion).
+    // Quoting the key spec still works — it was never required.
     let (out, code) = run(&kernel, r#"sort -k "2,2n" data.txt"#).await;
     assert_eq!(code, 0, "sort -k \"2,2n\" should succeed: {out:?}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines, vec!["carol 2", "bob 9", "alice 10"],
+        "sort -k2,2n numeric on stop spec: {out:?}");
+}
+
+#[tokio::test]
+async fn sort_k2_comma_2n_unquoted_numeric_stop() {
+    // Unquoted twin: comma has no grammatical role outside a
+    // `[...]`/`{...}` literal or pattern, so `2,2n` is one bareword.
+    let dir = tempdir().unwrap();
+    write_file(dir.path(), "data.txt", "alice 10\nbob 9\ncarol 2\n");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "sort -k 2,2n data.txt").await;
+    assert_eq!(code, 0, "sort -k 2,2n should succeed: {out:?}");
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines, vec!["carol 2", "bob 9", "alice 10"],
         "sort -k2,2n numeric on stop spec: {out:?}");
@@ -143,7 +175,7 @@ async fn sort_u_key_dedups_by_key_not_full_line() {
     let dir = tempdir().unwrap();
     write_file(dir.path(), "data.txt", "alice 10\nbob 10\ncarol 20\n");
     let kernel = kernel_at(dir.path());
-    // Comma in key spec must be quoted (kaish reserves bare commas for brace expansion).
+    // Quoting the key spec still works — it was never required.
     let (out, code) = run(&kernel, r#"sort -k "2,2" -u data.txt"#).await;
     assert_eq!(code, 0, "sort -k \"2,2\" -u should succeed: {out:?}");
     let lines: Vec<&str> = out.lines().collect();
