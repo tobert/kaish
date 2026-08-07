@@ -59,9 +59,9 @@ its loud illegal transitions, the append-only record and its timestamps, the sea
 decision is asked for, and the types that make a bypass unrepresentable. The embedder's
 half is every question whose right answer differs per deployment: how long an unanswered
 request should live, what counts as a secret, what a classifier believes, when to escalate
-to a human.
+to a human, and **who waits for the answer**.
 
-Two consequences are load-bearing enough to state as rules, because they read as absences
+Three consequences are load-bearing enough to state as rules, because they read as absences
 otherwise and someone will eventually try to fix them back:
 
 **The kernel stamps records with when things happened. The kernel never reads a clock to
@@ -71,6 +71,18 @@ expiry sweep, and no staleness deadline on an attempt. A request lives until it 
 or cancelled. The grant's `not_after` is the sole exception and is not a counter-example:
 it is a value the approval side *sets*, compared once at redemption, never a deadline the
 ledger wakes up to enforce. See §A.10 for why, and §B.5 for what replaced expiry.
+
+**The kernel never waits on the embedder.** A decision the kernel cannot make itself is
+returned as data — `ApprovalOutcome::Pending`, carrying the request view and a structured
+`ResumeAction` — and the embedder comes back when it has an answer. There is no hook the
+kernel awaits, because both ways of awaiting one are wrong: a bounded wait is a
+clock-driven decision, which the rule above already forbids, and an unbounded wait is a
+liveness hazard the kernel cannot cancel on anyone's behalf correctly. This is the same
+distinction the design draws everywhere else, applied to control flow — the kernel *asks*
+for policy with a pure function on the request path (`Approver::policy`), and it *returns*
+anything that cannot be answered immediately. It never runs the embedder's deliberation
+inside its own task, on its own clock, under its own cancellation. See §C.2 for the chain
+this produces and §C.1 for what comes back.
 
 **The kernel redacts exactly one thing: its own key.** It can do that exactly, with no
 heuristics, because it minted the credential and knows the string. It does not detect
@@ -109,6 +121,8 @@ document uses; it does not use synonyms for them.
 | **binding** | The context a grant was decided against — plan digest, cwd, scope, sandbox profile (`PlanBinding`, §A.9). A replay outside its binding is a new request, not a redemption. |
 | **assessment** | One attributed judgment recorded on the way to a decision — a classifier's, a specialist's, a human's (§C.7). Assessments explain a decision; they are not themselves decisions. |
 | **cancel** | To close an undecided request from the requesting side (§B.5). What replaced expiry: the kernel does not time a request out, so something must be able to end one. |
+| **pending** | A request the kernel has returned to the caller undecided (`ApprovalOutcome::Pending`). The normal outcome for anything that has to be thought about — the kernel does not wait (§0.1, §C.2). |
+| **resume** | To pick a pending request back up once it is decided, by the route `ResumeAction` names: re-run the statement with the key, or `Kernel::confirm` the captured invocation (§C.1, §B.4). |
 
 **`latch` and `nonce` retire with the mechanism.** A latch is now a request in the
 `Requested` state; a nonce is now a name plus a key. Two spellings of the retired word
@@ -730,6 +744,12 @@ any use of a clock as an *input to a decision*:
 - **No staleness deadline on an attempt.** A dropped attempt is reported by `AttemptGuard`'s
   outbox (§C.1), which knows the executor went away. Inferring the same fact from elapsed
   time would be guessing at something the kernel is already told.
+- **No decision budget, because there is no decision to bound.** The kernel does not await
+  an embedder's deliberation (§0.1), so there is no hold to time out and no clock on the
+  waiting side either. This is the rule's other half: a budget on a wait *is* a
+  clock-driven decision — it decides that a decision did not happen — and keeping one
+  while deleting the TTL would only have reduced two disagreeing clocks to one surviving
+  one.
 
 What the kernel keeps, and why none of it is a counter-example:
 
@@ -738,10 +758,19 @@ What the kernel keeps, and why none of it is a counter-example:
   standing grant, and §C.4 already has a deliberate, separate type for that.
 - **`ApprovalRequest::deadline`** is `Option`, defaults to `None`, and behaves the same way:
   compared when observed, never enforced on a timer.
-- **The patient hold** around `Approver::decide` (§C.2) is watchdog machinery. It keeps a
-  human's think time from tripping a script timeout. It bounds how long the *kernel* waits,
-  not how long an approval is valid, and those were only ever confused because they were
-  measured in the same units.
+- **The script watchdog** is unchanged and is not part of this. It bounds how long a
+  *statement* runs, which is execution, not approval. Because a gated statement returns
+  rather than waiting, the watchdog no longer has an approval-shaped hold to suspend, and
+  `ToolCtx::patient` is not needed on the gate path at all.
+
+**Two clocks disagreeing is what this rule prevents.** Before it, the request lease
+(`LedgerConfig::request_ttl`, 60s) and the decision budget (`Approver::decide_budget`, 300s)
+were separate clocks with disagreeing defaults, so the default kernel handed an approver a
+five-minute budget to spend against a one-minute lease: the request expired mid-decision
+and the grant that followed was refused. A human who thought for ninety seconds lost. The
+defect is not that the two numbers were wrong — picking better numbers reproduces it the
+first time an embedder overrides one — but that a design with two clocks in it has to keep
+them reconciled forever. Deleting both is what makes the reconciliation unnecessary.
 
 **The cost, stated plainly.** With no expiry, an undecided request occupies a live slot
 until something closes it, so `live_capacity` and `live_capacity_per_principal` (§D.4) are
@@ -750,6 +779,12 @@ ledger. That is the intended trade. The failure mode is *the ledger is full*, wi
 at a point where someone can act, rather than *your approval silently expired*; silent
 expiry is exactly the failure kaish refuses everywhere else. An embedder that wants a
 deadline sets one and cancels what it no longer wants (§B.5).
+
+That trade has a precondition, and it is worth stating next to the trade rather than
+leaving it implicit: **an embedder can only close what it was told about.** With expiry
+deleted, a pending request the caller never sees is not a slow request, it is a leaked
+slot that nothing will ever reclaim. So every pending request must reach the caller in the
+result — §C.1's carry rule — and that rule is load-bearing here, not a convenience.
 
 ---
 
@@ -1183,10 +1218,13 @@ branch on *why* it may not proceed:
 ```rust
 #[non_exhaustive]
 pub enum ApprovalOutcome {
-    /// A grant existed (or was decided inline) and an attempt is reserved.
+    /// A grant existed, or a standing rule or `Approver::policy` granted on
+    /// the request path, and an attempt is reserved.
     Authorized(AttemptHandle),
-    /// No decision yet. Carries what a caller needs to present the request
-    /// and to resume it; the view is tokenless (§A.2).
+    /// Nobody has decided, and the kernel will not wait to find out (§0.1).
+    /// The normal outcome for anything a human or a model has to think about.
+    /// Carries what a caller needs to present the request and to resume it;
+    /// the view is tokenless (§A.2).
     Pending(Box<PendingApproval>),
     Denied { request: RequestId, reason: String },
     /// A precondition on the grant no longer holds, or could not be observed.
@@ -1217,8 +1255,10 @@ pub struct PendingApproval {
 #[non_exhaustive]
 pub enum ResumeAction {
     /// Re-run the statement with the key; the digest names what was approved
-    /// (§A.9).
-    ConfirmStatement { plan_digest: PlanDigest },
+    /// (§A.9). `index` is the held statement's position in the submitted
+    /// program: the kernel halted there and runs nothing after it, so an
+    /// embedder continuing the program picks up at `index + 1` (§C.2).
+    ConfirmStatement { plan_digest: PlanDigest, index: usize },
     /// Replay the captured invocation via `Kernel::confirm`.
     RetryOperation,
     /// Grantable and redeemable, but the kernel cannot replay it — the
@@ -1238,6 +1278,26 @@ view on the control-plane field; `Denied`, `Refused`, `Unsupported`, `LedgerUnav
 exit 1 with a message naming the reason. This mirrors `gate_overwrites`'s existing `Err(result)`
 contract (`context.rs:828`), which callers already know to return verbatim and never fall
 through.
+
+**A pending request always reaches the caller, whatever ran after it.** `Pending` is the
+whole mechanism now — an embedder that is not told cannot decide, cannot cancel, and
+cannot reclaim the slot — so the control-plane field is not "the last statement's" field
+and must never be overwritten by a later statement's result. Two rules, and the second is
+the one the implementation gets wrong:
+
+- A result carrying a pending request keeps it through **every** accumulation step, even
+  when statements follow. Today `accumulate_result` assigns `accumulated.approval =
+  new.approval` unconditionally (`kernel.rs:7295`), on a comment asserting the pending
+  view *is* the last statement's, which holds only when the gated statement happens to be
+  last. `kaish -c 'rm x; echo ok'` with `rm` gated therefore returns exit 0 and no
+  approval view, while the request sits live in the ledger. Expiry used to collect that
+  request after 60 seconds; with expiry deleted (§A.10) nothing ever does.
+- Where a program can raise more than one, the field carries **all** of them, not the
+  first or the last. A caller that must reclaim every slot cannot be handed a sample.
+
+The exit code follows the same reasoning and is a separate question, taken in §I.5:
+whether a tool-level deferral should halt the top-level loop the way a statement-level one
+already does.
 
 **Tools never call `settle` on the happy path, and settlement is drop-safe.** The obvious
 design — the dispatch seam posts `Settled` after `tool.execute()` returns — does not fire
@@ -1271,32 +1331,28 @@ and nothing about provenance.
 
 ### C.2 The decision chain
 
-Four stages, tried in order, first non-`Defer` wins:
+Three stages, tried in order, first non-`Defer` wins. All three run on the request path and
+none of them waits:
 
 1. **Standing grants** — pure ledger lookup, no hook, no I/O, runs under the ledger lock.
    This is the auto-approve fast path. (§C.5's `observe` subscriptions never reach the
    chain at all — a covered operation posts a chainless `Observed` entry at the gate site
    and proceeds; only `enforce` posts a request.)
-2. **`Approver::policy`** — synchronous, on the request path, contractually non-blocking.
-   Suitable for allowlists, risk-class rules, and "never `git.push.force`, full stop".
-3. **`Approver::decide`** — async, may take minutes. Runs under a `ctx.patient(budget)`
-   hold so a human's think time does not trip the script watchdog, and `select!`s against
-   the cancellation token per `ToolCtx::patient`'s contract
-   (`crates/kaish-tool-api/src/ctx.rs:92-94`). **Never called while holding the ledger lock.**
-4. **`Defer` all the way through** ⇒ exit 2, the request stays `Requested`, and fulfilment
-   happens out of band (`--confirm=<token>`, `ApproverHandle::grant`, `approvals grant`).
-   This is today's behavior, byte for byte, and it is what a non-interactive kernel with no
-   `Approver` configured does.
+2. **`Approver::policy`** — synchronous, contractually non-blocking, **never called while
+   holding the ledger lock**. Suitable for allowlists, risk-class rules, and "never
+   `git.push.force`, full stop". A policy is a pure function of the request and the
+   ledger: the kernel asks it a question and gets an answer, which is why it can stay on
+   the path of every gated operation.
+3. **`Defer` through both** ⇒ `Pending`, exit 2, the request stays `Requested`, and
+   fulfilment happens out of band (`--confirm=<token>`, `ApproverHandle::grant`,
+   `approvals grant`). This is a non-interactive kernel with no `Approver` configured, and
+   it is equally what a kernel with a human, a UI, or a clearance model behind it does —
+   they all decide out of band, because there is no in-band place to decide.
 
 ```rust
-#[async_trait]
 pub trait Approver: Send + Sync {
     fn policy(&self, req: &ApprovalRequestView, ledger: &Approvals) -> Decision {
         let _ = (req, ledger);
-        Decision::Defer
-    }
-    async fn decide(&self, req: &ApprovalRequestView) -> Decision {
-        let _ = req;
         Decision::Defer
     }
 }
@@ -1305,33 +1361,91 @@ pub trait Approver: Send + Sync {
 pub enum Decision {
     Grant(GrantTerms),
     Deny { reason: String },
-    /// "Not my call." Falls through to the next stage. Never means "yes".
+    /// "Not my call." Falls through. Never means "yes".
     Defer,
 }
 ```
 
 An approver receives the tokenless `ApprovalRequestView` — it decides, it does not redeem.
-Both methods are defaulted, so an embedder implements only the half it cares about. `Defer`
-as the default for both means **the trait's default behavior is today's behavior** — an
-empty impl changes nothing.
+The method is defaulted, so an empty impl changes nothing and **the trait's default
+behavior is today's behavior**. The trait is not `async` and has no second method: a
+decision that cannot be made synchronously is not made here at all.
+
+**Why there is no asynchronous decision hook.** An `async fn decide` that the kernel awaits
+looks like the natural third stage, and it is the shape this design carried until it was
+built. Three costs, and the first is the one that forced the issue:
+
+- **It puts a clock back in the kernel.** The kernel has to bound the await or hang, and
+  the bound is a decision made by reading a clock — the thing §A.10 exists to remove.
+  Reconciling that bound with anything else measured in the same units is a standing
+  obligation; §A.10 records what it cost the first time.
+- **The kernel ends up owning the embedder's work.** An awaited future runs in the kernel's
+  task, under the kernel's cancellation. When the kernel drops it at a bound, it drops
+  whatever the embedder had in flight — a half-sent RPC, an open dialog with nothing left
+  to answer it, a model call already paid for. The embedder cannot fix this from inside its
+  own impl, because it does not own the future.
+- **It makes the timing untestable.** A hold measured on `kaish_types::clock::Instant`
+  does not follow tokio's virtual clock, so a paused-time test advances the budget while
+  the hold barely moves. That is why the existing patient-hold tests pass over the defect
+  §A.10 describes. With nothing awaited, the path has no timing in it and its tests are
+  state-machine tests.
+
+What replaces it is not a smaller hook but a different shape: the kernel returns `Pending`
+with a `ResumeAction`, and the embedder — which owns its own task, its own timeout, and its
+own cancellation — decides whenever it decides and comes back through `ApproverHandle`
+(§D.2). Everything an awaited hook could express is still expressible, in the embedder's
+process, on the embedder's terms.
+
+**The kernel halts; the embedder resumes.** A statement whose gate defers returns before
+the statement runs and the top-level loop stops there — nothing after it executes
+(`kernel.rs:2941-2947`). `Kernel::confirm` then replays exactly the held statement and
+nothing after it (`replay_statement_locked`: "runs the statement machinery, not the program
+loop"). This is deliberate and it is not going to change: retaining the remainder would
+mean the kernel holding suspended program state across an unbounded wait, which is the
+thing this section just removed, wearing a different hat. The embedder holds the program
+text — it submitted it — and the session holds the variables and cwd earlier statements
+set, so continuing means executing from `ResumeAction::ConfirmStatement`'s `index + 1` in
+the same session. `JobStatus::Gated` is not a suspension either: it is a job whose future
+already resolved, kept alive so it is not reaped before confirmation
+(`scheduler/job.rs:176-186`).
+
+**The cost, stated plainly.** An embedder that would have blocked in `decide` now gets a
+program that stopped early and a remainder to re-drive. That work is real and it moved to
+the embedder on purpose — it is the same work either way, and only the embedder knows
+whether the right answer is to continue, to re-plan, or to drop it.
 
 ### C.3 The human-in-terminal flow
 
-The REPL installs `TerminalApprover`. Its `decide`:
+The human at a terminal is the reference embedder, and the REPL fulfils its own gates the
+way every other embedder does: it retains the `ApproverHandle` from `Kernel::build`, gets
+`Pending` back from `execute`, and decides in its own loop. There is no `TerminalApprover`
+trait impl, because there is no method for one to implement — the prompt happens on the
+REPL's side of the call, not inside the kernel.
+
+On `ExecResult` carrying a pending request, the REPL:
 
 - Renders the request to **the terminal**, not to stdout — the agent's output stream must
   not be the approval affordance. Shows operation, risk class, principal, and every
   resource with its transition (`refs/heads/main: a1b2c3d → c3d4e5f`). Shows `req.hint`
   last and labelled *display only*, because it is producer-authored text.
 - Reads `y` / `n` / `a` / `Ctrl-C`.
-  - `y` → `Grant(GrantTerms::once_for(req))`
-  - `n` / `Ctrl-C` → `Deny { reason: "declined at terminal" }`
+  - `y` → `handle.grant(id, rev, GrantTerms::once_for_view(&req))`, then `Kernel::confirm`.
+  - `n` / `Ctrl-C` → `handle.deny(id, rev, "declined at terminal")`. Ctrl-C at the prompt
+    is now plain input handling in the REPL's own read loop rather than a cancellation
+    racing a future the kernel owns.
   - `a` → posts a `StandingIssued` scoped to this operation and these resources'
     *patterns* for the rest of the session, then grants. The "always" affordance and the
     audit trail are the same object.
-- Runs under `ctx.patient(Duration::from_secs(300))`.
-- **Non-TTY REPL** (piped script, `kaish -c`) → `Defer`. Exit 2 and the existing contract.
-  No prompt is ever written to a non-terminal.
+- Waits as long as the human takes. The REPL is a foreground program with a person in
+  front of it; its wait is a `readline`, which is the right and only bound. Nothing in the
+  kernel is holding a statement open while this happens, so nothing has to be told how
+  long to hold it.
+- **Non-TTY** (piped script, `kaish -c`) → no prompt, exit 2, the existing contract. No
+  prompt is ever written to a non-terminal.
+
+This is the shape §0.1 predicts, and the REPL is the cheapest place to see that the shape
+is sufficient: a human deciding at a prompt is the case an inline hook seemed most
+necessary for, and it needs about fifteen lines above the kernel.
 
 ### C.4 Standing grants — automation that is auditable by construction
 
@@ -1631,8 +1745,8 @@ which is exactly why it is written down here.
 
 `KernelConfig::with_statement_classifier` registers one; with none registered, every
 statement is `Observe`. A gate-classified statement enters the existing chain unchanged —
-a standing grant auto-approves it, `Approver::decide` puts it in front of a human under
-the patient hold, and all-`Defer` is exit 2 with the request pending, which at a TTY REPL
+a standing grant auto-approves it, `Approver::policy` may grant or deny it on the request
+path, and `Defer` through both is exit 2 with the request pending, which at a TTY REPL
 returns the line to the user (§C.3) and in a script halts execution at that statement.
 The classifier has no deny: refusal is a chain decision (`Approver::policy`), because a
 scoping seam that can refuse is a second decision chain.
@@ -1642,9 +1756,15 @@ runs in front of *every* top-level statement, including the ones nobody would ev
 making it async would put optional model or network latency on the path of `ls`, and would
 let a classifier's unavailability stall ordinary execution. The escape hatch already exists
 and costs nothing: a classifier too slow for the statement path returns `Gate`, and the
-expensive judgment happens in `Approver::decide`, which is async, bounded by a budget, and
-already the place slow decisions live. A classifier belongs preloaded and bounded — no
+expensive judgment happens out of band, after the statement returns `Pending`, which is
+where every slow decision lives (§C.2). A classifier belongs preloaded and bounded — no
 downloads, no queue waits, no remote calls.
+
+The classifier and the chain are the same rule applied twice, which is worth noticing
+because it is the rule the whole design runs on: **the kernel asks synchronous questions
+and returns everything else.** A classifier is a pure function on the statement; a policy
+is a pure function on the request; anything that has to think happens after the kernel has
+handed back control.
 
 **Deferral holds the whole line; replay is by statement index.** The capture is
 `Capture::Statement { source, index }` (§B.4): statements carry no source spans, so the
@@ -1653,6 +1773,13 @@ index. `Kernel::confirm` re-parses the source and executes exactly statement `in
 the originating session, where earlier statements' effects — variables, cwd — are session
 state and still hold. There is no mid-construct gate to resume, because the unit is
 top-level by definition.
+
+**"Holds the whole line" describes the capture, not the replay.** The source is recorded
+whole because a statement cannot be addressed any other way; `confirm` still runs one
+index and drops the rest of the parse. Statements *after* the held one are not resumed by
+the kernel and never will be — that remainder belongs to the embedder, which has the
+program text and the index it stopped at (§C.2). Read this line as a promise of
+line-level resumption and the code will disappoint you.
 
 `set -o approvals` and the statement layer are independent: the flag is an `fs.*`
 enforce policy (§C.5) and neither reads nor writes statement posture. `with_policy_pinned`
@@ -1716,13 +1843,12 @@ put the rest, "why did this get approved?" is answerable only from whatever the 
 happened to log on the side.
 
 ```rust
-/// Handed to `Approver::policy` and `Approver::decide`.
+/// Handed to `Approver::policy`. Carries no deadline and no cancellation
+/// token: `policy` is synchronous and non-blocking, so it has nothing to
+/// bound and nothing to abandon (§C.2).
 #[non_exhaustive]
 pub struct DecisionContext {
-    /// When the patient hold expires (§C.2). Read it to bound your own work.
-    pub deadline: Instant,
-    pub cancellation: CancellationToken,
-    /// Append-only. Records survive `decide` being cancelled at its budget.
+    /// Append-only.
     pub assessments: AssessmentRecorder,
 }
 
@@ -1743,23 +1869,35 @@ pub struct ApprovalAssessment {
 ```
 
 **A recorder, not a return value.** An approver that returned its assessments alongside its
-decision would lose them in exactly the case they matter most: a `decide` that overran its
-budget and was cancelled, or an LLM call that timed out, has no return path but has already
-learned something worth recording. Appending as it goes means the record survives the
-cancellation.
+decision would lose them in exactly the case they matter most: judgments reached on the way
+to a decision that never arrives. A specialist scores the request and the LLM behind it
+times out; a human is asked and walks away; the embedder gives up and cancels. Each of
+those learned something worth recording and has no return path to record it on. Appending
+as it goes is what survives.
+
+**Most assessments are now appended from the embedder's side, not from inside a hook.**
+The interesting deliberation happens between `Pending` and `grant` — in the embedder's own
+task, over as long as it takes (§C.2) — so the recorder is reachable from `ApproverHandle`
+as well as from `DecisionContext`, and both append to the same chain. This is the version
+of the recorder that pays for itself: `Approver::policy` is a fast pure rule and rarely has
+much to say, while a router feeding specialists feeding a model feeding a human has a great
+deal to say and now runs somewhere the kernel cannot see. The `Assessed` entries are how it
+stays auditable from the ledger anyway.
 
 **Assessments are not decisions.** An `Assessed` entry authorizes nothing; only `Granted`
 does. This keeps the balance rule (§A.1) intact no matter how many layers an embedder
-stacks inside its one `Approver`.
+stacks behind its decision.
 
-**One `Approver` remains the kernel's authorization boundary.** A router feeding
-specialists feeding an LLM feeding a human is a routed pipeline *inside* an embedder's impl,
-not a chain the kernel composes. The kernel taking a list of approvers would have to answer
+**The grant is the kernel's authorization boundary, wherever the deliberation happened.**
+A router feeding specialists feeding an LLM feeding a human is a pipeline the embedder
+owns, not a chain the kernel composes. The kernel composing one would have to answer
 whether deny overrides allow, whether allow short-circuits, whether a timeout is abstention
 or denial, and whether the human is always last — security-sensitive semantics that differ
-per deployment and that nobody should get by default. `DecisionContext` is what makes such
-a pipeline auditable without the kernel knowing its topology; reusable combinators can be
-written later, above this seam, without changing it.
+per deployment and that nobody should get by default. What the kernel offers instead is a
+boundary that does not care about topology: one `Granted` entry authorizes one successful
+settlement, and the `Assessed` chain leading to it explains why. Reusable combinators for
+that pipeline are worth writing, and they belong above this seam, in a crate that is itself
+an embedder — never inside the kernel, where they would become everyone's semantics.
 
 ---
 
@@ -1843,7 +1981,8 @@ placeholder is substituted by a frontend holding an `ApproverHandle` (§D.3).
 // KernelConfig — replaces with_nonce_store (see §F)
 .with_ledger(Ledger)                         // share one ledger across kernels in this process
 .with_ledger_sink(Arc<dyn LedgerSink>)       // export
-.with_approver(Arc<dyn Approver>)
+.with_approver(Arc<dyn Approver>)            // synchronous policy only — the kernel
+                                             // never awaits an embedder (§0.1, §C.2)
 .with_principal(Principal)
 .with_approver_handle(ApproverHandle)        // this session may grant; absent = it may not
 .with_policy_pinned(bool)                    // script can't disable an enforce subscription
@@ -1884,10 +2023,23 @@ fn state(&self, id: &RequestId) -> Option<RequestState>;
 fn get(&self, id: &RequestId) -> Option<RequestChain>;  // request + decision + attempts
 fn standing(&self) -> Vec<StandingGrant>;
 fn log(&self, since: u64, limit: usize) -> LedgerPage;  // seq-cursored, bounded
+/// Every append, in order, from `since`. No timeout and no filter — an
+/// embedder selects on this alongside its own events instead of polling
+/// `pending`. Lagging is reported, never silently skipped.
+fn watch(&self, since: u64) -> LedgerStream;
 /// A read side restricted to one session. Needed as much as the grant side
 /// is: a request carries the command text that raised it (§A.7).
 fn scope(&self, session: SessionId) -> Approvals;
 ```
+
+**`watch` is the one convenience the kernel offers around waiting, and its shape is the
+point.** It reports that an entry landed and nothing else: no deadline argument, no
+`wait_for_decision`, no queue of parked decisions the kernel holds on the embedder's
+behalf. Every one of those would put a clock or a decision back inside the kernel (§0.1),
+and each is trivial to write above this stream by an embedder that wants it — with its own
+timeout, its own retry, its own idea of what to do when the human never answers. `watch`
+exists because the ledger already knows when an append happens and making every embedder
+poll for it would be withholding a fact, not holding a line.
 
 **Listings are paginated and filterable, not bare vectors.** The statement tap posts an
 `Observed` entry per top-level statement (§C.6), so in a long-lived embedder the log and
@@ -2167,9 +2319,9 @@ tells it exactly what to say: `pending approval <request-id> — an operator mus
 Then, by where the human sits:
 
 - **Human shares the kernel** (a REPL the human is watching): the human grants from their
-  own seat — `approvals grant <id>` in an authority-holding session, or the
-  `TerminalApprover` prompt (§C.3), which renders to the terminal precisely so the approval
-  affordance is not the model's output stream.
+  own seat — `approvals grant <id>` in an authority-holding session, or the REPL's own
+  prompt (§C.3), which renders to the terminal precisely so the approval affordance is not
+  the model's output stream.
 - **The kernel is transient** (the model ran `kaish -c` inside its own sandbox): there is
   nothing durable to grant against, and that is the honest answer — the human re-runs the
   operation from their own shell, where they hold authority. The request record still tells
@@ -2212,44 +2364,51 @@ none should be added — the approver *retrieves* it (§E.1).
 ### E.5 Walkthrough: kaijutsu — the human approves via the UI
 
 kaijutsu is the motivating embedder for this design, and this is the flow it wires. The
-agent session calls kaish; a gated operation fires kaijutsu's approval hook; kaijutsu pops
-a dialog; the human clicks go; the click reaches the kernel's approval side and the ledger
-posts the grant. That flow has two shapes in the design, and kaijutsu will likely want
-both:
+agent session calls kaish; a gated operation comes back `Pending`; kaijutsu pops a dialog;
+the human clicks go; the click reaches the kernel's approval side and the ledger posts the
+grant; `confirm` replays. One shape, and the parts kaijutsu would have wanted from a
+blocking hook are all still available — it simply owns them:
 
-- **Blocking** — the hook is `Approver::decide` (§C.2 stage 3). The gated operation never
-  returns exit 2 at all: it *waits*, under a patient hold so the watchdog does not fire,
-  while the dialog is up. The click makes `decide` return `Grant` and the operation
-  proceeds inline. The agent never sees a pause it has to reason about. Right for
-  foreground work with the human at the screen; bound it with a decide budget (say five
-  minutes).
-- **Deferred** — `decide` returns `Defer` (or its budget expires). Exit 2 surfaces, the job
-  sits `Latched`, the dialog can fire whenever, and the human's later click hits `confirm`,
-  which replays. Right for background jobs and walked-away humans. This is today's latch
-  flow, kept.
+- **The dialog outlives any budget.** The human can think, walk away, and come back
+  tomorrow. Nothing in the kernel is holding a statement open, so nothing has an opinion
+  about how long that takes. kaijutsu's own timeout, if it wants one, is a `select!` in
+  kaijutsu's task against its own dialog, ending in `cancel` (§B.5).
+- **The UI request is kaijutsu's to own.** A dialog raised inside an awaited `decide` dies
+  when the kernel drops the future, taking the correlation with it; raised from kaijutsu's
+  own task, it is a normal request/response with a normal lifetime.
+- **The agent still sees a pause it must reason about** — exit 2 with the request, then a
+  resume. This is the one thing the blocking shape hid, and hiding it was never free: the
+  agent's turn was blocked either way, and a paused agent that can see why it paused is the
+  better of the two.
 
-Either way the ledger entries are the same — `Requested`, `Granted`, `Redeemed`, `Settled`,
-with the human's principal on the grant. Only *who waits* differs.
+The ledger entries are the same as every other route — `Requested`, `Granted`, `Redeemed`,
+`Settled`, with the human's principal on the grant.
 
-### E.6 The clearance officer — a small model as `Approver::decide`
+### E.6 The clearance officer — a small model deciding out of band
 
 The inverse of §E.4: there the big client model clears for a constrained worker; here a
-haiku-class model does per-command clearance for a bigger one. It sits in the decision
-chain's stage 3 (§C.2), and the boundaries that make it safe are structural, not
-prompt-side:
+haiku-class model does per-command clearance for a bigger one. A model call is exactly the
+kind of work the kernel does not wait on, so the clearance officer runs on the embedder's
+side of `Pending`: the request comes back undecided, the embedder routes it to the model,
+and the model's verdict returns through `ApproverHandle::grant`/`deny`. The boundaries that
+make it safe are structural, not prompt-side:
 
-- **Scope by chain position, not by prompt.** A stage-2 `policy` wrapper force-`Defer`s (or
-  denies) everything the clearance model must not decide — `RiskClass::Irreversible`
-  escalates to a human without the model ever being asked. Telling the model "never approve
-  irreversible operations" is theater; filtering what reaches it is enforcement.
+- **Scope by what reaches it, not by prompt.** `Approver::policy` runs first and
+  synchronously, so it can deny or short-circuit everything the clearance model must not
+  decide — `RiskClass::Irreversible` routes to a human without the model ever being asked.
+  Telling the model "never approve irreversible operations" is theater; filtering what
+  reaches it is enforcement. Routing on the embedder's side is enforcement too, and it is
+  where the escalation ladder naturally lives, since the embedder is the only party that
+  knows who the human is.
 - **Input discipline.** The clearance model reads the *structured* request — operation,
   risk class, resources, transitions, principal — and treats requester-authored strings
   (`reason`, `hint`) as untrusted display text, the same rule §C.3 already applies to
   humans. Requester prose is an injection channel into the approver; fence it or exclude
   it.
-- **Output discipline.** `Grant(GrantTerms::once_for(req))`, `Deny`, or `Defer` — a
-  clearance model never issues standing grants and never widens terms beyond the request in
-  front of it.
+- **Output discipline.** Grant on the view's own terms, deny, or escalate — a clearance
+  model never issues standing grants and never widens terms beyond the request in front of
+  it. Schema-validate the verdict before it reaches `grant`; a model that returns something
+  unparseable has abstained, not approved.
 - **Identity and audit.** The clearance model is its own principal; its grants carry
   `Grounds` naming it, so `approvals log` distinguishes machine clearance from human
   judgment.
@@ -2453,15 +2612,25 @@ emits the corresponding event; there is no second place where a ledger fact can 
 without a trace fact, and vice versa. That is the mechanism that makes "the OTel story and
 the audit story are the same story" true rather than aspirational.
 
-**Short spans, linked — not one span held open across a human's think time.** A span open
-for minutes is unusual, and several backends handle it badly. The decision latency is still
-measurable: it is the `approval.decide` span's duration, and the spans are correlated by
-`approval.request_id` and `approval.attempt_id`, which are attributes on all of them.
+**Short spans, linked — no span is held open across a human's think time.** This used to be
+a choice about span hygiene; it is now structural, because no kaish code is running while
+the human thinks. The kernel's spans cover what the kernel does: post the request, run the
+fast stages, return. All of them are correlated by `approval.request_id` and
+`approval.attempt_id`.
+
+**Decision latency is a ledger fact, not a kernel span.** It is the interval between the
+`Requested` entry's `at` and the deciding entry's `at` (§A.5) — timestamps the ledger
+records anyway, available to any reader of the log, and correct no matter which process did
+the deliberating. An embedder that wants its own deliberation traced emits its own span and
+parents it on `req.context.traceparent`, which the request carries for exactly this. That
+is the honest arrangement: the kernel cannot instrument work it does not run, and pretending
+otherwise would have produced a span whose duration measured a hold rather than a decision.
 
 | Span | Level | Where | Attributes | Notes |
 |---|---|---|---|---|
 | `approval.request` | info | `ExecContext::request_approval` | `approval.request_id`, `approval.operation`, `approval.risk`, `approval.resource_count`, `approval.principal`, `job_id` | Closes when the request is posted and the fast stages have run — **not** held across an out-of-band wait. |
-| `approval.decide` | info | around `Approver::decide` only | `approval.request_id`, `approval.stage` (`standing`\|`policy`\|`human`), `approval.decision`, `approval.grounds`, `approval.decided_by` | This is where decision latency lives, including a human's 40 seconds. Linked to `approval.request`, not nested in it. |
+| `approval.chain` | info | around the standing + `policy` stages | `approval.request_id`, `approval.stage` (`standing`\|`policy`\|`pending`), `approval.decision`, `approval.grounds`, `approval.decided_by` | Fast by contract — microseconds, not minutes. `pending` is the stage recorded when both stages defer and the request is returned. |
+| `approval.grant` | info | `ApproverHandle::grant`/`deny` | `approval.request_id`, `approval.decision`, `approval.grounds`, `approval.decided_by` | The out-of-band decision landing. Linked to `approval.request`, not nested in it — it usually arrives on another task and may arrive on another trace. |
 | `approval.attempt` | debug | reservation through settlement | `approval.request_id`, `approval.attempt_id`, `approval.conditions_checked`, `approval.outcome` | The execution half. Records `err` on refusal. Debug because it is per-execution. |
 | `approval.confirm` | info | `Kernel::confirm` | `approval.request_id`, `approval.attempt_id`, `approval.tool` | `confirm` sits *outside* the `execute_argv` span it then creates, so this correctly parents the replay. |
 
@@ -2470,7 +2639,9 @@ measurable: it is the `approval.decide` span's duration, and the spans are corre
 Emitted at the append site, one per entry variant:
 
 `approval.requested` (info) · `approval.granted` (info) · `approval.denied` (info) ·
-`approval.expired` (info) · `approval.key_retrieved` (info, carries `approval.retrieved_by`)
+`approval.cancelled` (info, carries `CancelReason` — expiry is deleted, so this is the only
+way an undecided request ends; §A.10, §B.5) ·
+`approval.key_retrieved` (info, carries `approval.retrieved_by`)
 · `approval.redeemed` (debug) · `approval.refused` (**warn** —
 preconditions failed, the world moved under an approval) · `approval.settled` (info) ·
 `approval.abandoned` (**warn** — an attempt ended with `Outcome::Unknown`, so effects are
@@ -2537,23 +2708,43 @@ sits on, so it goes first.
 request is posted; an unknown entry variant round-trips as unknown rather than being
 dropped.
 
-**R2 — `refactor(kernel)!: no clock-driven decisions`**
+**R2 — `refactor(kernel)!: no clock-driven decisions, and no waiting on the embedder`**
 
-§A.10 and §B.5: delete `request_ttl`, the request-expiry path, and `attempt_stale_after`;
-`ApprovalRequest::deadline` becomes `Option`, defaulting to `None`; add `Requester::cancel`
-and `CancelReason`; add `ApprovalOutcome::Closed`; and **wire the teardown obligations in
-§B.5's table**, which is the lane's real risk — `abandon_request` today has exactly one
-production caller (the cancelled-grant undo in `ledger/approver.rs`), so job discard, job
-kill, session shutdown, and kernel shutdown all currently strand a held request. Expiry was
-covering for that; nothing covers it after this lane.
+Both halves of §0.1's time rule, in one lane because they delete the same machinery from
+opposite ends and neither is finished alone.
 
-*Tests:* the parked case on `fix/approval-lease-expiry` — a decision that takes longer than
-any lease is honored — plus a request still `Requested` after an interval that would have
-expired it; `cancel` on another principal's request is refused; a cancelled request's
-`supersedes` chain is walkable; `Closed` is returned where `LedgerUnavailable` used to be,
-and `LedgerUnavailable` no longer describes a request's own state. And one test per row of
+*No clock* — §A.10 and §B.5: delete `request_ttl`, the request-expiry path, and
+`attempt_stale_after`; `ApprovalRequest::deadline` becomes `Option`, defaulting to `None`;
+add `Requester::cancel` and `CancelReason`; add `ApprovalOutcome::Closed`; and **wire the
+teardown obligations in §B.5's table**, which is the lane's real risk — `abandon_request`
+today has exactly one production caller (the cancelled-grant undo in
+`ledger/approver.rs`), so job discard, job kill, session shutdown, and kernel shutdown all
+currently strand a held request. Expiry was covering for that; nothing covers it after this
+lane.
+
+*No waiting* — §C.1, §C.2, §C.3: delete `Approver::decide` and `decide_budget`, dropping
+the chain to three stages and the trait to one synchronous method; drop the patient hold
+from the gate path; add `index` to `ResumeAction::ConfirmStatement`; strip `deadline` and
+`cancellation` from `DecisionContext` and reach `AssessmentRecorder` from `ApproverHandle`;
+replace the `approval.decide` span per §G. **Fix the accumulation carry** (§C.1): a pending
+request must survive every later statement's result instead of being overwritten at
+`kernel.rs:7295` — with expiry gone this is a permanent leak, not a sixty-second one.
+
+*Tests:* a request still `Requested` after an interval that would have expired it; `cancel`
+on another principal's request is refused; a cancelled request's `supersedes` chain is
+walkable; `Closed` is returned where `LedgerUnavailable` used to be, and
+`LedgerUnavailable` no longer describes a request's own state. And one test per row of
 §B.5's teardown table, each asserting the live count returns to zero — a discarded job, a
 killed job, a shut-down session, and `Kernel::shutdown` with a gated job outstanding.
+
+For the waiting half: a grant posted an arbitrarily long time after the request returned
+`Pending` still redeems (the successor to the parked lease case — same defect, expressed
+against the design that has no lease *and* no budget to disagree about); a program whose
+non-final statement gates still carries the pending request in its aggregate result
+(`'rm x; echo ok'` — red today); a program with two gated statements carries both; the
+statement after a halted one does not run, which `kernel.rs:2947` currently implements and
+no test pins. None of these need a paused clock or a real one, which is the point — the
+path they cover has no timing left in it.
 
 **R3 — `refactor(kernel)!: revision checks on every transition`**
 
@@ -2572,8 +2763,8 @@ entry.
 
 *Tests:* a classifier returning `Err` gates and does not observe; a panicking classifier
 gates rather than unwinding into the statement loop; a classifier cannot lower a static
-floor; assessments appended before a `decide` cancellation survive it; `ExecutionContext`
-carries no host path.
+floor; assessments appended from an embedder that then abandons the decision survive and
+remain readable through `Approvals::get`; `ExecutionContext` carries no host path.
 
 **R5 — `refactor(kernel)!: redaction seam and pagination`**
 
@@ -2590,17 +2781,22 @@ neither repeats nor skips.
 
 **PR 11 — `feat(repl): the REPL fulfills its own gates`**
 
-The reference REPL retains the `ApproverHandle` from `Kernel::build`, installs
-`TerminalApprover` (§C.3), substitutes the hint's `<token>` placeholder on retrieval,
-ships the static/regex `StatementClassifier` as the reference example, and makes
-`approvals grant` work at the prompt. Closes the gap where the REPL described in
-§C.3/§D.3 could not fulfil its own gates — gated `rm` said "an operator must grant it"
-and there was no operator.
+The reference REPL retains the `ApproverHandle` from `Kernel::build`, prompts on a
+`Pending` result and grants from its own read loop (§C.3), substitutes the hint's
+`<token>` placeholder on retrieval, ships the static/regex `StatementClassifier` as the
+reference example, and makes `approvals grant` work at the prompt. Closes the gap where the
+REPL described in §C.3/§D.3 could not fulfil its own gates — gated `rm` said "an operator
+must grant it" and there was no operator.
 
-*Tests:* a TTY session grants at the prompt and the statement proceeds inline; a
-non-TTY session defers to exit 2 and never writes a prompt; `approvals grant` succeeds
-in the REPL session and still exits 1 in an `agent()` session; the rendered re-run line
-carries the real token only in an authority-holding session.
+This lane is also the design's own proof: the REPL is a plain embedder with no privileged
+hook, so if a human at a prompt cannot be served by `Pending` + `grant` + `confirm`, §C.2
+is wrong and this is where that shows.
+
+*Tests:* a TTY session prompts, grants, and the held statement completes; a non-TTY
+session returns exit 2 and never writes a prompt; Ctrl-C at the prompt denies and leaves no
+live request; `approvals grant` succeeds in the REPL session and still exits 1 in an
+`agent()` session; the rendered re-run line carries the real token only in an
+authority-holding session.
 
 ---
 
@@ -2654,6 +2850,28 @@ permanent home.
    rows are in the §F.2 rename table and both land in the cutover (PR 5). What does **not**
    change: exit code **2**, the `--confirm=<token>` flag spelling, and `Kernel::confirm` —
    "confirm" is not latch vocabulary. `trash` is untouched.
+5. **Should a tool-level deferral halt the top-level loop, the way a statement-level one
+   already does?** A gated statement stops the program (`kernel.rs:2941-2947`, and §C.6
+   says so). A gate raised *inside* an `Observe`d statement — an `fs.*` gate under
+   `set -o approvals`, the oldest path in the system — does not: the loop takes the exit 2
+   as an ordinary result and runs the next statement. So `rm x; echo ok` runs `echo` after
+   the `rm` it never performed, and the request the caller must now decide arrives, if at
+   all, only because §C.1's carry rule preserves it.
+
+   The case for halting is consistency and predictability: exit 2 does not mean *failed*,
+   it means *this has not happened yet*, and statements after it were written expecting it
+   had. The case against is blast radius — this is the widest-reach contract kaish has
+   (§D.3 pins the code and the flag), and the current behavior predates the ledger.
+   R2 needs the answer, because deleting expiry is what turns "the next statement ran
+   anyway" from a wart into a decision someone has to live with. **Recommendation: halt**,
+   with `set -o approvals` as the switch that already scopes who is exposed to it. Not
+   taken unilaterally — the carry rule (§C.1) is a defect fix and lands regardless; this
+   one changes behavior an existing script can see.
+6. **Does the `Approver` trait still deserve that name?** It has one synchronous method,
+   `policy`, and it no longer approves anything asynchronously — the approving happens
+   through `ApproverHandle`, which is a different object with a confusingly similar name.
+   `Policy::evaluate` would say what it is. Cosmetic, and it costs a rename across the
+   §F.2 table, so it is worth doing at the same moment as R2 or not at all.
 
 **Resolved during the redraft, recorded in the body rather than here**, so they are not
 re-litigated from the reviews: whether an ungated `fs.*` operation posts at all — no, the

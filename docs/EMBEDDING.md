@@ -61,9 +61,11 @@ code is something agents can branch on:
 
 Embedders typically run a fresh kernel per request (variables, functions,
 aliases, `set -o` options, and `cwd` reset each time) while trash and
-approval requests (60 s undecided TTL) persist across calls — share one ledger
-with `KernelConfig::with_approver_handle()` (see
+approval requests persist across calls — share one ledger with
+`KernelConfig::with_approver_handle()` (see
 [Destructive-op rails](#destructive-op-rails-inspecting-and-fulfilling-an-approval-gate)).
+An undecided request lives until you decide it or cancel it: kaish does not expire
+requests, because how long one should live is yours to choose.
 
 ## Stack size — size your execution threads
 
@@ -241,7 +243,8 @@ pub struct ApprovalRequestView {
     pub job_id: Option<u64>,      // set when a backgrounded job raised it
     pub reason: String,           // why the gate fired
     pub hint: String,             // human re-run string (display only)
-    pub ttl: Duration,            // how long it stays live undecided
+    pub deadline: Option<SystemTime>, // yours to set; compared when observed,
+                                      // never enforced on a timer
     // … see kaish_types::approval for the full record
 }
 ```
@@ -277,6 +280,25 @@ if let Some(req) = gated.approval_request() {
     }
 }
 ```
+
+**The wait is yours, and that is deliberate.** `approve(&req)` above can return
+immediately, or it can pop a dialog, call a model, or sit in a queue until someone
+comes back from lunch — `execute` has already returned, so nothing in kaish is
+holding a statement open while you decide. There is no approval callback for the
+kernel to await, because awaiting one would mean the kernel bounding your work with
+a timeout it picked and cancelling your in-flight dialog or RPC when that timeout
+fired. Run the decision on your own task, with your own timeout if you want one,
+and end an abandoned request with `cancel` rather than letting it sit live.
+
+Two consequences worth planning for:
+
+- **A gated statement stops the program there.** `confirm` replays the held
+  statement and nothing after it. If you submitted `a; b; c` and `b` gated, running
+  `c` is yours to do — the session still holds the variables and cwd that `a` set.
+- **Decide the requests you are handed.** With no expiry, an undecided request holds
+  a live slot until something closes it, so an embedder that ignores pending requests
+  eventually fills the ledger (`live_capacity`). Read `ExecResult.approval` on every
+  result, not only the ones you expected to gate.
 
 Prefer `confirm` over hand-building the re-run. The `hint` field is a
 *human-display* string and does **not** robustly quote paths (`rm
@@ -511,11 +533,12 @@ With none registered every statement is `StatementPosture::Observe` — recorded
 and run. A `StatementPosture::Gate { reason, risk }` builds an
 `ApprovalRequest` under `cmd.execute` with the plan attached and one
 `Resource { kind: "cmd", id: <argv0> }` per planned command, then runs the same
-four-stage chain a gated `rm` runs: a standing grant auto-approves it
-(all-or-nothing over every `cmd` resource), `Approver::decide` puts it in front
-of a human under the patient hold, and all-`Defer` is **exit 2** with the view
+three-stage chain a gated `rm` runs: a standing grant auto-approves it
+(all-or-nothing over every `cmd` resource), `Approver::policy` may grant or deny
+it on the request path, and `Defer` through both is **exit 2** with the view
 on `.approval` and **nothing of the statement executed** — no substitution, no
-redirect target created, no first loop iteration. The classifier has no deny:
+redirect target created, no first loop iteration, and no statement after it in
+the same program. The classifier has no deny:
 refusal is a chain decision (`Approver::policy`), because a scoping seam that
 can refuse is a second decision chain.
 
