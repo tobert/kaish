@@ -381,33 +381,39 @@ and the request is surfaced under its own `approval` key:
 "resources": [...], "hint": ..., ... } }`. The typed `approval_request()`
 accessor works the same either way, so it's the recommended path.
 
-**A request nobody decides expires after 60s, and the expiry is recorded**
-rather than silently forgotten — the ledger materializes an `Expired` entry
-the first time anything observes it, so "nobody decided in 60s" stays
-readable.
+**A request nobody decides does not expire.** It stays `Requested` until you
+decide it or cancel it — kaish never reads a clock to end one, because how long
+an unanswered request should live differs per embedder and a kernel default is
+silently wrong for someone. What bounds the ledger instead is capacity:
+`live_capacity` refuses a new request with a number when the ledger is full,
+which is a failure someone can act on rather than a request that quietly
+vanished.
 
-**An expired request is not the end of the intent.** `Kernel::renew(&id)`
-posts a fresh request carrying the original's operation, resources, capture,
-principal, and trace context, linked to it by `supersedes`, and returns the
-new id. Grant *that* one and `confirm` it as usual. Three properties an
-embedder should know:
+**So closing what you no longer want is yours to do.** `Kernel::cancel(&id, rev,
+why)` closes an undecided request. Three properties an embedder should know:
 
-- **Renewal takes no `ApproverHandle`.** It is a requester action: a session
-  holding no authority renews its own requests, which is what lets a gated
-  agent keep its own request alive rather than watch it die unfulfillable. A
-  session *with* this ledger's authority may renew any request; a session
-  without it may not renew another principal's, and the refusal names both
-  principals. `approvals renew <id>` is the same call from the shell.
-- **Renewal is not re-approval.** The new request starts undecided. A standing
-  grant auto-approves it again; a human is asked again. Nothing about the
-  passage of an hour makes a stale approval better.
-- **Renewal re-observes the resource first**, through the same check
-  redemption makes, and fails with **exit 1** naming what changed rather than
-  posting claims that are already false.
+- **Cancellation takes no `ApproverHandle`.** It is a requester action: a
+  session holding no authority cancels its own requests, which is what lets a
+  gated agent withdraw an ask it has given up on. Cancelling another
+  principal's request without authority exits 1, naming both principals.
+  `approvals cancel <id>` is the same call from the shell.
+- **Cancellation is revision-checked.** A cancel racing a grant leaves exactly
+  one winner, and the loser is recorded rather than silently dropped.
+- **Asking again is a new request, not a revival.** It starts undecided, linked
+  to the cancelled one by `supersedes`, and re-observes the resource first —
+  failing with **exit 1** naming what changed rather than posting claims that
+  are already false.
 
-If the expired request came from a backgrounded job, that job is restamped
-with the renewed request, so `JobInfo.approval`, `/v/jobs/{id}/approval`, and
-`wait` all name the live id rather than the dead one.
+If the cancelled request came from a backgrounded job, `JobManager::cancel_gate`
+closes the job's held request, so a gated job is never both unfulfillable and
+undiscardable.
+
+**Gated backgrounded jobs surface on the job, not on the result.** `cmd &` that
+gates inside tool execution puts the request on `JobInfo.approval` and
+`/v/jobs/{id}/approval`; the statement that spawned it has already returned. An
+embedder that reads only `ExecResult.approval` will not see it. Poll
+`jobs --json` for gated entries, or enumerate `Approvals::pending()`, which is
+the authoritative set either way.
 
 **Reading the ledger.** `Kernel::approvals()` is the read side (it grants
 nothing): `pending()`, `ids()`, `get(&id)`, `standing()`, `subscriptions()`,
@@ -424,9 +430,9 @@ projected type has a credential field.
 **Deciding from inside a session.** `KernelConfig::with_approver_handle()`
 installs an authority *on the session*, which is what lets `approvals
 grant`/`deny`/`revoke` work there. Without one those three exit **1** naming
-the reason, while `list`, `show`, `log`, and `renew` keep working. That is
+the reason, while `list`, `show`, `log`, and `cancel` keep working. That is
 the whole separation: an agent that can run any shell command can see what is
-pending and re-raise its own expired requests, and cannot approve itself.
+pending and withdraw its own requests, and cannot approve itself.
 
 To decide a request raised in one `execute()` call from
 a *later* call — or from a different kernel — share the ledger with

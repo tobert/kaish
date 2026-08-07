@@ -780,11 +780,12 @@ at a point where someone can act, rather than *your approval silently expired*; 
 expiry is exactly the failure kaish refuses everywhere else. An embedder that wants a
 deadline sets one and cancels what it no longer wants (§B.5).
 
-That trade has a precondition, and it is worth stating next to the trade rather than
-leaving it implicit: **an embedder can only close what it was told about.** With expiry
-deleted, a pending request the caller never sees is not a slow request, it is a leaked
-slot that nothing will ever reclaim. So every pending request must reach the caller in the
-result — §C.1's carry rule — and that rule is load-bearing here, not a convenience.
+That trade has a precondition worth stating next to it: **an embedder can only close what
+it can find.** `Approvals::pending()` (§D.2) is what makes that possible and is the
+authoritative set — paginated, filterable by scope, and complete across statements, jobs,
+and sessions alike. An embedder reclaiming slots enumerates it; the pending request handed
+back on a result is a convenience for the common single-gate case, not the inventory.
+§C.1's carry rule keeps that convenience honest rather than carrying the whole weight.
 
 ---
 
@@ -1279,25 +1280,42 @@ exit 1 with a message naming the reason. This mirrors `gate_overwrites`'s existi
 contract (`context.rs:828`), which callers already know to return verbatim and never fall
 through.
 
-**A pending request always reaches the caller, whatever ran after it.** `Pending` is the
-whole mechanism now — an embedder that is not told cannot decide, cannot cancel, and
-cannot reclaim the slot — so the control-plane field is not "the last statement's" field
-and must never be overwritten by a later statement's result. Two rules, and the second is
-the one the implementation gets wrong:
+**A pending request is never silently dropped from the result.** `Pending` is how an
+embedder learns it has something to decide, so the control-plane field is not "the last
+statement's" field. Today `accumulate_result` assigns `accumulated.approval =
+new.approval` unconditionally (`kernel.rs:7295`), on a comment asserting the pending view
+*is* the last statement's — which holds only when the gated statement happens to be last.
+It should keep the **first** pending request it is given and let later results add nothing,
+rather than overwrite it with `None`.
 
-- A result carrying a pending request keeps it through **every** accumulation step, even
-  when statements follow. Today `accumulate_result` assigns `accumulated.approval =
-  new.approval` unconditionally (`kernel.rs:7295`), on a comment asserting the pending
-  view *is* the last statement's, which holds only when the gated statement happens to be
-  last. `kaish -c 'rm x; echo ok'` with `rm` gated therefore returns exit 0 and no
-  approval view, while the request sits live in the ledger. Expiry used to collect that
-  request after 60 seconds; with expiry deleted (§A.10) nothing ever does.
-- Where a program can raise more than one, the field carries **all** of them, not the
-  first or the last. A caller that must reclaim every slot cannot be handed a sample.
+Being precise about when this fires, because the imprecise version sounds worse than it is:
+a **statement-level** gate halts the loop, so nothing follows it and nothing can overwrite
+it. The defect is specifically an **`fs.*` gate inside an `Observe`-classified statement** —
+the oldest path in the system, and the one `set -o approvals` turns on. `kaish -c 'rm x;
+echo ok'` with `rm` gated returns exit 0 and no approval view.
 
-The exit code follows the same reasoning and is a separate question, taken in §I.5:
-whether a tool-level deferral should halt the top-level loop the way a statement-level one
-already does.
+**The ledger is the authoritative pending set; the result field is a convenience.** The
+request is *not* lost when the field is overwritten — it is `Requested` in the ledger and
+`Approvals::pending()` (§D.2) enumerates it, paginated, which is the interface an embedder
+reclaiming slots should be using anyway. So the cost of the defect is that a caller
+reading only the result never learns to look, not that the record is gone. Two consequences
+follow, and they are why the field carries one request rather than all of them:
+
+- **Carrying every pending request would make the field unbounded** — a thousand-statement
+  program gating at the `fs.*` layer accumulates a thousand views in a result an embedder
+  has to hold in memory — and would force an aggregate-exit-code answer this section does
+  not need to give. The ledger already answers "which requests are live" without either
+  problem.
+- **A gated backgrounded job never surfaces here at all.** `cmd &` that gates inside tool
+  execution puts the request on `JobInfo.approval`; the spawning statement has already
+  returned. This is a second reason the result field cannot be the complete enumeration and
+  `Approvals::pending()` must be.
+
+The exit code is a separate question, taken in §I.5: whether a tool-level deferral should
+halt the top-level loop the way a statement-level one already does. Note that answering it
+*yes* dissolves this defect as a side effect — nothing runs after the gate, so nothing
+overwrites the field — which is an argument for taking §I.5 in the same lane rather than
+shipping the accumulation fix and then changing the behavior underneath it.
 
 **Tools never call `settle` on the happy path, and settlement is drop-safe.** The obvious
 design — the dispatch seam posts `Settled` after `tool.execute()` returns — does not fire
@@ -1395,6 +1413,17 @@ with a `ResumeAction`, and the embedder — which owns its own task, its own tim
 own cancellation — decides whenever it decides and comes back through `ApproverHandle`
 (§D.2). Everything an awaited hook could express is still expressible, in the embedder's
 process, on the embedder's terms.
+
+**The middle ground, and why it is not one.** The obvious rescue is to have the hook return
+a future the *embedder* builds — with its own timeout and its own cancellation baked in —
+which the kernel merely awaits. The kernel picks no number, so the two-clocks problem
+looks solved. It is not, because the kernel is still awaiting: it must still decide what to
+do when that future never completes, and its only options are to pick a bound (the clock
+returns) or to hang the statement indefinitely (the liveness hazard returns). Moving the
+timeout *inside* the future relocates the number without removing the kernel's obligation
+to survive a future that ignores it. And the statement stays held open the whole time,
+which is the cost the whole section is about. The dichotomy is about awaiting, not about
+who authored the future — so the only way out of it is not to await.
 
 **The kernel halts; the embedder resumes.** A statement whose gate defers returns before
 the statement runs and the top-level loop stops there — nothing after it executes
@@ -2726,9 +2755,22 @@ lane.
 the chain to three stages and the trait to one synchronous method; drop the patient hold
 from the gate path; add `index` to `ResumeAction::ConfirmStatement`; strip `deadline` and
 `cancellation` from `DecisionContext` and reach `AssessmentRecorder` from `ApproverHandle`;
-replace the `approval.decide` span per §G. **Fix the accumulation carry** (§C.1): a pending
-request must survive every later statement's result instead of being overwritten at
-`kernel.rs:7295` — with expiry gone this is a permanent leak, not a sixty-second one.
+replace the `approval.decide` span per §G. **Fix the accumulation carry** (§C.1): the first
+pending request must survive later statements' results instead of being overwritten at
+`kernel.rs:7295`.
+
+Machinery that loses its only caller, and must be dealt with rather than left orphaned:
+`ChainStage::Decide`; `ChainContext::hold()` and the `PatientSource`/`PatientGuard` plumbing
+behind it, which exist only for `decide`'s hold — delete them from the ledger, keeping
+`ToolCtx::patient` itself, which is a general tool-author facility with unrelated callers;
+and `ChainOutcome::Cancelled`, which stays reachable through the pre-stage cancellation
+check but whose comments and mapping at `context.rs:1477` describe a `decide` race it can
+no longer be. The stale doc-comments naming the four-stage chain go with them
+(`ledger.rs:15`, `ledger/approver.rs:1-7`, and the `ctx.patient` remarks at
+`kernel.rs:2028` and `kernel.rs:2289`). `Requester::renew` and the expiry path go in the
+*no clock* half above; with nothing expiring there is no expiry to renew from, and
+`docs/EMBEDDING.md` documented renewal in detail, so that section is part of this lane's
+docs, not PR 9's.
 
 *Tests:* a request still `Requested` after an interval that would have expired it; `cancel`
 on another principal's request is refused; a cancelled request's `supersedes` chain is
@@ -2862,16 +2904,29 @@ permanent home.
    it means *this has not happened yet*, and statements after it were written expecting it
    had. The case against is blast radius — this is the widest-reach contract kaish has
    (§D.3 pins the code and the flag), and the current behavior predates the ledger.
-   R2 needs the answer, because deleting expiry is what turns "the next statement ran
-   anyway" from a wart into a decision someone has to live with. **Recommendation: halt**,
-   with `set -o approvals` as the switch that already scopes who is exposed to it. Not
-   taken unilaterally — the carry rule (§C.1) is a defect fix and lands regardless; this
-   one changes behavior an existing script can see.
+   The sharper version of the case for halting is that the current behavior lets a
+   *denied* operation's side effects run: `rm x; touch y` creates `y` whether or not `rm x`
+   is ever approved, and nothing un-creates it. R2 needs the answer, because the
+   accumulation fix (§C.1) and this question overlap — halting dissolves the overwrite by
+   making it unreachable, so shipping the carry rule first and changing the loop later is
+   two behavior changes where one would do. **Recommendation: halt**, with `set -o
+   approvals` as the switch that already scopes who is exposed — a user who has opted into
+   destructive-op gating has asked for exactly this semantics. A cross-family review
+   reached the same recommendation independently, and argued harder for taking it now.
+   Not taken unilaterally: it changes behavior an existing script can see, on the widest
+   contract kaish has.
 6. **Does the `Approver` trait still deserve that name?** It has one synchronous method,
    `policy`, and it no longer approves anything asynchronously — the approving happens
    through `ApproverHandle`, which is a different object with a confusingly similar name.
    `Policy::evaluate` would say what it is. Cosmetic, and it costs a rename across the
    §F.2 table, so it is worth doing at the same moment as R2 or not at all.
+7. **The always-on statement tap has no measurement behind it.** §C.6 makes the tap
+   non-optional and justifies it as `O(top-level statements)`, which is an assertion
+   rather than a number: every statement pays a `Plan` allocation, a ledger append, and an
+   outbox drain, whether or not a classifier is installed. A tight-loop benchmark with the
+   tap against one without it would settle whether always-on is tenable for a
+   high-statement-rate embedder, and until it exists the claim is untestable. Raised in
+   review of the `decide` deletion; it predates that change and does not block it.
 
 **Resolved during the redraft, recorded in the body rather than here**, so they are not
 re-litigated from the reviews: whether an ungated `fs.*` operation posts at all — no, the
