@@ -46,9 +46,7 @@ fn test_origin(principal: kaish_types::approval::Principal) -> kaish_types::appr
             scope,
         ),
         principal,
-        kaish_types::approval::Capture::DirectExecution,
-        std::time::Duration::from_secs(60),
-    )
+        kaish_types::approval::Capture::DirectExecution)
 }
 
 
@@ -278,9 +276,7 @@ async fn plugin_dangerous_fixture_gates_end_to_end_through_tool_api_alone() {
             view.scope.clone(),
             view.binding.clone(),
             view.principal.clone(),
-            view.capture.clone(),
-            view.ttl,
-        )
+            view.capture.clone())
         .with_parent(view.parent.clone())
         .with_context(view.context.clone())
         .with_job_id(view.job_id),
@@ -366,9 +362,7 @@ async fn plugin_dangerous_fixture_honors_a_presented_confirm_token() {
             view.scope.clone(),
             view.binding.clone(),
             view.principal.clone(),
-            view.capture.clone(),
-            view.ttl,
-        )
+            view.capture.clone())
         .with_parent(view.parent.clone())
         .with_context(view.context.clone())
         .with_job_id(view.job_id),

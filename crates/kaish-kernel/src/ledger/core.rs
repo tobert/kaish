@@ -33,22 +33,23 @@ use std::time::{Duration, SystemTime};
 
 use kaish_types::approval::{
     ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, AttemptState, Condition,
-    Expiring, Grant, GrantTerms, Grounds, LedgerEntry, LedgerRecord, Observation, ObservedResource,
+    CancelReason, Expiring, Grant, GrantTerms, Grounds, LedgerEntry, LedgerRecord, Observation,
+    ObservedResource,
     OperationId, Outcome, Plan, Principal, RequestId, RequestOrigin, RequestState, ResourceRef,
     SessionId, StandingGrant, StandingId, StateClaim, Subscription, SubscriptionId, Token,
 };
-use kaish_types::clock::Instant;
 use tokio::sync::mpsc::OwnedPermit;
 
 use super::config::{LedgerConfig, LedgerSink};
 use super::error::LedgerError;
 use super::resolver::ConditionReport;
 
-/// A monotonic clock is `std::time::Instant`/`kaish_types::clock::Instant`
-/// everywhere; only the *wall-clock* stamp on each entry is worth
-/// substituting in a test, to prove a wall-clock jump cannot move an expiry
-/// decision (spec §A.5). Test-only implementations live in this crate's
-/// `#[cfg(test)]` modules; production code always uses [`SystemWallClock`].
+/// The ledger's one clock. Every timestamp it stamps and every deadline it
+/// compares is wall-clock (spec §A.5): a grant's `not_after` and a request's
+/// optional deadline are promises about wall-clock time made by whoever set
+/// them, so a laptop suspend correctly makes a grant look expired. Test-only
+/// implementations live in this crate's `#[cfg(test)]` modules; production
+/// code always uses [`SystemWallClock`].
 pub(crate) trait WallClock: Send + Sync {
     fn now(&self) -> SystemTime;
 }
@@ -80,11 +81,6 @@ struct Chain {
     token: Option<Token>,
     reject_count: u32,
     void_reason: Option<String>,
-    /// Monotonic — never touched by a wall-clock jump (spec §A.5).
-    request_deadline: Instant,
-    /// Set at grant time, computed from `not_after` minus the wall-clock
-    /// "now" observed at that moment. Also never touched by a later jump.
-    grant_deadline: Option<Instant>,
     attempts: HashMap<AttemptId, AttemptRecord>,
     /// At most one attempt may be `Reserved` against a chain at a time
     /// (spec §A.1's "no other attempt against g was still live").
@@ -103,7 +99,6 @@ struct Chain {
 
 struct AttemptRecord {
     state: AttemptState,
-    reserved_at: Instant,
     outcome: Option<Outcome>,
     /// Sink capacity reserved at redemption time for this attempt's
     /// eventual terminal entry (`Settled`, or attempt-level `Abandoned`) —
@@ -117,7 +112,11 @@ impl Chain {
     fn is_closed(&self) -> bool {
         matches!(
             self.state,
-            RequestState::Denied | RequestState::Expired | RequestState::Voided | RequestState::Abandoned
+            RequestState::Denied
+                | RequestState::Cancelled
+                | RequestState::Expired
+                | RequestState::Voided
+                | RequestState::Abandoned
         ) || (self.state == RequestState::Granted && self.closed_by_settlement)
     }
 }
@@ -516,8 +515,8 @@ impl LedgerInner {
     /// Sampling before locking would let a caller be admitted or denied on
     /// a stale instant, and would stamp `at` with arrival time instead of
     /// commit time.
-    fn now(&self) -> (Instant, SystemTime) {
-        (Instant::now(), self.wall.now())
+    fn now(&self) -> SystemTime {
+        self.wall.now()
     }
 
     /// Queue a best-effort settlement for the next drain (spec §C.1). Called
@@ -590,16 +589,18 @@ impl LedgerInner {
         &self,
         guard: &mut LedgerState,
         id: &RequestId,
-        mono: Instant,
         wall: SystemTime,
     ) -> Result<Vec<LedgerRecord>, LedgerError> {
         let Some(chain) = guard.chains.get(id) else {
             return Ok(Vec::new());
         };
         let what = match chain.state {
-            RequestState::Requested if mono >= chain.request_deadline => Some(Expiring::Request),
-            RequestState::Granted if !chain.closed_by_settlement => match chain.grant_deadline {
-                Some(deadline) if mono >= deadline => Some(Expiring::Grant),
+            RequestState::Requested => match chain.request.deadline {
+                Some(deadline) if wall >= deadline => Some(Expiring::Request),
+                _ => None,
+            },
+            RequestState::Granted if !chain.closed_by_settlement => match &chain.grant {
+                Some(grant) if wall >= grant.not_after => Some(Expiring::Grant),
                 _ => None,
             },
             _ => None,
@@ -634,24 +635,21 @@ impl LedgerInner {
         origin: RequestOrigin,
     ) -> Result<ApprovalRequest, LedgerError> {
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let (request, committed) = self.post_request_locked(&mut guard, draft, origin, mono, wall)?;
+        let wall = self.now();
+        let (request, committed) = self.post_request_locked(&mut guard, draft, origin, wall)?;
         drop(guard);
         emit_events(&committed);
         Ok(request)
     }
 
-    /// The shared core of `post_request` and `renew` (review finding S5):
-    /// both need "check state, then post a new `Requested`" under *one*
-    /// held guard — `renew` additionally needs to have already checked its
-    /// old request is `Expired` under the same lock acquisition that
-    /// posts the superseding request, so nothing can race between the two.
+    /// Post a `Requested` entry with the caller's guard already held, so a
+    /// caller that must check state and post in one critical section can do
+    /// both without releasing the lock between them.
     fn post_request_locked(
         &self,
         guard: &mut LedgerState,
         draft: ApprovalRequestDraft,
         origin: RequestOrigin,
-        mono: Instant,
         wall: SystemTime,
     ) -> Result<(ApprovalRequest, Vec<LedgerRecord>), LedgerError> {
         if guard.live_count_total >= self.config.live_capacity {
@@ -660,7 +658,6 @@ impl LedgerInner {
             });
         }
         let principal_id = origin.principal.id.clone();
-        let ttl = origin.ttl;
         let per_principal = *guard.live_count_by_principal.get(&principal_id).unwrap_or(&0);
         if per_principal >= self.config.live_capacity_per_principal {
             return Err(LedgerError::LiveCapacityPerPrincipal {
@@ -681,8 +678,6 @@ impl LedgerInner {
             token: None,
             reject_count: 0,
             void_reason: None,
-            request_deadline: mono + ttl,
-            grant_deadline: None,
             attempts: HashMap::new(),
             live_attempt: None,
             closed_by_settlement: false,
@@ -711,9 +706,9 @@ impl LedgerInner {
         report: ConditionReport,
     ) -> Result<AttemptId, LedgerError> {
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
-        let (result, committed) = self.redeem_locked(&mut guard, id, by, report, mono, wall);
+        let wall = self.now();
+        let mut all_committed = self.materialize_expiry(&mut guard, id, wall)?;
+        let (result, committed) = self.redeem_locked(&mut guard, id, by, report, wall);
         all_committed.extend(committed);
         drop(guard);
         emit_events(&all_committed);
@@ -728,8 +723,8 @@ impl LedgerInner {
         report: ConditionReport,
     ) -> Result<AttemptId, LedgerError> {
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
+        let wall = self.now();
+        let mut all_committed = self.materialize_expiry(&mut guard, id, wall)?;
 
         let Some(chain) = guard.chains.get(id) else {
             all_committed.extend(self.record_unmatched_key_locked(&mut guard, wall));
@@ -774,7 +769,7 @@ impl LedgerInner {
             .is_some_and(|t| constant_time_eq(t.reveal(), presented));
 
         if matches_real_token {
-            let (result, committed) = self.redeem_locked(&mut guard, id, by, report, mono, wall);
+            let (result, committed) = self.redeem_locked(&mut guard, id, by, report, wall);
             all_committed.extend(committed);
             drop(guard);
             emit_events(&all_committed);
@@ -875,7 +870,7 @@ impl LedgerInner {
     /// against nothing.
     pub(crate) fn record_unmatched_key(&self) {
         let mut guard = self.lock();
-        let (_mono, wall) = self.now();
+        let wall = self.now();
         let committed = self.record_unmatched_key_locked(&mut guard, wall);
         drop(guard);
         emit_events(&committed);
@@ -928,7 +923,6 @@ impl LedgerInner {
         id: &RequestId,
         by: Principal,
         report: ConditionReport,
-        mono: Instant,
         wall: SystemTime,
     ) -> (Result<AttemptId, LedgerError>, Vec<LedgerRecord>) {
         let Some(chain) = guard.chains.get(id) else {
@@ -1035,7 +1029,6 @@ impl LedgerInner {
                 attempt_id,
                 AttemptRecord {
                     state: AttemptState::Reserved,
-                    reserved_at: mono,
                     outcome: None,
                     terminal_sink_permit: terminal_permit,
                 },
@@ -1052,7 +1045,7 @@ impl LedgerInner {
         outcome: Outcome,
     ) -> Result<bool, LedgerError> {
         let mut guard = self.lock();
-        let (_, wall) = self.now();
+        let wall = self.now();
         let Some(chain) = guard.chains.get(request_id) else {
             return Err(LedgerError::NotFound(request_id.clone()));
         };
@@ -1121,8 +1114,8 @@ impl LedgerInner {
 
     pub(crate) fn abandon_request(&self, id: &RequestId, reason: String) -> Result<(), LedgerError> {
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
+        let wall = self.now();
+        let mut all_committed = self.materialize_expiry(&mut guard, id, wall)?;
         let Some(chain) = guard.chains.get(id) else {
             return Err(LedgerError::NotFound(id.clone()));
         };
@@ -1166,91 +1159,75 @@ impl LedgerInner {
         Ok(())
     }
 
-    /// Renew an `Expired` request into a fresh `Requested` one (spec §B.5),
-    /// as one critical section (review finding S5 — this used to acquire
-    /// the lock up to three times).
+    /// Close an undecided request from the requesting side (spec §B.5).
     ///
-    /// **Does not yet re-observe transitions before posting** (the rest of
-    /// spec §B.5: "If the world already moved, renewal fails loud rather
-    /// than posting a request whose claims are already false"). The
-    /// original resources — which may carry `StateClaim::Exact` transition
-    /// claims — are cloned verbatim. Re-observation needs a `StateResolver`
-    /// call per resource, which is PR 6's `StateResolver` trait; PR 2 has
-    /// no I/O seam to call one through. A `renew`d request's conditions are
-    /// still re-checked at its own redemption time (the ordinary
-    /// `Refused`/`Voided` path), so a stale claim is caught there — just one
-    /// step later than the spec's stated ideal.
-    pub(crate) fn renew(&self, id: &RequestId) -> Result<RequestId, LedgerError> {
+    /// **This is what replaced expiry.** Nothing times a request out
+    /// (§A.10), so with no cancellation an undecided request holds a live
+    /// slot for the life of the process. Callers: `Requester::cancel`, and
+    /// every teardown path in §B.5's obligations table.
+    ///
+    /// Refused when the request is already terminal — one cancellation per
+    /// request, and a decision that already landed is not undone by one.
+    /// An attempt in flight refuses too: the operation is running, so
+    /// "nobody wants this any more" is not yet true.
+    pub(crate) fn cancel(
+        &self,
+        id: &RequestId,
+        by: Principal,
+        reason: CancelReason,
+    ) -> Result<ApprovalRequest, LedgerError> {
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
-
-        let Some(chain) = guard.chains.get(id) else {
-            drop(guard);
-            emit_events(&all_committed);
-            return Err(LedgerError::NotFound(id.clone()));
-        };
-        if chain.state != RequestState::Expired {
-            let err = LedgerError::NotRenewable {
-                id: id.clone(),
-                state: chain.state,
-            };
-            drop(guard);
-            emit_events(&all_committed);
-            return Err(err);
-        }
-        let old = chain.request.clone();
-
-        // `ApprovalRequestDraft` is `#[non_exhaustive]` with no external
-        // constructor besides the builder — rebuild through it rather than
-        // a struct literal. `operation`/`risk` were valid on the original
-        // request, so this should never fail; treat it as a bug if it does.
-        let mut builder = kaish_types::approval::ApprovalRequest::builder(old.operation.as_str().to_string())
-            .risk(old.risk)
-            .reason(old.reason)
-            .hint(old.hint)
-            .supersedes(id.clone());
-        for resource in old.resources {
-            builder = builder.resource(resource);
-        }
-        let draft = match builder.build() {
-            Ok(draft) => draft,
-            Err(e) => {
-                debug_assert!(false, "renew: rebuilding a draft from an already-valid request failed: {e}");
-                let err = LedgerError::InvariantViolated(format!("renew: failed to rebuild request {id} as a draft: {e}"));
+        let wall = self.now();
+        let mut all_committed = self.materialize_expiry(&mut guard, id, wall)?;
+        macro_rules! bail {
+            ($err:expr) => {{
+                let err = $err;
                 drop(guard);
                 emit_events(&all_committed);
                 return Err(err);
-            }
-        };
-
-        // A renewal carries the original's scope, parent, and binding
-        // forward: the thread of intent is the same one, raised again (spec
-        // §B.5). What it does not carry is a decision — the new request
-        // starts at `Requested` and at revision 0.
-        let origin = RequestOrigin::new(
-            old.scope,
-            old.binding,
-            old.principal,
-            old.capture,
-            old.ttl,
-        )
-        .with_parent(old.parent)
-        .with_context(old.context)
-        .with_job_id(old.job_id);
-        let result = self.post_request_locked(&mut guard, draft, origin, mono, wall);
-        drop(guard);
-        match result {
-            Ok((request, committed)) => {
-                all_committed.extend(committed);
-                emit_events(&all_committed);
-                Ok(request.id)
-            }
-            Err(err) => {
-                emit_events(&all_committed);
-                Err(err)
-            }
+            }};
         }
+        let Some(chain) = guard.chains.get(id) else {
+            bail!(LedgerError::NotFound(id.clone()));
+        };
+        if chain.is_closed() {
+            bail!(self.terminal_error(id, chain.state, chain.void_reason.clone()));
+        }
+        if chain.live_attempt.is_some() {
+            bail!(LedgerError::AttemptInFlight(id.clone()));
+        }
+        let reserved = match guard.reserve_capacity(1, self.config.retained_entries) {
+            Ok(reserved) => reserved,
+            Err(err) => bail!(err),
+        };
+        let seq = guard.alloc_seq();
+        let entries = vec![(
+            LedgerEntry::Cancelled {
+                seq,
+                at: wall,
+                request: id.clone(),
+                by,
+                reason,
+            },
+            Some(id.clone()),
+        )];
+        all_committed.extend(guard.commit(entries, None, reserved));
+        let request = match guard.chains.get_mut(id) {
+            Some(chain) => {
+                chain.state = RequestState::Cancelled;
+                chain.request.clone()
+            }
+            // Unreachable: the chain was present a few lines up and the
+            // lock has not been released. Reported rather than asserted —
+            // a missing chain here means the entry landed against nothing.
+            None => bail!(LedgerError::InvariantViolated(format!(
+                "cancel: request {id} vanished from the live index inside its own transaction"
+            ))),
+        };
+        guard.mark_closed(id);
+        drop(guard);
+        emit_events(&all_committed);
+        Ok(request)
     }
 
     /// Refuse an authority action aimed at a request outside a scoped
@@ -1335,14 +1312,14 @@ impl LedgerInner {
             generate_credential().map_err(|e| LedgerError::CredentialUnavailable(e.to_string()))?,
         );
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
+        let wall = self.now();
         // `materialize_expiry` hands back the entries it committed so this
         // caller can trace them after dropping the lock. Discarding them
         // loses the `Expired` event for a request that expired on the way
         // in — every ledger append gets a tracing event (spec §G), and an
         // error return is no exception. `deny` already threads them; this
         // does too.
-        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
+        let mut all_committed = self.materialize_expiry(&mut guard, id, wall)?;
         macro_rules! bail {
             ($err:expr) => {{
                 let err = $err;
@@ -1382,9 +1359,7 @@ impl LedgerInner {
             Err(err) => bail!(err),
         };
 
-        let not_after = terms.not_after;
         let grant = Grant::from_terms(id.clone(), decided_by, grounds, terms, token.token_prefix(), wall);
-        let remaining = not_after.duration_since(wall).unwrap_or(Duration::ZERO);
 
         let seq = guard.alloc_seq();
         let entries = vec![(
@@ -1399,7 +1374,6 @@ impl LedgerInner {
         if let Some(chain) = guard.chains.get_mut(id) {
             chain.grant = Some(grant.clone());
             chain.state = RequestState::Granted;
-            chain.grant_deadline = Some(mono + remaining);
             chain.token = Some(token);
         }
         drop(guard);
@@ -1409,8 +1383,8 @@ impl LedgerInner {
 
     pub(crate) fn deny(&self, id: &RequestId, reason: String, by: Principal) -> Result<(), LedgerError> {
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
+        let wall = self.now();
+        let mut all_committed = self.materialize_expiry(&mut guard, id, wall)?;
         let Some(chain) = guard.chains.get(id) else {
             drop(guard);
             emit_events(&all_committed);
@@ -1461,7 +1435,7 @@ impl LedgerInner {
 
     pub(crate) fn grant_standing(&self, mut standing: StandingGrant) -> Result<StandingId, LedgerError> {
         let mut guard = self.lock();
-        let (_, wall) = self.now();
+        let wall = self.now();
         let reserved = guard.reserve_capacity(1, self.config.retained_entries)?;
         let raw = guard.next_standing_seq;
         guard.next_standing_seq += 1;
@@ -1514,8 +1488,8 @@ impl LedgerInner {
         // commits is a time inside the critical section rather than one
         // read before an arbitrary wait for it.
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
+        let wall = self.now();
+        let mut all_committed = self.materialize_expiry(&mut guard, id, wall)?;
         macro_rules! bail {
             ($err:expr) => {{
                 let err = $err;
@@ -1598,8 +1572,6 @@ impl LedgerInner {
             token.token_prefix(),
             wall,
         );
-        let remaining = not_after.duration_since(wall).unwrap_or(Duration::ZERO);
-
         let seq = guard.alloc_seq();
         let entries = vec![(
             LedgerEntry::Granted {
@@ -1613,7 +1585,6 @@ impl LedgerInner {
         if let Some(chain) = guard.chains.get_mut(id) {
             chain.grant = Some(grant.clone());
             chain.state = RequestState::Granted;
-            chain.grant_deadline = Some(mono + remaining);
             chain.token = Some(token);
         }
         drop(guard);
@@ -1630,7 +1601,7 @@ impl LedgerInner {
 
     pub(crate) fn revoke_standing(&self, id: StandingId, by: Principal, reason: String) -> Result<(), LedgerError> {
         let mut guard = self.lock();
-        let (_, wall) = self.now();
+        let wall = self.now();
         if !guard.standing.contains_key(&id) {
             return Err(LedgerError::StandingNotFound(id));
         }
@@ -1664,7 +1635,7 @@ impl LedgerInner {
         mut subscription: Subscription,
     ) -> Result<SubscriptionId, LedgerError> {
         let mut guard = self.lock();
-        let (_, wall) = self.now();
+        let wall = self.now();
         let reserved = guard.reserve_capacity(1, self.config.retained_entries)?;
         let raw = guard.next_subscription_seq;
         guard.next_subscription_seq += 1;
@@ -1697,7 +1668,7 @@ impl LedgerInner {
         reason: String,
     ) -> Result<(), LedgerError> {
         let mut guard = self.lock();
-        let (_, wall) = self.now();
+        let wall = self.now();
         if !guard.subscriptions.contains_key(&id) {
             return Err(LedgerError::SubscriptionNotFound(id));
         }
@@ -1759,7 +1730,7 @@ impl LedgerInner {
         plan: Option<Plan>,
     ) -> Result<(), LedgerError> {
         let mut guard = self.lock();
-        let (_, wall) = self.now();
+        let wall = self.now();
         let reserved = guard.reserve_capacity(1, self.config.retained_entries)?;
         let seq = guard.alloc_seq();
         let entries = vec![(
@@ -1793,7 +1764,7 @@ impl LedgerInner {
     /// a bearer secret either way).
     pub(crate) fn token_for(&self, id: &RequestId, by: Principal) -> Option<Token> {
         let mut guard = self.lock();
-        let (_, wall) = self.now();
+        let wall = self.now();
         let token = guard.chains.get(id)?.token.clone()?;
         let reserved = guard.reserve_capacity(1, self.config.retained_entries).ok()?;
         let seq = guard.alloc_seq();
@@ -1812,15 +1783,19 @@ impl LedgerInner {
         Some(token)
     }
 
-    // ── Recovery sweep ───────────────────────────────────────────────
+    // ── The sweep ────────────────────────────────────────────────────
 
-    /// Materializes due `Expired` entries and closes `Reserved` attempts
-    /// that have sat unreported past `LedgerConfig::attempt_stale_after` as
-    /// `Abandoned` (spec §D.4's recovery sweep — see `attempt_stale_after`'s
-    /// doc comment for why PR 2 needs a staleness bound at all). Also drains
-    /// the `AttemptGuard` outbox (spec §C.1, PR 3) — the sweep tick is one
-    /// of the two places that drain is documented to happen, the other
-    /// being the ledger's transaction wrappers in `handles.rs`.
+    /// Drain the [`AttemptGuard`](super::AttemptGuard) outbox and
+    /// materialize any deadline that has passed — a grant's `not_after`, or
+    /// the optional deadline an embedder set on a request (spec §A.10).
+    ///
+    /// The sweep closes **no** attempt on its own. A dropped attempt is
+    /// reported by its guard's outbox, which knows the executor went away;
+    /// inferring the same fact from elapsed time would be guessing at
+    /// something the ledger is already told (spec §A.10). A `Reserved`
+    /// attempt whose guard never ran at all — the process died mid-attempt
+    /// — is left for restart-time recovery, which needs a replayable sink
+    /// and is deferred (spec §D.4).
     pub(crate) fn sweep(&self) {
         self.drain_outbox();
         let ids: Vec<RequestId> = {
@@ -1830,66 +1805,13 @@ impl LedgerInner {
         for id in ids {
             let committed = {
                 let mut guard = self.lock();
-                let (mono, wall) = self.now();
-                self.materialize_expiry(&mut guard, &id, mono, wall)
+                let wall = self.now();
+                self.materialize_expiry(&mut guard, &id, wall)
             };
             if let Ok(committed) = committed {
                 emit_events(&committed);
             }
-            self.sweep_stale_attempt(&id);
         }
-    }
-
-    fn sweep_stale_attempt(&self, id: &RequestId) {
-        let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let Some(chain) = guard.chains.get(id) else { return };
-        let Some(attempt_id) = chain.live_attempt else { return };
-        let Some(record) = chain.attempts.get(&attempt_id) else { return };
-        if !matches!(record.state, AttemptState::Reserved) {
-            return;
-        }
-        if mono.duration_since(record.reserved_at) < self.config.attempt_stale_after {
-            return;
-        }
-        // The chain may already have closed a different way (a 5th bad
-        // credential, expiry) while this attempt sat `Reserved` — same
-        // guard as `settle()`, same reason (review finding B2).
-        let was_already_closed = chain.is_closed();
-
-        // A terminal entry (this is one — attempt-level `Abandoned`) is
-        // never capacity-refusable (review finding B3); the room was
-        // banked when this attempt was reserved.
-        let permit = guard
-            .chains
-            .get_mut(id)
-            .and_then(|c| c.attempts.get_mut(&attempt_id))
-            .and_then(|r| r.terminal_sink_permit.take());
-        let seq = guard.alloc_seq();
-        let reason = "recovery sweep: reservation exceeded the staleness bound with no report".to_string();
-        let entry = LedgerEntry::Abandoned {
-            seq,
-            at: wall,
-            request: id.clone(),
-            attempt: Some(attempt_id),
-            reason,
-        };
-        let committed_entry = guard.commit_terminal(entry, id.clone(), permit);
-        if let Some(chain) = guard.chains.get_mut(id) {
-            if let Some(record) = chain.attempts.get_mut(&attempt_id) {
-                record.state = AttemptState::Abandoned;
-            }
-            chain.live_attempt = None;
-            // An abandoned attempt's effects are unknown, same as
-            // `Outcome::Unknown` — the chain closes rather than staying
-            // open for a retry against a grant nobody can vouch for.
-            chain.closed_by_settlement = true;
-        }
-        if !was_already_closed {
-            guard.mark_closed(id);
-        }
-        drop(guard);
-        emit_events(&[committed_entry]);
     }
 
     // ── Read side (Approvals) ────────────────────────────────────────
@@ -1996,8 +1918,8 @@ impl LedgerInner {
     /// `materialize_expiry`'s doc comment for the write-side contrast.
     fn best_effort_materialize(&self, id: &RequestId) {
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let result = self.materialize_expiry(&mut guard, id, mono, wall);
+        let wall = self.now();
+        let result = self.materialize_expiry(&mut guard, id, wall);
         drop(guard);
         if let Ok(committed) = result {
             emit_events(&committed);
@@ -2105,22 +2027,6 @@ fn evaluate_conditions(
     (observed, None)
 }
 
-/// Why `report` refuses `conditions`, if it does — the same decision
-/// [`evaluate_conditions`] makes at redemption, exposed for the one caller
-/// that has to make it *before* anything is posted: renewal (spec §B.5, "if
-/// the world already moved, renewal fails loud rather than posting a request
-/// whose claims are already false").
-///
-/// Shares the redemption path's implementation deliberately. A renewal that
-/// judged staleness by its own rules would let a request through that its own
-/// redemption then refuses, which is the drift this indirection exists to
-/// prevent.
-pub(crate) fn condition_conflict(conditions: &[Condition], report: ConditionReport) -> Option<String> {
-    evaluate_conditions(conditions, report)
-        .1
-        .map(|(_, _, reason)| reason)
-}
-
 /// Constant-time string equality (review NIT — defense in depth on
 /// credential comparison; see its call site for the threat-model caveat).
 fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -2195,6 +2101,9 @@ fn emit_events(records: &[LedgerRecord]) {
             }
             LedgerEntry::Unsubscribed { id, .. } => {
                 tracing::info!(subscription_id = %id, "approval.unsubscribed");
+            }
+            LedgerEntry::Cancelled { request, by, reason, .. } => {
+                tracing::info!(request_id = %request, cancelled_by = %by.id, reason = %reason, "approval.cancelled");
             }
             LedgerEntry::TokenRejected { request, attempts, .. } => {
                 tracing::warn!(request_id = ?request.as_ref().map(ToString::to_string), attempts = attempts, "approval.token_rejected");
@@ -2347,9 +2256,7 @@ mod tests {
             scope(),
             PlanBinding::new(PlanDigest::new("test"), "/", scope()),
             principal.clone(),
-            Capture::DirectExecution,
-            Duration::from_secs(60),
-        )
+            Capture::DirectExecution)
     }
 
     #[allow(clippy::unwrap_used)]

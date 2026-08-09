@@ -3,11 +3,10 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use kaish_types::approval::{
-    ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, Capture, Condition,
+    ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, CancelReason, Capture, Condition,
     Invocation, Observation, ObservedResource, OperationId, Outcome, Plan, PlanBinding, PlanDigest,
     Principal, RequestId, Resource, ResourceRef,
 };
@@ -345,11 +344,6 @@ pub struct LedgerAccess {
     /// field. The threat model says so explicitly — the ledger does not
     /// defend against hostile Rust compiled into the process (§A.2).
     pub session_authority: Option<crate::ledger::ApproverHandle>,
-    /// How long a posted request stays live with no decision, when this
-    /// context posts one. `ExecContext` has no access to the `LedgerConfig`
-    /// that minted `requester` (only the handle), so this is threaded
-    /// alongside it rather than re-derived.
-    pub request_ttl: Duration,
     /// The embedder- and plugin-registered [`StateResolver`]s a redemption
     /// consults for non-`path` resource kinds (spec §B.4). `path` is not in
     /// here — it is served by a [`PathResolver`] built from *this* context's
@@ -532,6 +526,12 @@ fn approval_error(id: RequestId, err: LedgerError) -> kaish_tool_api::ApprovalOu
     use kaish_tool_api::ApprovalOutcome;
     match err {
         LedgerError::Refused { id, detail } => ApprovalOutcome::Refused { request: id, detail },
+        // The request's own state, not the ledger's health (spec §C.1).
+        LedgerError::Terminal { id, state, detail } => ApprovalOutcome::Closed {
+            request: id,
+            state,
+            detail: detail.unwrap_or_default(),
+        },
         LedgerError::LiveCapacity { .. }
         | LedgerError::LiveCapacityPerPrincipal { .. }
         | LedgerError::RingAtCapacity
@@ -1161,7 +1161,6 @@ impl ExecContext {
             chain,
             principal: Principal::new("test-session", kaish_types::approval::PrincipalKind::Agent),
             scope,
-            request_ttl: crate::ledger::LedgerConfig::default().request_ttl,
             job_id: None,
             resolvers: Arc::new(StateResolvers::default()),
             // A wired test context is an authority-holding session: the
@@ -1531,9 +1530,7 @@ impl ExecContext {
             access.scope.clone(),
             binding,
             access.principal.clone(),
-            capture,
-            access.request_ttl,
-        )
+            capture)
         .with_parent(self.gate_parent.clone())
         .with_job_id(access.job_id);
         let request = match access.requester.post_request(draft, origin).await {
@@ -1567,9 +1564,11 @@ impl ExecContext {
             Ok(ChainOutcome::Cancelled) => ApprovalOutcome::Cancelled {
                 request: request.id,
             },
-            Err(err) => ApprovalOutcome::LedgerUnavailable {
-                reason: err.to_string(),
-            },
+            // A decision the ledger refused: the request closed underneath
+            // the chain (cancelled by its owner, past a deadline the
+            // embedder set) is `Closed`, and only a ledger condition —
+            // capacity, sink backpressure — is `LedgerUnavailable`.
+            Err(err) => approval_error(request.id, err),
         }
     }
 
@@ -1798,30 +1797,24 @@ impl ExecContext {
         ConditionReport::observed(observed)
     }
 
-    /// Renew an expired request (`docs/approval-ledger.md` §B.5): post a
-    /// fresh `Requested` carrying the original's operation, resources,
-    /// capture, principal, and trace context, linked by `supersedes`.
+    /// Close an undecided request (`docs/approval-ledger.md` §B.5).
     ///
-    /// **Renewal is a requester action, not an approval action.** The
-    /// principal that owns the request may renew it holding no authority at
-    /// all — that is what lets a gated agent keep its own request alive
-    /// instead of watching it die at `not_after` with no way to re-raise it.
-    /// A session holding this ledger's authority may renew any request,
-    /// because it could already grant or deny that request; withholding
-    /// renewal from it would be a special case with nothing behind it. Any
-    /// other session renewing another principal's request is refused.
+    /// **Cancellation is a requester action, not an approval action.** The
+    /// principal that owns the request may close it holding no authority at
+    /// all — that is what lets a gated agent withdraw its own request. A
+    /// session holding this ledger's authority may cancel any request,
+    /// because it could already deny that request; withholding cancellation
+    /// from it would be a special case with nothing behind it. Any other
+    /// session cancelling another principal's request is refused.
     ///
-    /// **The transitions are re-observed first.** A renewal posts the
-    /// original's resource claims verbatim, so if the world moved while
-    /// nobody was deciding, the fresh request would carry claims that are
-    /// already false and an approver would be deciding on fiction. The check
-    /// is the same one redemption makes, so a renewal can never post a
-    /// request its own redemption would refuse.
-    ///
-    /// The originating background job, if there was one, is restamped with
-    /// the renewed request — otherwise `wait`, `jobs`, and
-    /// `/v/jobs/{id}/approval` keep reporting the dead id.
-    pub(crate) async fn renew_request(&self, id: &RequestId) -> Result<RequestId, String> {
+    /// The originating background job, if there was one, keeps its cached
+    /// result; the request it names is now `Cancelled`, which
+    /// `approvals show` reports.
+    pub(crate) async fn cancel_request(
+        &self,
+        id: &RequestId,
+        reason: CancelReason,
+    ) -> Result<(), String> {
         let Some(access) = self.ledger_access.as_ref() else {
             return Err("this session has no approval ledger".to_string());
         };
@@ -1832,44 +1825,18 @@ impl ExecContext {
         let owned = chain.request.principal == access.principal;
         if !owned && access.session_authority.is_none() {
             return Err(format!(
-                "{id} was raised by {}, not {} — renewal is the requester's action, and this \
+                "{id} was raised by {}, not {} — cancellation is the requester's action, and this \
                  session holds no approval authority over another principal's request",
                 chain.request.principal.id, access.principal.id
             ));
         }
 
-        let conditions: Vec<kaish_types::approval::Condition> = chain
-            .request
-            .resources
-            .iter()
-            .filter_map(kaish_types::approval::Resource::to_condition)
-            .collect();
-        let report = self.observe_conditions(&conditions).await;
-        if let Some(reason) = crate::ledger::condition_conflict(&conditions, report) {
-            return Err(format!(
-                "{id} cannot be renewed: {reason} — the request's claims are no longer true, so \
-                 re-run the command to raise a request describing the world as it is now"
-            ));
-        }
-
-        let renewed = access
+        access
             .requester
-            .renew(id)
+            .cancel(id, access.principal.clone(), reason)
             .await
-            .map_err(|e| format!("{id} cannot be renewed: {e}"))?;
-
-        // Point the originating background job at the live request. Without
-        // this the job keeps surfacing the expired id through `wait`,
-        // `jobs`, and `/v/jobs/{id}/approval`, and an operator who granted
-        // the renewal has no way to see which job it belongs to.
-        if let Some(job_id) = chain.request.job_id
-            && let Some(manager) = self.job_manager.as_ref()
-            && let Some(view) = access.approvals.get(&renewed).map(|c| c.request)
-        {
-            manager.renew_gate(crate::scheduler::JobId(job_id), view).await;
-        }
-
-        Ok(renewed)
+            .map_err(|e| format!("{id} cannot be cancelled: {e}"))?;
+        Ok(())
     }
 
     /// Reserve an attempt against a request this execution just had granted.

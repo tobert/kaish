@@ -52,9 +52,7 @@ async fn post_in(requester: &Requester, scope: ApprovalScope) -> ApprovalRequest
         scope.clone(),
         PlanBinding::new(PlanDigest::new("test"), "/w", scope),
         agent("agent-1"),
-        Capture::DirectExecution,
-        Duration::from_secs(600),
-    );
+        Capture::DirectExecution);
     requester.post_request(draft, origin).await.unwrap()
 }
 

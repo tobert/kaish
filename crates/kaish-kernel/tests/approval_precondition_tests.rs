@@ -71,9 +71,7 @@ fn test_origin(principal: kaish_types::approval::Principal) -> kaish_types::appr
             scope,
         ),
         principal,
-        kaish_types::approval::Capture::DirectExecution,
-        std::time::Duration::from_secs(60),
-    )
+        kaish_types::approval::Capture::DirectExecution)
 }
 
 

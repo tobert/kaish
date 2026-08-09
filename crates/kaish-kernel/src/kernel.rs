@@ -1183,10 +1183,6 @@ struct KernelApprovals {
     /// The authority *this session* was given, if any. `None` means this
     /// session may not approve anything (spec §E.2, tier 1).
     session_authority: Option<crate::ledger::ApproverHandle>,
-    /// How long a request this session posts stays live with no decision.
-    /// Read off the `LedgerConfig` the ledger was built with, because a
-    /// gate site holds only the handle.
-    request_ttl: std::time::Duration,
     /// The registered state resolvers, by resource kind (spec §B.4). Shared
     /// by every fork, so a background job re-checks a precondition through
     /// the same resolver the foreground would.
@@ -1208,7 +1204,6 @@ impl KernelApprovals {
             chain: Arc::clone(&self.chain),
             principal: self.principal.clone(),
             scope: self.scope.clone(),
-            request_ttl: self.request_ttl,
             job_id,
             resolvers: Arc::clone(&self.resolvers),
             // `session_authority`, not `authority`: a context gets what the
@@ -1742,10 +1737,6 @@ impl Kernel {
                  cannot also apply — configure the ledger on the kernel that mints it"
             );
         }
-        let request_ttl = ledger_config
-            .as_ref()
-            .map(|c| c.request_ttl)
-            .unwrap_or_else(|| crate::ledger::LedgerConfig::default().request_ttl);
         let (requester, approvals, authority) = match &approver_handle {
             Some(handle) => handle.join(),
             None => crate::ledger::Ledger::build(
@@ -1774,7 +1765,6 @@ impl Kernel {
             principal: principal.unwrap_or_default(),
             authority,
             session_authority,
-            request_ttl,
             resolvers: Arc::new(resolvers),
             statement_classifier,
         })
@@ -2456,46 +2446,41 @@ impl Kernel {
         Ok(result)
     }
 
-    /// Renew an expired approval request (`docs/approval-ledger.md` §B.5):
-    /// post a fresh `Requested` carrying the original's operation, resources,
-    /// capture, principal, and trace context, linked by `supersedes`. Returns
-    /// the new request's id.
+    /// Close an undecided approval request (`docs/approval-ledger.md` §B.5).
     ///
-    /// **This is the dead-request fix.** Before it, a backgrounded gate that
-    /// nobody decided within `request_ttl` was unfulfillable *and*
-    /// undiscardable: the job could not run, the request could not be
-    /// granted, and there was no way to raise the same intent again except by
-    /// re-running the command — which a backgrounded job cannot do for
-    /// itself. Renewal walks the chain forward instead: `supersedes` links
-    /// each attempt to the last, so "this took four tries over two hours" is
-    /// legible in the log.
+    /// **Nothing times a request out** (spec §A.10), so this is the only way
+    /// a request nobody decides ever ends. An embedder that wants a horizon
+    /// runs its own timer and calls this with
+    /// [`CancelReason::DeadlinePassed`](kaish_types::approval::CancelReason::DeadlinePassed);
+    /// one that wants none never calls it.
     ///
-    /// **Renewal is not re-approval.** The renewed request starts at
-    /// `Requested` and needs a fresh decision — a standing grant will
-    /// auto-approve it again, a human will be asked again. Nothing about the
-    /// passage of an hour makes a stale approval better.
+    /// **Cancelling is not denying.** A cancelled request is closed with no
+    /// decision recorded against it, and asking again posts a **new**
+    /// request linked by `supersedes` — the thread of intent stays walkable.
     ///
     /// Takes no [`ApproverHandle`](crate::ledger::ApproverHandle), unlike
-    /// [`Self::confirm`]: renewal is a *requester* action, so a session
-    /// holding no authority renews its own requests. It cannot renew another
+    /// [`Self::confirm`]: cancellation is a *requester* action, so a session
+    /// holding no authority closes its own requests. It cannot close another
     /// principal's.
-    ///
-    /// If the request came from a backgrounded job, that job is restamped
-    /// with the renewed request, so `wait`, `jobs`, and
-    /// `/v/jobs/{id}/approval` name the live id rather than the dead one.
     ///
     /// # Errors
     ///
-    /// The request is unknown, is not `Expired`, belongs to another principal
-    /// in a session with no authority, or declares a transition the world no
-    /// longer shows — the last being the loud refusal §B.5 requires, so a
-    /// renewal never posts claims that are already false.
-    pub async fn renew(
+    /// The request is unknown, is already terminal, has an attempt in
+    /// flight, or belongs to another principal in a session with no
+    /// authority.
+    /// Named `cancel_approval` rather than the spec's bare `cancel`:
+    /// [`Kernel::cancel`] already means "interrupt the running execution",
+    /// and one name for two unrelated cancellations is exactly the
+    /// collision the style guide's one-term-one-meaning rule forbids.
+    pub async fn cancel_approval(
         &self,
         request_id: &kaish_types::approval::RequestId,
-    ) -> Result<kaish_types::approval::RequestId> {
+        reason: kaish_types::approval::CancelReason,
+    ) -> Result<()> {
         let ctx = self.exec_ctx.read().await;
-        ctx.renew_request(request_id).await.map_err(|e| anyhow::anyhow!(e))
+        ctx.cancel_request(request_id, reason)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
     }
 
     /// Run `work` under the movable-deadline watchdog for `timeout`, shared by the
@@ -6450,13 +6435,18 @@ impl Kernel {
     /// future exits at its next checkpoint, and any external children it
     /// spawned get the SIGTERM→SIGKILL cascade; it then stays tracked with
     /// status `Killed` once it unwinds. For a *gated* or already-finished
-    /// job the token trip is a no-op — its future has already resolved, the
-    /// job keeps reporting `Gated`/its terminal status, and a gated job's
-    /// pending approval request stays live in the ledger until its TTL
-    /// expires (an operator can still grant and `confirm` it). This only
+    /// job the token trip is a no-op — its future has already resolved and
+    /// the job keeps reporting `Gated`/its terminal status. This only
     /// *starts* cancellation, it does not wait (pair with
     /// [`JobManager::wait`]/`wait_all` if the caller needs to block on the
     /// unwind, bounded as [`Self::shutdown`] does).
+    ///
+    /// **A gated job's held request is cancelled here**
+    /// (`docs/approval-ledger.md` §B.5, "a job is cancelled or killed").
+    /// Nothing times a request out, so a job cancelled with a request still
+    /// `Requested` would hold a live ledger slot for the life of the
+    /// process — and forever, in an embedder where several kernels share
+    /// one ledger.
     ///
     /// A job registered by an embedder via [`JobManager::register`] with no
     /// cancel token attached has no lever to cancel — silently skipped here,
@@ -6467,6 +6457,14 @@ impl Kernel {
         let ids = self.jobs.list_ids().await;
         let mut cancelled = 0;
         for id in ids {
+            crate::ledger::cancel_job_request(
+                &self.approvals.requester,
+                &self.approvals.principal,
+                &self.jobs,
+                id,
+                kaish_types::approval::CancelReason::Withdrawn,
+            )
+            .await;
             if self.jobs.mark_killed_and_cancel(id, false).await {
                 cancelled += 1;
             }
@@ -6476,7 +6474,10 @@ impl Kernel {
 
     /// Shut down the kernel.
     ///
-    /// Cancels every tracked background job ([`Self::cancel_all_jobs`]), then
+    /// Cancels every tracked background job ([`Self::cancel_all_jobs`]),
+    /// closes every approval request left live in this kernel's scope
+    /// (`docs/approval-ledger.md` §B.5 — nothing times one out, so a kernel
+    /// that shares a ledger with other sessions would strand them), then
     /// waits up to `kill_grace + 3s` **per job** — the same bound `kill %N`
     /// gives a single target (GH #244) — for it to actually unwind. The
     /// waits are sequential, so the worst case is additive: N jobs that all
@@ -6499,6 +6500,20 @@ impl Kernel {
     pub async fn shutdown(&self) -> Result<()> {
         let ids = self.jobs.list_ids().await;
         self.cancel_all_jobs().await;
+        // Every request this kernel's scope still owns, whether or not a job
+        // holds it (`docs/approval-ledger.md` §B.5, rows 3 and 4). A kaish
+        // session *is* a kernel, so the session and kernel obligations are
+        // one call: `with_session` names the session, and the scope is what
+        // separates this kernel's requests from another session's sharing
+        // the same ledger.
+        crate::ledger::cancel_scope(
+            &self.approvals.requester,
+            &self.approvals.approvals,
+            &self.approvals.principal,
+            &self.approvals.scope,
+            kaish_types::approval::CancelReason::Withdrawn,
+        )
+        .await;
 
         let bound = self.jobs.kill_grace() + Duration::from_secs(3);
         for id in ids {

@@ -11,7 +11,7 @@
 //! handles behind `Kernel::approvals()` (spec §D.2) and are unrelated types
 //! that happen to share a name with their tool-facing counterpart here.
 
-use kaish_types::approval::{AttemptId, RequestId, StateClaim};
+use kaish_types::approval::{AttemptId, RequestId, RequestState, StateClaim};
 use kaish_types::ExecResult;
 
 /// What one execution reserved against a grant (spec §C.1). Exposes only its
@@ -83,12 +83,31 @@ pub enum ApprovalOutcome {
         /// Why.
         detail: String,
     },
+    /// The request is over: cancelled, past a deadline the embedder set,
+    /// voided, or abandoned. Nothing is wrong with the ledger and retrying
+    /// this request will never work — ask again, which posts a new request
+    /// (spec §B.5).
+    ///
+    /// Distinct from [`Self::LedgerUnavailable`], which used to answer this
+    /// question too. One says *the ledger could not record this, try
+    /// again*; this one says *this request is over*.
+    Closed {
+        /// The closed request.
+        request: RequestId,
+        /// Which terminal state closed it.
+        state: RequestState,
+        /// What the ledger recorded about the closing, when it recorded
+        /// something the state alone does not say — "voided after 5
+        /// invalid attempts". Empty otherwise.
+        detail: String,
+    },
     /// This context has no ledger — a unit-test harness or a minimal
     /// embedder. The default [`crate::ToolCtx::request_approval`] impl
     /// always returns this.
     Unsupported,
     /// The ledger refused to record: sink backpressure or live capacity
-    /// (spec §D.4).
+    /// (spec §D.4). A condition of the *ledger*, and retryable. Never used
+    /// to report a request's own state — that is [`Self::Closed`].
     LedgerUnavailable {
         /// Why.
         reason: String,
@@ -117,9 +136,9 @@ impl ApprovalOutcome {
     /// ```
     ///
     /// `Pending` maps to exit 2 with the view on [`ExecResult::approval`];
-    /// `Denied`, `Refused`, `Unsupported`, and `LedgerUnavailable` map to
-    /// exit 1 with a message naming the reason. `Authorized` is the only
-    /// variant that lets the caller continue.
+    /// `Denied`, `Refused`, `Closed`, `Unsupported`, and `LedgerUnavailable`
+    /// map to exit 1 with a message naming the reason. `Authorized` is the
+    /// only variant that lets the caller continue.
     // `ExecResult` is deliberately fat (see `kaish_trash.rs`'s identical
     // allow) — a gate site returns it verbatim, and boxing it here would
     // just move the same allocation the caller immediately unboxes again.
@@ -140,6 +159,15 @@ impl ApprovalOutcome {
             }
             Self::Refused { request, detail } => {
                 Err(ExecResult::failure(1, format!("request {request} refused: {detail}")))
+            }
+            Self::Closed { request, state, detail } => {
+                let mut message = format!(
+                    "request {request} is {state:?} and can no longer be decided — ask again to post a new one"
+                );
+                if !detail.is_empty() {
+                    message.push_str(&format!(" ({detail})"));
+                }
+                Err(ExecResult::failure(1, message))
             }
             Self::Unsupported => Err(ExecResult::failure(
                 1,

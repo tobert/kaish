@@ -46,9 +46,7 @@ fn test_origin(principal: kaish_types::approval::Principal) -> kaish_types::appr
             scope,
         ),
         principal,
-        kaish_types::approval::Capture::DirectExecution,
-        std::time::Duration::from_secs(60),
-    )
+        kaish_types::approval::Capture::DirectExecution)
 }
 
 
@@ -286,9 +284,7 @@ async fn an_approval_round_trips_through_the_argv_door() {
                 req.scope.clone(),
                 req.binding.clone(),
                 req.principal.clone(),
-                req.capture.clone(),
-                req.ttl,
-            )
+                req.capture.clone())
             .with_parent(req.parent.clone())
             .with_context(req.context.clone())
             .with_job_id(req.job_id),

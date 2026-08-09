@@ -891,7 +891,7 @@ mod tests {
         assert_eq!(req.operation.as_str(), "fs.remove");
         assert_eq!(req.resources.len(), 1);
         assert_eq!(req.resources[0].id, "important.dat");
-        assert_eq!(req.ttl, std::time::Duration::from_secs(60));
+        assert_eq!(req.deadline, None, "a request carries no deadline unless an embedder set one");
         assert!(req.hint.contains("--confirm"));
     }
 

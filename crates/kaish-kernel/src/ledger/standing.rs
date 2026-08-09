@@ -77,9 +77,7 @@ mod tests {
                 scope.clone(),
                 PlanBinding::new(PlanDigest::new("test"), "/", scope),
                 Principal::new("agent-1", PrincipalKind::Agent),
-                Capture::DirectExecution,
-                Duration::from_secs(60),
-            ),
+                Capture::DirectExecution),
         )
     }
 

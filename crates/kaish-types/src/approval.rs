@@ -27,7 +27,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -980,8 +980,8 @@ pub struct RequestContext {
 /// The request entry: one privileged operation asking to proceed (spec
 /// §A.3). Posted by the implementation side; every field except the ones a
 /// producer supplies through [`ApprovalRequest::builder`] is stamped by the
-/// kernel (`id`, `principal`, `capture`, `context`, `requested_at`, `ttl`,
-/// `job_id`) — see [`ApprovalRequestDraft::stamp`].
+/// kernel (`id`, `principal`, `capture`, `context`, `requested_at`,
+/// `deadline`, `job_id`) — see [`ApprovalRequestDraft::stamp`].
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApprovalRequest {
@@ -1028,9 +1028,16 @@ pub struct ApprovalRequest {
     /// Wall-clock post time.
     #[serde(with = "crate::rfc3339::system_time")]
     pub requested_at: SystemTime,
-    /// How long the request stays live with no decision.
-    pub ttl: Duration,
-    /// Set when this request renews an expired predecessor (spec §B.5).
+    /// When this request stops being answerable. `None` — the default —
+    /// means it never does: it lives until decided or cancelled (spec
+    /// §A.10). The kernel never enforces this field on a timer; it is
+    /// compared when the request is next observed, exactly like a grant's
+    /// `not_after`. An embedder that wants deadlines sets them and cancels
+    /// what it no longer wants (spec §B.5).
+    #[serde(default, with = "crate::rfc3339::opt_system_time")]
+    pub deadline: Option<SystemTime>,
+    /// Set when this request replaces a closed predecessor — the operation
+    /// was cancelled, or denied, and asked again (spec §B.5).
     pub supersedes: Option<RequestId>,
     /// The parsed statement plan, present exactly when the operation is the
     /// statement gate (spec §C.6). Typed here and mirrored as `cmd`
@@ -1118,8 +1125,9 @@ pub struct ApprovalRequestView {
     /// See [`ApprovalRequest::requested_at`].
     #[serde(with = "crate::rfc3339::system_time")]
     pub requested_at: SystemTime,
-    /// See [`ApprovalRequest::ttl`].
-    pub ttl: Duration,
+    /// See [`ApprovalRequest::deadline`].
+    #[serde(default, with = "crate::rfc3339::opt_system_time")]
+    pub deadline: Option<SystemTime>,
     /// See [`ApprovalRequest::supersedes`].
     pub supersedes: Option<RequestId>,
     /// See [`ApprovalRequest::plan`]. An approver reads this to see what the
@@ -1146,7 +1154,7 @@ impl From<ApprovalRequest> for ApprovalRequestView {
             reason: req.reason,
             hint: req.hint,
             requested_at: req.requested_at,
-            ttl: req.ttl,
+            deadline: req.deadline,
             supersedes: req.supersedes,
             plan: req.plan,
         }
@@ -1177,7 +1185,7 @@ pub struct ApprovalRequestDraft {
     pub reason: String,
     /// Display-only re-run template.
     pub hint: String,
-    /// Set when this request renews an expired predecessor.
+    /// Set when this request replaces a closed predecessor (spec §B.5).
     pub supersedes: Option<RequestId>,
     /// The parsed statement plan, for the statement gate (spec §C.6). The
     /// plan is producer information — it comes from the AST the gate site
@@ -1208,21 +1216,22 @@ pub struct RequestOrigin {
     pub capture: Capture,
     /// W3C context captured at request time.
     pub context: RequestContext,
-    /// How long the request stays live with no decision.
-    pub ttl: Duration,
+    /// When the request stops being answerable, when the embedder set one
+    /// (spec §A.10). `None` is the default and means it never does.
+    pub deadline: Option<SystemTime>,
     /// The backgrounded job that raised it, if any.
     pub job_id: Option<u64>,
 }
 
 impl RequestOrigin {
-    /// The four values every request must have. `context`, `parent`, and
-    /// `job_id` default to absent — add them with the `with_*` methods.
+    /// The four values every request must have. `context`, `parent`,
+    /// `deadline`, and `job_id` default to absent — add them with the
+    /// `with_*` methods.
     pub fn new(
         scope: ApprovalScope,
         binding: PlanBinding,
         principal: Principal,
         capture: Capture,
-        ttl: Duration,
     ) -> Self {
         Self {
             scope,
@@ -1231,7 +1240,7 @@ impl RequestOrigin {
             principal,
             capture,
             context: RequestContext::default(),
-            ttl,
+            deadline: None,
             job_id: None,
         }
     }
@@ -1254,9 +1263,13 @@ impl RequestOrigin {
         self
     }
 
-    /// Change how long the request stays live with no decision.
-    pub fn with_ttl(mut self, ttl: Duration) -> Self {
-        self.ttl = ttl;
+    /// Set when this request stops being answerable (spec §A.10). The
+    /// kernel records the value and compares it when the request is
+    /// observed; it runs no timer and cancels nothing on its own. An
+    /// embedder that wants a horizon sets one here and calls
+    /// `Requester::cancel` when it passes.
+    pub fn with_deadline(mut self, deadline: Option<SystemTime>) -> Self {
+        self.deadline = deadline;
         self
     }
 }
@@ -1293,7 +1306,7 @@ impl ApprovalRequestDraft {
             reason: self.reason,
             hint: self.hint,
             requested_at,
-            ttl: origin.ttl,
+            deadline: origin.deadline,
             supersedes: self.supersedes,
             plan: self.plan,
         }
@@ -1351,7 +1364,8 @@ impl ApprovalRequestBuilder {
         self
     }
 
-    /// Mark this draft as renewing an expired predecessor.
+    /// Mark this draft as replacing a closed predecessor (spec §B.5) — the
+    /// operation was cancelled, or denied, and is being asked again.
     pub fn supersedes(mut self, id: RequestId) -> Self {
         self.supersedes = Some(id);
         self
@@ -1834,7 +1848,12 @@ pub enum RequestState {
     Granted,
     /// Decided no.
     Denied,
-    /// TTL (or grant `not_after`) elapsed with no closing decision.
+    /// Closed from the requesting side with no decision (spec §B.5). Asking
+    /// again posts a **new** request linked by `supersedes`.
+    Cancelled,
+    /// A deadline the embedder set elapsed, or a grant's `not_after` did.
+    /// There is no default deadline — nothing reaches this state unless
+    /// somebody set one (spec §A.10).
     Expired,
     /// Discarded (job discarded, session shutdown) before authorizing an
     /// execution.
@@ -1844,16 +1863,50 @@ pub enum RequestState {
     Voided,
 }
 
-/// What a `Expired` entry's `what` names: which TTL elapsed (spec §B.1).
+/// What an `Expired` entry's `what` names: which deadline was observed to
+/// have passed (spec §B.1). Neither is enforced on a timer — both are
+/// wall-clock values compared when the request is next observed (spec
+/// §A.10).
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Expiring {
-    /// The request's own TTL — nobody decided in time.
+    /// The optional deadline an embedder set on the request. Requests
+    /// carry none by default.
     Request,
     /// The grant's `not_after` — decided, but never (successfully) redeemed
-    /// in time.
+    /// before it passed.
     Grant,
+}
+
+/// Why an undecided request was closed from the requesting side (spec §B.5).
+/// Cancellation is what replaced expiry: the kernel does not time a request
+/// out, so something must be able to end one.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum CancelReason {
+    /// The requesting side stopped wanting it: job discarded, session
+    /// ended, the agent moved on.
+    Withdrawn,
+    /// An embedder's own deadline policy closed it. The kernel records
+    /// this; it never originates it (spec §A.10).
+    DeadlinePassed,
+    /// Superseded by a later request for the same intent.
+    Superseded {
+        /// The request that replaced this one.
+        by: RequestId,
+    },
+}
+
+impl std::fmt::Display for CancelReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Withdrawn => write!(f, "withdrawn by the requester"),
+            Self::DeadlinePassed => write!(f, "the embedder's deadline passed"),
+            Self::Superseded { by } => write!(f, "superseded by {by}"),
+        }
+    }
 }
 
 // ───────────────────────── The entry log ─────────────────────────
@@ -2087,6 +2140,22 @@ pub enum LedgerEntry {
         /// Why.
         reason: String,
     },
+    /// An undecided request was closed from the requesting side (spec
+    /// §B.5). With no expiry, this is the only way a request nobody decides
+    /// ever ends.
+    Cancelled {
+        /// Monotonic per-ledger sequence number.
+        seq: u64,
+        /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
+        at: SystemTime,
+        /// The request that was closed.
+        request: RequestId,
+        /// Who closed it.
+        by: Principal,
+        /// Why.
+        reason: CancelReason,
+    },
     /// A bad credential was presented.
     TokenRejected {
         /// Monotonic per-ledger sequence number.
@@ -2126,6 +2195,7 @@ impl LedgerEntry {
             | Self::Subscribed { seq, .. }
             | Self::Observed { seq, .. }
             | Self::Unsubscribed { seq, .. }
+            | Self::Cancelled { seq, .. }
             | Self::TokenRejected { seq, .. } => *seq,
         }
     }
@@ -2150,6 +2220,7 @@ impl LedgerEntry {
             | Self::Subscribed { at, .. }
             | Self::Observed { at, .. }
             | Self::Unsubscribed { at, .. }
+            | Self::Cancelled { at, .. }
             | Self::TokenRejected { at, .. } => *at,
         }
     }
@@ -2170,7 +2241,8 @@ impl LedgerEntry {
             | Self::Refused { request, .. }
             | Self::Settled { request, .. }
             | Self::Abandoned { request, .. }
-            | Self::Voided { request, .. } => Some(request),
+            | Self::Voided { request, .. }
+            | Self::Cancelled { request, .. } => Some(request),
             Self::TokenRejected { request, .. } => request.as_ref(),
             Self::StandingIssued { .. }
             | Self::StandingRevoked { .. }
@@ -2326,7 +2398,6 @@ pub(crate) fn sample_view(operation: &str, paths: &[&str]) -> ApprovalRequestVie
                     tool: operation.split('.').next().unwrap_or(operation).to_string(),
                     argv: paths.iter().map(|p| (*p).to_string()).collect(),
                 }),
-                Duration::from_secs(60),
             ),
         )
         .into()
@@ -2347,6 +2418,7 @@ pub(crate) fn sample_binding() -> PlanBinding {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     // ── RequestId ──
 
@@ -2538,7 +2610,6 @@ mod tests {
                 sample_binding(),
                 Principal::new("agent-1", PrincipalKind::Agent),
                 Capture::DirectExecution,
-                Duration::from_secs(60),
             ),
         );
         assert_eq!(req.id.as_str(), "req_00000001_1");
@@ -2569,7 +2640,6 @@ mod tests {
                 sample_binding(),
                 Principal::default(),
                 Capture::DirectExecution,
-                Duration::from_secs(60),
             ),
         );
         let not_after = SystemTime::UNIX_EPOCH + Duration::from_secs(300);
@@ -2607,7 +2677,6 @@ mod tests {
                 sample_binding(),
                 Principal::default(),
                 Capture::DirectExecution,
-                Duration::from_secs(60),
             ),
         );
         let ApprovalRequest {
@@ -2626,7 +2695,7 @@ mod tests {
             reason,
             hint,
             requested_at,
-            ttl,
+            deadline,
             supersedes,
             plan,
         } = req;
@@ -2646,7 +2715,7 @@ mod tests {
         let _: String = reason;
         let _: String = hint;
         let _: SystemTime = requested_at;
-        let _: Duration = ttl;
+        let _: Option<SystemTime> = deadline;
         let _: Option<RequestId> = supersedes;
     }
 
@@ -2664,7 +2733,6 @@ mod tests {
                 sample_binding(),
                 Principal::default(),
                 Capture::DirectExecution,
-                Duration::from_secs(60),
             ),
         );
         let view: ApprovalRequestView = req.into();
@@ -2684,7 +2752,7 @@ mod tests {
             reason,
             hint,
             requested_at,
-            ttl,
+            deadline,
             supersedes,
             plan,
         } = view;
@@ -2704,7 +2772,7 @@ mod tests {
         let _: String = reason;
         let _: String = hint;
         let _: SystemTime = requested_at;
-        let _: Duration = ttl;
+        let _: Option<SystemTime> = deadline;
         let _: Option<RequestId> = supersedes;
     }
 
@@ -2765,7 +2833,6 @@ mod tests {
                         tool: "git".to_string(),
                         argv: vec!["push".to_string(), "origin".to_string(), "main".to_string()],
                     }),
-                    Duration::from_secs(60),
                 ),
             )
     }

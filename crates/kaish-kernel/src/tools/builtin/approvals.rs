@@ -1,18 +1,18 @@
-//! approvals — Read the approval ledger, renew requests, and decide them.
+//! approvals — Read the approval ledger, cancel requests, and decide them.
 //!
-//! Subcommands: list, show, log, renew, grant, deny, revoke
+//! Subcommands: list, show, log, cancel, grant, deny, revoke
 //! (`docs/approval-ledger.md` §D.3).
 //!
 //! **This is the one builtin that bridges to the approval side, and only
 //! through an authority installed on the session.** `grant`, `deny`, and
 //! `revoke` exit 1 without one. Everything else — `list`, `show`, `log`,
-//! `renew` — works in every session, because reading is not deciding and
-//! renewing is the requester's own action.
+//! `cancel` — works in every session, because reading is not deciding and
+//! closing your own request is the requester's own action.
 
 use async_trait::async_trait;
 use clap::{Args, Parser};
 
-use kaish_types::approval::{GrantTerms, RequestId, StandingId};
+use kaish_types::approval::{CancelReason, GrantTerms, RequestId, StandingId};
 
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{
@@ -26,7 +26,7 @@ use crate::tools::{
 /// (spec §A.1) — this bounds the window, not the count.
 const DEFAULT_GRANT_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Approvals tool: read the ledger, renew requests, and decide them.
+/// Approvals tool: read the ledger, cancel requests, and decide them.
 pub struct Approvals;
 
 /// The flat argv layer.
@@ -38,7 +38,7 @@ pub struct Approvals;
 /// approvals grant` lists only that subcommand's flags and the model never
 /// sees `--reason` advertised on `list`.
 #[derive(Parser, Debug)]
-#[command(name = "approvals", about = "Read the approval ledger, renew requests, and decide them")]
+#[command(name = "approvals", about = "Read the approval ledger, cancel requests, and decide them")]
 struct ApprovalsArgs {
     #[command(flatten)]
     global: GlobalFlags,
@@ -55,7 +55,7 @@ struct ApprovalsArgs {
     #[command(flatten)]
     deny: DenyArgs,
 
-    /// Subcommand (`list`, `show`, `log`, `renew`, `grant`, `deny`, `revoke`)
+    /// Subcommand (`list`, `show`, `log`, `cancel`, `grant`, `deny`, `revoke`)
     /// and the request id it acts on. Read off `args.positional`; this field
     /// exists so clap accepts the tail.
     #[arg(hide = true)]
@@ -120,7 +120,7 @@ impl Tool for Approvals {
     fn schema(&self) -> ToolSchema {
         let mut schema = ToolSchema::new(
             "approvals",
-            "Read the approval ledger, renew requests, and decide them",
+            "Read the approval ledger, cancel requests, and decide them",
         );
         for (description, code) in [
             ("List requests awaiting a decision", "approvals list"),
@@ -128,7 +128,7 @@ impl Tool for Approvals {
             ("Show one request and its attempts", "approvals show req_9c1a4f2e_42"),
             ("Read the log from the start", "approvals log"),
             ("Read the log after sequence 120", "approvals log --since 120"),
-            ("Re-raise an expired request", "approvals renew req_9c1a4f2e_42"),
+            ("Close your own undecided request", "approvals cancel req_9c1a4f2e_42"),
             ("Approve a request for 5 minutes", "approvals grant req_9c1a4f2e_42"),
             ("Approve a request for an hour", "approvals grant req_9c1a4f2e_42 --until 1h"),
             ("Refuse a request", "approvals deny req_9c1a4f2e_42 --reason 'wrong path'"),
@@ -150,8 +150,8 @@ impl Tool for Approvals {
                 "Print the retained ledger entries, oldest first",
             ))
             .subcommand(ToolSchema::new(
-                "renew",
-                "Re-raise an expired request as a new one linked to it. Needs no authority",
+                "cancel",
+                "Close your own undecided request. Needs no authority",
             ))
             .subcommand(child::<GrantArgs>(
                 "grant",
@@ -186,7 +186,7 @@ impl Tool for Approvals {
         let Some(subcommand) = args.get_string("subcommand", 0) else {
             return ExecResult::failure(
                 2,
-                "approvals: name a subcommand: list, show, log, renew, grant, deny, revoke",
+                "approvals: name a subcommand: list, show, log, cancel, grant, deny, revoke",
             );
         };
 
@@ -194,14 +194,14 @@ impl Tool for Approvals {
             "list" => cmd_list(&parsed.list, ctx),
             "show" => cmd_show(&args, ctx),
             "log" => cmd_log(&parsed.log, ctx),
-            "renew" => cmd_renew(&args, ctx).await,
+            "cancel" => cmd_cancel(&args, ctx).await,
             "grant" => cmd_grant(&args, &parsed.grant, ctx).await,
             "deny" => cmd_deny(&args, &parsed.deny, ctx).await,
             "revoke" => cmd_revoke(&args, ctx).await,
             other => ExecResult::failure(
                 2,
                 format!(
-                    "approvals: unknown subcommand {other:?} — use list, show, log, renew, \
+                    "approvals: unknown subcommand {other:?} — use list, show, log, cancel, \
                      grant, deny, or revoke"
                 ),
             ),
@@ -223,7 +223,7 @@ fn ledger(ctx: &ExecContext) -> Result<&crate::tools::LedgerAccess, ExecResult> 
 /// there is none.
 ///
 /// **The single most important check in this builtin.** An agent whose job is
-/// running shell commands can see what is pending and renew it; it cannot
+/// running shell commands can see what is pending and cancel its own; it cannot
 /// approve itself. Anything else makes the separation theater (spec §D.3).
 #[allow(clippy::result_large_err)]
 fn authority<'a>(
@@ -235,8 +235,8 @@ fn authority<'a>(
             1,
             format!(
                 "approvals {subcommand}: this session holds no approval authority — an operator \
-                 must decide it. Read what is pending with `approvals list`, and re-raise an \
-                 expired request with `approvals renew <id>`."
+                 must decide it. Read what is pending with `approvals list`, and close a request \
+                 you no longer want with `approvals cancel <id>`."
             ),
         )
     })
@@ -470,16 +470,16 @@ fn cmd_log(flags: &LogArgs, ctx: &ExecContext) -> ExecResult {
     )
 }
 
-async fn cmd_renew(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
-    let id = match request_id(args, "renew") {
+async fn cmd_cancel(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
+    let id = match request_id(args, "cancel") {
         Ok(id) => id,
         Err(e) => return e,
     };
-    match ctx.renew_request(&id).await {
-        Ok(renewed) => ExecResult::with_output(OutputData::text(format!(
-            "{id} renewed as {renewed} — it needs a fresh decision\n"
+    match ctx.cancel_request(&id, CancelReason::Withdrawn).await {
+        Ok(()) => ExecResult::with_output(OutputData::text(format!(
+            "{id} cancelled — run the command again to ask for the same thing\n"
         ))),
-        Err(e) => ExecResult::failure(1, format!("approvals renew: {e}")),
+        Err(e) => ExecResult::failure(1, format!("approvals cancel: {e}")),
     }
 }
 
@@ -641,7 +641,7 @@ mod tests {
         let names: Vec<&str> = schema.subcommands.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["list", "show", "log", "renew", "grant", "deny", "revoke"]
+            vec!["list", "show", "log", "cancel", "grant", "deny", "revoke"]
         );
     }
 
@@ -664,7 +664,7 @@ mod tests {
         assert_eq!(param_names("grant"), vec!["until"]);
         assert_eq!(param_names("deny"), vec!["reason"]);
         assert!(param_names("show").is_empty());
-        assert!(param_names("renew").is_empty());
+        assert!(param_names("cancel").is_empty());
         assert!(param_names("revoke").is_empty());
     }
 

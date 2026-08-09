@@ -36,6 +36,7 @@ mod patterns;
 mod resolver;
 mod standing;
 mod subscription;
+mod teardown;
 
 pub use approver::{
     Approver, ChainContext, ChainOutcome, ChainStage, DecisionChain, PatientSource,
@@ -50,12 +51,12 @@ pub use resolver::{
     StateResolvers, PATH_DIGEST_ALG, PATH_KIND,
 };
 pub use subscription::{Posture, SubscriptionFilter};
+pub(crate) use teardown::{cancel_job_request, cancel_scope};
 // The statement gate's scoping seam (spec §C.6) lives in `kaish-tool-api`,
 // beside `StateResolver` and for the same reason: it names no kernel type.
 // Re-exported here because an embedder registers it through `KernelConfig`,
 // next to `with_approver` and `with_state_resolver`.
 pub use kaish_tool_api::{CommandNameClassifier, StatementClassifier, StatementPosture};
-pub(crate) use core::condition_conflict;
 pub(crate) use resolver::{conditions_to_observe, digest_path};
 pub use handles::{ApproverHandle, AttemptHandle, AttemptView, Approvals, Ledger, RequestChain, Requester};
 
@@ -93,7 +94,6 @@ pub(crate) fn sample_view(
                     tool: "rm".to_string(),
                     argv: paths.iter().map(|p| (*p).to_string()).collect(),
                 }),
-                std::time::Duration::from_secs(60),
             ),
         )
         .into()
