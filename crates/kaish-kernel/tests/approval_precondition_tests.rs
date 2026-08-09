@@ -34,6 +34,49 @@ use kaish_types::approval::{
     ApprovalRequest, GrantTerms, LedgerEntry, RequestId, RequestState, Resource, StateClaim,
 };
 
+/// The entries inside a ledger's records. These tests assert on entry shape;
+/// the [`LedgerRecord`] envelope has its own coverage in `kaish-types` (spec
+/// §A.5), and an entry this build does not recognize cannot occur here.
+#[allow(dead_code)]
+fn entries(records: Vec<kaish_types::approval::LedgerRecord>) -> Vec<LedgerEntry> {
+    records
+        .into_iter()
+        .map(|record| {
+            record
+                .known()
+                .cloned()
+                .expect("this build wrote every record it reads back")
+        })
+        .collect()
+}
+
+/// This file's ledger scope (spec §A.7): a fresh kernel id per ledger, and
+/// no session — an unscoped ledger is the single-session shape.
+#[allow(dead_code)]
+fn test_scope() -> kaish_types::approval::ApprovalScope {
+    kaish_types::approval::ApprovalScope::kernel(kaish_types::approval::KernelId::mint())
+}
+
+/// The origin a request posted by this file is stamped with (spec §A.7,
+/// §A.9). One fixed binding: these tests exercise the state machine, not the
+/// replay rules.
+#[allow(dead_code)]
+fn test_origin(principal: kaish_types::approval::Principal) -> kaish_types::approval::RequestOrigin {
+    let scope = test_scope();
+    kaish_types::approval::RequestOrigin::new(
+        scope.clone(),
+        kaish_types::approval::PlanBinding::new(
+            kaish_types::approval::PlanDigest::new("test"),
+            "/",
+            scope,
+        ),
+        principal,
+        kaish_types::approval::Capture::DirectExecution,
+        std::time::Duration::from_secs(60),
+    )
+}
+
+
 fn tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("approval-precondition-")
@@ -80,9 +123,7 @@ impl Session {
 
     /// Every retained entry's variant name, in commit order.
     fn entry_kinds(&self) -> Vec<&'static str> {
-        self.kernel
-            .approvals()
-            .log(0)
+        entries(self.kernel.approvals().log(0))
             .iter()
             .filter(|e| !is_statement_tap(e))
             .map(entry_kind)
@@ -91,7 +132,7 @@ impl Session {
 
     /// The `observed` set the one `Redeemed` entry recorded, if there is one.
     fn redeemed_observations(&self) -> Option<Vec<kaish_types::approval::Observation>> {
-        self.kernel.approvals().log(0).into_iter().find_map(|e| match e {
+        entries(self.kernel.approvals().log(0)).into_iter().find_map(|e| match e {
             LedgerEntry::Redeemed { observed, .. } => Some(observed),
             _ => None,
         })
@@ -459,7 +500,7 @@ fn git_session(dir: &Path, failing_resolver: bool) -> GitFixture {
     )]));
     let pushed = Arc::new(AtomicUsize::new(0));
     let observed = Arc::new(AtomicUsize::new(0));
-    let (_r, _a, authority) = Ledger::build(LedgerConfig::default(), None).expect("ledger");
+    let (_r, _a, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None).expect("ledger");
     let config = KernelConfig::isolated()
         .with_cwd(dir.to_path_buf())
         .with_approvals(false)
@@ -619,7 +660,7 @@ async fn an_unregistered_resource_kind_refuses() {
     )]));
     let pushed = Arc::new(AtomicUsize::new(0));
     // No `with_state_resolver` — the kernel has never heard of `git.ref`.
-    let (_r, _a, authority) = Ledger::build(LedgerConfig::default(), None).expect("ledger");
+    let (_r, _a, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None).expect("ledger");
     let config = KernelConfig::isolated()
         .with_cwd(dir.path().to_path_buf())
         .with_approvals(false)
@@ -803,9 +844,7 @@ struct RacingBackend {
 impl RacingBackend {
     fn racing(&self, path: &Path) -> bool {
         path == self.raced
-            && self
-                .approvals
-                .log(0)
+            && entries(self.approvals.log(0))
                 .iter()
                 .any(|e| matches!(e, LedgerEntry::Redeemed { .. }))
     }
@@ -932,7 +971,7 @@ impl KernelBackend for RacingBackend {
 #[tokio::test]
 async fn a_write_racing_the_ledger_check_fails_loud_instead_of_clobbering() {
     let (_requester, approvals, authority) =
-        Ledger::build(LedgerConfig::default(), None).expect("ledger");
+        Ledger::build(LedgerConfig::default(), test_scope(), None).expect("ledger");
     let mut vfs = VfsRouter::new();
     vfs.mount("/", MemoryFs::new());
     let inner: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(vfs)));

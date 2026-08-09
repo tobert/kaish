@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use kaish_types::approval::LedgerEntry;
+use kaish_types::approval::LedgerRecord;
 
 /// Sizing and timeouts for one [`super::Ledger`] (spec §D.4). Every field has
 /// a default matching the spec's stated number; construct with
@@ -123,7 +123,12 @@ impl std::error::Error for LedgerSinkError {}
 ///   unrecorded privileged operation is exactly the corruption this design
 ///   refuses to risk.
 pub trait LedgerSink: Send + Sync {
-    /// Append one entry. See the trait doc for the exact delivery,
+    /// Append one record. See the trait doc for the exact delivery,
     /// backpressure, and failure contract.
-    fn post(&self, entry: &LedgerEntry) -> Result<(), LedgerSinkError>;
+    ///
+    /// A sink receives a [`LedgerRecord`], never a bare `LedgerEntry`: the
+    /// envelope carries the `schema_version` and the scope a later reader
+    /// needs to tell whose record it is holding and whether it understands
+    /// it (spec §A.5).
+    fn post(&self, record: &LedgerRecord) -> Result<(), LedgerSinkError>;
 }

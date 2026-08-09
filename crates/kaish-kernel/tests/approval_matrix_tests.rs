@@ -40,6 +40,23 @@ use kaish_kernel::{Kernel, KernelConfig};
 use kaish_types::approval::{GrantTerms, LedgerEntry, Outcome, RequestId};
 use rstest::rstest;
 
+/// The entries inside a ledger's records. These tests assert on entry shape;
+/// the [`LedgerRecord`] envelope has its own coverage in `kaish-types` (spec
+/// §A.5), and an entry this build does not recognize cannot occur here.
+#[allow(dead_code)]
+fn entries(records: Vec<kaish_types::approval::LedgerRecord>) -> Vec<LedgerEntry> {
+    records
+        .into_iter()
+        .map(|record| {
+            record
+                .known()
+                .cloned()
+                .expect("this build wrote every record it reads back")
+        })
+        .collect()
+}
+
+
 fn tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("approval-matrix-")
@@ -75,9 +92,7 @@ impl Session {
 
     /// Every retained entry's variant name, in commit order.
     fn entry_kinds(&self) -> Vec<&'static str> {
-        self.kernel
-            .approvals()
-            .log(0)
+        entries(self.kernel.approvals().log(0))
             .iter()
             .filter(|e| !is_statement_tap(e))
             .map(|e| match e {
@@ -511,10 +526,7 @@ async fn a_granted_and_redeemed_delete_posts_the_full_chain() {
     for expected in ["Requested", "Granted", "Redeemed", "Settled"] {
         assert!(kinds.contains(&expected), "missing {expected} in {kinds:?}");
     }
-    let settled = session
-        .kernel
-        .approvals()
-        .log(0)
+    let settled = entries(session.kernel.approvals().log(0))
         .into_iter()
         .find_map(|e| match e {
             LedgerEntry::Settled { outcome, .. } => Some(outcome),

@@ -59,8 +59,8 @@ pub(crate) fn matches(rule: &StandingGrant, request: &ApprovalRequest, now: Syst
 mod tests {
     use super::*;
     use kaish_types::approval::{
-        Capture, OperationPattern, Principal, PrincipalKind, RequestContext, RequestId,
-        ResourcePattern, Resource, RiskClass, StateClaim,
+        ApprovalScope, Capture, KernelId, OperationPattern, PlanBinding, PlanDigest, Principal,
+        PrincipalKind, RequestId, RequestOrigin, ResourcePattern, Resource, RiskClass, StateClaim,
     };
     use std::time::Duration;
 
@@ -69,14 +69,17 @@ mod tests {
         for resource in resources {
             builder = builder.resource(resource);
         }
+        let scope = ApprovalScope::kernel(KernelId::new(1));
         builder.build().unwrap().stamp(
             RequestId::new(1, 1),
-            Principal::new("agent-1", PrincipalKind::Agent),
-            Capture::DirectExecution,
-            RequestContext::default(),
             SystemTime::UNIX_EPOCH,
-            Duration::from_secs(60),
-            None,
+            RequestOrigin::new(
+                scope.clone(),
+                PlanBinding::new(PlanDigest::new("test"), "/", scope),
+                Principal::new("agent-1", PrincipalKind::Agent),
+                Capture::DirectExecution,
+                Duration::from_secs(60),
+            ),
         )
     }
 

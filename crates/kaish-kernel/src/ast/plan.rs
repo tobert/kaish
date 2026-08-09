@@ -55,6 +55,30 @@ pub fn plan_statement(stmt: &Stmt) -> StatementPlan {
     }
 }
 
+/// Remove every `--confirm=` (or `confirm=`) token from rendered plan text,
+/// whatever it carries.
+///
+/// What a [`PlanBinding`](kaish_types::approval::PlanBinding) digests is the
+/// operation that was *judged*, and the credential is not part of that — it
+/// is the authorization for it (spec §A.9). Without this, the held statement
+/// `rm x` and its re-run `rm --confirm=<redacted> x` would digest
+/// differently, and every key presentation would be read as a moved binding
+/// and re-asked, which is exactly the loop the binding exists to prevent.
+///
+/// Unlike [`redact_keys`], this does not need to know the key: it removes the
+/// whole token whether it carries a literal credential, the `<redacted>`
+/// placeholder a rendered plan shows, or an unexpanded `${key}` the plan
+/// could not lift.
+pub fn strip_confirm_tokens(rendered: &str) -> String {
+    rendered
+        .split_whitespace()
+        .filter(|word| {
+            !word.starts_with(&format!("--{CONFIRM_KEY}=")) && !word.starts_with(&format!("{CONFIRM_KEY}="))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Remove every one of `keys` from captured source text.
 ///
 /// The capture is what `Kernel::confirm` replays, and it lands in the ledger

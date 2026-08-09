@@ -297,10 +297,21 @@ async fn the_log_node_is_seq_ordered_ndjson() {
     let mut last = 0u64;
     let mut kinds = Vec::new();
     for line in body.lines().filter(|l| !l.trim().is_empty()) {
-        let entry: serde_json::Value = serde_json::from_str(line).expect("one JSON object per line");
-        let seq = entry["seq"].as_u64().expect("every entry carries a seq");
-        assert!(seq > last, "entries are seq-ordered: {seq} after {last}");
+        let record: serde_json::Value =
+            serde_json::from_str(line).expect("one JSON object per line");
+        // Every line is a versioned record (spec §A.5), so a reader knows the
+        // schema it is holding and whose scope it belongs to before it looks
+        // at the entry.
+        assert_eq!(
+            record["schema_version"].as_u64(),
+            Some(u64::from(kaish_types::approval::LEDGER_SCHEMA_VERSION)),
+            "every record names its schema: {line}"
+        );
+        assert!(record["scope"]["kernel_id"].is_u64(), "every record is scoped: {line}");
+        let seq = record["sequence"].as_u64().expect("every record carries a sequence");
+        assert!(seq > last, "records are sequence-ordered: {seq} after {last}");
         last = seq;
+        let entry = &record["entry"];
         // Every statement also posts the unconditional statement tap (spec
         // §C.6), including the `cat` reading this projection. This test is
         // about the fs chain's ordering, so the taps are filtered out.

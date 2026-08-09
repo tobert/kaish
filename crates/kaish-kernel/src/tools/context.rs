@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use kaish_types::approval::{
-    ApprovalRequest, ApprovalRequestDraft, AttemptId, Capture, Condition, Invocation, Observation,
-    ObservedResource, OperationId, Outcome, Plan, Principal, RequestContext, RequestId, Resource,
-    ResourceRef,
+    ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, Capture, Condition,
+    Invocation, Observation, ObservedResource, OperationId, Outcome, Plan, PlanBinding, PlanDigest,
+    Principal, RequestId, Resource, ResourceRef,
 };
+use sha2::{Digest, Sha256};
 use kaish_tool_api::{StatementClassifier, StatementPosture};
 
 use crate::ast::Value;
@@ -222,6 +223,17 @@ pub struct ExecContext {
     /// `confirm` refuses to replay it naming the variant.
     pub(crate) capture_failure: Option<String>,
 
+    /// The request currently being satisfied above this one, if any (spec
+    /// §A.7). The statement gate sets it when it authorizes a statement, so
+    /// an `fs.*` gate underneath names the statement's request as `parent`
+    /// and a UI can render one nested prompt instead of two unrelated ones.
+    ///
+    /// Propagated to pipeline stages and forks — a nested gate is nested
+    /// however deep the execution went to reach it — and cleared when the
+    /// statement settles. Parenthood is a display and audit relationship
+    /// only: a grant on a parent never authorizes a child (spec §A.7).
+    pub(crate) gate_parent: Option<RequestId>,
+
     /// Attempts reserved during this invocation, each in its drop-safe
     /// guard (spec §C.1). The dispatch seam settles them with the real exit
     /// code when `tool.execute()` returns; dropping this context instead —
@@ -251,6 +263,21 @@ pub(crate) enum StatementTap {
     /// Return this result verbatim. **Nothing of the statement has run** —
     /// no substitution, no redirect opened, no first loop iteration.
     Halt(Box<ExecResult>),
+}
+
+/// What a redemption path decided: it produced an outcome, or the operation
+/// has moved out of the context its grant was decided in and must ask again
+/// (spec §A.9).
+///
+/// A distinct type rather than a sentinel outcome, because the two are not
+/// the same answer: `Authorized` is final and the caller returns it, and
+/// `Rebind` means "keep going, post a fresh request" — the difference between
+/// refusing an operation and re-asking for it.
+enum Rebind {
+    /// The redemption path reached a decision. Return it.
+    Authorized(kaish_tool_api::ApprovalOutcome),
+    /// The binding moved. Nothing was redeemed; post a new request.
+    Rebind,
 }
 
 /// Kernel-internal correlation between a replay and the request it fulfills
@@ -286,6 +313,13 @@ pub struct LedgerAccess {
     /// Who this context's requests are attributed to. Set by
     /// `KernelConfig::with_principal`.
     pub principal: Principal,
+    /// Which kernel, session, and actor this context's requests belong to
+    /// (spec §A.7). Stamped onto every request and every `Observed` entry
+    /// this context posts, and recorded in the [`PlanBinding`] a redemption
+    /// must still match. Set by `KernelConfig::with_session`; a
+    /// single-session kernel like the REPL carries a kernel id and nothing
+    /// else.
+    pub scope: ApprovalScope,
     /// The approval authority **this session** holds, if any (spec §D.3).
     /// `None` means the session may not approve anything, and `approvals
     /// grant` exits 1 naming that.
@@ -649,6 +683,7 @@ impl ExecContext {
             ledger_access: None,
             redemption: None,
             capture_failure: None,
+            gate_parent: None,
             attempts: Vec::new(),
         }
     }
@@ -692,6 +727,7 @@ impl ExecContext {
             ledger_access: None,
             redemption: None,
             capture_failure: None,
+            gate_parent: None,
             attempts: Vec::new(),
         }
     }
@@ -732,6 +768,7 @@ impl ExecContext {
             ledger_access: None,
             redemption: None,
             capture_failure: None,
+            gate_parent: None,
             attempts: Vec::new(),
         }
     }
@@ -772,6 +809,7 @@ impl ExecContext {
             ledger_access: None,
             redemption: None,
             capture_failure: None,
+            gate_parent: None,
             attempts: Vec::new(),
         }
     }
@@ -815,6 +853,7 @@ impl ExecContext {
             ledger_access: None,
             redemption: None,
             capture_failure: None,
+            gate_parent: None,
             attempts: Vec::new(),
         }
     }
@@ -855,6 +894,7 @@ impl ExecContext {
             ledger_access: None,
             redemption: None,
             capture_failure: None,
+            gate_parent: None,
             attempts: Vec::new(),
         }
     }
@@ -1060,6 +1100,10 @@ impl ExecContext {
             // authorization travel to another command.
             redemption: None,
             capture_failure: None,
+            // Parenthood does travel: a gate reached from inside a gated
+            // statement is nested under it however many stages deep the
+            // execution went (spec §A.7). It authorizes nothing on its own.
+            gate_parent: self.gate_parent.clone(),
             attempts: Vec::new(),
         }
     }
@@ -1079,9 +1123,13 @@ impl ExecContext {
     /// context built by `Kernel::assemble` already has one.
     #[cfg(test)]
     pub(crate) fn wire_test_ledger(&mut self) -> crate::ledger::ApproverHandle {
-        let (requester, approvals, authority) =
-            crate::ledger::Ledger::build(crate::ledger::LedgerConfig::default(), None)
-                .expect("the test ledger must mint an id epoch");
+        let scope = ApprovalScope::kernel(kaish_types::approval::KernelId::mint());
+        let (requester, approvals, authority) = crate::ledger::Ledger::build(
+            crate::ledger::LedgerConfig::default(),
+            scope.clone(),
+            None,
+        )
+        .expect("the test ledger must mint an id epoch");
         let chain = Arc::new(crate::ledger::DecisionChain::new(
             authority.clone(),
             approvals.clone(),
@@ -1092,6 +1140,7 @@ impl ExecContext {
             approvals,
             chain,
             principal: Principal::new("test-session", kaish_types::approval::PrincipalKind::Agent),
+            scope,
             request_ttl: crate::ledger::LedgerConfig::default().request_ttl,
             job_id: None,
             resolvers: Arc::new(StateResolvers::default()),
@@ -1212,7 +1261,13 @@ impl ExecContext {
         let operation_id = operation.id();
         access
             .requester
-            .observed(operation_id, access.principal.clone(), resources, None)
+            .observed(
+                operation_id,
+                access.scope.clone(),
+                access.principal.clone(),
+                resources,
+                None,
+            )
             .await
             .map_err(|e| {
                 ExecResult::failure(
@@ -1313,7 +1368,13 @@ impl ExecContext {
         // acceptance contract, and the draft matcher is what correlates a
         // presentation to the request it is for).
         match self.gate(draft, presented, Some(capture)).await.proceed() {
-            Ok(_attempt) => StatementTap::Proceed { gated: true },
+            Ok(attempt) => {
+                // Everything this statement reaches is nested under it
+                // (spec §A.7). Recorded, never authorizing: a defense-in-depth
+                // `fs.*` gate underneath still asks for its own decision.
+                self.gate_parent = Some(attempt.request_id().clone());
+                StatementTap::Proceed { gated: true }
+            }
             Err(result) => StatementTap::Halt(Box::new(result)),
         }
     }
@@ -1337,6 +1398,7 @@ impl ExecContext {
             .requester
             .observed(
                 KernelOperation::CmdExecute.id(),
+                access.scope.clone(),
                 access.principal.clone(),
                 resources,
                 Some(plan.clone()),
@@ -1417,36 +1479,44 @@ impl ExecContext {
             return ApprovalOutcome::Unsupported;
         };
 
+        // The context this operation is being judged in, and the context a
+        // redemption of it must still match (spec §A.9).
+        let binding = self.binding_for(&draft, &access);
+
         // ── The replay path ─────────────────────────────────────────
         // `Kernel::confirm` already reserved the attempt; this draft must
         // describe the operation that was granted, or the replay turned into
         // something else on its way here.
         if let Some(redemption) = self.redemption.take() {
-            return self.authorize_replay(&access, redemption, &draft).await;
-        }
-
+            match self.authorize_replay(&access, redemption, &draft, &binding).await {
+                Rebind::Authorized(outcome) => return outcome,
+                // The replay moved out of the context it was approved in.
+                // It is not a redemption of that grant; it is a new ask.
+                Rebind::Rebind => {}
+            }
         // ── The bearer-key path ─────────────────────────────────────
         // The draft names the request; the key authorizes it. A wrong key
         // still counts against the request the draft describes, which is
         // what gives the rejected-attempt limit somewhere to attach (§F.3).
-        if let Some(key) = presented {
-            return self.present_key(&access, key, &draft).await;
+        } else if let Some(key) = presented {
+            match self.present_key(&access, key, &draft, &binding).await {
+                Rebind::Authorized(outcome) => return outcome,
+                Rebind::Rebind => {}
+            }
         }
 
         // ── A fresh request ─────────────────────────────────────────
         let capture = capture.unwrap_or_else(|| self.capture());
-        let request = match access
-            .requester
-            .post_request(
-                draft,
-                access.principal.clone(),
-                capture,
-                RequestContext::default(),
-                access.request_ttl,
-                access.job_id,
-            )
-            .await
-        {
+        let origin = kaish_types::approval::RequestOrigin::new(
+            access.scope.clone(),
+            binding,
+            access.principal.clone(),
+            capture,
+            access.request_ttl,
+        )
+        .with_parent(self.gate_parent.clone())
+        .with_job_id(access.job_id);
+        let request = match access.requester.post_request(draft, origin).await {
             Ok(request) => request,
             Err(err) => {
                 return ApprovalOutcome::LedgerUnavailable {
@@ -1501,6 +1571,32 @@ impl ExecContext {
         }
     }
 
+    /// The binding this gate call is judged under (spec §A.9): what was
+    /// judged, where, and by whom.
+    ///
+    /// The digest covers the statement's rendered text when the draft
+    /// carries a plan, and the operation plus its sorted resource references
+    /// otherwise — an `fs.*` gate has no statement behind it, and what it
+    /// judged is exactly the operation and the paths it named.
+    fn binding_for(&self, draft: &ApprovalRequestDraft, access: &LedgerAccess) -> PlanBinding {
+        let judged = match &draft.plan {
+            // The credential is the authorization, not part of what was
+            // judged — see `strip_confirm_tokens`.
+            Some(plan) => crate::ast::plan::strip_confirm_tokens(&plan.rendered),
+            None => format!(
+                "{}\n{}",
+                draft.operation,
+                render_refs(&resource_refs(draft))
+            ),
+        };
+        let digest = Sha256::digest(judged.as_bytes());
+        PlanBinding::new(
+            PlanDigest::new(format!("{digest:x}")),
+            self.cwd.display().to_string(),
+            access.scope.clone(),
+        )
+    }
+
     /// Accept an attempt `Kernel::confirm` already reserved, once the fresh
     /// draft is shown to describe the granted request.
     async fn authorize_replay(
@@ -1508,14 +1604,31 @@ impl ExecContext {
         access: &LedgerAccess,
         redemption: RedemptionContext,
         draft: &ApprovalRequestDraft,
-    ) -> kaish_tool_api::ApprovalOutcome {
+        binding: &PlanBinding,
+    ) -> Rebind {
         use kaish_tool_api::ApprovalOutcome;
 
         let Some(chain) = access.approvals.get(&redemption.request_id) else {
-            return ApprovalOutcome::LedgerUnavailable {
+            return Rebind::Authorized(ApprovalOutcome::LedgerUnavailable {
                 reason: LedgerError::NotFound(redemption.request_id).to_string(),
-            };
+            });
         };
+        // A grant is a decision about an operation *in a context* (spec
+        // §A.9). A replay that moved out of that context is not a redemption
+        // of this grant — it is a new request, so settle the reservation
+        // `confirm` made and fall through to posting one.
+        if let Some(detail) = binding.mismatch(&chain.request.binding) {
+            tracing::warn!(
+                request_id = %redemption.request_id,
+                detail = %detail,
+                "approval binding moved since the grant — posting a fresh request instead of redeeming"
+            );
+            let _ = access
+                .requester
+                .settle_by_ids(&redemption.request_id, redemption.attempt_id, Outcome::Exit(1))
+                .await;
+            return Rebind::Rebind;
+        }
         // Two checks, in order: the operation and the resource set, then the
         // prior-state claim on each resource. The second is replay-only —
         // see `transitions_match`.
@@ -1534,20 +1647,20 @@ impl ExecContext {
                     Outcome::Exit(1),
                 )
                 .await;
-            return ApprovalOutcome::Refused {
+            return Rebind::Authorized(ApprovalOutcome::Refused {
                 request: redemption.request_id.clone(),
                 detail: LedgerError::DraftMismatch {
                     request: redemption.request_id,
                     detail,
                 }
                 .to_string(),
-            };
+            });
         }
-        ApprovalOutcome::Authorized(self.adopt(
+        Rebind::Authorized(ApprovalOutcome::Authorized(self.adopt(
             access,
             redemption.request_id,
             redemption.attempt_id,
-        ))
+        )))
     }
 
     /// Redeem by presenting a bearer credential, resolving which request the
@@ -1557,21 +1670,37 @@ impl ExecContext {
         access: &LedgerAccess,
         key: &str,
         draft: &ApprovalRequestDraft,
-    ) -> kaish_tool_api::ApprovalOutcome {
+        binding: &PlanBinding,
+    ) -> Rebind {
         use kaish_tool_api::ApprovalOutcome;
 
         let Some(id) = access.approvals.match_draft(&draft.operation, &resource_refs(draft)) else {
             // A key describing no request kaish has ever seen counts against
             // nothing — a guesser cannot void a request it cannot describe.
             access.requester.reject_unmatched_key();
-            return ApprovalOutcome::Unmatched {
+            return Rebind::Authorized(ApprovalOutcome::Unmatched {
                 detail: format!(
                     "no approval request for {} over [{}]",
                     draft.operation,
                     render_refs(&resource_refs(draft))
                 ),
-            };
+            });
         };
+        // Same rule the replay path holds (spec §A.9): a key presented from
+        // outside the context the grant was decided in redeems nothing. It
+        // does not count as a rejected credential either — the key is right,
+        // the context is not — so the ledger's rejection counter is
+        // untouched and a fresh request is posted instead.
+        if let Some(chain) = access.approvals.get(&id) {
+            if let Some(detail) = binding.mismatch(&chain.request.binding) {
+                tracing::warn!(
+                    request_id = %id,
+                    detail = %detail,
+                    "approval binding moved since the grant — posting a fresh request instead of redeeming"
+                );
+                return Rebind::Rebind;
+            }
+        }
         // Observe before presenting, because the observation has to be
         // *inside* the reservation transaction (spec §B.1) and the I/O has
         // to be outside the lock. The ledger still checks the credential
@@ -1591,9 +1720,9 @@ impl ExecContext {
         {
             Ok(attempt) => {
                 let attempt_id = attempt.attempt_id();
-                ApprovalOutcome::Authorized(self.adopt(access, id, attempt_id))
+                Rebind::Authorized(ApprovalOutcome::Authorized(self.adopt(access, id, attempt_id)))
             }
-            Err(err) => approval_error(id, err),
+            Err(err) => Rebind::Authorized(approval_error(id, err)),
         }
     }
 

@@ -391,6 +391,301 @@ pub enum PrincipalKind {
     Unknown,
 }
 
+// ───────────────────────── Scope ─────────────────────────
+
+/// The kernel a request was raised in. Minted per kernel at construction
+/// (spec §A.7) — [`Self::mint`] hands out a fresh value per call, so two
+/// kernels in one process never share one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct KernelId(u64);
+
+/// Backing counter for [`KernelId::mint`]. Process-wide and monotonic: a
+/// kernel id must be unique within the process, and nothing outside the
+/// process ever reads one.
+static NEXT_KERNEL_ID: AtomicU64 = AtomicU64::new(1);
+
+impl KernelId {
+    /// Mint a fresh kernel id. One call per kernel construction.
+    pub fn mint() -> Self {
+        Self(NEXT_KERNEL_ID.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Wrap a raw id — for an embedder that assigns its own kernel numbering.
+    pub fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// The underlying number.
+    pub fn get(&self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for KernelId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// The conversation, connection, or task a kernel is serving. Supplied by
+/// the embedder; `None` on a single-session kernel like the REPL (spec §A.7).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionId(String);
+
+impl SessionId {
+    /// Name a session.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// The session's text form.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The actor an operation runs on behalf of, when the embedder distinguishes
+/// one from the session — a subagent under a user (spec §A.7).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PrincipalId(String);
+
+impl PrincipalId {
+    /// Name an actor.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// The actor's text form.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for PrincipalId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Which kernel, session, and actor a request belongs to (spec §A.7).
+///
+/// Mandatory on every request and carried onto every [`LedgerRecord`] about
+/// it: a helper hosting several sessions must never need an external map to
+/// answer "whose request is this?" — answering it from an external map is how
+/// a confused deputy is built.
+///
+/// Scoping is API hygiene, not a process boundary. A scoped handle stops a
+/// session's code from reaching another session's requests by accident; it
+/// does not stop hostile Rust in the same process, which can reach anything
+/// the process can (spec §A.2's threat model applies here unchanged).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalScope {
+    /// The kernel that raised it.
+    pub kernel_id: KernelId,
+    /// The conversation, connection, or task the kernel is serving. `None`
+    /// for a single-session kernel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    /// The actor on whose behalf the operation runs, when the embedder
+    /// distinguishes one from the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<PrincipalId>,
+}
+
+impl ApprovalScope {
+    /// A single-session kernel's scope: a kernel id and nothing else.
+    pub fn kernel(kernel_id: KernelId) -> Self {
+        Self {
+            kernel_id,
+            session_id: None,
+            actor_id: None,
+        }
+    }
+
+    /// Name the session this scope serves.
+    pub fn with_session(mut self, session: SessionId) -> Self {
+        self.session_id = Some(session);
+        self
+    }
+
+    /// Name the actor this scope runs on behalf of.
+    pub fn with_actor(mut self, actor: PrincipalId) -> Self {
+        self.actor_id = Some(actor);
+        self
+    }
+
+    /// Whether a handle restricted to `session` may see or decide this scope.
+    ///
+    /// Exact match on the session id, and a scope with **no** session is
+    /// invisible to every scoped handle: an unattributed request belongs to
+    /// the kernel, not to whichever session asks first.
+    pub fn in_session(&self, session: &SessionId) -> bool {
+        self.session_id.as_ref() == Some(session)
+    }
+}
+
+impl std::fmt::Display for ApprovalScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "kernel {}", self.kernel_id)?;
+        if let Some(session) = &self.session_id {
+            write!(f, ", session {session}")?;
+        }
+        if let Some(actor) = &self.actor_id {
+            write!(f, ", actor {actor}")?;
+        }
+        Ok(())
+    }
+}
+
+// ───────────────────────── Replay binding ─────────────────────────
+
+/// A digest over what was judged (spec §A.9). The kernel computes it; this
+/// type only carries the value, so `kaish-types` stays dependency-light.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PlanDigest(String);
+
+impl PlanDigest {
+    /// Wrap an already-computed digest.
+    pub fn new(hex: impl Into<String>) -> Self {
+        Self(hex.into())
+    }
+
+    /// The digest's text form.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for PlanDigest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Which sandbox profile was in force, when the embedder names them
+/// (spec §A.9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SandboxProfileId(String);
+
+impl SandboxProfileId {
+    /// Name a sandbox profile.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// The profile's text form.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SandboxProfileId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The context a grant was decided against (spec §A.9).
+///
+/// > A grant may be redeemed only by an attempt whose binding matches the one
+/// > the grant was decided against. Anything else is a new request.
+///
+/// This does not replace the redemption-time precondition check (spec §B.4);
+/// the two answer different questions. A [`StateResolver`] asks whether the
+/// *world* still matches what was claimed. The binding asks whether the
+/// *operation* is still the one that was judged — a resolver cannot cover a
+/// cwd change, because nothing declared the cwd as a precondition.
+///
+/// [`StateResolver`]: https://docs.rs/kaish-tool-api/latest/kaish_tool_api/trait.StateResolver.html
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanBinding {
+    /// Digest over what was judged: the rendered plan for a statement gate,
+    /// the operation and its resource references for every other gate.
+    pub plan_digest: PlanDigest,
+    /// The working directory it was judged in, as a logical path — the
+    /// spelling the VFS router resolves against, never a host path.
+    pub cwd: String,
+    /// The scope it was judged in.
+    pub scope: ApprovalScope,
+    /// Which sandbox profile was in force, when the embedder names them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_profile: Option<SandboxProfileId>,
+}
+
+impl PlanBinding {
+    /// Bind a decision to a digest, a working directory, and a scope.
+    pub fn new(plan_digest: PlanDigest, cwd: impl Into<String>, scope: ApprovalScope) -> Self {
+        Self {
+            plan_digest,
+            cwd: cwd.into(),
+            scope,
+            sandbox_profile: None,
+        }
+    }
+
+    /// Name the sandbox profile in force.
+    pub fn with_sandbox_profile(mut self, profile: SandboxProfileId) -> Self {
+        self.sandbox_profile = Some(profile);
+        self
+    }
+
+    /// How `self` (the binding a redemption presents) differs from `approved`
+    /// (the binding the grant was decided against), or `None` when they
+    /// agree.
+    ///
+    /// Names the first difference and both values, because "this replay is
+    /// not what was approved" is only actionable if it says how.
+    pub fn mismatch(&self, approved: &Self) -> Option<String> {
+        if self.cwd != approved.cwd {
+            return Some(format!(
+                "it runs in {} where {} was approved",
+                self.cwd, approved.cwd
+            ));
+        }
+        if self.scope != approved.scope {
+            return Some(format!(
+                "it runs under {} where {} was approved",
+                self.scope, approved.scope
+            ));
+        }
+        if self.sandbox_profile != approved.sandbox_profile {
+            return Some(format!(
+                "it runs under sandbox profile {} where {} was approved",
+                render_profile(self.sandbox_profile.as_ref()),
+                render_profile(approved.sandbox_profile.as_ref()),
+            ));
+        }
+        if self.plan_digest != approved.plan_digest {
+            return Some(format!(
+                "it digests to {} where {} was approved",
+                self.plan_digest, approved.plan_digest
+            ));
+        }
+        None
+    }
+}
+
+/// One sandbox profile, for a diagnostic an operator reads.
+fn render_profile(profile: Option<&SandboxProfileId>) -> String {
+    match profile {
+        Some(profile) => profile.to_string(),
+        None => "none".to_string(),
+    }
+}
+
 // ───────────────────────── Risk, resources, transitions ─────────────────────────
 
 /// How hard a request is to walk back. Read by an approver and matched by
@@ -692,6 +987,25 @@ pub struct RequestContext {
 pub struct ApprovalRequest {
     /// The request's public name.
     pub id: RequestId,
+    /// Which kernel, session, and actor this request belongs to (spec §A.7).
+    /// Mandatory: a helper hosting several sessions must never need an
+    /// external map to answer "whose request is this?".
+    pub scope: ApprovalScope,
+    /// Set when this request was raised while another was already being
+    /// satisfied — a statement gate that reaches an `fs.*` gate underneath it
+    /// (spec §A.7). Lets a UI show one nested prompt instead of two unrelated
+    /// ones. A grant on a parent never implies authority for a child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<RequestId>,
+    /// Bumped on every recorded transition of this request. A decision that
+    /// quotes a stale revision is refused, not applied (spec §B.6) — the
+    /// checks themselves land with the late-answer rule; this field is what
+    /// they quote.
+    #[serde(default)]
+    pub revision: u64,
+    /// The context this request was raised in, and the context a redemption
+    /// must still match (spec §A.9).
+    pub binding: PlanBinding,
     /// Dotted taxonomy (`"fs.remove"`, `"trash.empty"`, `"git.push"`).
     pub operation: OperationId,
     /// How hard this operation is to walk back.
@@ -772,6 +1086,17 @@ static REQUESTS_CONSTRUCTED: AtomicU64 = AtomicU64::new(0);
 pub struct ApprovalRequestView {
     /// See [`ApprovalRequest::id`].
     pub id: RequestId,
+    /// See [`ApprovalRequest::scope`].
+    pub scope: ApprovalScope,
+    /// See [`ApprovalRequest::parent`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<RequestId>,
+    /// See [`ApprovalRequest::revision`]. This is the revision a decision on
+    /// this request must quote (spec §B.6).
+    #[serde(default)]
+    pub revision: u64,
+    /// See [`ApprovalRequest::binding`].
+    pub binding: PlanBinding,
     /// See [`ApprovalRequest::operation`].
     pub operation: OperationId,
     /// See [`ApprovalRequest::risk`].
@@ -807,6 +1132,10 @@ impl From<ApprovalRequest> for ApprovalRequestView {
     fn from(req: ApprovalRequest) -> Self {
         Self {
             id: req.id,
+            scope: req.scope,
+            parent: req.parent,
+            revision: req.revision,
+            binding: req.binding,
             operation: req.operation,
             risk: req.risk,
             resources: req.resources,
@@ -857,40 +1186,114 @@ pub struct ApprovalRequestDraft {
     pub plan: Option<Plan>,
 }
 
+/// Everything the kernel stamps onto a draft that a producer cannot supply
+/// (spec §D.1) — the identity, the scope, the binding, and the provenance a
+/// plugin must not be able to forge.
+///
+/// One struct rather than a nine-argument [`ApprovalRequestDraft::stamp`]:
+/// three of these are optional and two are ids, so positional arguments were
+/// one reordering away from stamping a parent as a supersession.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestOrigin {
+    /// Which kernel, session, and actor raised it (spec §A.7).
+    pub scope: ApprovalScope,
+    /// The request this one was raised underneath, if any (spec §A.7).
+    pub parent: Option<RequestId>,
+    /// The context this request must still be redeemed in (spec §A.9).
+    pub binding: PlanBinding,
+    /// Who is asking.
+    pub principal: Principal,
+    /// Whether this invocation can be replayed by the approval side.
+    pub capture: Capture,
+    /// W3C context captured at request time.
+    pub context: RequestContext,
+    /// How long the request stays live with no decision.
+    pub ttl: Duration,
+    /// The backgrounded job that raised it, if any.
+    pub job_id: Option<u64>,
+}
+
+impl RequestOrigin {
+    /// The four values every request must have. `context`, `parent`, and
+    /// `job_id` default to absent — add them with the `with_*` methods.
+    pub fn new(
+        scope: ApprovalScope,
+        binding: PlanBinding,
+        principal: Principal,
+        capture: Capture,
+        ttl: Duration,
+    ) -> Self {
+        Self {
+            scope,
+            parent: None,
+            binding,
+            principal,
+            capture,
+            context: RequestContext::default(),
+            ttl,
+            job_id: None,
+        }
+    }
+
+    /// Name the request this one was raised underneath (spec §A.7).
+    pub fn with_parent(mut self, parent: Option<RequestId>) -> Self {
+        self.parent = parent;
+        self
+    }
+
+    /// Attach the W3C trace context captured at request time.
+    pub fn with_context(mut self, context: RequestContext) -> Self {
+        self.context = context;
+        self
+    }
+
+    /// Name the backgrounded job that raised it.
+    pub fn with_job_id(mut self, job_id: Option<u64>) -> Self {
+        self.job_id = job_id;
+        self
+    }
+
+    /// Change how long the request stays live with no decision.
+    pub fn with_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = ttl;
+        self
+    }
+}
+
 impl ApprovalRequestDraft {
     /// Stamp the kernel-supplied fields, turning a draft into a postable
     /// [`ApprovalRequest`]. Pure field assembly — no I/O, no validation
     /// beyond what the draft already carries. This method is `pub` and does
     /// not itself gate who calls it: the guarantee is that a *draft* cannot
-    /// carry these fields, and the kernel's `request_approval` seam (ledger
-    /// PR 3) is the one place real values enter.
-    // One argument per kernel-stamped field (spec §D.1's exact list) reads
-    // clearer here than a stamping-context struct for a 7-argument leaf
-    // constructor with no optional subsets.
-    #[allow(clippy::too_many_arguments)]
+    /// carry these fields, and the kernel's `request_approval` seam is the
+    /// one place real values enter.
+    ///
+    /// `revision` starts at 0 and is bumped by the ledger on every recorded
+    /// transition (spec §A.7) — a draft cannot set it either.
     pub fn stamp(
         self,
         id: RequestId,
-        principal: Principal,
-        capture: Capture,
-        context: RequestContext,
         requested_at: SystemTime,
-        ttl: Duration,
-        job_id: Option<u64>,
+        origin: RequestOrigin,
     ) -> ApprovalRequest {
         ApprovalRequest {
             id,
+            scope: origin.scope,
+            parent: origin.parent,
+            revision: 0,
+            binding: origin.binding,
             operation: self.operation,
             risk: self.risk,
             resources: self.resources,
-            principal,
-            capture,
-            context,
-            job_id,
+            principal: origin.principal,
+            capture: origin.capture,
+            context: origin.context,
+            job_id: origin.job_id,
             reason: self.reason,
             hint: self.hint,
             requested_at,
-            ttl,
+            ttl: origin.ttl,
             supersedes: self.supersedes,
             plan: self.plan,
         }
@@ -1726,6 +2129,175 @@ impl LedgerEntry {
             | Self::TokenRejected { seq, .. } => *seq,
         }
     }
+
+    /// When this entry was appended. Matched exhaustively here for the same
+    /// reason [`Self::seq`] is — a variant added without extending this match
+    /// is a compile error.
+    pub fn at(&self) -> SystemTime {
+        match self {
+            Self::Requested { at, .. }
+            | Self::Granted { at, .. }
+            | Self::Denied { at, .. }
+            | Self::Expired { at, .. }
+            | Self::KeyRetrieved { at, .. }
+            | Self::Redeemed { at, .. }
+            | Self::Refused { at, .. }
+            | Self::Settled { at, .. }
+            | Self::Abandoned { at, .. }
+            | Self::Voided { at, .. }
+            | Self::StandingIssued { at, .. }
+            | Self::StandingRevoked { at, .. }
+            | Self::Subscribed { at, .. }
+            | Self::Observed { at, .. }
+            | Self::Unsubscribed { at, .. }
+            | Self::TokenRejected { at, .. } => *at,
+        }
+    }
+
+    /// The request this entry is about, when it is about one. `None` for the
+    /// entries with no single owning request: `StandingIssued`,
+    /// `StandingRevoked`, `Subscribed`, `Unsubscribed`, `Observed` (a
+    /// chainless record — spec §C.5), and a `TokenRejected` that matched no
+    /// live request.
+    pub fn request(&self) -> Option<&RequestId> {
+        match self {
+            Self::Requested { request, .. } => Some(&request.id),
+            Self::Granted { grant, .. } => Some(&grant.request),
+            Self::Denied { request, .. }
+            | Self::Expired { request, .. }
+            | Self::KeyRetrieved { request, .. }
+            | Self::Redeemed { request, .. }
+            | Self::Refused { request, .. }
+            | Self::Settled { request, .. }
+            | Self::Abandoned { request, .. }
+            | Self::Voided { request, .. } => Some(request),
+            Self::TokenRejected { request, .. } => request.as_ref(),
+            Self::StandingIssued { .. }
+            | Self::StandingRevoked { .. }
+            | Self::Subscribed { .. }
+            | Self::Unsubscribed { .. }
+            | Self::Observed { .. } => None,
+        }
+    }
+
+    /// Whether appending this entry bumps its request's
+    /// [`revision`](ApprovalRequest::revision) — spec §A.7's "every recorded
+    /// transition bumps `revision`".
+    ///
+    /// Two entries that name a request are **not** transitions of it.
+    /// `Requested` creates the request at revision 0; there is nothing to
+    /// bump yet. `KeyRetrieved` records that a key left the kernel and moves
+    /// nothing on the state machine — bumping there would invalidate the
+    /// revision an approver is holding for a decision it has not made yet.
+    pub fn bumps_revision(&self) -> bool {
+        match self {
+            Self::Requested { .. } | Self::KeyRetrieved { .. } => false,
+            _ => self.request().is_some(),
+        }
+    }
+}
+
+// ───────────────────────── The record envelope ─────────────────────────
+
+/// The [`LedgerRecord::schema_version`] this build writes.
+///
+/// It bumps when a reader **must notice** a change, not on every addition —
+/// a version number nobody knows how to react to is decoration. Additions
+/// that a reader can ignore (a new optional field, a new entry variant a
+/// reader is required to surface as unknown anyway) do not bump it.
+pub const LEDGER_SCHEMA_VERSION: u16 = 1;
+
+/// A ledger entry as a consumer reads it: versioned, sequenced, scoped
+/// (spec §A.5).
+///
+/// Entries are read through this wrapper, never as a bare [`LedgerEntry`], so
+/// a consumer written against one release can be handed a later ledger's
+/// output and know what it is holding.
+///
+/// **Compatibility rules**, so `schema_version` is worth carrying:
+///
+/// - Every public type in this module is `#[non_exhaustive]`, and every field
+///   added later carries a serde default.
+/// - A reader **must tolerate unknown object fields** — they are a newer
+///   writer's additions, not corruption.
+/// - A reader **must not silently drop an unknown entry variant or an
+///   unrecognized `schema_version`.** Deserializing an unrecognized entry
+///   yields [`RecordedEntry::Unknown`] with its `sequence` and `scope`
+///   intact, so a gap in an audit log is visible as a gap. Dropping it would
+///   let a reader report a clean history it did not actually verify.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LedgerRecord {
+    /// The schema this record was written against. Compare it against
+    /// [`LEDGER_SCHEMA_VERSION`] — see [`Self::schema_is_known`].
+    pub schema_version: u16,
+    /// The entry's monotonic per-ledger sequence number.
+    pub sequence: u64,
+    /// Wall-clock append time.
+    #[serde(with = "crate::rfc3339::system_time")]
+    pub at: SystemTime,
+    /// Which kernel, session, and actor this record belongs to (spec §A.7).
+    pub scope: ApprovalScope,
+    /// The entry itself, or the fact that this build does not recognize it.
+    pub entry: RecordedEntry,
+}
+
+impl LedgerRecord {
+    /// Wrap an entry this build wrote. `sequence` and `at` are read off the
+    /// entry rather than supplied, so the envelope and its payload cannot
+    /// disagree about when a thing happened or in what order.
+    pub fn new(scope: ApprovalScope, entry: LedgerEntry) -> Self {
+        Self {
+            schema_version: LEDGER_SCHEMA_VERSION,
+            sequence: entry.seq(),
+            at: entry.at(),
+            scope,
+            entry: RecordedEntry::Known(entry),
+        }
+    }
+
+    /// Whether this build understands the schema this record was written
+    /// against. `false` means read `sequence`, `at`, and `scope` and treat
+    /// the entry as opaque — never as absent.
+    pub fn schema_is_known(&self) -> bool {
+        self.schema_version <= LEDGER_SCHEMA_VERSION
+    }
+
+    /// The entry, when this build recognizes it. `None` is an entry a newer
+    /// writer produced — a fact to surface, not a record to drop.
+    pub fn known(&self) -> Option<&LedgerEntry> {
+        match &self.entry {
+            RecordedEntry::Known(entry) => Some(entry),
+            RecordedEntry::Unknown(_) => None,
+        }
+    }
+}
+
+/// An entry this build recognizes, or one it does not (spec §A.5).
+///
+/// Untagged on the wire: a record written by any version of kaish
+/// deserializes as `Known` when this build has the variant and `Unknown` when
+/// it does not. There is no third outcome — an entry never disappears.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RecordedEntry {
+    /// An entry this build has a variant for.
+    Known(LedgerEntry),
+    /// An entry this build does not recognize, kept verbatim.
+    Unknown(UnknownEntry),
+}
+
+/// An entry a newer writer produced, carried through verbatim (spec §A.5).
+///
+/// Round-tripping it unchanged is the point: a reader that re-exports a log
+/// must not silently narrow it to the variants it happened to know about.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnknownEntry {
+    /// The `entry` tag the writer used, e.g. `"assessed"`.
+    pub entry: String,
+    /// Every other field, verbatim.
+    #[serde(flatten)]
+    pub fields: BTreeMap<String, serde_json::Value>,
 }
 
 /// Test-only: a stamped, tokenless view, for exercising the control-plane
@@ -1745,17 +2317,31 @@ pub(crate) fn sample_view(operation: &str, paths: &[&str]) -> ApprovalRequestVie
         .expect("a well-formed draft")
         .stamp(
             RequestId::new(0x0badcafe, 1),
-            Principal::new("session", PrincipalKind::Agent),
-            Capture::Exact(Invocation {
-                tool: operation.split('.').next().unwrap_or(operation).to_string(),
-                argv: paths.iter().map(|p| (*p).to_string()).collect(),
-            }),
-            RequestContext::default(),
             std::time::UNIX_EPOCH,
-            Duration::from_secs(60),
-            None,
+            RequestOrigin::new(
+                sample_scope(),
+                sample_binding(),
+                Principal::new("session", PrincipalKind::Agent),
+                Capture::Exact(Invocation {
+                    tool: operation.split('.').next().unwrap_or(operation).to_string(),
+                    argv: paths.iter().map(|p| (*p).to_string()).collect(),
+                }),
+                Duration::from_secs(60),
+            ),
         )
         .into()
+}
+
+/// Test-only: a fixed scope, so a fixture's shape is stable across runs.
+#[cfg(test)]
+pub(crate) fn sample_scope() -> ApprovalScope {
+    ApprovalScope::kernel(KernelId::new(1)).with_session(SessionId::new("session-1"))
+}
+
+/// Test-only: a binding matching [`sample_scope`].
+#[cfg(test)]
+pub(crate) fn sample_binding() -> PlanBinding {
+    PlanBinding::new(PlanDigest::new("d1ge57"), "/w", sample_scope())
 }
 
 #[cfg(test)]
@@ -1946,12 +2532,14 @@ mod tests {
             .unwrap();
         let req = draft.stamp(
             RequestId::new(1, 1),
-            Principal::new("agent-1", PrincipalKind::Agent),
-            Capture::DirectExecution,
-            RequestContext::default(),
             SystemTime::UNIX_EPOCH,
-            Duration::from_secs(60),
-            None,
+            RequestOrigin::new(
+                sample_scope(),
+                sample_binding(),
+                Principal::new("agent-1", PrincipalKind::Agent),
+                Capture::DirectExecution,
+                Duration::from_secs(60),
+            ),
         );
         assert_eq!(req.id.as_str(), "req_00000001_1");
         assert_eq!(req.principal.id, "agent-1");
@@ -1975,12 +2563,14 @@ mod tests {
             .unwrap();
         let req = draft.stamp(
             RequestId::new(1, 1),
-            Principal::default(),
-            Capture::DirectExecution,
-            RequestContext::default(),
             SystemTime::UNIX_EPOCH,
-            Duration::from_secs(60),
-            None,
+            RequestOrigin::new(
+                sample_scope(),
+                sample_binding(),
+                Principal::default(),
+                Capture::DirectExecution,
+                Duration::from_secs(60),
+            ),
         );
         let not_after = SystemTime::UNIX_EPOCH + Duration::from_secs(300);
         let terms = GrantTerms::once_for(&req, not_after);
@@ -2011,15 +2601,21 @@ mod tests {
             .unwrap();
         let req = draft.stamp(
             RequestId::new(1, 1),
-            Principal::default(),
-            Capture::DirectExecution,
-            RequestContext::default(),
             SystemTime::UNIX_EPOCH,
-            Duration::from_secs(60),
-            None,
+            RequestOrigin::new(
+                sample_scope(),
+                sample_binding(),
+                Principal::default(),
+                Capture::DirectExecution,
+                Duration::from_secs(60),
+            ),
         );
         let ApprovalRequest {
             id,
+            scope,
+            parent,
+            revision,
+            binding,
             operation,
             risk,
             resources,
@@ -2036,6 +2632,10 @@ mod tests {
         } = req;
         let _: Option<Plan> = plan;
         let _: RequestId = id;
+        let _: ApprovalScope = scope;
+        let _: Option<RequestId> = parent;
+        let _: u64 = revision;
+        let _: PlanBinding = binding;
         let _: OperationId = operation;
         let _: RiskClass = risk;
         let _: Vec<Resource> = resources;
@@ -2058,16 +2658,22 @@ mod tests {
             .unwrap();
         let req = draft.stamp(
             RequestId::new(1, 1),
-            Principal::default(),
-            Capture::DirectExecution,
-            RequestContext::default(),
             SystemTime::UNIX_EPOCH,
-            Duration::from_secs(60),
-            None,
+            RequestOrigin::new(
+                sample_scope(),
+                sample_binding(),
+                Principal::default(),
+                Capture::DirectExecution,
+                Duration::from_secs(60),
+            ),
         );
         let view: ApprovalRequestView = req.into();
         let ApprovalRequestView {
             id,
+            scope,
+            parent,
+            revision,
+            binding,
             operation,
             risk,
             resources,
@@ -2084,6 +2690,10 @@ mod tests {
         } = view;
         let _: Option<Plan> = plan;
         let _: RequestId = id;
+        let _: ApprovalScope = scope;
+        let _: Option<RequestId> = parent;
+        let _: u64 = revision;
+        let _: PlanBinding = binding;
         let _: OperationId = operation;
         let _: RiskClass = risk;
         let _: Vec<Resource> = resources;
@@ -2146,15 +2756,17 @@ mod tests {
             .unwrap()
             .stamp(
                 RequestId::new(1, 1),
-                Principal::new("agent-1", PrincipalKind::Agent),
-                Capture::Exact(Invocation {
-                    tool: "git".to_string(),
-                    argv: vec!["push".to_string(), "origin".to_string(), "main".to_string()],
-                }),
-                RequestContext::default(),
                 SystemTime::UNIX_EPOCH,
-                Duration::from_secs(60),
-                None,
+                RequestOrigin::new(
+                    sample_scope(),
+                    sample_binding(),
+                    Principal::new("agent-1", PrincipalKind::Agent),
+                    Capture::Exact(Invocation {
+                        tool: "git".to_string(),
+                        argv: vec!["push".to_string(), "origin".to_string(), "main".to_string()],
+                    }),
+                    Duration::from_secs(60),
+                ),
             )
     }
 
@@ -2571,5 +3183,221 @@ mod tests {
     #[test]
     fn principal_defaults_to_unknown_kind() {
         assert_eq!(Principal::default().kind, PrincipalKind::Unknown);
+    }
+
+    // ── Scope (spec §A.7) ──
+
+    #[test]
+    fn minted_kernel_ids_are_distinct() {
+        assert_ne!(KernelId::mint(), KernelId::mint());
+    }
+
+    #[test]
+    fn a_scoped_handle_sees_only_its_own_session() {
+        let kernel = KernelId::new(1);
+        let mine = ApprovalScope::kernel(kernel).with_session(SessionId::new("a"));
+        let theirs = ApprovalScope::kernel(kernel).with_session(SessionId::new("b"));
+        let unattributed = ApprovalScope::kernel(kernel);
+        let a = SessionId::new("a");
+        assert!(mine.in_session(&a));
+        assert!(!theirs.in_session(&a));
+        // An unattributed request belongs to the kernel, not to whichever
+        // session asks first.
+        assert!(!unattributed.in_session(&a));
+    }
+
+    #[test]
+    fn a_single_session_scope_omits_the_optional_ids_on_the_wire() {
+        let json = serde_json::to_value(ApprovalScope::kernel(KernelId::new(7))).unwrap();
+        assert_eq!(json, serde_json::json!({ "kernel_id": 7 }));
+        let back: ApprovalScope = serde_json::from_value(json).unwrap();
+        assert_eq!(back, ApprovalScope::kernel(KernelId::new(7)));
+    }
+
+    // ── Binding (spec §A.9) ──
+
+    #[test]
+    fn a_binding_matches_itself_and_names_the_first_difference_otherwise() {
+        let approved = sample_binding();
+        assert_eq!(approved.mismatch(&approved), None);
+
+        let moved = PlanBinding::new(PlanDigest::new("d1ge57"), "/elsewhere", sample_scope());
+        let detail = moved.mismatch(&approved).expect("a cwd change is a mismatch");
+        assert!(detail.contains("/elsewhere"), "{detail}");
+        assert!(detail.contains("/w"), "{detail}");
+
+        let other_session = PlanBinding::new(
+            PlanDigest::new("d1ge57"),
+            "/w",
+            ApprovalScope::kernel(KernelId::new(1)).with_session(SessionId::new("session-2")),
+        );
+        assert!(other_session
+            .mismatch(&approved)
+            .expect("a scope change is a mismatch")
+            .contains("session-2"));
+
+        let other_plan = PlanBinding::new(PlanDigest::new("0ther"), "/w", sample_scope());
+        assert!(other_plan
+            .mismatch(&approved)
+            .expect("a digest change is a mismatch")
+            .contains("0ther"));
+
+        let sandboxed = sample_binding().with_sandbox_profile(SandboxProfileId::new("readonly"));
+        assert!(sandboxed
+            .mismatch(&approved)
+            .expect("a profile change is a mismatch")
+            .contains("readonly"));
+    }
+
+    // ── The record envelope (spec §A.5) ──
+
+    #[test]
+    fn a_record_derives_its_sequence_and_time_from_the_entry_it_wraps() {
+        // The envelope and its payload cannot disagree about when a thing
+        // happened or in what order, because the envelope does not get to
+        // say.
+        let entry = LedgerEntry::Voided {
+            seq: 42,
+            at: SystemTime::UNIX_EPOCH + Duration::from_secs(9),
+            request: RequestId::new(1, 1),
+            reason: "5 rejected credentials".to_string(),
+        };
+        let record = LedgerRecord::new(sample_scope(), entry.clone());
+        assert_eq!(record.sequence, 42);
+        assert_eq!(record.at, SystemTime::UNIX_EPOCH + Duration::from_secs(9));
+        assert_eq!(record.schema_version, LEDGER_SCHEMA_VERSION);
+        assert!(record.schema_is_known());
+        assert_eq!(record.known(), Some(&entry));
+    }
+
+    #[test]
+    fn every_entry_variant_round_trips_inside_a_record() {
+        for entry in all_entries() {
+            let record = LedgerRecord::new(sample_scope(), entry.clone());
+            let json = serde_json::to_value(&record).expect("serialize");
+            let back: LedgerRecord = serde_json::from_value(json.clone()).expect("deserialize");
+            assert_eq!(back, record, "record round-trip mismatch: {json}");
+            assert_eq!(back.known(), Some(&entry));
+        }
+    }
+
+    #[test]
+    fn an_unknown_entry_variant_round_trips_as_unknown_rather_than_being_dropped() {
+        // A newer writer's entry: `assessed` (spec §C.7) is not a variant this
+        // build has. It must survive with its sequence and scope intact — a
+        // gap in an audit log has to be visible as a gap, and a reader that
+        // dropped it would report a clean history it never verified.
+        let json = serde_json::json!({
+            "schema_version": LEDGER_SCHEMA_VERSION,
+            "sequence": 17,
+            "at": "1970-01-01T00:00:00.000Z",
+            "scope": { "kernel_id": 1, "session_id": "session-1" },
+            "entry": {
+                "entry": "assessed",
+                "seq": 17,
+                "at": "1970-01-01T00:00:00.000Z",
+                "request": "req_00000001_1",
+                "assessment": { "by": "classifier", "verdict": "gate" }
+            }
+        });
+        let record: LedgerRecord = serde_json::from_value(json.clone()).expect("deserialize");
+        assert_eq!(record.sequence, 17);
+        assert_eq!(record.scope.session_id, Some(SessionId::new("session-1")));
+        assert_eq!(record.known(), None, "this build must not claim to know `assessed`");
+        let RecordedEntry::Unknown(unknown) = &record.entry else {
+            panic!("expected an unknown entry, got {:?}", record.entry);
+        };
+        assert_eq!(unknown.entry, "assessed");
+        assert_eq!(unknown.fields["request"], serde_json::json!("req_00000001_1"));
+        // Re-exporting must not narrow the log to the variants this build
+        // happens to know about.
+        assert_eq!(serde_json::to_value(&record).expect("serialize"), json);
+    }
+
+    #[test]
+    fn an_unrecognized_schema_version_keeps_its_sequence_and_scope() {
+        let mut json = serde_json::to_value(LedgerRecord::new(
+            sample_scope(),
+            LedgerEntry::Voided {
+                seq: 3,
+                at: SystemTime::UNIX_EPOCH,
+                request: RequestId::new(1, 1),
+                reason: "voided".to_string(),
+            },
+        ))
+        .expect("serialize");
+        json["schema_version"] = serde_json::json!(LEDGER_SCHEMA_VERSION as u32 + 999);
+        let record: LedgerRecord = serde_json::from_value(json).expect("deserialize");
+        assert!(!record.schema_is_known());
+        assert_eq!(record.sequence, 3);
+        assert_eq!(record.scope, sample_scope());
+    }
+
+    #[test]
+    fn a_reader_tolerates_an_unknown_object_field_on_a_known_entry() {
+        // A newer writer's added field is not corruption.
+        let mut json = serde_json::to_value(LedgerRecord::new(
+            sample_scope(),
+            LedgerEntry::Voided {
+                seq: 4,
+                at: SystemTime::UNIX_EPOCH,
+                request: RequestId::new(1, 1),
+                reason: "voided".to_string(),
+            },
+        ))
+        .expect("serialize");
+        json["entry"]["decided_under"] = serde_json::json!("some-future-field");
+        let record: LedgerRecord = serde_json::from_value(json).expect("deserialize");
+        assert!(record.known().is_some(), "an added field must not force `unknown`");
+    }
+
+    // ── Revision bookkeeping (spec §A.7) ──
+
+    #[test]
+    fn a_freshly_stamped_request_starts_at_revision_zero() {
+        let req = sample_request();
+        assert_eq!(req.revision, 0);
+        assert_eq!(req.parent, None);
+    }
+
+    #[test]
+    fn every_entry_naming_a_request_bumps_revision_except_requested_and_key_retrieved() {
+        for entry in all_entries() {
+            let names_a_request = entry.request().is_some();
+            let expected = names_a_request
+                && !matches!(
+                    entry,
+                    LedgerEntry::Requested { .. } | LedgerEntry::KeyRetrieved { .. }
+                );
+            assert_eq!(
+                entry.bumps_revision(),
+                expected,
+                "wrong revision-bump rule for {entry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn entries_with_no_owning_request_name_none() {
+        for entry in all_entries() {
+            match &entry {
+                LedgerEntry::StandingIssued { .. }
+                | LedgerEntry::StandingRevoked { .. }
+                | LedgerEntry::Subscribed { .. }
+                | LedgerEntry::Unsubscribed { .. }
+                | LedgerEntry::Observed { .. } => {
+                    assert_eq!(entry.request(), None, "{entry:?} owns no request");
+                    assert!(!entry.bumps_revision());
+                }
+                _ => assert!(entry.request().is_some(), "{entry:?} must name its request"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_entry_reports_the_timestamp_it_carries() {
+        for entry in all_entries() {
+            assert_eq!(entry.at(), SystemTime::UNIX_EPOCH, "{entry:?}");
+        }
     }
 }

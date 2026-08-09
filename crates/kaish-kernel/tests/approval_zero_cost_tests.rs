@@ -30,6 +30,23 @@
 use kaish_kernel::{Kernel, KernelConfig};
 use kaish_types::approval::{ApprovalRequest, LedgerEntry};
 
+/// The entries inside a ledger's records. These tests assert on entry shape;
+/// the [`LedgerRecord`] envelope has its own coverage in `kaish-types` (spec
+/// §A.5), and an entry this build does not recognize cannot occur here.
+#[allow(dead_code)]
+fn entries(records: Vec<kaish_types::approval::LedgerRecord>) -> Vec<LedgerEntry> {
+    records
+        .into_iter()
+        .map(|record| {
+            record
+                .known()
+                .cloned()
+                .expect("this build wrote every record it reads back")
+        })
+        .collect()
+}
+
+
 /// How many paths the delete names.
 const PATHS: usize = 10_000;
 
@@ -74,7 +91,7 @@ async fn an_unsubscribed_ten_thousand_path_delete_posts_nothing_and_builds_no_re
         "an unsubscribed {PATHS}-path delete built {} approval requests — 0 are allowed",
         after - before
     );
-    let log = kernel.approvals().log(0);
+    let log = entries(kernel.approvals().log(0));
     assert_eq!(
         log.len(),
         1,

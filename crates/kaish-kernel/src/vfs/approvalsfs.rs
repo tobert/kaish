@@ -109,12 +109,15 @@ impl ApprovalsFs {
             "pending" => pretty(&self.approvals.pending()),
             "standing" => pretty(&self.approvals.standing()),
             "log" => {
-                // NDJSON, seq-ordered: one entry per line, so a consumer can
-                // tail it and parse incrementally rather than re-reading a
-                // growing array.
+                // NDJSON, sequence-ordered: one versioned record per line, so
+                // a consumer can tail it and parse incrementally rather than
+                // re-reading a growing array. Each line is a `LedgerRecord`
+                // (spec §A.5) — `schema_version`, `sequence`, `at`, `scope`,
+                // and the entry itself under `entry` — so a reader knows what
+                // it is holding and whose it is.
                 let mut out = String::new();
-                for entry in self.approvals.log(0) {
-                    out.push_str(&serialize(&entry)?);
+                for record in self.approvals.log(0) {
+                    out.push_str(&serialize(&record)?);
                     out.push('\n');
                 }
                 Ok(out.into_bytes())
