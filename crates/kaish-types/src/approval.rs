@@ -1909,6 +1909,32 @@ impl std::fmt::Display for CancelReason {
     }
 }
 
+/// Which kind of decision a stale-revision refusal was attempting (spec
+/// §B.6). Named on [`LedgerEntry::RevisionRejected`] so a reader is not left
+/// inferring what was being tried from a variant that carries only the
+/// numbers.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionKind {
+    /// A `grant` was attempted.
+    Grant,
+    /// A `deny` was attempted.
+    Deny,
+    /// A `cancel` was attempted.
+    Cancel,
+}
+
+impl std::fmt::Display for TransitionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Grant => "grant",
+            Self::Deny => "deny",
+            Self::Cancel => "cancel",
+        })
+    }
+}
+
 // ───────────────────────── The entry log ─────────────────────────
 
 /// One append to the ledger. Internally tagged on the `"entry"` key so
@@ -2171,6 +2197,28 @@ pub enum LedgerEntry {
         /// rejection against one request voids it (spec §F.3).
         attempts: u32,
     },
+    /// A decision, cancellation, or resolution quoted a revision other than
+    /// the request's current one (spec §B.6). Refused, never applied — and
+    /// recorded rather than dropped, so a late answer to an already-moved
+    /// request is a readable fact instead of a vanished event. Does not
+    /// itself bump `revision`: nothing about the request's state changed.
+    RevisionRejected {
+        /// Monotonic per-ledger sequence number.
+        seq: u64,
+        /// The clock reading this entry was committed at.
+        #[serde(with = "crate::rfc3339::system_time")]
+        at: SystemTime,
+        /// The request the stale decision targeted.
+        request: RequestId,
+        /// Who attempted it.
+        by: Principal,
+        /// The revision the caller quoted.
+        quoted: u64,
+        /// The request's actual revision at refusal time.
+        current: u64,
+        /// Which kind of transition was attempted.
+        attempted: TransitionKind,
+    },
 }
 
 impl LedgerEntry {
@@ -2197,7 +2245,8 @@ impl LedgerEntry {
             | Self::Observed { seq, .. }
             | Self::Unsubscribed { seq, .. }
             | Self::Cancelled { seq, .. }
-            | Self::TokenRejected { seq, .. } => *seq,
+            | Self::TokenRejected { seq, .. }
+            | Self::RevisionRejected { seq, .. } => *seq,
         }
     }
 
@@ -2222,7 +2271,8 @@ impl LedgerEntry {
             | Self::Observed { at, .. }
             | Self::Unsubscribed { at, .. }
             | Self::Cancelled { at, .. }
-            | Self::TokenRejected { at, .. } => *at,
+            | Self::TokenRejected { at, .. }
+            | Self::RevisionRejected { at, .. } => *at,
         }
     }
 
@@ -2243,7 +2293,8 @@ impl LedgerEntry {
             | Self::Settled { request, .. }
             | Self::Abandoned { request, .. }
             | Self::Voided { request, .. }
-            | Self::Cancelled { request, .. } => Some(request),
+            | Self::Cancelled { request, .. }
+            | Self::RevisionRejected { request, .. } => Some(request),
             Self::TokenRejected { request, .. } => request.as_ref(),
             Self::StandingIssued { .. }
             | Self::StandingRevoked { .. }
@@ -2257,14 +2308,17 @@ impl LedgerEntry {
     /// [`revision`](ApprovalRequest::revision) — spec §A.7's "every recorded
     /// transition bumps `revision`".
     ///
-    /// Two entries that name a request are **not** transitions of it.
+    /// Three entries that name a request are **not** transitions of it.
     /// `Requested` creates the request at revision 0; there is nothing to
     /// bump yet. `KeyRetrieved` records that a key left the kernel and moves
     /// nothing on the state machine — bumping there would invalidate the
     /// revision an approver is holding for a decision it has not made yet.
+    /// `RevisionRejected` records a refusal, not a transition — the request
+    /// is exactly as it was before the stale decision arrived (spec §B.6's
+    /// transition table: "unchanged").
     pub fn bumps_revision(&self) -> bool {
         match self {
-            Self::Requested { .. } | Self::KeyRetrieved { .. } => false,
+            Self::Requested { .. } | Self::KeyRetrieved { .. } | Self::RevisionRejected { .. } => false,
             _ => self.request().is_some(),
         }
     }
@@ -3035,6 +3089,22 @@ mod tests {
                 request: Some(request.clone()),
                 attempts: 3,
             },
+            LedgerEntry::Cancelled {
+                seq: 17,
+                at,
+                request: request.clone(),
+                by: by.clone(),
+                reason: CancelReason::Withdrawn,
+            },
+            LedgerEntry::RevisionRejected {
+                seq: 18,
+                at,
+                request: request.clone(),
+                by: by.clone(),
+                quoted: 1,
+                current: 3,
+                attempted: TransitionKind::Grant,
+            },
         ]
     }
 
@@ -3132,6 +3202,8 @@ mod tests {
         "observed",
         "unsubscribed",
         "token_rejected",
+        "cancelled",
+        "revision_rejected",
     ];
 
     #[test]
@@ -3429,13 +3501,15 @@ mod tests {
     }
 
     #[test]
-    fn every_entry_naming_a_request_bumps_revision_except_requested_and_key_retrieved() {
+    fn every_entry_naming_a_request_bumps_revision_except_requested_key_retrieved_and_revision_rejected() {
         for entry in all_entries() {
             let names_a_request = entry.request().is_some();
             let expected = names_a_request
                 && !matches!(
                     entry,
-                    LedgerEntry::Requested { .. } | LedgerEntry::KeyRetrieved { .. }
+                    LedgerEntry::Requested { .. }
+                        | LedgerEntry::KeyRetrieved { .. }
+                        | LedgerEntry::RevisionRejected { .. }
                 );
             assert_eq!(
                 entry.bumps_revision(),
