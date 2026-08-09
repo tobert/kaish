@@ -615,19 +615,27 @@ installs one. It is called once per top-level statement, synchronously, and
 must not block — it runs on the execution path of every statement.
 
 ```rust
-use kaish_kernel::ledger::{StatementClassifier, StatementPosture};
-use kaish_types::approval::{Plan, RiskClass};
+use kaish_kernel::ledger::{
+    ClassificationError, ExecutionContext, StatementAssessment, StatementClassificationInput,
+    StatementClassifier, StatementPosture,
+};
+use kaish_types::approval::{AssessorId, RiskClass};
 
 struct GateWrites;
 impl StatementClassifier for GateWrites {
-    fn classify(&self, plan: &Plan) -> StatementPosture {
-        if plan.commands.iter().any(|c| !c.redirects.is_empty()) {
-            return StatementPosture::gate(
+    fn classify(
+        &self,
+        input: &StatementClassificationInput<'_>,
+    ) -> Result<StatementAssessment, ClassificationError> {
+        let posture = if input.plan.commands.iter().any(|c| !c.redirects.is_empty()) {
+            StatementPosture::gate(
                 "the statement redirects to a file",
                 RiskClass::Recoverable,
-            );
-        }
-        StatementPosture::Observe
+            )
+        } else {
+            StatementPosture::Observe
+        };
+        Ok(StatementAssessment::new(posture, AssessorId::new("gate-writes")))
     }
 }
 ```
@@ -645,11 +653,44 @@ the same program. The classifier has no deny:
 refusal is a chain decision (`Policy::evaluate`), because a scoping seam that
 can refuse is a second decision chain.
 
+**`Err` means `Gate`, never `Observe` — and a panic means the same thing.**
+`classify` returns `Result<StatementAssessment, ClassificationError>`. An
+`Err` — the model backing a classifier is unreachable, the input is outside
+what it can judge, anything it cannot answer — maps to `Gate`, never to a
+silent `Observe`: a classifier that cannot answer must not be able to turn
+the statement gate off. A panic inside `classify` is caught (`catch_unwind`
+at the tap site) and mapped the same way, so a bug in an embedder-authored
+classifier gates the one statement it broke on rather than crashing the rest
+of the program. This is a **looser** contract than `Policy::evaluate`'s,
+which still propagates a panic unguarded — `evaluate` only runs once a
+decision is genuinely being asked for, while a classifier runs in front of
+*every* statement, including the ones nobody would ever gate. A classifier
+may also **raise** the posture a kernel-owned static rule already set, but
+never **lower** it — `kaish-trash empty` gates even under a classifier that
+always answers `Observe`.
+
+**`ExecutionContext` carries no host path.** `StatementClassificationInput`
+pairs the plan with an `ExecutionContext { cwd, scope, sandbox_profile,
+mounts }`. `cwd` is a `String` holding the logical VFS path — the spelling
+the router resolves against, the same convention `PlanBinding::cwd` uses —
+never a raw host `PathBuf`. A classifier is frequently a call into a model,
+and that input frequently leaves the process; `/home/amy/clients/acme` says
+things a `MountClass::Project` does not.
+
 `CommandNameClassifier::new(names, reason, risk)` is the reference
 implementation: it gates a statement when any command it plans is named in
 `names`, matched on argv0 exactly as written. Classifying the plan is what
 tells `rm target.txt` from `echo 'rm target.txt'` and from `grep rm
 changelog.txt` — the plan carries the parse, and a raw line does not.
+
+**Every classifier judgment that leads to a `Gate` is recorded as an
+`Assessed` entry** (`docs/approval-ledger.md` §C.7) — `assessor`, `stage:
+Classifier`, `outcome`, `reason`, and the model identity/confidence a
+`StatementAssessment` carried, once the request it explains exists. An
+embedder's own deliberation pipeline appends more of the same shape through
+`ApproverHandle::assessments()`, so `Approvals::get(id).assessments` reads
+the whole chain of reasoning that led to a decision — or that never reached
+one, when the request was abandoned instead.
 
 **Replay of a held statement.** A deferred statement's capture is
 `Capture::Statement { source, index }`: statements carry no source spans, so
