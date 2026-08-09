@@ -53,10 +53,12 @@ mod scatter;
 mod stderr_stream;
 mod stream;
 
-pub use job::{Job, JobId, JobInfo, JobManager, JobStatus};
+pub use job::{Job, JobId, JobInfo, JobManager, JobStatus, JobStreams};
 pub use pipe_stream::{pipe_stream, pipe_stream_default, PipeReader, PipeWriter, PIPE_BUFFER_SIZE};
 pub use stderr_stream::{stderr_stream, StderrReceiver, StderrStream};
-pub use stream::{drain_to_stream, BoundedStream, StreamStats, DEFAULT_STREAM_MAX_SIZE};
+pub use stream::{
+    drain_to_stream, drain_to_stream_teed, BoundedStream, StreamStats, DEFAULT_STREAM_MAX_SIZE,
+};
 pub use pipeline::{build_tool_args, is_bool_type, schema_param_lookup, select_leaf, PipelineRunner};
 pub use scatter::{
     extract_items, parse_gather_options, parse_scatter_options, GatherOptions,

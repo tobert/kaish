@@ -1194,7 +1194,7 @@ VFS mounts provide unified resource access:
 /v/                → in-memory scratch storage
 /v/bin/            → read-only builtin listing (invocable: /v/bin/echo hi)
 /v/blobs/          → in-memory blob storage
-/v/jobs/<id>/      → background job state (status, command, approval — no stdout/stderr, GH #240)
+/v/jobs/<id>/      → background job state (status, command, stdout, stderr, approval)
 /v/approvals/      → the approval ledger, read-only (pending, standing, log, <id>/…)
 /dev/              → synthetic devices: /dev/null, /dev/zero, /dev/urandom, /dev/random
 ```

@@ -25,6 +25,31 @@ breaking entries are marked **BREAKING**.
   pair actually opens.
 
 ### Added
+- **`KernelConfig::with_kill_children_on_parent_death(bool)`** — arms Linux's
+  `PR_SET_PDEATHSIG(SIGKILL)` on external commands, so a `kill -9`'d or
+  crashed kaish process cannot orphan them; `setpgid`, pidfd kills, and
+  `kill_on_drop` all need the parent to still run code and so cover none of
+  those cases. On by default for `KernelConfig::agent()`/`agent_with_root()`,
+  off elsewhere — an armed child cannot outlive its shell and cannot opt out
+  from inside, which a REPL user may not want. No effect on macOS, which has
+  no equivalent that works without a live watcher process.
+- **`/v/jobs/{id}/stdout` and `/stderr` are back, and live.** GH #240 removed
+  them because they filled once, at completion, while four docs promised a
+  live stream; the missing half — teeing an external command's drain task into
+  the job's stream per 8 KiB chunk — is now wired, so `cat /v/jobs/1/stdout`
+  reports a running `cargo build &`'s progress. A builtin still lands its
+  output in one write at completion (a builtin returns a value, not a byte
+  stream), and only a pipeline's last stage reaches `stdout`.
+- **`JobManager::streams`/`read_stdout`/`read_stderr`** — the Rust-side view of
+  those nodes. `None` for an unknown job, `Some(vec![])` for one that has
+  written nothing yet, so the two stay distinguishable.
+- **`BoundedStream::changed_since(seen_total_written)`** — await new data or
+  close instead of poll-looping a running job's output. Returns immediately on
+  a closed stream so the caller stops on `stats.closed`, not a timeout.
+- **`KernelConfig::with_job_manager(Arc<JobManager>)`** — an embedder can hand
+  the kernel a `JobManager` it owns instead of the fresh one each kernel builds,
+  so `cmd &` jobs survive a kernel built per request. Default is unchanged: no
+  manager supplied means a private one.
 - **`kaish-help`: three missing Foundations fragments** — a compound statement
   (`for`/`while`/`if`/`case`) unable to feed a pipe, `[ … ]` not being a
   command, and bare `yes`/`no` being lexer errors. All three are real

@@ -114,6 +114,19 @@ pub struct ExecContext {
     pub pipeline_position: PipelinePosition,
     /// Whether we're running in interactive (REPL) mode.
     pub interactive: bool,
+    /// Arm `PR_SET_PDEATHSIG(SIGKILL)` on external commands spawned from this
+    /// context, so a hard-killed kaish process cannot orphan them.
+    ///
+    /// Seeded from `KernelConfig::kill_children_on_parent_death` — read that
+    /// field for the tradeoff and the macOS gap. It lives here, not on the
+    /// `Kernel`, because both external-command spawn sites (`Kernel::
+    /// try_execute_external` and `dispatch.rs`'s `BackendDispatcher`) reach an
+    /// `ExecContext` and only one of them reaches a `Kernel`; one home keeps
+    /// the two `pre_exec` blocks from drifting.
+    ///
+    /// `false` for a stand-alone `ExecContext` built outside a kernel, which
+    /// is the pre-existing behavior.
+    pub kill_children_on_parent_death: bool,
     /// Command aliases (name → expansion string).
     pub aliases: HashMap<String, String>,
     /// Ignore file configuration for file-walking tools.
@@ -631,6 +644,7 @@ impl ExecContext {
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
             interactive: false,
+            kill_children_on_parent_death: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -674,6 +688,7 @@ impl ExecContext {
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
             interactive: false,
+            kill_children_on_parent_death: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -714,6 +729,7 @@ impl ExecContext {
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
             interactive: false,
+            kill_children_on_parent_death: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -754,6 +770,7 @@ impl ExecContext {
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
             interactive: false,
+            kill_children_on_parent_death: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -797,6 +814,7 @@ impl ExecContext {
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
             interactive: false,
+            kill_children_on_parent_death: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -837,6 +855,7 @@ impl ExecContext {
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
             interactive: false,
+            kill_children_on_parent_death: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -1031,6 +1050,7 @@ impl ExecContext {
             job_manager: self.job_manager.clone(),
             pipeline_position: PipelinePosition::Only,
             interactive: self.interactive,
+            kill_children_on_parent_death: self.kill_children_on_parent_death,
             aliases: self.aliases.clone(),
             ignore_config: self.ignore_config.clone(),
             output_limit: self.output_limit.clone(),

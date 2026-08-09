@@ -841,6 +841,36 @@ pattern tears down runtimes between calls, either keep one long-lived
 runtime for any kernel that backgrounds work, or avoid `&` entirely on a
 per-call runtime.
 
+### A hard-killed kaish process can orphan its external children
+
+`setpgid` + a pidfd kill, and tokio's `kill_on_drop`, all need *your* process
+to still be alive and running code. None of them fire on `kill -9`, a
+segfault, or an OOM kill — so an external command started under an embedder
+that dies that way keeps running, unreparented to anything that will stop it.
+
+`KernelConfig::with_kill_children_on_parent_death(true)` arms Linux's
+`PR_SET_PDEATHSIG(SIGKILL)` in each child's `pre_exec`, so the OS kills it the
+instant the parent dies, for any reason, with no cleanup path of ours
+involved:
+
+```rust
+let config = KernelConfig::default().with_kill_children_on_parent_death(true);
+```
+
+On by default for `KernelConfig::agent()` and `agent_with_root()`, off
+everywhere else — the same "protection on for the agent preset, opt in
+elsewhere" split `vfs_budget_bytes` uses. It is not unconditional because it
+costs something a human at a REPL may not want: an armed child cannot outlive
+its shell at all, and cannot opt out from inside (unlike SIGHUP, which
+`nohup`/`disown` exist to escape). A REPL user who backgrounds a long download
+and exits expects it to survive; an agent embedder expects the opposite.
+
+**Linux only.** macOS has no `PR_SET_PDEATHSIG`, and no equivalent that works
+without a live watcher process (`kqueue`'s `NOTE_EXIT` needs one). The flag is
+accepted and has no effect there rather than being faked with something
+weaker — a macOS embedder that needs the guarantee supplies it from outside
+the process (a process group the supervisor kills, or a container).
+
 ## Argv-Native Execution: `execute_argv`
 
 `Kernel::execute(&str)` is string-native — it lexes and parses its input. If your
@@ -1131,6 +1161,38 @@ async fn capture_with_bounds() -> anyhow::Result<String> {
 }
 ```
 
+### Sharing one JobManager across kernels
+
+Each kernel builds its own `JobManager` unless you supply one. An embedder
+that builds a kernel per request loses every `cmd &` job when that kernel
+drops — ids, status, and output all live on the manager. Hand the same
+manager to every kernel and jobs survive between calls:
+
+```rust
+use std::sync::Arc;
+use kaish_kernel::scheduler::{JobId, JobManager};
+use kaish_kernel::{Kernel, KernelConfig};
+
+// Built once, held for the process's lifetime.
+let jobs = Arc::new(JobManager::new());
+
+// Every per-request kernel adopts it.
+let kernel = Kernel::new(KernelConfig::agent().with_job_manager(jobs.clone()))?;
+kernel.execute("cargo build &").await?;
+drop(kernel);
+
+// The next kernel sees job 1 — same table, same id space.
+let next = Kernel::new(KernelConfig::agent().with_job_manager(jobs.clone()))?;
+assert!(next.jobs().exists(JobId(1)).await);
+```
+
+A shared manager carries shared settings: `kill_grace` and
+`persist_output_files` are stamped onto it at kernel construction, so the
+last kernel built wins for both. A hermetic kernel (`NoLocal`, or any
+`with_backend` kernel) turns `persist_output_files` off for every kernel on
+that manager. Share a manager between kernels configured alike, or accept
+the last writer.
+
 ### JobFs for Background Job Observability
 
 The kernel automatically mounts `JobFs` at `/v/jobs`, exposing background
@@ -1141,27 +1203,64 @@ job state:
 ├── 1/
 │   ├── status    # "running", "stopped", "done:0", "gated", "killed:N", or "failed:N"
 │   ├── command   # Original command string
+│   ├── stdout    # Job's stdout so far — live while it runs
+│   ├── stderr    # Job's stderr so far — live while it runs
 │   └── approval  # Pending approval request (JSON) if gated, else empty
 ├── 2/
 │   └── ...
 ```
 
-There is no `stdout`/`stderr` node (GH #240 removed it: it filled only once,
-at completion, never live as earlier docs claimed). An embedder that needs a
-background job's output redirects it to a file the job writes to, and reads
-that file back after the job finishes — the job's own captured
-stdout/stderr never reaches the VFS.
-
 ```sh
 # In kaish scripts
-sleep 10 > /tmp/out.log &   # Starts job 1, output goes to a file
+cargo build 2>&1 &          # Starts job 1, returns immediately
 jobs                        # Shows: [1] running  /v/jobs/1/
 cat /v/jobs/1/status        # "running"
-
-# After completion
-cat /tmp/out.log            # Job's output
-cat /v/jobs/1/status        # "done:0" on success, "failed:N" otherwise
+cat /v/jobs/1/stdout        # Whatever the build has printed so far
 ```
+
+`stdout` and `stderr` are live for an **external** command run by the job:
+its drain task tees each 8 KiB chunk into the node as the child emits it.
+GH #240 had removed both nodes because they filled only once, at completion,
+while four docs promised a live stream — they are back on the terms the docs
+always claimed.
+
+Three limits, stated because an embedder polling these needs to predict them:
+
+- **A builtin is not a live producer.** A kaish builtin returns its whole
+  output as a value when it finishes, so `echo hi &` fills the node in one
+  write at completion — and so does `cargo build 2>&1 | tee build.log &`,
+  because kaish's `tee` is a builtin. Drop the `| tee`: the job's own stream
+  *is* the log.
+- **Only the last stage of a pipeline reaches `stdout`.** An upstream stage's
+  output is the next stage's stdin, not the job's stdout. `stderr` takes every
+  stage's, since stderr is not piped. One consequence: in a job mixing
+  builtins and externals, once any external has written stderr the
+  completion write is skipped, so a builtin stage's stderr stays in the job's
+  `ExecResult` and does not reach the node.
+- **Each node is a 10 MB ring** that evicts its oldest bytes. A job that
+  outruns it loses its head, not its tail; redirect to a file
+  (`cmd > /tmp/out.log &`) when the whole output matters.
+
+From Rust, `JobManager::read_stdout(id)` / `read_stderr(id)` return the same
+snapshot (`None` for an unknown job, `Some(vec![])` for one that has written
+nothing yet). To tail a job without a poll loop, take
+`JobManager::streams(id)` and await `BoundedStream::changed_since`:
+
+```rust
+let streams = kernel.jobs().streams(id).await.expect("job exists");
+let mut seen = 0;
+loop {
+    let stats = streams.stdout.changed_since(seen).await;
+    seen = stats.total_written;
+    // ... consume streams.stdout.read().await ...
+    if stats.closed {
+        break; // the job finished; nothing more is coming
+    }
+}
+```
+
+The streams close when the job's result is in, so `stats.closed` is the
+caller's stop condition — no timeout guessing.
 
 A destructive op backgrounded under `set -o approvals` (`rm x &`) gates in the
 background rather than running: `status` is `gated`, `JobInfo.approval` (from

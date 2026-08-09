@@ -104,7 +104,7 @@ use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_v
 use crate::parser::parse;
 use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_stream, JobManager, PipelineRunner, StderrReceiver};
 #[cfg(feature = "subprocess")]
-use crate::scheduler::{drain_to_stream, BoundedStream, DEFAULT_STREAM_MAX_SIZE};
+use crate::scheduler::{drain_to_stream_teed, BoundedStream, DEFAULT_STREAM_MAX_SIZE};
 use crate::tools::{register_builtins, ExecContext, GlobalFlags, ToolArgs, ToolRegistry};
 #[cfg(feature = "subprocess")]
 use crate::tools::{resolve_in_path, virtual_cwd_error};
@@ -342,6 +342,56 @@ pub struct KernelConfig {
     /// (`docs/approval-ledger.md` §D.2). Defaults to no approver and no
     /// authority, which is exactly today's behavior — every gate defers.
     pub approval: ApprovalConfig,
+
+    /// The [`JobManager`] this kernel adopts. `None` — the default — builds a
+    /// fresh one, so every kernel owns its own job table.
+    ///
+    /// Supply one to share a single job table across kernels. An embedder that
+    /// builds a kernel per request (kaijutsu builds one per tool call) has no
+    /// other way to keep a `cmd &` job reachable: ids, status, and output
+    /// streams all live on the manager, so a per-kernel manager takes them
+    /// down with the kernel that made it. One manager held by the embedder and
+    /// handed to every kernel keeps `&` usable across calls, and keeps job ids
+    /// unique because they are minted from the manager's own counter.
+    ///
+    /// **A shared manager carries shared settings.** `kill_grace` and
+    /// `persist_output_files` are stamped onto the manager at kernel
+    /// construction, so the last kernel built wins for both: a hermetic kernel
+    /// (`NoLocal`, or any `with_backend` kernel) turns `persist_output_files`
+    /// off for every kernel on that manager, and each kernel's
+    /// [`Self::kill_grace`] overwrites the previous one's. Share a manager
+    /// between kernels configured alike, or accept the last writer.
+    ///
+    /// Set through [`Self::with_job_manager`].
+    pub job_manager: Option<Arc<JobManager>>,
+
+    /// Arm `PR_SET_PDEATHSIG(SIGKILL)` on every external command this kernel
+    /// spawns, so the OS kills the child the instant this process dies —
+    /// **for any reason, including `kill -9`, a segfault, or an OOM kill.**
+    ///
+    /// Off by default; on for [`Self::agent`] and [`Self::agent_with_root`],
+    /// the same "protection on by default for the agent preset, opt in
+    /// elsewhere" split [`Self::vfs_budget_bytes`] uses.
+    ///
+    /// **Why not unconditional.** kaish already puts every child in its own
+    /// process group and kills through a pidfd on cancel, and drops it with
+    /// `kill_on_drop`. All three need this process to still be running code,
+    /// so none of them survive a hard kill — that is the gap this closes. But
+    /// closing it costs something a human at a REPL may not want: an armed
+    /// child cannot outlive its shell, at all, and the child has no way to
+    /// opt out from inside (unlike SIGHUP, which `nohup`/`disown` exist to
+    /// escape). A REPL user who backgrounds a long download and exits expects
+    /// it to keep going. An agent embedder expects the opposite — an
+    /// invisible orphaned `cargo build` is the failure — so the presets
+    /// differ rather than one behavior being forced on both.
+    ///
+    /// **Linux only.** macOS has no `PR_SET_PDEATHSIG` and no equivalent that
+    /// works without a live parent (`kqueue`'s `NOTE_EXIT` needs a watcher
+    /// process). This flag is accepted and has no effect there, rather than
+    /// being faked with something weaker.
+    ///
+    /// Set through [`Self::with_kill_children_on_parent_death`].
+    pub kill_children_on_parent_death: bool,
 }
 
 /// A kernel's approval-side configuration (spec §D.2), grouped so the
@@ -429,6 +479,8 @@ impl Default for KernelConfig {
                 vfs_budget_bytes: None,
                 overlay: false,
                 approval: ApprovalConfig::default(),
+                job_manager: None,
+                kill_children_on_parent_death: false,
             }
         }
         #[cfg(not(feature = "localfs"))]
@@ -453,6 +505,8 @@ impl Default for KernelConfig {
                 vfs_budget_bytes: None,
                 overlay: false,
                 approval: ApprovalConfig::default(),
+                job_manager: None,
+                kill_children_on_parent_death: false,
             }
         }
     }
@@ -483,6 +537,8 @@ impl KernelConfig {
             vfs_budget_bytes: None,
             overlay: false,
             approval: ApprovalConfig::default(),
+            job_manager: None,
+            kill_children_on_parent_death: false,
         }
     }
 
@@ -516,6 +572,8 @@ impl KernelConfig {
             vfs_budget_bytes: None,
             overlay: false,
             approval: ApprovalConfig::default(),
+            job_manager: None,
+            kill_children_on_parent_death: false,
         }
     }
 
@@ -557,6 +615,8 @@ impl KernelConfig {
             vfs_budget_bytes: None,
             overlay: false,
             approval: ApprovalConfig::default(),
+            job_manager: None,
+            kill_children_on_parent_death: false,
         }
     }
 
@@ -595,6 +655,11 @@ impl KernelConfig {
             vfs_budget_bytes: Some(64 * 1024 * 1024),
             overlay: false,
             approval: ApprovalConfig::default(),
+            job_manager: None,
+            // An agent embedder must never leave an invisible `cargo build` running
+            // after its process is hard-killed; see the field doc for why this is
+            // not the default everywhere.
+            kill_children_on_parent_death: true,
         }
     }
 
@@ -626,6 +691,9 @@ impl KernelConfig {
             vfs_budget_bytes: Some(64 * 1024 * 1024),
             overlay: false,
             approval: ApprovalConfig::default(),
+            job_manager: None,
+            // Same reasoning as `agent()`.
+            kill_children_on_parent_death: true,
         }
     }
 
@@ -654,6 +722,8 @@ impl KernelConfig {
             vfs_budget_bytes: None,
             overlay: false,
             approval: ApprovalConfig::default(),
+            job_manager: None,
+            kill_children_on_parent_death: false,
         }
     }
 
@@ -799,6 +869,24 @@ impl KernelConfig {
     /// Set the SIGTERM-to-SIGKILL grace period for child kills.
     pub fn with_kill_grace(mut self, grace: Duration) -> Self {
         self.kill_grace = grace;
+        self
+    }
+
+    /// Arm `PR_SET_PDEATHSIG(SIGKILL)` on external commands so a hard-killed
+    /// kaish process cannot orphan them (Linux only — read
+    /// [`Self::kill_children_on_parent_death`] for the tradeoff and the macOS
+    /// gap).
+    pub fn with_kill_children_on_parent_death(mut self, on: bool) -> Self {
+        self.kill_children_on_parent_death = on;
+        self
+    }
+
+    /// Adopt an embedder-owned [`JobManager`] instead of building a fresh one,
+    /// so background jobs outlive the kernel that started them. Read
+    /// [`Self::job_manager`] before sharing one manager between kernels that
+    /// are configured differently.
+    pub fn with_job_manager(mut self, jobs: Arc<JobManager>) -> Self {
+        self.job_manager = Some(jobs);
         self
     }
 
@@ -1159,7 +1247,10 @@ impl Kernel {
     /// Create a new kernel with the given configuration.
     pub fn new(config: KernelConfig) -> Result<Self> {
         let mut setup = Self::setup_vfs(&config)?;
-        let jobs = Arc::new(JobManager::new());
+        // An embedder-supplied manager keeps `cmd &` jobs alive across kernels
+        // (see `KernelConfig::job_manager`); with none, this kernel owns its
+        // own job table exactly as before.
+        let jobs = config.job_manager.clone().unwrap_or_else(|| Arc::new(JobManager::new()));
         // Mirror the cascade's SIGTERM->SIGKILL grace onto the manager so the
         // kill builtin bounds its wait-for-death on the same number (GH #244).
         jobs.set_kill_grace(config.kill_grace);
@@ -1417,7 +1508,8 @@ impl Kernel {
         }
 
         let mut vfs = VfsRouter::new();
-        let jobs = Arc::new(JobManager::new());
+        // See `Kernel::new` — the embedder's manager wins here too.
+        let jobs = config.job_manager.clone().unwrap_or_else(|| Arc::new(JobManager::new()));
         // Mirror the cascade's SIGTERM->SIGKILL grace onto the manager so the
         // kill builtin bounds its wait-for-death on the same number (GH #244).
         jobs.set_kill_grace(config.kill_grace);
@@ -1485,7 +1577,7 @@ impl Kernel {
         let no_host_side_channel =
             no_host_filesystem || matches!(config.vfs_mode, VfsMountMode::NoLocal);
 
-        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_external_commands, approvals_enabled, policy_pinned, trash_enabled, ledger_config, ledger_sink, initial_vars, request_timeout, kill_grace, approval, .. } = config;
+        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_external_commands, approvals_enabled, policy_pinned, trash_enabled, ledger_config, ledger_sink, initial_vars, request_timeout, kill_grace, approval, kill_children_on_parent_death, .. } = config;
 
         let approvals = Self::build_approvals(approval, ledger_config, ledger_sink)?;
 
@@ -1516,6 +1608,7 @@ impl Kernel {
 
         let mut exec_ctx = make_ctx(&vfs, &tools);
         exec_ctx.set_cwd(cwd);
+        exec_ctx.kill_children_on_parent_death = kill_children_on_parent_death;
         exec_ctx.set_job_manager(jobs.clone());
         exec_ctx.set_tool_schemas(tools.schemas());
         exec_ctx.set_tools(tools.clone());
@@ -3655,6 +3748,8 @@ impl Kernel {
             job_manager: ec.job_manager.clone(),
             pipeline_position,
             interactive: self.interactive,
+            // The kernel-wide setting; a snapshot inherits it like `interactive`.
+            kill_children_on_parent_death: ec.kill_children_on_parent_death,
             aliases: ec.aliases.clone(),
             ignore_config: ec.ignore_config.clone(),
             output_limit: ec.output_limit.clone(),
@@ -3764,11 +3859,14 @@ impl Kernel {
     ///
     /// The command is spawned as a tokio task and registered with the
     /// JobManager. The job is observable via `/v/jobs/{id}/status`,
-    /// `/v/jobs/{id}/command`, and `/v/jobs/{id}/approval`. There is no
-    /// stdout/stderr node — GH #240 removed `/v/jobs/{id}/stdout` and
-    /// `stderr` rather than making them live (they filled only once, at
-    /// completion, while docs promised a live stream). A caller that needs
-    /// the job's output redirects it explicitly (`cmd > /tmp/out &`).
+    /// `/v/jobs/{id}/command`, `/v/jobs/{id}/approval`, and — while it is
+    /// still running — `/v/jobs/{id}/stdout` and `/stderr`.
+    ///
+    /// GH #240 removed those two nodes because they filled once, at
+    /// completion, while the docs promised a live stream. They are back on
+    /// the terms the docs always claimed: `try_execute_external` tees each
+    /// 8 KiB chunk into the job's stream as the child emits it. See
+    /// `Job::stdout_stream` for exactly which bytes reach them.
     ///
     /// Returns immediately with a job ID like "[1]".
     #[tracing::instrument(level = "debug", skip(self, pipeline), fields(command_count = pipeline.commands.len()))]
@@ -3796,6 +3894,7 @@ impl Kernel {
         // command it spawns records its process group for `kill -<sig> %N`.
         let cancel = tokio_util::sync::CancellationToken::new();
         self.jobs.set_cancel_token(job_id, cancel.clone()).await;
+        let jobs = self.jobs.clone();
         let fork = self.fork_for_background(cancel, job_id).await;
         let runner = self.runner.clone();
         let commands = pipeline.commands.clone();
@@ -3827,6 +3926,15 @@ impl Kernel {
             // code to JobManager, so `[N] done:0`/`Job::status()` silently
             // read success even though the output was capped (GH #212).
             crate::output_limit::apply_spill_contract(&mut result, &bg_ctx.output_limit).await;
+
+            // Close out `/v/jobs/{id}/stdout`/`stderr`: a stream the external
+            // drain tasks already fed live is left alone (re-writing the
+            // aggregate would duplicate every byte), an untouched one takes
+            // the captured result, and both close. Before `tx.send`, so a
+            // reader that observes a terminal `status` also observes a
+            // finished stream — never a `done:0` job whose output is still
+            // arriving.
+            jobs.finalize_streams(job_id, &result).await;
 
             // Send result to JobManager (ignore error if receiver dropped)
             let _ = tx.send(result);
@@ -5689,13 +5797,24 @@ impl Kernel {
         #[cfg(unix)]
         {
             let restore_jc_signals = self.terminal_state.is_some() && inherit_output;
-            // SAFETY: setpgid and sigaction(SIG_DFL) are async-signal-safe per POSIX
+            // Read before the fork: the child compares `getppid()` against it to
+            // catch a parent that died inside the fork/prctl window.
+            let kill_on_parent_death = {
+                let ec = self.exec_ctx.read().await;
+                ec.kill_children_on_parent_death
+            };
+            let parent_pid = std::process::id();
+            // SAFETY: setpgid, prctl, getppid, and sigaction(SIG_DFL) are all
+            // async-signal-safe per POSIX; safe to call between fork and exec.
             #[allow(unsafe_code)]
             unsafe {
                 cmd.pre_exec(move || {
                     // Own process group — for kill scope.
                     nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))
                         .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+                    if kill_on_parent_death {
+                        crate::dispatch::arm_parent_death_signal(parent_pid)?;
+                    }
                     if restore_jc_signals {
                         use nix::libc::{sigaction, SIGTSTP, SIGTTOU, SIGTTIN, SIGINT, SIG_DFL};
                         let mut sa: nix::libc::sigaction = std::mem::zeroed();
@@ -5753,6 +5872,16 @@ impl Kernel {
         {
             self.jobs.add_pgid(job_id, pid).await;
         }
+
+        // Same seam, for output: a background job's streams outlive this one
+        // command, so the drain tasks below tee into them and the job closes
+        // them itself. This is what makes `/v/jobs/{id}/stdout` grow while a
+        // `cargo build &` is still building (GH #240 removed the node rather
+        // than wire this tee; the tee is the half that was missing).
+        let job_streams = match self.bg_job_id {
+            Some(job_id) => self.jobs.streams(job_id).await,
+            None => None,
+        };
 
         // Feed stdin. A streaming `pipe_stdin` is copied to the child by a
         // detached task (bounded memory, no pre-drain) so an upstream stage and
@@ -5960,15 +6089,26 @@ impl Kernel {
             let stdout_clone = stdout_stream.clone();
             let stderr_clone = stderr_stream.clone();
 
+            // Only the stage whose stdout *is* the job's stdout tees: in
+            // `a | b`, `a`'s bytes are `b`'s stdin, and teeing them would put
+            // the pipeline's intermediate data into the node alongside its
+            // real output. stderr has no such routing — every stage's stderr
+            // is the job's stderr — so it tees from any position.
+            let stdout_tee = job_streams.as_ref().and_then(|s| {
+                matches!(pipeline_position, PipelinePosition::Only | PipelinePosition::Last)
+                    .then(|| s.stdout.clone())
+            });
+            let stderr_tee = job_streams.as_ref().map(|s| s.stderr.clone());
+
             let stdout_task = stdout_pipe.map(|pipe| {
                 tokio::spawn(async move {
-                    drain_to_stream(pipe, stdout_clone).await;
+                    drain_to_stream_teed(pipe, stdout_clone, stdout_tee).await;
                 })
             });
 
             let stderr_task = stderr_pipe.map(|pipe| {
                 tokio::spawn(async move {
-                    drain_to_stream(pipe, stderr_clone).await;
+                    drain_to_stream_teed(pipe, stderr_clone, stderr_tee).await;
                 })
             });
 
@@ -9727,10 +9867,8 @@ AFTER="yes"'"#)
         let kernel = Kernel::new(KernelConfig::isolated()).expect("failed to create kernel");
 
         // Run a simple background command, redirecting its output to a
-        // memory-backed file — GH #240 removed `/v/jobs/{id}/stdout` (it
-        // filled only once, at completion, never live as four docs claimed),
-        // so a caller that wants a background job's output redirects it
-        // explicitly instead of peeking a VFS node.
+        // memory-backed file. `/v/jobs/{id}/stdout` would work too (and is
+        // live); the redirect is what this test asserts on.
         let result = kernel.execute("echo hello > /tmp/basic_out.txt &").await.expect("execution failed");
         assert!(result.ok(), "background command should succeed: {}", result.err);
         assert!(result.text_out().contains("[1]"), "should return job ID: {}", result.text_out());

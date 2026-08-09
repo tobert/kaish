@@ -44,6 +44,45 @@ use crate::tools::{GlobalFlags, ToolRegistry};
 #[cfg(all(test, feature = "subprocess"))]
 use crate::tools::{resolve_in_path, virtual_cwd_error};
 
+/// Arm `PR_SET_PDEATHSIG(SIGKILL)` in a freshly forked child, so the OS kills
+/// it the moment `parent_pid` dies — for any reason, including `kill -9`, a
+/// segfault, or an OOM kill, none of which let the parent run a single
+/// instruction of cleanup. This is the one orphan guard that does not depend
+/// on `setpgid` + a pidfd kill, `kill_on_drop`, or any other code of ours
+/// getting to run.
+///
+/// **Call only between fork and exec.** `prctl` and `getppid` are both
+/// async-signal-safe per POSIX, which is what makes that legal.
+///
+/// The `getppid` check closes `PR_SET_PDEATHSIG`'s documented race: if the
+/// parent dies in the window between `fork` and the `prctl` above, the signal
+/// is armed against a parent that is already gone and will never be delivered
+/// — the exact orphan the flag exists to prevent, in the exact window it is
+/// hardest to notice. Comparing against the pid the parent captured *before*
+/// forking detects it, and failing the `pre_exec` fails the spawn loudly
+/// rather than exec'ing a process nothing will ever reap.
+///
+/// Linux only. macOS has no equivalent that works without a live watcher
+/// process, so this is compiled out there rather than faked with something
+/// weaker — see `KernelConfig::kill_children_on_parent_death`.
+#[cfg(all(unix, feature = "subprocess"))]
+pub(crate) fn arm_parent_death_signal(parent_pid: u32) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL)
+            .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+
+        if nix::unistd::getppid().as_raw() as u32 != parent_pid {
+            return Err(std::io::Error::other(
+                "parent died before the parent-death signal was armed",
+            ));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = parent_pid;
+    Ok(())
+}
+
 /// Position of a command within a pipeline.
 ///
 /// Used by external command execution to decide stdio inheritance:
@@ -331,13 +370,18 @@ impl BackendDispatcher {
         // there is no signal-handler restoration to gate here.
         #[cfg(unix)]
         {
-            // SAFETY: setpgid is async-signal-safe per POSIX; safe to call
-            // between fork and exec.
+            let kill_on_parent_death = ctx.kill_children_on_parent_death;
+            let parent_pid = std::process::id();
+            // SAFETY: setpgid, prctl, and getppid are async-signal-safe per
+            // POSIX; safe to call between fork and exec.
             #[allow(unsafe_code)]
             unsafe {
-                cmd.pre_exec(|| {
+                cmd.pre_exec(move || {
                     nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))
                         .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+                    if kill_on_parent_death {
+                        arm_parent_death_signal(parent_pid)?;
+                    }
                     Ok(())
                 });
             }
