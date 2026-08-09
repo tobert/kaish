@@ -48,11 +48,13 @@ breaking entries are marked **BREAKING**.
   gives spawn order. Backs the `JobManager::list`/`list_ids` ordering fix below.
 - **`kaish_types::approval`** (ledger PR 1, `docs/approval-ledger.md`) — pure-data
   vocabulary for the upcoming approval ledger: `RequestId`/`Token`/`AttemptId`/
-  `OperationId` identity types, `ApprovalRequest` + builder, `Grant`/`GrantTerms`/
-  `Grounds`, `StandingGrant`, `Decision`/`Outcome`, and the internally-tagged
-  `LedgerEntry` log. Additive; no gate site uses it yet.
+  `OperationId`/`KernelId`/`SessionId`/`PrincipalId` identity types,
+  `ApprovalRequest` + builder + `RequestOrigin`, `ApprovalScope`, `PlanBinding`,
+  `Grant`/`GrantTerms`/`Grounds`, `StandingGrant`, `Decision`/`Outcome`, the
+  internally-tagged `LedgerEntry` log, and the `LedgerRecord` envelope it is read
+  through. Additive; no gate site uses it yet.
 - **`kaish_kernel::ledger`** (ledger PR 2, `docs/approval-ledger.md`) — the approval
-  ledger's state machine: `Ledger::build` mints a `Requester` (posts
+  ledger's state machine: `Ledger::build(config, scope, sink)` mints a `Requester` (posts
   `Requested`/`Redeemed`/`Settled`), an `Approvals` read view, and one
   `ApproverHandle` (posts `Granted`/`Denied`/standing grants, retrieves the
   credential). One grant authorizes exactly one successful settlement; a failed
@@ -87,7 +89,8 @@ breaking entries are marked **BREAKING**.
   with no approver defers to exit 2 exactly as today.
 - **`Kernel::build` returns `(Kernel, ApproverHandle)`** — the only way to obtain
   approval authority — with `KernelConfig::with_approver`/`with_principal`/
-  `with_approver_handle`; a session built without a handle has no method that grants.
+  `with_session`/`with_approver_handle`; a session built without a handle has no
+  method that grants.
   `Kernel::new` is unchanged for callers that do not participate in approvals.
 - **Standing grants now match live requests** — all-or-nothing across a request's
   resources (a rule covering three of four defers), `kind` matched exactly with only
@@ -166,7 +169,8 @@ breaking entries are marked **BREAKING**.
   a new reserved VFS path; an embedder mounting there through
   `Kernel::with_backend`'s `configure_vfs` closure now collides with a kernel mount.
 - `/v/approvals/{pending,standing,log}` and `/v/approvals/<id>/{request,state,attempts,grant}`
-  project the ledger's read side; `log` is NDJSON so a consumer can tail it.
+  project the ledger's read side; `log` is NDJSON so a consumer can tail it, one
+  `LedgerRecord` per line (`schema_version`, `sequence`, `at`, `scope`, `entry`).
 - **Read-only: every write path returns `Unsupported`** — granting by file write
   would make "the agent can write files" mean "the agent can approve itself".
 - No projection carries a credential, because no projected type has a credential
@@ -209,9 +213,32 @@ breaking entries are marked **BREAKING**.
   answer safe: a human answering a prompt for an already-cancelled request cannot
   revive it, and the attempt stays readable.
 - **`ApprovalScope` on every request and record** (`docs/approval-ledger.md` §A.7) —
-  kernel, session, and actor, with `scope()` on both `ApproverHandle` and
-  `Approvals`. The read side is scoped as deliberately as the grant side: under the
-  always-on statement tap a request carries the command text that raised it.
+  kernel, session, and actor, named by `KernelConfig::with_session`, with `scope()`
+  on both `ApproverHandle` and `Approvals`. The read side is scoped as deliberately
+  as the grant side: under the always-on statement tap a request carries the command
+  text that raised it. A scoped handle acting outside its session gets
+  `LedgerError::OutOfScope`, and a request with no session at all belongs to the
+  kernel — no scoped handle sees it.
+- **`ApprovalRequest::parent`** (`docs/approval-ledger.md` §A.7) — an `fs.*` gate
+  reached from inside a gated statement names that statement's request, so a UI can
+  render one nested prompt instead of two unrelated ones. Recorded, never
+  authorizing: a grant on a parent still does not cover a child.
+- **`ApprovalRequest::revision`** (`docs/approval-ledger.md` §A.7) — bumped on every
+  recorded transition of a request, so a decision has something to quote. Posting
+  and key retrieval are not transitions: a request starts at 0, and retrieval must
+  not invalidate the revision an approver is holding for a decision it has not made.
+- **`PlanBinding` on every request** (`docs/approval-ledger.md` §A.9) — the plan
+  digest, working directory, scope, and sandbox profile a decision was made against.
+  A key presented, or a replay dispatched, from outside that context **redeems
+  nothing**: the ledger posts a fresh request (exit 2) rather than authorizing an
+  operation nobody judged in that context. The grant it did not redeem is untouched.
+- **`LedgerRecord`, the versioned envelope** (`docs/approval-ledger.md` §A.5) —
+  `Approvals::log` and `LedgerSink::post` carry `LedgerRecord` (`schema_version`,
+  `sequence`, `at`, `scope`, `entry`) instead of a bare `LedgerEntry`, so a consumer
+  knows what schema it holds and whose record it is. An entry a newer writer
+  produced deserializes as `RecordedEntry::Unknown` with its sequence and scope
+  intact — a gap in an audit log has to be visible as a gap, and a reader that
+  dropped it would report a clean history it never verified.
 - **Approval listings are paginated** — `Approvals::pending`/`log` take a
   `PageRequest` (cursor on the stable `seq`, plus scope/state/time filters) and
   return a page. The statement tap posts an entry per top-level statement, so an

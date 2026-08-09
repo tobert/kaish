@@ -22,7 +22,9 @@ use kaish_types::approval::{
 /// The entries inside a ledger's records. These tests assert on entry shape;
 /// the [`LedgerRecord`] envelope has its own coverage in `kaish-types` (spec
 /// §A.5), and an entry this build does not recognize cannot occur here.
-#[allow(dead_code)]
+// A panic on a known-good fixture IS the test failing; this is a plain
+// helper fn, so clippy's in-test allowance does not reach it.
+#[allow(dead_code, clippy::expect_used)]
 fn entries(records: Vec<kaish_types::approval::LedgerRecord>) -> Vec<LedgerEntry> {
     records
         .into_iter()
