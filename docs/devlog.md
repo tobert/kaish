@@ -100,6 +100,112 @@ binary as a helper, reads back the pid of an external the helper started,
 what makes the positive one mean anything: with the flag off the child must
 *survive*, or something other than PDEATHSIG is doing the killing.
 
+---
+
+## The kernel stops waiting (2026-08-07)
+
+This started as a comment in a parked test. The lease case on
+`fix/approval-lease-expiry` had a long doc-comment explaining that
+`LedgerConfig::request_ttl` was 60s while `Approver::decide_budget` was 300s, so
+the default kernel handed an approver a five-minute budget to spend against a
+one-minute lease, and a human who thought for ninety seconds lost their grant.
+R2 already had the fix queued: delete the TTL, leaving one clock, and the test
+goes green.
+
+Amy read the comment and asked a different question. What if kaish returned data
+to the embedder when the ledger blocks — what if the ledger were inverted so the
+embedder controls the state?
+
+The first thing to say is that the inverted path was already there.
+`ApprovalOutcome::Pending`, `ResumeAction`, exit 2, `--confirm=<token>`, sixty-odd
+tests. Stage 4 of the chain *was* the return path. So the question wasn't whether
+to build one, it was whether to keep the other one — and once it was framed that
+way, `Approver::decide` stopped looking like a seam and started looking like the
+one place the spec violated its own spine.
+
+§0.1 says the kernel owns mechanism and the embedder owns policy. Look at the two
+trait methods side by side under that rule. `policy` is synchronous and pure: the
+kernel *asks* a question and gets an answer back, and control never leaves. `decide`
+is async and may take minutes: the kernel *runs* the embedder's policy, in the
+kernel's task, on the kernel's clock, under the kernel's cancellation. Three
+ownership confusions in one method, and §A.10 had already noticed the third one
+without naming it — the patient hold got an explicit exemption as "watchdog
+machinery," which is the sound a rule makes when it doesn't want to apply to
+something.
+
+The exemption doesn't hold. `decide_budget` decides. It decides that a decision
+didn't happen. Which means R2-as-written would have fixed the instance and kept the
+shape: one clock instead of two, still in the kernel, still bounding somebody else's
+work.
+
+So the rule grew a third clause: **the kernel never waits on the embedder.** Both
+ways of waiting are wrong, and that symmetry is what makes it a rule rather than a
+preference — a bounded wait is a clock-driven decision, which the previous clause
+already forbids, and an unbounded wait is a liveness hazard the kernel can't cancel
+on anyone's behalf correctly. There is no third option, so there is no hook.
+
+**What corroborated it.** Two things, from opposite directions. Sol's deliberation
+back on 08-05 had specced the kaibo-helper ACP bridge and found, independently, that
+the ACP RPC must not be owned by the `decide` future because the kernel cancels it at
+the budget — the bridge needed a correlation registry that survives cancellation.
+That's a workaround for a hazard that only exists because the kernel owns the wait.
+And §C.6 had already made this exact call once, for the classifier: *"The classifier
+stays synchronous, and that is a decision rather than an oversight."* Don't put
+embedder latency on the kernel's path; return instead. Applying the same reasoning
+one section over wasn't a new idea, it was finishing an old one.
+
+**What I expected to cost more than it did.** Resumption. Deleting an inline hook
+sounds like it should cost mid-statement resumption, and it doesn't, because §B.4 and
+§C.6 had already solved it for their own reasons. The statement tap fires
+*pre-dispatch*, so a held statement never started and replaying it is free. A tool
+gate captures `Capture::Exact`, so `rm a && dangerous b` replays only `dangerous b`.
+Earlier statements' variables and cwd are session state and still hold. The pieces
+were all there; nothing had needed to notice that they added up to a complete
+resumption story without a callback.
+
+**What it did cost.** The program remainder. A gated statement halts the top-level
+loop (`kernel.rs:2947`), `confirm` replays that one statement and drops the rest of
+the parse, and nothing anywhere retains a continuation — `JobStatus::Gated` turns out
+to be a *finished* job kept alive so it isn't reaped, not a suspension. That was
+already true, but `decide` hid it for the blocking case, and deleting `decide` sends
+every case down the halting path. The answer is the same answer as everything else
+here: the embedder submitted the program, so the embedder owns the remainder, and
+`ResumeAction::ConfirmStatement` grew an `index` so it knows where to pick up. What
+we didn't do is grow a continuation. That would be the kernel holding suspended
+program state across an unbounded wait — the thing we just deleted, wearing a hat.
+
+**And a real bug fell out of asking.** Tracing the halt turned up
+`accumulate_result`: it assigns `accumulated.approval = new.approval` unconditionally,
+under a comment asserting the pending view *is* the last statement's result. That
+holds only when the gated statement happens to be last. `kaish -c 'rm x; echo ok'`
+with `rm` gated returns exit 0 and no approval view, while the request sits live in
+the ledger. Today expiry collects it after sixty seconds. After R2 deletes expiry,
+nothing ever does — so removing a clock quietly converted a self-healing wart into a
+permanent leak, in a completely different file. That is the kind of interaction I
+would not have found by reading R2's own diff, and it is now §C.1's carry rule with a
+red test named in R2.
+
+There's a related question I deliberately did not settle: whether a *tool-level*
+deferral should halt the loop the way a statement-level one does. It probably should
+— exit 2 means "this hasn't happened yet", and the statements after it were written
+assuming it had — but that changes behavior an existing script can see, on the widest
+contract kaish has. It's §I.5 with a recommendation and Amy's name on the decision.
+
+**The shape of the answer, stated once.** The thing to invert was the *wait*, not the
+ledger. Amy's phrasing was "invert the ledger so the embedder controls state", and the
+distinction that matters is that two different states were wearing one word. The
+suspended decision — who's waiting, on what UI, for how long — inverts, completely.
+The record and the balance rule do not: one grant, one successful settlement, revision
+counters, replay binding. Those are the parts that must be correct under concurrency
+and identical for everyone, and inverting them would make every embedder re-implement
+the hard part, which is the opposite of what an embedder-controlled design is for.
+The kernel keeps the ledger. The embedder gets the clock, the task, and the decision.
+
+Written up as CLAUDE.md's "The embedder is in control", because this stopped being an
+approvals question about a third of the way in.
+
+---
+
 ## The statement gate: recording what was asked, before anything runs (2026-08-05)
 
 Ledger PR 10, and the first layer that watches *statements* rather than paths.

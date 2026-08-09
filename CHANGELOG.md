@@ -106,10 +106,10 @@ breaking entries are marked **BREAKING**.
   view's control-plane payload. Wired to no gate site — additive, no
   observable behavior change anywhere else in kaish.
 - **The approval decision chain and the authority capability** (ledger PR 4,
-  `docs/approval-ledger.md`) — `kaish_kernel::ledger::DecisionChain` runs four stages
-  in order (standing grants → `Approver::policy` → `Approver::decide` → defer), first
-  non-`Defer` wins. Both `Approver` decision methods default to `Defer`, so an empty
-  impl changes nothing and a kernel with no approver defers to exit 2 exactly as today.
+  `docs/approval-ledger.md`) — `kaish_kernel::ledger::DecisionChain` runs three stages
+  in order (standing grants → `Approver::policy` → pending), first non-`Defer` wins.
+  `Approver::policy` defaults to `Defer`, so an empty impl changes nothing and a kernel
+  with no approver defers to exit 2 exactly as today.
 - **`Kernel::build` returns `(Kernel, ApproverHandle)`** — the only way to obtain
   approval authority — with `KernelConfig::with_approver`/`with_principal`/
   `with_approver_handle`; a session built without a handle has no method that grants.
@@ -120,17 +120,18 @@ breaking entries are marked **BREAKING**.
   into the grant's conditions so the redemption-time check still fires.
 - **`max_uses` is charged in the same critical section that appends the grant**, so
   the limit holds exactly under concurrency and a full ring never consumes a use.
-- **`Approver::decide` runs under a patient hold** bounded by `Approver::decide_budget`
-  (default 300s), so a human's think time does not trip the script timeout — and a
-  cancelled execution never leaves a live grant, even when the cancellation lands
-  after the decision. The hold bounds how long the kernel waits, not how long an
-  approval stays valid; nothing expires underneath it (§A.10).
-- **`Approver::policy`/`decide` take a `DecisionContext`** (`docs/approval-ledger.md`
-  §C.7) carrying the deadline, the cancellation token, and an append-only
-  `AssessmentRecorder`. A router/specialist/LLM/human pipeline inside one `Approver`
-  can attribute each judgment, with model identity, and the records survive a
-  `decide` cancelled at its budget. One `Approver` remains the kernel's
-  authorization boundary.
+- **The kernel never waits on an embedder's decision** (`docs/approval-ledger.md` §0.1,
+  §C.2) — a gate the fast stages cannot settle returns `ApprovalOutcome::Pending` with a
+  `ResumeAction`, and the embedder decides on its own task and its own schedule. There is
+  no async approval hook and no decision budget, because a bounded wait is a clock-driven
+  decision and an unbounded one hangs the statement.
+- **A cancelled execution never leaves a live grant**, even when the cancellation lands
+  after the decision.
+- **`Approver::policy` takes a `DecisionContext`** (`docs/approval-ledger.md` §C.7)
+  carrying an append-only `AssessmentRecorder`, also reachable from `ApproverHandle` so an
+  embedder's router/specialist/LLM/human pipeline can attribute each judgment with model
+  identity. The `Granted` entry stays the kernel's authorization boundary wherever the
+  deliberation ran.
 - **`JobId`/`JobStatus`/`JobInfo` (kaish-types) now derive `Serialize`/`Deserialize`**
   (GH #241) — the last type family in kaish-types without serde.
 - `schemars::JsonSchema` on those types sits behind the `schema` feature, matching
