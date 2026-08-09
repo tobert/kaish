@@ -912,6 +912,182 @@ impl PlannedRedirect {
     }
 }
 
+// ───────────────────────── Assessments ─────────────────────────
+
+/// Free-form identity of whatever produced one [`ApprovalAssessment`]: a
+/// classifier's name, a policy rule id, a specialist's tag, a human's
+/// channel (spec §C.7). The kernel does not enumerate these — an embedder's
+/// pipeline names its own assessors, the same way [`Grounds::Policy`] names
+/// its own rule.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AssessorId(String);
+
+impl AssessorId {
+    /// Name an assessor.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// The assessor's text form.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for AssessorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A stable version or weight identity, when a model produced the judgment
+/// (spec §C.7). "The specialist allowed this" is not a reproducible audit
+/// statement without one.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelIdentity {
+    /// The model's stable name (e.g. `"claude-sonnet-4-6"`).
+    pub name: String,
+    /// A version, weight hash, or revision tag, when the embedder has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+impl ModelIdentity {
+    /// Name a model with no version tag.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            version: None,
+        }
+    }
+
+    /// Attach a version, weight hash, or revision tag.
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = Some(version.into());
+        self
+    }
+}
+
+/// Which stage of a decision pipeline produced one [`ApprovalAssessment`]
+/// (spec §C.7): "a classifier scoped the statement, a policy rule matched, a
+/// specialist model scored it, a human was asked."
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssessmentStage {
+    /// The statement classifier scoped the plan (spec §C.6).
+    Classifier,
+    /// The embedder's synchronous policy hook reached a decision.
+    Policy,
+    /// A specialist model or rule scored the request out of band, between
+    /// `Pending` and the eventual decision.
+    Specialist,
+    /// A human was asked.
+    Human,
+}
+
+/// What one assessment concluded (spec §C.7). Never a decision — only
+/// `Granted`/`Denied` decide; this is what an assessor recommended on the
+/// way there.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssessmentOutcome {
+    /// The assessor recommends granting.
+    Allow,
+    /// The assessor recommends denying.
+    Deny,
+    /// The assessor reached no opinion.
+    Abstain,
+    /// The assessor recommends asking someone else — typically a specialist
+    /// handing off to a human.
+    Escalate,
+}
+
+/// One attributed judgment on the way to a decision (spec §C.7). Never a
+/// decision itself — an assessment explains, a `Granted`/`Denied` decides,
+/// and appending one never bumps [`ApprovalRequest::revision`] (the same
+/// reason [`LedgerEntry::KeyRetrieved`] does not: bumping while an approver
+/// is still deliberating would invalidate the revision it is holding for a
+/// decision it has not made yet).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApprovalAssessment {
+    /// The request this assessment is about.
+    pub request: RequestId,
+    /// Who judged.
+    pub assessor: AssessorId,
+    /// Which stage of the pipeline this judgment came from.
+    pub stage: AssessmentStage,
+    /// What the assessor concluded.
+    pub outcome: AssessmentOutcome,
+    /// Why.
+    pub reason: String,
+    /// How hard the assessor believes this request is to walk back, when it
+    /// formed an opinion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<RiskClass>,
+    /// The assessor's confidence in its own judgment, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+    /// Stable version or weight identity, when a model judged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelIdentity>,
+    /// How long the assessor took to reach this judgment.
+    #[serde(default)]
+    pub latency: std::time::Duration,
+}
+
+impl ApprovalAssessment {
+    /// Record one judgment. The only constructor for this
+    /// `#[non_exhaustive]` type.
+    pub fn new(
+        request: RequestId,
+        assessor: AssessorId,
+        stage: AssessmentStage,
+        outcome: AssessmentOutcome,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            request,
+            assessor,
+            stage,
+            outcome,
+            reason: reason.into(),
+            risk: None,
+            confidence: None,
+            model: None,
+            latency: std::time::Duration::ZERO,
+        }
+    }
+
+    /// Name how hard the assessor believes this request is to walk back.
+    pub fn with_risk(mut self, risk: RiskClass) -> Self {
+        self.risk = Some(risk);
+        self
+    }
+
+    /// Attach the assessor's confidence in its own judgment.
+    pub fn with_confidence(mut self, confidence: f32) -> Self {
+        self.confidence = Some(confidence);
+        self
+    }
+
+    /// Name the model that judged.
+    pub fn with_model(mut self, model: ModelIdentity) -> Self {
+        self.model = Some(model);
+        self
+    }
+
+    /// Record how long the assessor took.
+    pub fn with_latency(mut self, latency: std::time::Duration) -> Self {
+        self.latency = latency;
+        self
+    }
+}
+
 // ───────────────────────── Capture ─────────────────────────
 
 /// The exact captured invocation of a gated tool call: the argv the approval
@@ -2219,6 +2395,21 @@ pub enum LedgerEntry {
         /// Which kind of transition was attempted.
         attempted: TransitionKind,
     },
+    /// One attributed judgment on the way to a decision (spec §C.7). Never a
+    /// decision itself — an assessment explains, a `Granted`/`Denied`
+    /// decides. The owning request is `assessment.request`, mirroring
+    /// [`LedgerEntry::Granted`]'s `grant.request` rather than duplicating the
+    /// id at this level — two copies of the same id would be a state this
+    /// entry could represent inconsistently.
+    Assessed {
+        /// Monotonic per-ledger sequence number.
+        seq: u64,
+        /// The clock reading this entry was committed at.
+        #[serde(with = "crate::rfc3339::system_time")]
+        at: SystemTime,
+        /// The judgment recorded.
+        assessment: ApprovalAssessment,
+    },
 }
 
 impl LedgerEntry {
@@ -2246,7 +2437,8 @@ impl LedgerEntry {
             | Self::Unsubscribed { seq, .. }
             | Self::Cancelled { seq, .. }
             | Self::TokenRejected { seq, .. }
-            | Self::RevisionRejected { seq, .. } => *seq,
+            | Self::RevisionRejected { seq, .. }
+            | Self::Assessed { seq, .. } => *seq,
         }
     }
 
@@ -2272,7 +2464,8 @@ impl LedgerEntry {
             | Self::Unsubscribed { at, .. }
             | Self::Cancelled { at, .. }
             | Self::TokenRejected { at, .. }
-            | Self::RevisionRejected { at, .. } => *at,
+            | Self::RevisionRejected { at, .. }
+            | Self::Assessed { at, .. } => *at,
         }
     }
 
@@ -2285,6 +2478,7 @@ impl LedgerEntry {
         match self {
             Self::Requested { request, .. } => Some(&request.id),
             Self::Granted { grant, .. } => Some(&grant.request),
+            Self::Assessed { assessment, .. } => Some(&assessment.request),
             Self::Denied { request, .. }
             | Self::Expired { request, .. }
             | Self::KeyRetrieved { request, .. }
@@ -2308,17 +2502,24 @@ impl LedgerEntry {
     /// [`revision`](ApprovalRequest::revision) — spec §A.7's "every recorded
     /// transition bumps `revision`".
     ///
-    /// Three entries that name a request are **not** transitions of it.
+    /// Four entries that name a request are **not** transitions of it.
     /// `Requested` creates the request at revision 0; there is nothing to
     /// bump yet. `KeyRetrieved` records that a key left the kernel and moves
     /// nothing on the state machine — bumping there would invalidate the
     /// revision an approver is holding for a decision it has not made yet.
     /// `RevisionRejected` records a refusal, not a transition — the request
     /// is exactly as it was before the stale decision arrived (spec §B.6's
-    /// transition table: "unchanged").
+    /// transition table: "unchanged"). `Assessed` carries the identical
+    /// KeyRetrieved rationale: assessments are appended *while* an approver
+    /// is deliberating (spec §C.7), often several per request, and bumping
+    /// on each one would invalidate the revision that approver's eventual
+    /// `grant`/`deny` quotes before it ever gets there.
     pub fn bumps_revision(&self) -> bool {
         match self {
-            Self::Requested { .. } | Self::KeyRetrieved { .. } | Self::RevisionRejected { .. } => false,
+            Self::Requested { .. }
+            | Self::KeyRetrieved { .. }
+            | Self::RevisionRejected { .. }
+            | Self::Assessed { .. } => false,
             _ => self.request().is_some(),
         }
     }
@@ -3105,6 +3306,18 @@ mod tests {
                 current: 3,
                 attempted: TransitionKind::Grant,
             },
+            LedgerEntry::Assessed {
+                seq: 19,
+                at,
+                assessment: ApprovalAssessment::new(
+                    request.clone(),
+                    AssessorId::new("classifier"),
+                    AssessmentStage::Classifier,
+                    AssessmentOutcome::Escalate,
+                    "matches a destructive command name",
+                )
+                .with_risk(RiskClass::Irreversible),
+            },
         ]
     }
 
@@ -3204,6 +3417,7 @@ mod tests {
         "token_rejected",
         "cancelled",
         "revision_rejected",
+        "assessed",
     ];
 
     #[test]
@@ -3423,31 +3637,33 @@ mod tests {
 
     #[test]
     fn an_unknown_entry_variant_round_trips_as_unknown_rather_than_being_dropped() {
-        // A newer writer's entry: `assessed` (spec §C.7) is not a variant this
-        // build has. It must survive with its sequence and scope intact — a
-        // gap in an audit log has to be visible as a gap, and a reader that
-        // dropped it would report a clean history it never verified.
+        // A newer writer's entry: `escalated` is not a variant this build
+        // has (R4 landed `assessed` — spec §C.7 — so that tag is `Known` now;
+        // this test needs a tag that stays hypothetical). It must survive
+        // with its sequence and scope intact — a gap in an audit log has to
+        // be visible as a gap, and a reader that dropped it would report a
+        // clean history it never verified.
         let json = serde_json::json!({
             "schema_version": LEDGER_SCHEMA_VERSION,
             "sequence": 17,
             "at": "1970-01-01T00:00:00.000Z",
             "scope": { "kernel_id": 1, "session_id": "session-1" },
             "entry": {
-                "entry": "assessed",
+                "entry": "escalated",
                 "seq": 17,
                 "at": "1970-01-01T00:00:00.000Z",
                 "request": "req_00000001_1",
-                "assessment": { "by": "classifier", "verdict": "gate" }
+                "to": "human-review"
             }
         });
         let record: LedgerRecord = serde_json::from_value(json.clone()).expect("deserialize");
         assert_eq!(record.sequence, 17);
         assert_eq!(record.scope.session_id, Some(SessionId::new("session-1")));
-        assert_eq!(record.known(), None, "this build must not claim to know `assessed`");
+        assert_eq!(record.known(), None, "this build must not claim to know `escalated`");
         let RecordedEntry::Unknown(unknown) = &record.entry else {
             panic!("expected an unknown entry, got {:?}", record.entry);
         };
-        assert_eq!(unknown.entry, "assessed");
+        assert_eq!(unknown.entry, "escalated");
         assert_eq!(unknown.fields["request"], serde_json::json!("req_00000001_1"));
         // Re-exporting must not narrow the log to the variants this build
         // happens to know about.
@@ -3501,7 +3717,7 @@ mod tests {
     }
 
     #[test]
-    fn every_entry_naming_a_request_bumps_revision_except_requested_key_retrieved_and_revision_rejected() {
+    fn every_entry_naming_a_request_bumps_revision_except_requested_key_retrieved_revision_rejected_and_assessed() {
         for entry in all_entries() {
             let names_a_request = entry.request().is_some();
             let expected = names_a_request
@@ -3510,6 +3726,7 @@ mod tests {
                     LedgerEntry::Requested { .. }
                         | LedgerEntry::KeyRetrieved { .. }
                         | LedgerEntry::RevisionRejected { .. }
+                        | LedgerEntry::Assessed { .. }
                 );
             assert_eq!(
                 entry.bumps_revision(),

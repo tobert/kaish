@@ -51,7 +51,11 @@ pub use approval::{
     ApprovalOutcome, Approvals, AttemptHandle, PendingApproval, ResolverError, ResumeAction,
     StateResolver,
 };
-pub use statement::{CommandNameClassifier, StatementClassifier, StatementPosture};
+pub use statement::{
+    ClassificationError, CommandNameClassifier, ExecutionContext, MountAccess, MountClass,
+    MountDescriptor, StatementAssessment, StatementClassificationInput, StatementClassifier,
+    StatementPosture, COMMAND_NAME_CLASSIFIER_ASSESSOR,
+};
 pub use backend::KernelBackend;
 pub use clap_schema::{params_from_clap, schema_from_clap, schema_tree_from_clap};
 pub use ctx::{PatientGuard, ToolCtx};
