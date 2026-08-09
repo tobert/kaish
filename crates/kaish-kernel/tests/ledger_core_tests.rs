@@ -120,7 +120,7 @@ async fn post_request_creates_a_requested_chain() {
 async fn grant_moves_requested_to_granted_and_appends_granted() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
-    approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
+    approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
     assert_eq!(approvals.state(&req.id), Some(RequestState::Granted));
     assert!(matches!(entries(approvals.log(0)).last(), Some(LedgerEntry::Granted { .. })));
 }
@@ -129,7 +129,7 @@ async fn grant_moves_requested_to_granted_and_appends_granted() {
 async fn deny_moves_requested_to_denied_and_appends_denied() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
-    approver.deny(&req.id, "no").await.unwrap();
+    approver.deny(&req.id, req.revision, "no").await.unwrap();
     assert_eq!(approvals.state(&req.id), Some(RequestState::Denied));
     assert!(matches!(entries(approvals.log(0)).last(), Some(LedgerEntry::Denied { .. })));
 }
@@ -191,7 +191,7 @@ async fn redeem_before_any_decision_is_not_authorized_and_counts_a_rejection() {
 async fn bad_key_against_a_granted_request_is_not_authorized_and_counts() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
-    approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
+    approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
     let err = requester
         .redeem_with_token(&req.id, "wrong", agent("agent-1"), ConditionReport::none())
         .await
@@ -208,7 +208,7 @@ async fn bad_key_against_a_granted_request_is_not_authorized_and_counts() {
 async fn fifth_bad_key_voids_and_a_later_good_key_fails_naming_the_void() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
-    approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
+    approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
     let real = approver.token_for(&req.id).expect("granted request has a credential");
 
     for n in 1..5 {
@@ -276,7 +276,7 @@ async fn bad_key_matching_no_live_request_appends_token_rejected_none_and_voids_
 async fn redeem_with_the_real_credential_succeeds_and_reserves_an_attempt() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
-    approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
+    approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
     let token = approver.token_for(&req.id).unwrap();
 
     let attempt = requester
@@ -304,7 +304,7 @@ async fn condition_failure_refuses_and_voids_reserving_no_attempt() {
         .unwrap();
     let grant_terms = GrantTerms::once_for(&req, far_future());
     assert_eq!(grant_terms.conditions.len(), 1);
-    approver.grant(&req.id, grant_terms).await.unwrap();
+    approver.grant(&req.id, req.revision, grant_terms).await.unwrap();
 
     // The world moved: the ref is no longer at a1b2.
     let observed = vec![Observation {
@@ -330,7 +330,7 @@ async fn condition_failure_refuses_and_voids_reserving_no_attempt() {
 async fn redeem_while_an_attempt_is_in_flight_is_rejected() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
-    approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
+    approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
     let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
     let before = entries(approvals.log(0)).len();
 
@@ -347,7 +347,7 @@ async fn redeem_while_an_attempt_is_in_flight_is_rejected() {
 async fn redeem_after_a_successful_settlement_reports_the_outcome_and_does_not_reexecute() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
-    approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
+    approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
     let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
     requester.settle(&attempt, Outcome::Exit(0)).await.unwrap();
 
@@ -366,7 +366,7 @@ async fn redeem_after_a_successful_settlement_reports_the_outcome_and_does_not_r
 async fn a_reported_failure_leaves_the_grant_live_for_a_retry() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
-    approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
+    approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
     let attempt1 = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
     requester.settle(&attempt1, Outcome::Exit(1)).await.unwrap();
 
@@ -384,7 +384,7 @@ async fn a_reported_failure_leaves_the_grant_live_for_a_retry() {
 async fn an_unknown_outcome_closes_the_chain_without_reopening_the_grant() {
     let (requester, _approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
-    approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
+    approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
     let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
     requester
         .settle(&attempt, Outcome::Unknown { cause: kaish_types::approval::LostCause::Cancelled })
@@ -400,7 +400,7 @@ async fn grant_not_after_elapsing_materializes_expired() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
     approver
-        .grant(&req.id, terms(&req, SystemTime::now() + Duration::from_millis(1)))
+        .grant(&req.id, req.revision, terms(&req, SystemTime::now() + Duration::from_millis(1)))
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -415,9 +415,9 @@ async fn grant_not_after_elapsing_materializes_expired() {
 async fn granting_an_already_decided_request_is_rejected() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
-    approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
+    approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
     let before = entries(approvals.log(0)).clone();
-    let err = approver.grant(&req.id, terms(&req, far_future())).await.unwrap_err();
+    let err = approver.grant(&req.id, approvals.get(&req.id).unwrap().request.revision, terms(&req, far_future())).await.unwrap_err();
     assert!(matches!(err, LedgerError::AlreadyDecided(id) if id == req.id));
     assert_eq!(approvals.state(&req.id), Some(RequestState::Granted), "state must not move");
     assert_eq!(entries(approvals.log(0)), before, "no new entry from the rejected second decision — the log is byte-for-byte unchanged");
@@ -429,9 +429,9 @@ async fn terminal_states_reject_any_further_transition_and_leave_state_unchanged
     {
         let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
         let req = post(&requester, "fs.remove").await;
-        approver.deny(&req.id, "no").await.unwrap();
+        approver.deny(&req.id, req.revision, "no").await.unwrap();
         let before = entries(approvals.log(0)).clone();
-        let err = approver.deny(&req.id, "no again").await.unwrap_err();
+        let err = approver.deny(&req.id, approvals.get(&req.id).unwrap().request.revision, "no again").await.unwrap_err();
         assert!(matches!(err, LedgerError::Terminal { state: RequestState::Denied, .. }));
         assert_eq!(approvals.state(&req.id), Some(RequestState::Denied));
         assert_eq!(entries(approvals.log(0)), before, "a rejected second decision must append nothing");
@@ -442,7 +442,7 @@ async fn terminal_states_reject_any_further_transition_and_leave_state_unchanged
         let req = post(&requester, "fs.remove").await;
         requester.abandon_request(&req.id, "job discarded").await.unwrap();
         let before = entries(approvals.log(0)).clone();
-        let err = approver.grant(&req.id, terms(&req, far_future())).await.unwrap_err();
+        let err = approver.grant(&req.id, approvals.get(&req.id).unwrap().request.revision, terms(&req, far_future())).await.unwrap_err();
         assert!(matches!(err, LedgerError::Terminal { state: RequestState::Abandoned, .. }));
         assert_eq!(approvals.state(&req.id), Some(RequestState::Abandoned));
         assert_eq!(entries(approvals.log(0)), before, "a grant against an abandoned request must append nothing");
@@ -461,7 +461,7 @@ async fn terminal_states_reject_any_further_transition_and_leave_state_unchanged
             .post_request(d, test_origin(agent("agent-1")))
             .await
             .unwrap();
-        approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
+        approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
         let observed = vec![Observation {
             resource: ResourceRef {
                 kind: "git.ref".to_string(),
@@ -473,7 +473,7 @@ async fn terminal_states_reject_any_further_transition_and_leave_state_unchanged
         requester.redeem(&req.id, agent("agent-1"), ConditionReport::observed(observed)).await.unwrap_err();
         assert_eq!(approvals.state(&req.id), Some(RequestState::Voided));
         let before = entries(approvals.log(0)).clone();
-        let err = approver.grant(&req.id, terms(&req, far_future())).await.unwrap_err();
+        let err = approver.grant(&req.id, approvals.get(&req.id).unwrap().request.revision, terms(&req, far_future())).await.unwrap_err();
         assert!(matches!(err, LedgerError::Terminal { state: RequestState::Voided, .. }));
         assert_eq!(approvals.state(&req.id), Some(RequestState::Voided));
         assert_eq!(entries(approvals.log(0)), before, "a grant against a voided request must append nothing");
@@ -488,7 +488,7 @@ async fn cancel_closes_an_undecided_request_and_records_the_reason() {
     let req = post(&requester, "fs.remove").await;
 
     let closed = requester
-        .cancel(&req.id, agent("agent-1"), CancelReason::Withdrawn)
+        .cancel(&req.id, req.revision, agent("agent-1"), CancelReason::Withdrawn)
         .await
         .unwrap();
     assert_eq!(closed.id, req.id);
@@ -510,13 +510,13 @@ async fn cancelling_a_cancelled_request_is_terminal_and_appends_nothing() {
     let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
     requester
-        .cancel(&req.id, agent("agent-1"), CancelReason::Withdrawn)
+        .cancel(&req.id, req.revision, agent("agent-1"), CancelReason::Withdrawn)
         .await
         .unwrap();
     let before = entries(approvals.log(0)).clone();
 
     let err = requester
-        .cancel(&req.id, agent("agent-1"), CancelReason::Withdrawn)
+        .cancel(&req.id, approvals.get(&req.id).unwrap().request.revision, agent("agent-1"), CancelReason::Withdrawn)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -535,14 +535,158 @@ async fn cancelling_a_cancelled_request_is_terminal_and_appends_nothing() {
 async fn cancelling_a_granted_request_is_already_decided() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
-    approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
+    approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
 
     let err = requester
-        .cancel(&req.id, agent("agent-1"), CancelReason::Withdrawn)
+        .cancel(&req.id, approvals.get(&req.id).unwrap().request.revision, agent("agent-1"), CancelReason::Withdrawn)
         .await
         .unwrap_err();
     assert!(matches!(err, LedgerError::AlreadyDecided(id) if id == req.id));
     assert_eq!(approvals.state(&req.id), Some(RequestState::Granted));
+}
+
+// ─────────────────────── §B.6 revision checks ───────────────────────
+//
+// `grant`/`deny`/`cancel` quote the revision they read; a stale quote is
+// refused as `LedgerError::StaleRevision` and recorded as
+// `LedgerEntry::RevisionRejected` rather than applied — never silently
+// dropped, and never silently applied anyway. Idempotent settlement
+// (`settling_the_same_attempt_twice_appends_one_entry_and_returns_ok`,
+// above) is the other half of "must not be confused": that is one
+// operation arriving twice, not two operations disagreeing about state, and
+// nothing about revision-checking changes it — `settle` takes no revision
+// at all.
+
+/// A wrong credential presentation bumps `revision` (`TokenRejected`
+/// bumps — spec §A.7) without moving the request off `Requested`, which is
+/// exactly the shape a caller needs to test a stale-but-still-open quote
+/// against: the request is live, but the revision a caller read before this
+/// happened is now behind.
+async fn bump_revision_without_deciding(requester: &kaish_kernel::ledger::Requester, id: &RequestId) {
+    let _ = requester
+        .redeem_with_token(id, "wrong", agent("agent-1"), ConditionReport::none())
+        .await;
+}
+
+#[tokio::test]
+async fn granting_with_a_stale_revision_is_refused_and_recorded() {
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
+    assert_eq!(req.revision, 0);
+    bump_revision_without_deciding(&requester, &req.id).await;
+    assert_eq!(approvals.get(&req.id).unwrap().request.revision, 1, "TokenRejected bumped the revision");
+
+    let before_len = approvals.log(0).len();
+    // Quotes 0 — the revision this test read before the bump above, exactly
+    // the shape an out-of-band approver holding a stale view is in.
+    let err = approver.grant(&req.id, 0, terms(&req, far_future())).await.unwrap_err();
+    match &err {
+        LedgerError::StaleRevision { request, quoted, current, attempted } => {
+            assert_eq!(*request, req.id);
+            assert_eq!(*quoted, 0);
+            assert_eq!(*current, 1);
+            assert_eq!(*attempted, kaish_types::approval::TransitionKind::Grant);
+        }
+        other => panic!("expected StaleRevision, got {other:?}"),
+    }
+
+    // Recorded, not dropped — and with the request's own scope and a real
+    // sequence number, the same as any other entry (spec §B.6).
+    let log = approvals.log(0);
+    assert_eq!(log.len(), before_len + 1, "the refusal is recorded");
+    let record = log.last().unwrap();
+    assert_eq!(record.scope, req.scope, "scope intact");
+    assert!(record.sequence > 0, "sequence intact");
+    assert!(matches!(
+        record.known(),
+        // `by` names the deciding principal — the minted authority's own
+        // default identity here, since this test never assigns one — not
+        // the requester (`agent-1`, whom `bump_revision_without_deciding`
+        // presented a bad key as).
+        Some(LedgerEntry::RevisionRejected { quoted: 0, current: 1, by, .. }) if by.id == "approver-handle-1"
+    ));
+
+    // Never applied: the request is exactly as it was — still `Requested`,
+    // and the refusal itself did not move the revision further (spec §B.6's
+    // transition table: "unchanged").
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Requested));
+    assert_eq!(approvals.get(&req.id).unwrap().request.revision, 1);
+}
+
+#[tokio::test]
+async fn denying_with_a_stale_revision_is_refused_and_recorded() {
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
+    bump_revision_without_deciding(&requester, &req.id).await;
+
+    let before_len = approvals.log(0).len();
+    let err = approver.deny(&req.id, 0, "no").await.unwrap_err();
+    assert!(
+        matches!(&err, LedgerError::StaleRevision { quoted: 0, current: 1, attempted: kaish_types::approval::TransitionKind::Deny, .. }),
+        "{err:?}"
+    );
+    assert_eq!(approvals.log(0).len(), before_len + 1, "the refusal is recorded");
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Requested), "never applied");
+}
+
+#[tokio::test]
+async fn cancelling_with_a_stale_revision_is_refused_and_recorded() {
+    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
+    bump_revision_without_deciding(&requester, &req.id).await;
+
+    let before_len = approvals.log(0).len();
+    let err = requester
+        .cancel(&req.id, 0, agent("agent-1"), CancelReason::Withdrawn)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, LedgerError::StaleRevision { quoted: 0, current: 1, attempted: kaish_types::approval::TransitionKind::Cancel, .. }),
+        "{err:?}"
+    );
+    assert_eq!(approvals.log(0).len(), before_len + 1, "the refusal is recorded");
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Requested), "never applied");
+}
+
+/// The race the late-answer rule exists for (spec §B.5, §B.6): a deadline
+/// timer and a human answering at the same moment. Both sides read the
+/// request at revision 0 and both act on that reading — only the one whose
+/// transaction commits first can still be quoting the current revision by
+/// the time it runs.
+#[tokio::test]
+async fn a_cancel_racing_a_grant_leaves_exactly_one_winner_and_exactly_one_revision_rejected() {
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
+    assert_eq!(req.revision, 0);
+
+    let grant_task = {
+        let approver = approver.clone();
+        let req = req.clone();
+        tokio::spawn(async move { approver.grant(&req.id, 0, terms(&req, far_future())).await })
+    };
+    let cancel_task = {
+        let requester = requester.clone();
+        let id = req.id.clone();
+        tokio::spawn(async move { requester.cancel(&id, 0, agent("agent-1"), CancelReason::Withdrawn).await })
+    };
+    let grant_result = grant_task.await.unwrap();
+    let cancel_result = cancel_task.await.unwrap();
+
+    match (&grant_result, &cancel_result) {
+        (Ok(_), Err(err)) | (Err(err), Ok(_)) => {
+            assert!(
+                matches!(err, LedgerError::StaleRevision { .. }),
+                "the losing side must be refused as a stale quote, not fail some other way: {err:?}"
+            );
+        }
+        other => panic!("exactly one side must win the race, got {other:?}"),
+    }
+
+    let rejected_count = entries(approvals.log(0))
+        .iter()
+        .filter(|e| matches!(e, LedgerEntry::RevisionRejected { .. }))
+        .count();
+    assert_eq!(rejected_count, 1, "exactly one RevisionRejected — the loser's, and only the loser's");
 }
 
 // ─────────────────────── Attempt-level table ───────────────────────
@@ -551,7 +695,7 @@ async fn cancelling_a_granted_request_is_already_decided() {
 async fn settling_the_same_attempt_twice_appends_one_entry_and_returns_ok() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
-    approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
+    approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
     let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
 
     let first = requester.settle(&attempt, Outcome::Exit(0)).await.unwrap();
@@ -576,7 +720,7 @@ async fn settling_the_same_attempt_twice_appends_one_entry_and_returns_ok() {
 async fn concurrent_redemptions_of_one_grant_produce_exactly_one_redeemed() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
-    approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
+    approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
 
     let mut tasks = Vec::new();
     for i in 0..16 {
@@ -649,7 +793,7 @@ async fn ring_evicts_closed_chains_to_make_room() {
     };
     let (requester, approvals, approver) = Ledger::build(config, test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req1 = post(&requester, "fs.remove").await;
-    approver.deny(&req1.id, "no").await.unwrap(); // closes req1 — its 2 entries become evictable
+    approver.deny(&req1.id, req1.revision, "no").await.unwrap(); // closes req1 — its 2 entries become evictable
     let req2 = post(&requester, "fs.remove").await;
     assert_eq!(approvals.state(&req2.id), Some(RequestState::Requested));
 }
@@ -744,7 +888,7 @@ async fn live_capacity_refuses_a_new_request_rather_than_evicting() {
 async fn token_for_appends_key_retrieved_naming_the_retriever() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
-    approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
+    approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
     let _token = approver.token_for(&req.id).unwrap();
     assert!(matches!(
         entries(approvals.log(0)).last(),
@@ -826,7 +970,7 @@ async fn deny_self_approval_off_by_default_lets_the_requesting_principal_grant()
     let req = post(&requester, "fs.remove").await;
     approver
         .with_principal(agent("agent-1"))
-        .grant(&req.id, terms(&req, far_future()))
+        .grant(&req.id, req.revision, terms(&req, far_future()))
         .await
         .unwrap();
     assert_eq!(approvals.state(&req.id), Some(RequestState::Granted));
@@ -842,7 +986,7 @@ async fn deny_self_approval_refuses_a_grant_from_the_requesting_principal() {
     let req = post(&requester, "fs.remove").await;
     let err = approver
         .with_principal(agent("agent-1"))
-        .grant(&req.id, terms(&req, far_future()))
+        .grant(&req.id, req.revision, terms(&req, far_future()))
         .await
         .unwrap_err();
     match &err {
@@ -879,7 +1023,7 @@ async fn deny_self_approval_on_still_allows_a_grant_from_a_distinct_principal() 
     let req = post(&requester, "fs.remove").await;
     approver
         .with_principal(agent("agent-2"))
-        .grant(&req.id, terms(&req, far_future()))
+        .grant(&req.id, req.revision, terms(&req, far_future()))
         .await
         .unwrap();
     assert_eq!(approvals.state(&req.id), Some(RequestState::Granted));

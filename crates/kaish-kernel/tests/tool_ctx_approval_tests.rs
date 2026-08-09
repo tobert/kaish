@@ -280,7 +280,7 @@ async fn plugin_dangerous_fixture_gates_end_to_end_through_tool_api_alone() {
     );
     let not_after = SystemTime::now() + Duration::from_secs(300);
     approver
-        .grant(&view.id, GrantTerms::once_for(&terms_source, not_after))
+        .grant(&view.id, view.revision, GrantTerms::once_for(&terms_source, not_after))
         .await
         .unwrap();
     assert_eq!(approvals.state(&view.id), Some(RequestState::Granted));
@@ -365,7 +365,7 @@ async fn plugin_dangerous_fixture_honors_a_presented_confirm_token() {
     );
     let not_after = SystemTime::now() + Duration::from_secs(300);
     approver
-        .grant(&view.id, GrantTerms::once_for(&terms_source, not_after))
+        .grant(&view.id, view.revision, GrantTerms::once_for(&terms_source, not_after))
         .await
         .unwrap();
 

@@ -331,6 +331,7 @@ mod tests {
         authority
             .grant(
                 &id,
+                chain.request.revision,
                 GrantTerms::once_for_view(
                     &chain.request,
                     std::time::SystemTime::now() + std::time::Duration::from_secs(300),

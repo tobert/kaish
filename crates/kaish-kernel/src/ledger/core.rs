@@ -37,6 +37,7 @@ use kaish_types::approval::{
     ObservedResource,
     OperationId, Outcome, Plan, Principal, RequestId, RequestOrigin, RequestState, ResourceRef,
     SessionId, StandingGrant, StandingId, StateClaim, Subscription, SubscriptionId, Token,
+    TransitionKind,
 };
 use tokio::sync::mpsc::OwnedPermit;
 
@@ -491,6 +492,22 @@ pub(crate) struct LedgerInner {
     /// by `subscribe`/`unsubscribe`, so it can never disagree with the
     /// registry for longer than one uncontended store.
     any_subscriptions: AtomicBool,
+}
+
+/// The four values one `grant`/`deny`/`cancel` call's revision check needs
+/// (spec §B.6), bundled so [`LedgerInner::check_revision`] stays under
+/// clippy's argument-count lint without losing any of them individually —
+/// unlike the entry it may append, this is a call-scoped grouping with no
+/// meaning of its own outside that one method.
+struct RevisionQuote<'a> {
+    /// The request the decision targets.
+    id: &'a RequestId,
+    /// The revision the caller believes is current.
+    quoted: u64,
+    /// The principal attempting the transition.
+    by: &'a Principal,
+    /// Which kind of transition this is.
+    attempted: TransitionKind,
 }
 
 impl LedgerInner {
@@ -1183,6 +1200,7 @@ impl LedgerInner {
     pub(crate) fn cancel(
         &self,
         id: &RequestId,
+        rev: u64,
         by: Principal,
         reason: CancelReason,
     ) -> Result<ApprovalRequest, LedgerError> {
@@ -1197,8 +1215,22 @@ impl LedgerInner {
                 return Err(err);
             }};
         }
-        let Some(chain) = guard.chains.get(id) else {
+        if !guard.chains.contains_key(id) {
             bail!(LedgerError::NotFound(id.clone()));
+        }
+        // A stale quote is refused as a race, whatever the request has
+        // since moved to (spec §B.6) — checked before the state-machine
+        // check below, so "a cancel racing a grant" reports the race
+        // (`StaleRevision`) rather than the transition it happened to land
+        // on (`AlreadyDecided`).
+        let quote = RevisionQuote { id, quoted: rev, by: &by, attempted: TransitionKind::Cancel };
+        if let Err(err) = self.check_revision(&mut guard, quote, now, &mut all_committed) {
+            bail!(err);
+        }
+        let Some(chain) = guard.chains.get(id) else {
+            bail!(LedgerError::InvariantViolated(format!(
+                "cancel: request {id} vanished from the live index inside its own transaction"
+            )));
         };
         // Only an **undecided** request is cancellable (spec §B.3): a
         // decision that already landed is not undone by the requester
@@ -1284,6 +1316,74 @@ impl LedgerInner {
         }
     }
 
+    /// Refuse a `grant`, `deny`, or `cancel` that quotes a revision other
+    /// than the request's current one (spec §B.6). Called with the guard
+    /// already held, after the chain's existence is confirmed and *before*
+    /// the state-machine check that method makes on its own: a stale quote
+    /// is refused as a race, whatever state the request has since moved to,
+    /// while a *current* quote against an illegal transition still falls
+    /// through to that method's own `AlreadyDecided`/`Terminal` error — the
+    /// two checks answer different questions ("is your view current?" vs.
+    /// "is this transition legal?").
+    ///
+    /// `Ok(())` means the quote matches; the caller proceeds with its own
+    /// transition check unchanged. `Err` means the quote was stale — this
+    /// call's own committed entries (empty when capacity refused even the
+    /// refusal's own entry) are appended to `all_committed` directly, the
+    /// same contract every other sub-transaction here follows, but taken as
+    /// an out parameter rather than folded into the `Err` payload: a tuple
+    /// of `(LedgerError, Vec<LedgerRecord>)` is 144 bytes and every
+    /// `Result<_, LedgerError>` in this module would pay that size even on
+    /// its `Ok` path (`clippy::result_large_err`).
+    ///
+    /// A capacity failure here is **not** masked as `StaleRevision`: it is
+    /// propagated as the real `LedgerError` (`LiveCapacity`/`RingAtCapacity`/
+    /// `SinkUnavailable`), matching how a known request's `TokenRejected`
+    /// entry already behaves under pressure (`redeem_with_token`) — the
+    /// caller learns what actually happened, not a plausible-looking
+    /// substitute.
+    fn check_revision(
+        &self,
+        guard: &mut LedgerState,
+        quote: RevisionQuote<'_>,
+        now: SystemTime,
+        all_committed: &mut Vec<LedgerRecord>,
+    ) -> Result<(), LedgerError> {
+        let RevisionQuote { id, quoted, by, attempted } = quote;
+        let Some(chain) = guard.chains.get(id) else {
+            // Unreachable in practice: every caller already checked
+            // existence before calling in. Treated as "nothing to check"
+            // rather than panicking — the caller's own lookup is what
+            // reports `NotFound`.
+            return Ok(());
+        };
+        let current = chain.request.revision;
+        if quoted == current {
+            return Ok(());
+        }
+        let reserved = guard.reserve_capacity(1, self.config.retained_entries)?;
+        let seq = guard.alloc_seq();
+        let entries = vec![(
+            LedgerEntry::RevisionRejected {
+                seq,
+                at: now,
+                request: id.clone(),
+                by: by.clone(),
+                quoted,
+                current,
+                attempted,
+            },
+            Some(id.clone()),
+        )];
+        all_committed.extend(guard.commit(entries, None, reserved));
+        Err(LedgerError::StaleRevision {
+            request: id.clone(),
+            quoted,
+            current,
+            attempted,
+        })
+    }
+
     // ── Authorizations (ApproverHandle) ─────────────────────────────
 
     /// Refuse a grant whose issuing principal equals the request's own
@@ -1312,6 +1412,7 @@ impl LedgerInner {
     pub(crate) fn grant(
         &self,
         id: &RequestId,
+        rev: u64,
         terms: GrantTerms,
         decided_by: Principal,
         grounds: Grounds,
@@ -1344,8 +1445,21 @@ impl LedgerInner {
                 return Err(err);
             }};
         }
-        let Some(chain) = guard.chains.get(id) else {
+        if !guard.chains.contains_key(id) {
             bail!(LedgerError::NotFound(id.clone()));
+        }
+        // See `cancel`'s identical ordering: a stale quote is refused as a
+        // race before the state-machine check, so a grant racing another
+        // decision reports `StaleRevision`, not whatever transition it
+        // happened to land on (spec §B.6).
+        let quote = RevisionQuote { id, quoted: rev, by: &decided_by, attempted: TransitionKind::Grant };
+        if let Err(err) = self.check_revision(&mut guard, quote, now, &mut all_committed) {
+            bail!(err);
+        }
+        let Some(chain) = guard.chains.get(id) else {
+            bail!(LedgerError::InvariantViolated(format!(
+                "grant: request {id} vanished from the live index inside its own transaction"
+            )));
         };
         match chain.state {
             RequestState::Requested => {}
@@ -1397,14 +1511,34 @@ impl LedgerInner {
         Ok(grant)
     }
 
-    pub(crate) fn deny(&self, id: &RequestId, reason: String, by: Principal) -> Result<(), LedgerError> {
+    pub(crate) fn deny(
+        &self,
+        id: &RequestId,
+        rev: u64,
+        reason: String,
+        by: Principal,
+    ) -> Result<(), LedgerError> {
         let mut guard = self.lock();
         let now = self.now(&mut guard);
         let mut all_committed = self.materialize_expiry(&mut guard, id, now)?;
-        let Some(chain) = guard.chains.get(id) else {
+        if !guard.chains.contains_key(id) {
             drop(guard);
             emit_events(&all_committed);
             return Err(LedgerError::NotFound(id.clone()));
+        }
+        // See `cancel`'s identical ordering (spec §B.6).
+        let quote = RevisionQuote { id, quoted: rev, by: &by, attempted: TransitionKind::Deny };
+        if let Err(err) = self.check_revision(&mut guard, quote, now, &mut all_committed) {
+            drop(guard);
+            emit_events(&all_committed);
+            return Err(err);
+        }
+        let Some(chain) = guard.chains.get(id) else {
+            drop(guard);
+            emit_events(&all_committed);
+            return Err(LedgerError::InvariantViolated(format!(
+                "deny: request {id} vanished from the live index inside its own transaction"
+            )));
         };
         match chain.state {
             RequestState::Requested => {}
@@ -2124,6 +2258,16 @@ fn emit_events(records: &[LedgerRecord]) {
             LedgerEntry::TokenRejected { request, attempts, .. } => {
                 tracing::warn!(request_id = ?request.as_ref().map(ToString::to_string), attempts = attempts, "approval.token_rejected");
             }
+            LedgerEntry::RevisionRejected { request, by, quoted, current, attempted, .. } => {
+                tracing::warn!(
+                    request_id = %request,
+                    attempted_by = %by.id,
+                    quoted = quoted,
+                    current = current,
+                    attempted = %attempted,
+                    "approval.revision_rejected"
+                );
+            }
             // `LedgerEntry` is `#[non_exhaustive]` from this crate's side,
             // so this match needs a wildcard even though every variant that
             // exists today is covered above (kaish-types' own `impl
@@ -2350,7 +2494,7 @@ mod tests {
         let not_after = clock.now() + Duration::from_secs(300);
         #[allow(clippy::unwrap_used)]
         inner
-            .grant(&req.id, GrantTerms::once_for(&req, not_after), principal, Grounds::Embedder)
+            .grant(&req.id, req.revision, GrantTerms::once_for(&req, not_after), principal, Grounds::Embedder)
             .unwrap();
         assert_eq!(inner.state(&req.id, None), Some(RequestState::Granted));
 
@@ -2389,7 +2533,7 @@ mod tests {
         let not_after = clock.now() + Duration::from_secs(300);
         #[allow(clippy::unwrap_used)]
         inner
-            .grant(&req.id, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
+            .grant(&req.id, req.revision, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
             .unwrap();
 
         // The clock passes `not_after`, and an unrelated transaction takes
@@ -2409,7 +2553,7 @@ mod tests {
         let not_after = clock.now() + Duration::from_secs(300);
         #[allow(clippy::unwrap_used)]
         inner
-            .grant(&second.id, GrantTerms::once_for(&second, not_after), principal.clone(), Grounds::Embedder)
+            .grant(&second.id, second.revision, GrantTerms::once_for(&second, not_after), principal.clone(), Grounds::Embedder)
             .unwrap();
         clock.set(1_000_700);
         post(&inner, &principal); // takes the high reading, latches it
@@ -2563,7 +2707,7 @@ mod tests {
         let not_after = SystemTime::now() + Duration::from_secs(300);
         #[allow(clippy::unwrap_used)]
         inner
-            .grant(&req.id, GrantTerms::once_for(&req, not_after), principal, Grounds::Embedder)
+            .grant(&req.id, req.revision, GrantTerms::once_for(&req, not_after), principal, Grounds::Embedder)
             .unwrap();
         #[allow(clippy::unwrap_used)]
         holder.join().unwrap();
@@ -2590,7 +2734,7 @@ mod tests {
         let not_after = SystemTime::now() + Duration::from_secs(300);
         #[allow(clippy::unwrap_used)]
         inner
-            .grant(&req.id, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
+            .grant(&req.id, req.revision, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
             .unwrap();
         #[allow(clippy::unwrap_used)]
         let attempt_a = inner.redeem(&req.id, principal.clone(), ConditionReport::none()).unwrap();
@@ -2625,7 +2769,7 @@ mod tests {
         let not_after = SystemTime::now() + Duration::from_secs(300);
         #[allow(clippy::unwrap_used)]
         inner
-            .grant(&req.id, GrantTerms::once_for(&req, not_after), principal, Grounds::Embedder)
+            .grant(&req.id, req.revision, GrantTerms::once_for(&req, not_after), principal, Grounds::Embedder)
             .unwrap();
         let bogus_attempt = AttemptId::new(999_999);
         let _ = inner.settle(&req.id, bogus_attempt, Outcome::Exit(0));
@@ -2654,7 +2798,7 @@ mod tests {
         let not_after = SystemTime::now() + Duration::from_secs(300);
         #[allow(clippy::unwrap_used)]
         inner
-            .grant(&req_a.id, GrantTerms::once_for(&req_a, not_after), principal.clone(), Grounds::Embedder)
+            .grant(&req_a.id, req_a.revision, GrantTerms::once_for(&req_a, not_after), principal.clone(), Grounds::Embedder)
             .unwrap();
         #[allow(clippy::unwrap_used)]
         let attempt_a = inner.redeem(&req_a.id, principal.clone(), ConditionReport::none()).unwrap();
@@ -2713,7 +2857,7 @@ mod tests {
         let not_after = SystemTime::now() + Duration::from_secs(300);
         #[allow(clippy::unwrap_used)]
         inner
-            .grant(&req.id, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
+            .grant(&req.id, req.revision, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
             .unwrap(); // 2: Granted
         #[allow(clippy::unwrap_used)]
         let attempt = inner.redeem(&req.id, principal, ConditionReport::none()).unwrap(); // 3: Redeemed, + 1 banked for the terminal — ring is now exactly full at 4
@@ -2773,7 +2917,7 @@ mod tests {
         let not_after = SystemTime::now() + Duration::from_secs(300);
         #[allow(clippy::unwrap_used)]
         inner
-            .grant(&req.id, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
+            .grant(&req.id, req.revision, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
             .unwrap();
         #[allow(clippy::unwrap_used)]
         let attempt = inner.redeem(&req.id, principal, ConditionReport::none()).unwrap();
@@ -2818,7 +2962,7 @@ mod tests {
         // Case: removed — terms carries no condition at all.
         let req = make_request(&inner);
         let terms = GrantTerms::new(not_after, Vec::new());
-        let err = inner.grant(&req.id, terms, principal.clone(), Grounds::Embedder).unwrap_err();
+        let err = inner.grant(&req.id, req.revision, terms, principal.clone(), Grounds::Embedder).unwrap_err();
         assert!(matches!(err, LedgerError::ConditionsWidened { .. }), "removed: got {err:?}");
 
         // Case: altered — same resource, a different expected_from.
@@ -2833,7 +2977,7 @@ mod tests {
                 expected_from: StateClaim::Exact("wrong".to_string()),
             }],
         );
-        let err = inner.grant(&req.id, terms, principal.clone(), Grounds::Embedder).unwrap_err();
+        let err = inner.grant(&req.id, req.revision, terms, principal.clone(), Grounds::Embedder).unwrap_err();
         assert!(matches!(err, LedgerError::ConditionsWidened { .. }), "altered: got {err:?}");
 
         // Case: unrelated-added — the exact declared condition, plus an
@@ -2849,14 +2993,14 @@ mod tests {
             expected_from: StateClaim::Exact("unrelated".to_string()),
         });
         assert!(
-            inner.grant(&req.id, terms, principal.clone(), Grounds::Embedder).is_ok(),
+            inner.grant(&req.id, req.revision, terms, principal.clone(), Grounds::Embedder).is_ok(),
             "an added, unrelated condition must not be treated as widening"
         );
 
         // Case: valid-narrower — exactly what once_for produces.
         let req = make_request(&inner);
         let terms = GrantTerms::once_for(&req, not_after);
-        assert!(inner.grant(&req.id, terms, principal, Grounds::Embedder).is_ok());
+        assert!(inner.grant(&req.id, req.revision, terms, principal, Grounds::Embedder).is_ok());
     }
 
     /// Regression test for review finding S2: a credential retrieval that
@@ -2876,7 +3020,7 @@ mod tests {
         let not_after = SystemTime::now() + Duration::from_secs(300);
         #[allow(clippy::unwrap_used)]
         inner
-            .grant(&req.id, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
+            .grant(&req.id, req.revision, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
             .unwrap(); // 2: Granted — ring is now exactly full; the chain is still live (Granted), so nothing is evictable.
 
         let token = inner.token_for(&req.id, principal);
@@ -2920,7 +3064,7 @@ mod tests {
         // entries become evictable. `sink_queue: 5` gives both calls room
         // to queue before the drain task has processed anything.
         let req = post(&inner, &principal);
-        let _ = inner.deny(&req.id, "no".to_string(), principal.clone());
+        let _ = inner.deny(&req.id, req.revision, "no".to_string(), principal.clone());
 
         // Give the background drain task a chance to call the always-failing
         // sink and trip `sink_failed`.
@@ -3033,7 +3177,7 @@ mod tests {
         // past the small retention window.
         for _ in 0..50 {
             let req = post(&inner, &principal);
-            let _ = inner.deny(&req.id, "no".to_string(), principal.clone());
+            let _ = inner.deny(&req.id, req.revision, "no".to_string(), principal.clone());
         }
 
         #[allow(clippy::unwrap_used)]

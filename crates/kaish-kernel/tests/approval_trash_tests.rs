@@ -81,7 +81,10 @@ impl Session {
             &chain.request,
             std::time::SystemTime::now() + std::time::Duration::from_secs(300),
         );
-        self.authority.grant(id, terms).await.expect("the grant must post");
+        self.authority
+            .grant(id, chain.request.revision, terms)
+            .await
+            .expect("the grant must post");
     }
 
     /// Grant the single pending request and replay it through

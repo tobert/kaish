@@ -519,7 +519,7 @@ mod tests {
             &chain.request,
             std::time::SystemTime::now() + std::time::Duration::from_secs(300),
         );
-        authority.grant(&id, terms).await.expect("the grant must post");
+        authority.grant(&id, chain.request.revision, terms).await.expect("the grant must post");
         let token = authority.token_for(&id).expect("a credential for a granted request");
         (id, token.reveal().to_string())
     }

@@ -1834,9 +1834,16 @@ impl ExecContext {
     /// The originating background job, if there was one, keeps its cached
     /// result; the request it names is now `Cancelled`, which
     /// `approvals show` reports.
+    ///
+    /// `rev` is the revision the caller's view of the request was at (spec
+    /// §B.6) — a caller that read the request moments ago (`approvals
+    /// cancel`'s own chain fetch, an embedder's cached `PendingApproval`)
+    /// quotes it, and a stale quote is refused and recorded as
+    /// `RevisionRejected` rather than applied.
     pub(crate) async fn cancel_request(
         &self,
         id: &RequestId,
+        rev: u64,
         reason: CancelReason,
     ) -> Result<(), String> {
         let Some(access) = self.ledger_access.as_ref() else {
@@ -1857,7 +1864,7 @@ impl ExecContext {
 
         access
             .requester
-            .cancel(id, access.principal.clone(), reason)
+            .cancel(id, rev, access.principal.clone(), reason)
             .await
             .map_err(|e| format!("{id} cannot be cancelled: {e}"))?;
         Ok(())

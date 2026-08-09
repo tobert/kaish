@@ -292,6 +292,7 @@ async fn an_approval_round_trips_through_the_argv_door() {
     authority
         .grant(
             &req.id,
+            req.revision,
             GrantTerms::once_for(
                 &request,
                 std::time::SystemTime::now() + std::time::Duration::from_secs(300),

@@ -475,7 +475,18 @@ async fn cmd_cancel(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
         Ok(id) => id,
         Err(e) => return e,
     };
-    match ctx.cancel_request(&id, CancelReason::Withdrawn).await {
+    let access = match ledger(ctx) {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+    // Quotes the revision this same read just saw (spec §B.6) — the CLI has
+    // no revision of its own to remember between commands, so it reads
+    // current, acts on it immediately, and lets the ledger refuse loud if
+    // something else decided the request in between.
+    let Some(chain) = access.approvals.get(&id) else {
+        return ExecResult::failure(1, format!("approvals cancel: no request {id} in this ledger"));
+    };
+    match ctx.cancel_request(&id, chain.request.revision, CancelReason::Withdrawn).await {
         Ok(()) => ExecResult::with_output(OutputData::text(format!(
             "{id} cancelled — run the command again to ask for the same thing\n"
         ))),
@@ -515,7 +526,11 @@ async fn cmd_grant(args: &ToolArgs, flags: &GrantArgs, ctx: &ExecContext) -> Exe
     // operator granting from the shell approves what was asked for, and the
     // ledger refuses a widening anyway (spec §A.4).
     let terms = GrantTerms::once_for_view(&chain.request, kaish_types::clock::system_now() + window);
-    match handle.grant(&id, terms).await {
+    // Quotes the revision this same read just saw (spec §B.6) — same
+    // read-then-act contract as `cmd_cancel`: no revision to remember
+    // between commands, so read current, act immediately, and let the
+    // ledger refuse loud on a genuine race.
+    match handle.grant(&id, chain.request.revision, terms).await {
         Ok(()) => ExecResult::with_output(OutputData::text(format!(
             "{id} granted for {} — one successful settlement\n",
             humanize(window)
@@ -534,8 +549,12 @@ async fn cmd_deny(args: &ToolArgs, flags: &DenyArgs, ctx: &ExecContext) -> ExecR
         Ok(h) => h,
         Err(e) => return e,
     };
+    // Quotes the revision this read just saw (spec §B.6) — see `cmd_grant`.
+    let Some(chain) = handle.approvals_view().get(&id) else {
+        return ExecResult::failure(1, format!("approvals deny: no request {id} in this ledger"));
+    };
     let reason = flags.reason.as_deref().unwrap_or("denied from the shell");
-    match handle.deny(&id, reason).await {
+    match handle.deny(&id, chain.request.revision, reason).await {
         Ok(()) => ExecResult::with_output(OutputData::text(format!("{id} denied: {reason}\n"))),
         Err(e) => ExecResult::failure(1, format!("approvals deny: {e}")),
     }

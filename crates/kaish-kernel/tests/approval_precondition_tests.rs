@@ -101,6 +101,7 @@ impl Session {
         self.authority
             .grant(
                 &view.id,
+                view.revision,
                 GrantTerms::once_for_view(
                     &view,
                     std::time::SystemTime::now() + std::time::Duration::from_secs(300),
