@@ -257,7 +257,7 @@ pub struct KernelConfig {
     /// or via `KAISH_TRASH=1`.
     pub trash_enabled: bool,
 
-    /// How this kernel's approval ledger is configured: retention, TTLs,
+    /// How this kernel's approval ledger is configured: retention, capacity,
     /// and the rejected-credential limit (spec §D.4). `None` takes
     /// [`LedgerConfig::default`](crate::ledger::LedgerConfig).
     ///
@@ -398,15 +398,15 @@ pub struct KernelConfig {
 /// surface stays one field on [`KernelConfig`] as later PRs add
 /// `policy_pinned`, `deny_self_approval`, and the state resolvers.
 ///
-/// Set through [`KernelConfig::with_approver`],
+/// Set through [`KernelConfig::with_policy`],
 /// [`KernelConfig::with_principal`], and
 /// [`KernelConfig::with_approver_handle`].
 #[derive(Clone, Default)]
 pub struct ApprovalConfig {
-    /// The decision hook stages 2 and 3 of the chain call. `None` — the
-    /// default — skips both stages, so every request no standing grant
+    /// The synchronous decision policy stage 2 of the chain calls. `None`
+    /// — the default — skips that stage, so every request no standing grant
     /// covers defers to exit 2.
-    pub approver: Option<Arc<dyn crate::ledger::Approver>>,
+    pub policy: Option<Arc<dyn crate::ledger::Policy>>,
     /// Who this session is. Recorded as the decider on grants made through
     /// the authority this kernel mints, and stamped on the requests it
     /// posts. `None` takes the ledger's own placeholder identity.
@@ -431,17 +431,22 @@ pub struct ApprovalConfig {
     /// Decides which top-level statements must ask before they run (spec
     /// §C.6). `None` — the default — makes every statement `Observe`. There
     /// is no script surface that changes this: the classifier is
-    /// embedder-registered, like the approver.
+    /// embedder-registered, like the policy.
     pub statement_classifier: Option<Arc<dyn crate::ledger::StatementClassifier>>,
+    /// The clock the approval ledger reads (spec §A.5). `None` — the
+    /// default — installs [`SystemClock`](crate::ledger::SystemClock).
+    /// Ignored when [`Self::approver_handle`] is set, because that adopts a
+    /// ledger that already has one.
+    pub clock: Option<Arc<dyn crate::ledger::Clock>>,
 }
 
-/// Names what is configured without printing an opaque `dyn Approver`
+/// Names what is configured without printing an opaque `dyn Policy`
 /// address — `KernelConfig` keeps its `#[derive(Debug)]` this way rather
 /// than taxing every embedder's hook with a `Debug` bound.
 impl std::fmt::Debug for ApprovalConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ApprovalConfig")
-            .field("approver", &self.approver.is_some())
+            .field("policy", &self.policy.is_some())
             .field("principal", &self.principal)
             .field("session", &self.session)
             .field("approver_handle", &self.approver_handle)
@@ -800,7 +805,7 @@ impl KernelConfig {
         self
     }
 
-    /// Configure the approval ledger this kernel mints: retention, TTLs,
+    /// Configure the approval ledger this kernel mints: retention, capacity,
     /// and the rejected-credential limit (spec §D.4).
     ///
     /// Cross-request continuity — the reason `with_nonce_store` existed — is
@@ -842,6 +847,31 @@ impl KernelConfig {
     /// request **closed** rather than dropping the entry.
     pub fn with_ledger_sink(mut self, sink: Arc<dyn crate::ledger::LedgerSink>) -> Self {
         self.ledger_sink = Some(sink);
+        self
+    }
+
+    /// Install the clock the approval ledger reads
+    /// (`docs/approval-ledger.md` §A.5). The default is
+    /// [`SystemClock`](crate::ledger::SystemClock).
+    ///
+    /// **This is the ledger's clock and nothing else's.** It is not the
+    /// script watchdog's timer — `timeout`, `ToolCtx::patient`, and the
+    /// per-statement deadline run on `Instant` and are unaffected — which is
+    /// why the name says which clock rather than claiming the kernel's.
+    ///
+    /// One clock stamps every entry and answers every bound comparison in
+    /// that ledger, so a record's timestamps and the decisions taken
+    /// alongside them can never come from two different sources. The
+    /// ledger's *view* of whatever you install is monotone non-decreasing:
+    /// it latches the largest reading it has seen and clamps a smaller one
+    /// up to it, so an expired grant stays expired and entry stamps never
+    /// regress, whatever the clock does.
+    ///
+    /// Incompatible with [`Self::with_approver_handle`], which adopts a
+    /// ledger that already has a clock; setting both fails
+    /// [`Kernel::build`] loudly.
+    pub fn with_approval_clock(mut self, clock: Arc<dyn crate::ledger::Clock>) -> Self {
+        self.approval.clock = Some(clock);
         self
     }
 
@@ -931,15 +961,24 @@ impl KernelConfig {
         self
     }
 
-    /// Install the decision hook stages 2 and 3 of the approval chain call
-    /// (`docs/approval-ledger.md` §C.2).
+    /// Install the synchronous decision policy stage 2 of the approval
+    /// chain calls (`docs/approval-ledger.md` §C.2).
     ///
-    /// With no approver — the default — a gated operation is decided by
+    /// With no policy — the default — a gated operation is decided by
     /// standing grants alone, and anything they do not cover defers to exit
-    /// 2. Installing one whose methods both `Defer` changes nothing: the
-    /// trait's defaults are today's behavior.
-    pub fn with_approver(mut self, approver: Arc<dyn crate::ledger::Approver>) -> Self {
-        self.approval.approver = Some(approver);
+    /// 2. Installing one whose `evaluate` returns `Defer` changes nothing.
+    ///
+    /// **The kernel never awaits this** — [`Policy::evaluate`](crate::ledger::Policy::evaluate) is
+    /// synchronous and contractually non-blocking. A decision that has to
+    /// be thought about is not made here: the gate site returns
+    /// `ApprovalOutcome::Pending` and the embedder decides in its own task,
+    /// then grants through its [`ApproverHandle`](crate::ledger::ApproverHandle).
+    ///
+    /// Distinct from [`Self::with_policy_pinned`], which pins the `fs.*`
+    /// enforce posture (`set -o approvals`) against script code and has
+    /// nothing to do with this trait.
+    pub fn with_policy(mut self, policy: Arc<dyn crate::ledger::Policy>) -> Self {
+        self.approval.policy = Some(policy);
         self
     }
 
@@ -1012,7 +1051,7 @@ impl KernelConfig {
     /// goes through.
     ///
     /// The classifier cannot deny. Refusal is a chain decision
-    /// ([`Approver::policy`](crate::ledger::Approver::policy)), because a
+    /// ([`Policy::evaluate`](crate::ledger::Policy::evaluate)), because a
     /// scoping seam that can refuse is a second decision chain.
     pub fn with_statement_classifier(
         mut self,
@@ -1166,7 +1205,7 @@ struct KernelApprovals {
     requester: crate::ledger::Requester,
     /// The read side. Safe to hand anywhere.
     approvals: crate::ledger::Approvals,
-    /// The four-stage chain. Holds the ledger's authority internally so it
+    /// The decision chain. Holds the ledger's authority internally so it
     /// can post the decision it reaches; nothing reachable from script code
     /// can get that authority back out of it.
     chain: Arc<crate::ledger::DecisionChain>,
@@ -1183,10 +1222,6 @@ struct KernelApprovals {
     /// The authority *this session* was given, if any. `None` means this
     /// session may not approve anything (spec §E.2, tier 1).
     session_authority: Option<crate::ledger::ApproverHandle>,
-    /// How long a request this session posts stays live with no decision.
-    /// Read off the `LedgerConfig` the ledger was built with, because a
-    /// gate site holds only the handle.
-    request_ttl: std::time::Duration,
     /// The registered state resolvers, by resource kind (spec §B.4). Shared
     /// by every fork, so a background job re-checks a precondition through
     /// the same resolver the foreground would.
@@ -1208,7 +1243,6 @@ impl KernelApprovals {
             chain: Arc::clone(&self.chain),
             principal: self.principal.clone(),
             scope: self.scope.clone(),
-            request_ttl: self.request_ttl,
             job_id,
             resolvers: Arc::clone(&self.resolvers),
             // `session_authority`, not `authority`: a context gets what the
@@ -1716,12 +1750,13 @@ impl Kernel {
         ledger_sink: Option<Arc<dyn crate::ledger::LedgerSink>>,
     ) -> Result<KernelApprovals> {
         let ApprovalConfig {
-            approver,
+            policy,
             principal,
             session,
             approver_handle,
             resolvers,
             statement_classifier,
+            clock,
         } = config;
         // One kernel, one kernel id (spec §A.7) — including a kernel that
         // joins another's ledger through `with_approver_handle`, which is
@@ -1736,22 +1771,22 @@ impl Kernel {
         let resolvers = crate::ledger::StateResolvers::from_registrations(resolvers)
             .context("the approval ledger's state resolvers conflict")?;
 
-        if approver_handle.is_some() && (ledger_config.is_some() || ledger_sink.is_some()) {
+        if approver_handle.is_some()
+            && (ledger_config.is_some() || ledger_sink.is_some() || clock.is_some())
+        {
             anyhow::bail!(
-                "with_approver_handle adopts that handle's ledger, so with_ledger/with_ledger_sink \
-                 cannot also apply — configure the ledger on the kernel that mints it"
+                "with_approver_handle adopts that handle's ledger, so with_ledger/with_ledger_sink/\
+                 with_approval_clock cannot also apply — configure the ledger on the kernel that \
+                 mints it"
             );
         }
-        let request_ttl = ledger_config
-            .as_ref()
-            .map(|c| c.request_ttl)
-            .unwrap_or_else(|| crate::ledger::LedgerConfig::default().request_ttl);
         let (requester, approvals, authority) = match &approver_handle {
             Some(handle) => handle.join(),
             None => crate::ledger::Ledger::build(
                 ledger_config.unwrap_or_default(),
                 scope.clone(),
                 ledger_sink,
+                clock.unwrap_or_else(|| Arc::new(crate::ledger::SystemClock)),
             )
             .context("approval ledger could not mint its id epoch — the OS supplied no entropy")?,
         };
@@ -1763,7 +1798,7 @@ impl Kernel {
         let chain = Arc::new(crate::ledger::DecisionChain::new(
             authority.clone(),
             approvals.clone(),
-            approver,
+            policy,
         ));
 
         Ok(KernelApprovals {
@@ -1774,7 +1809,6 @@ impl Kernel {
             principal: principal.unwrap_or_default(),
             authority,
             session_authority,
-            request_ttl,
             resolvers: Arc::new(resolvers),
             statement_classifier,
         })
@@ -1792,7 +1826,7 @@ impl Kernel {
         &self.approvals.requester
     }
 
-    /// The four-stage decision chain this kernel's gate sites run
+    /// The decision chain this kernel's gate sites run
     /// (spec §C.2). The seam `ToolCtx::request_approval` (PR 3) and the
     /// rewritten gate sites (PR 5) call.
     pub fn decision_chain(&self) -> &Arc<crate::ledger::DecisionChain> {
@@ -2159,9 +2193,9 @@ impl Kernel {
             background: false,
         };
         // Tap and dispatch run under one watchdog, as they do at the string
-        // door — a gate that puts a human in the loop suspends the script
-        // clock through `ctx.patient`, and a watchdog installed only around
-        // the dispatch would leave that decision unbounded.
+        // door: the tap can post a ledger entry and run the decision chain,
+        // and a watchdog installed only around the dispatch would leave that
+        // work outside the bound the caller asked for.
         let work = async {
             // The second — and last — statement tap site (spec §C.6). The
             // argv door bypasses the statement loop entirely, and a door the
@@ -2421,8 +2455,8 @@ impl Kernel {
         }
 
         // Tap and statement run under one watchdog, as they do at both other
-        // doors: the gate this replay re-enters can hold on a human, and
-        // `ctx.patient` needs a live watchdog to suspend.
+        // doors: the gate this replay re-enters is inside the bound the
+        // caller asked for, not outside it.
         let work = async {
             // The captured source was recorded credential-free, so a replayed
             // statement presents no key: the redemption correlation on the
@@ -2456,46 +2490,41 @@ impl Kernel {
         Ok(result)
     }
 
-    /// Renew an expired approval request (`docs/approval-ledger.md` §B.5):
-    /// post a fresh `Requested` carrying the original's operation, resources,
-    /// capture, principal, and trace context, linked by `supersedes`. Returns
-    /// the new request's id.
+    /// Close an undecided approval request (`docs/approval-ledger.md` §B.5).
     ///
-    /// **This is the dead-request fix.** Before it, a backgrounded gate that
-    /// nobody decided within `request_ttl` was unfulfillable *and*
-    /// undiscardable: the job could not run, the request could not be
-    /// granted, and there was no way to raise the same intent again except by
-    /// re-running the command — which a backgrounded job cannot do for
-    /// itself. Renewal walks the chain forward instead: `supersedes` links
-    /// each attempt to the last, so "this took four tries over two hours" is
-    /// legible in the log.
+    /// **Nothing times a request out** (spec §A.10), so this is the only way
+    /// a request nobody decides ever ends. An embedder that wants a horizon
+    /// runs its own timer and calls this with
+    /// [`CancelReason::DeadlinePassed`](kaish_types::approval::CancelReason::DeadlinePassed);
+    /// one that wants none never calls it.
     ///
-    /// **Renewal is not re-approval.** The renewed request starts at
-    /// `Requested` and needs a fresh decision — a standing grant will
-    /// auto-approve it again, a human will be asked again. Nothing about the
-    /// passage of an hour makes a stale approval better.
+    /// **Cancelling is not denying.** A cancelled request is closed with no
+    /// decision recorded against it, and asking again posts a **new**
+    /// request linked by `supersedes` — the thread of intent stays walkable.
     ///
     /// Takes no [`ApproverHandle`](crate::ledger::ApproverHandle), unlike
-    /// [`Self::confirm`]: renewal is a *requester* action, so a session
-    /// holding no authority renews its own requests. It cannot renew another
+    /// [`Self::confirm`]: cancellation is a *requester* action, so a session
+    /// holding no authority closes its own requests. It cannot close another
     /// principal's.
-    ///
-    /// If the request came from a backgrounded job, that job is restamped
-    /// with the renewed request, so `wait`, `jobs`, and
-    /// `/v/jobs/{id}/approval` name the live id rather than the dead one.
     ///
     /// # Errors
     ///
-    /// The request is unknown, is not `Expired`, belongs to another principal
-    /// in a session with no authority, or declares a transition the world no
-    /// longer shows — the last being the loud refusal §B.5 requires, so a
-    /// renewal never posts claims that are already false.
-    pub async fn renew(
+    /// The request is unknown, is already terminal, has an attempt in
+    /// flight, or belongs to another principal in a session with no
+    /// authority.
+    /// Named `cancel_approval` rather than the spec's bare `cancel`:
+    /// [`Kernel::cancel`] already means "interrupt the running execution",
+    /// and one name for two unrelated cancellations is exactly the
+    /// collision the style guide's one-term-one-meaning rule forbids.
+    pub async fn cancel_approval(
         &self,
         request_id: &kaish_types::approval::RequestId,
-    ) -> Result<kaish_types::approval::RequestId> {
+        reason: kaish_types::approval::CancelReason,
+    ) -> Result<()> {
         let ctx = self.exec_ctx.read().await;
-        ctx.renew_request(request_id).await.map_err(|e| anyhow::anyhow!(e))
+        ctx.cancel_request(request_id, reason)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
     }
 
     /// Run `work` under the movable-deadline watchdog for `timeout`, shared by the
@@ -3106,6 +3135,15 @@ impl Kernel {
                         let combined = format!("{}{}", drained_stderr, r.err);
                         r.err = combined;
                     }
+                    // A gate raised *inside* the statement — an `fs.*` gate
+                    // under `set -o approvals` — halts the program exactly
+                    // the way a statement-level gate does, and for the same
+                    // reason: exit 2 means "this has not happened yet", and
+                    // the statements after it were written expecting it had
+                    // (`docs/approval-ledger.md` §I.5). Without this,
+                    // `rm x; touch y` creates `y` whether or not `rm x` is
+                    // ever approved, and nothing un-creates it.
+                    let held = r.approval.is_some();
                     on_output(&r);
                     // Carry the last statement's structured output for MCP TOON encoding.
                     // Must be done here (not in accumulate_result) because accumulate_result
@@ -3113,6 +3151,12 @@ impl Kernel {
                     let last_output = r.output().cloned();
                     accumulate_result(&mut result, &r);
                     result.set_output(last_output);
+                    if held {
+                        if !surfaced_warnings.is_empty() {
+                            result.err = format!("{surfaced_warnings}{}", result.err);
+                        }
+                        return Ok(result);
+                    }
                 }
                 ControlFlow::Exit { code } => {
                     if !drained_stderr.is_empty() {
@@ -3165,11 +3209,12 @@ impl Kernel {
     /// is the rule, so a 1,000-iteration loop posts one entry rather than a
     /// thousand.
     ///
-    /// The `exec_ctx` write lock is held across the decision chain, which can
-    /// be a human deciding for minutes under the patient hold. That is safe
-    /// here and only here: this runs under the execute lock, so no other
-    /// statement is executing, and an `Approver` reaches the ledger through
-    /// its own handles rather than through this context.
+    /// The `exec_ctx` write lock is held across the decision chain, which
+    /// returns in microseconds: the chain is a ledger lookup plus a
+    /// synchronous [`Policy::evaluate`](crate::ledger::Policy::evaluate),
+    /// and nothing in it awaits an embedder (spec §C.2). A
+    /// [`Policy`](crate::ledger::Policy) reaches the ledger through its own
+    /// handles rather than through this context.
     /// `capture` is built from the statement's presented credentials, so a
     /// caller that captures source text can redact it — see
     /// [`crate::ast::plan::redact_keys`]. The keys reach the gate as
@@ -6450,13 +6495,18 @@ impl Kernel {
     /// future exits at its next checkpoint, and any external children it
     /// spawned get the SIGTERM→SIGKILL cascade; it then stays tracked with
     /// status `Killed` once it unwinds. For a *gated* or already-finished
-    /// job the token trip is a no-op — its future has already resolved, the
-    /// job keeps reporting `Gated`/its terminal status, and a gated job's
-    /// pending approval request stays live in the ledger until its TTL
-    /// expires (an operator can still grant and `confirm` it). This only
+    /// job the token trip is a no-op — its future has already resolved and
+    /// the job keeps reporting `Gated`/its terminal status. This only
     /// *starts* cancellation, it does not wait (pair with
     /// [`JobManager::wait`]/`wait_all` if the caller needs to block on the
     /// unwind, bounded as [`Self::shutdown`] does).
+    ///
+    /// **A gated job's held request is cancelled here**
+    /// (`docs/approval-ledger.md` §B.5, "a job is cancelled or killed").
+    /// Nothing times a request out, so a job cancelled with a request still
+    /// `Requested` would hold a live ledger slot for the life of the
+    /// process — and forever, in an embedder where several kernels share
+    /// one ledger.
     ///
     /// A job registered by an embedder via [`JobManager::register`] with no
     /// cancel token attached has no lever to cancel — silently skipped here,
@@ -6467,6 +6517,14 @@ impl Kernel {
         let ids = self.jobs.list_ids().await;
         let mut cancelled = 0;
         for id in ids {
+            crate::ledger::cancel_job_request(
+                &self.approvals.requester,
+                &self.approvals.principal,
+                &self.jobs,
+                id,
+                kaish_types::approval::CancelReason::Withdrawn,
+            )
+            .await;
             if self.jobs.mark_killed_and_cancel(id, false).await {
                 cancelled += 1;
             }
@@ -6476,7 +6534,10 @@ impl Kernel {
 
     /// Shut down the kernel.
     ///
-    /// Cancels every tracked background job ([`Self::cancel_all_jobs`]), then
+    /// Cancels every tracked background job ([`Self::cancel_all_jobs`]),
+    /// closes every approval request left live in this kernel's scope
+    /// (`docs/approval-ledger.md` §B.5 — nothing times one out, so a kernel
+    /// that shares a ledger with other sessions would strand them), then
     /// waits up to `kill_grace + 3s` **per job** — the same bound `kill %N`
     /// gives a single target (GH #244) — for it to actually unwind. The
     /// waits are sequential, so the worst case is additive: N jobs that all
@@ -6499,6 +6560,20 @@ impl Kernel {
     pub async fn shutdown(&self) -> Result<()> {
         let ids = self.jobs.list_ids().await;
         self.cancel_all_jobs().await;
+        // Every request this kernel's scope still owns, whether or not a job
+        // holds it (`docs/approval-ledger.md` §B.5, rows 3 and 4). A kaish
+        // session *is* a kernel, so the session and kernel obligations are
+        // one call: `with_session` names the session, and the scope is what
+        // separates this kernel's requests from another session's sharing
+        // the same ledger.
+        crate::ledger::cancel_scope(
+            &self.approvals.requester,
+            &self.approvals.approvals,
+            &self.approvals.principal,
+            &self.approvals.scope,
+            kaish_types::approval::CancelReason::Withdrawn,
+        )
+        .await;
 
         let bound = self.jobs.kill_grace() + Duration::from_secs(3);
         for id in ids {
@@ -7475,9 +7550,10 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     accumulated.original_code = new.original_code;
     accumulated.content_type = new.content_type.clone();
     accumulated.baggage.clone_from(&new.baggage);
-    // A pending approval (exit 2 + the request) is the last statement's
-    // result; carry its control-plane field through accumulation or the
-    // request is lost.
+    // A pending approval (exit 2 + the request) rides the control-plane
+    // field through accumulation, or the request is lost. It is always the
+    // *last* result's, because a statement that carries one halts the
+    // top-level loop (spec §I.5) — nothing runs after it to overwrite it.
     accumulated.approval = new.approval.clone();
 }
 

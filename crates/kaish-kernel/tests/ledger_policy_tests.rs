@@ -1,34 +1,31 @@
-//! The approval decision chain (`docs/approval-ledger.md`, ledger PR 4).
+//! The approval decision chain (`docs/approval-ledger.md` §C.2).
 //!
-//! Four stages, tried in order, first non-`Defer` wins (§C.2); standing
-//! grants matched all-or-nothing with exact kinds and globbed ids (§C.4);
-//! `decide` under a patient hold and never under the ledger lock (§B.1).
-//! No `#![cfg(feature = ...)]` gate — the chain has no OS dependency and
-//! must compile and pass featureless, like the ledger core it sits on. The
-//! one test that needs a live kernel builds a `MemoryFs`-backed one, which
-//! also works featureless.
+//! Three stages, tried in order, first non-`Defer` wins, and **none of them
+//! waits** (§C.2); standing grants matched all-or-nothing with exact kinds
+//! and globbed ids (§C.4); `Policy::evaluate` never called under the ledger
+//! lock (§B.1). No `#![cfg(feature = ...)]` gate — the chain has no OS
+//! dependency and must compile and pass featureless, like the ledger core it
+//! sits on. The one test that needs a live kernel builds a `MemoryFs`-backed
+//! one, which also works featureless.
+//!
+//! There is no timing in this file, and that is the point: with nothing
+//! awaited on the request path, every test here is a state-machine test.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use async_trait::async_trait;
-use kaish_kernel::ledger::{
-    Approver, Approvals, ApproverHandle, ChainContext, ChainOutcome, ChainStage, DecisionChain,
-    Ledger, LedgerConfig, LedgerError, Requester,
-};
-use kaish_kernel::tools::{ToolArgs, ToolCtx, ToolSchema};
-use kaish_kernel::vfs::{MemoryFs, VfsRouter};
-use kaish_kernel::{ExecContext, ExecuteOptions, Kernel, KernelBackend, KernelConfig, LocalBackend, Tool};
+use kaish_kernel::ledger::{Approvals, ApproverHandle, ChainContext, ChainOutcome, ChainStage, ConditionReport, DecisionChain, Ledger, LedgerConfig, LedgerError, Policy, Requester, SystemClock};
+use kaish_kernel::{Kernel, KernelConfig};
 use kaish_types::approval::{
     ApprovalRequest, ApprovalRequestView, Decision, Grounds, GrantTerms, LedgerEntry,
     OperationPattern, Principal, PrincipalKind, RequestState, Resource,
     ResourcePattern, RiskClass, StandingGrant, StandingId, StateClaim,
 };
-use kaish_types::{ExecResult, Value};
+use kaish_types::ExecResult;
 
 /// The entries inside a ledger's records. These tests assert on entry shape;
 /// the [`LedgerRecord`] envelope has its own coverage in `kaish-types` (spec
@@ -67,9 +64,7 @@ fn test_origin(principal: kaish_types::approval::Principal) -> kaish_types::appr
             scope,
         ),
         principal,
-        kaish_types::approval::Capture::DirectExecution,
-        std::time::Duration::from_secs(60),
-    )
+        kaish_types::approval::Capture::DirectExecution)
 }
 
 
@@ -143,20 +138,18 @@ fn gate_result(outcome: &ChainOutcome, request: &ApprovalRequest) -> ExecResult 
     }
 }
 
-/// An approver scripted per stage, recording every call it receives in
-/// order so a test can assert which stages fired and which did not.
-struct ScriptedApprover {
-    policy: Mutex<Option<Decision>>,
-    decide: Mutex<Option<Decision>>,
+/// A scripted policy, recording every call it receives so a test can assert
+/// whether stage 2 fired at all.
+struct ScriptedPolicy {
+    decision: Mutex<Option<Decision>>,
     calls: Mutex<Vec<&'static str>>,
     seen: Mutex<Vec<ApprovalRequestView>>,
 }
 
-impl ScriptedApprover {
-    fn new(policy: Decision, decide: Decision) -> Arc<Self> {
+impl ScriptedPolicy {
+    fn new(decision: Decision) -> Arc<Self> {
         Arc::new(Self {
-            policy: Mutex::new(Some(policy)),
-            decide: Mutex::new(Some(decide)),
+            decision: Mutex::new(Some(decision)),
             calls: Mutex::new(Vec::new()),
             seen: Mutex::new(Vec::new()),
         })
@@ -167,18 +160,11 @@ impl ScriptedApprover {
     }
 }
 
-#[async_trait]
-impl Approver for ScriptedApprover {
-    fn policy(&self, req: &ApprovalRequestView, _ledger: &Approvals) -> Decision {
-        self.calls.lock().unwrap().push("policy");
+impl Policy for ScriptedPolicy {
+    fn evaluate(&self, req: &ApprovalRequestView, _ledger: &Approvals) -> Decision {
+        self.calls.lock().unwrap().push("evaluate");
         self.seen.lock().unwrap().push(req.clone());
-        self.policy.lock().unwrap().clone().unwrap_or(Decision::Defer)
-    }
-
-    async fn decide(&self, req: &ApprovalRequestView) -> Decision {
-        self.calls.lock().unwrap().push("decide");
-        self.seen.lock().unwrap().push(req.clone());
-        self.decide.lock().unwrap().clone().unwrap_or(Decision::Defer)
+        self.decision.lock().unwrap().clone().unwrap_or(Decision::Defer)
     }
 
     fn principal(&self) -> Principal {
@@ -186,35 +172,30 @@ impl Approver for ScriptedApprover {
     }
 }
 
-/// Build a ledger and a chain over it, with an optional approver.
-fn chain_over(approver: Option<Arc<dyn Approver>>) -> (Requester, Approvals, ApproverHandle, DecisionChain) {
-    let (requester, approvals, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let chain = DecisionChain::new(authority.clone(), approvals.clone(), approver);
+/// Build a ledger and a chain over it, with an optional policy.
+fn chain_over(policy: Option<Arc<dyn Policy>>) -> (Requester, Approvals, ApproverHandle, DecisionChain) {
+    let (requester, approvals, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let chain = DecisionChain::new(authority.clone(), approvals.clone(), policy);
     (requester, approvals, authority, chain)
 }
 
-// ─────────────────────── §C.2 the four stages, in order ───────────────────────
+// ─────────────────────── §C.2 the three stages, in order ───────────────────────
 
 #[tokio::test]
-async fn stages_fire_in_order_and_a_policy_grant_short_circuits_decide() {
-    let approver = ScriptedApprover::new(
-        Decision::Grant(GrantTerms::once_for(
-            &ApprovalRequest::builder("fs.write")
-                .risk(RiskClass::Reversible)
-                .build()
-                .unwrap()
-                .stamp(
-                    kaish_types::approval::RequestId::new(0, 0),
-                    SystemTime::now(),
-                    test_origin(agent("agent-1")),
-                ),
-            far_future(),
-        )),
-        Decision::Deny {
-            reason: "decide must never run".into(),
-        },
-    );
-    let (requester, approvals, _authority, chain) = chain_over(Some(approver.clone()));
+async fn a_policy_grant_on_the_request_path_authorizes_immediately() {
+    let policy = ScriptedPolicy::new(Decision::Grant(GrantTerms::once_for(
+        &ApprovalRequest::builder("fs.write")
+            .risk(RiskClass::Reversible)
+            .build()
+            .unwrap()
+            .stamp(
+                kaish_types::approval::RequestId::new(0, 0),
+                SystemTime::now(),
+                test_origin(agent("agent-1")),
+            ),
+        far_future(),
+    )));
+    let (requester, approvals, _authority, chain) = chain_over(Some(policy.clone()));
     let request = post(&requester, "fs.write", vec![]).await;
 
     let outcome = chain.decide(&request, &ChainContext::detached()).await.unwrap();
@@ -226,21 +207,18 @@ async fn stages_fire_in_order_and_a_policy_grant_short_circuits_decide() {
                 ..
             }
         ),
-        "policy must decide, got {outcome:?}"
+        "the policy must decide, got {outcome:?}"
     );
-    assert_eq!(approver.calls(), vec!["policy"], "decide must not run after policy decided");
+    assert_eq!(policy.calls(), vec!["evaluate"]);
     assert_eq!(approvals.state(&request.id), Some(RequestState::Granted));
 }
 
 #[tokio::test]
-async fn a_standing_grant_short_circuits_both_hooks() {
-    let approver = ScriptedApprover::new(
-        Decision::Deny {
-            reason: "policy must never run".into(),
-        },
-        Decision::Defer,
-    );
-    let (requester, approvals, authority, chain) = chain_over(Some(approver.clone()));
+async fn a_standing_grant_short_circuits_the_policy() {
+    let policy = ScriptedPolicy::new(Decision::Deny {
+        reason: "the policy must never run".into(),
+    });
+    let (requester, approvals, authority, chain) = chain_over(Some(policy.clone()));
     standing(&authority, &["fs.write"], &[("path", "/workspace/*")], None).await;
     let request = post(
         &requester,
@@ -260,19 +238,16 @@ async fn a_standing_grant_short_circuits_both_hooks() {
         ),
         "the standing grant must decide, got {outcome:?}"
     );
-    assert!(approver.calls().is_empty(), "no hook may run after stage 1 decided");
+    assert!(policy.calls().is_empty(), "the policy may not run after stage 1 decided");
     assert_eq!(approvals.state(&request.id), Some(RequestState::Granted));
 }
 
 #[tokio::test]
-async fn decide_runs_only_after_policy_defers_and_its_denial_is_recorded() {
-    let approver = ScriptedApprover::new(
-        Decision::Defer,
-        Decision::Deny {
-            reason: "not on my watch".into(),
-        },
-    );
-    let (requester, approvals, _authority, chain) = chain_over(Some(approver.clone()));
+async fn a_policy_denial_is_recorded_and_the_gate_site_exits_1() {
+    let policy = ScriptedPolicy::new(Decision::Deny {
+        reason: "not on my watch".into(),
+    });
+    let (requester, approvals, _authority, chain) = chain_over(Some(policy.clone()));
     let request = post(&requester, "fs.remove", vec![]).await;
 
     let outcome = chain.decide(&request, &ChainContext::detached()).await.unwrap();
@@ -280,28 +255,28 @@ async fn decide_runs_only_after_policy_defers_and_its_denial_is_recorded() {
         matches!(
             &outcome,
             ChainOutcome::Denied {
-                stage: ChainStage::Decide,
+                stage: ChainStage::Policy,
                 reason
             } if reason == "not on my watch"
         ),
-        "decide must deny, got {outcome:?}"
+        "the policy must deny, got {outcome:?}"
     );
-    assert_eq!(approver.calls(), vec!["policy", "decide"]);
+    assert_eq!(policy.calls(), vec!["evaluate"]);
     assert_eq!(approvals.state(&request.id), Some(RequestState::Denied));
     assert_eq!(gate_result(&outcome, &request).code, 1);
 }
 
 #[tokio::test]
-async fn defer_through_all_four_stages_is_exit_2_with_a_pending_view() {
-    let approver = ScriptedApprover::new(Decision::Defer, Decision::Defer);
-    let (requester, approvals, _authority, chain) = chain_over(Some(approver.clone()));
+async fn defer_through_both_stages_is_exit_2_with_a_pending_view() {
+    let policy = ScriptedPolicy::new(Decision::Defer);
+    let (requester, approvals, _authority, chain) = chain_over(Some(policy.clone()));
     let request = post(&requester, "fs.remove", vec![Resource::plain("path", "/etc/hosts")]).await;
 
     let outcome = chain.decide(&request, &ChainContext::detached()).await.unwrap();
     assert_eq!(outcome, ChainOutcome::Deferred);
-    assert_eq!(approver.calls(), vec!["policy", "decide"]);
+    assert_eq!(policy.calls(), vec!["evaluate"]);
 
-    // Stage 4: the request stays `Requested`, nothing was decided, and the
+    // Stage 3: the request stays `Requested`, nothing was decided, and the
     // gate site returns exit 2 carrying the pending view.
     assert_eq!(approvals.state(&request.id), Some(RequestState::Requested));
     let pending = approvals.pending();
@@ -315,9 +290,9 @@ async fn defer_through_all_four_stages_is_exit_2_with_a_pending_view() {
 }
 
 #[tokio::test]
-async fn a_kernel_with_no_approver_defers_exactly_as_today() {
+async fn a_kernel_with_no_policy_defers() {
     let (requester, approvals, _authority, chain) = chain_over(None);
-    assert!(!chain.has_approver());
+    assert!(!chain.has_policy());
     let request = post(&requester, "fs.remove", vec![]).await;
 
     let outcome = chain.decide(&request, &ChainContext::detached()).await.unwrap();
@@ -517,8 +492,8 @@ async fn max_uses_consumption_is_exact_under_eight_concurrent_matching_requests(
 
 #[tokio::test]
 async fn an_exhausted_rule_stops_matching_and_the_request_falls_through() {
-    let approver = ScriptedApprover::new(Decision::Defer, Decision::Defer);
-    let (requester, _approvals, authority, chain) = chain_over(Some(approver.clone()));
+    let policy = ScriptedPolicy::new(Decision::Defer);
+    let (requester, _approvals, authority, chain) = chain_over(Some(policy.clone()));
     standing(&authority, &["fs.write"], &[("path", "*")], Some(1)).await;
 
     let first = post(&requester, "fs.write", vec![Resource::plain("path", "/x")]).await;
@@ -526,7 +501,7 @@ async fn an_exhausted_rule_stops_matching_and_the_request_falls_through() {
         chain.decide(&first, &ChainContext::detached()).await.unwrap(),
         ChainOutcome::Granted { .. }
     ));
-    assert!(approver.calls().is_empty());
+    assert!(policy.calls().is_empty());
 
     let second = post(&requester, "fs.write", vec![Resource::plain("path", "/x")]).await;
     assert_eq!(
@@ -534,9 +509,9 @@ async fn an_exhausted_rule_stops_matching_and_the_request_falls_through() {
         ChainOutcome::Deferred
     );
     assert_eq!(
-        approver.calls(),
-        vec!["policy", "decide"],
-        "exhaustion must fall through to the later stages, not fail"
+        policy.calls(),
+        vec!["evaluate"],
+        "exhaustion must fall through to the later stage, not fail"
     );
 }
 
@@ -569,41 +544,31 @@ async fn a_revoked_rule_stops_matching_immediately() {
     );
 }
 
-// ─────────────────────── §B.1 the lock is never held across a hook ───────────────────────
+// ─────────────────────── §B.1 the lock is never held across the policy ───────────────────────
 
-/// An approver that reads the ledger from inside both hooks. If the chain
-/// held the ledger lock across either call this would deadlock on a
-/// re-entrant `std::sync::Mutex` acquisition — which is the assertion.
-struct LedgerReadingApprover {
-    approvals: OnceLock<Approvals>,
+/// A policy that reads the ledger from inside `evaluate`. If the chain held
+/// the ledger lock across the call this would deadlock on a re-entrant
+/// `std::sync::Mutex` acquisition — which is the assertion.
+struct LedgerReadingPolicy {
     pending_seen: AtomicUsize,
 }
 
-#[async_trait]
-impl Approver for LedgerReadingApprover {
-    fn policy(&self, _req: &ApprovalRequestView, ledger: &Approvals) -> Decision {
+impl Policy for LedgerReadingPolicy {
+    fn evaluate(&self, _req: &ApprovalRequestView, ledger: &Approvals) -> Decision {
         // Stage 2 gets the read side as an argument and may use it freely.
         self.pending_seen.fetch_add(ledger.pending().len(), Ordering::SeqCst);
-        Decision::Defer
-    }
-
-    async fn decide(&self, _req: &ApprovalRequestView) -> Decision {
-        let approvals = self.approvals.get().expect("approvals installed");
-        self.pending_seen.fetch_add(approvals.pending().len(), Ordering::SeqCst);
-        let _ = entries(approvals.log(0));
-        let _ = approvals.standing();
+        let _ = entries(ledger.log(0));
+        let _ = ledger.standing();
         Decision::Defer
     }
 }
 
 #[tokio::test]
-async fn neither_hook_is_invoked_while_the_ledger_lock_is_held() {
-    let approver = Arc::new(LedgerReadingApprover {
-        approvals: OnceLock::new(),
+async fn the_policy_is_never_invoked_while_the_ledger_lock_is_held() {
+    let policy = Arc::new(LedgerReadingPolicy {
         pending_seen: AtomicUsize::new(0),
     });
-    let (requester, approvals, authority, chain) = chain_over(Some(approver.clone()));
-    approver.approvals.set(approvals.clone()).ok();
+    let (requester, _approvals, authority, chain) = chain_over(Some(policy.clone()));
     // A live standing rule so stage 1 really does take the lock first.
     standing(&authority, &["nothing.matches"], &[], None).await;
     let request = post(&requester, "fs.remove", vec![]).await;
@@ -615,301 +580,101 @@ async fn neither_hook_is_invoked_while_the_ledger_lock_is_held() {
         chain.decide(&request, &ChainContext::detached()),
     )
     .await
-    .expect("the chain must not deadlock — a hook ran under the ledger lock")
+    .expect("the chain must not deadlock — the policy ran under the ledger lock")
     .unwrap();
 
     assert_eq!(outcome, ChainOutcome::Deferred);
     assert_eq!(
-        approver.pending_seen.load(Ordering::SeqCst),
-        2,
-        "both hooks must have read the ledger and seen the one pending request"
+        policy.pending_seen.load(Ordering::SeqCst),
+        1,
+        "the policy must have read the ledger and seen the one pending request"
     );
 }
 
-// ─────────────────────── §C.2 stage 3: patient hold and cancellation ───────────────────────
+// ─────────────────────── §C.2 the kernel does not wait ───────────────────────
 
-/// An approver that takes `delay` to make up its mind.
-struct SlowApprover {
-    delay: Duration,
-    decision: Decision,
-    budget: Duration,
-    started: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl Approver for SlowApprover {
-    async fn decide(&self, _req: &ApprovalRequestView) -> Decision {
-        self.started.fetch_add(1, Ordering::SeqCst);
-        tokio::time::sleep(self.delay).await;
-        self.decision.clone()
-    }
-
-    fn decide_budget(&self) -> Duration {
-        self.budget
-    }
-}
-
-/// `gate <operation>`: post a request through the kernel's own requester,
-/// run the kernel's own decision chain against it, and return what a gate
-/// site would. This is the driver PR 3's `ToolCtx::request_approval`
-/// replaces.
-struct GateTool {
-    kernel: Arc<OnceLock<std::sync::Weak<Kernel>>>,
-}
-
-#[async_trait]
-impl Tool for GateTool {
-    fn name(&self) -> &str {
-        "gate"
-    }
-
-    fn schema(&self) -> ToolSchema {
-        ToolSchema::new("gate", "test tool: run the approval decision chain")
-    }
-
-    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let operation = match args.get_positional(0) {
-            Some(Value::String(s)) => s.clone(),
-            other => return ExecResult::failure(2, format!("gate: bad operation {other:?}")),
-        };
-        let Some(kernel) = self.kernel.get().and_then(std::sync::Weak::upgrade) else {
-            return ExecResult::failure(1, "gate: no kernel");
-        };
-        let request = match kernel
-            .requester()
-            .post_request(
-                ApprovalRequest::builder(operation)
-                    .risk(RiskClass::Irreversible)
-                    .build()
-                    .expect("draft"),
-                test_origin(kernel.principal().clone()).with_ttl(Duration::from_secs(600)),
-            )
-            .await
-        {
-            Ok(request) => request,
-            Err(err) => return ExecResult::failure(1, format!("gate: {err}")),
-        };
-
-        let Some(exec_ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "gate requires ExecContext");
-        };
-        let cancel = exec_ctx.cancel.clone();
-        let chain_ctx = ChainContext::new(exec_ctx, cancel);
-        match kernel.decision_chain().decide(&request, &chain_ctx).await {
-            Ok(outcome) => gate_result(&outcome, &request),
-            Err(err) => ExecResult::failure(1, format!("gate: {err}")),
-        }
-    }
-}
-
-/// A `MemoryFs`-backed kernel with the `gate` tool registered, sharing
-/// `authority`'s ledger.
-fn gate_kernel(approver: Arc<dyn Approver>, authority: ApproverHandle) -> Arc<Kernel> {
-    let cell: Arc<OnceLock<std::sync::Weak<Kernel>>> = Arc::new(OnceLock::new());
-    let mut vfs = VfsRouter::new();
-    vfs.mount("/", MemoryFs::new());
-    let backend: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(vfs)));
-    let config = KernelConfig::isolated()
-        .with_approver(approver)
-        .with_approver_handle(authority)
-        .with_principal(agent("agent-1"));
-    let kernel = Kernel::with_backend(backend, config, |_| {}, {
-        let cell = Arc::clone(&cell);
-        move |tools| {
-            tools.register(GateTool { kernel: cell });
-        }
-    })
-    .expect("with_backend kernel")
-    .into_arc();
-    cell.set(Arc::downgrade(&kernel)).ok();
-    kernel
-}
-
-/// A 90-second decision under a patient hold does not trip a 30-second
-/// script timeout — the whole reason stage 3 holds one (spec §C.2).
-#[tokio::test(start_paused = true)]
-async fn a_ninety_second_decision_does_not_trip_a_thirty_second_script_timeout() {
-    let (_requester, _approvals, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let started = Arc::new(AtomicUsize::new(0));
-    let approver = Arc::new(SlowApprover {
-        delay: Duration::from_secs(90),
-        decision: Decision::Grant(GrantTerms::once_for(
-            &ApprovalRequest::builder("fs.remove")
-                .risk(RiskClass::Irreversible)
-                .build()
-                .unwrap()
-                .stamp(
-                    kaish_types::approval::RequestId::new(0, 0),
-                    SystemTime::now(),
-                    test_origin(agent("agent-1")).with_ttl(Duration::from_secs(600)),
-                ),
-            SystemTime::now() + Duration::from_secs(3_600),
-        )),
-        budget: Duration::from_secs(300),
-        started: Arc::clone(&started),
-    });
-    let kernel = gate_kernel(approver, authority);
-
-    let result = kernel
-        .execute_with_options(
-            "gate fs.remove",
-            ExecuteOptions::new().with_timeout(Duration::from_secs(30)),
-        )
-        .await
-        .expect("execute");
-
-    assert_eq!(started.load(Ordering::SeqCst), 1, "decide must have run");
-    assert_eq!(
-        result.code, 0,
-        "a decision under the patient hold must outlive the script timeout; got code={} err={}",
-        result.code, result.err
-    );
-}
-
-/// The hold is bounded by the approver's own budget: a decision that
-/// overruns it still trips the watchdog, so a hung approver cannot wait
-/// forever.
-#[tokio::test(start_paused = true)]
-async fn a_decision_that_overruns_its_own_budget_still_trips_the_watchdog() {
-    let (_requester, approvals, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let approver = Arc::new(SlowApprover {
-        delay: Duration::from_secs(3_600),
-        decision: Decision::Deny {
-            reason: "never reached".into(),
-        },
-        budget: Duration::from_secs(60),
-        started: Arc::new(AtomicUsize::new(0)),
-    });
-    let kernel = gate_kernel(approver, authority);
-
-    let result = kernel
-        .execute_with_options(
-            "gate fs.remove",
-            ExecuteOptions::new().with_timeout(Duration::from_secs(30)),
-        )
-        .await
-        .expect("execute");
-
-    assert_eq!(result.code, 124, "got code={} err={}", result.code, result.err);
-    // Nothing was decided: the request is still pending, with no decision
-    // entry behind it.
-    assert_eq!(approvals.pending().len(), 1);
-    // One `Requested`, plus the statement tap's unconditional `Observed`
-    // (spec §C.6) for the `gate fs.remove` line itself.
-    let chain_entries: Vec<_> = entries(approvals.log(0))
-        .into_iter()
-        .filter(|e| !matches!(e, LedgerEntry::Observed { .. }))
-        .collect();
-    assert_eq!(chain_entries.len(), 1, "{chain_entries:?}");
-}
-
-/// Cancellation during `decide` posts nothing and never grants (spec §C.2).
+/// **The successor to the parked lease case.** A grant that arrives an
+/// arbitrarily long time after the gate site returned `Pending` still
+/// redeems: there is no lease to have expired and no budget to have
+/// disagreed with it. No paused clock, no sleep — the path this covers has
+/// no timing left in it, so the "arbitrarily long time" is expressed as the
+/// clock reading a decade out.
 #[tokio::test]
-async fn cancellation_during_decide_posts_nothing_and_never_grants() {
-    let (requester, approvals, _authority, chain) = chain_over(Some(Arc::new(SlowApprover {
-        delay: Duration::from_secs(3_600),
-        decision: Decision::Grant(GrantTerms::once_for(
-            &ApprovalRequest::builder("fs.remove")
-                .risk(RiskClass::Irreversible)
-                .build()
-                .unwrap()
-                .stamp(
-                    kaish_types::approval::RequestId::new(0, 0),
-                    SystemTime::now(),
-                    test_origin(agent("agent-1")).with_ttl(Duration::from_secs(600)),
-                ),
-            far_future(),
-        )),
-        budget: Duration::from_secs(300),
-        started: Arc::new(AtomicUsize::new(0)),
-    })));
-    let request = post(&requester, "fs.remove", vec![]).await;
+async fn a_grant_posted_a_decade_after_pending_still_redeems() {
+    let (requester, approvals, authority, chain) = chain_over(None);
+    let request = post(&requester, "fs.remove", vec![Resource::plain("path", "/x")]).await;
 
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let waiter = cancel.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        waiter.cancel();
-    });
+    // Nobody decides. The kernel does not wait.
+    assert_eq!(
+        chain.decide(&request, &ChainContext::detached()).await.unwrap(),
+        ChainOutcome::Deferred
+    );
+    assert_eq!(approvals.state(&request.id), Some(RequestState::Requested));
 
-    let outcome = chain
-        .decide(&request, &ChainContext::new(&NoPatient, cancel))
+    // A decade later — expressed as a `not_after` a decade out, since there
+    // is nothing in the ledger for an interval to have run down.
+    let much_later = SystemTime::now() + Duration::from_secs(10 * 365 * 24 * 3_600);
+    authority
+        .grant(&request.id, GrantTerms::once_for(&request, much_later))
         .await
         .unwrap();
+    assert_eq!(approvals.state(&request.id), Some(RequestState::Granted));
 
-    assert_eq!(outcome, ChainOutcome::Cancelled);
-    assert_eq!(
-        approvals.state(&request.id),
-        Some(RequestState::Requested),
-        "a cancelled decision must leave the request exactly as posted"
-    );
-    assert_eq!(entries(approvals.log(0)).len(), 1, "nothing beyond the Requested entry was posted");
-    assert_eq!(gate_result(&outcome, &request).code, 130);
+    let attempt = requester
+        .redeem(&request.id, agent("agent-1"), ConditionReport::none())
+        .await
+        .expect("a request nothing timed out is still redeemable");
+    assert_eq!(attempt.request_id(), &request.id);
 }
 
-/// An already-cancelled execution never reaches a hook at all — an
-/// execution on its way out must not acquire authority.
+/// The chain reports the *execution's* cancellation, and nothing else — an
+/// execution already unwinding must not acquire authority on its way out.
+/// There is no decision in flight for it to race: nothing is awaited.
 #[tokio::test]
 async fn an_already_cancelled_execution_is_never_granted() {
-    let approver = ScriptedApprover::new(
-        Decision::Deny {
-            reason: "must not run".into(),
-        },
-        Decision::Defer,
-    );
-    let (requester, approvals, authority, chain) = chain_over(Some(approver.clone()));
+    let policy = ScriptedPolicy::new(Decision::Deny {
+        reason: "must not run".into(),
+    });
+    let (requester, approvals, authority, chain) = chain_over(Some(policy.clone()));
     standing(&authority, &["fs.write"], &[("path", "*")], None).await;
     let request = post(&requester, "fs.write", vec![Resource::plain("path", "/x")]).await;
 
     let cancel = tokio_util::sync::CancellationToken::new();
     cancel.cancel();
     let outcome = chain
-        .decide(&request, &ChainContext::new(&NoPatient, cancel))
+        .decide(&request, &ChainContext::new(cancel))
         .await
         .unwrap();
 
     assert_eq!(outcome, ChainOutcome::Cancelled);
-    assert!(approver.calls().is_empty());
+    assert!(policy.calls().is_empty());
     assert_eq!(
         approvals.state(&request.id),
         Some(RequestState::Requested),
         "not even the standing rule may fire for a cancelled execution"
     );
+    assert_eq!(gate_result(&outcome, &request).code, 130);
 }
 
-/// An approver that fires the cancellation token from inside the narrowest
+/// A policy that fires the cancellation token from inside the narrowest
 /// window there is: `principal()`, which the chain calls *after* its
-/// post-decide cancellation check and *before* the grant reaches the
-/// ledger. Nothing a timing-based test can hit reliably — this makes the
-/// race deterministic.
+/// pre-stage cancellation check and *before* the grant reaches the ledger.
+/// Nothing a timing-based test can hit reliably — this makes the race
+/// deterministic.
 struct CancelsWhileGranting {
     cancel: tokio_util::sync::CancellationToken,
     decision: Decision,
-    from_policy: bool,
 }
 
-#[async_trait]
-impl Approver for CancelsWhileGranting {
-    fn policy(&self, _req: &ApprovalRequestView, _ledger: &Approvals) -> Decision {
-        if self.from_policy {
-            self.decision.clone()
-        } else {
-            Decision::Defer
-        }
-    }
-
-    async fn decide(&self, _req: &ApprovalRequestView) -> Decision {
-        if self.from_policy {
-            Decision::Defer
-        } else {
-            self.decision.clone()
-        }
+impl Policy for CancelsWhileGranting {
+    fn evaluate(&self, _req: &ApprovalRequestView, _ledger: &Approvals) -> Decision {
+        self.decision.clone()
     }
 
     fn principal(&self) -> Principal {
         // The chain has already decided to grant and has not yet posted.
         self.cancel.cancel();
-        Principal::new("racing-approver", PrincipalKind::Automation)
+        Principal::new("racing-policy", PrincipalKind::Automation)
     }
 }
 
@@ -922,7 +687,7 @@ fn grant_terms_for(operation: &str) -> Decision {
             .stamp(
                 kaish_types::approval::RequestId::new(0, 0),
                 SystemTime::now(),
-                test_origin(agent("agent-1")).with_ttl(Duration::from_secs(600)),
+                test_origin(agent("agent-1")),
             ),
         far_future(),
     ))
@@ -935,38 +700,34 @@ fn grant_terms_for(operation: &str) -> Decision {
 /// `Abandoned`, and the caller is told `Cancelled`.
 #[tokio::test]
 async fn a_cancellation_that_beats_the_commit_leaves_no_live_grant() {
-    for from_policy in [true, false] {
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let approver = Arc::new(CancelsWhileGranting {
-            cancel: cancel.clone(),
-            decision: grant_terms_for("fs.remove"),
-            from_policy,
-        });
-        let (requester, approvals, _authority, chain) = chain_over(Some(approver));
-        let request = post(&requester, "fs.remove", vec![]).await;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let policy = Arc::new(CancelsWhileGranting {
+        cancel: cancel.clone(),
+        decision: grant_terms_for("fs.remove"),
+    });
+    let (requester, approvals, _authority, chain) = chain_over(Some(policy));
+    let request = post(&requester, "fs.remove", vec![]).await;
 
-        let outcome = chain
-            .decide(&request, &ChainContext::new(&NoPatient, cancel))
-            .await
-            .unwrap();
+    let outcome = chain
+        .decide(&request, &ChainContext::new(cancel))
+        .await
+        .unwrap();
 
-        assert_eq!(
-            outcome,
-            ChainOutcome::Cancelled,
-            "from_policy={from_policy}: a cancelled execution is never told it may proceed"
-        );
-        assert_eq!(
-            approvals.state(&request.id),
-            Some(RequestState::Abandoned),
-            "from_policy={from_policy}: the grant that beat the cancellation must be undone"
-        );
-        // The record keeps both halves: the decision, and its undoing.
-        let log = entries(approvals.log(0));
-        assert!(log.iter().any(|e| matches!(e, LedgerEntry::Granted { .. })));
-        assert!(log.iter().any(|e| matches!(e, LedgerEntry::Abandoned { .. })));
-        // And the credential is gone — an abandoned chain is closed.
-        assert_eq!(gate_result(&outcome, &request).code, 130);
-    }
+    assert_eq!(
+        outcome,
+        ChainOutcome::Cancelled,
+        "a cancelled execution is never told it may proceed"
+    );
+    assert_eq!(
+        approvals.state(&request.id),
+        Some(RequestState::Abandoned),
+        "the grant that beat the cancellation must be undone"
+    );
+    // The record keeps both halves: the decision, and its undoing.
+    let log = entries(approvals.log(0));
+    assert!(log.iter().any(|e| matches!(e, LedgerEntry::Granted { .. })));
+    assert!(log.iter().any(|e| matches!(e, LedgerEntry::Abandoned { .. })));
+    assert_eq!(gate_result(&outcome, &request).code, 130);
 }
 
 /// A cancellation racing a *denial* leaves the denial standing: it
@@ -974,18 +735,17 @@ async fn a_cancellation_that_beats_the_commit_leaves_no_live_grant() {
 #[tokio::test]
 async fn a_cancellation_racing_a_denial_keeps_the_denial() {
     let cancel = tokio_util::sync::CancellationToken::new();
-    let approver = Arc::new(CancelsWhileGranting {
+    let policy = Arc::new(CancelsWhileGranting {
         cancel: cancel.clone(),
         decision: Decision::Deny {
             reason: "denied on the way out".into(),
         },
-        from_policy: true,
     });
-    let (requester, approvals, _authority, chain) = chain_over(Some(approver));
+    let (requester, approvals, _authority, chain) = chain_over(Some(policy));
     let request = post(&requester, "fs.remove", vec![]).await;
 
     let outcome = chain
-        .decide(&request, &ChainContext::new(&NoPatient, cancel))
+        .decide(&request, &ChainContext::new(cancel))
         .await
         .unwrap();
 
@@ -993,38 +753,25 @@ async fn a_cancellation_racing_a_denial_keeps_the_denial() {
     assert_eq!(approvals.state(&request.id), Some(RequestState::Denied));
 }
 
-/// A `PatientSource` with no watchdog behind it — the shape a non-kernel
-/// caller has.
-struct NoPatient;
-
-impl kaish_kernel::ledger::PatientSource for NoPatient {
-    fn patient(&self, _budget: Duration) -> kaish_tool_api::PatientGuard {
-        kaish_tool_api::PatientGuard::inert()
-    }
-}
-
-// ─────────────────────── §A.4 an approver may narrow, never widen ───────────────────────
+// ─────────────────────── §A.4 a policy may narrow, never widen ───────────────────────
 
 #[tokio::test]
-async fn an_approver_that_drops_a_declared_condition_is_refused() {
-    // The approver grants unconditioned terms for a request that declared a
+async fn a_policy_that_drops_a_declared_condition_is_refused() {
+    // The policy grants unconditioned terms for a request that declared a
     // transition — that authorizes more than was asked for.
-    let approver = ScriptedApprover::new(
-        Decision::Grant(GrantTerms::once_for(
-            &ApprovalRequest::builder("git.push")
-                .risk(RiskClass::Irreversible)
-                .build()
-                .unwrap()
-                .stamp(
-                    kaish_types::approval::RequestId::new(0, 0),
-                    SystemTime::now(),
-                    test_origin(agent("agent-1")),
-                ),
-            far_future(),
-        )),
-        Decision::Defer,
-    );
-    let (requester, approvals, _authority, chain) = chain_over(Some(approver));
+    let policy = ScriptedPolicy::new(Decision::Grant(GrantTerms::once_for(
+        &ApprovalRequest::builder("git.push")
+            .risk(RiskClass::Irreversible)
+            .build()
+            .unwrap()
+            .stamp(
+                kaish_types::approval::RequestId::new(0, 0),
+                SystemTime::now(),
+                test_origin(agent("agent-1")),
+            ),
+        far_future(),
+    )));
+    let (requester, approvals, _authority, chain) = chain_over(Some(policy));
     let request = post(
         &requester,
         "git.push",
@@ -1093,7 +840,7 @@ async fn with_deny_self_approval_wires_kernelconfig_through_to_the_minted_ledger
 
 #[tokio::test]
 async fn a_session_given_a_handle_holds_authority_and_joins_its_ledger() {
-    let (_requester, approvals, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
+    let (_requester, approvals, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let kernel = Kernel::new(
         KernelConfig::isolated()
             .with_approver_handle(authority.clone())
@@ -1140,12 +887,12 @@ async fn a_fork_shares_its_parents_ledger() {
     );
 }
 
-// ─────────────────────── §A.2 an approver has no path to a credential ───────────────────────
+// ─────────────────────── §A.2 a policy has no path to a credential ───────────────────────
 
 #[tokio::test]
-async fn an_approver_receives_the_tokenless_view_of_the_request_it_decides() {
-    let approver = ScriptedApprover::new(Decision::Defer, Decision::Defer);
-    let (requester, _approvals, _authority, chain) = chain_over(Some(approver.clone()));
+async fn a_policy_receives_the_tokenless_view_of_the_request_it_decides() {
+    let policy = ScriptedPolicy::new(Decision::Defer);
+    let (requester, _approvals, _authority, chain) = chain_over(Some(policy.clone()));
     let request = post(
         &requester,
         "git.push",
@@ -1155,36 +902,42 @@ async fn an_approver_receives_the_tokenless_view_of_the_request_it_decides() {
 
     chain.decide(&request, &ChainContext::detached()).await.unwrap();
 
-    let seen = approver.seen.lock().unwrap().clone();
-    assert_eq!(seen.len(), 2, "both hooks saw the request");
-    for view in seen {
-        assert_eq!(view, ApprovalRequestView::from(&request));
-    }
+    let seen = policy.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "the policy saw the request");
+    assert_eq!(seen[0], ApprovalRequestView::from(&request));
 }
 
-/// The structural half of "an `Approver` has no path to a credential": the
+/// The structural half of "a `Policy` has no path to a credential": the
 /// trait's own definition mentions no credential type, so there is nothing
 /// for an implementor to reach through. The other half is the `compile_fail`
 /// doctest on the trait itself, which proves the view carries no such field.
 /// `trybuild` was judged not worth a workspace dependency for this class of
 /// assertion; PR 2 made the same call.
+///
+/// The snapshot also pins the trait's **shape**: one synchronous method and
+/// no `async fn`, which is what "the kernel never awaits an embedder"
+/// (§0.1) reduces to at the type level.
 #[test]
-fn the_approver_trait_names_no_credential_type() {
-    let source = include_str!("../src/ledger/approver.rs");
+fn the_policy_trait_names_no_credential_type_and_awaits_nothing() {
+    let source = include_str!("../src/ledger/policy.rs");
     let start = source
-        .find("pub trait Approver: Send + Sync {")
-        .expect("the Approver trait must exist");
+        .find("pub trait Policy: Send + Sync {")
+        .expect("the Policy trait must exist");
     let body = &source[start..];
     let block = &body[..find_matching_brace(body)];
     assert!(
         !block.contains("Token") && !block.contains("token"),
-        "the Approver trait must never name a credential:\n{block}"
+        "the Policy trait must never name a credential:\n{block}"
     );
     assert!(
         !block.contains("ApproverHandle"),
-        "an Approver must never be handed the authority capability:\n{block}"
+        "a Policy must never be handed the authority capability:\n{block}"
     );
-    insta::assert_snapshot!("approver_trait_block", block);
+    assert!(
+        !block.contains("async fn"),
+        "the kernel awaits no embedder hook — the Policy trait must have no async method:\n{block}"
+    );
+    insta::assert_snapshot!("policy_trait_block", block);
 }
 
 /// Finds the index just past the closing `}` matching the first `{` in

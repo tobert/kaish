@@ -2,11 +2,11 @@
 //!
 //! [`LedgerInner`] holds one `std::sync::Mutex<LedgerState>` — the whole
 //! ledger's single lock. Every `do_*` method here acquires it exactly once,
-//! samples the monotonic and wall clocks *after* acquiring it (so a caller
-//! that blocks on contention is decided against the instant it actually
-//! got the lock, never the instant it first called in — spec §B.1's
-//! linearization is about commit order, and commit order is what the lock
-//! serializes), reads the chain's current state, decides, and either
+//! takes a clock reading *after* acquiring it (so a caller that blocks on
+//! contention is decided against the reading it actually got the lock at,
+//! never the one it first called in — spec §B.1's linearization is about
+//! commit order, and commit order is what the lock serializes), reads the
+//! chain's current state, decides, and either
 //! commits every entry the decision produces or commits nothing and
 //! returns `Err`. Nothing `.await`s while the guard is live: sink delivery
 //! reserves an [`tokio::sync::mpsc::OwnedPermit`] synchronously (never the
@@ -33,34 +33,17 @@ use std::time::{Duration, SystemTime};
 
 use kaish_types::approval::{
     ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, AttemptState, Condition,
-    Expiring, Grant, GrantTerms, Grounds, LedgerEntry, LedgerRecord, Observation, ObservedResource,
+    CancelReason, Expiring, Grant, GrantTerms, Grounds, LedgerEntry, LedgerRecord, Observation,
+    ObservedResource,
     OperationId, Outcome, Plan, Principal, RequestId, RequestOrigin, RequestState, ResourceRef,
     SessionId, StandingGrant, StandingId, StateClaim, Subscription, SubscriptionId, Token,
 };
-use kaish_types::clock::Instant;
 use tokio::sync::mpsc::OwnedPermit;
 
+use super::clock::Clock;
 use super::config::{LedgerConfig, LedgerSink};
 use super::error::LedgerError;
 use super::resolver::ConditionReport;
-
-/// A monotonic clock is `std::time::Instant`/`kaish_types::clock::Instant`
-/// everywhere; only the *wall-clock* stamp on each entry is worth
-/// substituting in a test, to prove a wall-clock jump cannot move an expiry
-/// decision (spec §A.5). Test-only implementations live in this crate's
-/// `#[cfg(test)]` modules; production code always uses [`SystemWallClock`].
-pub(crate) trait WallClock: Send + Sync {
-    fn now(&self) -> SystemTime;
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct SystemWallClock;
-
-impl WallClock for SystemWallClock {
-    fn now(&self) -> SystemTime {
-        kaish_types::clock::system_now()
-    }
-}
 
 /// One request's full accumulated state — the ledger's authoritative record.
 /// Removed from [`LedgerState::chains`] once it is both closed
@@ -80,11 +63,6 @@ struct Chain {
     token: Option<Token>,
     reject_count: u32,
     void_reason: Option<String>,
-    /// Monotonic — never touched by a wall-clock jump (spec §A.5).
-    request_deadline: Instant,
-    /// Set at grant time, computed from `not_after` minus the wall-clock
-    /// "now" observed at that moment. Also never touched by a later jump.
-    grant_deadline: Option<Instant>,
     attempts: HashMap<AttemptId, AttemptRecord>,
     /// At most one attempt may be `Reserved` against a chain at a time
     /// (spec §A.1's "no other attempt against g was still live").
@@ -103,7 +81,6 @@ struct Chain {
 
 struct AttemptRecord {
     state: AttemptState,
-    reserved_at: Instant,
     outcome: Option<Outcome>,
     /// Sink capacity reserved at redemption time for this attempt's
     /// eventual terminal entry (`Settled`, or attempt-level `Abandoned`) —
@@ -117,7 +94,11 @@ impl Chain {
     fn is_closed(&self) -> bool {
         matches!(
             self.state,
-            RequestState::Denied | RequestState::Expired | RequestState::Voided | RequestState::Abandoned
+            RequestState::Denied
+                | RequestState::Cancelled
+                | RequestState::Expired
+                | RequestState::Voided
+                | RequestState::Abandoned
         ) || (self.state == RequestState::Granted && self.closed_by_settlement)
     }
 }
@@ -155,6 +136,10 @@ struct LedgerState {
     /// grant, a subscription, an unmatched credential (spec §A.7). A record
     /// about a request carries that request's own scope instead.
     scope: ApprovalScope,
+    /// The largest clock reading this ledger has taken, so its view of the
+    /// installed clock is monotone non-decreasing — see
+    /// [`LedgerInner::now`]. `None` until the first transaction.
+    clock_latch: Option<SystemTime>,
     next_seq: u64,
     next_attempt_seq: u64,
     next_standing_seq: u64,
@@ -473,13 +458,18 @@ impl LedgerState {
 /// The whole ledger's shared, lockable core. Never public — `Requester`,
 /// `Approvals`, and `ApproverHandle` (`handles.rs`) are the public surface.
 pub(crate) struct LedgerInner {
-    /// 32-bit epoch minted once at construction (CSPRNG, not wall-clock —
-    /// see `RequestId`'s doc comment for why the id format needs one), so
-    /// ids from two ledger instances in the same process never collide.
+    /// 32-bit epoch minted once at construction (CSPRNG, never derived from
+    /// a clock — see `RequestId`'s doc comment for why the id format needs
+    /// one), so ids from two ledger instances in the same process never
+    /// collide.
     epoch: u32,
     config: LedgerConfig,
     state: Mutex<LedgerState>,
-    wall: Arc<dyn WallClock>,
+    /// The one clock this ledger reads, installed by the embedder (spec
+    /// §A.5). Both what it stamps and what it compares come from here, so a
+    /// record's timestamps and the decisions taken alongside them can never
+    /// disagree about which clock they meant.
+    clock: Arc<dyn Clock>,
     /// Best-effort settlements queued by a dropped or panicking
     /// `AttemptGuard` (`kaish-kernel`'s dispatcher, ledger PR 3 — spec §C.1).
     /// A separate, plain `std::sync::Mutex` from `state`: `Drop` cannot
@@ -509,15 +499,46 @@ impl LedgerInner {
         self.state.lock().expect("approval ledger mutex poisoned")
     }
 
-    /// Sample both clocks. Every call site calls this **after** acquiring
-    /// the lock, at the transaction's actual commit point (review finding
-    /// B1) — a caller that blocks on contention is decided against the
-    /// instant it got the lock, never the instant it first called in.
-    /// Sampling before locking would let a caller be admitted or denied on
-    /// a stale instant, and would stamp `at` with arrival time instead of
-    /// commit time.
-    fn now(&self) -> (Instant, SystemTime) {
-        (Instant::now(), self.wall.now())
+    /// Take this transaction's clock reading, latched.
+    ///
+    /// Every call site calls this **after** acquiring the lock, at the
+    /// transaction's actual commit point (review finding B1) — a caller that
+    /// blocks on contention is decided against the reading it got the lock
+    /// at, never the one it first called in. Reading before locking would
+    /// let a caller be admitted or denied on a stale reading, and would
+    /// stamp `at` with arrival time instead of commit time. Taking `guard`
+    /// is what makes that structural: there is no way to read the clock
+    /// without already holding the section the reading is committed in.
+    ///
+    /// **The latch.** `LedgerState::clock_latch` holds the largest reading
+    /// this ledger has ever seen, and a smaller one is clamped up to it. So
+    /// the ledger's view of its clock is monotone non-decreasing whatever the
+    /// installed clock does: an expired grant stays expired, a stamped entry
+    /// is never older than the entry before it, and `seq` order and `at`
+    /// order never disagree. That is mechanism, not policy — the same kind of
+    /// unconditional guarantee `sequence` gives ordering — and it is why the
+    /// kernel needs no opinion at all about the clock behind it (spec §A.5).
+    fn now(&self, guard: &mut LedgerState) -> SystemTime {
+        let reading = self.clock.now();
+        let latched = match guard.clock_latch {
+            Some(latch) if latch > reading => latch,
+            _ => reading,
+        };
+        guard.clock_latch = Some(latched);
+        latched
+    }
+
+    /// A raw reading from this ledger's installed clock, taking no lock and
+    /// touching no latch.
+    ///
+    /// **For I/O-time metadata only** — today, `Observation::at`, which a
+    /// gate site stamps while running `StateResolver`s outside the critical
+    /// section (spec §B.1). Nothing that *decides* may read the clock this
+    /// way: a decision reads [`Self::now`], which holds the guard and
+    /// latches. The one thing this reading is guaranteed against is coming
+    /// from a different clock than the entry it ends up inside.
+    pub(crate) fn clock_reading(&self) -> SystemTime {
+        self.clock.now()
     }
 
     /// Queue a best-effort settlement for the next drain (spec §C.1). Called
@@ -583,23 +604,25 @@ impl LedgerInner {
     /// finish its own transaction, so emitting here would happen while the
     /// lock is still live. A subscriber re-entering `Approvals` from inside
     /// its own event handler would then deadlock on this same
-    /// non-reentrant `std::sync::Mutex`. This is also the exact boundary
-    /// PR 4's `Approver::decide` hook relies on: nothing in this file may
-    /// emit, await, or call out while `guard` is alive.
+    /// non-reentrant `std::sync::Mutex`. This is also the boundary the
+    /// decision chain relies on: nothing in this file may emit, await, or
+    /// call out while `guard` is alive.
     fn materialize_expiry(
         &self,
         guard: &mut LedgerState,
         id: &RequestId,
-        mono: Instant,
-        wall: SystemTime,
+        now: SystemTime,
     ) -> Result<Vec<LedgerRecord>, LedgerError> {
         let Some(chain) = guard.chains.get(id) else {
             return Ok(Vec::new());
         };
         let what = match chain.state {
-            RequestState::Requested if mono >= chain.request_deadline => Some(Expiring::Request),
-            RequestState::Granted if !chain.closed_by_settlement => match chain.grant_deadline {
-                Some(deadline) if mono >= deadline => Some(Expiring::Grant),
+            RequestState::Requested => match chain.request.deadline {
+                Some(deadline) if now >= deadline => Some(Expiring::Request),
+                _ => None,
+            },
+            RequestState::Granted if !chain.closed_by_settlement => match &chain.grant {
+                Some(grant) if now >= grant.not_after => Some(Expiring::Grant),
                 _ => None,
             },
             _ => None,
@@ -612,7 +635,7 @@ impl LedgerInner {
         let entries = vec![(
             LedgerEntry::Expired {
                 seq,
-                at: wall,
+                at: now,
                 request: id.clone(),
                 what,
             },
@@ -634,25 +657,22 @@ impl LedgerInner {
         origin: RequestOrigin,
     ) -> Result<ApprovalRequest, LedgerError> {
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let (request, committed) = self.post_request_locked(&mut guard, draft, origin, mono, wall)?;
+        let now = self.now(&mut guard);
+        let (request, committed) = self.post_request_locked(&mut guard, draft, origin, now)?;
         drop(guard);
         emit_events(&committed);
         Ok(request)
     }
 
-    /// The shared core of `post_request` and `renew` (review finding S5):
-    /// both need "check state, then post a new `Requested`" under *one*
-    /// held guard — `renew` additionally needs to have already checked its
-    /// old request is `Expired` under the same lock acquisition that
-    /// posts the superseding request, so nothing can race between the two.
+    /// Post a `Requested` entry with the caller's guard already held, so a
+    /// caller that must check state and post in one critical section can do
+    /// both without releasing the lock between them.
     fn post_request_locked(
         &self,
         guard: &mut LedgerState,
         draft: ApprovalRequestDraft,
         origin: RequestOrigin,
-        mono: Instant,
-        wall: SystemTime,
+        now: SystemTime,
     ) -> Result<(ApprovalRequest, Vec<LedgerRecord>), LedgerError> {
         if guard.live_count_total >= self.config.live_capacity {
             return Err(LedgerError::LiveCapacity {
@@ -660,7 +680,6 @@ impl LedgerInner {
             });
         }
         let principal_id = origin.principal.id.clone();
-        let ttl = origin.ttl;
         let per_principal = *guard.live_count_by_principal.get(&principal_id).unwrap_or(&0);
         if per_principal >= self.config.live_capacity_per_principal {
             return Err(LedgerError::LiveCapacityPerPrincipal {
@@ -672,7 +691,7 @@ impl LedgerInner {
 
         let seq = guard.alloc_seq();
         let id = RequestId::new(self.epoch, seq);
-        let request = draft.stamp(id.clone(), wall, origin);
+        let request = draft.stamp(id.clone(), now, origin);
         let chain = Chain {
             request: request.clone(),
             posted_seq: seq,
@@ -681,8 +700,6 @@ impl LedgerInner {
             token: None,
             reject_count: 0,
             void_reason: None,
-            request_deadline: mono + ttl,
-            grant_deadline: None,
             attempts: HashMap::new(),
             live_attempt: None,
             closed_by_settlement: false,
@@ -695,7 +712,7 @@ impl LedgerInner {
         let entries = vec![(
             LedgerEntry::Requested {
                 seq,
-                at: wall,
+                at: now,
                 request: Box::new(request.clone()),
             },
             Some(id),
@@ -711,9 +728,9 @@ impl LedgerInner {
         report: ConditionReport,
     ) -> Result<AttemptId, LedgerError> {
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
-        let (result, committed) = self.redeem_locked(&mut guard, id, by, report, mono, wall);
+        let now = self.now(&mut guard);
+        let mut all_committed = self.materialize_expiry(&mut guard, id, now)?;
+        let (result, committed) = self.redeem_locked(&mut guard, id, by, report, now);
         all_committed.extend(committed);
         drop(guard);
         emit_events(&all_committed);
@@ -728,11 +745,11 @@ impl LedgerInner {
         report: ConditionReport,
     ) -> Result<AttemptId, LedgerError> {
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
+        let now = self.now(&mut guard);
+        let mut all_committed = self.materialize_expiry(&mut guard, id, now)?;
 
         let Some(chain) = guard.chains.get(id) else {
-            all_committed.extend(self.record_unmatched_key_locked(&mut guard, wall));
+            all_committed.extend(self.record_unmatched_key_locked(&mut guard, now));
             drop(guard);
             emit_events(&all_committed);
             return Err(LedgerError::NotAuthorized(id.clone()));
@@ -774,7 +791,7 @@ impl LedgerInner {
             .is_some_and(|t| constant_time_eq(t.reveal(), presented));
 
         if matches_real_token {
-            let (result, committed) = self.redeem_locked(&mut guard, id, by, report, mono, wall);
+            let (result, committed) = self.redeem_locked(&mut guard, id, by, report, now);
             all_committed.extend(committed);
             drop(guard);
             emit_events(&all_committed);
@@ -815,7 +832,7 @@ impl LedgerInner {
         let mut entries = vec![(
             LedgerEntry::TokenRejected {
                 seq: seq1,
-                at: wall,
+                at: now,
                 request: Some(id.clone()),
                 attempts: n,
             },
@@ -832,7 +849,7 @@ impl LedgerInner {
             entries.push((
                 LedgerEntry::Voided {
                     seq: seq2,
-                    at: wall,
+                    at: now,
                     request: id.clone(),
                     reason,
                 },
@@ -853,7 +870,7 @@ impl LedgerInner {
     /// bookkeeping entry, skip recording it rather than failing a rejection
     /// that was never going to succeed anyway — `seq` is only allocated once
     /// capacity is confirmed, so a skip here never opens a gap.
-    fn record_unmatched_key_locked(&self, guard: &mut LedgerState, wall: SystemTime) -> Vec<LedgerRecord> {
+    fn record_unmatched_key_locked(&self, guard: &mut LedgerState, now: SystemTime) -> Vec<LedgerRecord> {
         let Ok(reserved) = guard.reserve_capacity(1, self.config.retained_entries) else {
             return Vec::new();
         };
@@ -861,7 +878,7 @@ impl LedgerInner {
         let entries = vec![(
             LedgerEntry::TokenRejected {
                 seq,
-                at: wall,
+                at: now,
                 request: None,
                 attempts: 0,
             },
@@ -875,8 +892,8 @@ impl LedgerInner {
     /// against nothing.
     pub(crate) fn record_unmatched_key(&self) {
         let mut guard = self.lock();
-        let (_mono, wall) = self.now();
-        let committed = self.record_unmatched_key_locked(&mut guard, wall);
+        let now = self.now(&mut guard);
+        let committed = self.record_unmatched_key_locked(&mut guard, now);
         drop(guard);
         emit_events(&committed);
     }
@@ -928,8 +945,7 @@ impl LedgerInner {
         id: &RequestId,
         by: Principal,
         report: ConditionReport,
-        mono: Instant,
-        wall: SystemTime,
+        now: SystemTime,
     ) -> (Result<AttemptId, LedgerError>, Vec<LedgerRecord>) {
         let Some(chain) = guard.chains.get(id) else {
             return (Err(LedgerError::NotFound(id.clone())), Vec::new());
@@ -966,7 +982,19 @@ impl LedgerInner {
 
         // Preconditions were evaluated outside this lock (spec §B.1); what
         // arrives here is the observation, and this is where it decides.
-        let (observed, refusal) = evaluate_conditions(&grant.conditions, report);
+        let (mut observed, refusal) = evaluate_conditions(&grant.conditions, report);
+
+        // An observation is stamped with a raw reading, outside the lock and
+        // outside the latch, because that is when the resolver actually
+        // looked. Keeping that reading is the point — it is what tells an
+        // auditor how stale the check was by the time it committed. What it
+        // may not do is claim to have happened *after* the entry carrying
+        // it, which a forward clock spike between the observation and this
+        // commit would otherwise produce, so it is clamped into the ledger's
+        // latched view of its own clock (spec §A.5).
+        for observation in &mut observed {
+            observation.at = observation.at.min(now);
+        }
 
         if let Some((condition, found, reason)) = refusal {
             let reserved = match guard.reserve_capacity(2, self.config.retained_entries) {
@@ -977,7 +1005,7 @@ impl LedgerInner {
             let mut entries = vec![(
                 LedgerEntry::Refused {
                     seq: seq1,
-                    at: wall,
+                    at: now,
                     request: id.clone(),
                     condition,
                     found,
@@ -993,7 +1021,7 @@ impl LedgerInner {
             entries.push((
                 LedgerEntry::Voided {
                     seq: seq2,
-                    at: wall,
+                    at: now,
                     request: id.clone(),
                     reason: reason.clone(),
                 },
@@ -1023,7 +1051,7 @@ impl LedgerInner {
         let seq = guard.alloc_seq();
         let entry = LedgerEntry::Redeemed {
             seq,
-            at: wall,
+            at: now,
             request: id.clone(),
             attempt: attempt_id,
             by,
@@ -1035,7 +1063,6 @@ impl LedgerInner {
                 attempt_id,
                 AttemptRecord {
                     state: AttemptState::Reserved,
-                    reserved_at: mono,
                     outcome: None,
                     terminal_sink_permit: terminal_permit,
                 },
@@ -1052,7 +1079,7 @@ impl LedgerInner {
         outcome: Outcome,
     ) -> Result<bool, LedgerError> {
         let mut guard = self.lock();
-        let (_, wall) = self.now();
+        let now = self.now(&mut guard);
         let Some(chain) = guard.chains.get(request_id) else {
             return Err(LedgerError::NotFound(request_id.clone()));
         };
@@ -1095,7 +1122,7 @@ impl LedgerInner {
         let seq = guard.alloc_seq();
         let entry = LedgerEntry::Settled {
             seq,
-            at: wall,
+            at: now,
             request: request_id.clone(),
             attempt: attempt_id,
             outcome: outcome.clone(),
@@ -1121,8 +1148,8 @@ impl LedgerInner {
 
     pub(crate) fn abandon_request(&self, id: &RequestId, reason: String) -> Result<(), LedgerError> {
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
+        let now = self.now(&mut guard);
+        let mut all_committed = self.materialize_expiry(&mut guard, id, now)?;
         let Some(chain) = guard.chains.get(id) else {
             return Err(LedgerError::NotFound(id.clone()));
         };
@@ -1149,7 +1176,7 @@ impl LedgerInner {
         let entries = vec![(
             LedgerEntry::Abandoned {
                 seq,
-                at: wall,
+                at: now,
                 request: id.clone(),
                 attempt: None,
                 reason,
@@ -1166,91 +1193,82 @@ impl LedgerInner {
         Ok(())
     }
 
-    /// Renew an `Expired` request into a fresh `Requested` one (spec §B.5),
-    /// as one critical section (review finding S5 — this used to acquire
-    /// the lock up to three times).
+    /// Close an undecided request from the requesting side (spec §B.5).
     ///
-    /// **Does not yet re-observe transitions before posting** (the rest of
-    /// spec §B.5: "If the world already moved, renewal fails loud rather
-    /// than posting a request whose claims are already false"). The
-    /// original resources — which may carry `StateClaim::Exact` transition
-    /// claims — are cloned verbatim. Re-observation needs a `StateResolver`
-    /// call per resource, which is PR 6's `StateResolver` trait; PR 2 has
-    /// no I/O seam to call one through. A `renew`d request's conditions are
-    /// still re-checked at its own redemption time (the ordinary
-    /// `Refused`/`Voided` path), so a stale claim is caught there — just one
-    /// step later than the spec's stated ideal.
-    pub(crate) fn renew(&self, id: &RequestId) -> Result<RequestId, LedgerError> {
+    /// **This is what replaced expiry.** Nothing times a request out
+    /// (§A.10), so with no cancellation an undecided request holds a live
+    /// slot for the life of the process. Callers: `Requester::cancel`, and
+    /// every teardown path in §B.5's obligations table.
+    ///
+    /// Refused unless the request is still `Requested`: a decision that
+    /// already landed is not undone by the requester losing interest, and a
+    /// terminal request has nothing left to close. An attempt in flight
+    /// refuses too — the operation is running, so "nobody wants this any
+    /// more" is not yet true.
+    pub(crate) fn cancel(
+        &self,
+        id: &RequestId,
+        by: Principal,
+        reason: CancelReason,
+    ) -> Result<ApprovalRequest, LedgerError> {
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
-
-        let Some(chain) = guard.chains.get(id) else {
-            drop(guard);
-            emit_events(&all_committed);
-            return Err(LedgerError::NotFound(id.clone()));
-        };
-        if chain.state != RequestState::Expired {
-            let err = LedgerError::NotRenewable {
-                id: id.clone(),
-                state: chain.state,
-            };
-            drop(guard);
-            emit_events(&all_committed);
-            return Err(err);
-        }
-        let old = chain.request.clone();
-
-        // `ApprovalRequestDraft` is `#[non_exhaustive]` with no external
-        // constructor besides the builder — rebuild through it rather than
-        // a struct literal. `operation`/`risk` were valid on the original
-        // request, so this should never fail; treat it as a bug if it does.
-        let mut builder = kaish_types::approval::ApprovalRequest::builder(old.operation.as_str().to_string())
-            .risk(old.risk)
-            .reason(old.reason)
-            .hint(old.hint)
-            .supersedes(id.clone());
-        for resource in old.resources {
-            builder = builder.resource(resource);
-        }
-        let draft = match builder.build() {
-            Ok(draft) => draft,
-            Err(e) => {
-                debug_assert!(false, "renew: rebuilding a draft from an already-valid request failed: {e}");
-                let err = LedgerError::InvariantViolated(format!("renew: failed to rebuild request {id} as a draft: {e}"));
+        let now = self.now(&mut guard);
+        let mut all_committed = self.materialize_expiry(&mut guard, id, now)?;
+        macro_rules! bail {
+            ($err:expr) => {{
+                let err = $err;
                 drop(guard);
                 emit_events(&all_committed);
                 return Err(err);
-            }
-        };
-
-        // A renewal carries the original's scope, parent, and binding
-        // forward: the thread of intent is the same one, raised again (spec
-        // §B.5). What it does not carry is a decision — the new request
-        // starts at `Requested` and at revision 0.
-        let origin = RequestOrigin::new(
-            old.scope,
-            old.binding,
-            old.principal,
-            old.capture,
-            old.ttl,
-        )
-        .with_parent(old.parent)
-        .with_context(old.context)
-        .with_job_id(old.job_id);
-        let result = self.post_request_locked(&mut guard, draft, origin, mono, wall);
-        drop(guard);
-        match result {
-            Ok((request, committed)) => {
-                all_committed.extend(committed);
-                emit_events(&all_committed);
-                Ok(request.id)
-            }
-            Err(err) => {
-                emit_events(&all_committed);
-                Err(err)
-            }
+            }};
         }
+        let Some(chain) = guard.chains.get(id) else {
+            bail!(LedgerError::NotFound(id.clone()));
+        };
+        // Only an **undecided** request is cancellable (spec §B.3): a
+        // decision that already landed is not undone by the requester
+        // losing interest, and a granted-but-unredeemed chain closes on
+        // its own at the grant's `not_after`.
+        match chain.state {
+            RequestState::Requested => {}
+            RequestState::Granted => bail!(LedgerError::AlreadyDecided(id.clone())),
+            other => bail!(self.terminal_error(id, other, chain.void_reason.clone())),
+        }
+        if chain.live_attempt.is_some() {
+            bail!(LedgerError::AttemptInFlight(id.clone()));
+        }
+        let reserved = match guard.reserve_capacity(1, self.config.retained_entries) {
+            Ok(reserved) => reserved,
+            Err(err) => bail!(err),
+        };
+        let seq = guard.alloc_seq();
+        let entries = vec![(
+            LedgerEntry::Cancelled {
+                seq,
+                at: now,
+                request: id.clone(),
+                by,
+                reason,
+            },
+            Some(id.clone()),
+        )];
+        all_committed.extend(guard.commit(entries, None, reserved));
+        let request = match guard.chains.get_mut(id) {
+            Some(chain) => {
+                chain.state = RequestState::Cancelled;
+                chain.request.clone()
+            }
+            // Unreachable: the chain was present a few lines up and the
+            // lock has not been released. Reported rather than asserted —
+            // a missing chain here means the entry landed against nothing.
+            None => bail!(LedgerError::InvariantViolated(format!(
+                "cancel: request {id} vanished from the live index inside its own transaction"
+            ))),
+        };
+        guard.mark_closed(id);
+        drop(guard);
+        emit_events(&all_committed);
+        Ok(request)
     }
 
     /// Refuse an authority action aimed at a request outside a scoped
@@ -1325,8 +1343,8 @@ impl LedgerInner {
     ) -> Result<Grant, LedgerError> {
         // Drawn before the lock is taken: `getrandom::fill` is synchronous
         // but can block on entropy starvation, and the ledger lock must
-        // never gate on I/O — even non-async I/O — the way it never gates
-        // on `Approver::decide` (spec §B.1, §C.2). A grant that turns out
+        // never gate on I/O — even non-async I/O — the way it never calls
+        // an embedder's hook (spec §B.1, §C.2). A grant that turns out
         // to be invalid (already decided, terminal, widened) has drawn
         // entropy for nothing; that is a cheap, inconsequential cost next
         // to the alternative of blocking every other transaction on this
@@ -1335,14 +1353,14 @@ impl LedgerInner {
             generate_credential().map_err(|e| LedgerError::CredentialUnavailable(e.to_string()))?,
         );
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
+        let now = self.now(&mut guard);
         // `materialize_expiry` hands back the entries it committed so this
         // caller can trace them after dropping the lock. Discarding them
         // loses the `Expired` event for a request that expired on the way
         // in — every ledger append gets a tracing event (spec §G), and an
         // error return is no exception. `deny` already threads them; this
         // does too.
-        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
+        let mut all_committed = self.materialize_expiry(&mut guard, id, now)?;
         macro_rules! bail {
             ($err:expr) => {{
                 let err = $err;
@@ -1382,15 +1400,13 @@ impl LedgerInner {
             Err(err) => bail!(err),
         };
 
-        let not_after = terms.not_after;
-        let grant = Grant::from_terms(id.clone(), decided_by, grounds, terms, token.token_prefix(), wall);
-        let remaining = not_after.duration_since(wall).unwrap_or(Duration::ZERO);
+        let grant = Grant::from_terms(id.clone(), decided_by, grounds, terms, token.token_prefix(), now);
 
         let seq = guard.alloc_seq();
         let entries = vec![(
             LedgerEntry::Granted {
                 seq,
-                at: wall,
+                at: now,
                 grant: grant.clone(),
             },
             Some(id.clone()),
@@ -1399,7 +1415,6 @@ impl LedgerInner {
         if let Some(chain) = guard.chains.get_mut(id) {
             chain.grant = Some(grant.clone());
             chain.state = RequestState::Granted;
-            chain.grant_deadline = Some(mono + remaining);
             chain.token = Some(token);
         }
         drop(guard);
@@ -1409,8 +1424,8 @@ impl LedgerInner {
 
     pub(crate) fn deny(&self, id: &RequestId, reason: String, by: Principal) -> Result<(), LedgerError> {
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
+        let now = self.now(&mut guard);
+        let mut all_committed = self.materialize_expiry(&mut guard, id, now)?;
         let Some(chain) = guard.chains.get(id) else {
             drop(guard);
             emit_events(&all_committed);
@@ -1442,7 +1457,7 @@ impl LedgerInner {
         let entries = vec![(
             LedgerEntry::Denied {
                 seq,
-                at: wall,
+                at: now,
                 request: id.clone(),
                 by,
                 reason,
@@ -1461,7 +1476,7 @@ impl LedgerInner {
 
     pub(crate) fn grant_standing(&self, mut standing: StandingGrant) -> Result<StandingId, LedgerError> {
         let mut guard = self.lock();
-        let (_, wall) = self.now();
+        let now = self.now(&mut guard);
         let reserved = guard.reserve_capacity(1, self.config.retained_entries)?;
         let raw = guard.next_standing_seq;
         guard.next_standing_seq += 1;
@@ -1472,7 +1487,7 @@ impl LedgerInner {
         let entries = vec![(
             LedgerEntry::StandingIssued {
                 seq,
-                at: wall,
+                at: now,
                 grant: standing,
             },
             None,
@@ -1514,8 +1529,8 @@ impl LedgerInner {
         // commits is a time inside the critical section rather than one
         // read before an arbitrary wait for it.
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
+        let now = self.now(&mut guard);
+        let mut all_committed = self.materialize_expiry(&mut guard, id, now)?;
         macro_rules! bail {
             ($err:expr) => {{
                 let err = $err;
@@ -1559,7 +1574,7 @@ impl LedgerInner {
             });
             // Exhaustion appends nothing special — the rule simply stops
             // matching and the request falls through (spec §C.4).
-            !exhausted && super::standing::matches(rule, &request, wall)
+            !exhausted && super::standing::matches(rule, &request, now)
         });
         let Some(winner) = winner else {
             no_match!();
@@ -1572,8 +1587,8 @@ impl LedgerInner {
             bail!(err);
         }
         let not_after = match rule.expires_at {
-            Some(rule_expiry) => (wall + grant_ttl).min(rule_expiry),
-            None => wall + grant_ttl,
+            Some(rule_expiry) => (now + grant_ttl).min(rule_expiry),
+            None => now + grant_ttl,
         };
 
         // Commit-or-nothing: the use is charged only once capacity for the
@@ -1596,15 +1611,13 @@ impl LedgerInner {
             Grounds::Standing { grant: winner },
             terms,
             token.token_prefix(),
-            wall,
+            now,
         );
-        let remaining = not_after.duration_since(wall).unwrap_or(Duration::ZERO);
-
         let seq = guard.alloc_seq();
         let entries = vec![(
             LedgerEntry::Granted {
                 seq,
-                at: wall,
+                at: now,
                 grant: grant.clone(),
             },
             Some(id.clone()),
@@ -1613,7 +1626,6 @@ impl LedgerInner {
         if let Some(chain) = guard.chains.get_mut(id) {
             chain.grant = Some(grant.clone());
             chain.state = RequestState::Granted;
-            chain.grant_deadline = Some(mono + remaining);
             chain.token = Some(token);
         }
         drop(guard);
@@ -1630,7 +1642,7 @@ impl LedgerInner {
 
     pub(crate) fn revoke_standing(&self, id: StandingId, by: Principal, reason: String) -> Result<(), LedgerError> {
         let mut guard = self.lock();
-        let (_, wall) = self.now();
+        let now = self.now(&mut guard);
         if !guard.standing.contains_key(&id) {
             return Err(LedgerError::StandingNotFound(id));
         }
@@ -1643,7 +1655,7 @@ impl LedgerInner {
         let entries = vec![(
             LedgerEntry::StandingRevoked {
                 seq,
-                at: wall,
+                at: now,
                 id,
                 by,
                 reason,
@@ -1664,7 +1676,7 @@ impl LedgerInner {
         mut subscription: Subscription,
     ) -> Result<SubscriptionId, LedgerError> {
         let mut guard = self.lock();
-        let (_, wall) = self.now();
+        let now = self.now(&mut guard);
         let reserved = guard.reserve_capacity(1, self.config.retained_entries)?;
         let raw = guard.next_subscription_seq;
         guard.next_subscription_seq += 1;
@@ -1675,7 +1687,7 @@ impl LedgerInner {
         let entries = vec![(
             LedgerEntry::Subscribed {
                 seq,
-                at: wall,
+                at: now,
                 subscription,
             },
             None,
@@ -1697,7 +1709,7 @@ impl LedgerInner {
         reason: String,
     ) -> Result<(), LedgerError> {
         let mut guard = self.lock();
-        let (_, wall) = self.now();
+        let now = self.now(&mut guard);
         if !guard.subscriptions.contains_key(&id) {
             return Err(LedgerError::SubscriptionNotFound(id));
         }
@@ -1707,7 +1719,7 @@ impl LedgerInner {
         let entries = vec![(
             LedgerEntry::Unsubscribed {
                 seq,
-                at: wall,
+                at: now,
                 id,
                 by,
                 reason,
@@ -1759,13 +1771,13 @@ impl LedgerInner {
         plan: Option<Plan>,
     ) -> Result<(), LedgerError> {
         let mut guard = self.lock();
-        let (_, wall) = self.now();
+        let now = self.now(&mut guard);
         let reserved = guard.reserve_capacity(1, self.config.retained_entries)?;
         let seq = guard.alloc_seq();
         let entries = vec![(
             LedgerEntry::Observed {
                 seq,
-                at: wall,
+                at: now,
                 operation,
                 by,
                 resources,
@@ -1793,14 +1805,14 @@ impl LedgerInner {
     /// a bearer secret either way).
     pub(crate) fn token_for(&self, id: &RequestId, by: Principal) -> Option<Token> {
         let mut guard = self.lock();
-        let (_, wall) = self.now();
+        let now = self.now(&mut guard);
         let token = guard.chains.get(id)?.token.clone()?;
         let reserved = guard.reserve_capacity(1, self.config.retained_entries).ok()?;
         let seq = guard.alloc_seq();
         let entries = vec![(
             LedgerEntry::KeyRetrieved {
                 seq,
-                at: wall,
+                at: now,
                 request: id.clone(),
                 by,
             },
@@ -1812,15 +1824,19 @@ impl LedgerInner {
         Some(token)
     }
 
-    // ── Recovery sweep ───────────────────────────────────────────────
+    // ── The sweep ────────────────────────────────────────────────────
 
-    /// Materializes due `Expired` entries and closes `Reserved` attempts
-    /// that have sat unreported past `LedgerConfig::attempt_stale_after` as
-    /// `Abandoned` (spec §D.4's recovery sweep — see `attempt_stale_after`'s
-    /// doc comment for why PR 2 needs a staleness bound at all). Also drains
-    /// the `AttemptGuard` outbox (spec §C.1, PR 3) — the sweep tick is one
-    /// of the two places that drain is documented to happen, the other
-    /// being the ledger's transaction wrappers in `handles.rs`.
+    /// Drain the [`AttemptGuard`](super::AttemptGuard) outbox and
+    /// materialize any deadline that has passed — a grant's `not_after`, or
+    /// the optional deadline an embedder set on a request (spec §A.10).
+    ///
+    /// The sweep closes **no** attempt on its own. A dropped attempt is
+    /// reported by its guard's outbox, which knows the executor went away;
+    /// inferring the same fact from elapsed time would be guessing at
+    /// something the ledger is already told (spec §A.10). A `Reserved`
+    /// attempt whose guard never ran at all — the process died mid-attempt
+    /// — is left for restart-time recovery, which needs a replayable sink
+    /// and is deferred (spec §D.4).
     pub(crate) fn sweep(&self) {
         self.drain_outbox();
         let ids: Vec<RequestId> = {
@@ -1830,66 +1846,13 @@ impl LedgerInner {
         for id in ids {
             let committed = {
                 let mut guard = self.lock();
-                let (mono, wall) = self.now();
-                self.materialize_expiry(&mut guard, &id, mono, wall)
+                let now = self.now(&mut guard);
+                self.materialize_expiry(&mut guard, &id, now)
             };
             if let Ok(committed) = committed {
                 emit_events(&committed);
             }
-            self.sweep_stale_attempt(&id);
         }
-    }
-
-    fn sweep_stale_attempt(&self, id: &RequestId) {
-        let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let Some(chain) = guard.chains.get(id) else { return };
-        let Some(attempt_id) = chain.live_attempt else { return };
-        let Some(record) = chain.attempts.get(&attempt_id) else { return };
-        if !matches!(record.state, AttemptState::Reserved) {
-            return;
-        }
-        if mono.duration_since(record.reserved_at) < self.config.attempt_stale_after {
-            return;
-        }
-        // The chain may already have closed a different way (a 5th bad
-        // credential, expiry) while this attempt sat `Reserved` — same
-        // guard as `settle()`, same reason (review finding B2).
-        let was_already_closed = chain.is_closed();
-
-        // A terminal entry (this is one — attempt-level `Abandoned`) is
-        // never capacity-refusable (review finding B3); the room was
-        // banked when this attempt was reserved.
-        let permit = guard
-            .chains
-            .get_mut(id)
-            .and_then(|c| c.attempts.get_mut(&attempt_id))
-            .and_then(|r| r.terminal_sink_permit.take());
-        let seq = guard.alloc_seq();
-        let reason = "recovery sweep: reservation exceeded the staleness bound with no report".to_string();
-        let entry = LedgerEntry::Abandoned {
-            seq,
-            at: wall,
-            request: id.clone(),
-            attempt: Some(attempt_id),
-            reason,
-        };
-        let committed_entry = guard.commit_terminal(entry, id.clone(), permit);
-        if let Some(chain) = guard.chains.get_mut(id) {
-            if let Some(record) = chain.attempts.get_mut(&attempt_id) {
-                record.state = AttemptState::Abandoned;
-            }
-            chain.live_attempt = None;
-            // An abandoned attempt's effects are unknown, same as
-            // `Outcome::Unknown` — the chain closes rather than staying
-            // open for a retry against a grant nobody can vouch for.
-            chain.closed_by_settlement = true;
-        }
-        if !was_already_closed {
-            guard.mark_closed(id);
-        }
-        drop(guard);
-        emit_events(&[committed_entry]);
     }
 
     // ── Read side (Approvals) ────────────────────────────────────────
@@ -1996,8 +1959,8 @@ impl LedgerInner {
     /// `materialize_expiry`'s doc comment for the write-side contrast.
     fn best_effort_materialize(&self, id: &RequestId) {
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let result = self.materialize_expiry(&mut guard, id, mono, wall);
+        let now = self.now(&mut guard);
+        let result = self.materialize_expiry(&mut guard, id, now);
         drop(guard);
         if let Ok(committed) = result {
             emit_events(&committed);
@@ -2105,22 +2068,6 @@ fn evaluate_conditions(
     (observed, None)
 }
 
-/// Why `report` refuses `conditions`, if it does — the same decision
-/// [`evaluate_conditions`] makes at redemption, exposed for the one caller
-/// that has to make it *before* anything is posted: renewal (spec §B.5, "if
-/// the world already moved, renewal fails loud rather than posting a request
-/// whose claims are already false").
-///
-/// Shares the redemption path's implementation deliberately. A renewal that
-/// judged staleness by its own rules would let a request through that its own
-/// redemption then refuses, which is the drift this indirection exists to
-/// prevent.
-pub(crate) fn condition_conflict(conditions: &[Condition], report: ConditionReport) -> Option<String> {
-    evaluate_conditions(conditions, report)
-        .1
-        .map(|(_, _, reason)| reason)
-}
-
 /// Constant-time string equality (review NIT — defense in depth on
 /// credential comparison; see its call site for the threat-model caveat).
 fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -2196,6 +2143,9 @@ fn emit_events(records: &[LedgerRecord]) {
             LedgerEntry::Unsubscribed { id, .. } => {
                 tracing::info!(subscription_id = %id, "approval.unsubscribed");
             }
+            LedgerEntry::Cancelled { request, by, reason, .. } => {
+                tracing::info!(request_id = %request, cancelled_by = %by.id, reason = %reason, "approval.cancelled");
+            }
             LedgerEntry::TokenRejected { request, attempts, .. } => {
                 tracing::warn!(request_id = ?request.as_ref().map(ToString::to_string), attempts = attempts, "approval.token_rejected");
             }
@@ -2235,7 +2185,7 @@ pub(crate) fn build_inner(
     config: LedgerConfig,
     scope: ApprovalScope,
     sink: Option<Arc<dyn LedgerSink>>,
-    wall: Arc<dyn WallClock>,
+    clock: Arc<dyn Clock>,
 ) -> Result<Arc<LedgerInner>, getrandom::Error> {
     let epoch = generate_epoch()?;
     let sink_failed = Arc::new(AtomicBool::new(false));
@@ -2269,6 +2219,7 @@ pub(crate) fn build_inner(
 
     let state = LedgerState {
         scope,
+        clock_latch: None,
         next_seq: 1,
         next_attempt_seq: 1,
         next_standing_seq: 1,
@@ -2290,7 +2241,7 @@ pub(crate) fn build_inner(
         epoch,
         config,
         state: Mutex::new(state),
-        wall,
+        clock,
         outbox: Mutex::new(Vec::new()),
         any_subscriptions: AtomicBool::new(false),
     }))
@@ -2305,26 +2256,40 @@ mod tests {
         PrincipalKind, Resource, RiskClass,
     };
 
+    use super::super::clock::SystemClock;
     use super::*;
 
-    /// A wall clock a test can jump forward or backward independently of
-    /// the real monotonic clock, to prove expiry math never reads it (spec
-    /// §A.5). There is no way to fake `kaish_types::clock::Instant` itself
-    /// (no public constructor) — nor is one needed, since the property
-    /// under test is precisely that expiry decisions never consult this
-    /// clock at all.
-    struct FakeWallClock {
+    /// A clock a test drives by hand, offset from a fixed base so a test
+    /// states exactly which readings the ledger sees and in what order. The
+    /// offset is signed on purpose: a reading that goes *backwards* is what
+    /// the latch exists for.
+    struct TestClock {
         offset_secs: AtomicI64,
     }
 
-    impl WallClock for FakeWallClock {
+    impl TestClock {
+        /// A base far enough above the epoch that a negative offset is still
+        /// a legal reading, and fixed so a test's arithmetic is exact.
+        const BASE: SystemTime = SystemTime::UNIX_EPOCH;
+
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                offset_secs: AtomicI64::new(1_000_000),
+            })
+        }
+
+        fn set(&self, offset_secs: i64) {
+            self.offset_secs.store(offset_secs, Ordering::Relaxed);
+        }
+    }
+
+    impl Clock for TestClock {
         fn now(&self) -> SystemTime {
-            let base = kaish_types::clock::system_now();
             let offset = self.offset_secs.load(Ordering::Relaxed);
             if offset >= 0 {
-                base + Duration::from_secs(offset as u64)
+                Self::BASE + Duration::from_secs(offset as u64)
             } else {
-                base - Duration::from_secs((-offset) as u64)
+                Self::BASE - Duration::from_secs(offset.unsigned_abs())
             }
         }
     }
@@ -2347,9 +2312,7 @@ mod tests {
             scope(),
             PlanBinding::new(PlanDigest::new("test"), "/", scope()),
             principal.clone(),
-            Capture::DirectExecution,
-            Duration::from_secs(60),
-        )
+            Capture::DirectExecution)
     }
 
     #[allow(clippy::unwrap_used)]
@@ -2378,7 +2341,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, scope(), None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), None, Arc::new(SystemClock)).unwrap();
         let principal = agent("agent-1");
         // Occupies the ring's one slot with a still-live (Requested, no
         // decision yet) chain — nothing is evictable, so any further
@@ -2398,11 +2361,13 @@ mod tests {
         assert_eq!(reject_count, 0, "a capacity failure must not silently advance the rejection counter");
     }
 
+    /// Spec §A.5: a bound is compared against a reading from the clock the
+    /// embedder installed, at the moment somebody acts on the chain.
+    /// `not_after` and the reading are expressed in the same clock's terms,
+    /// so the comparison needs no knowledge of what that clock tracks.
     #[test]
-    fn wall_clock_jumps_neither_extend_nor_void_a_grant() {
-        let clock = Arc::new(FakeWallClock {
-            offset_secs: AtomicI64::new(0),
-        });
+    fn a_grant_expires_when_a_reading_passes_its_not_after() {
+        let clock = TestClock::new();
         #[allow(clippy::unwrap_used)]
         let inner = build_inner(LedgerConfig::default(), scope(), None, clock.clone()).unwrap();
         let principal = agent("agent-1");
@@ -2414,19 +2379,180 @@ mod tests {
             .unwrap();
         assert_eq!(inner.state(&req.id, None), Some(RequestState::Granted));
 
-        clock.offset_secs.store(100_000_000, Ordering::Relaxed);
+        clock.set(1_000_299);
         assert_eq!(
             inner.state(&req.id, None),
             Some(RequestState::Granted),
-            "a forward wall-clock jump must not expire the grant"
+            "the grant is still inside its own not_after"
         );
 
-        clock.offset_secs.store(-100_000_000, Ordering::Relaxed);
+        clock.set(1_000_301);
         assert_eq!(
             inner.state(&req.id, None),
-            Some(RequestState::Granted),
-            "a backward wall-clock jump must not extend or void the grant either"
+            Some(RequestState::Expired),
+            "past not_after, the next observation materializes the expiry"
         );
+    }
+
+    /// §A.5's latch: the ledger's view of its clock is monotone
+    /// non-decreasing, so a reading the ledger has already taken cannot be
+    /// walked back for a chain nobody had observed yet.
+    ///
+    /// The sharp case, and the only one the latch is load-bearing for: the
+    /// clock passes a grant's `not_after` while nothing looks at *that*
+    /// chain, some other transaction takes the reading, and then the clock
+    /// steps back. Once an expiry has actually materialized the record holds
+    /// it — the chain is terminal and no reading can move it — so it is the
+    /// un-observed window this has to cover.
+    #[test]
+    fn a_reading_below_the_latch_cannot_un_expire_an_unobserved_grant() {
+        let clock = TestClock::new();
+        #[allow(clippy::unwrap_used)]
+        let inner = build_inner(LedgerConfig::default(), scope(), None, clock.clone()).unwrap();
+        let principal = agent("agent-1");
+        let req = post(&inner, &principal);
+        let not_after = clock.now() + Duration::from_secs(300);
+        #[allow(clippy::unwrap_used)]
+        inner
+            .grant(&req.id, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
+            .unwrap();
+
+        // The clock passes `not_after`, and an unrelated transaction takes
+        // that reading — but nothing observes this chain, so no `Expired`
+        // entry has been written for it yet.
+        clock.set(1_000_301);
+        post(&inner, &principal);
+        assert_eq!(
+            inner.chain(&req.id, None).map(|c| c.state),
+            Some(RequestState::Expired),
+            "sanity: observing it now is what materializes the expiry"
+        );
+
+        // Same shape again, this time reading the chain only *after* the
+        // clock has stepped back below `not_after`.
+        let second = post(&inner, &principal);
+        let not_after = clock.now() + Duration::from_secs(300);
+        #[allow(clippy::unwrap_used)]
+        inner
+            .grant(&second.id, GrantTerms::once_for(&second, not_after), principal.clone(), Grounds::Embedder)
+            .unwrap();
+        clock.set(1_000_700);
+        post(&inner, &principal); // takes the high reading, latches it
+        clock.set(1_000_400); // back below `second`'s not_after
+        assert_eq!(
+            inner.state(&second.id, None),
+            Some(RequestState::Expired),
+            "a reading below the latch must not un-expire a grant the ledger had already passed"
+        );
+        let err = inner
+            .redeem(&second.id, principal, ConditionReport::none())
+            .unwrap_err();
+        assert!(
+            matches!(err, LedgerError::Terminal { state: RequestState::Expired, .. }),
+            "and the expired chain must still refuse a redemption, got {err:?}"
+        );
+    }
+
+    /// The other half of the latch: stamps never regress, so `seq` order and
+    /// `at` order can never disagree in the record an auditor reads.
+    #[test]
+    fn entry_stamps_never_regress_when_a_reading_does() {
+        let clock = TestClock::new();
+        #[allow(clippy::unwrap_used)]
+        let inner = build_inner(LedgerConfig::default(), scope(), None, clock.clone()).unwrap();
+        let principal = agent("agent-1");
+        post(&inner, &principal);
+        clock.set(1_000_050);
+        post(&inner, &principal);
+        // Backwards, twice, by different amounts.
+        clock.set(900_000);
+        post(&inner, &principal);
+        clock.set(-1_000);
+        post(&inner, &principal);
+
+        let stamps: Vec<SystemTime> = inner
+            .log(0, None)
+            .into_iter()
+            .map(|record| record.at)
+            .collect();
+        assert_eq!(stamps.len(), 4);
+        assert!(
+            stamps.windows(2).all(|pair| pair[1] >= pair[0]),
+            "entry stamps must be monotone non-decreasing, got {stamps:?}"
+        );
+        let latched = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_050);
+        assert_eq!(
+            stamps[2], latched,
+            "a reading below the latch is clamped up to the latch, not recorded as-is"
+        );
+        assert_eq!(stamps[3], latched);
+    }
+
+    /// The latch is a floor, not a freeze: a reading above it still moves
+    /// the ledger's view forward.
+    #[test]
+    fn a_reading_above_the_latch_advances_it() {
+        let clock = TestClock::new();
+        #[allow(clippy::unwrap_used)]
+        let inner = build_inner(LedgerConfig::default(), scope(), None, clock.clone()).unwrap();
+        let principal = agent("agent-1");
+        post(&inner, &principal);
+        clock.set(500_000);
+        post(&inner, &principal);
+        clock.set(1_000_400);
+        post(&inner, &principal);
+
+        let stamps: Vec<SystemTime> = inner
+            .log(0, None)
+            .into_iter()
+            .map(|record| record.at)
+            .collect();
+        assert_eq!(stamps[2], SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_400));
+    }
+
+    /// Spec §A.10: there is no request TTL. A request nobody decides stays
+    /// `Requested` however far the clock runs — this walks it a century
+    /// forward, a great deal further than the 60s lease that used to close
+    /// it.
+    #[test]
+    fn an_undecided_request_never_expires_on_its_own() {
+        let clock = TestClock::new();
+        #[allow(clippy::unwrap_used)]
+        let inner = build_inner(LedgerConfig::default(), scope(), None, clock.clone()).unwrap();
+        let principal = agent("agent-1");
+        let req = post(&inner, &principal);
+
+        clock.set(3_155_760_000);
+        inner.sweep();
+        assert_eq!(
+            inner.state(&req.id, None),
+            Some(RequestState::Requested),
+            "nothing times a request out — it lives until decided or cancelled"
+        );
+    }
+
+    /// Spec §A.10, the other half: an embedder that *does* want a deadline
+    /// sets one, and it is compared when the request is observed rather
+    /// than enforced on a timer.
+    #[test]
+    fn an_embedder_set_deadline_expires_when_it_is_observed() {
+        let clock = TestClock::new();
+        #[allow(clippy::unwrap_used)]
+        let inner = build_inner(LedgerConfig::default(), scope(), None, clock.clone()).unwrap();
+        let principal = agent("agent-1");
+        let deadline = clock.now() + Duration::from_secs(60);
+        #[allow(clippy::unwrap_used)]
+        let req = inner
+            .post_request(
+                draft("fs.remove"),
+                origin(&principal).with_deadline(Some(deadline)),
+            )
+            .unwrap();
+        assert_eq!(req.deadline, Some(deadline));
+        assert_eq!(inner.state(&req.id, None), Some(RequestState::Requested));
+
+        clock.set(1_000_061);
+        assert_eq!(inner.state(&req.id, None), Some(RequestState::Expired));
     }
 
     /// Regression test for review finding B1: every commit-point clock
@@ -2439,7 +2565,7 @@ mod tests {
     #[test]
     fn grant_decided_at_is_sampled_after_acquiring_the_lock_not_before() {
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(LedgerConfig::default(), scope(), None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(LedgerConfig::default(), scope(), None, Arc::new(SystemClock)).unwrap();
         let principal = agent("agent-1");
         let req = post(&inner, &principal);
 
@@ -2483,7 +2609,7 @@ mod tests {
     #[should_panic(expected = "second successful settlement")]
     fn second_successful_settlement_against_one_grant_is_invariant_violated() {
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(LedgerConfig::default(), scope(), None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(LedgerConfig::default(), scope(), None, Arc::new(SystemClock)).unwrap();
         let principal = agent("agent-1");
         let req = post(&inner, &principal);
         let not_after = SystemTime::now() + Duration::from_secs(300);
@@ -2518,7 +2644,7 @@ mod tests {
     #[should_panic(expected = "never reserved against this request")]
     fn settle_with_an_unreserved_attempt_id_is_invariant_violated() {
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(LedgerConfig::default(), scope(), None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(LedgerConfig::default(), scope(), None, Arc::new(SystemClock)).unwrap();
         let principal = agent("agent-1");
         let req = post(&inner, &principal);
         let not_after = SystemTime::now() + Duration::from_secs(300);
@@ -2528,42 +2654,6 @@ mod tests {
             .unwrap();
         let bogus_attempt = AttemptId::new(999_999);
         let _ = inner.settle(&req.id, bogus_attempt, Outcome::Exit(0));
-    }
-
-    #[test]
-    fn recovery_sweep_closes_an_unreported_reservation_as_abandoned() {
-        let config = LedgerConfig {
-            attempt_stale_after: Duration::from_millis(0),
-            ..Default::default()
-        };
-        #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, scope(), None, Arc::new(SystemWallClock)).unwrap();
-        let principal = agent("agent-1");
-        let req = post(&inner, &principal);
-        let not_after = SystemTime::now() + Duration::from_secs(300);
-        #[allow(clippy::unwrap_used)]
-        inner
-            .grant(&req.id, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
-            .unwrap();
-        #[allow(clippy::unwrap_used)]
-        let attempt = inner.redeem(&req.id, principal.clone(), ConditionReport::none()).unwrap();
-
-        // Let real monotonic time actually advance past the (zero) bound.
-        std::thread::sleep(Duration::from_millis(5));
-        inner.sweep();
-
-        #[allow(clippy::unwrap_used)]
-        let chain = inner.chain(&req.id, None).unwrap();
-        #[allow(clippy::unwrap_used)]
-        let record = chain.attempts.iter().find(|a| a.attempt == attempt).unwrap();
-        assert!(matches!(record.state, AttemptState::Abandoned));
-
-        // The chain closed as a side effect — a fresh redemption reports
-        // "already settled" (spec §B.2: an abandoned attempt's effects are
-        // unknown, same as `Outcome::Unknown`) rather than reserving a new
-        // attempt against a grant nobody can vouch for.
-        let err = inner.redeem(&req.id, principal, ConditionReport::none()).unwrap_err();
-        assert!(matches!(err, LedgerError::AlreadySettled { .. }));
     }
 
     /// Regression test for a review finding: `settle()` must not run
@@ -2581,7 +2671,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, scope(), None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), None, Arc::new(SystemClock)).unwrap();
         let principal = agent("agent-1");
 
         // Chain A occupies the ledger's one live slot.
@@ -2623,59 +2713,6 @@ mod tests {
         );
     }
 
-    /// Regression test for review finding B2: the recovery sweep must use
-    /// the same `was_already_closed` guard `settle()` does. Reproduces the
-    /// review's exact 4-step sequence: reserve an attempt, void the chain
-    /// via 5 bad keys (closing it once), let the sweep find the
-    /// now-orphaned stale attempt (which must NOT close the chain again),
-    /// then prove the live-capacity gate still holds.
-    #[test]
-    fn sweep_after_a_different_close_does_not_admit_extra_live_requests_past_capacity() {
-        let config = LedgerConfig {
-            live_capacity: 1,
-            attempt_stale_after: Duration::from_millis(0),
-            ..Default::default()
-        };
-        #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, scope(), None, Arc::new(SystemWallClock)).unwrap();
-        let principal = agent("agent-1");
-
-        let req_a = post(&inner, &principal);
-        let not_after = SystemTime::now() + Duration::from_secs(300);
-        #[allow(clippy::unwrap_used)]
-        inner
-            .grant(&req_a.id, GrantTerms::once_for(&req_a, not_after), principal.clone(), Grounds::Embedder)
-            .unwrap();
-        // Step 1: reserve an attempt.
-        #[allow(clippy::unwrap_used)]
-        let _attempt = inner.redeem(&req_a.id, principal.clone(), ConditionReport::none()).unwrap();
-        // Step 2: void via 5 bad keys while the attempt is still Reserved
-        // — closes the chain once, frees the live slot.
-        for _ in 0..5 {
-            let _ = inner.redeem_with_token(&req_a.id, "wrong", principal.clone(), ConditionReport::none());
-        }
-        assert_eq!(inner.state(&req_a.id, None), Some(RequestState::Voided));
-
-        // The freed slot admits chain B, which stays live.
-        let _req_b = post(&inner, &principal);
-
-        // Step 3: the sweep finds the now-orphaned stale attempt against
-        // already-voided chain A and closes IT too — this must not call
-        // mark_closed a second time.
-        std::thread::sleep(Duration::from_millis(5));
-        inner.sweep();
-
-        // Step 4: the capacity gate must still hold — chain B is the only
-        // genuinely live request.
-        let err = inner
-            .post_request(draft("fs.remove"), origin(&principal))
-            .unwrap_err();
-        assert!(
-            matches!(err, LedgerError::LiveCapacity { limit: 1 }),
-            "chain B is still live — the capacity gate must still refuse a third request, got {err:?}"
-        );
-    }
-
     /// Regression test for review finding B3: a terminal entry (`Settled`)
     /// must land even when the ring is otherwise completely full — capacity
     /// for it (and for `Redeemed` itself) is banked together, at redemption
@@ -2694,7 +2731,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, scope(), None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), None, Arc::new(SystemClock)).unwrap();
         let principal = agent("agent-1");
 
         let req = post(&inner, &principal); // 1: Requested
@@ -2754,7 +2791,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, scope(), Some(sink), Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), Some(sink), Arc::new(SystemClock)).unwrap();
         let principal = agent("agent-1");
 
         let req = post(&inner, &principal);
@@ -2781,7 +2818,7 @@ mod tests {
     #[test]
     fn grant_rejects_widened_conditions_but_allows_narrower_or_added_ones() {
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(LedgerConfig::default(), scope(), None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(LedgerConfig::default(), scope(), None, Arc::new(SystemClock)).unwrap();
         let principal = agent("agent-1");
         let not_after = SystemTime::now() + Duration::from_secs(300);
 
@@ -2858,7 +2895,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, scope(), None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), None, Arc::new(SystemClock)).unwrap();
         let principal = agent("agent-1");
         let req = post(&inner, &principal); // 1: Requested
         let not_after = SystemTime::now() + Duration::from_secs(300);
@@ -2901,7 +2938,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, scope(), Some(sink), Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), Some(sink), Arc::new(SystemClock)).unwrap();
         let principal = agent("agent-1");
 
         // Post and immediately deny one request, closing its chain — its
@@ -2959,7 +2996,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, scope(), Some(Arc::clone(&sink) as Arc<dyn LedgerSink>), Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), Some(Arc::clone(&sink) as Arc<dyn LedgerSink>), Arc::new(SystemClock)).unwrap();
         let principal = agent("agent-1");
 
         // Three posts land in the ring and the sink queue before the drain
@@ -3010,7 +3047,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, scope(), None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), None, Arc::new(SystemClock)).unwrap();
         let principal = agent("agent-1");
 
         // A chain that stays live (never decided) for the whole test.

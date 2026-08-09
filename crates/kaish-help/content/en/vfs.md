@@ -92,7 +92,7 @@ rm precious.txt &                     # gates in the background
 cat /v/approvals/pending              # every request, across every job
 approvals list                        # the same, as a table
 approvals show req_9c1a4f2e_42        # one request, its decision, its attempts
-approvals renew req_9c1a4f2e_42       # re-raise it after it expires (60s)
+approvals cancel req_9c1a4f2e_42      # close it — nothing times a request out
 ```
 
 ## /tmp — Interop

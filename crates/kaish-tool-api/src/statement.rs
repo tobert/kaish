@@ -7,7 +7,7 @@
 //! or a deferral to exit 2 — is the same chain every `fs.*` gate runs.
 //!
 //! There is deliberately no deny posture. Refusal is a chain decision
-//! (`Approver::policy`), because a scoping seam that can refuse is a second
+//! (`Policy::evaluate`), because a scoping seam that can refuse is a second
 //! decision chain, and two chains disagree.
 
 use kaish_types::approval::{Plan, RiskClass};
@@ -20,14 +20,16 @@ use kaish_types::approval::{Plan, RiskClass};
 pub trait StatementClassifier: Send + Sync {
     /// Classify one top-level statement from its plan.
     ///
-    /// **Synchronous and non-blocking**, like `Approver::policy` (spec §C.2):
-    /// it runs on the execution path of every statement, before anything of
-    /// the statement has run. Do I/O or model calls in `Approver::decide`,
-    /// which runs under the patient hold; this is the cheap scoping pass.
+    /// **Synchronous and non-blocking**, like `Policy::evaluate` (spec
+    /// §C.2): it runs on the execution path of every statement, before
+    /// anything of the statement has run. A classifier too slow for that
+    /// path returns `Gate`, and the expensive judgment happens out of band
+    /// after the statement returns exit 2 — which is where every slow
+    /// decision lives; the kernel awaits none of them.
     ///
     /// **It must not panic, and a panic propagates.** kaish installs no
-    /// `catch_unwind` here — the same contract `Approver::policy` and
-    /// `Approver::decide` carry, and for the same reason: a hook that panics
+    /// `catch_unwind` here — the same contract `Policy::evaluate`
+    /// carries, and for the same reason: a hook that panics
     /// is an embedder bug, and swallowing it would run the statement under a
     /// posture nothing decided. The unwind corrupts nothing (an in-flight
     /// attempt settles through its drop guard, and the kernel's locks do not

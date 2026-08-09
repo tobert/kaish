@@ -30,8 +30,9 @@ pub enum LedgerError {
     /// A redemption was attempted while another attempt against the same
     /// grant is still `Reserved`.
     AttemptInFlight(RequestId),
-    /// The request is in a terminal state (`Denied`, `Voided`, `Abandoned`,
-    /// or `Expired` outside a `renew`) and accepts no further transitions.
+    /// The request is in a terminal state (`Denied`, `Cancelled`,
+    /// `Expired`, `Voided`, or `Abandoned`) and accepts no further
+    /// transitions.
     /// `detail` carries the specific reason for `Voided` (spec §F.3's "a
     /// later good key fails naming the void").
     Terminal {
@@ -46,14 +47,12 @@ pub enum LedgerError {
     StandingNotFound(StandingId),
     /// No subscription exists with this id.
     SubscriptionNotFound(SubscriptionId),
-    /// A redemption arrived after the grant already closed — either a
-    /// successful (or `Unknown`) settlement, or the recovery sweep closing
-    /// an unreported `Reserved` attempt as `Abandoned` (spec §B.2 treats
-    /// that the same as `Unknown`: effects unknown, no retry against this
-    /// grant). The kernel reports the outcome instead of re-executing (spec
-    /// §B.4); `outcome` is `None` when the chain closed via the sweep
-    /// rather than an actual `Settled` entry — there is no outcome to
-    /// report, only the fact that nobody ever will.
+    /// A redemption arrived after the grant already closed: an attempt
+    /// settled successfully, or settled `Unknown` (spec §B.2 — effects
+    /// unknown, no retry against this grant). The kernel reports the
+    /// outcome instead of re-executing (spec §B.4); `outcome` is `None`
+    /// when the chain closed without an actual `Settled` entry — there is
+    /// no outcome to report, only the fact that nobody ever will.
     AlreadySettled {
         /// The request whose grant already closed.
         id: RequestId,
@@ -68,14 +67,6 @@ pub enum LedgerError {
         id: RequestId,
         /// Why.
         detail: String,
-    },
-    /// `renew` was called on a request that is not `Expired` — only an
-    /// expired request may be renewed (spec §B.5).
-    NotRenewable {
-        /// The request that cannot be renewed.
-        id: RequestId,
-        /// Its actual current state.
-        state: RequestState,
     },
     /// The OS could not supply entropy for a new credential. No fallback —
     /// a guessable credential is worse than a loud failure.
@@ -191,16 +182,12 @@ impl fmt::Display for LedgerError {
                 ),
                 None => write!(
                     f,
-                    "request {id} closed with no reported outcome (its reservation was abandoned by the recovery sweep) — not re-executing; present a new request to retry"
+                    "request {id} closed with no reported outcome (its reservation was abandoned) — not re-executing; present a new request to retry"
                 ),
             },
             Self::Refused { id, detail } => {
                 write!(f, "request {id} was refused: {detail} — the grant is voided; re-request")
             }
-            Self::NotRenewable { id, state } => write!(
-                f,
-                "request {id} is {state:?}, not Expired — only an expired request can be renewed"
-            ),
             Self::CredentialUnavailable(detail) => {
                 write!(f, "approval ledger could not generate a credential: {detail}")
             }

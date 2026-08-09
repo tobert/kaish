@@ -366,6 +366,21 @@ async fn kill_one(
                     ),
                 );
             }
+            // Close the held request before the job entry — and with it the
+            // only reference to that request — is dropped
+            // (`docs/approval-ledger.md` §B.5, "a job is discarded").
+            // Nothing times a request out, so a discard that skipped this
+            // would leave a live ledger slot nobody can reach.
+            if let Some(access) = ctx.ledger_access.as_ref() {
+                crate::ledger::cancel_job_request(
+                    &access.requester,
+                    &access.principal,
+                    &manager,
+                    job_id,
+                    kaish_types::approval::CancelReason::Withdrawn,
+                )
+                .await;
+            }
             manager.cancel(job_id).await;
             manager.remove(job_id).await;
             return ExecResult::success(format!(

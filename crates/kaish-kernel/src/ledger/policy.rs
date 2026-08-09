@@ -1,35 +1,38 @@
-//! The four-stage decision chain (`docs/approval-ledger.md` §C.2) and the
-//! [`Approver`] hook an embedder installs into it.
+//! The decision chain (`docs/approval-ledger.md` §C.2) and the [`Policy`]
+//! hook an embedder installs into it.
 //!
-//! Four stages, tried in order, and the **first non-`Defer` wins**:
+//! Three stages, tried in order, the **first non-`Defer` wins**, and **none
+//! of them waits**:
 //!
 //! 1. **Standing grants, then `observe` subscriptions** — pure ledger
 //!    lookups with no hook and no I/O, the only stage that runs under the
 //!    ledger lock. A standing grant authorizes the request; an observe
 //!    subscription only records it, so the authorization answers first.
-//! 2. **[`Approver::policy`]** — synchronous, on the request path,
+//! 2. **[`Policy::evaluate`]** — synchronous, on the request path,
 //!    contractually non-blocking. Allowlists and risk-class rules.
-//! 3. **[`Approver::decide`]** — async, may take minutes. Runs under a
-//!    patient hold so a human's think time does not trip the script
-//!    watchdog, and `select!`s against the cancellation token.
-//! 4. **Defer all the way through** ⇒ the request stays `Requested` and the
-//!    gate site returns exit 2. **This is today's behavior, byte for byte,
-//!    and it is what a kernel with no `Approver` configured does** — the
-//!    trait's two decision methods both default to `Decision::Defer`, so an
-//!    empty impl changes nothing.
+//! 3. **Defer through both** ⇒ the request stays `Requested` and the gate
+//!    site returns exit 2 with the pending view. **This is what a kernel
+//!    with no [`Policy`] configured does** — the trait's one method
+//!    defaults to `Decision::Defer`, so an empty impl changes nothing.
 //!
-//! **`decide` is never called while the ledger lock is held** (§B.1). The
+//! **The kernel never awaits an embedder** (spec §0.1). A decision that
+//! cannot be made synchronously is not made here at all: it comes back as
+//! `Pending`, and the embedder decides in its own task, on its own clock,
+//! under its own cancellation, then returns through
+//! [`ApproverHandle`]. Both ways of awaiting one are wrong — a bounded wait
+//! is a clock-driven decision, which §A.10 forbids, and an unbounded wait is
+//! a liveness hazard the kernel cannot cancel on anyone's behalf correctly.
+//!
+//! **`evaluate` is never called while the ledger lock is held** (§B.1). The
 //! chain's structure is what enforces it: stage 1 is one self-contained
-//! ledger transaction that returns before stage 2 starts, and stages 2 and 3
-//! take no lock at all — they call back into [`Approvals`] freely, which is
-//! exactly what the deadlock-shaped test in `ledger_approver_tests.rs`
+//! ledger transaction that returns before stage 2 starts, and stage 2 takes
+//! no lock at all — it calls back into [`Approvals`] freely, which is
+//! exactly what the deadlock-shaped test in `ledger_policy_tests.rs`
 //! proves.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use kaish_tool_api::PatientGuard;
 use kaish_types::approval::{
     ApprovalRequest, ApprovalRequestView, Decision, Grant, Grounds, Principal, PrincipalKind,
 };
@@ -38,44 +41,44 @@ use tokio_util::sync::CancellationToken;
 use super::error::LedgerError;
 use super::handles::{ApproverHandle, Approvals, Requester};
 
-/// How long [`Approver::decide`] may hold the patient budget before the
-/// watchdog fires anyway — 300 seconds, the number §C.3 gives the terminal
-/// prompt. An approver whose human sits elsewhere overrides
-/// [`Approver::decide_budget`].
-pub const DEFAULT_DECIDE_BUDGET: Duration = Duration::from_secs(300);
-
 /// How long a grant the chain issues stays redeemable if nothing redeems it.
 /// The chain grants in order to let an operation proceed immediately, so
 /// this is a short leash, not a standing authorization.
 const DEFAULT_GRANT_TTL: Duration = Duration::from_secs(300);
 
-/// The embedder's decision hook (spec §C.2).
+/// The embedder's synchronous decision policy (spec §C.2).
 ///
-/// Both decision methods are defaulted to `Decision::Defer`, so an embedder
-/// implements only the half it cares about and an empty impl changes no
-/// behavior. An approver receives the tokenless [`ApprovalRequestView`] — it
-/// decides, it does not redeem. There is no path from this trait to a
-/// credential and none should be added: the view type has no field for one
-/// (§A.2), and retrieval lives on [`ApproverHandle`], which the chain never
-/// hands out.
+/// **One method, and it does not wait.** A policy is a pure function of the
+/// request and the ledger: the kernel asks it a question and gets an answer,
+/// which is why it can sit on the path of every gated operation. Anything
+/// that has to be thought about is not decided here — the request comes back
+/// to the embedder as `Pending`, and the embedder decides in its own task
+/// and returns through [`ApproverHandle`].
 ///
-/// **Neither decision method may panic, and a panic propagates.** kaish
-/// installs no `catch_unwind` around either — a hook that panics is an
-/// embedder bug, and swallowing it would let an operation proceed under a
-/// decision nothing made. The unwind corrupts nothing: an in-flight attempt
-/// settles `Unknown{Cancelled}` through its drop guard, and the kernel's
-/// locks do not poison.
+/// [`Self::evaluate`] is defaulted to `Decision::Defer`, so an empty impl
+/// changes no behavior. A policy receives the tokenless
+/// [`ApprovalRequestView`] — it decides, it does not redeem. There is no
+/// path from this trait to a credential and none should be added: the view
+/// type has no field for one (§A.2), and retrieval lives on
+/// [`ApproverHandle`], which the chain never hands out.
+///
+/// **[`Self::evaluate`] may not panic, and a panic propagates.** kaish
+/// installs no `catch_unwind` around it — a hook that panics is an embedder
+/// bug, and swallowing it would let an operation proceed under a decision
+/// nothing made. The unwind corrupts nothing: an in-flight attempt settles
+/// `Unknown{Cancelled}` through its drop guard, and the kernel's locks do
+/// not poison.
 /// [`StatementClassifier::classify`](crate::ledger::StatementClassifier::classify)
 /// carries the same contract, for the same reason.
 ///
 /// ```compile_fail
-/// use kaish_kernel::ledger::Approver;
+/// use kaish_kernel::ledger::Policy;
 /// use kaish_types::approval::{ApprovalRequestView, Decision};
 ///
 /// struct Peeker;
 ///
-/// impl Approver for Peeker {
-///     fn policy(&self, req: &ApprovalRequestView, _l: &kaish_kernel::ledger::Approvals) -> Decision {
+/// impl Policy for Peeker {
+///     fn evaluate(&self, req: &ApprovalRequestView, _l: &kaish_kernel::ledger::Approvals) -> Decision {
 ///         // There is no credential on the view — this does not compile,
 ///         // in this or any other spelling.
 ///         let _ = &req.token;
@@ -83,56 +86,37 @@ const DEFAULT_GRANT_TTL: Duration = Duration::from_secs(300);
 ///     }
 /// }
 /// ```
-#[async_trait]
-pub trait Approver: Send + Sync {
+pub trait Policy: Send + Sync {
     /// Stage 2: synchronous, on the request path, **contractually
     /// non-blocking**. Suitable for allowlists, risk-class rules, and
     /// "never `git.push.force`, full stop". `ledger` is the read side —
     /// pending requests, states, the log tail; it grants nothing.
     ///
     /// Blocking here blocks the gate site and every other execution behind
-    /// it. Anything that can take time belongs in [`Self::decide`].
-    fn policy(&self, req: &ApprovalRequestView, ledger: &Approvals) -> Decision {
+    /// it. Anything that can take time returns `Defer` and is decided out
+    /// of band, after the gate site has returned `Pending`.
+    fn evaluate(&self, req: &ApprovalRequestView, ledger: &Approvals) -> Decision {
         let _ = (req, ledger);
         Decision::Defer
     }
 
-    /// Stage 3: async, may take minutes — a human at a terminal, a dialog in
-    /// an embedder's UI, a clearance model. The chain runs it under a
-    /// patient hold bounded by [`Self::decide_budget`] and races it against
-    /// cancellation, so a slow decision does not trip the script timeout and
-    /// a cancelled execution does not wait for one.
-    async fn decide(&self, req: &ApprovalRequestView) -> Decision {
-        let _ = req;
-        Decision::Defer
-    }
-
-    /// Who decided. Recorded on every grant and denial this approver
+    /// Who decided. Recorded on every grant and denial this policy
     /// produces, so `approvals log` distinguishes machine clearance from
     /// human judgment (spec §E.6). Defaults to an `Automation` principal
-    /// named `approver`.
+    /// named `policy`.
     fn principal(&self) -> Principal {
-        Principal::new("approver", PrincipalKind::Automation)
-    }
-
-    /// How long [`Self::decide`] may run under its patient hold. The
-    /// watchdog fires if the hold outlives this, so it is the real bound on
-    /// a human's think time. Defaults to [`DEFAULT_DECIDE_BUDGET`].
-    fn decide_budget(&self) -> Duration {
-        DEFAULT_DECIDE_BUDGET
+        Principal::new("policy", PrincipalKind::Automation)
     }
 }
 
-/// Which stage of the chain produced an outcome (spec §C.2's four stages).
+/// Which stage of the chain produced an outcome (spec §C.2's three stages).
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChainStage {
     /// Stage 1 — a standing grant covered the request.
     Standing,
-    /// Stage 2 — [`Approver::policy`] decided.
+    /// Stage 2 — [`Policy::evaluate`] decided.
     Policy,
-    /// Stage 3 — [`Approver::decide`] decided.
-    Decide,
 }
 
 /// What the chain concluded. Only [`ChainOutcome::Granted`] authorizes
@@ -154,86 +138,65 @@ pub enum ChainOutcome {
         /// Which stage decided.
         stage: ChainStage,
     },
-    /// Every stage deferred. The request stays `Requested`, nothing was
+    /// Both stages deferred. The request stays `Requested`, nothing was
     /// posted beyond the `Requested` entry the caller already wrote, and
     /// fulfilment happens out of band — the gate site returns exit 2 with
-    /// the pending view (spec §C.2 stage 4).
+    /// the pending view (spec §C.2 stage 3).
     Deferred,
-    /// Cancellation fired before or during [`Approver::decide`]. Nothing was
-    /// posted and nothing was granted; the request is left exactly as the
-    /// caller posted it.
+    /// The **execution** was cancelled, so nothing was granted: either the
+    /// cancellation had already fired when the chain was entered, or it
+    /// fired in the window between deciding to grant and the grant landing
+    /// on the log, and [`DecisionChain`]'s undo took it back.
+    ///
+    /// Not a decision, and nothing to do with an embedder: no hook is
+    /// awaited here (spec §C.2), so there is no decision in flight for a
+    /// cancellation to race.
     Cancelled,
 }
 
-/// What the chain needs from the execution it is deciding for: somewhere to
-/// take a patient hold, and the token that cancels it.
+/// The one thing the chain needs from the execution it is deciding for: the
+/// token that says that execution is already unwinding.
 ///
-/// [`ChainContext::detached`] is the no-execution form — no watchdog to
-/// suspend and a token nobody fires — for embedder-driven and test callers.
-pub struct ChainContext<'a> {
-    patient: Option<&'a dyn PatientSource>,
+/// There is no patient hold here and no budget. The chain takes no time it
+/// could need one for — nothing in it awaits an embedder (spec §C.2), so a
+/// gated statement returns rather than being held open.
+///
+/// [`ChainContext::detached`] is the no-execution form — a token nobody
+/// fires — for embedder-driven and test callers.
+pub struct ChainContext {
     cancel: CancellationToken,
 }
 
-impl<'a> ChainContext<'a> {
-    /// Bind the chain to a live execution: `patient` suspends its script
-    /// timeout for the length of `decide`, `cancel` interrupts it.
-    pub fn new(patient: &'a dyn PatientSource, cancel: CancellationToken) -> Self {
-        Self {
-            patient: Some(patient),
-            cancel,
-        }
+impl ChainContext {
+    /// Bind the chain to a live execution, so a grant is never left behind
+    /// for an execution that is unwinding.
+    pub fn new(cancel: CancellationToken) -> Self {
+        Self { cancel }
     }
 
-    /// No watchdog to suspend and a token nobody fires.
+    /// A token nobody fires.
     pub fn detached() -> Self {
         Self {
-            patient: None,
             cancel: CancellationToken::new(),
         }
     }
-
-    fn hold(&self, budget: Duration) -> PatientGuard {
-        match self.patient {
-            Some(patient) => patient.patient(budget),
-            None => PatientGuard::inert(),
-        }
-    }
 }
 
-/// Anything that can suspend a script-level timeout for a patient operation
-/// — in practice `ExecContext`, via `ToolCtx::patient`.
+/// The chain, holding everything a decision needs: the authority that posts
+/// the outcome, the read side a policy consults, and the embedder's policy
+/// when one is installed.
 ///
-/// A one-method trait rather than taking `&dyn ToolCtx` directly: the chain
-/// needs exactly this one capability, and a test driver should not have to
-/// implement a whole tool context to exercise the patient path.
-pub trait PatientSource: Send + Sync {
-    /// Suspend the script timeout for `budget`; the returned guard restores
-    /// it on drop. See `ToolCtx::patient` for the full contract.
-    fn patient(&self, budget: Duration) -> PatientGuard;
-}
-
-impl PatientSource for crate::ExecContext {
-    fn patient(&self, budget: Duration) -> PatientGuard {
-        kaish_tool_api::ToolCtx::patient(self, budget)
-    }
-}
-
-/// The four-stage chain, holding everything a decision needs: the authority
-/// that posts the outcome, the read side a policy hook consults, and the
-/// embedder's hook when one is installed.
-///
-/// A chain with no approver is stages 1 and 4 only, which is today's
-/// behavior: no standing rule means Defer means exit 2.
+/// A chain with no policy is stages 1 and 3 only: no standing rule means
+/// Defer means exit 2.
 #[derive(Clone)]
 pub struct DecisionChain {
     authority: ApproverHandle,
     approvals: Approvals,
     /// Derived from `authority`, and used for exactly one thing: abandoning
-    /// a request whose execution was cancelled out from under a decision
+    /// a request whose execution was cancelled out from under a grant
     /// (see [`DecisionChain::undo_if_cancelled`]). Grants nothing.
     requester: Requester,
-    approver: Option<Arc<dyn Approver>>,
+    policy: Option<Arc<dyn Policy>>,
     grant_ttl: Duration,
 }
 
@@ -241,23 +204,23 @@ impl std::fmt::Debug for DecisionChain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DecisionChain")
             .field("authority", &self.authority)
-            .field("approver", &self.approver.is_some())
+            .field("policy", &self.policy.is_some())
             .field("grant_ttl", &self.grant_ttl)
             .finish()
     }
 }
 
 impl DecisionChain {
-    /// Build a chain over one ledger's authority and read side.
-    /// `approver` is `None` for a kernel with no decision hook — stages 2
-    /// and 3 are then skipped outright.
-    pub fn new(authority: ApproverHandle, approvals: Approvals, approver: Option<Arc<dyn Approver>>) -> Self {
+    /// Build a chain over one ledger's authority and read side. `policy` is
+    /// `None` for a kernel with no decision hook — stage 2 is then skipped
+    /// outright.
+    pub fn new(authority: ApproverHandle, approvals: Approvals, policy: Option<Arc<dyn Policy>>) -> Self {
         let (requester, _, _) = authority.join();
         Self {
             authority,
             approvals,
             requester,
-            approver,
+            policy,
             grant_ttl: DEFAULT_GRANT_TTL,
         }
     }
@@ -268,10 +231,10 @@ impl DecisionChain {
         self
     }
 
-    /// Whether an [`Approver`] is installed. Stages 2 and 3 do nothing when
-    /// this is `false`.
-    pub fn has_approver(&self) -> bool {
-        self.approver.is_some()
+    /// Whether a [`Policy`] is installed. Stage 2 does nothing when this is
+    /// `false`.
+    pub fn has_policy(&self) -> bool {
+        self.policy.is_some()
     }
 
     /// Run the chain against an already-posted request.
@@ -284,12 +247,12 @@ impl DecisionChain {
     /// # Errors
     ///
     /// Any ledger transaction failure: the request was already decided, it
-    /// is terminal, the ring or sink is full, or an approver returned terms
+    /// is terminal, the ring or sink is full, or a policy returned terms
     /// that widen the request it was shown.
     pub async fn decide(
         &self,
         request: &ApprovalRequest,
-        ctx: &ChainContext<'_>,
+        ctx: &ChainContext,
     ) -> Result<ChainOutcome, LedgerError> {
         // Fail closed on a cancellation that fired before we got here: an
         // execution that is already unwinding must not acquire authority on
@@ -318,65 +281,42 @@ impl DecisionChain {
                 .await;
         }
 
-        let Some(approver) = self.approver.as_ref() else {
+        let Some(policy) = self.policy.as_ref() else {
             return Ok(ChainOutcome::Deferred);
         };
         let view = ApprovalRequestView::from(request);
 
         // ── Stage 2: policy ─────────────────────────────────────────
-        // No lock is held here. `policy` is handed the read side and may
-        // consult it freely.
-        match approver.policy(&view, &self.approvals) {
+        // No lock is held here. `evaluate` is handed the read side and may
+        // consult it freely. It is synchronous by contract, so the chain
+        // returns in microseconds whatever the answer is.
+        match policy.evaluate(&view, &self.approvals) {
             Decision::Defer => {}
             decision => {
                 return self
-                    .post(request, decision, approver.as_ref(), ChainStage::Policy, ctx)
+                    .post(request, decision, policy.as_ref(), ChainStage::Policy, ctx)
                     .await
             }
         }
 
-        // ── Stage 3: decide ─────────────────────────────────────────
-        // Under a patient hold so a human's think time does not trip the
-        // script watchdog, and raced against cancellation so a cancelled
-        // execution does not wait one out. Still no lock held.
-        let decision = {
-            let _hold = ctx.hold(approver.decide_budget());
-            tokio::select! {
-                biased;
-                _ = ctx.cancel.cancelled() => return Ok(ChainOutcome::Cancelled),
-                decision = approver.decide(&view) => decision,
-            }
-        };
-        // A decision that arrived and a cancellation that arrived with it:
-        // the cancellation wins, because posting a grant for an execution
-        // that is unwinding authorizes something nobody will perform.
-        if ctx.cancel.is_cancelled() {
-            return Ok(ChainOutcome::Cancelled);
-        }
-        match decision {
-            Decision::Defer => {}
-            decision => {
-                return self
-                    .post(request, decision, approver.as_ref(), ChainStage::Decide, ctx)
-                    .await
-            }
-        }
-
-        // ── Stage 4: defer ──────────────────────────────────────────
+        // ── Stage 3: defer ──────────────────────────────────────────
+        // Nobody decided, and the kernel will not wait to find out. The
+        // request stays `Requested` and the gate site returns exit 2 with
+        // the pending view (spec §0.1, §C.2).
         Ok(ChainOutcome::Deferred)
     }
 
-    /// Post an approver's non-`Defer` decision through the authority handle,
-    /// attributed to the approver's own principal.
+    /// Post a policy's non-`Defer` decision through the authority handle,
+    /// attributed to the policy's own principal.
     async fn post(
         &self,
         request: &ApprovalRequest,
         decision: Decision,
-        approver: &dyn Approver,
+        policy: &dyn Policy,
         stage: ChainStage,
-        ctx: &ChainContext<'_>,
+        ctx: &ChainContext,
     ) -> Result<ChainOutcome, LedgerError> {
-        let principal = approver.principal();
+        let principal = policy.principal();
         match decision {
             Decision::Grant(terms) => {
                 // Terms that drop or alter a condition the request declared
@@ -385,10 +325,9 @@ impl DecisionChain {
                 // one place every grant passes through, not here, so an
                 // approver cannot route around it.
                 let grounds = match stage {
-                    // The rule that matched is the approver itself — the
-                    // trait gives a policy hook no way to name a finer rule,
-                    // and inventing one would put a made-up name in the
-                    // audit record.
+                    // The rule that matched is the policy itself — the trait
+                    // gives it no way to name a finer rule, and inventing one
+                    // would put a made-up name in the audit record.
                     ChainStage::Policy => Grounds::Policy {
                         rule: principal.id.clone(),
                     },
@@ -443,7 +382,7 @@ impl DecisionChain {
         &self,
         request: &ApprovalRequest,
         outcome: ChainOutcome,
-        ctx: &ChainContext<'_>,
+        ctx: &ChainContext,
     ) -> Result<ChainOutcome, LedgerError> {
         if !ctx.cancel.is_cancelled() {
             return Ok(outcome);

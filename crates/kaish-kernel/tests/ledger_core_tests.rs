@@ -10,11 +10,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use kaish_kernel::ledger::{
-    ConditionReport, Ledger, LedgerConfig, LedgerError, LedgerSink, LedgerSinkError,
-};
+use kaish_kernel::ledger::{ConditionReport, Ledger, LedgerConfig, LedgerError, LedgerSink, LedgerSinkError, SystemClock};
 use kaish_types::approval::{
-    ApprovalRequest, Decision, GrantTerms, LedgerEntry, Observation, OperationPattern, Outcome,
+    ApprovalRequest, CancelReason, Decision, GrantTerms, LedgerEntry, Observation, OperationPattern, Outcome,
     Principal, PrincipalKind, RequestId, RequestState, Resource,
     ResourceRef, RiskClass, StandingGrant, StateClaim,
 };
@@ -58,9 +56,7 @@ fn test_origin(principal: kaish_types::approval::Principal) -> kaish_types::appr
             scope,
         ),
         principal,
-        kaish_types::approval::Capture::DirectExecution,
-        std::time::Duration::from_secs(60),
-    )
+        kaish_types::approval::Capture::DirectExecution)
 }
 
 fn agent(id: &str) -> Principal {
@@ -72,16 +68,27 @@ fn draft(op: &str) -> kaish_types::approval::ApprovalRequestDraft {
     ApprovalRequest::builder(op).risk(RiskClass::Reversible).build().unwrap()
 }
 
-async fn post(
+async fn post(requester: &kaish_kernel::ledger::Requester, op: &str) -> ApprovalRequest {
+    #[allow(clippy::unwrap_used)]
+    requester
+        .post_request(draft(op), test_origin(agent("agent-1")))
+        .await
+        .unwrap()
+}
+
+/// Post with the optional deadline an embedder may set (spec §A.10). Nothing
+/// enforces it on a timer, so a test states a deadline already in the past
+/// rather than sleeping for one.
+async fn post_with_deadline(
     requester: &kaish_kernel::ledger::Requester,
     op: &str,
-    ttl: Duration,
+    deadline: SystemTime,
 ) -> ApprovalRequest {
     #[allow(clippy::unwrap_used)]
     requester
         .post_request(
             draft(op),
-            test_origin(agent("agent-1")).with_ttl(ttl),
+            test_origin(agent("agent-1")).with_deadline(Some(deadline)),
         )
         .await
         .unwrap()
@@ -102,8 +109,8 @@ fn far_future() -> SystemTime {
 
 #[tokio::test]
 async fn post_request_creates_a_requested_chain() {
-    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     assert_eq!(approvals.state(&req.id), Some(RequestState::Requested));
     let log = entries(approvals.log(0));
     assert!(matches!(log.last(), Some(LedgerEntry::Requested { .. })));
@@ -111,8 +118,8 @@ async fn post_request_creates_a_requested_chain() {
 
 #[tokio::test]
 async fn grant_moves_requested_to_granted_and_appends_granted() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
     assert_eq!(approvals.state(&req.id), Some(RequestState::Granted));
     assert!(matches!(entries(approvals.log(0)).last(), Some(LedgerEntry::Granted { .. })));
@@ -120,18 +127,40 @@ async fn grant_moves_requested_to_granted_and_appends_granted() {
 
 #[tokio::test]
 async fn deny_moves_requested_to_denied_and_appends_denied() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     approver.deny(&req.id, "no").await.unwrap();
     assert_eq!(approvals.state(&req.id), Some(RequestState::Denied));
     assert!(matches!(entries(approvals.log(0)).last(), Some(LedgerEntry::Denied { .. })));
 }
 
+/// §A.10: there is **no** request TTL, so an undecided request with no
+/// deadline stays `Requested` no matter how long nobody looks at it.
 #[tokio::test]
-async fn request_ttl_elapsing_materializes_expired_on_read() {
-    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_millis(1)).await;
-    tokio::time::sleep(Duration::from_millis(20)).await;
+async fn an_undecided_request_with_no_deadline_never_expires() {
+    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
+    assert_eq!(req.deadline, None, "a request carries no deadline by default");
+    // Anything that enumerates the ledger runs the sweep, which is the only
+    // place expiry could ever materialize.
+    let _ = approvals.pending();
+    let _ = approvals.ids();
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Requested));
+    assert!(
+        !entries(approvals.log(0))
+            .iter()
+            .any(|e| matches!(e, LedgerEntry::Expired { .. })),
+        "nothing expires a request the embedder set no deadline on"
+    );
+}
+
+/// §A.10's other half: an embedder that *does* set a deadline gets it
+/// compared when the request is observed — never enforced on a timer.
+#[tokio::test]
+async fn an_embedder_set_deadline_materializes_expired_on_read() {
+    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let deadline = SystemTime::now() - Duration::from_secs(1);
+    let req = post_with_deadline(&requester, "fs.remove", deadline).await;
     assert_eq!(approvals.state(&req.id), Some(RequestState::Expired));
     assert!(matches!(
         entries(approvals.log(0)).last(),
@@ -144,8 +173,8 @@ async fn request_ttl_elapsing_materializes_expired_on_read() {
 
 #[tokio::test]
 async fn redeem_before_any_decision_is_not_authorized_and_counts_a_rejection() {
-    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     let err = requester
         .redeem_with_token(&req.id, "whatever", agent("agent-1"), ConditionReport::none())
         .await
@@ -160,8 +189,8 @@ async fn redeem_before_any_decision_is_not_authorized_and_counts_a_rejection() {
 
 #[tokio::test]
 async fn bad_key_against_a_granted_request_is_not_authorized_and_counts() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
     let err = requester
         .redeem_with_token(&req.id, "wrong", agent("agent-1"), ConditionReport::none())
@@ -177,8 +206,8 @@ async fn bad_key_against_a_granted_request_is_not_authorized_and_counts() {
 
 #[tokio::test]
 async fn fifth_bad_key_voids_and_a_later_good_key_fails_naming_the_void() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
     let real = approver.token_for(&req.id).expect("granted request has a credential");
 
@@ -219,7 +248,7 @@ async fn fifth_bad_key_voids_and_a_later_good_key_fails_naming_the_void() {
 
 #[tokio::test]
 async fn bad_key_matching_no_live_request_appends_token_rejected_none_and_voids_nothing() {
-    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
+    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     // A syntactically valid but entirely unknown id.
     let bogus = RequestId::new(0xdead_beef, 999_999);
 
@@ -245,8 +274,8 @@ async fn bad_key_matching_no_live_request_appends_token_rejected_none_and_voids_
 
 #[tokio::test]
 async fn redeem_with_the_real_credential_succeeds_and_reserves_an_attempt() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
     let token = approver.token_for(&req.id).unwrap();
 
@@ -261,7 +290,7 @@ async fn redeem_with_the_real_credential_succeeds_and_reserves_an_attempt() {
 
 #[tokio::test]
 async fn condition_failure_refuses_and_voids_reserving_no_attempt() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let mut d = draft("git.push");
     d.resources.push(Resource::transition(
         "git.ref",
@@ -299,8 +328,8 @@ async fn condition_failure_refuses_and_voids_reserving_no_attempt() {
 
 #[tokio::test]
 async fn redeem_while_an_attempt_is_in_flight_is_rejected() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
     let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
     let before = entries(approvals.log(0)).len();
@@ -316,8 +345,8 @@ async fn redeem_while_an_attempt_is_in_flight_is_rejected() {
 
 #[tokio::test]
 async fn redeem_after_a_successful_settlement_reports_the_outcome_and_does_not_reexecute() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
     let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
     requester.settle(&attempt, Outcome::Exit(0)).await.unwrap();
@@ -335,8 +364,8 @@ async fn redeem_after_a_successful_settlement_reports_the_outcome_and_does_not_r
 
 #[tokio::test]
 async fn a_reported_failure_leaves_the_grant_live_for_a_retry() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
     let attempt1 = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
     requester.settle(&attempt1, Outcome::Exit(1)).await.unwrap();
@@ -353,8 +382,8 @@ async fn a_reported_failure_leaves_the_grant_live_for_a_retry() {
 
 #[tokio::test]
 async fn an_unknown_outcome_closes_the_chain_without_reopening_the_grant() {
-    let (requester, _approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, _approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
     let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
     requester
@@ -368,8 +397,8 @@ async fn an_unknown_outcome_closes_the_chain_without_reopening_the_grant() {
 
 #[tokio::test]
 async fn grant_not_after_elapsing_materializes_expired() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     approver
         .grant(&req.id, terms(&req, SystemTime::now() + Duration::from_millis(1)))
         .await
@@ -384,8 +413,8 @@ async fn grant_not_after_elapsing_materializes_expired() {
 
 #[tokio::test]
 async fn granting_an_already_decided_request_is_rejected() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
     let before = entries(approvals.log(0)).clone();
     let err = approver.grant(&req.id, terms(&req, far_future())).await.unwrap_err();
@@ -398,8 +427,8 @@ async fn granting_an_already_decided_request_is_rejected() {
 async fn terminal_states_reject_any_further_transition_and_leave_state_unchanged() {
     // Denied.
     {
-        let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-        let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+        let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+        let req = post(&requester, "fs.remove").await;
         approver.deny(&req.id, "no").await.unwrap();
         let before = entries(approvals.log(0)).clone();
         let err = approver.deny(&req.id, "no again").await.unwrap_err();
@@ -409,8 +438,8 @@ async fn terminal_states_reject_any_further_transition_and_leave_state_unchanged
     }
     // Abandoned.
     {
-        let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-        let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+        let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+        let req = post(&requester, "fs.remove").await;
         requester.abandon_request(&req.id, "job discarded").await.unwrap();
         let before = entries(approvals.log(0)).clone();
         let err = approver.grant(&req.id, terms(&req, far_future())).await.unwrap_err();
@@ -420,7 +449,7 @@ async fn terminal_states_reject_any_further_transition_and_leave_state_unchanged
     }
     // Voided (via redemption-time condition failure).
     {
-        let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
+        let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
         let mut d = draft("git.push");
         d.resources.push(Resource::transition(
             "git.ref",
@@ -451,38 +480,77 @@ async fn terminal_states_reject_any_further_transition_and_leave_state_unchanged
     }
 }
 
+/// §B.5: cancel closes an undecided request, records who and why, and
+/// returns its live slot.
 #[tokio::test]
-async fn renew_only_succeeds_from_expired_and_links_via_supersedes() {
-    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_millis(1)).await;
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    assert_eq!(approvals.state(&req.id), Some(RequestState::Expired));
+async fn cancel_closes_an_undecided_request_and_records_the_reason() {
+    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
 
-    let new_id = requester.renew(&req.id).await.unwrap();
-    assert_ne!(new_id, req.id);
-    assert_eq!(approvals.state(&new_id), Some(RequestState::Requested));
-    let chain = approvals.get(&new_id).unwrap();
-    assert_eq!(chain.request.supersedes, Some(req.id.clone()));
-    assert_eq!(chain.request.operation.as_str(), "fs.remove");
+    let closed = requester
+        .cancel(&req.id, agent("agent-1"), CancelReason::Withdrawn)
+        .await
+        .unwrap();
+    assert_eq!(closed.id, req.id);
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Cancelled));
+    assert!(approvals.pending().is_empty(), "the live slot comes back");
+    assert!(matches!(
+        entries(approvals.log(0)).last(),
+        Some(LedgerEntry::Cancelled {
+            by,
+            reason: CancelReason::Withdrawn,
+            ..
+        }) if by.id == "agent-1"
+    ));
 }
 
+/// §B.3: `Cancelled` is terminal — a second cancellation appends nothing.
 #[tokio::test]
-async fn renew_on_a_non_expired_request_is_rejected() {
-    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+async fn cancelling_a_cancelled_request_is_terminal_and_appends_nothing() {
+    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
+    requester
+        .cancel(&req.id, agent("agent-1"), CancelReason::Withdrawn)
+        .await
+        .unwrap();
     let before = entries(approvals.log(0)).clone();
-    let err = requester.renew(&req.id).await.unwrap_err();
-    assert!(matches!(err, LedgerError::NotRenewable { .. }));
-    assert_eq!(approvals.state(&req.id), Some(RequestState::Requested), "state must not move");
-    assert_eq!(entries(approvals.log(0)), before, "a rejected renewal must post no superseding request");
+
+    let err = requester
+        .cancel(&req.id, agent("agent-1"), CancelReason::Withdrawn)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        LedgerError::Terminal {
+            state: RequestState::Cancelled,
+            ..
+        }
+    ));
+    assert_eq!(entries(approvals.log(0)), before, "a refused cancellation appends nothing");
+}
+
+/// §B.3: a decided request is not cancellable — a decision that landed is
+/// not undone by the requester losing interest.
+#[tokio::test]
+async fn cancelling_a_granted_request_is_already_decided() {
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
+    approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
+
+    let err = requester
+        .cancel(&req.id, agent("agent-1"), CancelReason::Withdrawn)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LedgerError::AlreadyDecided(id) if id == req.id));
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Granted));
 }
 
 // ─────────────────────── Attempt-level table ───────────────────────
 
 #[tokio::test]
 async fn settling_the_same_attempt_twice_appends_one_entry_and_returns_ok() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
     let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
 
@@ -506,8 +574,8 @@ async fn settling_the_same_attempt_twice_appends_one_entry_and_returns_ok() {
 
 #[tokio::test]
 async fn concurrent_redemptions_of_one_grant_produce_exactly_one_redeemed() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
 
     let mut tasks = Vec::new();
@@ -535,11 +603,11 @@ async fn concurrent_redemptions_of_one_grant_produce_exactly_one_redeemed() {
 
 #[tokio::test]
 async fn seq_is_gap_free_under_concurrent_posts_from_sixteen_tasks() {
-    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
+    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let mut tasks = Vec::new();
     for i in 0..16 {
         let requester = requester.clone();
-        tasks.push(tokio::spawn(async move { post(&requester, &format!("fs.remove.{i}"), Duration::from_secs(60)).await }));
+        tasks.push(tokio::spawn(async move { post(&requester, &format!("fs.remove.{i}")).await }));
     }
     for task in tasks {
         task.await.unwrap();
@@ -562,12 +630,12 @@ async fn ring_refuses_loudly_rather_than_evicting_a_live_chain() {
         retained_entries: 1,
         ..Default::default()
     };
-    let (requester, _approvals, _approver) = Ledger::build(config, test_scope(), None).unwrap();
-    let _first = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, _approvals, _approver) = Ledger::build(config, test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let _first = post(&requester, "fs.remove").await;
     // The ring holds exactly the first Requested entry now, and that
     // request is still live (Requested, undecided) — nothing is evictable.
     let err = requester
-        .post_request(draft("fs.remove"), test_origin(agent("agent-1")).with_ttl(Duration::from_secs(60)))
+        .post_request(draft("fs.remove"), test_origin(agent("agent-1")))
         .await
         .unwrap_err();
     assert!(matches!(err, LedgerError::RingAtCapacity));
@@ -579,10 +647,10 @@ async fn ring_evicts_closed_chains_to_make_room() {
         retained_entries: 2,
         ..Default::default()
     };
-    let (requester, approvals, approver) = Ledger::build(config, test_scope(), None).unwrap();
-    let req1 = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(config, test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req1 = post(&requester, "fs.remove").await;
     approver.deny(&req1.id, "no").await.unwrap(); // closes req1 — its 2 entries become evictable
-    let req2 = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let req2 = post(&requester, "fs.remove").await;
     assert_eq!(approvals.state(&req2.id), Some(RequestState::Requested));
 }
 
@@ -618,15 +686,15 @@ async fn full_sink_queue_returns_ledger_unavailable_rather_than_blocking_or_drop
         sink_queue: 1,
         ..Default::default()
     };
-    let (requester, _approvals, _approver) = Ledger::build(config, test_scope(), Some(sink)).unwrap();
+    let (requester, _approvals, _approver) = Ledger::build(config, test_scope(), Some(sink), std::sync::Arc::new(SystemClock)).unwrap();
     // Neither call below has any internal `.await` point (the transaction
     // is fully synchronous — see `core.rs`'s module doc), so the background
     // drain task gets no chance to run between them: the one queue slot is
     // still occupied by the first entry when the second post is attempted,
     // and this is deterministic, not a race.
-    let _first = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let _first = post(&requester, "fs.remove").await;
     let err = requester
-        .post_request(draft("fs.remove"), test_origin(agent("agent-1")).with_ttl(Duration::from_secs(60)))
+        .post_request(draft("fs.remove"), test_origin(agent("agent-1")))
         .await
         .unwrap_err();
     assert!(matches!(err, LedgerError::SinkUnavailable(_)));
@@ -638,13 +706,13 @@ async fn a_sink_error_fails_subsequent_requests_closed() {
         fail_after: AtomicUsize::new(0), // every post() call fails immediately
         ..Default::default()
     });
-    let (requester, _approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), Some(sink)).unwrap();
-    let _first = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, _approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), Some(sink), std::sync::Arc::new(SystemClock)).unwrap();
+    let _first = post(&requester, "fs.remove").await;
     // Give the background drain task a chance to observe the failure.
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(5)).await;
         let err = requester
-            .post_request(draft("fs.remove"), test_origin(agent("agent-1")).with_ttl(Duration::from_secs(60)))
+            .post_request(draft("fs.remove"), test_origin(agent("agent-1")))
             .await;
         if let Err(LedgerError::SinkUnavailable(_)) = err {
             return; // fail-closed observed
@@ -661,10 +729,10 @@ async fn live_capacity_refuses_a_new_request_rather_than_evicting() {
         live_capacity: 1,
         ..Default::default()
     };
-    let (requester, _approvals, _approver) = Ledger::build(config, test_scope(), None).unwrap();
-    let _first = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, _approvals, _approver) = Ledger::build(config, test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let _first = post(&requester, "fs.remove").await;
     let err = requester
-        .post_request(draft("fs.remove"), test_origin(agent("agent-1")).with_ttl(Duration::from_secs(60)))
+        .post_request(draft("fs.remove"), test_origin(agent("agent-1")))
         .await
         .unwrap_err();
     assert!(matches!(err, LedgerError::LiveCapacity { limit: 1 }));
@@ -674,8 +742,8 @@ async fn live_capacity_refuses_a_new_request_rather_than_evicting() {
 
 #[tokio::test]
 async fn token_for_appends_key_retrieved_naming_the_retriever() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
     let _token = approver.token_for(&req.id).unwrap();
     assert!(matches!(
@@ -688,7 +756,7 @@ async fn token_for_appends_key_retrieved_naming_the_retriever() {
 
 #[tokio::test]
 async fn grant_standing_and_revoke_standing_are_pure_record_operations() {
-    let (_requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
+    let (_requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let g = kaish_types::approval::StandingGrant::new(
         vec![kaish_types::approval::OperationPattern::new("git.commit")],
         Vec::new(),
@@ -754,8 +822,8 @@ fn find_matching_brace(text: &str) -> usize {
 async fn deny_self_approval_off_by_default_lets_the_requesting_principal_grant() {
     // The solo-human-REPL case: one principal is legitimately both
     // requester and approver, and the default must not break it.
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     approver
         .with_principal(agent("agent-1"))
         .grant(&req.id, terms(&req, far_future()))
@@ -770,8 +838,8 @@ async fn deny_self_approval_refuses_a_grant_from_the_requesting_principal() {
         deny_self_approval: true,
         ..LedgerConfig::default()
     };
-    let (requester, approvals, approver) = Ledger::build(config, test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(config, test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     let err = approver
         .with_principal(agent("agent-1"))
         .grant(&req.id, terms(&req, far_future()))
@@ -807,8 +875,8 @@ async fn deny_self_approval_on_still_allows_a_grant_from_a_distinct_principal() 
         deny_self_approval: true,
         ..LedgerConfig::default()
     };
-    let (requester, approvals, approver) = Ledger::build(config, test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(config, test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     approver
         .with_principal(agent("agent-2"))
         .grant(&req.id, terms(&req, far_future()))
@@ -827,8 +895,8 @@ async fn deny_self_approval_refuses_a_standing_grant_issued_by_the_requesting_pr
         deny_self_approval: true,
         ..LedgerConfig::default()
     };
-    let (requester, approvals, approver) = Ledger::build(config, test_scope(), None).unwrap();
-    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let (requester, approvals, approver) = Ledger::build(config, test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
     let rule = StandingGrant::new(
         vec![OperationPattern::new("fs.remove")],
         Vec::new(),
@@ -856,14 +924,13 @@ async fn deny_self_approval_refuses_a_standing_grant_issued_by_the_requesting_pr
     );
 }
 
-// ─────────────────────── Approver::decide input shape (forward reference) ───────────────────────
+// ─────────────────────── the decision vocabulary ───────────────────────
 
 #[test]
-fn decision_defer_is_the_default_shape_used_by_a_deferring_approver() {
-    // Not wired to any gate site in this PR (PR 4 owns the decision chain),
-    // but `Decision` is part of the vocabulary this ledger core speaks —
-    // confirm the variant a fully-deferring `Approver` returns exists and
-    // round-trips, since PR 4 depends on it unchanged.
+fn decision_defer_is_the_default_shape_used_by_a_deferring_policy() {
+    // `Decision` is the vocabulary the ledger core speaks to the chain:
+    // `Defer` is what `Policy::evaluate` returns by default, and "not my
+    // call" must never read as "yes".
     let d = Decision::Defer;
     assert!(matches!(d, Decision::Defer));
 }

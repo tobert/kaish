@@ -1,11 +1,12 @@
 //! Ledger sizing, the audit-sink trait, and the sink's own error type
 //! (`docs/approval-ledger.md` §D.4).
 
-use std::time::Duration;
-
 use kaish_types::approval::LedgerRecord;
 
-/// Sizing and timeouts for one [`super::Ledger`] (spec §D.4). Every field has
+/// Sizing for one [`super::Ledger`] (spec §D.4). There is no timeout here
+/// and there will not be one: the kernel never reads a clock to decide
+/// anything (spec §A.10), so capacity is the whole backstop against an
+/// embedder that asks and never answers. Every field has
 /// a default matching the spec's stated number; construct with
 /// `LedgerConfig { field: ..., ..Default::default() }` to override one —
 /// deliberately **not** `#[non_exhaustive]`, unlike the rest of this
@@ -31,22 +32,9 @@ pub struct LedgerConfig {
     pub retained_entries: usize,
     /// Bounded sink queue depth. Default 1024 entries.
     pub sink_queue: usize,
-    /// How long a request stays live with no decision. Default 60s (today's
-    /// nonce TTL).
-    pub request_ttl: Duration,
     /// The rejection count at which a request's chain voids. Default 5 (the
     /// counter kaish #259 deferred — spec §F.3).
     pub max_token_attempts: u32,
-    /// How long a `Reserved` attempt may go unreported before the recovery
-    /// sweep closes it as `Abandoned`. Not in the spec's own `LedgerConfig`
-    /// field list — added here because PR 3's `AttemptGuard` (the drop-safe
-    /// settlement guard that gives the sweep a real "the process died"
-    /// signal) does not land until the next PR, and a sweep with no
-    /// staleness bound at all would never resolve to
-    /// `Outcome::Unknown{ExecutorLost}`. Default 10 minutes — generous
-    /// enough that no in-flight operation should ever cross it. Superseded
-    /// once `AttemptGuard`'s outbox exists; flagged for review then.
-    pub attempt_stale_after: Duration,
     /// Refuse a grant whose issuing principal equals the request's own
     /// principal (spec §D.2, §E.7). Default false: a solo human at the REPL
     /// is legitimately both requester and approver, so this is an opt-in
@@ -68,9 +56,7 @@ impl Default for LedgerConfig {
             live_capacity_per_principal: 256,
             retained_entries: 4096,
             sink_queue: 1024,
-            request_ttl: Duration::from_secs(60),
             max_token_attempts: 5,
-            attempt_stale_after: Duration::from_secs(600),
             deny_self_approval: false,
         }
     }

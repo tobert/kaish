@@ -11,7 +11,9 @@
 //! handles behind `Kernel::approvals()` (spec §D.2) and are unrelated types
 //! that happen to share a name with their tool-facing counterpart here.
 
-use kaish_types::approval::{AttemptId, RequestId, StateClaim};
+use kaish_types::approval::{
+    ApprovalRequestView, AttemptId, Capture, PlanDigest, RequestId, RequestState, StateClaim,
+};
 use kaish_types::ExecResult;
 
 /// What one execution reserved against a grant (spec §C.1). Exposes only its
@@ -65,8 +67,11 @@ impl AttemptHandle {
 pub enum ApprovalOutcome {
     /// A grant existed (or was decided inline) and an attempt is reserved.
     Authorized(AttemptHandle),
-    /// No decision yet. The view is tokenless (spec §A.2).
-    Pending(Box<kaish_types::approval::ApprovalRequestView>),
+    /// Nobody has decided, and the kernel will not wait to find out (spec
+    /// §0.1). The normal outcome for anything a human or a model has to
+    /// think about. Carries what a caller needs to present the request and
+    /// to resume it; the view is tokenless (spec §A.2).
+    Pending(Box<PendingApproval>),
     /// The request was denied.
     Denied {
         /// The denied request.
@@ -83,18 +88,41 @@ pub enum ApprovalOutcome {
         /// Why.
         detail: String,
     },
+    /// The request is over: cancelled, past a deadline the embedder set,
+    /// voided, or abandoned. Nothing is wrong with the ledger and retrying
+    /// this request will never work — ask again, which posts a new request
+    /// (spec §B.5).
+    ///
+    /// Distinct from [`Self::LedgerUnavailable`], which used to answer this
+    /// question too. One says *the ledger could not record this, try
+    /// again*; this one says *this request is over*.
+    Closed {
+        /// The closed request.
+        request: RequestId,
+        /// Which terminal state closed it.
+        state: RequestState,
+        /// What the ledger recorded about the closing, when it recorded
+        /// something the state alone does not say — "voided after 5
+        /// invalid attempts". Empty otherwise.
+        detail: String,
+    },
     /// This context has no ledger — a unit-test harness or a minimal
     /// embedder. The default [`crate::ToolCtx::request_approval`] impl
     /// always returns this.
     Unsupported,
     /// The ledger refused to record: sink backpressure or live capacity
-    /// (spec §D.4).
+    /// (spec §D.4). A condition of the *ledger*, and retryable. Never used
+    /// to report a request's own state — that is [`Self::Closed`].
     LedgerUnavailable {
         /// Why.
         reason: String,
     },
-    /// Cancellation fired before a decision could be recorded. Nothing was
-    /// granted; the execution is already unwinding.
+    /// The execution was cancelled before a grant could be recorded.
+    /// Nothing was granted and nothing will run.
+    ///
+    /// This is the *execution's* cancellation token, not a decision that
+    /// was raced: no hook is awaited on the request path (spec §C.2), so
+    /// there is never a decision in flight here.
     Cancelled {
         /// The request that was posted before the cancellation.
         request: RequestId,
@@ -117,9 +145,9 @@ impl ApprovalOutcome {
     /// ```
     ///
     /// `Pending` maps to exit 2 with the view on [`ExecResult::approval`];
-    /// `Denied`, `Refused`, `Unsupported`, and `LedgerUnavailable` map to
-    /// exit 1 with a message naming the reason. `Authorized` is the only
-    /// variant that lets the caller continue.
+    /// `Denied`, `Refused`, `Closed`, `Unsupported`, and `LedgerUnavailable`
+    /// map to exit 1 with a message naming the reason. `Authorized` is the
+    /// only variant that lets the caller continue.
     // `ExecResult` is deliberately fat (see `kaish_trash.rs`'s identical
     // allow) — a gate site returns it verbatim, and boxing it here would
     // just move the same allocation the caller immediately unboxes again.
@@ -127,12 +155,15 @@ impl ApprovalOutcome {
     pub fn proceed(self) -> Result<AttemptHandle, ExecResult> {
         match self {
             Self::Authorized(attempt) => Ok(attempt),
-            Self::Pending(view) => {
+            Self::Pending(pending) => {
                 let mut result = ExecResult::failure(
                     2,
-                    format!("pending approval {} — an operator must grant it", view.id),
+                    format!(
+                        "pending approval {} — an operator must grant it",
+                        pending.request.id
+                    ),
                 );
-                result.approval = Some(view);
+                result.approval = Some(Box::new(pending.request));
                 Err(result)
             }
             Self::Denied { request, reason } => {
@@ -140,6 +171,15 @@ impl ApprovalOutcome {
             }
             Self::Refused { request, detail } => {
                 Err(ExecResult::failure(1, format!("request {request} refused: {detail}")))
+            }
+            Self::Closed { request, state, detail } => {
+                let mut message = format!(
+                    "request {request} is {state:?} and can no longer be decided — ask again to post a new one"
+                );
+                if !detail.is_empty() {
+                    message.push_str(&format!(" ({detail})"));
+                }
+                Err(ExecResult::failure(1, message))
             }
             Self::Unsupported => Err(ExecResult::failure(
                 1,
@@ -156,6 +196,88 @@ impl ApprovalOutcome {
                 1,
                 format!("the presented key matches no approval request — {detail}"),
             )),
+        }
+    }
+}
+
+/// What a caller needs to show a pending request and to pick it back up
+/// (spec §C.1).
+///
+/// The kernel returns this instead of waiting: a decision it cannot make
+/// itself comes back as data, and the embedder comes back when it has an
+/// answer.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct PendingApproval {
+    /// The request, tokenless by construction (spec §A.2).
+    pub request: ApprovalRequestView,
+    /// How this request continues once it is decided.
+    pub resume: ResumeAction,
+}
+
+impl PendingApproval {
+    /// Pair a pending request with the route that resumes it, derived from
+    /// how the invocation was captured (spec §B.4's capture statuses).
+    pub fn new(request: ApprovalRequestView) -> Self {
+        let resume = ResumeAction::for_capture(&request.capture, &request.binding.plan_digest);
+        Self { request, resume }
+    }
+}
+
+/// How a pending request continues once it is decided (spec §C.1).
+/// Structured, because a caller must not have to infer it from the
+/// capture's shape.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeAction {
+    /// Re-run the statement with the key; the digest names what was
+    /// approved (spec §A.9).
+    ConfirmStatement {
+        /// The digest of the statement that was judged.
+        plan_digest: PlanDigest,
+        /// The held statement's position in the submitted program. The
+        /// kernel halted there and ran nothing after it, so an embedder
+        /// continuing the program picks up at `index + 1` (spec §C.2).
+        index: usize,
+    },
+    /// Replay the captured invocation via `Kernel::confirm`.
+    RetryOperation,
+    /// Grantable and redeemable, but the kernel cannot replay it — the
+    /// caller must re-issue the operation itself.
+    NotReplayable {
+        /// Which capture status the request carries, and why it cannot be
+        /// replayed.
+        reason: String,
+    },
+}
+
+impl ResumeAction {
+    /// The route a capture implies. `Exact` replays through
+    /// `Kernel::confirm`; a statement re-runs by index; everything else
+    /// names why the kernel cannot re-issue it.
+    pub fn for_capture(capture: &Capture, plan_digest: &PlanDigest) -> Self {
+        match capture {
+            Capture::Exact(_) => Self::RetryOperation,
+            Capture::Statement { index, .. } => Self::ConfirmStatement {
+                plan_digest: plan_digest.clone(),
+                index: *index,
+            },
+            Capture::DirectExecution => Self::NotReplayable {
+                reason: "the operation ran with no dispatch seam above it, so there is no \
+                         invocation to replay"
+                    .to_string(),
+            },
+            Capture::Unavailable { reason } => Self::NotReplayable {
+                reason: reason.clone(),
+            },
+            Capture::CaptureFailed { reason } => Self::NotReplayable {
+                reason: reason.clone(),
+            },
+            // `Capture` is `#[non_exhaustive]`: a variant added upstream
+            // with no arm here is not replayable until someone says how.
+            _ => Self::NotReplayable {
+                reason: "this build does not know how to replay that capture".to_string(),
+            },
         }
     }
 }

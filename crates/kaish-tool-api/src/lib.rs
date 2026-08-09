@@ -47,7 +47,10 @@ mod issue;
 mod statement;
 mod tool;
 
-pub use approval::{ApprovalOutcome, Approvals, AttemptHandle, ResolverError, StateResolver};
+pub use approval::{
+    ApprovalOutcome, Approvals, AttemptHandle, PendingApproval, ResolverError, ResumeAction,
+    StateResolver,
+};
 pub use statement::{CommandNameClassifier, StatementClassifier, StatementPosture};
 pub use backend::KernelBackend;
 pub use clap_schema::{params_from_clap, schema_from_clap, schema_tree_from_clap};

@@ -790,7 +790,7 @@ distinct from the data-plane `.data`, and it is **tokenless**: the request
 names the operation, never its credential.
 
 - **No `--json`** — `ExecResult.approval` is the typed request
-  `Some(ApprovalRequestView { id, operation, resources, hint, ttl, … })`
+  `Some(ApprovalRequestView { id, operation, resources, hint, deadline, … })`
   (embedders read it via `approval_request()`).
 
 - **`--json`** — the result is a non-zero exit with a diagnostic, so it's wrapped
@@ -850,18 +850,22 @@ grant's lifetime.
 
 **Lifecycle:** requests and grants live in the kernel's approval ledger, so a
 request raised in one `execute()` call is approvable and confirmable in a later
-one. A request nobody decides expires after 60 seconds, and the expiry is
-recorded rather than silently forgotten.
+one. **A request nobody decides does not expire** — it stays `Requested` until
+somebody decides or cancels it. kaish never reads a clock to end one.
 
-**Renewing.** An expired request is re-raised with `approvals renew <id>`,
-which posts a new request carrying the original's operation, resources, and
-captured invocation, linked to it by `supersedes`. Renewing your **own**
-request needs no approval authority — that is what lets a gated command keep
-its intent alive instead of dying unfulfillable at 60 seconds. Renewing
-another principal's request without authority exits **1**. Renewal is not
-re-approval: the new request starts undecided and needs a fresh decision. It
-exits **1**, changing nothing, when the resource moved since the original was
-raised.
+**A gate stops the program.** Exit 2 means *this has not happened yet*, so the
+statements written after it do not run: `rm x; echo ok` with `rm` gated prints
+nothing and exits 2. Re-run the whole line with `--confirm=<token>`, or grant
+the request and let an embedder replay it.
+
+**Cancelling.** `approvals cancel <id>` closes an undecided request you no
+longer want. Cancelling your **own** request needs no approval authority — that
+is what lets a gated command withdraw an ask it has given up on; cancelling
+another principal's request without authority exits **1**. Only an undecided
+request is cancellable: cancelling one that was already granted or denied exits
+**1**, because a decision that landed is not undone by losing interest. Asking
+again means running the command again — the fresh request starts undecided and
+is linked to the closed one by `supersedes`.
 
 **Reading and deciding from the shell.** The `approvals` builtin is the only
 one that reaches the approval side:
@@ -871,14 +875,15 @@ one that reaches the approval side:
 | `approvals list [--pending\|--all\|--standing]` | Requests awaiting a decision (default), every retained request, or the live standing grants |
 | `approvals show <id>` | One request: what was asked, what was decided, and every attempt |
 | `approvals log [--since <seq>]` | The retained entries, oldest first |
-| `approvals renew <id>` | Re-raise an expired request. Needs no authority for your own |
+| `approvals cancel <id>` | Close an undecided request. Needs no authority for your own |
 | `approvals grant <id> [--until <duration>]` | Approve it. Defaults to 5m, and is good for one successful run |
 | `approvals deny <id> [--reason R]` | Refuse it |
 | `approvals revoke <standing-id>` | Retire a standing grant |
 
 `grant`, `deny`, and `revoke` exit **1** in a session with no approval
-authority, naming the reason. `list`, `show`, `log`, and `renew` work in every
-session: reading is not deciding, and renewing is the requester's own action.
+authority, naming the reason. `list`, `show`, `log`, and `cancel` work in every
+session: reading is not deciding, and closing your own request is the
+requester's own action.
 
 The same read model is a filesystem at `/v/approvals` — `pending`, `standing`,
 and `log` at the root, and `<id>/{request,state,attempts,grant}` per request.

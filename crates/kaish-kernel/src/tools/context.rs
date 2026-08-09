@@ -3,13 +3,12 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use kaish_types::approval::{
-    ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, Capture, Condition,
+    ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, CancelReason, Capture, Condition,
     Invocation, Observation, ObservedResource, OperationId, Outcome, Plan, PlanBinding, PlanDigest,
-    Principal, RequestId, Resource, ResourceRef,
+    Principal, RequestId, RequestState, Resource, ResourceRef,
 };
 use sha2::{Digest, Sha256};
 use kaish_tool_api::{StatementClassifier, StatementPosture};
@@ -314,7 +313,7 @@ pub struct LedgerAccess {
     pub requester: Requester,
     /// The read side, for `ToolCtx::approvals`.
     pub approvals: Approvals,
-    /// The four-stage decision chain (spec §C.2) a fresh request runs
+    /// The decision chain (spec §C.2) a fresh request runs
     /// through. Holds the ledger's authority internally; nothing reachable
     /// from script or tool code can get that authority back out of it.
     pub chain: Arc<DecisionChain>,
@@ -345,11 +344,6 @@ pub struct LedgerAccess {
     /// field. The threat model says so explicitly — the ledger does not
     /// defend against hostile Rust compiled into the process (§A.2).
     pub session_authority: Option<crate::ledger::ApproverHandle>,
-    /// How long a posted request stays live with no decision, when this
-    /// context posts one. `ExecContext` has no access to the `LedgerConfig`
-    /// that minted `requester` (only the handle), so this is threaded
-    /// alongside it rather than re-derived.
-    pub request_ttl: Duration,
     /// The embedder- and plugin-registered [`StateResolver`]s a redemption
     /// consults for non-`path` resource kinds (spec §B.4). `path` is not in
     /// here — it is served by a [`PathResolver`] built from *this* context's
@@ -532,6 +526,12 @@ fn approval_error(id: RequestId, err: LedgerError) -> kaish_tool_api::ApprovalOu
     use kaish_tool_api::ApprovalOutcome;
     match err {
         LedgerError::Refused { id, detail } => ApprovalOutcome::Refused { request: id, detail },
+        // The request's own state, not the ledger's health (spec §C.1).
+        LedgerError::Terminal { id, state, detail } => ApprovalOutcome::Closed {
+            request: id,
+            state,
+            detail: detail.unwrap_or_default(),
+        },
         LedgerError::LiveCapacity { .. }
         | LedgerError::LiveCapacityPerPrincipal { .. }
         | LedgerError::RingAtCapacity
@@ -1148,6 +1148,7 @@ impl ExecContext {
             crate::ledger::LedgerConfig::default(),
             scope.clone(),
             None,
+            std::sync::Arc::new(crate::ledger::SystemClock),
         )
         .expect("the test ledger must mint an id epoch");
         let chain = Arc::new(crate::ledger::DecisionChain::new(
@@ -1161,7 +1162,6 @@ impl ExecContext {
             chain,
             principal: Principal::new("test-session", kaish_types::approval::PrincipalKind::Agent),
             scope,
-            request_ttl: crate::ledger::LedgerConfig::default().request_ttl,
             job_id: None,
             resolvers: Arc::new(StateResolvers::default()),
             // A wired test context is an authority-holding session: the
@@ -1526,14 +1526,28 @@ impl ExecContext {
         }
 
         // ── A fresh request ─────────────────────────────────────────
+        // Asking again after a closed predecessor links to it (spec §B.5):
+        // "this took four attempts over two hours" stays legible and the
+        // chain stays walkable. Only a *closed-without-running* predecessor
+        // counts — cancelled, denied, or past a deadline the embedder set;
+        // a successful settlement is a repeat operation, not the same
+        // thread of intent.
+        let mut draft = draft;
+        if draft.supersedes.is_none()
+            && let Some(previous) = access.approvals.match_draft(&draft.operation, &resource_refs(&draft))
+            && matches!(
+                access.approvals.state(&previous),
+                Some(RequestState::Cancelled | RequestState::Denied | RequestState::Expired)
+            )
+        {
+            draft.supersedes = Some(previous);
+        }
         let capture = capture.unwrap_or_else(|| self.capture());
         let origin = kaish_types::approval::RequestOrigin::new(
             access.scope.clone(),
             binding,
             access.principal.clone(),
-            capture,
-            access.request_ttl,
-        )
+            capture)
         .with_parent(self.gate_parent.clone())
         .with_job_id(access.job_id);
         let request = match access.requester.post_request(draft, origin).await {
@@ -1546,7 +1560,7 @@ impl ExecContext {
         };
 
         let outcome = {
-            let chain_ctx = ChainContext::new(&*self, self.cancel.clone());
+            let chain_ctx = ChainContext::new(self.cancel.clone());
             access.chain.decide(&request, &chain_ctx).await
         };
         match outcome {
@@ -1563,13 +1577,22 @@ impl ExecContext {
                 request: request.id,
                 reason,
             },
-            Ok(ChainOutcome::Deferred) => ApprovalOutcome::Pending(Box::new(request.into())),
+            Ok(ChainOutcome::Deferred) => ApprovalOutcome::Pending(Box::new(
+                kaish_tool_api::PendingApproval::new(request.into()),
+            )),
+            // The *execution* was cancelled, not a decision: the chain
+            // awaits nobody (spec §C.2), so this is either a token that had
+            // already fired when the chain was entered or one that fired in
+            // the window between deciding to grant and the grant landing.
+            // Either way nothing was granted and nothing will run.
             Ok(ChainOutcome::Cancelled) => ApprovalOutcome::Cancelled {
                 request: request.id,
             },
-            Err(err) => ApprovalOutcome::LedgerUnavailable {
-                reason: err.to_string(),
-            },
+            // A decision the ledger refused: the request closed underneath
+            // the chain (cancelled by its owner, past a deadline the
+            // embedder set) is `Closed`, and only a ledger condition —
+            // capacity, sink backpressure — is `LedgerUnavailable`.
+            Err(err) => approval_error(request.id, err),
         }
     }
 
@@ -1769,6 +1792,17 @@ impl ExecContext {
     /// resource — or one whose kind has no registered resolver — becomes
     /// [`ConditionReport::Unobservable`], which refuses; it is never a
     /// silent pass.
+    ///
+    /// **Each observation is stamped from the ledger's own clock**
+    /// (`Requester::clock_reading`), not from the system clock, so a
+    /// custom-clock embedder reads one timeline inside one `Redeemed` entry
+    /// (spec §A.5). The reading is raw: it is taken here, at the moment the
+    /// resolver looked, which is earlier than the entry's own latched commit
+    /// stamp and is meant to be — that gap is how stale the check was, and
+    /// collapsing it would make the record claim the world was observed at
+    /// commit time when it was not. The ledger clamps the stamp to its own
+    /// view at commit, so an observation can never claim to postdate the
+    /// entry carrying it.
     pub(crate) async fn observe_conditions(&self, conditions: &[Condition]) -> ConditionReport {
         let mut observed = Vec::new();
         // A condition that claims nothing has nothing to check, and costs no
@@ -1781,11 +1815,24 @@ impl ExecContext {
                     resource,
                 };
             };
+            // A context with no ledger has no grant either, so there are no
+            // conditions to observe and this arm cannot be reached with one
+            // — but a stamp from the wrong clock is exactly the defect this
+            // reading exists to close, so say so rather than substituting a
+            // system reading.
+            let Some(access) = self.ledger_access.as_ref() else {
+                return ConditionReport::Unobservable {
+                    detail: "this context has no approval ledger, so there is no clock to stamp \
+                             the observation from"
+                        .to_string(),
+                    resource,
+                };
+            };
             match resolver.observe(&resource.id).await {
                 Ok(claim) => observed.push(Observation {
                     resource,
                     claim,
-                    at: kaish_types::clock::system_now(),
+                    at: access.requester.clock_reading(),
                 }),
                 Err(err) => {
                     return ConditionReport::Unobservable {
@@ -1798,30 +1845,24 @@ impl ExecContext {
         ConditionReport::observed(observed)
     }
 
-    /// Renew an expired request (`docs/approval-ledger.md` §B.5): post a
-    /// fresh `Requested` carrying the original's operation, resources,
-    /// capture, principal, and trace context, linked by `supersedes`.
+    /// Close an undecided request (`docs/approval-ledger.md` §B.5).
     ///
-    /// **Renewal is a requester action, not an approval action.** The
-    /// principal that owns the request may renew it holding no authority at
-    /// all — that is what lets a gated agent keep its own request alive
-    /// instead of watching it die at `not_after` with no way to re-raise it.
-    /// A session holding this ledger's authority may renew any request,
-    /// because it could already grant or deny that request; withholding
-    /// renewal from it would be a special case with nothing behind it. Any
-    /// other session renewing another principal's request is refused.
+    /// **Cancellation is a requester action, not an approval action.** The
+    /// principal that owns the request may close it holding no authority at
+    /// all — that is what lets a gated agent withdraw its own request. A
+    /// session holding this ledger's authority may cancel any request,
+    /// because it could already deny that request; withholding cancellation
+    /// from it would be a special case with nothing behind it. Any other
+    /// session cancelling another principal's request is refused.
     ///
-    /// **The transitions are re-observed first.** A renewal posts the
-    /// original's resource claims verbatim, so if the world moved while
-    /// nobody was deciding, the fresh request would carry claims that are
-    /// already false and an approver would be deciding on fiction. The check
-    /// is the same one redemption makes, so a renewal can never post a
-    /// request its own redemption would refuse.
-    ///
-    /// The originating background job, if there was one, is restamped with
-    /// the renewed request — otherwise `wait`, `jobs`, and
-    /// `/v/jobs/{id}/approval` keep reporting the dead id.
-    pub(crate) async fn renew_request(&self, id: &RequestId) -> Result<RequestId, String> {
+    /// The originating background job, if there was one, keeps its cached
+    /// result; the request it names is now `Cancelled`, which
+    /// `approvals show` reports.
+    pub(crate) async fn cancel_request(
+        &self,
+        id: &RequestId,
+        reason: CancelReason,
+    ) -> Result<(), String> {
         let Some(access) = self.ledger_access.as_ref() else {
             return Err("this session has no approval ledger".to_string());
         };
@@ -1832,44 +1873,18 @@ impl ExecContext {
         let owned = chain.request.principal == access.principal;
         if !owned && access.session_authority.is_none() {
             return Err(format!(
-                "{id} was raised by {}, not {} — renewal is the requester's action, and this \
+                "{id} was raised by {}, not {} — cancellation is the requester's action, and this \
                  session holds no approval authority over another principal's request",
                 chain.request.principal.id, access.principal.id
             ));
         }
 
-        let conditions: Vec<kaish_types::approval::Condition> = chain
-            .request
-            .resources
-            .iter()
-            .filter_map(kaish_types::approval::Resource::to_condition)
-            .collect();
-        let report = self.observe_conditions(&conditions).await;
-        if let Some(reason) = crate::ledger::condition_conflict(&conditions, report) {
-            return Err(format!(
-                "{id} cannot be renewed: {reason} — the request's claims are no longer true, so \
-                 re-run the command to raise a request describing the world as it is now"
-            ));
-        }
-
-        let renewed = access
+        access
             .requester
-            .renew(id)
+            .cancel(id, access.principal.clone(), reason)
             .await
-            .map_err(|e| format!("{id} cannot be renewed: {e}"))?;
-
-        // Point the originating background job at the live request. Without
-        // this the job keeps surfacing the expired id through `wait`,
-        // `jobs`, and `/v/jobs/{id}/approval`, and an operator who granted
-        // the renewal has no way to see which job it belongs to.
-        if let Some(job_id) = chain.request.job_id
-            && let Some(manager) = self.job_manager.as_ref()
-            && let Some(view) = access.approvals.get(&renewed).map(|c| c.request)
-        {
-            manager.renew_gate(crate::scheduler::JobId(job_id), view).await;
-        }
-
-        Ok(renewed)
+            .map_err(|e| format!("{id} cannot be cancelled: {e}"))?;
+        Ok(())
     }
 
     /// Reserve an attempt against a request this execution just had granted.

@@ -284,35 +284,6 @@ impl Job {
         self.result.as_ref().and_then(|r| r.approval_request())
     }
 
-    /// Point this held job at the request that superseded its own
-    /// (`docs/approval-ledger.md` §B.5). Returns whether the job was held.
-    ///
-    /// Without this a renewal is invisible where it matters most: the job
-    /// keeps reporting the *expired* request through `wait`, `jobs`, and
-    /// `/v/jobs/{id}/approval`, so an operator granting the renewed one has
-    /// no way to see that the job it belongs to is now fulfillable. The
-    /// exit code and the stored output do not change — the operation is
-    /// still held, on a live request rather than a dead one.
-    ///
-    /// A job that is not held is left alone and reports `false`. Restamping
-    /// a *finished* job with an approval request would fabricate a gate that
-    /// never existed.
-    pub fn renew_gate(&mut self, renewed: kaish_types::approval::ApprovalRequestView) -> bool {
-        if self.approval().is_none() {
-            return false;
-        }
-        match &mut self.result {
-            Some(result) => {
-                result.approval = Some(Box::new(renewed));
-                true
-            }
-            // Unreachable: `approval()` just returned `Some`, which requires
-            // a result. Reported rather than asserted — a renewal that finds
-            // nothing to restamp is a missed surface, not a corruption.
-            None => false,
-        }
-    }
-
     /// Write job output to a temp file.
     fn write_output_file(&self, result: &ExecResult) -> Option<PathBuf> {
         // This is a human-readable text log; a binary stdout is noted, not
@@ -1054,19 +1025,6 @@ impl JobManager {
     pub async fn get_approval(&self, id: JobId) -> Option<kaish_types::approval::ApprovalRequestView> {
         let mut jobs = self.jobs.lock().await;
         jobs.get_mut(&id).and_then(|job| job.approval())
-    }
-
-    /// Point a held job at the request that superseded its own
-    /// (`docs/approval-ledger.md` §B.5). Returns whether a held job was
-    /// restamped — `false` for a job that does not exist or is not held.
-    /// See [`Job::renew_gate`].
-    pub async fn renew_gate(
-        &self,
-        id: JobId,
-        renewed: kaish_types::approval::ApprovalRequestView,
-    ) -> bool {
-        let mut jobs = self.jobs.lock().await;
-        jobs.get_mut(&id).is_some_and(|job| job.renew_gate(renewed))
     }
 
     /// List all job IDs, sorted (GH #247 — see [`Self::list`]'s doc for why

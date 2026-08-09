@@ -7,13 +7,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kaish_types::approval::{
-    ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, AttemptState, Grant,
+    ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, AttemptState, CancelReason, Grant,
     GrantTerms, Grounds, LedgerRecord, ObservedResource, OperationId, Outcome, Plan, Principal,
     RequestId, RequestOrigin, RequestState, SessionId, StandingGrant, StandingId, Subscription,
     SubscriptionId, Token,
 };
 
-use super::core::{build_inner, LedgerInner, SystemWallClock};
+use super::clock::Clock;
+use super::core::{build_inner, LedgerInner};
 use super::resolver::ConditionReport;
 use super::config::{LedgerConfig, LedgerSink};
 use super::error::LedgerError;
@@ -155,6 +156,12 @@ impl Ledger {
     /// (`ApproverHandle`). `sink` is optional — a ledger with none is purely
     /// in-memory and never applies sink backpressure (spec §D.4).
     ///
+    /// `clock` is required rather than defaulted, so **one clock per
+    /// ledger** is structural: there is no way to build one without saying
+    /// which clock stamps its entries and which clock its bounds are
+    /// compared against (spec §A.5). Pass
+    /// `Arc::new(`[`SystemClock`](super::SystemClock)`)` for the default.
+    ///
     /// # Errors
     ///
     /// Only if the OS cannot supply entropy for the ledger's id epoch (spec
@@ -164,8 +171,9 @@ impl Ledger {
         config: LedgerConfig,
         scope: ApprovalScope,
         sink: Option<Arc<dyn LedgerSink>>,
+        clock: Arc<dyn Clock>,
     ) -> Result<(Requester, Approvals, ApproverHandle), getrandom::Error> {
-        let inner = build_inner(config, scope, sink, Arc::new(SystemWallClock))?;
+        let inner = build_inner(config, scope, sink, clock)?;
         Ok((
             Requester(Arc::clone(&inner)),
             Approvals(Some(Arc::clone(&inner)), None),
@@ -300,6 +308,20 @@ impl Requester {
         self.0.abandon_request(id, reason.into())
     }
 
+    /// A raw reading from this ledger's clock, for stamping the I/O-time
+    /// metadata a redemption carries in — `Observation::at`, taken while
+    /// `StateResolver`s run outside the critical section (spec §B.1).
+    ///
+    /// **This is not a decision seam.** It takes no lock and does not touch
+    /// the monotonicity latch, so it must never be used to compare a bound
+    /// or to decide anything; the ledger's own `now` does that, under the
+    /// guard. What it guarantees is that an observation stamp comes from the
+    /// same clock as the entry it lands inside, instead of from whatever
+    /// clock the gate site happened to reach for.
+    pub fn clock_reading(&self) -> std::time::SystemTime {
+        self.0.clock_reading()
+    }
+
     /// Record a credential presentation whose draft named no request the
     /// ledger can identify (spec §F.3 item 2). It counts against nothing —
     /// a guesser cannot void a request it cannot describe.
@@ -307,17 +329,28 @@ impl Requester {
         self.0.record_unmatched_key();
     }
 
-    /// Renew an `Expired` request: post a new `Requested` carrying the
-    /// original's operation, resources, capture, principal, and trace
-    /// context, linked via `supersedes` (spec §B.5). Renewal is a requester
-    /// action — the principal that owns the request may renew it without
-    /// holding any authority.
-    pub async fn renew(&self, id: &RequestId) -> Result<RequestId, LedgerError> {
-        // `renew` shares `post_request`'s capacity-checking path (review
-        // finding S5 unified them under one lock) — see `post_request`'s
-        // identical drain for why.
+    /// Close an undecided request (spec §B.5). Nothing times a request out
+    /// (spec §A.10), so this is the only way one that nobody decides ever
+    /// ends — and every teardown path that can strand a request calls it.
+    ///
+    /// Cancellation is a **requester** action: the principal that owns the
+    /// request may close it holding no authority at all. Refused when the
+    /// request is already terminal, or when an attempt against it is in
+    /// flight — the operation is running, so nothing is stranded yet.
+    ///
+    /// Returns the closed request, so a caller can walk its `supersedes`
+    /// chain or re-raise the same intent.
+    pub async fn cancel(
+        &self,
+        id: &RequestId,
+        by: Principal,
+        reason: CancelReason,
+    ) -> Result<ApprovalRequest, LedgerError> {
+        // An attempt whose guard already dropped (queued but not yet
+        // drained) would wrongly still look `Reserved` to the in-flight
+        // check — the same reason `abandon_request` drains.
         self.0.drain_outbox();
-        self.0.renew(id)
+        self.0.cancel(id, by, reason)
     }
 
     /// Post one `Observed` entry: an `observe` subscription covered a
