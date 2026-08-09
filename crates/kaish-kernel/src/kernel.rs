@@ -938,7 +938,7 @@ impl KernelConfig {
     /// standing grants alone, and anything they do not cover defers to exit
     /// 2. Installing one whose `evaluate` returns `Defer` changes nothing.
     ///
-    /// **The kernel never awaits this** — [`Policy::evaluate`] is
+    /// **The kernel never awaits this** — [`Policy::evaluate`](crate::ledger::Policy::evaluate) is
     /// synchronous and contractually non-blocking. A decision that has to
     /// be thought about is not made here: the gate site returns
     /// `ApprovalOutcome::Pending` and the embedder decides in its own task,
@@ -1175,7 +1175,7 @@ struct KernelApprovals {
     requester: crate::ledger::Requester,
     /// The read side. Safe to hand anywhere.
     approvals: crate::ledger::Approvals,
-    /// The four-stage chain. Holds the ledger's authority internally so it
+    /// The decision chain. Holds the ledger's authority internally so it
     /// can post the decision it reaches; nothing reachable from script code
     /// can get that authority back out of it.
     chain: Arc<crate::ledger::DecisionChain>,
@@ -1791,7 +1791,7 @@ impl Kernel {
         &self.approvals.requester
     }
 
-    /// The four-stage decision chain this kernel's gate sites run
+    /// The decision chain this kernel's gate sites run
     /// (spec §C.2). The seam `ToolCtx::request_approval` (PR 3) and the
     /// rewritten gate sites (PR 5) call.
     pub fn decision_chain(&self) -> &Arc<crate::ledger::DecisionChain> {

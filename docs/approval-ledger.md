@@ -1,6 +1,6 @@
 # The kaish approval ledger
 
-**Status:** living design doc — spec current as of 2026-08-07. The ledger core, the latch cutover, and the statement gate have landed; §H names what remains before 0.14.0.
+**Status:** living design doc — spec current as of 2026-08-09. The ledger core, the latch cutover, and the statement gate have landed; §H names what remains before 0.14.0.
 This file in kaish `docs/` is the canonical copy (migrated from kaish-extras 2026-08-01;
 the extras copy is superseded).
 **Target:** kaish kernel (post-0.13) · **Motivating embedder:** kaijutsu · **First in-kernel consumer:** kaish-git's write profile
@@ -79,7 +79,7 @@ kernel awaits, because both ways of awaiting one are wrong: a bounded wait is a
 clock-driven decision, which the rule above already forbids, and an unbounded wait is a
 liveness hazard the kernel cannot cancel on anyone's behalf correctly. This is the same
 distinction the design draws everywhere else, applied to control flow — the kernel *asks*
-for policy with a pure function on the request path (`Approver::policy`), and it *returns*
+for policy with a pure function on the request path (`Policy::evaluate`), and it *returns*
 anything that cannot be answered immediately. It never runs the embedder's deliberation
 inside its own task, on its own clock, under its own cancellation. See §C.2 for the chain
 this produces and §C.1 for what comes back.
@@ -144,7 +144,7 @@ split is the load-bearing property; everything else in this document serves it.
 | Posting side | Held by | Entries it may post |
 |---|---|---|
 | **Obligations** | the implementation side — kernel gate sites, plugins via `ToolCtx` (`Requester`) | `Requested`, `Redeemed`, `Settled` |
-| **Authorizations** | the approval side — human via REPL, `Approver` hook, standing policy, embedder (`ApproverHandle`) | `Granted`, `Denied`, `KeyRetrieved`, `StandingIssued`, `StandingRevoked` |
+| **Authorizations** | the approval side — human via REPL, `Policy` hook, standing policy, embedder (`ApproverHandle`) | `Granted`, `Denied`, `KeyRetrieved`, `StandingIssued`, `StandingRevoked` |
 | **Derived** | the ledger itself, on observation | `Expired`, `Refused`, `Voided`, `Abandoned`, `TokenRejected` |
 
 This is enforced by types, not convention. One log, three handles:
@@ -940,7 +940,7 @@ chain. Neither means "no effect happened".
 
 **Success is what closes a chain.** A request is closed when an attempt settled successfully
 (`Outcome::Exit(0)`) or with `Outcome::Unknown` (see below), or when it can no longer
-authorize an execution — `Denied`, `Expired`, `Voided`, `Abandoned` — and every attempt it
+authorize an execution — `Denied`, `Cancelled`, `Expired`, `Voided`, `Abandoned` — and every attempt it
 spawned is terminal. Nothing stays live because
 a limit was never reached: there is no limit to reach (§A.1). Only closed chains are
 evictable (§D.4), which is why the common case — one request, one grant, one attempt, one
@@ -1154,14 +1154,18 @@ undecided request, because with no clock closing them something must.
 
 ```rust
 impl Requester {
-    /// Close an undecided request. Refused if `expected_revision` is stale
-    /// (§B.6) or the request is already terminal.
+    /// Close an undecided request, recording who closed it and why.
+    /// Refused unless the request is still `Requested`: a decision that
+    /// already landed is not undone by the requester losing interest, and a
+    /// granted-but-unredeemed chain closes on its own at `not_after`. An
+    /// attempt in flight refuses too — the operation is running, so nothing
+    /// is stranded yet. Gains an `expected_revision` argument with §B.6.
     pub async fn cancel(
         &self,
-        id: RequestId,
-        expected_revision: u64,
+        id: &RequestId,
+        by: Principal,
         reason: CancelReason,
-    ) -> Result<ApprovalRequestView, LedgerError>;
+    ) -> Result<ApprovalRequest, LedgerError>;
 }
 
 #[non_exhaustive]
@@ -1208,12 +1212,18 @@ against accumulation, not a substitute for cleanup.
 
 Every teardown path that can strand a request closes it:
 
-| Teardown | Obligation |
-|---|---|
-| A job is discarded | Cancel its held request, `Withdrawn` |
-| A job is cancelled or killed | Cancel its held request, `Withdrawn` |
-| A session shuts down | Cancel every request its principal still owns |
-| A kernel shuts down | Cancel every live request in its scope (§A.7) |
+| Teardown | Obligation | Where |
+|---|---|---|
+| A job is discarded | Cancel its held request, `Withdrawn` | `kill --discard %N` |
+| A job is cancelled or killed | Cancel its held request, `Withdrawn` | `Kernel::cancel_all_jobs` |
+| A session shuts down | Cancel every request in its scope | `Kernel::shutdown` |
+| A kernel shuts down | Cancel every live request in its scope (§A.7) | `Kernel::shutdown` |
+
+The last two rows are one call, because **a kaish session is a kernel**:
+`KernelConfig::with_session` names the session and `ApprovalScope` is what separates one
+session's requests from another's sharing the same ledger. What no teardown path can
+cover is a session that goes away without calling `shutdown`; an embedder in that
+position enumerates `Approvals::pending()` and cancels what it recognizes.
 
 Under a request TTL this was invisible: an orphan expired on its own and returned its slot,
 so a missing teardown path cost sixty seconds of capacity and nothing else. Without one it
@@ -1266,7 +1276,7 @@ branch on *why* it may not proceed:
 ```rust
 #[non_exhaustive]
 pub enum ApprovalOutcome {
-    /// A grant existed, or a standing rule or `Approver::policy` granted on
+    /// A grant existed, or a standing rule or `Policy::evaluate` granted on
     /// the request path, and an attempt is reserved.
     Authorized(AttemptHandle),
     /// Nobody has decided, and the kernel will not wait to find out (§0.1).
@@ -1278,11 +1288,13 @@ pub enum ApprovalOutcome {
     /// A precondition on the grant no longer holds, or could not be observed.
     /// The grant is voided and the operation must re-request (§B.4).
     Refused { request: RequestId, detail: String },
-    /// The request was closed while the decision was in flight — cancelled,
-    /// superseded, or past a deadline the embedder set. Distinct from
-    /// `LedgerUnavailable`: nothing is wrong with the ledger, and retrying
-    /// this request will never work. Ask again (§B.5).
-    Closed { request: RequestId, state: RequestState },
+    /// The request is over — cancelled, superseded, voided, or past a
+    /// deadline the embedder set. Distinct from `LedgerUnavailable`:
+    /// nothing is wrong with the ledger, and retrying this request will
+    /// never work. Ask again (§B.5). `detail` carries what the state alone
+    /// does not say ("voided after 5 invalid attempts") and is empty
+    /// otherwise.
+    Closed { request: RequestId, state: RequestState, detail: String },
     /// This context has no ledger — a unit-test harness or a minimal embedder.
     Unsupported,
     /// The ledger refused to record: sink backpressure or live capacity (§D.4).
@@ -1327,42 +1339,26 @@ exit 1 with a message naming the reason. This mirrors `gate_overwrites`'s existi
 contract (`context.rs:828`), which callers already know to return verbatim and never fall
 through.
 
-**A pending request is never silently dropped from the result.** `Pending` is how an
-embedder learns it has something to decide, so the control-plane field is not "the last
-statement's" field. Today `accumulate_result` assigns `accumulated.approval =
-new.approval` unconditionally (`kernel.rs:7295`), on a comment asserting the pending view
-*is* the last statement's — which holds only when the gated statement happens to be last.
-It should keep the **first** pending request it is given and let later results add nothing,
-rather than overwrite it with `None`.
+**A pending request is never silently dropped from the result, because nothing runs
+after one.** A gate halts the top-level statement loop, whether it was raised on the
+statement itself or by an `fs.*` operation inside it (§I.5, resolved). So the pending
+view on the control-plane field is always the last statement's, `accumulate_result`'s
+unconditional assignment is correct, and there is nothing after the gate to overwrite it
+with `None`. There is no carry rule, and there should not be one: it would be a second
+mechanism for a case the halt already makes unreachable.
 
-Being precise about when this fires, because the imprecise version sounds worse than it is:
-a **statement-level** gate halts the loop, so nothing follows it and nothing can overwrite
-it. The defect is specifically an **`fs.*` gate inside an `Observe`-classified statement** —
-the oldest path in the system, and the one `set -o approvals` turns on. `kaish -c 'rm x;
-echo ok'` with `rm` gated returns exit 0 and no approval view.
+**The ledger is still the authoritative pending set; the result field is a
+convenience.** `Approvals::pending()` (§D.2) enumerates every live request, paginated,
+which is the interface an embedder reclaiming slots should be using. Two reasons the
+field carries one request rather than all of them:
 
-**The ledger is the authoritative pending set; the result field is a convenience.** The
-request is *not* lost when the field is overwritten — it is `Requested` in the ledger and
-`Approvals::pending()` (§D.2) enumerates it, paginated, which is the interface an embedder
-reclaiming slots should be using anyway. So the cost of the defect is that a caller
-reading only the result never learns to look, not that the record is gone. Two consequences
-follow, and they are why the field carries one request rather than all of them:
-
-- **Carrying every pending request would make the field unbounded** — a thousand-statement
-  program gating at the `fs.*` layer accumulates a thousand views in a result an embedder
-  has to hold in memory — and would force an aggregate-exit-code answer this section does
-  not need to give. The ledger already answers "which requests are live" without either
-  problem.
+- **Carrying every pending request would make the field unbounded** and would force an
+  aggregate-exit-code answer this section does not need to give. The ledger already
+  answers "which requests are live" without either problem.
 - **A gated backgrounded job never surfaces here at all.** `cmd &` that gates inside tool
   execution puts the request on `JobInfo.approval`; the spawning statement has already
-  returned. This is a second reason the result field cannot be the complete enumeration and
-  `Approvals::pending()` must be.
-
-The exit code is a separate question, taken in §I.5: whether a tool-level deferral should
-halt the top-level loop the way a statement-level one already does. Note that answering it
-*yes* dissolves this defect as a side effect — nothing runs after the gate, so nothing
-overwrites the field — which is an argument for taking §I.5 in the same lane rather than
-shipping the accumulation fix and then changing the behavior underneath it.
+  returned, and the loop does not halt for it. This is why the result field cannot be the
+  complete enumeration and `Approvals::pending()` must be.
 
 **Tools never call `settle` on the happy path, and settlement is drop-safe.** The obvious
 design — the dispatch seam posts `Settled` after `tool.execute()` returns — does not fire
@@ -1403,7 +1399,7 @@ none of them waits:
    This is the auto-approve fast path. (§C.5's `observe` subscriptions never reach the
    chain at all — a covered operation posts a chainless `Observed` entry at the gate site
    and proceeds; only `enforce` posts a request.)
-2. **`Approver::policy`** — synchronous, contractually non-blocking, **never called while
+2. **`Policy::evaluate`** — synchronous, contractually non-blocking, **never called while
    holding the ledger lock**. Suitable for allowlists, risk-class rules, and "never
    `git.push.force`, full stop". A policy is a pure function of the request and the
    ledger: the kernel asks it a question and gets an answer, which is why it can stay on
@@ -1415,8 +1411,8 @@ none of them waits:
    they all decide out of band, because there is no in-band place to decide.
 
 ```rust
-pub trait Approver: Send + Sync {
-    fn policy(&self, req: &ApprovalRequestView, ledger: &Approvals) -> Decision {
+pub trait Policy: Send + Sync {
+    fn evaluate(&self, req: &ApprovalRequestView, ledger: &Approvals) -> Decision {
         let _ = (req, ledger);
         Decision::Defer
     }
@@ -1431,10 +1427,11 @@ pub enum Decision {
 }
 ```
 
-An approver receives the tokenless `ApprovalRequestView` — it decides, it does not redeem.
-The method is defaulted, so an empty impl changes nothing and **the trait's default
-behavior is today's behavior**. The trait is not `async` and has no second method: a
-decision that cannot be made synchronously is not made here at all.
+A policy receives the tokenless `ApprovalRequestView` — it decides, it does not redeem.
+The method is defaulted, so an empty impl changes nothing. The trait is not `async` and
+has no second method: a decision that cannot be made synchronously is not made here at
+all. `ApproverHandle` keeps its name and is a different object — it is what actually
+approves (§I.6).
 
 **Why there is no asynchronous decision hook.** An `async fn decide` that the kernel awaits
 looks like the natural third stage, and it is the shape this design carried until it was
@@ -1738,7 +1735,7 @@ cannot be recorded is not made.
 
 ```rust
 pub trait StatementClassifier: Send + Sync {
-    /// Synchronous and non-blocking, like `Approver::policy` (§C.2). Called once
+    /// Synchronous and non-blocking, like `Policy::evaluate` (§C.2). Called once
     /// per top-level statement. An `Err` means `Gate`, never `Observe`.
     fn classify(
         &self,
@@ -1821,10 +1818,10 @@ which is exactly why it is written down here.
 
 `KernelConfig::with_statement_classifier` registers one; with none registered, every
 statement is `Observe`. A gate-classified statement enters the existing chain unchanged —
-a standing grant auto-approves it, `Approver::policy` may grant or deny it on the request
+a standing grant auto-approves it, `Policy::evaluate` may grant or deny it on the request
 path, and `Defer` through both is exit 2 with the request pending, which at a TTY REPL
 returns the line to the user (§C.3) and in a script halts execution at that statement.
-The classifier has no deny: refusal is a chain decision (`Approver::policy`), because a
+The classifier has no deny: refusal is a chain decision (`Policy::evaluate`), because a
 scoping seam that can refuse is a second decision chain.
 
 **The classifier stays synchronous, and that is a decision rather than an oversight.** It
@@ -1919,8 +1916,8 @@ put the rest, "why did this get approved?" is answerable only from whatever the 
 happened to log on the side.
 
 ```rust
-/// Handed to `Approver::policy`. Carries no deadline and no cancellation
-/// token: `policy` is synchronous and non-blocking, so it has nothing to
+/// Handed to `Policy::evaluate`. Carries no deadline and no cancellation
+/// token: `evaluate` is synchronous and non-blocking, so it has nothing to
 /// bound and nothing to abandon (§C.2).
 #[non_exhaustive]
 pub struct DecisionContext {
@@ -1955,7 +1952,7 @@ as it goes is what survives.
 The interesting deliberation happens between `Pending` and `grant` — in the embedder's own
 task, over as long as it takes (§C.2) — so the recorder is reachable from `ApproverHandle`
 as well as from `DecisionContext`, and both append to the same chain. This is the version
-of the recorder that pays for itself: `Approver::policy` is a fast pure rule and rarely has
+of the recorder that pays for itself: `Policy::evaluate` is a fast pure rule and rarely has
 much to say, while a router feeding specialists feeding a model feeding a human has a great
 deal to say and now runs somewhere the kernel cannot see. The `Assessed` entries are how it
 stays auditable from the ledger anyway.
@@ -2060,7 +2057,7 @@ placeholder is substituted by a frontend holding an `ApproverHandle` (§D.3).
 // KernelConfig — replaces with_nonce_store (see §F)
 .with_ledger(Ledger)                         // share one ledger across kernels in this process
 .with_ledger_sink(Arc<dyn LedgerSink>)       // export
-.with_approver(Arc<dyn Approver>)            // synchronous policy only — the kernel
+.with_policy(Arc<dyn Policy>)                // synchronous policy only — the kernel
                                              // never awaits an embedder (§0.1, §C.2)
 .with_principal(Principal)
 .with_session(SessionId)                     // §A.7; absent = a single-session kernel
@@ -2075,8 +2072,10 @@ placeholder is substituted by a frontend holding an `ApproverHandle` (§D.3).
 fn build(config: KernelConfig) -> (Kernel, ApproverHandle);
 fn approvals(&self) -> Approvals;                          // read side, no authority
 /// Close an undecided request (§B.5). Requester action: no authority needed
-/// for your own request. Revision-checked (§B.6).
-async fn cancel(&self, id: &RequestId, rev: u64, why: CancelReason)
+/// for your own request. Revision-checked (§B.6). Spelled `cancel_approval`
+/// on `Kernel`, because `Kernel::cancel` already means "interrupt the
+/// running execution".
+async fn cancel_approval(&self, id: &RequestId, rev: u64, why: CancelReason)
     -> Result<ApprovalRequestView>;
 /// Reserve an attempt and replay the captured invocation. The handle is a
 /// required argument: replay is an execution (kernel) authorized by the
@@ -2475,7 +2474,7 @@ side of `Pending`: the request comes back undecided, the embedder routes it to t
 and the model's verdict returns through `ApproverHandle::grant`/`deny`. The boundaries that
 make it safe are structural, not prompt-side:
 
-- **Scope by what reaches it, not by prompt.** `Approver::policy` runs first and
+- **Scope by what reaches it, not by prompt.** `Policy::evaluate` runs first and
   synchronously, so it can deny or short-circuit everything the clearance model must not
   decide — `RiskClass::Irreversible` routes to a human without the model ever being asked.
   Telling the model "never approve irreversible operations" is theater; filtering what
@@ -2599,6 +2598,7 @@ those is a field above.
 | `JobInfo.latch: Option<LatchRequest>` | `JobInfo.approval: Option<ApprovalRequestView>` |
 | `set -o latch` / `set +o latch` | `set -o approvals` / `set +o approvals` (and `KAISH_LATCH` → `KAISH_APPROVALS`, `KernelConfig::with_latch` → `with_approvals`) |
 | `JobStatus::Latched`, wire `"latched"` | `JobStatus::Gated`, wire `"gated"` |
+| `Approver` trait, method `policy`; `KernelConfig::with_approver` | `Policy` trait, method `evaluate`; `KernelConfig::with_policy` (§I.6). `ApproverHandle` is unchanged — it approves |
 
 Keeping `LatchRequest` as a compatibility projection was considered and rejected twice, on
 independent grounds: `LatchRequest` is `#[serde(deny_unknown_fields)]` (`result.rs:72-74`)
@@ -2769,6 +2769,8 @@ decision records are in `git log`. What each one carried:
 | 7 | `/v/approvals`, the `approvals` builtin (§D.3) |
 | 8 | `fs.*` observability subscriptions (§C.5) |
 | 10 | The statement gate: `Plan`, the classifier seam, the two-site tap, `Capture::Statement` replay (§C.6) |
+| R1 | Identity, binding, and the versioned record: `ApprovalScope`, `parent`, `revision`, `PlanBinding`, `LedgerRecord` (§A.5, §A.7, §A.9) |
+| R2 | No clock-driven decisions and no waiting: the TTL, the expiry path, `renew`, `Approver::decide`, and the patient hold deleted; `cancel` + `CancelReason` + `ApprovalOutcome::Closed` + `PendingApproval`/`ResumeAction` added; §B.5's teardown obligations wired; §I.5's halt and §I.6's `Policy` rename executed (§A.10, §B.5, §C.1–§C.3, §G) |
 
 Also landed: `security(kernel): CSPRNG confirmation nonces` (kaish #259), which replaced
 the 32-bit non-CSPRNG generator and made entropy failure loud.
@@ -2776,70 +2778,6 @@ the 32-bit non-CSPRNG generator and made entropy failure loud.
 ---
 
 ### Remaining work
-
-**R1 — `refactor(kernel)!: identity, binding, and the versioned record`**
-
-§A.7, §A.9, and §A.5's envelope: `ApprovalScope` on every request and record, `parent`,
-`revision`, `PlanBinding`, `LedgerRecord` with `schema_version`, and `scope()` on both
-`ApproverHandle` and `Approvals`. The widest of these lanes and the one everything else
-sits on, so it goes first.
-
-*Tests:* a request raised under a scoped handle is invisible to another session's
-`Approvals`; a nested `fs.*` gate under a statement gate names the statement's request as
-`parent`; a grant whose binding disagrees with the replay's cwd is refused and a new
-request is posted; an unknown entry variant round-trips as unknown rather than being
-dropped.
-
-**R2 — `refactor(kernel)!: no clock-driven decisions, and no waiting on the embedder`**
-
-Both halves of §0.1's time rule, in one lane because they delete the same machinery from
-opposite ends and neither is finished alone.
-
-*No clock* — §A.10 and §B.5: delete `request_ttl`, the request-expiry path, and
-`attempt_stale_after`; `ApprovalRequest::deadline` becomes `Option`, defaulting to `None`;
-add `Requester::cancel` and `CancelReason`; add `ApprovalOutcome::Closed`; and **wire the
-teardown obligations in §B.5's table**, which is the lane's real risk — `abandon_request`
-today has exactly one production caller (the cancelled-grant undo in
-`ledger/approver.rs`), so job discard, job kill, session shutdown, and kernel shutdown all
-currently strand a held request. Expiry was covering for that; nothing covers it after this
-lane.
-
-*No waiting* — §C.1, §C.2, §C.3: delete `Approver::decide` and `decide_budget`, dropping
-the chain to three stages and the trait to one synchronous method; drop the patient hold
-from the gate path; add `index` to `ResumeAction::ConfirmStatement`; strip `deadline` and
-`cancellation` from `DecisionContext` and reach `AssessmentRecorder` from `ApproverHandle`;
-replace the `approval.decide` span per §G. **Fix the accumulation carry** (§C.1): the first
-pending request must survive later statements' results instead of being overwritten at
-`kernel.rs:7295`.
-
-Machinery that loses its only caller, and must be dealt with rather than left orphaned:
-`ChainStage::Decide`; `ChainContext::hold()` and the `PatientSource`/`PatientGuard` plumbing
-behind it, which exist only for `decide`'s hold — delete them from the ledger, keeping
-`ToolCtx::patient` itself, which is a general tool-author facility with unrelated callers;
-and `ChainOutcome::Cancelled`, which stays reachable through the pre-stage cancellation
-check but whose comments and mapping at `context.rs:1477` describe a `decide` race it can
-no longer be. The stale doc-comments naming the four-stage chain go with them
-(`ledger.rs:15`, `ledger/approver.rs:1-7`, and the `ctx.patient` remarks at
-`kernel.rs:2028` and `kernel.rs:2289`). `Requester::renew` and the expiry path go in the
-*no clock* half above; with nothing expiring there is no expiry to renew from, and
-`docs/EMBEDDING.md` documented renewal in detail, so that section is part of this lane's
-docs, not PR 9's.
-
-*Tests:* a request still `Requested` after an interval that would have expired it; `cancel`
-on another principal's request is refused; a cancelled request's `supersedes` chain is
-walkable; `Closed` is returned where `LedgerUnavailable` used to be, and
-`LedgerUnavailable` no longer describes a request's own state. And one test per row of
-§B.5's teardown table, each asserting the live count returns to zero — a discarded job, a
-killed job, a shut-down session, and `Kernel::shutdown` with a gated job outstanding.
-
-For the waiting half: a grant posted an arbitrarily long time after the request returned
-`Pending` still redeems (the successor to the parked lease case — same defect, expressed
-against the design that has no lease *and* no budget to disagree about); a program whose
-non-final statement gates still carries the pending request in its aggregate result
-(`'rm x; echo ok'` — red today); a program with two gated statements carries both; the
-statement after a halted one does not run, which `kernel.rs:2947` currently implements and
-no test pins. None of these need a paused clock or a real one, which is the point — the
-path they cover has no timing left in it.
 
 **R3 — `refactor(kernel)!: revision checks on every transition`**
 
@@ -2945,34 +2883,22 @@ permanent home.
    rows are in the §F.2 rename table and both land in the cutover (PR 5). What does **not**
    change: exit code **2**, the `--confirm=<token>` flag spelling, and `Kernel::confirm` —
    "confirm" is not latch vocabulary. `trash` is untouched.
-5. **Should a tool-level deferral halt the top-level loop, the way a statement-level one
-   already does?** A gated statement stops the program (`kernel.rs:2941-2947`, and §C.6
-   says so). A gate raised *inside* an `Observe`d statement — an `fs.*` gate under
-   `set -o approvals`, the oldest path in the system — does not: the loop takes the exit 2
-   as an ordinary result and runs the next statement. So `rm x; echo ok` runs `echo` after
-   the `rm` it never performed, and the request the caller must now decide arrives, if at
-   all, only because §C.1's carry rule preserves it.
-
-   The case for halting is consistency and predictability: exit 2 does not mean *failed*,
-   it means *this has not happened yet*, and statements after it were written expecting it
-   had. The case against is blast radius — this is the widest-reach contract kaish has
-   (§D.3 pins the code and the flag), and the current behavior predates the ledger.
-   The sharper version of the case for halting is that the current behavior lets a
-   *denied* operation's side effects run: `rm x; touch y` creates `y` whether or not `rm x`
-   is ever approved, and nothing un-creates it. R2 needs the answer, because the
-   accumulation fix (§C.1) and this question overlap — halting dissolves the overwrite by
-   making it unreachable, so shipping the carry rule first and changing the loop later is
-   two behavior changes where one would do. **Recommendation: halt**, with `set -o
-   approvals` as the switch that already scopes who is exposed — a user who has opted into
-   destructive-op gating has asked for exactly this semantics. A cross-family review
-   reached the same recommendation independently, and argued harder for taking it now.
-   Not taken unilaterally: it changes behavior an existing script can see, on the widest
-   contract kaish has.
-6. **Does the `Approver` trait still deserve that name?** It has one synchronous method,
-   `policy`, and it no longer approves anything asynchronously — the approving happens
-   through `ApproverHandle`, which is a different object with a confusingly similar name.
-   `Policy::evaluate` would say what it is. Cosmetic, and it costs a rename across the
-   §F.2 table, so it is worth doing at the same moment as R2 or not at all.
+5. ~~**Should a tool-level deferral halt the top-level loop?**~~ **Resolved 2026-08-09
+   (Amy): halt.** A gate raised *inside* an `Observe`d statement — an `fs.*` gate under
+   `set -o approvals` — halts the top-level statement loop exactly the way a
+   statement-level gate does. Exit 2 does not mean *failed*, it means *this has not
+   happened yet*, and the statements after it were written expecting it had. The
+   behavior it replaces let a *denied* operation's side effects run: `rm x; touch y`
+   created `y` whether or not `rm x` was ever approved, and nothing un-creates it.
+   `set -o approvals` is the opt-in that scopes who sees the change. Halting also
+   dissolves §C.1's accumulation defect by making the overwrite unreachable, which is
+   why the two were taken together rather than as two behavior changes. A cross-family
+   review reached the same recommendation independently.
+6. ~~**Does the `Approver` trait still deserve that name?**~~ **Resolved 2026-08-09
+   (Amy): rename.** The trait is `Policy` and its method is `evaluate`; it has one
+   synchronous method and approves nothing. `ApproverHandle` keeps its name — it
+   approves, and that was the confusion being fixed. `KernelConfig::with_approver`
+   becomes `with_policy`. The row is in the §F.2 rename table.
 7. **The always-on statement tap has no measurement behind it.** §C.6 makes the tap
    non-optional and justifies it as `O(top-level statements)`, which is an assertion
    rather than a number: every statement pays a `Plan` allocation, a ledger append, and an

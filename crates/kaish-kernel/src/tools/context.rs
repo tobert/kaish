@@ -313,7 +313,7 @@ pub struct LedgerAccess {
     pub requester: Requester,
     /// The read side, for `ToolCtx::approvals`.
     pub approvals: Approvals,
-    /// The four-stage decision chain (spec §C.2) a fresh request runs
+    /// The decision chain (spec §C.2) a fresh request runs
     /// through. Holds the ledger's authority internally; nothing reachable
     /// from script or tool code can get that authority back out of it.
     pub chain: Arc<DecisionChain>,

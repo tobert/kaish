@@ -38,7 +38,7 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 | `alias` | First word only; not in pipelines or compound commands |
 | `set` | `-e`, `-o approvals`, `-o trash`, `-o glob`, `-o output-limit[=SIZE]` (no `-u`, `-x`, `pipefail`) |
 | `rm` (trash) | Trash failure = error, no fallthrough to permanent delete. Dirs always trash (stat size unreliable). |
-| `rm` (approvals) | A grant covers exactly the operation and paths that were requested, and authorizes one successful run. Requests expire after 60s undecided; renewal posts a fresh request. Live within a session, not across reconnects. |
+| `rm` (approvals) | A grant covers exactly the operation and paths that were requested, and authorizes one successful run. A request never expires — decide it or `approvals cancel <id>`. A gated command exits 2 and halts the program. Live within a session, not across reconnects. |
 | `ps` | Linux-only (reads `/proc`) |
 | `head`/`tail -c` | Counts bytes (POSIX); can split multi-byte UTF-8 — prefer `-n` for text |
 | `**` globs | Slow on deep trees; use specific prefixes |

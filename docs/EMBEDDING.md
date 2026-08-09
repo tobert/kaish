@@ -290,11 +290,21 @@ a timeout it picked and cancelling your in-flight dialog or RPC when that timeou
 fired. Run the decision on your own task, with your own timeout if you want one,
 and end an abandoned request with `cancel` rather than letting it sit live.
 
+`ApprovalOutcome::Pending` carries a `PendingApproval { request, resume }`, and
+`resume` is a structured `ResumeAction` rather than something to infer from the
+capture's shape: `ConfirmStatement { plan_digest, index }` for a held statement,
+`RetryOperation` for an invocation `Kernel::confirm` can replay, and
+`NotReplayable { reason }` for a capture the kernel cannot re-issue at all.
+
 Two consequences worth planning for:
 
-- **A gated statement stops the program there.** `confirm` replays the held
-  statement and nothing after it. If you submitted `a; b; c` and `b` gated, running
-  `c` is yours to do — the session still holds the variables and cwd that `a` set.
+- **A gate stops the program there — exit 2 halts the statement loop.** This
+  holds whether the gate was raised on the statement itself or by an `fs.*`
+  operation inside it: exit 2 means *this has not happened yet*, so the
+  statements written after it do not run. `confirm` replays the held statement
+  and nothing after it. If you submitted `a; b; c` and `b` gated, running `c` is
+  yours to do — the session still holds the variables and cwd that `a` set, and
+  `ResumeAction::ConfirmStatement`'s `index` says where to pick up (`index + 1`).
 - **Decide the requests you are handed.** With no expiry, an undecided request holds
   a live slot until something closes it, so an embedder that ignores pending requests
   eventually fills the ledger (`live_capacity`). Read `ExecResult.approval` on every
@@ -389,24 +399,37 @@ silently wrong for someone. What bounds the ledger instead is capacity:
 which is a failure someone can act on rather than a request that quietly
 vanished.
 
-**So closing what you no longer want is yours to do.** `Kernel::cancel(&id, rev,
-why)` closes an undecided request. Three properties an embedder should know:
+**So closing what you no longer want is yours to do.**
+`Kernel::cancel_approval(&id, why)` closes an undecided request. (It is not
+spelled `cancel`: `Kernel::cancel` already means "interrupt the running
+execution".) Three properties an embedder should know:
 
 - **Cancellation takes no `ApproverHandle`.** It is a requester action: a
   session holding no authority cancels its own requests, which is what lets a
   gated agent withdraw an ask it has given up on. Cancelling another
   principal's request without authority exits 1, naming both principals.
   `approvals cancel <id>` is the same call from the shell.
-- **Cancellation is revision-checked.** A cancel racing a grant leaves exactly
-  one winner, and the loser is recorded rather than silently dropped.
-- **Asking again is a new request, not a revival.** It starts undecided, linked
-  to the cancelled one by `supersedes`, and re-observes the resource first —
-  failing with **exit 1** naming what changed rather than posting claims that
-  are already false.
+- **Only an undecided request is cancellable.** A decision that already landed
+  is not undone by the requester losing interest — cancelling a granted request
+  exits 1 — and a granted-but-unredeemed chain closes on its own at the grant's
+  `not_after`.
+- **Asking again is a new request, not a revival.** Re-run the command; the
+  fresh request starts undecided and is linked to the closed one by
+  `supersedes`, so the whole thread of intent stays walkable.
 
-If the cancelled request came from a backgrounded job, `JobManager::cancel_gate`
-closes the job's held request, so a gated job is never both unfulfillable and
-undiscardable.
+**A deadline is a timer you run, not one the kernel runs.** Set
+`RequestOrigin::with_deadline(Some(when))` if you want the request to *record*
+one — it is compared when the request is next observed — and run your own timer
+that calls `cancel_approval(&id, CancelReason::DeadlinePassed)` when it fires.
+An embedder that wants no horizon never calls it.
+
+**kaish closes what its own teardown would strand.** `kill --discard %N`,
+`Kernel::cancel_all_jobs`, and `Kernel::shutdown` cancel the requests they would
+otherwise orphan — the last sweeping every live request in that kernel's scope,
+which matters when several kernels share one ledger through
+`with_approver_handle`. What kaish cannot close is a session that goes away
+without calling `shutdown`; enumerate `Approvals::pending()` and cancel what you
+recognize.
 
 **Gated backgrounded jobs surface on the job, not on the result.** `cmd &` that
 gates inside tool execution puts the request on `JobInfo.approval` and
@@ -581,12 +604,12 @@ and run. A `StatementPosture::Gate { reason, risk }` builds an
 `ApprovalRequest` under `cmd.execute` with the plan attached and one
 `Resource { kind: "cmd", id: <argv0> }` per planned command, then runs the same
 three-stage chain a gated `rm` runs: a standing grant auto-approves it
-(all-or-nothing over every `cmd` resource), `Approver::policy` may grant or deny
+(all-or-nothing over every `cmd` resource), `Policy::evaluate` may grant or deny
 it on the request path, and `Defer` through both is **exit 2** with the view
 on `.approval` and **nothing of the statement executed** — no substitution, no
 redirect target created, no first loop iteration, and no statement after it in
 the same program. The classifier has no deny:
-refusal is a chain decision (`Approver::policy`), because a scoping seam that
+refusal is a chain decision (`Policy::evaluate`), because a scoping seam that
 can refuse is a second decision chain.
 
 `CommandNameClassifier::new(names, reason, risk)` is the reference

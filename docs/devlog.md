@@ -15,6 +15,81 @@ before it ships.
 
 ---
 
+## What deleting a clock cost, and what it bought (2026-08-09)
+
+The design half of this is two entries down — "The kernel stops waiting", written
+when the rule grew its third clause. This is what happened when the code caught up
+with it, because two things surprised me and one ruling changed a contract kaish
+has had since before the ledger existed.
+
+**The first surprise: nothing was holding the orphans up.** §A.10 deletes the
+request TTL, and the spec's own §H had already flagged the consequence — expiry was
+covering for teardown. I read that as a housekeeping item. It is not. Before this
+lane, `abandon_request` had exactly one production caller: the cancelled-grant undo
+inside the decision chain. Discard a gated job with `kill --discard %1` and its
+request stayed `Requested` forever. Kill every job, shut the kernel down — same.
+Under a 60-second TTL none of that was visible: the orphan expired on its own and
+returned its slot, so a missing teardown path cost a minute of capacity and nobody
+noticed. Delete the TTL and the same missing path costs a live slot for the life of
+the process — and *forever*, in an embedder where several kernels share one ledger
+through `with_approver_handle`, which is exactly the shape kaijutsu is heading for.
+
+So the lane grew a `ledger::teardown` module and four tests, one per row of §B.5's
+obligations table, each asserting the live count returns to zero. Writing them
+turned two rows into one call: a kaish session *is* a kernel, so "a session shuts
+down" and "a kernel shuts down" are both `Kernel::shutdown`, and what separates
+them is `ApprovalScope`. The test for that builds two kernels over one ledger with
+different session ids, shuts one down, and asserts the other's request is
+untouched — which is the only way to see the difference at all.
+
+**The second surprise: the deadline wanted to be wall-clock.** The ledger kept two
+`Instant` mirrors — `request_deadline` and `grant_deadline` — computed at post and
+grant time so a wall-clock jump could not move an expiry decision. There was a test
+pinning it. §A.5 already said the opposite in present tense: both surviving
+deadlines are wall-clock values compared when observed, and a laptop suspend
+correctly makes a grant look expired, because `not_after` is a promise about
+wall-clock time made by whoever set it. Reading those side by side, the monotonic
+mirror was protecting a property nobody had asked for. It went, the `Instant`
+import with it, and the test became one that asserts the stated reading instead:
+299 seconds in, still granted; 301 seconds in, expired. The two other clock fields
+went the same way — `attempt_stale_after` because `AttemptGuard`'s outbox already
+*tells* the ledger an executor went away, and inferring the same fact from elapsed
+time is guessing at something you were told.
+
+**The ruling that changes a contract.** §I.5 asked whether a tool-level deferral
+should halt the top-level loop the way a statement-level one already does. Amy
+ruled halt. The case that settled it is not consistency, it is that the old
+behavior let a *denied* operation's side effects run: `rm x; touch y` with `rm`
+gated created `y` whether or not `rm x` was ever approved, and nothing un-creates
+it. Exit 2 does not mean *failed*, it means *this has not happened yet*, and the
+statements after it were written expecting it had.
+
+The implementation is one branch. The interesting part is what it made unnecessary.
+§C.1 had a whole subsection about `accumulate_result` overwriting the pending view
+with `None`, and a proposed carry rule — keep the first pending request, let later
+results add nothing. With the halt there is no "later result": nothing runs after a
+gate, so the unconditional assignment is correct and the carry rule would be a
+second mechanism for a case that cannot occur. Shipping both would have been two
+answers to one question. The subsection is now four sentences saying why there is
+no rule.
+
+**And a rename I would not have bothered with alone.** §I.6: `Approver` → `Policy`,
+`policy` → `evaluate`. Cosmetic in isolation — but after `decide` is gone the trait
+has one synchronous method and approves nothing, while `ApproverHandle`, a
+different object with a confusingly similar name, is what actually approves. It
+costs a rename across the §F.2 table and it was free to take in the same lane. The
+`Policy` snapshot test picked up an extra assertion on the way through: the trait
+must contain no `async fn`. That is "the kernel never awaits an embedder" reduced
+to something a compiler can check.
+
+**One naming collision worth recording.** The spec puts `cancel` on `Kernel`.
+`Kernel::cancel` already exists and means "interrupt the running execution". Two
+unrelated cancellations under one name is exactly what the style guide's
+one-term-one-meaning rule is for, so the kernel method is `cancel_approval` and
+the spec now says why.
+
+---
+
 ## Three things an embedder needed that `&` could not do (2026-08-07)
 
 kaijutsu embeds kaish and, for background work, did not use it. Its

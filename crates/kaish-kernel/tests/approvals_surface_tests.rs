@@ -646,6 +646,49 @@ async fn cancelling_a_granted_request_is_refused() {
     );
 }
 
+/// §C.1: a key presented against a request that is *over* reports the
+/// request's own state — `ApprovalOutcome::Closed` — and never
+/// `LedgerUnavailable`, which answers a different question ("the ledger
+/// could not record this, try again"). Collapsing the two told an embedder
+/// to retry a healthy ledger forever.
+#[tokio::test]
+async fn a_key_presented_against_a_cancelled_request_reports_closed_not_unavailable() {
+    let dir = tempdir();
+    let session = agent_session(dir.path());
+    std::fs::write(dir.path().join("precious.txt"), "keep me").expect("write");
+    session.run("set -o approvals").await;
+    let gated = session.run("rm precious.txt").await;
+    let id = gated.approval_request().expect("a gated request").id;
+    session.run(&format!("approvals cancel {id}")).await;
+
+    // 32 lowercase hex, the credential's shape — the key never matters here,
+    // because the ledger checks the request's state first.
+    let presented = session
+        .run("rm precious.txt --confirm=00000000000000000000000000000000")
+        .await;
+
+    assert_eq!(presented.code, 1, "a closed request is exit 1, not exit 2: {presented:?}");
+    assert!(
+        presented.err.contains("Cancelled"),
+        "the message must name the request's own state: {}",
+        presented.err
+    );
+    assert!(
+        presented.err.contains("ask again"),
+        "and say what to do instead: {}",
+        presented.err
+    );
+    assert!(
+        !presented.err.contains("ledger unavailable"),
+        "nothing is wrong with the ledger — retrying it will never help: {}",
+        presented.err
+    );
+    assert!(
+        dir.path().join("precious.txt").exists(),
+        "and the operation did not run"
+    );
+}
+
 // ============================================================================
 // wait's pending count
 // ============================================================================

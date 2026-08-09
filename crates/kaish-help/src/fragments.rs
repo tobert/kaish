@@ -652,12 +652,16 @@ file write would make "can write files" mean "can approve itself".
 `approvals grant`, `deny`, and `revoke` exit **1** in a session with no
 approval authority.
 
-**Expiry and renewal:** an undecided request expires after **60s**, and the
-ledger records that nobody decided. `approvals renew <id>` posts a new
-request carrying the original's operation, resources, and capture, linked by
-`supersedes`; renewing your own request needs no authority. Renewal is not
-re-approval — the new request starts undecided. It fails loud, changing
-nothing, when the resource moved since the original was raised.
+**A gate stops the program.** Exit **2** means *this has not happened yet*,
+so the statements after it do not run: `rm x; echo ok` with `rm` gated prints
+nothing and exits 2.
+
+**No expiry; cancel instead:** an undecided request stays pending until
+somebody decides or cancels it. `approvals cancel <id>` closes one you no
+longer want; cancelling your own needs no authority, and cancelling one that
+was already granted or denied exits **1**. Asking again means running the
+command again — the fresh request is linked to the closed one by
+`supersedes`.
 
 An embedder can pin the policy so `set +o approvals` fails with exit 1
 instead of disarming the session.

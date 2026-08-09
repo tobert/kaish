@@ -146,7 +146,7 @@ pub enum ChainOutcome {
     /// The **execution** was cancelled, so nothing was granted: either the
     /// cancellation had already fired when the chain was entered, or it
     /// fired in the window between deciding to grant and the grant landing
-    /// on the log, and [`DecisionChain::undo_if_cancelled`] undid it.
+    /// on the log, and [`DecisionChain`]'s undo took it back.
     ///
     /// Not a decision, and nothing to do with an embedder: no hook is
     /// awaited here (spec §C.2), so there is no decision in flight for a

@@ -11,6 +11,35 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Changed
+- **BREAKING: a pending approval halts the program — exit 2 stops the statement
+  loop, and statements after the gated one do not run.** Previously only a
+  *statement-level* gate halted; an `fs.*` gate raised **inside** an `Observe`d
+  statement (what `set -o approvals` turns on) came back as an ordinary exit-2
+  result and the loop ran the next statement. So `kaish -c 'rm x; echo ok'`
+  printed `ok` and exited 0, and `rm x; touch y` created `y` whether or not
+  `rm x` was ever approved — nothing un-creates it. Exit 2 does not mean
+  *failed*, it means *this has not happened yet*, and the statements after it
+  were written expecting it had. The result carries the pending request on
+  `.approval` and exits **2**; the program stops there and an embedder that
+  wants the remainder re-drives it from `ResumeAction::ConfirmStatement`'s
+  `index + 1`. `set -o approvals` is the opt-in that scopes who sees the
+  change (`docs/approval-ledger.md` §I.5).
+- **BREAKING: the `Approver` trait is `Policy`, and `Approver::policy` is
+  `Policy::evaluate`** (`docs/approval-ledger.md` §I.6). It has one synchronous
+  method and approves nothing — `ApproverHandle`, a different object with a
+  confusingly similar name, is what approves. `KernelConfig::with_approver`
+  becomes `with_policy`; `ApproverHandle` keeps its name.
+- **BREAKING: `ApprovalOutcome::Pending` carries `Box<PendingApproval>`**, not a
+  bare `Box<ApprovalRequestView>` — the view plus the `ResumeAction` that says
+  how to pick the request back up. `ExecResult.approval` is unchanged and still
+  carries the tokenless view.
+- **BREAKING: `ApprovalRequest::ttl: Duration` is `deadline: Option<SystemTime>`**,
+  defaulting to `None` — nothing times a request out (§A.10). `RequestOrigin::new`
+  loses its `ttl` argument (four arguments now) and `with_ttl` becomes
+  `with_deadline`.
+- **BREAKING: `approvals renew <id>` is `approvals cancel <id>`.** Nothing expires,
+  so there is no expiry to renew from; what a requester needs instead is a way to
+  end a request nobody is going to answer.
 - **BREAKING: comma is significant only inside a `[...]`/`{...}` literal or
   pattern.** A bare `,` used to lex as its own token everywhere, so
   `sed -n 1,3p`, `cut -f 1,3`, `sort -k 2,2n`, and `echo a,b,c` were parse
@@ -109,11 +138,11 @@ breaking entries are marked **BREAKING**.
   observable behavior change anywhere else in kaish.
 - **The approval decision chain and the authority capability** (ledger PR 4,
   `docs/approval-ledger.md`) — `kaish_kernel::ledger::DecisionChain` runs three stages
-  in order (standing grants → `Approver::policy` → pending), first non-`Defer` wins.
-  `Approver::policy` defaults to `Defer`, so an empty impl changes nothing and a kernel
-  with no approver defers to exit 2 exactly as today.
+  in order (standing grants → `Policy::evaluate` → pending), first non-`Defer` wins.
+  `Policy::evaluate` defaults to `Defer`, so an empty impl changes nothing and a kernel
+  with no policy defers to exit 2 exactly as today.
 - **`Kernel::build` returns `(Kernel, ApproverHandle)`** — the only way to obtain
-  approval authority — with `KernelConfig::with_approver`/`with_principal`/
+  approval authority — with `KernelConfig::with_policy`/`with_principal`/
   `with_session`/`with_approver_handle`; a session built without a handle has no
   method that grants.
   `Kernel::new` is unchanged for callers that do not participate in approvals.
@@ -124,17 +153,24 @@ breaking entries are marked **BREAKING**.
 - **`max_uses` is charged in the same critical section that appends the grant**, so
   the limit holds exactly under concurrency and a full ring never consumes a use.
 - **The kernel never waits on an embedder's decision** (`docs/approval-ledger.md` §0.1,
-  §C.2) — a gate the fast stages cannot settle returns `ApprovalOutcome::Pending` with a
-  `ResumeAction`, and the embedder decides on its own task and its own schedule. There is
-  no async approval hook and no decision budget, because a bounded wait is a clock-driven
-  decision and an unbounded one hangs the statement.
+  §C.2) — a gate the two fast stages cannot settle returns `ApprovalOutcome::Pending`
+  carrying `PendingApproval { request, resume }`, and the embedder decides on its own
+  task and its own schedule. There is no async approval hook and no decision budget,
+  because a bounded wait is a clock-driven decision and an unbounded one hangs the
+  statement.
+- **`ResumeAction` names how a pending request continues** — `ConfirmStatement
+  { plan_digest, index }` for a held statement (the kernel ran nothing after `index`,
+  so an embedder continuing the program picks up at `index + 1`), `RetryOperation` for
+  a captured invocation replayable through `Kernel::confirm`, and `NotReplayable
+  { reason }` for a capture the kernel cannot re-issue. Structured, because a caller
+  must not have to infer the route from the capture's shape.
 - **A cancelled execution never leaves a live grant**, even when the cancellation lands
   after the decision.
-- **`Approver::policy` takes a `DecisionContext`** (`docs/approval-ledger.md` §C.7)
-  carrying an append-only `AssessmentRecorder`, also reachable from `ApproverHandle` so an
-  embedder's router/specialist/LLM/human pipeline can attribute each judgment with model
-  identity. The `Granted` entry stays the kernel's authorization boundary wherever the
-  deliberation ran.
+- **Assessments** (`docs/approval-ledger.md` §C.7) — an append-only
+  `AssessmentRecorder`, reachable from `ApproverHandle`, so an embedder's
+  router/specialist/LLM/human pipeline can attribute each judgment with model identity.
+  Most deliberation now happens between `Pending` and `grant`, in the embedder's own
+  task; the `Granted` entry stays the kernel's authorization boundary wherever it ran.
 - **`JobId`/`JobStatus`/`JobInfo` (kaish-types) now derive `Serialize`/`Deserialize`**
   (GH #241) — the last type family in kaish-types without serde.
 - `schemars::JsonSchema` on those types sits behind the `schema` feature, matching
@@ -209,16 +245,26 @@ breaking entries are marked **BREAKING**.
   every grant is still good for exactly one successful settlement.
 - An empty listing is `[]` under `--json`, not a string — "nothing pending" must
   not be a different shape from "one request".
-- **`Kernel::cancel(&id, rev, reason)` / `approvals cancel <id>`** (ledger PR 7,
-  `docs/approval-ledger.md` §B.5) — closes an undecided request, since nothing
-  times one out; asking again posts a new request linked by `supersedes`.
+- **`Requester::cancel` / `Kernel::cancel_approval(&id, reason)` / `approvals cancel
+  <id>`** (`docs/approval-ledger.md` §B.5) — closes an undecided request, since nothing
+  times one out. Named `cancel_approval` on the kernel because `Kernel::cancel` already
+  means "interrupt the running execution". Refused on a request that is already
+  decided or terminal, and on one with an attempt in flight.
+- **`CancelReason`** (`Withdrawn` | `DeadlinePassed` | `Superseded { by }`), a
+  `RequestState::Cancelled` state, and a `LedgerEntry::Cancelled { request, by, reason }`
+  entry. `DeadlinePassed` is the reason an embedder's own timer records; the kernel
+  never originates it.
 - Cancellation takes no `ApproverHandle`: the owning principal cancels without
   authority, which is what lets a gated agent withdraw its own request. Cancelling
   another principal's request without authority exits 1.
-- Asking again re-observes the transitions first and exits 1 naming what changed,
-  so it never posts claims that are already false, and starts undecided.
-- `JobManager::cancel_gate`/`Job::cancel_gate` close a backgrounded job's held
-  request, so a gated job is no longer both unfulfillable and undiscardable.
+- Asking again — re-running the command — posts a **new** request linked by
+  `supersedes`, so "this took four attempts over two hours" stays legible and the
+  chain stays walkable. It starts `Requested` and needs a fresh decision.
+- **Teardown closes what it orphans** (§B.5's obligations table) — `kill --discard %N`,
+  `Kernel::cancel_all_jobs`, and `Kernel::shutdown` all cancel the requests they
+  would otherwise strand, the last sweeping every live request in the kernel's own
+  scope. Expiry was silently covering for every one of these; with no expiry a
+  missing path costs a live slot for the life of the process.
 - **Approval requests do not expire** (`docs/approval-ledger.md` §A.10) — the kernel
   stamps records with when things happened and never reads a clock to decide
   anything. How long an unanswered request should live is embedder policy: a bridge
@@ -226,11 +272,17 @@ breaking entries are marked **BREAKING**.
   kernel default is silently wrong for two of them. `live_capacity` is the backstop,
   and a full ledger says so with a number rather than discarding the request.
 - **`ApprovalRequest::deadline: Option<SystemTime>`** defaults to `None`; when an
-  embedder sets one it is compared on observation, never enforced on a timer.
-- **`ApprovalOutcome::Closed { request, state }`** distinguishes "this request is
-  over, asking again will not help" from `LedgerUnavailable`'s "the ledger could not
+  embedder sets one it is compared on observation, never enforced on a timer. Set it
+  with `RequestOrigin::with_deadline`.
+- **Both surviving deadlines are wall-clock, compared when observed** — a grant's
+  `not_after` and a request's optional `deadline`. A laptop suspend can make a grant
+  look expired that a monotonic clock would have kept alive, which is the correct
+  reading: `not_after` is a promise about wall-clock time made by whoever set it.
+- **`ApprovalOutcome::Closed { request, state, detail }`** distinguishes "this request
+  is over, asking again will not help" from `LedgerUnavailable`'s "the ledger could not
   record this, retry". `LedgerUnavailable` now describes only the ledger's own
-  condition and never a request's state.
+  condition and never a request's state. `detail` carries what the state alone does
+  not say — "voided after 5 invalid attempts".
 - **Every state-changing approval call is revision-checked**
   (`docs/approval-ledger.md` §B.6) — `grant`/`deny`/`cancel` quote the revision they
   act on, and one quoting a stale revision is refused and recorded as
@@ -336,7 +388,7 @@ breaking entries are marked **BREAKING**.
   otherwise.
 - **`KernelConfig::with_statement_classifier`** and
   `kaish_tool_api::{StatementClassifier, StatementPosture}` — the classifier
-  scopes, the chain decides. `Gate { reason, risk }` runs the same four-stage
+  scopes, the chain decides. `Gate { reason, risk }` runs the same decision
   chain a gated `rm` runs, and all-`Defer` is exit 2 with **nothing of the
   statement executed**: no substitution, no redirect target created, no first
   loop iteration. There is no deny posture — refusal is a chain decision.
@@ -564,6 +616,26 @@ breaking entries are marked **BREAKING**.
   every grant regardless of the flag.
 
 ### Removed
+- **BREAKING:** `Approver::decide` and `Approver::decide_budget`
+  (`docs/approval-ledger.md` §C.2). The kernel awaited that hook under a patient
+  hold; both ways of awaiting one are wrong — a bounded wait is a clock-driven
+  decision, and an unbounded one is a liveness hazard the kernel cannot cancel on
+  anyone's behalf. Everything it could express is still expressible, in the
+  embedder's own task, after `ApprovalOutcome::Pending` comes back.
+  `ledger::{PatientSource, DEFAULT_DECIDE_BUDGET}` and `ChainStage::Decide` go
+  with it; `ChainContext::new` now takes only the cancellation token.
+  `ToolCtx::patient` is untouched — it is a general tool-author facility and is
+  simply no longer on the gate path.
+- **BREAKING:** `LedgerConfig::request_ttl` (was 60s) and
+  `LedgerConfig::attempt_stale_after` (was 600s). How long an unanswered request
+  should live is embedder policy, and a dropped attempt is already reported by
+  `AttemptGuard`'s outbox — inferring it from elapsed time guesses at something
+  the ledger is told. The recovery sweep no longer closes attempts on a staleness
+  bound; it drains the outbox and materializes deadlines that have passed.
+- **BREAKING:** `Requester::renew`, `Kernel::renew`, `LedgerError::NotRenewable`,
+  and `JobManager::renew_gate`/`Job::renew_gate` — with nothing expiring there is
+  no expiry to renew from. Re-run the command to ask again; the new request links
+  to the closed one by `supersedes`.
 - **BREAKING:** `/v/jobs/{id}/stdout` and `/v/jobs/{id}/stderr` (GH #240) — both
   filled only once, at job completion, while four docs (`jobfs.rs`, `job.rs`,
   `docs/LANGUAGE.md`) promised a live stream that never existed; removed rather

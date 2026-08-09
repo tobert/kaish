@@ -926,14 +926,13 @@ async fn deny_self_approval_refuses_a_standing_grant_issued_by_the_requesting_pr
     );
 }
 
-// ─────────────────────── Approver::decide input shape (forward reference) ───────────────────────
+// ─────────────────────── the decision vocabulary ───────────────────────
 
 #[test]
-fn decision_defer_is_the_default_shape_used_by_a_deferring_approver() {
-    // Not wired to any gate site in this PR (PR 4 owns the decision chain),
-    // but `Decision` is part of the vocabulary this ledger core speaks —
-    // confirm the variant a fully-deferring `Approver` returns exists and
-    // round-trips, since PR 4 depends on it unchanged.
+fn decision_defer_is_the_default_shape_used_by_a_deferring_policy() {
+    // `Decision` is the vocabulary the ledger core speaks to the chain:
+    // `Defer` is what `Policy::evaluate` returns by default, and "not my
+    // call" must never read as "yes".
     let d = Decision::Defer;
     assert!(matches!(d, Decision::Defer));
 }
