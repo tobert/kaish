@@ -6,13 +6,17 @@ pub trait Policy: Send + Sync {
     /// Stage 2: synchronous, on the request path, **contractually
     /// non-blocking**. Suitable for allowlists, risk-class rules, and
     /// "never `git.push.force`, full stop". `ledger` is the read side —
-    /// pending requests, states, the log tail; it grants nothing.
+    /// pending requests, states, the log tail; it grants nothing. `ctx`
+    /// carries the append-only recorder for judgments reached on the way to
+    /// this decision (spec §C.7) — append to it and they survive on the log
+    /// whatever `evaluate` returns, including a `Defer` that a human later
+    /// turns into a grant.
     ///
     /// Blocking here blocks the gate site and every other execution behind
     /// it. Anything that can take time returns `Defer` and is decided out
     /// of band, after the gate site has returned `Pending`.
-    fn evaluate(&self, req: &ApprovalRequestView, ledger: &Approvals) -> Decision {
-        let _ = (req, ledger);
+    fn evaluate(&self, req: &ApprovalRequestView, ledger: &Approvals, ctx: &DecisionContext) -> Decision {
+        let _ = (req, ledger, ctx);
         Decision::Defer
     }
 

@@ -1,6 +1,5 @@
 ---
 source: crates/kaish-kernel/tests/ledger_core_tests.rs
-assertion_line: 797
 expression: block
 ---
 impl Requester {
@@ -206,5 +205,15 @@ impl Requester {
         // frees the ring capacity this append reserves.
         self.0.drain_outbox();
         self.0.post_observed(operation, scope, by, resources, plan)
+    }
+
+    /// This side's [`AssessmentRecorder`] — for the statement tap posting
+    /// the classifier's own judgment (spec §C.6), before any request exists
+    /// to hold authority over. Recording an assessment is not a privileged
+    /// act (spec §C.7: "an `Assessed` entry authorizes nothing"), so the
+    /// obligation side records its own scoping the same way it records
+    /// `Observed`.
+    pub fn assessments(&self) -> AssessmentRecorder {
+        AssessmentRecorder(Arc::clone(&self.0), None)
     }
 }

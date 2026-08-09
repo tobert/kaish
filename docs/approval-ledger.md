@@ -504,8 +504,11 @@ pub enum LedgerEntry {
                        quoted: u64, current: u64, attempted: TransitionKind },
     /// One attributed judgment on the way to a decision (§C.7). Never a
     /// decision itself — an assessment explains, a `Granted`/`Denied`
-    /// decides.
-    Assessed    { seq: u64, at: SystemTime, request: RequestId, assessment: ApprovalAssessment },
+    /// decides. No separate `request` field: `assessment.request` is the
+    /// owning id, the same shape `Granted{grant}` already uses via
+    /// `grant.request` — a second copy of the id at the entry level would be
+    /// a state this entry could represent inconsistently.
+    Assessed    { seq: u64, at: SystemTime, assessment: ApprovalAssessment },
 }
 ```
 
@@ -1803,8 +1806,11 @@ pub struct StatementClassificationInput<'a> {
 /// target is a scratch mount or the project.
 #[non_exhaustive]
 pub struct ExecutionContext {
-    /// Logical VFS path, never a host path.
-    pub cwd: VirtualPath,
+    /// Logical VFS path, never a host path — the same convention
+    /// `PlanBinding::cwd` already uses (§A.9), and for the identical reason:
+    /// kaish has no `VirtualPath` newtype, and `kaish-tool-api` cannot
+    /// depend on `kaish-vfs` to borrow one. `String`, not `PathBuf`.
+    pub cwd: String,
     pub scope: ApprovalScope,
     pub sandbox_profile: Option<SandboxProfileId>,
     pub mounts: Vec<MountDescriptor>,
@@ -1812,7 +1818,8 @@ pub struct ExecutionContext {
 
 #[non_exhaustive]
 pub struct MountDescriptor {
-    pub prefix: VirtualPath,
+    /// Logical VFS prefix — a `String`, for the same reason `cwd` is.
+    pub prefix: String,
     /// The embedder's classification of what lives there.
     pub class: MountClass,   // Project | Scratch | System | External
     pub access: MountAccess, // ReadOnly | ReadWrite
@@ -1848,12 +1855,25 @@ paths. A classifier is frequently a model, its input frequently leaves the proce
 to `Gate` — not to `Observe`, and not to a panic. A classifier that fails to load, times
 out, sees input outside its distribution, or is unsure returns the safe answer by
 construction, and the alternative is a statement gate that quietly stops gating when its
-classifier breaks. Three rules follow from the same reasoning, and belong to whoever writes
+classifier breaks. **A panic is the same case, handled the same way**: the kernel wraps
+`classify` in `catch_unwind` and maps a caught panic to `Gate` through the identical path
+an `Err` return takes. This is a *looser* contract than `Policy::evaluate`'s, on purpose —
+`evaluate` still propagates a panic unguarded, because it only runs once a decision is
+genuinely being asked for. A classifier runs in front of *every* statement, including the
+ones nobody would ever gate, so its own failure — of any kind — must default to the
+conservative answer rather than take the rest of the program down over one broken rule on
+an unrelated line. Three rules follow from the same reasoning, and belong to whoever writes
 a classifier:
 
 - A classifier may **raise** posture to `Gate` freely. It may never lower a posture the
   kernel's own static rules set — a model is an escalation path, not an override.
 - Dangerous syntax classes keep static gate floors that no classifier can clear.
+  **Landed scope (R4):** the floor is consulted only when a classifier is registered — a
+  kernel with none keeps its pre-R4 default of `Observe` everywhere at this layer, with
+  every `fs.*`/tool-level gate unaffected — and is seeded with exactly one class:
+  `kaish-trash empty`, mirroring that operation's `always_enforced` status at the `fs.*`
+  layer (§F.1). A broader taxonomy (recursive delete of `/`, generic `rm -rf` detection) has
+  no settled design and is real follow-up work, not part of this floor.
 - The statement gate is not the only enforcement. Plugin and `fs.*` gates still fire
   underneath it (§A.7's parenthood), so a classifier's false negative costs defense in
   depth rather than all of it.
@@ -2006,9 +2026,24 @@ much to say, while a router feeding specialists feeding a model feeding a human 
 deal to say and now runs somewhere the kernel cannot see. The `Assessed` entries are how it
 stays auditable from the ledger anyway.
 
+**A third path, for the kernel's own use.** The recorder is also reachable from
+`Requester` — the obligation side, not the approval side — because §C.6's statement
+classifier posts its judgment before any decision authority is even relevant: recording an
+assessment authorizes nothing, so the implementation side records its own classifier's
+reasoning the same way it already records `Observed`. All three paths append to the same
+chain; there is no second recorder type and no second `Assessed` shape depending on which
+side posted.
+
 **Assessments are not decisions.** An `Assessed` entry authorizes nothing; only `Granted`
 does. This keeps the balance rule (§A.1) intact no matter how many layers an embedder
 stacks behind its decision.
+
+**Appending an assessment never bumps `revision`.** The same rule §A.7 gives
+`KeyRetrieved`, for the identical reason: an approver holds the revision it read when the
+request went `Pending`, and several assessments can land on the way to its eventual
+`grant`/`deny`. If appending bumped revision, that later call would quote a revision the
+ledger no longer recognizes and be refused as stale purely because assessments were
+recorded — the exact hazard this rule closes.
 
 **The grant is the kernel's authorization boundary, wherever the deliberation happened.**
 A router feeding specialists feeding an LLM feeding a human is a pipeline the embedder
@@ -2830,6 +2865,7 @@ decision records are in `git log`. What each one carried:
 | R1 | Identity, binding, and the versioned record: `ApprovalScope`, `parent`, `revision`, `PlanBinding`, `LedgerRecord` (§A.5, §A.7, §A.9) |
 | R2 | No clock-driven decisions and no waiting: the TTL, the expiry path, `renew`, `Approver::decide`, and the patient hold deleted; `cancel` + `CancelReason` + `ApprovalOutcome::Closed` + `PendingApproval`/`ResumeAction` added; §B.5's teardown obligations wired; §I.5's halt and §I.6's `Policy` rename executed (§A.10, §B.5, §C.1–§C.3, §G) |
 | R3 | Revision checks on every transition: `LedgerError::StaleRevision`, `LedgerEntry::RevisionRejected`, `TransitionKind`; `grant`/`grant_with_grounds`/`deny`/`cancel`/`cancel_approval` all gain a `rev: u64` argument, checked before the state-machine legality check so a race reports as a stale quote rather than whatever transition it happened to land on (§B.6) |
+| R4 | The classifier contract and assessments: `StatementClassificationInput`/`ExecutionContext`/`StatementAssessment`, `classify` returning `Result` with `Err` and a caught panic both mapping to `Gate`, the kernel-owned static gate floor (seeded with `kaish-trash empty`), `DecisionContext`, `AssessmentRecorder` (reachable from `Requester` and `ApproverHandle`), and the `Assessed` entry (§C.6, §C.7) |
 
 Also landed: `security(kernel): CSPRNG confirmation nonces` (kaish #259), which replaced
 the 32-bit non-CSPRNG generator and made entropy failure loud.
@@ -2837,17 +2873,6 @@ the 32-bit non-CSPRNG generator and made entropy failure loud.
 ---
 
 ### Remaining work
-
-**R4 — `refactor(kernel)!: the classifier contract and assessments`**
-
-§C.6's `StatementClassificationInput`/`ExecutionContext`/`StatementAssessment` and the
-`Err` → `Gate` mapping; §C.7's `DecisionContext`, `AssessmentRecorder`, and the `Assessed`
-entry.
-
-*Tests:* a classifier returning `Err` gates and does not observe; a panicking classifier
-gates rather than unwinding into the statement loop; a classifier cannot lower a static
-floor; assessments appended from an embedder that then abandons the decision survive and
-remain readable through `Approvals::get`; `ExecutionContext` carries no host path.
 
 **R5 — `refactor(kernel)!: redaction seam and pagination`**
 

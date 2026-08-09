@@ -6,12 +6,17 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use kaish_types::approval::{
-    ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, CancelReason, Capture, Condition,
-    Invocation, Observation, ObservedResource, OperationId, Outcome, Plan, PlanBinding, PlanDigest,
+    ApprovalAssessment, ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AssessmentOutcome,
+    AssessmentStage, AssessorId, AttemptId, CancelReason, Capture, Condition,
+    Invocation, KernelId, Observation, ObservedResource, OperationId, Outcome, Plan, PlanBinding,
+    PlanDigest,
     Principal, RequestId, RequestState, Resource, ResourceRef,
 };
 use sha2::{Digest, Sha256};
-use kaish_tool_api::{StatementClassifier, StatementPosture};
+use kaish_tool_api::{
+    ExecutionContext, StatementAssessment, StatementClassificationInput, StatementClassifier,
+    StatementPosture,
+};
 
 use crate::ast::Value;
 use crate::backend::{KernelBackend, LocalBackend};
@@ -19,9 +24,9 @@ use crate::dispatch::PipelinePosition;
 use crate::ignore_config::IgnoreConfig;
 use crate::interpreter::{ExecResult, Scope};
 use crate::ledger::{
-    Approvals, AttemptGuard, ChainContext, ChainOutcome, ConditionReport, DecisionChain,
-    KernelOperation, LedgerError, PathResolver, Posture, Requester, StateResolver, StateResolvers,
-    SubscriptionFilter, PATH_KIND,
+    static_gate_floor, Approvals, AttemptGuard, ChainContext, ChainOutcome, ConditionReport,
+    DecisionChain, KernelOperation, LedgerError, PathResolver, Posture, Requester, StateResolver,
+    StateResolvers, SubscriptionFilter, PATH_KIND,
 };
 use crate::output_limit::OutputLimitConfig;
 use crate::scheduler::{JobManager, PipeReader, PipeWriter, StderrStream};
@@ -516,6 +521,20 @@ fn render_refs(refs: &[ResourceRef]) -> String {
         .map(|r| format!("{}:{}", r.kind, r.id))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Extract a human-readable message from a caught panic payload (spec
+/// §C.6's `classify_statement` `catch_unwind`). `panic!("literal")` and
+/// `panic!("{}", x)` cover the overwhelming majority of panics in practice;
+/// anything else is named honestly rather than guessed at.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
 }
 
 /// Map a ledger failure at redemption onto the outcome a gate site returns.
@@ -1343,9 +1362,7 @@ impl ExecContext {
             return StatementTap::Proceed { gated: false };
         }
 
-        let posture = classifier
-            .map(|c| c.classify(&plan))
-            .unwrap_or(StatementPosture::Observe);
+        let (posture, assessment) = self.classify_statement(&plan, classifier);
 
         if !replaying_this_statement {
             self.record_statement(&plan).await;
@@ -1353,11 +1370,19 @@ impl ExecContext {
 
         let (reason, risk) = match &posture {
             StatementPosture::Gate { reason, risk } => (reason.clone(), *risk),
-            _ if replaying_this_statement => (
+            StatementPosture::Observe if replaying_this_statement => (
                 "replaying a granted statement".to_string(),
                 KernelOperation::CmdExecute.risk(),
             ),
-            _ => return StatementTap::Proceed { gated: false },
+            StatementPosture::Observe => return StatementTap::Proceed { gated: false },
+            // `StatementPosture` is `#[non_exhaustive]`: an unrecognized
+            // future variant gates rather than silently reading as
+            // `Observe` — the same fail-closed rule an `Err` classification
+            // and a caught panic already follow (spec §C.6).
+            other => (
+                format!("unrecognized statement posture: {other:?}"),
+                KernelOperation::CmdExecute.risk(),
+            ),
         };
 
         let mut builder = ApprovalRequest::builder(KernelOperation::CmdExecute.as_str())
@@ -1387,7 +1412,17 @@ impl ExecContext {
         // exit 2 again with the first one still pending (spec §B.4 — one
         // acceptance contract, and the draft matcher is what correlates a
         // presentation to the request it is for).
-        match self.gate(draft, presented, Some(capture)).await.proceed() {
+        let outcome = self.gate(draft, presented, Some(capture)).await;
+        // The classifier's own judgment — which may differ from `posture`
+        // above when the static floor forced a `Gate` it did not ask for —
+        // is recorded once the request it is about actually exists (spec
+        // §C.7). Best-effort: a classifier's reasoning is a second opinion,
+        // not itself a permission gate, so a capacity failure here warns and
+        // never changes what the statement does.
+        if let (Some(assessment), Some(request_id)) = (assessment, outcome.request_id()) {
+            self.record_assessment(request_id.clone(), assessment).await;
+        }
+        match outcome.proceed() {
             Ok(attempt) => {
                 // Everything this statement reaches is nested under it
                 // (spec §A.7). Recorded, never authorizing: a defense-in-depth
@@ -1396,6 +1431,149 @@ impl ExecContext {
                 StatementTap::Proceed { gated: true }
             }
             Err(result) => StatementTap::Halt(Box::new(result)),
+        }
+    }
+
+    /// Run the registered classifier, if any, against `plan`, and combine
+    /// its answer with the kernel's static gate floor (spec §C.6).
+    ///
+    /// Returns the posture the tap must act on, plus the classifier's own
+    /// raw [`StatementAssessment`] (`None` only when no classifier is
+    /// registered at all) — kept separate because the floor can force a
+    /// `Gate` the classifier itself did not ask for, and the eventual
+    /// `Assessed` entry (spec §C.7) should say what the classifier actually
+    /// judged, not the floor-adjusted result.
+    ///
+    /// **`catch_unwind` here is a deliberate panic boundary** — one of the
+    /// few correct ones in this codebase. A statement classifier runs
+    /// unconditionally in front of *every* top-level statement, is very
+    /// often a call into a model or an embedder-authored rule this kernel
+    /// did not write, and — unlike `Policy::evaluate`, which only runs once
+    /// a decision is genuinely being asked for — has no scope in which a
+    /// panic is unambiguously a kaish bug worth an unwind. Letting it
+    /// propagate into the statement loop would crash every later statement
+    /// in the same program over one classifier's bug on an unrelated line.
+    /// The unwind corrupts nothing it catches: no lock is held across this
+    /// call, and a caught panic maps to `Gate` through the exact same path
+    /// an `Err` return takes (spec §C.6) — a classifier that cannot answer
+    /// must not be able to turn the statement gate off.
+    fn classify_statement(
+        &self,
+        plan: &Plan,
+        classifier: Option<&Arc<dyn StatementClassifier>>,
+    ) -> (StatementPosture, Option<StatementAssessment>) {
+        // The floor only bounds a *classifier's* answer (spec §C.6: "a
+        // classifier may raise... it may never lower..." — the rule's
+        // subject is the classifier). A kernel with none registered keeps
+        // its pre-R4 default exactly: every statement is `Observe` at this
+        // layer, and dangerous operations still gate at their own `fs.*` /
+        // tool-level site (`kaish-trash empty`'s `trash.empty` gate is
+        // `always_enforced` there independent of the statement tap). Firing
+        // the floor unconditionally would gate `cmd.execute` in front of a
+        // tool-level gate that already covers the same operation, for a
+        // kernel that opted into no classification at all.
+        let Some(classifier) = classifier else {
+            return (StatementPosture::Observe, None);
+        };
+        let floor = static_gate_floor(plan);
+
+        let execution_context = self.execution_context();
+        let input = StatementClassificationInput::new(plan, &execution_context);
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| classifier.classify(&input)));
+
+        let assessment = match outcome {
+            Ok(Ok(assessment)) => assessment,
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    reason = %err,
+                    "statement classifier returned Err — gating (spec §C.6: Err means Gate, never Observe)"
+                );
+                StatementAssessment::new(
+                    StatementPosture::gate(
+                        format!("the statement classifier could not judge this statement: {err}"),
+                        KernelOperation::CmdExecute.risk(),
+                    ),
+                    AssessorId::new("kernel:classifier-error"),
+                )
+            }
+            Err(panic_payload) => {
+                let message = panic_message(&*panic_payload);
+                tracing::warn!(
+                    panic = %message,
+                    "statement classifier panicked — gating rather than unwinding into the statement loop (spec §C.6)"
+                );
+                StatementAssessment::new(
+                    StatementPosture::gate(
+                        format!("the statement classifier panicked: {message}"),
+                        KernelOperation::CmdExecute.risk(),
+                    ),
+                    AssessorId::new("kernel:classifier-panic"),
+                )
+            }
+        };
+        let posture = assessment.posture.clone().at_least(floor);
+        (posture, Some(assessment))
+    }
+
+    /// What a statement would run against, for the classifier (spec §C.6).
+    /// `cwd` is a logical VFS path, never a host path — the same convention
+    /// `PlanBinding::cwd` uses (spec §A.9).
+    ///
+    /// `mounts` is empty: the router has no per-mount `MountClass` registry
+    /// yet (a `KernelConfig` seam an embedder assigns classes through is
+    /// real follow-up work, not part of this lane's scope — R4 built the
+    /// type a classifier can consume, not the registry that would populate
+    /// it in the real kernel).
+    fn execution_context(&self) -> ExecutionContext {
+        let scope = self
+            .ledger_access
+            .as_ref()
+            .map(|access| access.scope.clone())
+            .unwrap_or_else(|| ApprovalScope::kernel(KernelId::new(0)));
+        ExecutionContext::new(self.cwd.display().to_string(), scope)
+    }
+
+    /// Post the classifier's judgment as an `Assessed` entry, once the
+    /// request it is about exists (spec §C.7). Best-effort, matching
+    /// `record_statement`'s asymmetry: a classifier's reasoning is a second
+    /// opinion, not itself a permission gate.
+    async fn record_assessment(&self, request: RequestId, assessment: StatementAssessment) {
+        let Some(access) = self.ledger_access.as_ref() else {
+            return;
+        };
+        let (outcome, reason, risk) = match &assessment.posture {
+            StatementPosture::Gate { reason, risk } => (AssessmentOutcome::Escalate, reason.clone(), Some(*risk)),
+            StatementPosture::Observe => (
+                AssessmentOutcome::Allow,
+                "no gate posture matched".to_string(),
+                None,
+            ),
+            // See the identical `#[non_exhaustive]` note in `tap_statement`.
+            other => (
+                AssessmentOutcome::Escalate,
+                format!("unrecognized statement posture: {other:?}"),
+                None,
+            ),
+        };
+        let mut recorded = ApprovalAssessment::new(
+            request.clone(),
+            assessment.assessor,
+            AssessmentStage::Classifier,
+            outcome,
+            reason,
+        );
+        if let Some(risk) = risk {
+            recorded = recorded.with_risk(risk);
+        }
+        if let Some(confidence) = assessment.confidence {
+            recorded = recorded.with_confidence(confidence);
+        }
+        if let Some(model) = assessment.model {
+            recorded = recorded.with_model(model);
+        }
+        if let Err(err) = access.requester.assessments().append(recorded).await {
+            tracing::warn!(request_id = %request, error = %err, "could not record the statement classifier's assessment");
         }
     }
 

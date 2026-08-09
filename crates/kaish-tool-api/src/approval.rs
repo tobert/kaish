@@ -137,6 +137,21 @@ pub enum ApprovalOutcome {
 }
 
 impl ApprovalOutcome {
+    /// The request this outcome is about, when it is about one. `None` for
+    /// [`Self::Unsupported`] and [`Self::LedgerUnavailable`] — conditions of
+    /// the ledger itself, not of any particular request.
+    pub fn request_id(&self) -> Option<&RequestId> {
+        match self {
+            Self::Authorized(attempt) => Some(attempt.request_id()),
+            Self::Pending(pending) => Some(&pending.request.id),
+            Self::Denied { request, .. }
+            | Self::Refused { request, .. }
+            | Self::Closed { request, .. }
+            | Self::Cancelled { request, .. } => Some(request),
+            Self::Unsupported | Self::LedgerUnavailable { .. } | Self::Unmatched { .. } => None,
+        }
+    }
+
     /// Convert every non-`Authorized` variant into the `ExecResult` a gate
     /// site returns verbatim (spec §C.1) — the one call pattern:
     ///

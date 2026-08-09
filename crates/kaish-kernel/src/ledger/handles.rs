@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kaish_types::approval::{
-    ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, AttemptState, CancelReason, Grant,
+    ApprovalAssessment, ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, AttemptState,
+    CancelReason, Grant,
     GrantTerms, Grounds, LedgerRecord, ObservedResource, OperationId, Outcome, Plan, Principal,
     RequestId, RequestOrigin, RequestState, SessionId, StandingGrant, StandingId, Subscription,
     SubscriptionId, Token,
@@ -36,6 +37,45 @@ pub struct Requester(Arc<LedgerInner>);
 /// multi-session process reads every session's commands.
 #[derive(Clone)]
 pub struct Approvals(Option<Arc<LedgerInner>>, Option<SessionId>);
+
+/// An append-only handle for recording assessments (spec §C.7): one
+/// attributed judgment on the way to a decision. Never a decision itself —
+/// appending an `Assessed` entry authorizes nothing, and it never bumps the
+/// request's `revision` (spec §A.7's `KeyRetrieved` rationale applies
+/// identically: an approver still deliberating must not have its quoted
+/// revision invalidated by an assessment landing mid-thought).
+///
+/// Reached from [`Requester::assessments`] (the statement classifier's own
+/// judgment, posted at the tap site before any decision exists — spec §C.6)
+/// and from [`ApproverHandle::assessments`] (an embedder's pipeline,
+/// appending while `Pending` — spec §C.7). Both derive one from whichever
+/// handle they already hold; there is no separate construction path.
+#[derive(Clone)]
+pub struct AssessmentRecorder(Arc<LedgerInner>, Option<SessionId>);
+
+impl AssessmentRecorder {
+    /// Record one judgment. Requires the request to exist — an assessment
+    /// about nothing to decide is a caller bug (spec §C.7 assumes a live
+    /// `Requested` chain to attach to).
+    pub async fn append(&self, assessment: ApprovalAssessment) -> Result<(), LedgerError> {
+        self.0.check_scope(&assessment.request, self.1.as_ref())?;
+        self.0.drain_outbox();
+        self.0.post_assessment(assessment)
+    }
+}
+
+/// What [`Policy::evaluate`](super::Policy::evaluate) sees alongside the
+/// request and the read side (spec §C.7). Carries no deadline and no
+/// cancellation token: `evaluate` is synchronous and non-blocking, so it has
+/// nothing to bound and nothing to abandon (spec §C.2) — only a place to
+/// record what it noticed on its way to a `Decision`.
+#[non_exhaustive]
+pub struct DecisionContext {
+    /// Append a judgment here to have it survive on the log regardless of
+    /// what `evaluate` returns — a `Defer` that later becomes a human's
+    /// `Grant` still carries the reasoning that got it there.
+    pub assessments: AssessmentRecorder,
+}
 
 /// The approval side's capability (spec §A.1). No public constructor — the
 /// only way to get one is [`Ledger::build`]. Not `Default`, not
@@ -130,6 +170,11 @@ pub struct RequestChain {
     pub grant: Option<Grant>,
     /// Every attempt reserved against this request, in no particular order.
     pub attempts: Vec<AttemptView>,
+    /// Every `Assessed` judgment appended against this request, in append
+    /// order (spec §C.7). Survives an abandoned or otherwise never-decided
+    /// request — appending one never bumps `revision` and never requires a
+    /// decision to follow it.
+    pub assessments: Vec<kaish_types::approval::ApprovalAssessment>,
 }
 
 /// One attempt's read-model: its id, state, and outcome once settled.
@@ -385,6 +430,16 @@ impl Requester {
         // frees the ring capacity this append reserves.
         self.0.drain_outbox();
         self.0.post_observed(operation, scope, by, resources, plan)
+    }
+
+    /// This side's [`AssessmentRecorder`] — for the statement tap posting
+    /// the classifier's own judgment (spec §C.6), before any request exists
+    /// to hold authority over. Recording an assessment is not a privileged
+    /// act (spec §C.7: "an `Assessed` entry authorizes nothing"), so the
+    /// obligation side records its own scoping the same way it records
+    /// `Observed`.
+    pub fn assessments(&self) -> AssessmentRecorder {
+        AssessmentRecorder(Arc::clone(&self.0), None)
     }
 }
 
@@ -701,6 +756,15 @@ impl ApproverHandle {
     /// ledger the caller holds authority over.
     pub fn approvals_view(&self) -> Approvals {
         Approvals(Some(Arc::clone(&self.0)), self.3.clone())
+    }
+
+    /// This authority's [`AssessmentRecorder`] (spec §C.7) — for an
+    /// embedder's pipeline appending judgments while a request sits
+    /// `Pending`, whether or not a decision ever follows. Scoped like every
+    /// other method on this handle: a session-restricted authority records
+    /// assessments only within its own session.
+    pub fn assessments(&self) -> AssessmentRecorder {
+        AssessmentRecorder(Arc::clone(&self.0), self.3.clone())
     }
 
     /// The principal recorded as deciding/retrieving through this handle.
