@@ -150,6 +150,39 @@ Kernel (核)
     └── Job Scheduler (background jobs, scatter/gather)
 ```
 
+### The embedder is in control
+
+kaish prefers designs where the **embedder holds the state and the control flow**, and the
+kernel supplies the mechanism that makes holding it correct. This is a design preference,
+not a rule about one subsystem — reach for it whenever a new seam is being drawn.
+
+The test to apply at a seam: does the kernel *ask* the embedder for an answer, or does it
+*run* the embedder's work? Asking is a pure function on the request path — the kernel keeps
+control, and the answer is data. Running means the kernel owns a task, a clock, and a
+cancellation policy on the embedder's behalf, and those are three decisions per deployment
+that no default gets right. When the answer cannot be immediate, **return the question as
+data and let the embedder come back**, rather than awaiting a callback the kernel then has
+to bound.
+
+Three things follow, and each has a worked example in `docs/approval-ledger.md`:
+
+- **The kernel never waits on the embedder.** A bounded wait is a clock-driven decision; an
+  unbounded one is a liveness hazard the kernel cannot cancel correctly. The approval ledger
+  returns `ApprovalOutcome::Pending` with a structured `ResumeAction` instead (§C.1, §C.2).
+- **The kernel keeps what must be correct under concurrency**, and only that: the
+  append-only record, the state machine, the balance rule, the types that make a bypass
+  unrepresentable. Inverting *those* would make every embedder re-implement the hard part
+  (`docs/approval-ledger.md` §0.1).
+- **Helpers compose above the seam, never inside it.** A reusable waiter, a pending queue,
+  a retry policy — write them as composable pieces on top of the traits and the record, in
+  the REPL or a util crate that is itself an embedder. A convenience that reads a clock or
+  parks a decision inside the kernel has moved policy back in through the back door.
+
+The payoff is the point: an embedder that owns the state can do things with it we will not
+think of. kaijutsu parks a decision in a UI, kaibo puts it in front of a different model,
+someone else queues it for a shift change. None of those shapes need a kernel change,
+because the kernel never assumed which one it was serving.
+
 ## Testing
 
 Uses **rstest** for parameterized tests and **insta** for snapshot testing.
