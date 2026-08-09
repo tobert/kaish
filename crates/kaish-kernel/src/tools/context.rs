@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use kaish_types::approval::{
     ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, CancelReason, Capture, Condition,
     Invocation, Observation, ObservedResource, OperationId, Outcome, Plan, PlanBinding, PlanDigest,
-    Principal, RequestId, Resource, ResourceRef,
+    Principal, RequestId, RequestState, Resource, ResourceRef,
 };
 use sha2::{Digest, Sha256};
 use kaish_tool_api::{StatementClassifier, StatementPosture};
@@ -1525,6 +1525,22 @@ impl ExecContext {
         }
 
         // ── A fresh request ─────────────────────────────────────────
+        // Asking again after a closed predecessor links to it (spec §B.5):
+        // "this took four attempts over two hours" stays legible and the
+        // chain stays walkable. Only a *closed-without-running* predecessor
+        // counts — cancelled, denied, or past a deadline the embedder set;
+        // a successful settlement is a repeat operation, not the same
+        // thread of intent.
+        let mut draft = draft;
+        if draft.supersedes.is_none()
+            && let Some(previous) = access.approvals.match_draft(&draft.operation, &resource_refs(&draft))
+            && matches!(
+                access.approvals.state(&previous),
+                Some(RequestState::Cancelled | RequestState::Denied | RequestState::Expired)
+            )
+        {
+            draft.supersedes = Some(previous);
+        }
         let capture = capture.unwrap_or_else(|| self.capture());
         let origin = kaish_types::approval::RequestOrigin::new(
             access.scope.clone(),
@@ -1543,7 +1559,7 @@ impl ExecContext {
         };
 
         let outcome = {
-            let chain_ctx = ChainContext::new(&*self, self.cancel.clone());
+            let chain_ctx = ChainContext::new(self.cancel.clone());
             access.chain.decide(&request, &chain_ctx).await
         };
         match outcome {
@@ -1560,7 +1576,14 @@ impl ExecContext {
                 request: request.id,
                 reason,
             },
-            Ok(ChainOutcome::Deferred) => ApprovalOutcome::Pending(Box::new(request.into())),
+            Ok(ChainOutcome::Deferred) => ApprovalOutcome::Pending(Box::new(
+                kaish_tool_api::PendingApproval::new(request.into()),
+            )),
+            // The *execution* was cancelled, not a decision: the chain
+            // awaits nobody (spec §C.2), so this is either a token that had
+            // already fired when the chain was entered or one that fired in
+            // the window between deciding to grant and the grant landing.
+            // Either way nothing was granted and nothing will run.
             Ok(ChainOutcome::Cancelled) => ApprovalOutcome::Cancelled {
                 request: request.id,
             },

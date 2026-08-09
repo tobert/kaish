@@ -135,17 +135,28 @@ impl Requester {
         self.0.record_unmatched_key();
     }
 
-    /// Renew an `Expired` request: post a new `Requested` carrying the
-    /// original's operation, resources, capture, principal, and trace
-    /// context, linked via `supersedes` (spec §B.5). Renewal is a requester
-    /// action — the principal that owns the request may renew it without
-    /// holding any authority.
-    pub async fn renew(&self, id: &RequestId) -> Result<RequestId, LedgerError> {
-        // `renew` shares `post_request`'s capacity-checking path (review
-        // finding S5 unified them under one lock) — see `post_request`'s
-        // identical drain for why.
+    /// Close an undecided request (spec §B.5). Nothing times a request out
+    /// (spec §A.10), so this is the only way one that nobody decides ever
+    /// ends — and every teardown path that can strand a request calls it.
+    ///
+    /// Cancellation is a **requester** action: the principal that owns the
+    /// request may close it holding no authority at all. Refused when the
+    /// request is already terminal, or when an attempt against it is in
+    /// flight — the operation is running, so nothing is stranded yet.
+    ///
+    /// Returns the closed request, so a caller can walk its `supersedes`
+    /// chain or re-raise the same intent.
+    pub async fn cancel(
+        &self,
+        id: &RequestId,
+        by: Principal,
+        reason: CancelReason,
+    ) -> Result<ApprovalRequest, LedgerError> {
+        // An attempt whose guard already dropped (queued but not yet
+        // drained) would wrongly still look `Reserved` to the in-flight
+        // check — the same reason `abandon_request` drains.
         self.0.drain_outbox();
-        self.0.renew(id)
+        self.0.cancel(id, by, reason)
     }
 
     /// Post one `Observed` entry: an `observe` subscription covered a

@@ -102,7 +102,6 @@ async fn kernel_request_approval_round_trips_a_request_through_the_ledger() {
         chain: chain_over(&approver),
         principal: agent("agent-1"),
         scope: test_scope(),
-        request_ttl: Duration::from_secs(60),
         job_id: None,
         resolvers: std::sync::Arc::new(kaish_kernel::ledger::StateResolvers::default()),
         session_authority: None,
@@ -115,10 +114,11 @@ async fn kernel_request_approval_round_trips_a_request_through_the_ledger() {
         .unwrap();
 
     let outcome = ctx.request_approval(draft, None).await;
-    let view = match outcome {
-        ApprovalOutcome::Pending(view) => *view,
-        other => panic!("PR 3 wires no decision chain — every post must defer to Pending, got {other:?}"),
+    let pending = match outcome {
+        ApprovalOutcome::Pending(pending) => *pending,
+        other => panic!("nothing decides here — every post must defer to Pending, got {other:?}"),
     };
+    let view = pending.request;
     assert_eq!(view.operation.as_str(), "plugin.dangerous");
     assert_eq!(
         view.principal,
@@ -233,7 +233,6 @@ async fn plugin_dangerous_fixture_gates_end_to_end_through_tool_api_alone() {
         chain: chain_over(&approver),
         principal: agent("agent-1"),
         scope: test_scope(),
-        request_ttl: Duration::from_secs(60),
         job_id: None,
         resolvers: std::sync::Arc::new(kaish_kernel::ledger::StateResolvers::default()),
         session_authority: None,
@@ -333,7 +332,6 @@ async fn plugin_dangerous_fixture_honors_a_presented_confirm_token() {
         chain: chain_over(&approver),
         principal: agent("agent-1"),
         scope: test_scope(),
-        request_ttl: Duration::from_secs(60),
         job_id: None,
         resolvers: resolvers_with_git_ref(),
         session_authority: None,
@@ -407,7 +405,6 @@ async fn plugin_dangerous_fixture_rejects_a_wrong_presented_confirm_token() {
         chain: chain_over(&approver),
         principal: agent("agent-1"),
         scope: test_scope(),
-        request_ttl: Duration::from_secs(60),
         job_id: None,
         resolvers: resolvers_with_git_ref(),
         session_authority: None,

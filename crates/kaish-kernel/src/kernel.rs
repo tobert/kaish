@@ -398,15 +398,15 @@ pub struct KernelConfig {
 /// surface stays one field on [`KernelConfig`] as later PRs add
 /// `policy_pinned`, `deny_self_approval`, and the state resolvers.
 ///
-/// Set through [`KernelConfig::with_approver`],
+/// Set through [`KernelConfig::with_policy`],
 /// [`KernelConfig::with_principal`], and
 /// [`KernelConfig::with_approver_handle`].
 #[derive(Clone, Default)]
 pub struct ApprovalConfig {
-    /// The decision hook stages 2 and 3 of the chain call. `None` — the
-    /// default — skips both stages, so every request no standing grant
+    /// The synchronous decision policy stage 2 of the chain calls. `None`
+    /// — the default — skips that stage, so every request no standing grant
     /// covers defers to exit 2.
-    pub approver: Option<Arc<dyn crate::ledger::Approver>>,
+    pub policy: Option<Arc<dyn crate::ledger::Policy>>,
     /// Who this session is. Recorded as the decider on grants made through
     /// the authority this kernel mints, and stamped on the requests it
     /// posts. `None` takes the ledger's own placeholder identity.
@@ -435,13 +435,13 @@ pub struct ApprovalConfig {
     pub statement_classifier: Option<Arc<dyn crate::ledger::StatementClassifier>>,
 }
 
-/// Names what is configured without printing an opaque `dyn Approver`
+/// Names what is configured without printing an opaque `dyn Policy`
 /// address — `KernelConfig` keeps its `#[derive(Debug)]` this way rather
 /// than taxing every embedder's hook with a `Debug` bound.
 impl std::fmt::Debug for ApprovalConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ApprovalConfig")
-            .field("approver", &self.approver.is_some())
+            .field("policy", &self.policy.is_some())
             .field("principal", &self.principal)
             .field("session", &self.session)
             .field("approver_handle", &self.approver_handle)
@@ -931,15 +931,24 @@ impl KernelConfig {
         self
     }
 
-    /// Install the decision hook stages 2 and 3 of the approval chain call
-    /// (`docs/approval-ledger.md` §C.2).
+    /// Install the synchronous decision policy stage 2 of the approval
+    /// chain calls (`docs/approval-ledger.md` §C.2).
     ///
-    /// With no approver — the default — a gated operation is decided by
+    /// With no policy — the default — a gated operation is decided by
     /// standing grants alone, and anything they do not cover defers to exit
-    /// 2. Installing one whose methods both `Defer` changes nothing: the
-    /// trait's defaults are today's behavior.
-    pub fn with_approver(mut self, approver: Arc<dyn crate::ledger::Approver>) -> Self {
-        self.approval.approver = Some(approver);
+    /// 2. Installing one whose `evaluate` returns `Defer` changes nothing.
+    ///
+    /// **The kernel never awaits this** — [`Policy::evaluate`] is
+    /// synchronous and contractually non-blocking. A decision that has to
+    /// be thought about is not made here: the gate site returns
+    /// `ApprovalOutcome::Pending` and the embedder decides in its own task,
+    /// then grants through its [`ApproverHandle`](crate::ledger::ApproverHandle).
+    ///
+    /// Distinct from [`Self::with_policy_pinned`], which pins the `fs.*`
+    /// enforce posture (`set -o approvals`) against script code and has
+    /// nothing to do with this trait.
+    pub fn with_policy(mut self, policy: Arc<dyn crate::ledger::Policy>) -> Self {
+        self.approval.policy = Some(policy);
         self
     }
 
@@ -1012,7 +1021,7 @@ impl KernelConfig {
     /// goes through.
     ///
     /// The classifier cannot deny. Refusal is a chain decision
-    /// ([`Approver::policy`](crate::ledger::Approver::policy)), because a
+    /// ([`Policy::evaluate`](crate::ledger::Policy::evaluate)), because a
     /// scoping seam that can refuse is a second decision chain.
     pub fn with_statement_classifier(
         mut self,
@@ -1711,7 +1720,7 @@ impl Kernel {
         ledger_sink: Option<Arc<dyn crate::ledger::LedgerSink>>,
     ) -> Result<KernelApprovals> {
         let ApprovalConfig {
-            approver,
+            policy,
             principal,
             session,
             approver_handle,
@@ -1754,7 +1763,7 @@ impl Kernel {
         let chain = Arc::new(crate::ledger::DecisionChain::new(
             authority.clone(),
             approvals.clone(),
-            approver,
+            policy,
         ));
 
         Ok(KernelApprovals {
@@ -2149,9 +2158,9 @@ impl Kernel {
             background: false,
         };
         // Tap and dispatch run under one watchdog, as they do at the string
-        // door — a gate that puts a human in the loop suspends the script
-        // clock through `ctx.patient`, and a watchdog installed only around
-        // the dispatch would leave that decision unbounded.
+        // door: the tap can post a ledger entry and run the decision chain,
+        // and a watchdog installed only around the dispatch would leave that
+        // work outside the bound the caller asked for.
         let work = async {
             // The second — and last — statement tap site (spec §C.6). The
             // argv door bypasses the statement loop entirely, and a door the
@@ -2411,8 +2420,8 @@ impl Kernel {
         }
 
         // Tap and statement run under one watchdog, as they do at both other
-        // doors: the gate this replay re-enters can hold on a human, and
-        // `ctx.patient` needs a live watchdog to suspend.
+        // doors: the gate this replay re-enters is inside the bound the
+        // caller asked for, not outside it.
         let work = async {
             // The captured source was recorded credential-free, so a replayed
             // statement presents no key: the redemption correlation on the
@@ -3091,6 +3100,15 @@ impl Kernel {
                         let combined = format!("{}{}", drained_stderr, r.err);
                         r.err = combined;
                     }
+                    // A gate raised *inside* the statement — an `fs.*` gate
+                    // under `set -o approvals` — halts the program exactly
+                    // the way a statement-level gate does, and for the same
+                    // reason: exit 2 means "this has not happened yet", and
+                    // the statements after it were written expecting it had
+                    // (`docs/approval-ledger.md` §I.5). Without this,
+                    // `rm x; touch y` creates `y` whether or not `rm x` is
+                    // ever approved, and nothing un-creates it.
+                    let held = r.approval.is_some();
                     on_output(&r);
                     // Carry the last statement's structured output for MCP TOON encoding.
                     // Must be done here (not in accumulate_result) because accumulate_result
@@ -3098,6 +3116,12 @@ impl Kernel {
                     let last_output = r.output().cloned();
                     accumulate_result(&mut result, &r);
                     result.set_output(last_output);
+                    if held {
+                        if !surfaced_warnings.is_empty() {
+                            result.err = format!("{surfaced_warnings}{}", result.err);
+                        }
+                        return Ok(result);
+                    }
                 }
                 ControlFlow::Exit { code } => {
                     if !drained_stderr.is_empty() {
@@ -3150,11 +3174,12 @@ impl Kernel {
     /// is the rule, so a 1,000-iteration loop posts one entry rather than a
     /// thousand.
     ///
-    /// The `exec_ctx` write lock is held across the decision chain, which can
-    /// be a human deciding for minutes under the patient hold. That is safe
-    /// here and only here: this runs under the execute lock, so no other
-    /// statement is executing, and an `Approver` reaches the ledger through
-    /// its own handles rather than through this context.
+    /// The `exec_ctx` write lock is held across the decision chain, which
+    /// returns in microseconds: the chain is a ledger lookup plus a
+    /// synchronous [`Policy::evaluate`](crate::ledger::Policy::evaluate),
+    /// and nothing in it awaits an embedder (spec §C.2). A
+    /// [`Policy`](crate::ledger::Policy) reaches the ledger through its own
+    /// handles rather than through this context.
     /// `capture` is built from the statement's presented credentials, so a
     /// caller that captures source text can redact it — see
     /// [`crate::ast::plan::redact_keys`]. The keys reach the gate as
@@ -7490,9 +7515,10 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     accumulated.original_code = new.original_code;
     accumulated.content_type = new.content_type.clone();
     accumulated.baggage.clone_from(&new.baggage);
-    // A pending approval (exit 2 + the request) is the last statement's
-    // result; carry its control-plane field through accumulation or the
-    // request is lost.
+    // A pending approval (exit 2 + the request) rides the control-plane
+    // field through accumulation, or the request is lost. It is always the
+    // *last* result's, because a statement that carries one halts the
+    // top-level loop (spec §I.5) — nothing runs after it to overwrite it.
     accumulated.approval = new.approval.clone();
 }
 

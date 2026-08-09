@@ -582,9 +582,9 @@ impl LedgerInner {
     /// finish its own transaction, so emitting here would happen while the
     /// lock is still live. A subscriber re-entering `Approvals` from inside
     /// its own event handler would then deadlock on this same
-    /// non-reentrant `std::sync::Mutex`. This is also the exact boundary
-    /// PR 4's `Approver::decide` hook relies on: nothing in this file may
-    /// emit, await, or call out while `guard` is alive.
+    /// non-reentrant `std::sync::Mutex`. This is also the boundary the
+    /// decision chain relies on: nothing in this file may emit, await, or
+    /// call out while `guard` is alive.
     fn materialize_expiry(
         &self,
         guard: &mut LedgerState,
@@ -1166,10 +1166,11 @@ impl LedgerInner {
     /// slot for the life of the process. Callers: `Requester::cancel`, and
     /// every teardown path in §B.5's obligations table.
     ///
-    /// Refused when the request is already terminal — one cancellation per
-    /// request, and a decision that already landed is not undone by one.
-    /// An attempt in flight refuses too: the operation is running, so
-    /// "nobody wants this any more" is not yet true.
+    /// Refused unless the request is still `Requested`: a decision that
+    /// already landed is not undone by the requester losing interest, and a
+    /// terminal request has nothing left to close. An attempt in flight
+    /// refuses too — the operation is running, so "nobody wants this any
+    /// more" is not yet true.
     pub(crate) fn cancel(
         &self,
         id: &RequestId,
@@ -1190,8 +1191,14 @@ impl LedgerInner {
         let Some(chain) = guard.chains.get(id) else {
             bail!(LedgerError::NotFound(id.clone()));
         };
-        if chain.is_closed() {
-            bail!(self.terminal_error(id, chain.state, chain.void_reason.clone()));
+        // Only an **undecided** request is cancellable (spec §B.3): a
+        // decision that already landed is not undone by the requester
+        // losing interest, and a granted-but-unredeemed chain closes on
+        // its own at the grant's `not_after`.
+        match chain.state {
+            RequestState::Requested => {}
+            RequestState::Granted => bail!(LedgerError::AlreadyDecided(id.clone())),
+            other => bail!(self.terminal_error(id, other, chain.void_reason.clone())),
         }
         if chain.live_attempt.is_some() {
             bail!(LedgerError::AttemptInFlight(id.clone()));
@@ -1302,8 +1309,8 @@ impl LedgerInner {
     ) -> Result<Grant, LedgerError> {
         // Drawn before the lock is taken: `getrandom::fill` is synchronous
         // but can block on entropy starvation, and the ledger lock must
-        // never gate on I/O — even non-async I/O — the way it never gates
-        // on `Approver::decide` (spec §B.1, §C.2). A grant that turns out
+        // never gate on I/O — even non-async I/O — the way it never calls
+        // an embedder's hook (spec §B.1, §C.2). A grant that turns out
         // to be invalid (already decided, terminal, widened) has drawn
         // entropy for nothing; that is a cheap, inconsequential cost next
         // to the alternative of blocking every other transaction on this
@@ -2305,8 +2312,13 @@ mod tests {
         assert_eq!(reject_count, 0, "a capacity failure must not silently advance the rejection counter");
     }
 
+    /// Spec §A.5: both surviving deadlines are **wall-clock** values
+    /// compared when observed. A laptop suspend therefore makes a grant
+    /// look expired that a monotonic clock would have kept alive, and that
+    /// is the correct reading — `not_after` is a promise about wall-clock
+    /// time made by whoever set it.
     #[test]
-    fn wall_clock_jumps_neither_extend_nor_void_a_grant() {
+    fn a_grant_expires_against_the_wall_clock_it_was_promised_on() {
         let clock = Arc::new(FakeWallClock {
             offset_secs: AtomicI64::new(0),
         });
@@ -2321,19 +2333,68 @@ mod tests {
             .unwrap();
         assert_eq!(inner.state(&req.id, None), Some(RequestState::Granted));
 
-        clock.offset_secs.store(100_000_000, Ordering::Relaxed);
+        clock.offset_secs.store(299, Ordering::Relaxed);
         assert_eq!(
             inner.state(&req.id, None),
             Some(RequestState::Granted),
-            "a forward wall-clock jump must not expire the grant"
+            "the grant is still inside its own not_after"
         );
 
-        clock.offset_secs.store(-100_000_000, Ordering::Relaxed);
+        clock.offset_secs.store(301, Ordering::Relaxed);
         assert_eq!(
             inner.state(&req.id, None),
-            Some(RequestState::Granted),
-            "a backward wall-clock jump must not extend or void the grant either"
+            Some(RequestState::Expired),
+            "past not_after, the next observation materializes the expiry"
         );
+    }
+
+    /// Spec §A.10: there is no request TTL. A request nobody decides stays
+    /// `Requested` however long it sits — this walks the wall clock a
+    /// century forward, which is a great deal further than the 60s lease
+    /// that used to close it.
+    #[test]
+    fn an_undecided_request_never_expires_on_its_own() {
+        let clock = Arc::new(FakeWallClock {
+            offset_secs: AtomicI64::new(0),
+        });
+        #[allow(clippy::unwrap_used)]
+        let inner = build_inner(LedgerConfig::default(), scope(), None, clock.clone()).unwrap();
+        let principal = agent("agent-1");
+        let req = post(&inner, &principal);
+
+        clock.offset_secs.store(3_155_760_000, Ordering::Relaxed);
+        inner.sweep();
+        assert_eq!(
+            inner.state(&req.id, None),
+            Some(RequestState::Requested),
+            "nothing times a request out — it lives until decided or cancelled"
+        );
+    }
+
+    /// Spec §A.10, the other half: an embedder that *does* want a deadline
+    /// sets one, and it is compared when the request is observed rather
+    /// than enforced on a timer.
+    #[test]
+    fn an_embedder_set_deadline_expires_when_it_is_observed() {
+        let clock = Arc::new(FakeWallClock {
+            offset_secs: AtomicI64::new(0),
+        });
+        #[allow(clippy::unwrap_used)]
+        let inner = build_inner(LedgerConfig::default(), scope(), None, clock.clone()).unwrap();
+        let principal = agent("agent-1");
+        let deadline = clock.now() + Duration::from_secs(60);
+        #[allow(clippy::unwrap_used)]
+        let req = inner
+            .post_request(
+                draft("fs.remove"),
+                origin(&principal).with_deadline(Some(deadline)),
+            )
+            .unwrap();
+        assert_eq!(req.deadline, Some(deadline));
+        assert_eq!(inner.state(&req.id, None), Some(RequestState::Requested));
+
+        clock.offset_secs.store(61, Ordering::Relaxed);
+        assert_eq!(inner.state(&req.id, None), Some(RequestState::Expired));
     }
 
     /// Regression test for review finding B1: every commit-point clock
@@ -2437,42 +2498,6 @@ mod tests {
         let _ = inner.settle(&req.id, bogus_attempt, Outcome::Exit(0));
     }
 
-    #[test]
-    fn recovery_sweep_closes_an_unreported_reservation_as_abandoned() {
-        let config = LedgerConfig {
-            attempt_stale_after: Duration::from_millis(0),
-            ..Default::default()
-        };
-        #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, scope(), None, Arc::new(SystemWallClock)).unwrap();
-        let principal = agent("agent-1");
-        let req = post(&inner, &principal);
-        let not_after = SystemTime::now() + Duration::from_secs(300);
-        #[allow(clippy::unwrap_used)]
-        inner
-            .grant(&req.id, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
-            .unwrap();
-        #[allow(clippy::unwrap_used)]
-        let attempt = inner.redeem(&req.id, principal.clone(), ConditionReport::none()).unwrap();
-
-        // Let real monotonic time actually advance past the (zero) bound.
-        std::thread::sleep(Duration::from_millis(5));
-        inner.sweep();
-
-        #[allow(clippy::unwrap_used)]
-        let chain = inner.chain(&req.id, None).unwrap();
-        #[allow(clippy::unwrap_used)]
-        let record = chain.attempts.iter().find(|a| a.attempt == attempt).unwrap();
-        assert!(matches!(record.state, AttemptState::Abandoned));
-
-        // The chain closed as a side effect — a fresh redemption reports
-        // "already settled" (spec §B.2: an abandoned attempt's effects are
-        // unknown, same as `Outcome::Unknown`) rather than reserving a new
-        // attempt against a grant nobody can vouch for.
-        let err = inner.redeem(&req.id, principal, ConditionReport::none()).unwrap_err();
-        assert!(matches!(err, LedgerError::AlreadySettled { .. }));
-    }
-
     /// Regression test for a review finding: `settle()` must not run
     /// `mark_closed` a second time when the chain already closed a
     /// different way (voided, expired, abandoned) while its attempt was
@@ -2521,59 +2546,6 @@ mod tests {
         // If the double-decrement happened, the ledger now believes it has
         // 0 live requests even though chain B genuinely is one, and this
         // wrongly succeeds past the configured capacity of 1.
-        let err = inner
-            .post_request(draft("fs.remove"), origin(&principal))
-            .unwrap_err();
-        assert!(
-            matches!(err, LedgerError::LiveCapacity { limit: 1 }),
-            "chain B is still live — the capacity gate must still refuse a third request, got {err:?}"
-        );
-    }
-
-    /// Regression test for review finding B2: the recovery sweep must use
-    /// the same `was_already_closed` guard `settle()` does. Reproduces the
-    /// review's exact 4-step sequence: reserve an attempt, void the chain
-    /// via 5 bad keys (closing it once), let the sweep find the
-    /// now-orphaned stale attempt (which must NOT close the chain again),
-    /// then prove the live-capacity gate still holds.
-    #[test]
-    fn sweep_after_a_different_close_does_not_admit_extra_live_requests_past_capacity() {
-        let config = LedgerConfig {
-            live_capacity: 1,
-            attempt_stale_after: Duration::from_millis(0),
-            ..Default::default()
-        };
-        #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, scope(), None, Arc::new(SystemWallClock)).unwrap();
-        let principal = agent("agent-1");
-
-        let req_a = post(&inner, &principal);
-        let not_after = SystemTime::now() + Duration::from_secs(300);
-        #[allow(clippy::unwrap_used)]
-        inner
-            .grant(&req_a.id, GrantTerms::once_for(&req_a, not_after), principal.clone(), Grounds::Embedder)
-            .unwrap();
-        // Step 1: reserve an attempt.
-        #[allow(clippy::unwrap_used)]
-        let _attempt = inner.redeem(&req_a.id, principal.clone(), ConditionReport::none()).unwrap();
-        // Step 2: void via 5 bad keys while the attempt is still Reserved
-        // — closes the chain once, frees the live slot.
-        for _ in 0..5 {
-            let _ = inner.redeem_with_token(&req_a.id, "wrong", principal.clone(), ConditionReport::none());
-        }
-        assert_eq!(inner.state(&req_a.id, None), Some(RequestState::Voided));
-
-        // The freed slot admits chain B, which stays live.
-        let _req_b = post(&inner, &principal);
-
-        // Step 3: the sweep finds the now-orphaned stale attempt against
-        // already-voided chain A and closes IT too — this must not call
-        // mark_closed a second time.
-        std::thread::sleep(Duration::from_millis(5));
-        inner.sweep();
-
-        // Step 4: the capacity gate must still hold — chain B is the only
-        // genuinely live request.
         let err = inner
             .post_request(draft("fs.remove"), origin(&principal))
             .unwrap_err();

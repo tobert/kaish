@@ -1,6 +1,7 @@
 //! The approval ledger's shell- and VFS-facing surfaces (ledger PR 7,
 //! `docs/approval-ledger.md` §D.3): the `/v/approvals` mount, the `approvals`
-//! builtin and its authority check, gate renewal, and `wait`'s pending count.
+//! builtin and its authority check, cancellation, and `wait`'s pending
+//! count.
 //!
 //! Everything drives real command strings through `kernel.execute()`, so the
 //! full pipeline runs — lex → parse → validate → clap binding → builtin →
@@ -17,7 +18,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use kaish_kernel::interpreter::ExecResult;
-use kaish_kernel::ledger::{ApproverHandle, LedgerConfig};
+use kaish_kernel::ledger::ApproverHandle;
 use kaish_kernel::{Kernel, KernelConfig};
 use kaish_types::approval::{GrantTerms, Principal, PrincipalKind, RequestId};
 
@@ -85,24 +86,6 @@ fn operator_session(dir: &Path) -> Session {
 fn build(config: KernelConfig) -> Session {
     let (kernel, authority) = Kernel::build(config).expect("kernel");
     Session { kernel, authority }
-}
-
-/// A kernel whose requests expire almost immediately, for the renewal tests.
-/// `with_ledger` cannot be combined with `with_approver_handle` (an adopted
-/// ledger already has a configuration), so this is always an agent session.
-fn short_ttl_session(dir: &Path, ttl: Duration) -> Session {
-    build(short_ttl_config(dir, ttl))
-}
-
-fn short_ttl_config(dir: &Path, ttl: Duration) -> KernelConfig {
-    KernelConfig::repl()
-        .with_cwd(dir.to_path_buf())
-        .with_approvals(false)
-        .with_trash(false)
-        .with_ledger(LedgerConfig {
-            request_ttl: ttl,
-            ..LedgerConfig::default()
-        })
 }
 
 // ============================================================================
@@ -357,7 +340,7 @@ async fn grant_is_refused_without_authority_and_permitted_with_it() {
     );
     assert!(precious.exists());
 
-    // Reading and renewing stay open to the same session.
+    // Reading and cancelling stay open to the same session.
     let listed = agent.run("approvals list").await;
     assert_eq!(listed.code, 0, "list needs no authority: {}", listed.err);
     assert!(listed.text_out().contains(id.as_str()));
@@ -480,15 +463,15 @@ async fn usage_mistakes_exit_2() {
 }
 
 // ============================================================================
-// Renewal — the dead-request case, closed
+// Cancellation — what replaced expiry (§B.5)
 // ============================================================================
 
-/// Spec test 5: an authority-less session **can** renew its own request and
-/// **cannot** renew another principal's. Renewal is a requester action.
+/// §B.5: an authority-less session **can** cancel its own request and
+/// **cannot** cancel another principal's. Cancellation is a requester action.
 #[tokio::test]
-async fn a_session_renews_its_own_request_and_not_another_principals() {
+async fn a_session_cancels_its_own_request_and_not_another_principals() {
     let dir = tempdir();
-    let session = short_ttl_session(dir.path(), Duration::from_millis(30));
+    let session = agent_session(dir.path());
     std::fs::write(dir.path().join("precious.txt"), "keep me").expect("write");
     session.run("set -o approvals").await;
     let gated = session.run("rm precious.txt").await;
@@ -498,17 +481,19 @@ async fn a_session_renews_its_own_request_and_not_another_principals() {
         "this session must hold no approval authority"
     );
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
-    let renewed = session.run(&format!("approvals renew {id}")).await;
-    assert_eq!(renewed.code, 0, "a session renews its own request: {}", renewed.err);
+    let cancelled = session.run(&format!("approvals cancel {id}")).await;
+    assert_eq!(cancelled.code, 0, "a session cancels its own request: {}", cancelled.err);
+    assert_eq!(
+        session.out(&format!("cat /v/approvals/{id}/state")).await.trim(),
+        "cancelled"
+    );
     assert!(
-        renewed.text_out().contains("needs a fresh decision"),
-        "renewal is not re-approval, and the message says so: {}",
-        renewed.text_out()
+        session.kernel.approvals().pending().is_empty(),
+        "a cancelled request returns its live slot"
     );
 
     // Now a request raised by someone else, in a session with no authority.
-    let other = short_ttl_session(dir.path(), Duration::from_millis(30));
+    let other = agent_session(dir.path());
     let other_kernel = Kernel::build(
         KernelConfig::repl()
             .with_cwd(dir.path().to_path_buf())
@@ -523,45 +508,53 @@ async fn a_session_renews_its_own_request_and_not_another_principals() {
     other_kernel.execute("set -o approvals").await.expect("set");
     let theirs = other_kernel.execute("rm theirs.txt").await.expect("rm");
     let theirs_id = theirs.approval_request().expect("a gated request").id;
-    tokio::time::sleep(Duration::from_millis(60)).await;
 
     // `other` shares the ledger but is the default principal, not
     // "someone-else", and holds no session authority.
-    let refused = other.run(&format!("approvals renew {theirs_id}")).await;
-    assert_eq!(refused.code, 1, "renewing another principal's request must fail: {refused:?}");
+    let refused = other.run(&format!("approvals cancel {theirs_id}")).await;
+    assert_eq!(
+        refused.code, 1,
+        "cancelling another principal's request must fail: {refused:?}"
+    );
     assert!(
         refused.err.contains("someone-else"),
         "the refusal must name the principal that owns it: {}",
         refused.err
     );
+    assert_eq!(
+        other.kernel.approvals().state(&theirs_id),
+        Some(kaish_types::approval::RequestState::Requested),
+        "a refused cancellation closes nothing"
+    );
 }
 
 /// The other half of the ownership rule: a session **holding this ledger's
-/// authority** may renew any request, not only its own. It could already
-/// grant or deny that request, so withholding renewal from it would be a
-/// special case with nothing behind it (spec §B.5).
+/// authority** may cancel any request, not only its own. It could already
+/// deny that request, so withholding cancellation from it would be a special
+/// case with nothing behind it (spec §B.5).
 ///
-/// Flip `renew_request`'s `!owned && session_authority.is_none()` to a bare
+/// Flip `cancel_request`'s `!owned && session_authority.is_none()` to a bare
 /// `!owned` and this test exits 1 — it is what pins the authority path, and
 /// nothing else does.
 #[tokio::test]
-async fn an_authority_holding_session_renews_another_principals_request() {
+async fn an_authority_holding_session_cancels_another_principals_request() {
     let dir = tempdir();
     std::fs::write(dir.path().join("theirs.txt"), "keep me").expect("write");
 
-    // The raiser mints the ledger (short TTL) and asks as "someone-else". It
-    // holds no session authority itself — `with_approver_handle` is what
-    // installs one, and this kernel is the one being adopted *from*.
+    // The raiser mints the ledger and asks as "someone-else". It holds no
+    // session authority itself — `with_approver_handle` is what installs one,
+    // and this kernel is the one being adopted *from*.
     let raiser = build(
-        short_ttl_config(dir.path(), Duration::from_millis(30))
+        KernelConfig::repl()
+            .with_cwd(dir.path().to_path_buf())
+            .with_approvals(false)
+            .with_trash(false)
             .with_principal(Principal::new("someone-else", PrincipalKind::Agent)),
     );
     raiser.run("set -o approvals").await;
     let gated = raiser.run("rm theirs.txt").await;
     let id = gated.approval_request().expect("a gated request").id;
 
-    // The operator adopts that ledger, so it holds the authority — and it is
-    // a different principal from the one that asked.
     let operator = build(
         KernelConfig::repl()
             .with_cwd(dir.path().to_path_buf())
@@ -569,157 +562,87 @@ async fn an_authority_holding_session_renews_another_principals_request() {
             .with_trash(false)
             .with_approver_handle(raiser.authority.clone()),
     );
-    assert!(
-        operator.kernel.session_authority().is_some(),
-        "the operator session must hold the authority"
-    );
-    assert_ne!(
-        operator.kernel.principal().id, "someone-else",
-        "and must not be the principal that asked"
-    );
+    assert!(operator.kernel.session_authority().is_some());
+    assert_ne!(operator.kernel.principal().id, "someone-else");
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
-    let renewed = operator.run(&format!("approvals renew {id}")).await;
+    let cancelled = operator.run(&format!("approvals cancel {id}")).await;
     assert_eq!(
-        renewed.code, 0,
-        "an authority-holding session renews another principal's request: {}",
-        renewed.err
+        cancelled.code, 0,
+        "an authority-holding session cancels another principal's request: {}",
+        cancelled.err
     );
-
-    // The record names the ORIGINAL requester, not the renewer — renewal
-    // carries the thread of intent forward, it does not re-attribute it
-    // (spec §A.2, accountability is the record).
-    let fresh = operator
-        .kernel
-        .approvals()
-        .pending()
-        .into_iter()
-        .find(|view| view.supersedes.as_ref() == Some(&id))
-        .expect("the renewed request supersedes the expired one");
     assert_eq!(
-        fresh.principal.id, "someone-else",
-        "the renewed request must still name who asked"
+        operator.kernel.approvals().state(&id),
+        Some(kaish_types::approval::RequestState::Cancelled)
     );
 }
 
-/// Spec test 6: a background job whose request expired is renewable and then
-/// confirmable — the dead-request case, closed. Before renewal this job was
-/// unfulfillable *and* undiscardable.
+/// §B.5: `Cancelled` is terminal for the request and not for the thread of
+/// intent. Asking again posts a **new** request with
+/// `supersedes: Some(old_id)`, so "this took three attempts" stays legible
+/// and the chain stays walkable.
 #[tokio::test]
-async fn an_expired_backgrounded_request_is_renewable_and_then_confirmable() {
-    use kaish_kernel::scheduler::JobId;
-
-    let dir = tempdir();
-    let session = short_ttl_session(dir.path(), Duration::from_millis(30));
-    let precious = dir.path().join("precious.txt");
-    std::fs::write(&precious, "keep me").expect("write");
-
-    session.run("set -o approvals").await;
-    session.run("rm precious.txt &").await;
-    let waited = session.run("wait 1").await;
-    assert_eq!(waited.code, 2, "the backgrounded job gates: {waited:?}");
-    let id = waited.approval_request().expect("a backgrounded request").id;
-
-    // Let it die. A grant is now impossible: the request is Expired.
-    tokio::time::sleep(Duration::from_millis(60)).await;
-    assert_eq!(
-        session.out(&format!("cat /v/approvals/{id}/state")).await.trim(),
-        "expired",
-        "expiry materializes on observation, it does not silently vanish"
-    );
-    let chain = session.kernel.approvals().get(&id).expect("chain");
-    let terms = GrantTerms::once_for_view(
-        &chain.request,
-        std::time::SystemTime::now() + Duration::from_secs(300),
-    );
-    assert!(
-        session.authority.grant(&id, terms).await.is_err(),
-        "an expired request cannot be granted — that is the trap renewal escapes"
-    );
-
-    // Renew, and the job follows the live request.
-    let renewed = session.run(&format!("approvals renew {id}")).await;
-    assert_eq!(renewed.code, 0, "renew: {}", renewed.err);
-    let new_id = session
-        .kernel
-        .approvals()
-        .pending()
-        .into_iter()
-        .find(|view| view.supersedes.as_ref() == Some(&id))
-        .expect("the renewed request supersedes the expired one")
-        .id;
-    let job_node = session.out("cat /v/jobs/1/approval").await;
-    assert!(
-        job_node.contains(new_id.as_str()),
-        "the job must point at the live request, not the dead one: {job_node}"
-    );
-
-    // and it is confirmable: the whole point.
-    session.grant(&new_id).await;
-    let confirmed = session
-        .kernel
-        .confirm(&session.authority, &new_id)
-        .await
-        .expect("confirm");
-    assert_eq!(confirmed.code, 0, "confirm: {}", confirmed.err);
-    assert!(!precious.exists(), "the renewed request deletes the file");
-    assert!(
-        session.kernel.jobs().get(JobId(1)).await.is_none(),
-        "the originating job is retired by the confirm of its renewed request"
-    );
-}
-
-/// §B.5: renewal re-observes the transitions and fails loud if the world
-/// already moved, rather than posting a request whose claims are false.
-#[tokio::test]
-async fn renewal_refuses_when_the_world_already_moved() {
-    let dir = tempdir();
-    let session = short_ttl_session(dir.path(), Duration::from_millis(30));
-    let target = dir.path().join("target.txt");
-    std::fs::write(&target, "original").expect("write");
-
-    session.run("set -o approvals").await;
-    // An overwrite declares a digest transition; a delete of an existing file
-    // does too. Either way the claim is about content that is about to change.
-    let gated = session.run("write target.txt replacement").await;
-    assert_eq!(gated.code, 2, "the overwrite gates: {gated:?}");
-    let id = gated.approval_request().expect("a gated request").id;
-
-    // Somebody else edits the file while the request sits undecided.
-    std::fs::write(&target, "changed underneath").expect("write");
-    tokio::time::sleep(Duration::from_millis(60)).await;
-
-    let refused = session.run(&format!("approvals renew {id}")).await;
-    assert_eq!(refused.code, 1, "a stale renewal must fail loud: {refused:?}");
-    assert!(
-        refused.err.contains("no longer true") || refused.err.contains("changed"),
-        "the refusal must say the world moved: {}",
-        refused.err
-    );
-    assert_eq!(
-        std::fs::read_to_string(&target).unwrap(),
-        "changed underneath",
-        "nothing was written"
-    );
-}
-
-/// A request that has not expired is not renewable — renewal re-raises dead
-/// intent, it does not duplicate live intent.
-#[tokio::test]
-async fn a_live_request_is_not_renewable() {
+async fn a_cancelled_requests_supersedes_chain_is_walkable() {
     let dir = tempdir();
     let session = agent_session(dir.path());
     std::fs::write(dir.path().join("precious.txt"), "keep me").expect("write");
     session.run("set -o approvals").await;
+
+    // Three asks, each cancelled, each linked to the last.
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let gated = session.run("rm precious.txt").await;
+        let id = gated.approval_request().expect("a gated request").id;
+        if let Some(previous) = ids.last() {
+            session
+                .kernel
+                .approvals()
+                .get(&id)
+                .expect("chain")
+                .request
+                .supersedes
+                .as_ref()
+                .map_or_else(
+                    || panic!("the re-ask must link to {previous}"),
+                    |linked| assert_eq!(linked, previous),
+                );
+        }
+        session.run(&format!("approvals cancel {id}")).await;
+        ids.push(id);
+    }
+
+    // Walk it backwards from the newest: every hop lands on a `Cancelled`
+    // predecessor, and the walk terminates at the first ask.
+    let approvals = session.kernel.approvals();
+    let mut cursor = Some(ids[2].clone());
+    let mut walked = Vec::new();
+    while let Some(id) = cursor {
+        let chain = approvals.get(&id).expect("every link is still retained");
+        assert_eq!(chain.state, kaish_types::approval::RequestState::Cancelled);
+        cursor = chain.request.supersedes.clone();
+        walked.push(id);
+    }
+    assert_eq!(walked, vec![ids[2].clone(), ids[1].clone(), ids[0].clone()]);
+}
+
+/// A re-ask is not re-approval: the superseding request starts `Requested`
+/// and needs a fresh decision (spec §B.5).
+#[tokio::test]
+async fn cancelling_a_granted_request_is_refused() {
+    let dir = tempdir();
+    let session = operator_session(dir.path());
+    std::fs::write(dir.path().join("precious.txt"), "keep me").expect("write");
+    session.run("set -o approvals").await;
     let gated = session.run("rm precious.txt").await;
     let id = gated.approval_request().expect("a gated request").id;
+    session.grant(&id).await;
 
-    let refused = session.run(&format!("approvals renew {id}")).await;
-    assert_eq!(refused.code, 1, "{refused:?}");
+    let refused = session.run(&format!("approvals cancel {id}")).await;
+    assert_eq!(refused.code, 1, "a decided request is not cancellable: {refused:?}");
     assert_eq!(
-        session.kernel.approvals().pending().len(),
-        1,
-        "a refused renewal posts nothing"
+        session.out(&format!("cat /v/approvals/{id}/state")).await.trim(),
+        "granted",
+        "the decision stands"
     );
 }
 

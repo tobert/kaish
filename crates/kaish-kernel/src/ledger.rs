@@ -11,9 +11,9 @@
 //! **What is here:** both state machines (spec §B.2–§B.3), the credential
 //! index and its rejected-attempt voiding (§F.3), idempotent settlement
 //! (§A.1), partitioned retention with a ring that refuses to evict a live
-//! chain (§D.4), sink backpressure, the invariant checks, the recovery
-//! sweep, the four-stage [`DecisionChain`] (standing → `policy` → `decide` →
-//! defer) with standing-grant matching, redemption-time precondition
+//! chain (§D.4), sink backpressure, the invariant checks, the sweep, the
+//! [`DecisionChain`] (standing → [`Policy::evaluate`] → defer) with
+//! standing-grant matching, redemption-time precondition
 //! verification through the [`StateResolver`]s, the subscription registry
 //! with its [`SubscriptionFilter`], and the statement gate's operation and
 //! classifier seam ([`KernelOperation::CmdExecute`], [`StatementClassifier`]).
@@ -25,7 +25,6 @@
 //! [`AttemptGuard`]. `Kernel::build` is what constructs a ledger and a
 //! [`DecisionChain`] and hands the embedder the one [`ApproverHandle`].
 
-mod approver;
 mod attempt_guard;
 mod config;
 mod core;
@@ -33,19 +32,17 @@ mod error;
 mod handles;
 mod operation;
 mod patterns;
+mod policy;
 mod resolver;
 mod standing;
 mod subscription;
 mod teardown;
 
-pub use approver::{
-    Approver, ChainContext, ChainOutcome, ChainStage, DecisionChain, PatientSource,
-    DEFAULT_DECIDE_BUDGET,
-};
 pub use attempt_guard::AttemptGuard;
 pub use config::{LedgerConfig, LedgerSink, LedgerSinkError};
 pub use error::LedgerError;
 pub use operation::KernelOperation;
+pub use policy::{ChainContext, ChainOutcome, ChainStage, DecisionChain, Policy};
 pub use resolver::{
     ConditionReport, PathResolver, ResolverError, StateResolver, StateResolverConflict,
     StateResolvers, PATH_DIGEST_ALG, PATH_KIND,
@@ -55,7 +52,7 @@ pub(crate) use teardown::{cancel_job_request, cancel_scope};
 // The statement gate's scoping seam (spec §C.6) lives in `kaish-tool-api`,
 // beside `StateResolver` and for the same reason: it names no kernel type.
 // Re-exported here because an embedder registers it through `KernelConfig`,
-// next to `with_approver` and `with_state_resolver`.
+// next to `with_policy` and `with_state_resolver`.
 pub use kaish_tool_api::{CommandNameClassifier, StatementClassifier, StatementPosture};
 pub(crate) use resolver::{conditions_to_observe, digest_path};
 pub use handles::{ApproverHandle, AttemptHandle, AttemptView, Approvals, Ledger, RequestChain, Requester};

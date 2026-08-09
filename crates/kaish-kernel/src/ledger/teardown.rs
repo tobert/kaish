@@ -49,9 +49,10 @@ pub(crate) async fn cancel_job_request(
 
 /// Close every live request in `scope` (spec §B.5, rows 3 and 4).
 ///
-/// Returns how many requests were closed. A request already terminal, or one
-/// with an attempt in flight, is left alone: the first has nothing to close
-/// and the second is still running, so nothing is stranded yet.
+/// Returns how many requests were closed. A request already decided or
+/// terminal, or one with an attempt in flight, is left alone: a granted
+/// chain closes on its own at the grant's `not_after`, a terminal one has
+/// nothing left to close, and a running attempt has not been stranded yet.
 pub(crate) async fn cancel_scope(
     requester: &Requester,
     approvals: &Approvals,
@@ -72,7 +73,8 @@ pub(crate) async fn cancel_scope(
 }
 
 /// One cancellation, with teardown's error posture: a request that closed
-/// underneath us is not a failure — something else already did the job — and
+/// or was decided underneath us is not a failure — a decided chain closes at
+/// its grant's `not_after` and a terminal one is already closed — and
 /// anything else is logged, because a teardown path has nobody to return an
 /// error to.
 async fn cancel_one(
@@ -83,7 +85,11 @@ async fn cancel_one(
 ) -> bool {
     match requester.cancel(id, by.clone(), reason).await {
         Ok(_) => true,
-        Err(LedgerError::NotFound(_) | LedgerError::Terminal { .. }) => false,
+        Err(
+            LedgerError::NotFound(_)
+            | LedgerError::Terminal { .. }
+            | LedgerError::AlreadyDecided(_),
+        ) => false,
         Err(err) => {
             tracing::warn!(
                 request_id = %id,
