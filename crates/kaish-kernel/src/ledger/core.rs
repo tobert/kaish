@@ -528,6 +528,19 @@ impl LedgerInner {
         latched
     }
 
+    /// A raw reading from this ledger's installed clock, taking no lock and
+    /// touching no latch.
+    ///
+    /// **For I/O-time metadata only** — today, `Observation::at`, which a
+    /// gate site stamps while running `StateResolver`s outside the critical
+    /// section (spec §B.1). Nothing that *decides* may read the clock this
+    /// way: a decision reads [`Self::now`], which holds the guard and
+    /// latches. The one thing this reading is guaranteed against is coming
+    /// from a different clock than the entry it ends up inside.
+    pub(crate) fn clock_reading(&self) -> SystemTime {
+        self.clock.now()
+    }
+
     /// Queue a best-effort settlement for the next drain (spec §C.1). Called
     /// from `AttemptGuard::drop`, which cannot `.await` a real transaction —
     /// a plain, synchronous `Mutex::lock` on a queue distinct from `state`.
@@ -969,7 +982,19 @@ impl LedgerInner {
 
         // Preconditions were evaluated outside this lock (spec §B.1); what
         // arrives here is the observation, and this is where it decides.
-        let (observed, refusal) = evaluate_conditions(&grant.conditions, report);
+        let (mut observed, refusal) = evaluate_conditions(&grant.conditions, report);
+
+        // An observation is stamped with a raw reading, outside the lock and
+        // outside the latch, because that is when the resolver actually
+        // looked. Keeping that reading is the point — it is what tells an
+        // auditor how stale the check was by the time it committed. What it
+        // may not do is claim to have happened *after* the entry carrying
+        // it, which a forward clock spike between the observation and this
+        // commit would otherwise produce, so it is clamped into the ledger's
+        // latched view of its own clock (spec §A.5).
+        for observation in &mut observed {
+            observation.at = observation.at.min(now);
+        }
 
         if let Some((condition, found, reason)) = refusal {
             let reserved = match guard.reserve_capacity(2, self.config.retained_entries) {

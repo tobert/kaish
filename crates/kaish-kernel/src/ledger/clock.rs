@@ -36,11 +36,23 @@ use std::time::SystemTime;
 ///
 /// **A reading may be anything; the ledger's *view* of it is monotone
 /// non-decreasing.** The ledger latches the largest reading it has seen and
-/// clamps a smaller one up to that latch (see the type's own note on
-/// [`SystemClock`]). That is mechanism, not policy — the same kind of
-/// guarantee `sequence` gives ordering — and it is what makes "an expired
-/// grant stays expired" hold without the kernel having to know anything
-/// about the clock behind it.
+/// clamps a smaller one up to that latch. That is mechanism, not policy —
+/// the same kind of guarantee `sequence` gives ordering — and it is what
+/// makes "an expired grant stays expired" hold without the kernel having to
+/// know anything about the clock behind it.
+///
+/// **The latch is permanent for the ledger's lifetime, and a forward spike
+/// is unrecoverable without a restart.** A clock that jumps far ahead and
+/// then comes back pins the view at the spike: every grant whose `not_after`
+/// the spike passed is expired, and stays expired once the clock recovers,
+/// because the ledger cannot tell a spike from a legitimate advance — a
+/// clock that reads an hour ahead and one that is an hour ahead are the same
+/// two readings. That is the price of the guarantee, and it is the side to
+/// be wrong on: the alternative is a ledger whose invariants hold only while
+/// the installed clock behaves. A process restart is the recovery, and it is
+/// the only one. An embedder whose clock can step forward and back —
+/// anything synchronizing against an external source — should install a
+/// clock that smears the correction rather than stepping it.
 ///
 /// Implementations must be cheap and must not block: `now` is called inside
 /// the ledger's critical section, once per transaction.

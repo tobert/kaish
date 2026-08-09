@@ -1792,6 +1792,17 @@ impl ExecContext {
     /// resource — or one whose kind has no registered resolver — becomes
     /// [`ConditionReport::Unobservable`], which refuses; it is never a
     /// silent pass.
+    ///
+    /// **Each observation is stamped from the ledger's own clock**
+    /// (`Requester::clock_reading`), not from the system clock, so a
+    /// custom-clock embedder reads one timeline inside one `Redeemed` entry
+    /// (spec §A.5). The reading is raw: it is taken here, at the moment the
+    /// resolver looked, which is earlier than the entry's own latched commit
+    /// stamp and is meant to be — that gap is how stale the check was, and
+    /// collapsing it would make the record claim the world was observed at
+    /// commit time when it was not. The ledger clamps the stamp to its own
+    /// view at commit, so an observation can never claim to postdate the
+    /// entry carrying it.
     pub(crate) async fn observe_conditions(&self, conditions: &[Condition]) -> ConditionReport {
         let mut observed = Vec::new();
         // A condition that claims nothing has nothing to check, and costs no
@@ -1804,11 +1815,24 @@ impl ExecContext {
                     resource,
                 };
             };
+            // A context with no ledger has no grant either, so there are no
+            // conditions to observe and this arm cannot be reached with one
+            // — but a stamp from the wrong clock is exactly the defect this
+            // reading exists to close, so say so rather than substituting a
+            // system reading.
+            let Some(access) = self.ledger_access.as_ref() else {
+                return ConditionReport::Unobservable {
+                    detail: "this context has no approval ledger, so there is no clock to stamp \
+                             the observation from"
+                        .to_string(),
+                    resource,
+                };
+            };
             match resolver.observe(&resource.id).await {
                 Ok(claim) => observed.push(Observation {
                     resource,
                     claim,
-                    at: kaish_types::clock::system_now(),
+                    at: access.requester.clock_reading(),
                 }),
                 Err(err) => {
                     return ConditionReport::Unobservable {

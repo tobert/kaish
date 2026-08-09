@@ -108,7 +108,7 @@ breaking entries are marked **BREAKING**.
   internally-tagged `LedgerEntry` log, and the `LedgerRecord` envelope it is read
   through. Additive; no gate site uses it yet.
 - **`kaish_kernel::ledger`** (ledger PR 2, `docs/approval-ledger.md`) — the approval
-  ledger's state machine: `Ledger::build(config, scope, sink)` mints a `Requester` (posts
+  ledger's state machine: `Ledger::build(config, scope, sink, clock)` mints a `Requester` (posts
   `Requested`/`Redeemed`/`Settled`), an `Approvals` read view, and one
   `ApproverHandle` (posts `Granted`/`Denied`/standing grants, retrieves the
   credential). One grant authorizes exactly one successful settlement; a failed

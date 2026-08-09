@@ -308,6 +308,20 @@ impl Requester {
         self.0.abandon_request(id, reason.into())
     }
 
+    /// A raw reading from this ledger's clock, for stamping the I/O-time
+    /// metadata a redemption carries in — `Observation::at`, taken while
+    /// `StateResolver`s run outside the critical section (spec §B.1).
+    ///
+    /// **This is not a decision seam.** It takes no lock and does not touch
+    /// the monotonicity latch, so it must never be used to compare a bound
+    /// or to decide anything; the ledger's own `now` does that, under the
+    /// guard. What it guarantees is that an observation stamp comes from the
+    /// same clock as the entry it lands inside, instead of from whatever
+    /// clock the gate site happened to reach for.
+    pub fn clock_reading(&self) -> std::time::SystemTime {
+        self.0.clock_reading()
+    }
+
     /// Record a credential presentation whose draft named no request the
     /// ledger can identify (spec §F.3 item 2). It counts against nothing —
     /// a guesser cannot void a request it cannot describe.
