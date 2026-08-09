@@ -39,7 +39,7 @@ use kaish_types::approval::{
 use tokio_util::sync::CancellationToken;
 
 use super::error::LedgerError;
-use super::handles::{ApproverHandle, Approvals, Requester};
+use super::handles::{ApproverHandle, Approvals, DecisionContext, Requester};
 
 /// How long a grant the chain issues stays redeemable if nothing redeems it.
 /// The chain grants in order to let an operation proceed immediately, so
@@ -68,8 +68,19 @@ const DEFAULT_GRANT_TTL: Duration = Duration::from_secs(300);
 /// nothing made. The unwind corrupts nothing: an in-flight attempt settles
 /// `Unknown{Cancelled}` through its drop guard, and the kernel's locks do
 /// not poison.
+///
 /// [`StatementClassifier::classify`](crate::ledger::StatementClassifier::classify)
-/// carries the same contract, for the same reason.
+/// does **not** carry this same contract as of the classifier's `Result`
+/// return (spec §C.6): a classifier answers a different question — whether
+/// to gate at all, in front of *every* statement including the ones nobody
+/// would ever gate — and a classifier that fails to load or panics on
+/// unusual input must not be able to turn the statement gate off. The
+/// kernel installs `catch_unwind` at the tap site and maps both an `Err`
+/// and a caught panic to `Gate`, never to `Observe`. `evaluate` keeps the
+/// stricter, older contract: it runs only when a request already exists and
+/// a decision is genuinely being asked for, so a panic there is unambiguously
+/// an embedder bug worth surfacing loudly rather than a case the kernel
+/// should paper over.
 ///
 /// ```compile_fail
 /// use kaish_kernel::ledger::Policy;
@@ -78,7 +89,7 @@ const DEFAULT_GRANT_TTL: Duration = Duration::from_secs(300);
 /// struct Peeker;
 ///
 /// impl Policy for Peeker {
-///     fn evaluate(&self, req: &ApprovalRequestView, _l: &kaish_kernel::ledger::Approvals) -> Decision {
+///     fn evaluate(&self, req: &ApprovalRequestView, _l: &kaish_kernel::ledger::Approvals, _c: &kaish_kernel::ledger::DecisionContext) -> Decision {
 ///         // There is no credential on the view — this does not compile,
 ///         // in this or any other spelling.
 ///         let _ = &req.token;
@@ -90,13 +101,17 @@ pub trait Policy: Send + Sync {
     /// Stage 2: synchronous, on the request path, **contractually
     /// non-blocking**. Suitable for allowlists, risk-class rules, and
     /// "never `git.push.force`, full stop". `ledger` is the read side —
-    /// pending requests, states, the log tail; it grants nothing.
+    /// pending requests, states, the log tail; it grants nothing. `ctx`
+    /// carries the append-only recorder for judgments reached on the way to
+    /// this decision (spec §C.7) — append to it and they survive on the log
+    /// whatever `evaluate` returns, including a `Defer` that a human later
+    /// turns into a grant.
     ///
     /// Blocking here blocks the gate site and every other execution behind
     /// it. Anything that can take time returns `Defer` and is decided out
     /// of band, after the gate site has returned `Pending`.
-    fn evaluate(&self, req: &ApprovalRequestView, ledger: &Approvals) -> Decision {
-        let _ = (req, ledger);
+    fn evaluate(&self, req: &ApprovalRequestView, ledger: &Approvals, ctx: &DecisionContext) -> Decision {
+        let _ = (req, ledger, ctx);
         Decision::Defer
     }
 
@@ -290,7 +305,10 @@ impl DecisionChain {
         // No lock is held here. `evaluate` is handed the read side and may
         // consult it freely. It is synchronous by contract, so the chain
         // returns in microseconds whatever the answer is.
-        match policy.evaluate(&view, &self.approvals) {
+        let decision_ctx = DecisionContext {
+            assessments: self.authority.assessments(),
+        };
+        match policy.evaluate(&view, &self.approvals, &decision_ctx) {
             Decision::Defer => {}
             decision => {
                 return self
