@@ -14,9 +14,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use kaish_kernel::ledger::{
-    ConditionReport, DecisionChain, Ledger, LedgerConfig, ResolverError, StateResolver, StateResolvers,
-};
+use kaish_kernel::ledger::{ConditionReport, DecisionChain, Ledger, LedgerConfig, ResolverError, StateResolver, StateResolvers, SystemClock};
 use kaish_kernel::vfs::{MemoryFs, VfsRouter};
 use kaish_kernel::{ExecContext, LedgerAccess};
 use kaish_tool_api::{ApprovalOutcome, Tool, ToolArgs, ToolCtx};
@@ -84,7 +82,7 @@ fn agent(id: &str) -> Principal {
     Principal::new(id, PrincipalKind::Agent)
 }
 
-/// A decision chain with no `Approver` installed — stages 1 and 4 only, which
+/// A decision chain with no `Policy` installed — stages 1 and 3 only, which
 /// is a kernel with no decision hook: no standing rule means Defer means
 /// exit 2 (spec §C.2).
 fn chain_over(approver: &kaish_kernel::ledger::ApproverHandle) -> std::sync::Arc<DecisionChain> {
@@ -94,7 +92,7 @@ fn chain_over(approver: &kaish_kernel::ledger::ApproverHandle) -> std::sync::Arc
 
 #[tokio::test]
 async fn kernel_request_approval_round_trips_a_request_through_the_ledger() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let mut ctx = ctx_with_memory_fs();
     ctx.ledger_access = Some(LedgerAccess {
         requester,
@@ -225,7 +223,7 @@ mod plugin_dangerous {
 async fn plugin_dangerous_fixture_gates_end_to_end_through_tool_api_alone() {
     use plugin_dangerous::PluginDangerous;
 
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let mut ctx = ctx_with_memory_fs();
     ctx.ledger_access = Some(LedgerAccess {
         requester: requester.clone(),
@@ -324,7 +322,7 @@ async fn plugin_dangerous_fixture_honors_a_presented_confirm_token() {
     // invocation shape as `rm --confirm=<token>` (`execute_argv_tests.rs`).
     use plugin_dangerous::PluginDangerous;
 
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let mut ctx = ctx_with_memory_fs();
     ctx.ledger_access = Some(LedgerAccess {
         requester,
@@ -397,7 +395,7 @@ async fn plugin_dangerous_fixture_rejects_a_wrong_presented_confirm_token() {
     // silently fall through to the operation.
     use plugin_dangerous::PluginDangerous;
 
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let mut ctx = ctx_with_memory_fs();
     ctx.ledger_access = Some(LedgerAccess {
         requester,

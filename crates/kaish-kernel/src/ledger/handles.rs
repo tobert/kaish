@@ -13,7 +13,8 @@ use kaish_types::approval::{
     SubscriptionId, Token,
 };
 
-use super::core::{build_inner, LedgerInner, SystemWallClock};
+use super::clock::Clock;
+use super::core::{build_inner, LedgerInner};
 use super::resolver::ConditionReport;
 use super::config::{LedgerConfig, LedgerSink};
 use super::error::LedgerError;
@@ -155,6 +156,12 @@ impl Ledger {
     /// (`ApproverHandle`). `sink` is optional — a ledger with none is purely
     /// in-memory and never applies sink backpressure (spec §D.4).
     ///
+    /// `clock` is required rather than defaulted, so **one clock per
+    /// ledger** is structural: there is no way to build one without saying
+    /// which clock stamps its entries and which clock its bounds are
+    /// compared against (spec §A.5). Pass
+    /// `Arc::new(`[`SystemClock`](super::SystemClock)`)` for the default.
+    ///
     /// # Errors
     ///
     /// Only if the OS cannot supply entropy for the ledger's id epoch (spec
@@ -164,8 +171,9 @@ impl Ledger {
         config: LedgerConfig,
         scope: ApprovalScope,
         sink: Option<Arc<dyn LedgerSink>>,
+        clock: Arc<dyn Clock>,
     ) -> Result<(Requester, Approvals, ApproverHandle), getrandom::Error> {
-        let inner = build_inner(config, scope, sink, Arc::new(SystemWallClock))?;
+        let inner = build_inner(config, scope, sink, clock)?;
         Ok((
             Requester(Arc::clone(&inner)),
             Approvals(Some(Arc::clone(&inner)), None),

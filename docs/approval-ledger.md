@@ -561,13 +561,29 @@ pub enum Outcome {
 pub enum LostCause { Cancelled, ExecutorLost }
 ```
 
-`seq` is monotonic per ledger. `at` is wall-clock, from `kaish_types::clock::system_now`,
-and exists purely for the record. Since §A.10 there is no expiry math to protect from a
-wall-clock jump: nothing in the ledger consults a clock to decide anything, and the two
-remaining deadlines (`Grant::not_after`, the request's optional `deadline`) are wall-clock
-values compared when observed. A laptop suspend can therefore make a grant look expired
-that a monotonic clock would have kept alive — which is the correct reading, because
-`not_after` is a promise about wall-clock time made by whoever set it.
+**`seq` and `at` are both monotonic per ledger.** `at` is a reading from the one clock
+the embedder installed (`Clock`, `KernelConfig::with_approval_clock`, defaulting to
+`SystemClock`), taken at the entry's commit point. The kernel holds no opinion about which
+clock is true — that is the embedder's, like policy and deadlines — and it holds exactly
+two properties instead:
+
+- **One clock per ledger.** The reading an entry is stamped with and the reading a bound is
+  compared against come from the same source, so a record's timestamps and the decisions
+  taken alongside them can never mean two different clocks. `Ledger::build` requires the
+  clock rather than defaulting it, which is what makes that structural.
+- **The ledger's view of it never goes backwards.** The ledger latches the largest reading
+  it has taken, under the same mutex everything else commits under, and clamps a smaller
+  one up to that latch. So an expired grant stays expired, entry stamps never regress, and
+  `seq` order and `at` order can never disagree — unconditionally, whatever the installed
+  clock does. This is mechanism of exactly the kind `sequence` is: a property the record
+  has by construction rather than one a reader has to verify.
+
+Everything the ledger does with a reading is those two things plus the two comparisons
+§A.10 names. A reading is a value in the installed clock's terms, and the bounds
+(`Grant::not_after`, the request's optional `deadline`) are values in the same terms, set by
+whoever set them; the comparison needs to know nothing else. The representation is
+`std::time::SystemTime` because that is the serializable reading type Rust supplies and
+RFC 3339 round-trips — the ledger reads no meaning into the name.
 
 No entry carries a credential (§A.2), so the whole log is safe to stream to a sink, project
 into `/v/approvals`, and print. Serde is stable and internally tagged, so NDJSON is the
@@ -777,11 +793,13 @@ one.
 
 ### A.10 What the kernel does with time
 
-The kernel stamps records. The kernel does not decide with a clock.
+The kernel stamps records, and compares two bounds at the moment somebody acts. It never
+runs a timer, and it never picks a duration.
 
-Every entry carries `at: SystemTime` (§A.5) — an append-only record of security decisions
-with no timestamps is not auditable, so observation stays. What the kernel does not have is
-any use of a clock as an *input to a decision*:
+Every entry carries `at` (§A.5) — an append-only record of security decisions with no
+timestamps is not auditable, so observation stays. What the kernel does not have is any
+*duration of its own*: no interval it chose, and nothing that fires because time passed
+rather than because a caller arrived.
 
 - **No request TTL.** How long an unanswered request should live is policy, and it differs
   per deployment in a way no single default can cover: a bridge waiting on a human wants a
@@ -800,11 +818,14 @@ any use of a clock as an *input to a decision*:
 
 What the kernel keeps, and why none of it is a counter-example:
 
-- **`Grant::not_after`** is set by the approval side and compared once, when a redemption is
-  attempted. The ledger never wakes up to enforce it. A grant with no bound would be a
-  standing grant, and §C.4 already has a deliberate, separate type for that.
+- **`Grant::not_after`** is set by the approval side and compared against a reading when a
+  redemption is attempted. The ledger never wakes up to enforce it. A grant with no bound
+  would be a standing grant, and §C.4 already has a deliberate, separate type for that.
 - **`ApprovalRequest::deadline`** is `Option`, defaults to `None`, and behaves the same way:
   compared when observed, never enforced on a timer.
+- **The installed clock** (§A.5) is a seam, not a decision. The ledger reads it, latches its
+  view of it, stamps with it, and compares against it. Which clock it is, and therefore what
+  a deadline means, is the embedder's to say.
 - **The script watchdog** is unchanged and is not part of this. It bounds how long a
   *statement* runs, which is execution, not approval. Because a gated statement returns
   rather than waiting, the watchdog no longer has an approval-shaped hold to suspend, and
@@ -831,8 +852,9 @@ That trade has a precondition worth stating next to it: **an embedder can only c
 it can find.** `Approvals::pending()` (§D.2) is what makes that possible and is the
 authoritative set — paginated, filterable by scope, and complete across statements, jobs,
 and sessions alike. An embedder reclaiming slots enumerates it; the pending request handed
-back on a result is a convenience for the common single-gate case, not the inventory.
-§C.1's carry rule keeps that convenience honest rather than carrying the whole weight.
+back on a result is a convenience for the common single-gate case, not the inventory. The
+halt (§I.5) keeps that convenience honest — nothing runs after a gate, so the request on the
+result is always the one that stopped the program.
 
 ---
 
@@ -843,7 +865,7 @@ back on a result is a convenience for the common single-gate case, not the inven
 **An operation wins by the order in which its conditional ledger transaction commits.**
 There is one critical section per ledger. A transaction reads the chain's current state,
 decides, and appends — or appends nothing and returns `Err`. Nothing else orders
-anything: not wall time, not the order a caller entered a function, not the order two
+anything: not a clock reading, not the order a caller entered a function, not the order two
 futures were spawned.
 
 Everything that must be exclusive happens inside that one section:
@@ -875,8 +897,7 @@ the ledger **detects stale authorization**; it does not make the final mutation 
 Closing the window is the resource's own job — for git refs, git's compare-and-swap ref
 update; for files, the backend's conditional write.
 
-**v1 is in-process only.** One `Arc<LedgerInner>`, one lock, one monotonic clock
-(`kaish_types::clock::Instant`). "Kernels sharing a ledger" means kernels in the same
+**v1 is in-process only.** One `Arc<LedgerInner>`, one lock, one installed clock (§A.5). "Kernels sharing a ledger" means kernels in the same
 process sharing that `Arc` — not two OS processes, not two hosts. **There is no durability
 claim**: a memory-only ledger is an *operational* ledger, and a `LedgerSink` is an export,
 not a source of truth. The one thing a sink is read for is the recovery sweep (§D.4). A
@@ -2564,7 +2585,7 @@ reader who knows the latch can find the concept they are looking for.
 | `Kernel::confirm(&req)` | `Kernel::confirm(&handle, &request_id)` — same replay semantics, authority now in the signature (§B.4) |
 
 **What the latch could not express**, and why the mapping is a rewrite rather than a rename:
-a nonce has no principal, no wall-clock record, no decision provenance, no per-resource
+a nonce has no principal, no timestamped record, no decision provenance, no per-resource
 state claim, no notion of a second attempt, and no life after it is forgotten. Every one of
 those is a field above.
 

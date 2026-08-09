@@ -42,19 +42,49 @@ them is `ApprovalScope`. The test for that builds two kernels over one ledger wi
 different session ids, shuts one down, and asserts the other's request is
 untouched — which is the only way to see the difference at all.
 
-**The second surprise: the deadline wanted to be wall-clock.** The ledger kept two
+**The second surprise, and the ruling that followed it.** The ledger kept two
 `Instant` mirrors — `request_deadline` and `grant_deadline` — computed at post and
-grant time so a wall-clock jump could not move an expiry decision. There was a test
-pinning it. §A.5 already said the opposite in present tense: both surviving
-deadlines are wall-clock values compared when observed, and a laptop suspend
-correctly makes a grant look expired, because `not_after` is a promise about
-wall-clock time made by whoever set it. Reading those side by side, the monotonic
-mirror was protecting a property nobody had asked for. It went, the `Instant`
-import with it, and the test became one that asserts the stated reading instead:
-299 seconds in, still granted; 301 seconds in, expired. The two other clock fields
-went the same way — `attempt_stale_after` because `AttemptGuard`'s outbox already
-*tells* the ledger an executor went away, and inferring the same fact from elapsed
-time is guessing at something you were told.
+grant time so a clock step could not move an expiry decision. There was a test
+pinning it. §A.5 said something else in present tense: both surviving deadlines are
+compared when observed, and a laptop suspend correctly makes a grant look expired.
+Reading those side by side, I deleted the mirrors, wrote the wall-clock reading into
+the spec as the settled one, and rewrote the test to assert it.
+
+Amy rejected the framing. Not the deletion — the mirrors were genuinely protecting a
+property nobody asked for — but the idea that kaish gets to say which clock is true.
+"Wall clock" is a claim about what the reading *means*, and meaning is the embedder's
+department, exactly like policy and deadlines and redaction. The kernel should care
+that there is *some* clock, that there is exactly one of it per ledger, and that its
+own view of it never goes backwards. Nothing more.
+
+So the seam inverted. `WallClock` was `pub(crate)` with one production impl; it is now
+`ledger::Clock`, public, installed through `KernelConfig::with_approval_clock`, with
+`SystemClock` as the default — and saying the *default* reads system time is a fact
+about the default, not a claim in the design. `Ledger::build` takes the clock as a
+required argument rather than defaulting it, which is the cheapest way to make "one
+clock per ledger" something you cannot get wrong.
+
+The part I would not have thought of is the latch. The ledger now keeps the largest
+reading it has taken, under the same mutex everything else commits under, and clamps a
+smaller reading up to it. That is what lets the kernel hold no opinion at all: an
+expired grant stays expired and entry stamps never regress *whatever* the installed
+clock does, so the design never has to say what a well-behaved clock looks like. It is
+the same shape as `sequence` — a property the record has by construction instead of one
+a reader has to verify. The cross-family review pushed back that refusing to
+acknowledge a clock step is itself a time decision, which is a fair reading; Amy
+overruled it, and I think correctly, because the alternative is a ledger whose
+invariants are conditional on the embedder's clock being sane.
+
+The vocabulary sweep that followed was larger than the code change. "Wall-clock post
+time" appeared on every entry field in `kaish-types`; `at` is now "the clock reading
+this entry was committed at". The test clock stopped being `FakeWallClock` and became
+`TestClock` — no longer a test double for a `pub(crate)` trait, but an ordinary
+implementation of a public seam, which is a nicer thing for a test to be. I kept
+`SystemTime` as the representation, and that is the one place a reader might still
+hear "wall": it is `std`'s name, it is what RFC 3339 round-trips, and a neutral newtype
+over it would ripple through three crates and both embedders to buy nothing the prose
+does not already buy. The spec says so out loud rather than leaving the type name to
+imply something.
 
 **The ruling that changes a contract.** §I.5 asked whether a tool-level deferral
 should halt the top-level loop the way a statement-level one already does. Amy

@@ -26,6 +26,7 @@
 //! [`DecisionChain`] and hands the embedder the one [`ApproverHandle`].
 
 mod attempt_guard;
+mod clock;
 mod config;
 mod core;
 mod error;
@@ -39,6 +40,7 @@ mod subscription;
 mod teardown;
 
 pub use attempt_guard::AttemptGuard;
+pub use clock::{Clock, SystemClock};
 pub use config::{LedgerConfig, LedgerSink, LedgerSinkError};
 pub use error::LedgerError;
 pub use operation::KernelOperation;

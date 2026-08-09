@@ -929,11 +929,10 @@ mod tests {
         // reachable, nested under `data`, alongside the error/code envelope.
         let mut result = ExecResult::failure(2, "rm: approval required (fs.* enforce policy)");
         result.data = Some(crate::value::Value::Json(serde_json::json!({
-            "nonce": "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a",
-            "command": "rm",
+            "request": "req_9c1a4f2e_42",
+            "operation": "fs.remove",
             "paths": ["important.dat"],
-            "hint": "rm --confirm=\"4b1e0d9a7c3f28e6b5a0c1d4e7f2938a\" important.dat",
-            "ttl": 60,
+            "hint": "rm --confirm=<token> important.dat",
         })));
 
         let formatted = apply_output_format(result, OutputFormat::Json);
@@ -941,11 +940,11 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(parsed["error"], "rm: approval required (fs.* enforce policy)");
         assert_eq!(parsed["code"], 2);
-        assert_eq!(parsed["data"]["nonce"], "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a");
-        assert_eq!(parsed["data"]["ttl"], 60);
+        assert_eq!(parsed["data"]["request"], "req_9c1a4f2e_42");
+        assert_eq!(parsed["data"]["operation"], "fs.remove");
         // .data mirrors the serialized envelope (reachable from the struct too).
         match &formatted.data {
-            Some(crate::value::Value::Json(v)) => assert_eq!(v["data"]["nonce"], "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a"),
+            Some(crate::value::Value::Json(v)) => assert_eq!(v["data"]["request"], "req_9c1a4f2e_42"),
             other => panic!("expected nested JSON data, got {other:?}"),
         }
     }

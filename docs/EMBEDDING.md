@@ -423,6 +423,26 @@ one — it is compared when the request is next observed — and run your own ti
 that calls `cancel_approval(&id, CancelReason::DeadlinePassed)` when it fires.
 An embedder that wants no horizon never calls it.
 
+**And the clock those bounds are read against is yours too.**
+`KernelConfig::with_approval_clock(Arc<dyn Clock>)` installs it; the default is
+`SystemClock`. The kernel keeps no opinion about which clock is true — it keeps
+two properties:
+
+- **One clock per ledger.** The reading an entry is stamped with and the reading
+  a bound is compared against come from the same source, so a record's
+  timestamps and the decisions taken alongside them can never mean two different
+  clocks. `Ledger::build` takes the clock as a required argument for exactly
+  that reason.
+- **A monotone non-decreasing view of it.** The ledger latches the largest
+  reading it has taken and clamps a smaller one up to that latch, so an expired
+  grant stays expired and entry stamps never regress — whatever your clock does.
+  You do not have to promise the kernel a well-behaved clock.
+
+This is the *ledger's* clock, not the kernel's: `timeout`, the script watchdog,
+and `ToolCtx::patient` run on `Instant` and are unaffected. It is also
+incompatible with `with_approver_handle`, which adopts a ledger that already has
+one — setting both fails `Kernel::build` loudly.
+
 **kaish closes what its own teardown would strand.** `kill --discard %N`,
 `Kernel::cancel_all_jobs`, and `Kernel::shutdown` cancel the requests they would
 otherwise orphan — the last sweeping every live request in that kernel's scope,

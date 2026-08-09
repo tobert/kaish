@@ -18,10 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use kaish_kernel::ledger::{
-    Approvals, ApproverHandle, ChainContext, ChainOutcome, ChainStage, ConditionReport,
-    DecisionChain, Ledger, LedgerConfig, LedgerError, Policy, Requester,
-};
+use kaish_kernel::ledger::{Approvals, ApproverHandle, ChainContext, ChainOutcome, ChainStage, ConditionReport, DecisionChain, Ledger, LedgerConfig, LedgerError, Policy, Requester, SystemClock};
 use kaish_kernel::{Kernel, KernelConfig};
 use kaish_types::approval::{
     ApprovalRequest, ApprovalRequestView, Decision, Grounds, GrantTerms, LedgerEntry,
@@ -177,7 +174,7 @@ impl Policy for ScriptedPolicy {
 
 /// Build a ledger and a chain over it, with an optional policy.
 fn chain_over(policy: Option<Arc<dyn Policy>>) -> (Requester, Approvals, ApproverHandle, DecisionChain) {
-    let (requester, approvals, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
+    let (requester, approvals, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let chain = DecisionChain::new(authority.clone(), approvals.clone(), policy);
     (requester, approvals, authority, chain)
 }
@@ -601,7 +598,7 @@ async fn the_policy_is_never_invoked_while_the_ledger_lock_is_held() {
 /// redeems: there is no lease to have expired and no budget to have
 /// disagreed with it. No paused clock, no sleep — the path this covers has
 /// no timing left in it, so the "arbitrarily long time" is expressed as the
-/// wall clock jumping a decade.
+/// clock reading a decade out.
 #[tokio::test]
 async fn a_grant_posted_a_decade_after_pending_still_redeems() {
     let (requester, approvals, authority, chain) = chain_over(None);
@@ -614,8 +611,8 @@ async fn a_grant_posted_a_decade_after_pending_still_redeems() {
     );
     assert_eq!(approvals.state(&request.id), Some(RequestState::Requested));
 
-    // A decade of wall clock later — expressed as a `not_after` a decade out,
-    // since nothing in the ledger consults a clock to decide anything.
+    // A decade later — expressed as a `not_after` a decade out, since there
+    // is nothing in the ledger for an interval to have run down.
     let much_later = SystemTime::now() + Duration::from_secs(10 * 365 * 24 * 3_600);
     authority
         .grant(&request.id, GrantTerms::once_for(&request, much_later))
@@ -843,7 +840,7 @@ async fn with_deny_self_approval_wires_kernelconfig_through_to_the_minted_ledger
 
 #[tokio::test]
 async fn a_session_given_a_handle_holds_authority_and_joins_its_ledger() {
-    let (_requester, approvals, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
+    let (_requester, approvals, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let kernel = Kernel::new(
         KernelConfig::isolated()
             .with_approver_handle(authority.clone())

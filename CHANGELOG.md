@@ -274,10 +274,21 @@ breaking entries are marked **BREAKING**.
 - **`ApprovalRequest::deadline: Option<SystemTime>`** defaults to `None`; when an
   embedder sets one it is compared on observation, never enforced on a timer. Set it
   with `RequestOrigin::with_deadline`.
-- **Both surviving deadlines are wall-clock, compared when observed** — a grant's
-  `not_after` and a request's optional `deadline`. A laptop suspend can make a grant
-  look expired that a monotonic clock would have kept alive, which is the correct
-  reading: `not_after` is a promise about wall-clock time made by whoever set it.
+- **`kaish_kernel::ledger::{Clock, SystemClock}` and
+  `KernelConfig::with_approval_clock`** (`docs/approval-ledger.md` §A.5) — the clock
+  the approval ledger reads is installed by the embedder, defaulting to `SystemClock`.
+  The kernel holds no opinion about which clock is true; it holds two properties
+  instead. **One clock per ledger:** `Ledger::build` requires it rather than
+  defaulting it, so entry stamps and bound comparisons can never come from two
+  sources. **A monotone non-decreasing view:** the ledger latches the largest reading
+  it has taken and clamps a smaller one up to it, so an expired grant stays expired
+  and entry stamps never regress whatever the installed clock does. Not the script
+  watchdog's timer — `timeout` and `ToolCtx::patient` are unaffected.
+- **Both surviving bounds are compared against a reading, at the moment somebody acts**
+  — a grant's `not_after` and a request's optional `deadline`. Neither is enforced on a
+  timer, and the ledger's own monotonic-`Instant` mirrors are gone: a bound and the
+  reading it is compared against are values in the same installed clock's terms, which
+  is all the comparison needs.
 - **`ApprovalOutcome::Closed { request, state, detail }`** distinguishes "this request
   is over, asking again will not help" from `LedgerUnavailable`'s "the ledger could not
   record this, retry". `LedgerUnavailable` now describes only the ledger's own

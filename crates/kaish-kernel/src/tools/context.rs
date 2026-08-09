@@ -1148,6 +1148,7 @@ impl ExecContext {
             crate::ledger::LedgerConfig::default(),
             scope.clone(),
             None,
+            std::sync::Arc::new(crate::ledger::SystemClock),
         )
         .expect("the test ledger must mint an id epoch");
         let chain = Arc::new(crate::ledger::DecisionChain::new(

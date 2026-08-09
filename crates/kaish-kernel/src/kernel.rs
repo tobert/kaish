@@ -257,7 +257,7 @@ pub struct KernelConfig {
     /// or via `KAISH_TRASH=1`.
     pub trash_enabled: bool,
 
-    /// How this kernel's approval ledger is configured: retention, TTLs,
+    /// How this kernel's approval ledger is configured: retention, capacity,
     /// and the rejected-credential limit (spec §D.4). `None` takes
     /// [`LedgerConfig::default`](crate::ledger::LedgerConfig).
     ///
@@ -431,8 +431,13 @@ pub struct ApprovalConfig {
     /// Decides which top-level statements must ask before they run (spec
     /// §C.6). `None` — the default — makes every statement `Observe`. There
     /// is no script surface that changes this: the classifier is
-    /// embedder-registered, like the approver.
+    /// embedder-registered, like the policy.
     pub statement_classifier: Option<Arc<dyn crate::ledger::StatementClassifier>>,
+    /// The clock the approval ledger reads (spec §A.5). `None` — the
+    /// default — installs [`SystemClock`](crate::ledger::SystemClock).
+    /// Ignored when [`Self::approver_handle`] is set, because that adopts a
+    /// ledger that already has one.
+    pub clock: Option<Arc<dyn crate::ledger::Clock>>,
 }
 
 /// Names what is configured without printing an opaque `dyn Policy`
@@ -800,7 +805,7 @@ impl KernelConfig {
         self
     }
 
-    /// Configure the approval ledger this kernel mints: retention, TTLs,
+    /// Configure the approval ledger this kernel mints: retention, capacity,
     /// and the rejected-credential limit (spec §D.4).
     ///
     /// Cross-request continuity — the reason `with_nonce_store` existed — is
@@ -842,6 +847,31 @@ impl KernelConfig {
     /// request **closed** rather than dropping the entry.
     pub fn with_ledger_sink(mut self, sink: Arc<dyn crate::ledger::LedgerSink>) -> Self {
         self.ledger_sink = Some(sink);
+        self
+    }
+
+    /// Install the clock the approval ledger reads
+    /// (`docs/approval-ledger.md` §A.5). The default is
+    /// [`SystemClock`](crate::ledger::SystemClock).
+    ///
+    /// **This is the ledger's clock and nothing else's.** It is not the
+    /// script watchdog's timer — `timeout`, `ToolCtx::patient`, and the
+    /// per-statement deadline run on `Instant` and are unaffected — which is
+    /// why the name says which clock rather than claiming the kernel's.
+    ///
+    /// One clock stamps every entry and answers every bound comparison in
+    /// that ledger, so a record's timestamps and the decisions taken
+    /// alongside them can never come from two different sources. The
+    /// ledger's *view* of whatever you install is monotone non-decreasing:
+    /// it latches the largest reading it has seen and clamps a smaller one
+    /// up to it, so an expired grant stays expired and entry stamps never
+    /// regress, whatever the clock does.
+    ///
+    /// Incompatible with [`Self::with_approver_handle`], which adopts a
+    /// ledger that already has a clock; setting both fails
+    /// [`Kernel::build`] loudly.
+    pub fn with_approval_clock(mut self, clock: Arc<dyn crate::ledger::Clock>) -> Self {
+        self.approval.clock = Some(clock);
         self
     }
 
@@ -1726,6 +1756,7 @@ impl Kernel {
             approver_handle,
             resolvers,
             statement_classifier,
+            clock,
         } = config;
         // One kernel, one kernel id (spec §A.7) — including a kernel that
         // joins another's ledger through `with_approver_handle`, which is
@@ -1740,10 +1771,13 @@ impl Kernel {
         let resolvers = crate::ledger::StateResolvers::from_registrations(resolvers)
             .context("the approval ledger's state resolvers conflict")?;
 
-        if approver_handle.is_some() && (ledger_config.is_some() || ledger_sink.is_some()) {
+        if approver_handle.is_some()
+            && (ledger_config.is_some() || ledger_sink.is_some() || clock.is_some())
+        {
             anyhow::bail!(
-                "with_approver_handle adopts that handle's ledger, so with_ledger/with_ledger_sink \
-                 cannot also apply — configure the ledger on the kernel that mints it"
+                "with_approver_handle adopts that handle's ledger, so with_ledger/with_ledger_sink/\
+                 with_approval_clock cannot also apply — configure the ledger on the kernel that \
+                 mints it"
             );
         }
         let (requester, approvals, authority) = match &approver_handle {
@@ -1752,6 +1786,7 @@ impl Kernel {
                 ledger_config.unwrap_or_default(),
                 scope.clone(),
                 ledger_sink,
+                clock.unwrap_or_else(|| Arc::new(crate::ledger::SystemClock)),
             )
             .context("approval ledger could not mint its id epoch — the OS supplied no entropy")?,
         };

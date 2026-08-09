@@ -790,7 +790,7 @@ distinct from the data-plane `.data`, and it is **tokenless**: the request
 names the operation, never its credential.
 
 - **No `--json`** — `ExecResult.approval` is the typed request
-  `Some(ApprovalRequestView { id, operation, resources, hint, ttl, … })`
+  `Some(ApprovalRequestView { id, operation, resources, hint, deadline, … })`
   (embedders read it via `approval_request()`).
 
 - **`--json`** — the result is a non-zero exit with a diagnostic, so it's wrapped

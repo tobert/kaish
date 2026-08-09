@@ -1025,7 +1025,7 @@ pub struct ApprovalRequest {
     /// Display-only re-run template. Producer-authored, therefore untrusted
     /// text (spec §C.3) — never contains a credential.
     pub hint: String,
-    /// Wall-clock post time.
+    /// The clock reading this entry was committed at.
     #[serde(with = "crate::rfc3339::system_time")]
     pub requested_at: SystemTime,
     /// When this request stops being answerable. `None` — the default —
@@ -1087,7 +1087,7 @@ static REQUESTS_CONSTRUCTED: AtomicU64 = AtomicU64::new(0);
 /// nothing else — deliberately no credential field, so there is nothing to
 /// redact and nothing to leak through clone/serde/VFS/telemetry (spec §A.2).
 /// This is what `ExecResult.approval`, `JobInfo.approval`, `/v/approvals`,
-/// and an `Approver`'s input all see.
+/// and a `Policy`'s input all see.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApprovalRequestView {
@@ -1425,7 +1425,7 @@ pub struct Grant {
     /// transitions declared on the request's resources. An approver may
     /// narrow (add or tighten) and may never widen — enforced at post time.
     pub conditions: Vec<Condition>,
-    /// Wall-clock decision time.
+    /// The clock reading the decision was committed at.
     #[serde(with = "crate::rfc3339::system_time")]
     pub decided_at: SystemTime,
 }
@@ -1771,7 +1771,7 @@ impl ObservedResource {
     }
 }
 
-/// An `Approver`'s verdict on a request (spec §C.2).
+/// A policy's verdict on a request (spec §C.2).
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1865,8 +1865,8 @@ pub enum RequestState {
 
 /// What an `Expired` entry's `what` names: which deadline was observed to
 /// have passed (spec §B.1). Neither is enforced on a timer — both are
-/// wall-clock values compared when the request is next observed (spec
-/// §A.10).
+/// readings from the clock the embedder installed, compared when the
+/// request is next observed (spec §A.10).
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1913,9 +1913,9 @@ impl std::fmt::Display for CancelReason {
 
 /// One append to the ledger. Internally tagged on the `"entry"` key so
 /// NDJSON stays one self-describing line per entry (spec §A.5). `seq` is
-/// monotonic per ledger; `at` is wall-clock and exists purely for the
-/// record — expiry math never uses it (see the module-level warning on
-/// `kaish_types::clock::Instant` vs. wall-clock jumps, spec §A.5).
+/// monotonic per ledger, and so is `at`: the ledger latches the largest
+/// reading it has taken from the clock the embedder installed, so entry
+/// stamps never regress and `seq` order and `at` order can never disagree.
 ///
 /// No entry carries a credential, so the whole log is safe to stream to a
 /// sink, project into `/v/approvals`, and print.
@@ -1927,7 +1927,7 @@ pub enum LedgerEntry {
     Requested {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The posted request. Boxed because it is by far the widest payload
@@ -1941,7 +1941,7 @@ pub enum LedgerEntry {
     Granted {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The posted grant.
@@ -1951,7 +1951,7 @@ pub enum LedgerEntry {
     Denied {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The denied request.
@@ -1961,16 +1961,17 @@ pub enum LedgerEntry {
         /// Why.
         reason: String,
     },
-    /// A TTL elapsed with no closing decision.
+    /// A deadline passed with no closing decision — a grant's `not_after`,
+    /// or the optional deadline an embedder set on the request.
     Expired {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The expired request.
         request: RequestId,
-        /// Which TTL elapsed.
+        /// Which deadline passed.
         what: Expiring,
     },
     /// The approval side retrieved the key. Appended on every retrieval, so
@@ -1979,7 +1980,7 @@ pub enum LedgerEntry {
     KeyRetrieved {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The request whose key was retrieved.
@@ -1991,7 +1992,7 @@ pub enum LedgerEntry {
     Redeemed {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The request being redeemed.
@@ -2010,7 +2011,7 @@ pub enum LedgerEntry {
     Refused {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The request whose redemption was refused.
@@ -2024,7 +2025,7 @@ pub enum LedgerEntry {
     Settled {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The request this attempt belongs to.
@@ -2038,7 +2039,7 @@ pub enum LedgerEntry {
     Abandoned {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The request abandoned.
@@ -2055,7 +2056,7 @@ pub enum LedgerEntry {
     Voided {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The request voided.
@@ -2067,7 +2068,7 @@ pub enum LedgerEntry {
     StandingIssued {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The standing grant issued.
@@ -2077,7 +2078,7 @@ pub enum LedgerEntry {
     StandingRevoked {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The standing grant revoked.
@@ -2091,7 +2092,7 @@ pub enum LedgerEntry {
     Subscribed {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The subscription registered, carrying its allocated id.
@@ -2106,7 +2107,7 @@ pub enum LedgerEntry {
     Observed {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The operation observed.
@@ -2130,7 +2131,7 @@ pub enum LedgerEntry {
     Unsubscribed {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The subscription revoked.
@@ -2146,7 +2147,7 @@ pub enum LedgerEntry {
     Cancelled {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The request that was closed.
@@ -2160,7 +2161,7 @@ pub enum LedgerEntry {
     TokenRejected {
         /// Monotonic per-ledger sequence number.
         seq: u64,
-        /// Wall-clock post time.
+        /// The clock reading this entry was committed at.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// `Some` when the presenting draft matched a live request (so the

@@ -765,7 +765,7 @@ async fn a_replay_that_errors_still_settles_its_attempt() {
 // ============================================================================
 
 /// A classifier that panics takes the execution down with it — documented on
-/// `StatementClassifier::classify` and matching `Approver::policy`, which
+/// `StatementClassifier::classify` and matching `Policy::evaluate`, which
 /// kaish does not guard either. Swallowing it would run the statement under a
 /// posture nothing decided.
 struct PanickingClassifier;

@@ -24,9 +24,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use kaish_kernel::interpreter::ExecResult;
-use kaish_kernel::ledger::{
-    ApproverHandle, Ledger, LedgerConfig, ResolverError, StateResolver,
-};
+use kaish_kernel::ledger::{ApproverHandle, Ledger, LedgerConfig, ResolverError, StateResolver, SystemClock};
 use kaish_kernel::tools::{ToolArgs, ToolCtx, ToolSchema};
 use kaish_kernel::vfs::{MemoryFs, VfsRouter};
 use kaish_kernel::{Kernel, KernelBackend, KernelConfig, LocalBackend, Tool};
@@ -498,7 +496,7 @@ fn git_session(dir: &Path, failing_resolver: bool) -> GitFixture {
     )]));
     let pushed = Arc::new(AtomicUsize::new(0));
     let observed = Arc::new(AtomicUsize::new(0));
-    let (_r, _a, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None).expect("ledger");
+    let (_r, _a, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).expect("ledger");
     let config = KernelConfig::isolated()
         .with_cwd(dir.to_path_buf())
         .with_approvals(false)
@@ -658,7 +656,7 @@ async fn an_unregistered_resource_kind_refuses() {
     )]));
     let pushed = Arc::new(AtomicUsize::new(0));
     // No `with_state_resolver` — the kernel has never heard of `git.ref`.
-    let (_r, _a, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None).expect("ledger");
+    let (_r, _a, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).expect("ledger");
     let config = KernelConfig::isolated()
         .with_cwd(dir.path().to_path_buf())
         .with_approvals(false)
@@ -969,7 +967,7 @@ impl KernelBackend for RacingBackend {
 #[tokio::test]
 async fn a_write_racing_the_ledger_check_fails_loud_instead_of_clobbering() {
     let (_requester, approvals, authority) =
-        Ledger::build(LedgerConfig::default(), test_scope(), None).expect("ledger");
+        Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).expect("ledger");
     let mut vfs = VfsRouter::new();
     vfs.mount("/", MemoryFs::new());
     let inner: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(vfs)));

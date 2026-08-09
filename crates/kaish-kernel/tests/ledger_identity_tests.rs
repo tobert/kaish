@@ -19,7 +19,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use kaish_kernel::ledger::{Ledger, LedgerConfig, LedgerError, Requester};
+use kaish_kernel::ledger::{Ledger, LedgerConfig, LedgerError, Requester, SystemClock};
 use kaish_types::approval::{
     ApprovalRequest, ApprovalScope, Capture, GrantTerms, KernelId, LedgerEntry, PlanBinding,
     PlanDigest, Principal, PrincipalKind, RequestOrigin, RequestState, RiskClass, SessionId,
@@ -66,7 +66,7 @@ fn far_future() -> SystemTime {
 async fn a_request_raised_in_one_session_is_invisible_to_another_sessions_read_side() {
     let kernel = KernelId::mint();
     let (requester, approvals, _authority) =
-        Ledger::build(LedgerConfig::default(), scope_for(kernel, None), None).unwrap();
+        Ledger::build(LedgerConfig::default(), scope_for(kernel, None), None, std::sync::Arc::new(SystemClock)).unwrap();
 
     let mine = post_in(&requester, scope_for(kernel, Some("a"))).await;
     let theirs = post_in(&requester, scope_for(kernel, Some("b"))).await;
@@ -102,7 +102,7 @@ async fn a_request_raised_in_one_session_is_invisible_to_another_sessions_read_s
 async fn an_unattributed_request_belongs_to_the_kernel_and_no_scoped_reader_sees_it() {
     let kernel = KernelId::mint();
     let (requester, approvals, _authority) =
-        Ledger::build(LedgerConfig::default(), scope_for(kernel, None), None).unwrap();
+        Ledger::build(LedgerConfig::default(), scope_for(kernel, None), None, std::sync::Arc::new(SystemClock)).unwrap();
     let request = post_in(&requester, scope_for(kernel, None)).await;
 
     assert!(
@@ -118,7 +118,7 @@ async fn an_unattributed_request_belongs_to_the_kernel_and_no_scoped_reader_sees
 async fn a_scoped_authority_decides_only_within_its_session() {
     let kernel = KernelId::mint();
     let (requester, _approvals, authority) =
-        Ledger::build(LedgerConfig::default(), scope_for(kernel, None), None).unwrap();
+        Ledger::build(LedgerConfig::default(), scope_for(kernel, None), None, std::sync::Arc::new(SystemClock)).unwrap();
 
     let mine = post_in(&requester, scope_for(kernel, Some("a"))).await;
     let theirs = post_in(&requester, scope_for(kernel, Some("b"))).await;
@@ -161,7 +161,7 @@ async fn a_scoped_authority_decides_only_within_its_session() {
 async fn every_record_carries_the_scope_of_the_request_it_is_about() {
     let kernel = KernelId::mint();
     let (requester, approvals, authority) =
-        Ledger::build(LedgerConfig::default(), scope_for(kernel, None), None).unwrap();
+        Ledger::build(LedgerConfig::default(), scope_for(kernel, None), None, std::sync::Arc::new(SystemClock)).unwrap();
     let request = post_in(&requester, scope_for(kernel, Some("a"))).await;
     authority
         .grant(&request.id, GrantTerms::once_for(&request, far_future()))
@@ -194,7 +194,7 @@ async fn every_record_carries_the_scope_of_the_request_it_is_about() {
 async fn every_recorded_transition_bumps_the_revision_and_posting_does_not() {
     let kernel = KernelId::mint();
     let (requester, approvals, authority) =
-        Ledger::build(LedgerConfig::default(), scope_for(kernel, None), None).unwrap();
+        Ledger::build(LedgerConfig::default(), scope_for(kernel, None), None, std::sync::Arc::new(SystemClock)).unwrap();
     let request = post_in(&requester, scope_for(kernel, None)).await;
     assert_eq!(request.revision, 0, "a posted request starts at revision 0");
 
@@ -238,7 +238,7 @@ async fn a_chainless_observed_record_carries_the_posting_sessions_scope() {
     // very session that produced it.
     let kernel = KernelId::mint();
     let (requester, approvals, _authority) =
-        Ledger::build(LedgerConfig::default(), scope_for(kernel, None), None).unwrap();
+        Ledger::build(LedgerConfig::default(), scope_for(kernel, None), None, std::sync::Arc::new(SystemClock)).unwrap();
     requester
         .observed(
             kaish_types::approval::OperationId::new("fs.remove").unwrap(),
