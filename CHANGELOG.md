@@ -40,6 +40,13 @@ breaking entries are marked **BREAKING**.
 - **BREAKING: `approvals renew <id>` is `approvals cancel <id>`.** Nothing expires,
   so there is no expiry to renew from; what a requester needs instead is a way to
   end a request nobody is going to answer.
+- **BREAKING: `ApproverHandle::grant`/`grant_with_grounds`/`deny`, `Requester::cancel`,
+  and `Kernel::cancel_approval` take a `rev: u64` argument** naming the revision the
+  caller's view of the request was at (`docs/approval-ledger.md` §B.6) — the value
+  every `ApprovalRequestView`/`ApprovalRequest` already carries on `.revision`. A
+  call quoting anything but the request's current revision is refused with
+  `LedgerError::StaleRevision` and recorded as `RevisionRejected` rather than
+  applied.
 - **BREAKING: comma is significant only inside a `[...]`/`{...}` literal or
   pattern.** A bare `,` used to lex as its own token everywhere, so
   `sed -n 1,3p`, `cut -f 1,3`, `sort -k 2,2n`, and `echo a,b,c` were parse
@@ -245,7 +252,7 @@ breaking entries are marked **BREAKING**.
   every grant is still good for exactly one successful settlement.
 - An empty listing is `[]` under `--json`, not a string — "nothing pending" must
   not be a different shape from "one request".
-- **`Requester::cancel` / `Kernel::cancel_approval(&id, reason)` / `approvals cancel
+- **`Requester::cancel` / `Kernel::cancel_approval(&id, rev, reason)` / `approvals cancel
   <id>`** (`docs/approval-ledger.md` §B.5) — closes an undecided request, since nothing
   times one out. Named `cancel_approval` on the kernel because `Kernel::cancel` already
   means "interrupt the running execution". Refused on a request that is already
