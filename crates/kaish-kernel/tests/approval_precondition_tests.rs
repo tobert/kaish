@@ -98,15 +98,15 @@ impl Session {
         let pending = self.kernel.approvals().pending();
         assert_eq!(pending.len(), 1, "exactly one request must be pending");
         let view = pending[0].clone();
+        // `not_after` is compared against a reading from the ledger's own
+        // clock (spec §A.5), so an approver states it in that clock's terms.
+        // With the default `SystemClock` this is `SystemTime::now()`; a test
+        // that installs its own clock would otherwise grant a window that
+        // was already over.
+        let not_after =
+            self.kernel.requester().clock_reading() + std::time::Duration::from_secs(300);
         self.authority
-            .grant(
-                &view.id,
-                view.revision,
-                GrantTerms::once_for_view(
-                    &view,
-                    std::time::SystemTime::now() + std::time::Duration::from_secs(300),
-                ),
-            )
+            .grant(&view.id, view.revision, GrantTerms::once_for_view(&view, not_after))
             .await
             .expect("the grant must post");
         let token = self
@@ -343,6 +343,75 @@ async fn the_redeemed_entry_records_what_was_observed_and_when() {
     assert!(
         observation.at >= before,
         "the observation must be timestamped when it was taken"
+    );
+}
+
+/// §A.5: **one clock per ledger** reaches inside the entry too. An
+/// observation is stamped while the resolver runs, outside the lock, so its
+/// reading is raw — but it must come from the clock the embedder installed,
+/// or a custom-clock embedder reads two timelines inside one `Redeemed`
+/// entry. This drives the whole path with a clock nowhere near the system
+/// one, so a stamp that leaked through `system_now()` is decades out.
+#[tokio::test]
+async fn an_observation_is_stamped_from_the_installed_clock() {
+    /// Fixed, and decades *ahead* of any real system reading — ahead on
+    /// purpose. The ledger clamps an observation stamp down into its own
+    /// latched view, so a stamp that leaked in from the system clock would
+    /// be clamped and still land below this reading; behind, the clamp
+    /// would hide the leak.
+    struct FixedClock;
+    /// 2096-ish, in seconds since the epoch.
+    const FIXED_SECS: u64 = 4_000_000_000;
+    impl kaish_kernel::ledger::Clock for FixedClock {
+        fn now(&self) -> std::time::SystemTime {
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(FIXED_SECS)
+        }
+    }
+
+    let dir = tempdir();
+    std::fs::write(dir.path().join("dst.txt"), "before").unwrap();
+    let config = KernelConfig::repl()
+        .with_cwd(dir.path().to_path_buf())
+        .with_approvals(false)
+        .with_trash(false)
+        .with_approval_clock(Arc::new(FixedClock));
+    let (kernel, authority) = Kernel::build(config).expect("kernel");
+    let session = Session { kernel, authority };
+
+    session.run("set -o approvals").await;
+    session.run("write dst.txt 'after'").await;
+    let (_id, token) = session.approve_pending().await;
+    let done = session
+        .run(&format!("write --confirm={token} dst.txt 'after'"))
+        .await;
+    assert_eq!(done.code, 0, "an unchanged file must redeem: {}", done.err);
+
+    let observed = session
+        .redeemed_observations()
+        .expect("a successful redemption must append Redeemed");
+    assert_eq!(observed.len(), 1);
+    let expected = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(FIXED_SECS);
+    assert_eq!(
+        observed[0].at, expected,
+        "the observation must be stamped from the ledger's own clock, not the system clock"
+    );
+
+    // And it agrees with the entry carrying it: the observation is never
+    // later than its own `Redeemed` stamp.
+    let redeemed_at = session
+        .kernel
+        .approvals()
+        .log(0)
+        .into_iter()
+        .filter(|record| matches!(record.known(), Some(LedgerEntry::Redeemed { .. })))
+        .map(|record| record.at)
+        .next_back()
+        .expect("a Redeemed record");
+    assert!(
+        observed[0].at <= redeemed_at,
+        "an observation must never claim to postdate the entry carrying it: \
+         {:?} > {redeemed_at:?}",
+        observed[0].at
     );
 }
 

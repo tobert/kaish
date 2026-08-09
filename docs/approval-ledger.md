@@ -578,6 +578,16 @@ two properties instead:
   clock does. This is mechanism of exactly the kind `sequence` is: a property the record
   has by construction rather than one a reader has to verify.
 
+**The latch is permanent for the ledger's lifetime, and that is the price of the
+guarantee.** A clock that jumps far forward and then recovers pins the view at the spike:
+every grant whose `not_after` the spike passed is expired, and stays expired afterwards.
+The ledger cannot distinguish a spike from a legitimate advance — a clock reading an hour
+ahead and a clock that *is* an hour ahead produce the same two readings — so a rule that
+recovered from the first would have to un-expire under the second, and "an expired grant
+stays expired" would become conditional on somebody else's clock. Recovery from a spike is
+a process restart, and there is no other. An embedder whose clock can correct against an
+external source should install one that smears the correction rather than stepping it.
+
 Everything the ledger does with a reading is those two things plus the two comparisons
 §A.10 names. A reading is a value in the installed clock's terms, and the bounds
 (`Grant::not_after`, the request's optional `deadline`) are values in the same terms, set by
@@ -892,7 +902,16 @@ per key; a second attempt appends nothing and returns `Ok`.
 
 **Condition evaluation happens outside the critical section**, because it is I/O
 (`StateResolver::observe`, §B.4). The observation is carried *into* the transaction and
-recorded on the `Redeemed` entry, so the record states what was seen and when. This means
+recorded on the `Redeemed` entry, so the record states what was seen and when.
+
+`Observation::at` is a **raw** reading from the same installed clock (§A.5) —
+`Requester::clock_reading`, taking no lock and touching no latch — because it records
+when the resolver actually looked, which is earlier than the entry's commit stamp and is
+meant to be: that gap is how stale the check was, and collapsing it onto the commit stamp
+would make the record claim the world was observed at a moment it was not. It is clamped
+into the ledger's latched view when the entry commits, so an observation can never claim
+to postdate the entry carrying it. A raw reading is legitimate here and nowhere else:
+nothing *decides* on it. This means
 the ledger **detects stale authorization**; it does not make the final mutation atomic.
 Closing the window is the resource's own job — for git refs, git's compare-and-swap ref
 update; for files, the backend's conditional write.
