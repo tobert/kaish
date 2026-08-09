@@ -523,8 +523,23 @@ pub struct LedgerRecord {
     pub at: SystemTime,
     /// Which kernel/session/actor this record belongs to (§A.7).
     pub scope: ApprovalScope,
-    pub entry: LedgerEntry,
+    pub entry: RecordedEntry,
 }
+
+/// An entry this build recognizes, or one it does not. Untagged on the wire.
+/// The two arms are what make "never silently drop an unknown variant" a
+/// property of the type rather than a rule a reader has to remember.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum RecordedEntry {
+    Known(LedgerEntry),
+    Unknown(UnknownEntry),
+}
+
+/// A newer writer's entry, kept verbatim: the `entry` tag plus every other
+/// field. Re-exporting a log must not narrow it to the variants the
+/// re-exporter happened to know about.
+pub struct UnknownEntry { pub entry: String, pub fields: BTreeMap<String, Value> }
 
 /// Names a resource without its transition claim: the pair an `Observation`
 /// or a match result points at.
@@ -570,6 +585,8 @@ nobody knows how to react to is decoration:
   intact, so a gap in an audit log is visible as a gap. Dropping it would let a reader
   report a clean history it did not actually verify.
 - `schema_version` bumps when a reader must notice a change, not on every addition.
+- `sequence` and `at` are read off the entry rather than supplied alongside it, so the
+  envelope and its payload cannot disagree about order or about when a thing happened.
 
 ### A.6 Anti-drift for the operation taxonomy
 
@@ -608,12 +625,20 @@ pub struct ApprovalScope {
 }
 ```
 
-Scope is mandatory on the request and travels onto every entry about it (§A.5). Handles
+Scope is mandatory on the request and travels onto every record about it (§A.5). Handles
 derive from it: `approvals.scope(session)` yields a read side that sees only that session's
-requests, and `authority.scope(session)` a grant side that can decide only within it. **The
+requests, and `authority.scope(session)` a grant side that can decide only within it —
+every other request is `LedgerError::OutOfScope`. **The
 read side needs scoping as much as the grant side does** — under the always-on statement
 tap (§C.6) a request carries the command text that raised it, so an unscoped reader in a
 multi-session process reads every session's commands.
+
+**A request with no session belongs to the kernel, and no scoped handle sees it.** The
+alternative — letting an unattributed request fall to whichever session asks first — makes
+the single-session shape (`session_id: None`, what the REPL builds) leak into every scoped
+view the moment a process grows a second session. A record with no owning request
+(`StandingIssued`, `Observed`, an unmatched `TokenRejected`) carries the scope its poster
+supplied, or the ledger's own kernel scope when there is nobody to ask.
 
 This is API hygiene, not a process boundary. A scoped handle stops a session's code from
 reaching another session's requests by accident or by confusion; it does not stop hostile
@@ -629,7 +654,11 @@ parent. Approval storms are a real hazard — a human shown four prompts for one
 learns to click through them — but the fix is coalescing in the UI on top of a correct
 hierarchy, not a broader grant underneath.
 
-**Revision.** Every recorded transition bumps `revision`. Decisions quote the revision they
+**Revision.** Every recorded transition bumps `revision`. Two entries that name a request
+are not transitions of it: `Requested` creates the request at revision 0, and
+`KeyRetrieved` records that a key left the kernel without moving the state machine —
+bumping there would invalidate the revision an approver is holding for a decision it has
+not made yet. Decisions quote the revision they
 were made against, and one that quotes a stale revision is refused and recorded rather than
 applied (§B.6). This is what makes a late answer safe: a human who answers a prompt after
 the operation was cancelled, superseded, or already decided cannot revive it, and the
@@ -705,19 +734,37 @@ underneath it.
 ```rust
 #[non_exhaustive]
 pub struct PlanBinding {
-    /// Digest over the redacted, rendered plan — what was actually judged.
+    /// Digest over what was judged (see below).
     pub plan_digest: PlanDigest,
-    /// The working directory it was judged in, as a logical VFS path.
-    pub cwd: VirtualPath,
+    /// The working directory it was judged in, as a logical path — the
+    /// spelling the VFS router resolves against, never a host path. A
+    /// `String`: kaish has no `VirtualPath` newtype, and `kaish-types` is a
+    /// leaf crate that could not depend on `kaish-vfs` to borrow one.
+    pub cwd: String,
     pub scope: ApprovalScope,
     /// Which sandbox profile was in force, when the embedder names them.
     pub sandbox_profile: Option<SandboxProfileId>,
 }
 ```
 
+**What the digest covers**, since not every gate has a plan: the statement gate digests
+`Plan::rendered`, and every other gate digests its operation plus its sorted resource
+references — which is exactly what an `fs.*` gate judged. Two rules keep it stable across a
+legitimate redemption. Every `--confirm=` token is stripped first: the credential is the
+*authorization*, not part of what was judged, and without stripping it the held statement
+`rm x` and its re-run `rm --confirm=<redacted> x` digest differently, so every key
+presentation would read as a moved binding and be re-asked. And the digest covers the plan
+**after** §A.8's redaction seam, so an embedder installing a `Redactor` does not thereby
+invalidate every grant in flight.
+
 > **A grant may be redeemed only by an attempt whose binding matches the one the grant was
 > decided against, and whose operation and resources the grant covers. Anything else is a
 > new request.**
+
+"A new request" is literal, and it is why this is not an error: a presentation from a moved
+binding posts a fresh `Requested` and returns `Pending` (exit 2) rather than refusing. The
+grant it did not redeem is untouched — not voided, not counted as a rejected credential —
+because nothing was wrong with the key. What moved was the context.
 
 This does not replace the redemption-time precondition check (§B.4); the two answer
 different questions. `StateResolver` asks whether the *world* still matches what was
@@ -1997,7 +2044,10 @@ let req = ApprovalRequest::builder("git.push")
 `ApprovalRequest` lives in `kaish-types`, so the builder produces a *draft* and
 `request_approval` stamps `id`, `scope`, `parent`, `revision`, `principal`, `capture`,
 `context`, `binding`, and `requested_at` from the context — everything a plugin must not be
-able to choose. A plugin cannot forge a principal or an invocation, and it cannot
+able to choose. The stamped half travels as one `RequestOrigin` rather than as positional
+arguments to `ApprovalRequestDraft::stamp`: three of those fields are optional and two are
+ids, so a positional list was one reordering away from stamping a `parent` as a
+`supersedes`. A plugin cannot forge a principal or an invocation, and it cannot
 put a credential in the `hint` because it has no way to obtain one — the literal `<token>`
 placeholder is substituted by a frontend holding an `ApproverHandle` (§D.3).
 
@@ -2013,6 +2063,7 @@ placeholder is substituted by a frontend holding an `ApproverHandle` (§D.3).
 .with_approver(Arc<dyn Approver>)            // synchronous policy only — the kernel
                                              // never awaits an embedder (§0.1, §C.2)
 .with_principal(Principal)
+.with_session(SessionId)                     // §A.7; absent = a single-session kernel
 .with_approver_handle(ApproverHandle)        // this session may grant; absent = it may not
 .with_policy_pinned(bool)                    // script can't disable an enforce subscription
 .with_deny_self_approval(bool)               // refuse a grant whose principal is the requester's
@@ -2059,6 +2110,8 @@ fn watch(&self, since: u64) -> LedgerStream;
 /// A read side restricted to one session. Needed as much as the grant side
 /// is: a request carries the command text that raised it (§A.7).
 fn scope(&self, session: SessionId) -> Approvals;
+/// Which session this view is restricted to, if any.
+fn session(&self) -> Option<&SessionId>;
 ```
 
 **`watch` is the one convenience the kernel offers around waiting, and its shape is the

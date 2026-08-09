@@ -559,6 +559,23 @@ mod tests {
         assert!(approvals.pending().is_empty());
     }
 
+    /// The entries inside this ledger's records. These tests assert on entry
+    /// shape; the record envelope is covered in `kaish-types` (spec §A.5).
+    fn ledger_entries(
+        approvals: &crate::ledger::Approvals,
+    ) -> Vec<kaish_types::approval::LedgerEntry> {
+        approvals
+            .log(0)
+            .into_iter()
+            .map(|record| {
+                record
+                    .known()
+                    .cloned()
+                    .expect("this build wrote every record it reads back")
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn rm_under_the_policy_with_no_approval_returns_code_2() {
         let (mut ctx, _authority) = gated_ctx().await;
@@ -609,8 +626,7 @@ mod tests {
         ctx.settle_attempts(0).await;
 
         let approvals = ctx.ledger_access.as_ref().expect("a wired ledger").approvals.clone();
-        let kinds: Vec<&str> = approvals
-            .log(0)
+        let kinds: Vec<&str> = ledger_entries(&approvals)
             .iter()
             .map(|e| match e {
                 LedgerEntry::Requested { .. } => "Requested",
@@ -628,8 +644,7 @@ mod tests {
                 && kinds.contains(&"Settled"),
             "the full chain must be on the log: {kinds:?}"
         );
-        let settled = approvals
-            .log(0)
+        let settled = ledger_entries(&approvals)
             .into_iter()
             .find_map(|e| match e {
                 LedgerEntry::Settled { outcome, .. } => Some(outcome),
@@ -676,8 +691,7 @@ mod tests {
         assert!(ctx.backend.exists(Path::new("/file.txt")).await);
 
         let approvals = ctx.ledger_access.as_ref().expect("a wired ledger").approvals.clone();
-        let rejections: Vec<_> = approvals
-            .log(0)
+        let rejections: Vec<_> = ledger_entries(&approvals)
             .into_iter()
             .filter_map(|e| match e {
                 LedgerEntry::TokenRejected { request, .. } => Some(request),

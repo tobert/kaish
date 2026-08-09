@@ -25,6 +25,33 @@ use kaish_types::approval::{
     ResourceRef, RiskClass, StateClaim,
 };
 
+/// This file's ledger scope (spec §A.7): a fresh kernel id per ledger, and
+/// no session — an unscoped ledger is the single-session shape.
+#[allow(dead_code)]
+fn test_scope() -> kaish_types::approval::ApprovalScope {
+    kaish_types::approval::ApprovalScope::kernel(kaish_types::approval::KernelId::mint())
+}
+
+/// The origin a request posted by this file is stamped with (spec §A.7,
+/// §A.9). One fixed binding: these tests exercise the state machine, not the
+/// replay rules.
+#[allow(dead_code)]
+fn test_origin(principal: kaish_types::approval::Principal) -> kaish_types::approval::RequestOrigin {
+    let scope = test_scope();
+    kaish_types::approval::RequestOrigin::new(
+        scope.clone(),
+        kaish_types::approval::PlanBinding::new(
+            kaish_types::approval::PlanDigest::new("test"),
+            "/",
+            scope,
+        ),
+        principal,
+        kaish_types::approval::Capture::DirectExecution,
+        std::time::Duration::from_secs(60),
+    )
+}
+
+
 /// Resolves `git.ref` to whatever the fixture's own transition claims as its
 /// prior state — just enough to let `present_key`'s redemption-time
 /// precondition check (spec §B.4) pass for the confirm-token tests below.
@@ -69,13 +96,14 @@ fn chain_over(approver: &kaish_kernel::ledger::ApproverHandle) -> std::sync::Arc
 
 #[tokio::test]
 async fn kernel_request_approval_round_trips_a_request_through_the_ledger() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
     let mut ctx = ctx_with_memory_fs();
     ctx.ledger_access = Some(LedgerAccess {
         requester,
         approvals: approvals.clone(),
         chain: chain_over(&approver),
         principal: agent("agent-1"),
+        scope: test_scope(),
         request_ttl: Duration::from_secs(60),
         job_id: None,
         resolvers: std::sync::Arc::new(kaish_kernel::ledger::StateResolvers::default()),
@@ -199,13 +227,14 @@ mod plugin_dangerous {
 async fn plugin_dangerous_fixture_gates_end_to_end_through_tool_api_alone() {
     use plugin_dangerous::PluginDangerous;
 
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
     let mut ctx = ctx_with_memory_fs();
     ctx.ledger_access = Some(LedgerAccess {
         requester: requester.clone(),
         approvals: approvals.clone(),
         chain: chain_over(&approver),
         principal: agent("agent-1"),
+        scope: test_scope(),
         request_ttl: Duration::from_secs(60),
         job_id: None,
         resolvers: std::sync::Arc::new(kaish_kernel::ledger::StateResolvers::default()),
@@ -244,12 +273,17 @@ async fn plugin_dangerous_fixture_gates_end_to_end_through_tool_api_alone() {
     terms_draft.resources = view.resources.clone();
     let terms_source = terms_draft.stamp(
         view.id.clone(),
-        view.principal.clone(),
-        view.capture.clone(),
-        view.context.clone(),
         view.requested_at,
-        view.ttl,
-        view.job_id,
+        kaish_types::approval::RequestOrigin::new(
+            view.scope.clone(),
+            view.binding.clone(),
+            view.principal.clone(),
+            view.capture.clone(),
+            view.ttl,
+        )
+        .with_parent(view.parent.clone())
+        .with_context(view.context.clone())
+        .with_job_id(view.job_id),
     );
     let not_after = SystemTime::now() + Duration::from_secs(300);
     approver
@@ -295,13 +329,14 @@ async fn plugin_dangerous_fixture_honors_a_presented_confirm_token() {
     // invocation shape as `rm --confirm=<token>` (`execute_argv_tests.rs`).
     use plugin_dangerous::PluginDangerous;
 
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
     let mut ctx = ctx_with_memory_fs();
     ctx.ledger_access = Some(LedgerAccess {
         requester,
         approvals: approvals.clone(),
         chain: chain_over(&approver),
         principal: agent("agent-1"),
+        scope: test_scope(),
         request_ttl: Duration::from_secs(60),
         job_id: None,
         resolvers: resolvers_with_git_ref(),
@@ -326,12 +361,17 @@ async fn plugin_dangerous_fixture_honors_a_presented_confirm_token() {
     terms_draft.resources = view.resources.clone();
     let terms_source = terms_draft.stamp(
         view.id.clone(),
-        view.principal.clone(),
-        view.capture.clone(),
-        view.context.clone(),
         view.requested_at,
-        view.ttl,
-        view.job_id,
+        kaish_types::approval::RequestOrigin::new(
+            view.scope.clone(),
+            view.binding.clone(),
+            view.principal.clone(),
+            view.capture.clone(),
+            view.ttl,
+        )
+        .with_parent(view.parent.clone())
+        .with_context(view.context.clone())
+        .with_job_id(view.job_id),
     );
     let not_after = SystemTime::now() + Duration::from_secs(300);
     approver
@@ -365,13 +405,14 @@ async fn plugin_dangerous_fixture_rejects_a_wrong_presented_confirm_token() {
     // silently fall through to the operation.
     use plugin_dangerous::PluginDangerous;
 
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
     let mut ctx = ctx_with_memory_fs();
     ctx.ledger_access = Some(LedgerAccess {
         requester,
         approvals: approvals.clone(),
         chain: chain_over(&approver),
         principal: agent("agent-1"),
+        scope: test_scope(),
         request_ttl: Duration::from_secs(60),
         job_id: None,
         resolvers: resolvers_with_git_ref(),

@@ -418,6 +418,16 @@ the authoritative set either way.
 **Reading the ledger.** `Kernel::approvals()` is the read side (it grants
 nothing): `pending()`, `ids()`, `get(&id)`, `standing()`, `subscriptions()`,
 `any_subscriptions()`, and `log(since)`.
+
+`log(since)` returns `LedgerRecord`s, never bare entries: each carries
+`schema_version`, `sequence`, `at`, and the `scope` the entry belongs to,
+alongside the entry itself. Read `record.known()` for the entry — `None` means
+a **newer writer's entry this build does not recognize**, kept verbatim as
+`RecordedEntry::Unknown` with its sequence and scope intact. Surface it as
+unknown; never drop it, or the history you report is one you did not verify.
+`record.schema_is_known()` answers the same question for the envelope.
+`LedgerSink::post` receives the same `LedgerRecord`.
+
 The same read model is projected at **`/v/approvals`** — `pending`,
 `standing`, and `log` at the root, and `{id}/{request,state,attempts,grant}`
 per request — and surfaced by the `approvals` builtin (`list`, `show`,
@@ -438,8 +448,39 @@ To decide a request raised in one `execute()` call from
 a *later* call — or from a different kernel — share the ledger with
 `KernelConfig::with_approver_handle()`; the default is a fresh ledger per
 kernel. `KernelConfig::with_ledger(config)` tunes retention and the
-rejected-credential limit, and `with_ledger_sink(sink)` posts every entry to an
-audit sink as it commits.
+rejected-credential limit, and `with_ledger_sink(sink)` posts every record to
+an audit sink as it commits.
+
+**Hosting several sessions in one process.** Every request carries an
+`ApprovalScope` — a kernel id, an optional session, and an optional actor — so
+"whose request is this?" is answerable from the request itself rather than from
+a map you keep beside it. Name the session with
+`KernelConfig::with_session(SessionId::new("conversation-7"))`; a kernel with
+none is the single-session shape.
+
+`Approvals::scope(session)` and `ApproverHandle::scope(session)` derive views
+restricted to one session. The scoped read side sees only that session's
+requests and records, and the scoped authority decides only within it —
+`grant`, `deny`, and `token_for` on another session's request return
+`LedgerError::OutOfScope`. **Scope the read side too**: the statement tap puts
+the command text that raised a request into the request, so an unscoped reader
+in a multi-session process reads every session's commands. A request with no
+session belongs to the kernel and is invisible to every scoped handle.
+
+This is API hygiene, not a process boundary. It stops a session's code from
+reaching another session's requests by accident or by confusion; it does not
+stop hostile Rust in the same process, which can reach anything the process
+can.
+
+**A grant is a decision about an operation in a context.** Every request
+records the `PlanBinding` it was judged under: a digest of what was judged, the
+working directory, the scope, and the sandbox profile when you name one. A
+`--confirm=<token>` presented — or a `Kernel::confirm` replay dispatched — from
+outside that binding **redeems nothing**. The kernel posts a fresh request and
+returns exit 2 with it, rather than authorizing an operation nobody judged in
+that context; the grant it did not redeem stays live and untouched. The
+common case is a changed working directory, which no precondition resolver can
+catch, because nothing declares the cwd as a precondition.
 
 **Recording without gating: `fs.*` subscriptions.** `set -o approvals` is one
 posture — enforce, over the whole `fs.*` namespace. A subscription generalizes

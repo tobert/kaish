@@ -32,10 +32,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use kaish_types::approval::{
-    ApprovalRequest, ApprovalRequestDraft, AttemptId, AttemptState, Capture, Condition, Expiring,
-    Grant, GrantTerms, Grounds, LedgerEntry, Observation, ObservedResource, OperationId, Outcome,
-    Plan, Principal, RequestContext, RequestId, RequestState, ResourceRef, StandingGrant,
-    StandingId, StateClaim, Subscription, SubscriptionId, Token,
+    ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, AttemptState, Condition,
+    Expiring, Grant, GrantTerms, Grounds, LedgerEntry, LedgerRecord, Observation, ObservedResource,
+    OperationId, Outcome, Plan, Principal, RequestId, RequestOrigin, RequestState, ResourceRef,
+    SessionId, StandingGrant, StandingId, StateClaim, Subscription, SubscriptionId, Token,
 };
 use kaish_types::clock::Instant;
 use tokio::sync::mpsc::OwnedPermit;
@@ -110,7 +110,7 @@ struct AttemptRecord {
     /// `None` when no sink is configured. Consumed unconditionally by
     /// whichever terminal entry lands first; never re-checked for capacity
     /// (review finding B3).
-    terminal_sink_permit: Option<OwnedPermit<LedgerEntry>>,
+    terminal_sink_permit: Option<OwnedPermit<LedgerRecord>>,
 }
 
 impl Chain {
@@ -122,10 +122,11 @@ impl Chain {
     }
 }
 
-/// One ring-retained audit entry alongside the request it belongs to (`None`
-/// for entries with no single owning request, e.g. `StandingIssued`).
+/// One ring-retained audit record alongside the request it belongs to
+/// (`None` for entries with no single owning request, e.g.
+/// `StandingIssued`).
 struct RingSlot {
-    entry: LedgerEntry,
+    record: LedgerRecord,
     request: Option<RequestId>,
 }
 
@@ -139,17 +140,21 @@ struct RingSlot {
 /// a reservation that is never committed leaves no trace.
 #[must_use]
 struct ReservedCapacity {
-    permits: Vec<OwnedPermit<LedgerEntry>>,
+    permits: Vec<OwnedPermit<LedgerRecord>>,
 }
 
 impl ReservedCapacity {
-    fn take_one(&mut self) -> Option<OwnedPermit<LedgerEntry>> {
+    fn take_one(&mut self) -> Option<OwnedPermit<LedgerRecord>> {
         self.permits.pop()
     }
 }
 
 /// Everything the single mutex protects.
 struct LedgerState {
+    /// The scope stamped on a record that owns no request — a standing
+    /// grant, a subscription, an unmatched credential (spec §A.7). A record
+    /// about a request carries that request's own scope instead.
+    scope: ApprovalScope,
     next_seq: u64,
     next_attempt_seq: u64,
     next_standing_seq: u64,
@@ -174,7 +179,7 @@ struct LedgerState {
     /// `ring.len()` so ordinary admissions can never squeeze out room a
     /// live attempt's eventual settlement already banked.
     reserved_ring_slots: usize,
-    sink_tx: Option<tokio::sync::mpsc::Sender<LedgerEntry>>,
+    sink_tx: Option<tokio::sync::mpsc::Sender<LedgerRecord>>,
     sink_failed: Arc<AtomicBool>,
     /// How many entries the sink never received: every item still queued
     /// when the drain task hit a `post` failure, plus the one that failed
@@ -271,7 +276,7 @@ impl LedgerState {
     /// taken releases every one of them back to the channel — so a caller
     /// that receives `Err` here has caused no observable effect (spec
     /// §B.1 / review finding S1).
-    fn reserve_sink_permits(&self, n: usize) -> Result<Vec<OwnedPermit<LedgerEntry>>, LedgerError> {
+    fn reserve_sink_permits(&self, n: usize) -> Result<Vec<OwnedPermit<LedgerRecord>>, LedgerError> {
         let Some(tx) = &self.sink_tx else {
             return Ok(Vec::new());
         };
@@ -332,14 +337,19 @@ impl LedgerState {
     /// the matching `reserve_capacity` call was given, or some entries
     /// will land with no sink delivery at all (a caller bug, not a runtime
     /// condition this method can detect).
-    fn commit(&mut self, entries: Vec<(LedgerEntry, Option<RequestId>)>, mut reserved: ReservedCapacity) -> Vec<LedgerEntry> {
+    fn commit(
+        &mut self,
+        entries: Vec<(LedgerEntry, Option<RequestId>)>,
+        override_scope: Option<&ApprovalScope>,
+        mut reserved: ReservedCapacity,
+    ) -> Vec<LedgerRecord> {
         let mut committed = Vec::with_capacity(entries.len());
         for (entry, request) in entries {
+            let record = self.push_ring(entry, request, override_scope);
             if let Some(permit) = reserved.take_one() {
-                let _ = permit.send(entry.clone());
+                let _ = permit.send(record.clone());
             }
-            self.push_ring(entry.clone(), request);
-            committed.push(entry);
+            committed.push(record);
         }
         committed
     }
@@ -353,14 +363,14 @@ impl LedgerState {
         entry: LedgerEntry,
         request: RequestId,
         mut reserved: ReservedCapacity,
-    ) -> (LedgerEntry, Option<OwnedPermit<LedgerEntry>>) {
+    ) -> (LedgerRecord, Option<OwnedPermit<LedgerRecord>>) {
         let immediate = reserved.take_one();
         let banked = reserved.take_one();
+        let record = self.push_ring(entry, Some(request), None);
         if let Some(permit) = immediate {
-            let _ = permit.send(entry.clone());
+            let _ = permit.send(record.clone());
         }
-        self.push_ring(entry.clone(), Some(request));
-        (entry, banked)
+        (record, banked)
     }
 
     /// Commit a terminal entry (`Settled`, or attempt-level `Abandoned`)
@@ -370,16 +380,22 @@ impl LedgerState {
     /// finding B3: work that already ran must always be able to record
     /// what happened). Releases the ring slot banked for it back into
     /// ordinary circulation.
-    fn commit_terminal(&mut self, entry: LedgerEntry, request: RequestId, permit: Option<OwnedPermit<LedgerEntry>>) -> LedgerEntry {
+    fn commit_terminal(
+        &mut self,
+        entry: LedgerEntry,
+        request: RequestId,
+        permit: Option<OwnedPermit<LedgerRecord>>,
+    ) -> LedgerRecord {
+        let record = self.push_ring(entry, Some(request), None);
         if let Some(permit) = permit {
-            let _ = permit.send(entry.clone());
+            let _ = permit.send(record.clone());
         } else if let Some(tx) = &self.sink_tx {
             // Defensive fallback only — every `Redeemed` created while a
             // sink is configured always banks a permit for its terminal
             // entry, so this should be unreachable in practice. If it is
             // ever reached, the entry still lands in the ring (never
             // refused) and the gap is *accounted*, not silently dropped.
-            if let Err(err) = tx.try_send(entry.clone()) {
+            if let Err(err) = tx.try_send(record.clone()) {
                 self.sink_dropped_count.fetch_add(1, Ordering::Relaxed);
                 tracing::error!(
                     error = %err,
@@ -387,18 +403,44 @@ impl LedgerState {
                 );
             }
         }
-        self.push_ring(entry.clone(), Some(request));
         self.reserved_ring_slots = self.reserved_ring_slots.saturating_sub(1);
-        entry
+        record
     }
 
-    fn push_ring(&mut self, entry: LedgerEntry, request: Option<RequestId>) {
+    /// Wrap an entry in its [`LedgerRecord`] envelope and retain it.
+    ///
+    /// **The one place a request's `revision` moves** (spec §A.7): every
+    /// recorded transition bumps it, and `LedgerEntry::bumps_revision` is the
+    /// exhaustive rule for which entries are transitions. Doing it here
+    /// rather than at each transition method means a new entry type cannot
+    /// forget.
+    fn push_ring(
+        &mut self,
+        entry: LedgerEntry,
+        request: Option<RequestId>,
+        override_scope: Option<&ApprovalScope>,
+    ) -> LedgerRecord {
         if let Some(id) = &request {
             if let Some(chain) = self.chains.get_mut(id) {
                 chain.ring_refs += 1;
+                if entry.bumps_revision() {
+                    chain.request.revision += 1;
+                }
             }
         }
-        self.ring.push_back(RingSlot { entry, request });
+        let scope = match override_scope {
+            Some(scope) => scope.clone(),
+            None => request
+                .as_ref()
+                .and_then(|id| self.chains.get(id))
+                .map_or_else(|| self.scope.clone(), |chain| chain.request.scope.clone()),
+        };
+        let record = LedgerRecord::new(scope, entry);
+        self.ring.push_back(RingSlot {
+            record: record.clone(),
+            request,
+        });
+        record
     }
 
     /// Maintain the live counters and drop the credential for a chain the
@@ -550,7 +592,7 @@ impl LedgerInner {
         id: &RequestId,
         mono: Instant,
         wall: SystemTime,
-    ) -> Result<Vec<LedgerEntry>, LedgerError> {
+    ) -> Result<Vec<LedgerRecord>, LedgerError> {
         let Some(chain) = guard.chains.get(id) else {
             return Ok(Vec::new());
         };
@@ -576,7 +618,7 @@ impl LedgerInner {
             },
             Some(id.clone()),
         )];
-        let committed = guard.commit(entries, reserved);
+        let committed = guard.commit(entries, None, reserved);
         if let Some(chain) = guard.chains.get_mut(id) {
             chain.state = RequestState::Expired;
         }
@@ -586,20 +628,14 @@ impl LedgerInner {
 
     // ── Obligations (Requester) ──────────────────────────────────────
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn post_request(
         &self,
         draft: ApprovalRequestDraft,
-        principal: Principal,
-        capture: Capture,
-        context: RequestContext,
-        ttl: Duration,
-        job_id: Option<u64>,
+        origin: RequestOrigin,
     ) -> Result<ApprovalRequest, LedgerError> {
         let mut guard = self.lock();
         let (mono, wall) = self.now();
-        let (request, committed) =
-            self.post_request_locked(&mut guard, draft, principal, capture, context, ttl, job_id, mono, wall)?;
+        let (request, committed) = self.post_request_locked(&mut guard, draft, origin, mono, wall)?;
         drop(guard);
         emit_events(&committed);
         Ok(request)
@@ -610,28 +646,25 @@ impl LedgerInner {
     /// held guard — `renew` additionally needs to have already checked its
     /// old request is `Expired` under the same lock acquisition that
     /// posts the superseding request, so nothing can race between the two.
-    #[allow(clippy::too_many_arguments)]
     fn post_request_locked(
         &self,
         guard: &mut LedgerState,
         draft: ApprovalRequestDraft,
-        principal: Principal,
-        capture: Capture,
-        context: RequestContext,
-        ttl: Duration,
-        job_id: Option<u64>,
+        origin: RequestOrigin,
         mono: Instant,
         wall: SystemTime,
-    ) -> Result<(ApprovalRequest, Vec<LedgerEntry>), LedgerError> {
+    ) -> Result<(ApprovalRequest, Vec<LedgerRecord>), LedgerError> {
         if guard.live_count_total >= self.config.live_capacity {
             return Err(LedgerError::LiveCapacity {
                 limit: self.config.live_capacity,
             });
         }
-        let per_principal = *guard.live_count_by_principal.get(&principal.id).unwrap_or(&0);
+        let principal_id = origin.principal.id.clone();
+        let ttl = origin.ttl;
+        let per_principal = *guard.live_count_by_principal.get(&principal_id).unwrap_or(&0);
         if per_principal >= self.config.live_capacity_per_principal {
             return Err(LedgerError::LiveCapacityPerPrincipal {
-                principal: principal.id.clone(),
+                principal: principal_id,
                 limit: self.config.live_capacity_per_principal,
             });
         }
@@ -639,7 +672,7 @@ impl LedgerInner {
 
         let seq = guard.alloc_seq();
         let id = RequestId::new(self.epoch, seq);
-        let request = draft.stamp(id.clone(), principal.clone(), capture, context, wall, ttl, job_id);
+        let request = draft.stamp(id.clone(), wall, origin);
         let chain = Chain {
             request: request.clone(),
             posted_seq: seq,
@@ -657,7 +690,7 @@ impl LedgerInner {
         };
         guard.chains.insert(id.clone(), chain);
         guard.live_count_total += 1;
-        *guard.live_count_by_principal.entry(principal.id).or_insert(0) += 1;
+        *guard.live_count_by_principal.entry(principal_id).or_insert(0) += 1;
 
         let entries = vec![(
             LedgerEntry::Requested {
@@ -667,7 +700,7 @@ impl LedgerInner {
             },
             Some(id),
         )];
-        let committed = guard.commit(entries, reserved);
+        let committed = guard.commit(entries, None, reserved);
         Ok((request, committed))
     }
 
@@ -806,7 +839,7 @@ impl LedgerInner {
                 Some(id.clone()),
             ));
         }
-        all_committed.extend(guard.commit(entries, reserved));
+        all_committed.extend(guard.commit(entries, None, reserved));
         drop(guard);
         emit_events(&all_committed);
         Err(LedgerError::NotAuthorized(id.clone()))
@@ -820,7 +853,7 @@ impl LedgerInner {
     /// bookkeeping entry, skip recording it rather than failing a rejection
     /// that was never going to succeed anyway — `seq` is only allocated once
     /// capacity is confirmed, so a skip here never opens a gap.
-    fn record_unmatched_key_locked(&self, guard: &mut LedgerState, wall: SystemTime) -> Vec<LedgerEntry> {
+    fn record_unmatched_key_locked(&self, guard: &mut LedgerState, wall: SystemTime) -> Vec<LedgerRecord> {
         let Ok(reserved) = guard.reserve_capacity(1, self.config.retained_entries) else {
             return Vec::new();
         };
@@ -834,7 +867,7 @@ impl LedgerInner {
             },
             None,
         )];
-        guard.commit(entries, reserved)
+        guard.commit(entries, None, reserved)
     }
 
     /// The gate site's draft matcher found no request this presentation
@@ -861,11 +894,13 @@ impl LedgerInner {
         &self,
         operation: &kaish_types::approval::OperationId,
         refs: &[kaish_types::approval::ResourceRef],
+        session: Option<&SessionId>,
     ) -> Option<RequestId> {
         let guard = self.lock();
         guard
             .chains
             .values()
+            .filter(|c| session.is_none_or(|s| c.request.scope.in_session(s)))
             .filter(|c| {
                 &c.request.operation == operation && {
                     let mut have: Vec<_> = c.request.resources.iter().map(|r| r.to_ref()).collect();
@@ -895,7 +930,7 @@ impl LedgerInner {
         report: ConditionReport,
         mono: Instant,
         wall: SystemTime,
-    ) -> (Result<AttemptId, LedgerError>, Vec<LedgerEntry>) {
+    ) -> (Result<AttemptId, LedgerError>, Vec<LedgerRecord>) {
         let Some(chain) = guard.chains.get(id) else {
             return (Err(LedgerError::NotFound(id.clone())), Vec::new());
         };
@@ -964,7 +999,7 @@ impl LedgerInner {
                 },
                 Some(id.clone()),
             ));
-            let committed = guard.commit(entries, reserved);
+            let committed = guard.commit(entries, None, reserved);
             return (
                 Err(LedgerError::Refused {
                     id: id.clone(),
@@ -1121,7 +1156,7 @@ impl LedgerInner {
             },
             Some(id.clone()),
         )];
-        all_committed.extend(guard.commit(entries, reserved));
+        all_committed.extend(guard.commit(entries, None, reserved));
         if let Some(chain) = guard.chains.get_mut(id) {
             chain.state = RequestState::Abandoned;
         }
@@ -1189,17 +1224,21 @@ impl LedgerInner {
             }
         };
 
-        let result = self.post_request_locked(
-            &mut guard,
-            draft,
+        // A renewal carries the original's scope, parent, and binding
+        // forward: the thread of intent is the same one, raised again (spec
+        // §B.5). What it does not carry is a decision — the new request
+        // starts at `Requested` and at revision 0.
+        let origin = RequestOrigin::new(
+            old.scope,
+            old.binding,
             old.principal,
             old.capture,
-            old.context,
             old.ttl,
-            old.job_id,
-            mono,
-            wall,
-        );
+        )
+        .with_parent(old.parent)
+        .with_context(old.context)
+        .with_job_id(old.job_id);
+        let result = self.post_request_locked(&mut guard, draft, origin, mono, wall);
         drop(guard);
         match result {
             Ok((request, committed)) => {
@@ -1212,6 +1251,33 @@ impl LedgerInner {
                 Err(err)
             }
         }
+    }
+
+    /// Refuse an authority action aimed at a request outside a scoped
+    /// handle's session (spec §A.7). `Ok` for an unscoped handle, which is
+    /// the kernel-wide authority `Ledger::build` mints.
+    pub(crate) fn check_scope(
+        &self,
+        id: &RequestId,
+        session: Option<&SessionId>,
+    ) -> Result<(), LedgerError> {
+        let Some(session) = session else { return Ok(()) };
+        let guard = self.lock();
+        let Some(chain) = guard.chains.get(id) else {
+            return Err(LedgerError::NotFound(id.clone()));
+        };
+        if chain.request.scope.in_session(session) {
+            return Ok(());
+        }
+        Err(LedgerError::OutOfScope {
+            request: id.clone(),
+            session: session.clone(),
+        })
+    }
+
+    /// The scope this ledger stamps on a record that owns no request.
+    pub(crate) fn scope(&self) -> ApprovalScope {
+        self.lock().scope.clone()
     }
 
     fn terminal_error(&self, id: &RequestId, state: RequestState, void_reason: Option<String>) -> LedgerError {
@@ -1329,7 +1395,7 @@ impl LedgerInner {
             },
             Some(id.clone()),
         )];
-        all_committed.extend(guard.commit(entries, reserved));
+        all_committed.extend(guard.commit(entries, None, reserved));
         if let Some(chain) = guard.chains.get_mut(id) {
             chain.grant = Some(grant.clone());
             chain.state = RequestState::Granted;
@@ -1383,7 +1449,7 @@ impl LedgerInner {
             },
             Some(id.clone()),
         )];
-        all_committed.extend(guard.commit(entries, reserved));
+        all_committed.extend(guard.commit(entries, None, reserved));
         if let Some(chain) = guard.chains.get_mut(id) {
             chain.state = RequestState::Denied;
         }
@@ -1411,7 +1477,7 @@ impl LedgerInner {
             },
             None,
         )];
-        let committed = guard.commit(entries, reserved);
+        let committed = guard.commit(entries, None, reserved);
         drop(guard);
         emit_events(&committed);
         Ok(id)
@@ -1543,7 +1609,7 @@ impl LedgerInner {
             },
             Some(id.clone()),
         )];
-        all_committed.extend(guard.commit(entries, reserved));
+        all_committed.extend(guard.commit(entries, None, reserved));
         if let Some(chain) = guard.chains.get_mut(id) {
             chain.grant = Some(grant.clone());
             chain.state = RequestState::Granted;
@@ -1584,7 +1650,7 @@ impl LedgerInner {
             },
             None,
         )];
-        let committed = guard.commit(entries, reserved);
+        let committed = guard.commit(entries, None, reserved);
         drop(guard);
         emit_events(&committed);
         Ok(())
@@ -1614,7 +1680,7 @@ impl LedgerInner {
             },
             None,
         )];
-        let committed = guard.commit(entries, reserved);
+        let committed = guard.commit(entries, None, reserved);
         self.any_subscriptions.store(true, Ordering::Relaxed);
         drop(guard);
         emit_events(&committed);
@@ -1648,7 +1714,7 @@ impl LedgerInner {
             },
             None,
         )];
-        let committed = guard.commit(entries, reserved);
+        let committed = guard.commit(entries, None, reserved);
         // Clear the flag only once the registry is actually empty: it
         // answers "is anything subscribed", not "was something just
         // removed".
@@ -1687,6 +1753,7 @@ impl LedgerInner {
     pub(crate) fn post_observed(
         &self,
         operation: OperationId,
+        scope: ApprovalScope,
         by: Principal,
         resources: Vec<ObservedResource>,
         plan: Option<Plan>,
@@ -1706,7 +1773,11 @@ impl LedgerInner {
             },
             None,
         )];
-        let committed = guard.commit(entries, reserved);
+        // An `Observed` entry has no chain to read a scope off, so the
+        // posting session supplies one: a record whose scope defaulted to
+        // the kernel's would be invisible to the session that produced it
+        // (spec §A.7).
+        let committed = guard.commit(entries, Some(&scope), reserved);
         drop(guard);
         emit_events(&committed);
         Ok(())
@@ -1735,7 +1806,7 @@ impl LedgerInner {
             },
             Some(id.clone()),
         )];
-        let committed = guard.commit(entries, reserved);
+        let committed = guard.commit(entries, None, reserved);
         drop(guard);
         emit_events(&committed);
         Some(token)
@@ -1823,7 +1894,7 @@ impl LedgerInner {
 
     // ── Read side (Approvals) ────────────────────────────────────────
 
-    pub(crate) fn pending(&self) -> Vec<ApprovalRequest> {
+    pub(crate) fn pending(&self, session: Option<&SessionId>) -> Vec<ApprovalRequest> {
         // Reuses the full sweep (expiry materialization across every chain)
         // rather than a narrower per-id check — `pending()` doesn't know in
         // advance which ids are due, and the sweep's own capacity failures
@@ -1835,6 +1906,7 @@ impl LedgerInner {
             .chains
             .values()
             .filter(|c| c.state == RequestState::Requested)
+            .filter(|c| session.is_none_or(|s| c.request.scope.in_session(s)))
             .map(|c| c.request.clone())
             .collect();
         // Chains live in a `HashMap`, so this is otherwise in whatever order
@@ -1845,27 +1917,42 @@ impl LedgerInner {
         pending
     }
 
-    pub(crate) fn ids(&self) -> Vec<RequestId> {
+    pub(crate) fn ids(&self, session: Option<&SessionId>) -> Vec<RequestId> {
         // Same full sweep `pending` runs: a request whose deadline passed
         // must be listed as `Expired`, not `Requested`, the moment anything
         // enumerates it (spec §B.5 — expiry materializes on observation).
         self.sweep();
         let guard = self.lock();
-        let mut ids: Vec<RequestId> = guard.chains.keys().cloned().collect();
+        let mut ids: Vec<RequestId> = guard
+            .chains
+            .values()
+            .filter(|c| session.is_none_or(|s| c.request.scope.in_session(s)))
+            .map(|c| c.request.id.clone())
+            .collect();
         ids.sort_by_key(RequestId::seq);
         ids
     }
 
-    pub(crate) fn state(&self, id: &RequestId) -> Option<RequestState> {
-        self.best_effort_materialize(id);
-        let guard = self.lock();
-        guard.chains.get(id).map(|c| c.state)
-    }
-
-    pub(crate) fn chain(&self, id: &RequestId) -> Option<super::handles::RequestChain> {
+    pub(crate) fn state(&self, id: &RequestId, session: Option<&SessionId>) -> Option<RequestState> {
         self.best_effort_materialize(id);
         let guard = self.lock();
         let chain = guard.chains.get(id)?;
+        session
+            .is_none_or(|s| chain.request.scope.in_session(s))
+            .then_some(chain.state)
+    }
+
+    pub(crate) fn chain(
+        &self,
+        id: &RequestId,
+        session: Option<&SessionId>,
+    ) -> Option<super::handles::RequestChain> {
+        self.best_effort_materialize(id);
+        let guard = self.lock();
+        let chain = guard.chains.get(id)?;
+        if !session.is_none_or(|s| chain.request.scope.in_session(s)) {
+            return None;
+        }
         Some(super::handles::RequestChain {
             request: (&chain.request).into(),
             state: chain.state,
@@ -1887,13 +1974,17 @@ impl LedgerInner {
         guard.standing.values().cloned().collect()
     }
 
-    pub(crate) fn log(&self, since: u64) -> Vec<LedgerEntry> {
+    /// The retained log as versioned records (spec §A.5): every retained
+    /// record with `sequence > since`, restricted to `session` when the
+    /// reader is a scoped handle (spec §A.7).
+    pub(crate) fn log(&self, since: u64, session: Option<&SessionId>) -> Vec<LedgerRecord> {
         let guard = self.lock();
         guard
             .ring
             .iter()
-            .map(|slot| &slot.entry)
-            .filter(|entry| entry.seq() > since)
+            .map(|slot| &slot.record)
+            .filter(|record| record.sequence > since)
+            .filter(|record| session.is_none_or(|s| record.scope.in_session(s)))
             .cloned()
             .collect()
     }
@@ -2049,8 +2140,16 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 /// without a trace fact" (spec §G). Levels match the spec's Events table.
 /// Called only after every lock this batch of entries was committed under
 /// has been dropped (review finding S6).
-fn emit_events(entries: &[LedgerEntry]) {
-    for entry in entries {
+fn emit_events(records: &[LedgerRecord]) {
+    for record in records {
+        // Every record this function is handed was just built by
+        // `push_ring` from an entry this build wrote, so `known()` is always
+        // `Some` here. An `Unknown` would mean a record read back from a
+        // newer writer's log reached the emit path, which nothing does.
+        let Some(entry) = record.known() else {
+            debug_assert!(false, "approval ledger: emit_events was handed an unrecognized record");
+            continue;
+        };
         match entry {
             LedgerEntry::Requested { request, .. } => {
                 tracing::info!(request_id = %request.id, operation = %request.operation, "approval.requested");
@@ -2134,6 +2233,7 @@ pub(crate) fn generate_epoch() -> Result<u32, getrandom::Error> {
 
 pub(crate) fn build_inner(
     config: LedgerConfig,
+    scope: ApprovalScope,
     sink: Option<Arc<dyn LedgerSink>>,
     wall: Arc<dyn WallClock>,
 ) -> Result<Arc<LedgerInner>, getrandom::Error> {
@@ -2141,13 +2241,13 @@ pub(crate) fn build_inner(
     let sink_failed = Arc::new(AtomicBool::new(false));
     let sink_dropped_count = Arc::new(AtomicUsize::new(0));
     let sink_tx = sink.as_ref().map(|sink| {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<LedgerEntry>(config.sink_queue.max(1));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<LedgerRecord>(config.sink_queue.max(1));
         let sink = Arc::clone(sink);
         let failed = Arc::clone(&sink_failed);
         let dropped_count = Arc::clone(&sink_dropped_count);
         tokio::spawn(async move {
-            while let Some(entry) = rx.recv().await {
-                if let Err(err) = sink.post(&entry) {
+            while let Some(record) = rx.recv().await {
+                if let Err(err) = sink.post(&record) {
                     tracing::error!(error = %err, "approval ledger: audit sink failed — refusing further obligations");
                     failed.store(true, Ordering::Relaxed);
                     // Count the entry that just failed, plus every entry
@@ -2168,6 +2268,7 @@ pub(crate) fn build_inner(
     });
 
     let state = LedgerState {
+        scope,
         next_seq: 1,
         next_attempt_seq: 1,
         next_standing_seq: 1,
@@ -2199,7 +2300,10 @@ pub(crate) fn build_inner(
 mod tests {
     use std::sync::atomic::AtomicI64;
 
-    use kaish_types::approval::{ApprovalRequest, AttemptId, PrincipalKind, Resource, RiskClass};
+    use kaish_types::approval::{
+        ApprovalRequest, AttemptId, Capture, KernelId, LedgerEntry, PlanBinding, PlanDigest,
+        PrincipalKind, Resource, RiskClass,
+    };
 
     use super::*;
 
@@ -2229,6 +2333,25 @@ mod tests {
         Principal::new(id, PrincipalKind::Agent)
     }
 
+    /// A distinct kernel scope per ledger built in a test, so nothing here
+    /// depends on two ledgers sharing an id.
+    fn scope() -> ApprovalScope {
+        ApprovalScope::kernel(KernelId::mint())
+    }
+
+    /// The origin an unscoped, unbound test request is stamped with. The
+    /// binding is fixed, because these tests exercise the state machine
+    /// rather than the replay rules.
+    fn origin(principal: &Principal) -> RequestOrigin {
+        RequestOrigin::new(
+            scope(),
+            PlanBinding::new(PlanDigest::new("test"), "/", scope()),
+            principal.clone(),
+            Capture::DirectExecution,
+            Duration::from_secs(60),
+        )
+    }
+
     #[allow(clippy::unwrap_used)]
     fn draft(op: &str) -> ApprovalRequestDraft {
         ApprovalRequest::builder(op).risk(RiskClass::Reversible).build().unwrap()
@@ -2237,14 +2360,7 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     fn post(inner: &LedgerInner, principal: &Principal) -> ApprovalRequest {
         inner
-            .post_request(
-                draft("fs.remove"),
-                principal.clone(),
-                Capture::DirectExecution,
-                RequestContext::default(),
-                Duration::from_secs(60),
-                None,
-            )
+            .post_request(draft("fs.remove"), origin(principal))
             .unwrap()
     }
 
@@ -2262,7 +2378,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), None, Arc::new(SystemWallClock)).unwrap();
         let principal = agent("agent-1");
         // Occupies the ring's one slot with a still-live (Requested, no
         // decision yet) chain — nothing is evictable, so any further
@@ -2288,7 +2404,7 @@ mod tests {
             offset_secs: AtomicI64::new(0),
         });
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(LedgerConfig::default(), None, clock.clone()).unwrap();
+        let inner = build_inner(LedgerConfig::default(), scope(), None, clock.clone()).unwrap();
         let principal = agent("agent-1");
         let req = post(&inner, &principal);
         let not_after = clock.now() + Duration::from_secs(300);
@@ -2296,18 +2412,18 @@ mod tests {
         inner
             .grant(&req.id, GrantTerms::once_for(&req, not_after), principal, Grounds::Embedder)
             .unwrap();
-        assert_eq!(inner.state(&req.id), Some(RequestState::Granted));
+        assert_eq!(inner.state(&req.id, None), Some(RequestState::Granted));
 
         clock.offset_secs.store(100_000_000, Ordering::Relaxed);
         assert_eq!(
-            inner.state(&req.id),
+            inner.state(&req.id, None),
             Some(RequestState::Granted),
             "a forward wall-clock jump must not expire the grant"
         );
 
         clock.offset_secs.store(-100_000_000, Ordering::Relaxed);
         assert_eq!(
-            inner.state(&req.id),
+            inner.state(&req.id, None),
             Some(RequestState::Granted),
             "a backward wall-clock jump must not extend or void the grant either"
         );
@@ -2323,7 +2439,7 @@ mod tests {
     #[test]
     fn grant_decided_at_is_sampled_after_acquiring_the_lock_not_before() {
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(LedgerConfig::default(), None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(LedgerConfig::default(), scope(), None, Arc::new(SystemWallClock)).unwrap();
         let principal = agent("agent-1");
         let req = post(&inner, &principal);
 
@@ -2354,7 +2470,7 @@ mod tests {
         #[allow(clippy::unwrap_used)]
         let release_time = release_time.lock().unwrap().unwrap();
         #[allow(clippy::unwrap_used)]
-        let chain = inner.chain(&req.id).unwrap();
+        let chain = inner.chain(&req.id, None).unwrap();
         #[allow(clippy::unwrap_used)]
         let decided_at = chain.grant.unwrap().decided_at;
         assert!(
@@ -2367,7 +2483,7 @@ mod tests {
     #[should_panic(expected = "second successful settlement")]
     fn second_successful_settlement_against_one_grant_is_invariant_violated() {
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(LedgerConfig::default(), None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(LedgerConfig::default(), scope(), None, Arc::new(SystemWallClock)).unwrap();
         let principal = agent("agent-1");
         let req = post(&inner, &principal);
         let not_after = SystemTime::now() + Duration::from_secs(300);
@@ -2402,7 +2518,7 @@ mod tests {
     #[should_panic(expected = "never reserved against this request")]
     fn settle_with_an_unreserved_attempt_id_is_invariant_violated() {
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(LedgerConfig::default(), None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(LedgerConfig::default(), scope(), None, Arc::new(SystemWallClock)).unwrap();
         let principal = agent("agent-1");
         let req = post(&inner, &principal);
         let not_after = SystemTime::now() + Duration::from_secs(300);
@@ -2421,7 +2537,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), None, Arc::new(SystemWallClock)).unwrap();
         let principal = agent("agent-1");
         let req = post(&inner, &principal);
         let not_after = SystemTime::now() + Duration::from_secs(300);
@@ -2437,7 +2553,7 @@ mod tests {
         inner.sweep();
 
         #[allow(clippy::unwrap_used)]
-        let chain = inner.chain(&req.id).unwrap();
+        let chain = inner.chain(&req.id, None).unwrap();
         #[allow(clippy::unwrap_used)]
         let record = chain.attempts.iter().find(|a| a.attempt == attempt).unwrap();
         assert!(matches!(record.state, AttemptState::Abandoned));
@@ -2465,7 +2581,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), None, Arc::new(SystemWallClock)).unwrap();
         let principal = agent("agent-1");
 
         // Chain A occupies the ledger's one live slot.
@@ -2484,7 +2600,7 @@ mod tests {
         for _ in 0..5 {
             let _ = inner.redeem_with_token(&req_a.id, "wrong", principal.clone(), ConditionReport::none());
         }
-        assert_eq!(inner.state(&req_a.id), Some(RequestState::Voided));
+        assert_eq!(inner.state(&req_a.id, None), Some(RequestState::Voided));
 
         // The freed slot admits chain B, which stays live (undecided).
         let _req_b = post(&inner, &principal);
@@ -2499,7 +2615,7 @@ mod tests {
         // 0 live requests even though chain B genuinely is one, and this
         // wrongly succeeds past the configured capacity of 1.
         let err = inner
-            .post_request(draft("fs.remove"), principal, Capture::DirectExecution, RequestContext::default(), Duration::from_secs(60), None)
+            .post_request(draft("fs.remove"), origin(&principal))
             .unwrap_err();
         assert!(
             matches!(err, LedgerError::LiveCapacity { limit: 1 }),
@@ -2521,7 +2637,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), None, Arc::new(SystemWallClock)).unwrap();
         let principal = agent("agent-1");
 
         let req_a = post(&inner, &principal);
@@ -2538,7 +2654,7 @@ mod tests {
         for _ in 0..5 {
             let _ = inner.redeem_with_token(&req_a.id, "wrong", principal.clone(), ConditionReport::none());
         }
-        assert_eq!(inner.state(&req_a.id), Some(RequestState::Voided));
+        assert_eq!(inner.state(&req_a.id, None), Some(RequestState::Voided));
 
         // The freed slot admits chain B, which stays live.
         let _req_b = post(&inner, &principal);
@@ -2552,7 +2668,7 @@ mod tests {
         // Step 4: the capacity gate must still hold — chain B is the only
         // genuinely live request.
         let err = inner
-            .post_request(draft("fs.remove"), principal, Capture::DirectExecution, RequestContext::default(), Duration::from_secs(60), None)
+            .post_request(draft("fs.remove"), origin(&principal))
             .unwrap_err();
         assert!(
             matches!(err, LedgerError::LiveCapacity { limit: 1 }),
@@ -2578,7 +2694,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), None, Arc::new(SystemWallClock)).unwrap();
         let principal = agent("agent-1");
 
         let req = post(&inner, &principal); // 1: Requested
@@ -2595,9 +2711,9 @@ mod tests {
             .settle(&req.id, attempt, Outcome::Exit(0))
             .expect("a terminal entry must never be refused by ring capacity");
         assert!(appended);
-        assert_eq!(inner.state(&req.id), Some(RequestState::Granted));
+        assert_eq!(inner.state(&req.id, None), Some(RequestState::Granted));
         #[allow(clippy::unwrap_used)]
-        let chain = inner.chain(&req.id).unwrap();
+        let chain = inner.chain(&req.id, None).unwrap();
         assert!(matches!(
             chain.attempts.iter().find(|a| a.attempt == attempt).map(|a| a.state),
             Some(AttemptState::Settled)
@@ -2610,12 +2726,12 @@ mod tests {
     /// unrelated entries afterward must not be able to starve it.
     #[derive(Default)]
     struct AcceptingSink {
-        received: Mutex<Vec<LedgerEntry>>,
+        received: Mutex<Vec<LedgerRecord>>,
     }
     impl LedgerSink for AcceptingSink {
-        fn post(&self, entry: &LedgerEntry) -> Result<(), super::super::config::LedgerSinkError> {
+        fn post(&self, record: &LedgerRecord) -> Result<(), super::super::config::LedgerSinkError> {
             #[allow(clippy::unwrap_used)]
-            self.received.lock().unwrap().push(entry.clone());
+            self.received.lock().unwrap().push(record.clone());
             Ok(())
         }
     }
@@ -2638,7 +2754,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, Some(sink), Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), Some(sink), Arc::new(SystemWallClock)).unwrap();
         let principal = agent("agent-1");
 
         let req = post(&inner, &principal);
@@ -2665,7 +2781,7 @@ mod tests {
     #[test]
     fn grant_rejects_widened_conditions_but_allows_narrower_or_added_ones() {
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(LedgerConfig::default(), None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(LedgerConfig::default(), scope(), None, Arc::new(SystemWallClock)).unwrap();
         let principal = agent("agent-1");
         let not_after = SystemTime::now() + Duration::from_secs(300);
 
@@ -2683,7 +2799,7 @@ mod tests {
                 .unwrap();
             #[allow(clippy::unwrap_used)]
             inner
-                .post_request(draft, agent("agent-1"), Capture::DirectExecution, RequestContext::default(), Duration::from_secs(60), None)
+                .post_request(draft, origin(&agent("agent-1")))
                 .unwrap()
         };
 
@@ -2742,7 +2858,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), None, Arc::new(SystemWallClock)).unwrap();
         let principal = agent("agent-1");
         let req = post(&inner, &principal); // 1: Requested
         let not_after = SystemTime::now() + Duration::from_secs(300);
@@ -2754,7 +2870,10 @@ mod tests {
         let token = inner.token_for(&req.id, principal);
         assert!(token.is_none(), "retrieval must fail closed rather than hand out an unaccounted credential");
         assert!(
-            inner.log(0).iter().all(|e| !matches!(e, LedgerEntry::KeyRetrieved { .. })),
+            inner
+                .log(0, None)
+                .iter()
+                .all(|r| !matches!(r.known(), Some(LedgerEntry::KeyRetrieved { .. }))),
             "no KeyRetrieved entry should have been recorded"
         );
     }
@@ -2768,7 +2887,7 @@ mod tests {
     #[derive(Default)]
     struct AlwaysFailingSink;
     impl LedgerSink for AlwaysFailingSink {
-        fn post(&self, _entry: &LedgerEntry) -> Result<(), super::super::config::LedgerSinkError> {
+        fn post(&self, _record: &LedgerRecord) -> Result<(), super::super::config::LedgerSinkError> {
             Err(super::super::config::LedgerSinkError("synthetic failure".to_string()))
         }
     }
@@ -2782,7 +2901,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, Some(sink), Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), Some(sink), Arc::new(SystemWallClock)).unwrap();
         let principal = agent("agent-1");
 
         // Post and immediately deny one request, closing its chain — its
@@ -2796,28 +2915,21 @@ mod tests {
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(5)).await;
             if inner
-                .post_request(
-                    draft("fs.remove"),
-                    principal.clone(),
-                    Capture::DirectExecution,
-                    RequestContext::default(),
-                    Duration::from_secs(60),
-                    None,
-                )
+                .post_request(draft("fs.remove"), origin(&principal))
                 .is_err()
             {
                 break;
             }
         }
 
-        let before = inner.log(0);
+        let before = inner.log(0, None);
         // Ring eviction alone would succeed here (the denied chain's
         // entries are closed and evictable) — only the sink side refuses.
         let err = inner
-            .post_request(draft("fs.remove"), principal, Capture::DirectExecution, RequestContext::default(), Duration::from_secs(60), None)
+            .post_request(draft("fs.remove"), origin(&principal))
             .unwrap_err();
         assert!(matches!(err, LedgerError::SinkUnavailable(_)), "got {err:?}");
-        let after = inner.log(0);
+        let after = inner.log(0, None);
         assert_eq!(
             before.len(),
             after.len(),
@@ -2831,10 +2943,10 @@ mod tests {
     /// of the backlog the drain task abandons.
     #[derive(Default)]
     struct FailFirstSink {
-        received: Mutex<Vec<LedgerEntry>>,
+        received: Mutex<Vec<LedgerRecord>>,
     }
     impl LedgerSink for FailFirstSink {
-        fn post(&self, _entry: &LedgerEntry) -> Result<(), super::super::config::LedgerSinkError> {
+        fn post(&self, _record: &LedgerRecord) -> Result<(), super::super::config::LedgerSinkError> {
             Err(super::super::config::LedgerSinkError("synthetic failure".to_string()))
         }
     }
@@ -2847,7 +2959,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, Some(Arc::clone(&sink) as Arc<dyn LedgerSink>), Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), Some(Arc::clone(&sink) as Arc<dyn LedgerSink>), Arc::new(SystemWallClock)).unwrap();
         let principal = agent("agent-1");
 
         // Three posts land in the ring and the sink queue before the drain
@@ -2864,14 +2976,9 @@ mod tests {
         let mut message = String::new();
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(5)).await;
-            if let Err(LedgerError::SinkUnavailable(msg)) = inner.post_request(
-                draft("fs.remove"),
-                principal.clone(),
-                Capture::DirectExecution,
-                RequestContext::default(),
-                Duration::from_secs(60),
-                None,
-            ) {
+            if let Err(LedgerError::SinkUnavailable(msg)) =
+                inner.post_request(draft("fs.remove"), origin(&principal))
+            {
                 message = msg;
                 break;
             }
@@ -2884,9 +2991,9 @@ mod tests {
         // Every entry the ledger recorded for the three original posts
         // (3 Requested entries) is exactly what went undelivered.
         let ring_entries_for_those_requests = inner
-            .log(0)
+            .log(0, None)
             .into_iter()
-            .filter(|e| matches!(e, LedgerEntry::Requested { request, .. } if ids.contains(&request.id)))
+            .filter(|r| matches!(r.known(), Some(LedgerEntry::Requested { request, .. }) if ids.contains(&request.id)))
             .count();
         assert_eq!(ring_entries_for_those_requests, 3, "all 3 Requested entries still landed in the in-memory ring");
     }
@@ -2903,7 +3010,7 @@ mod tests {
             ..Default::default()
         };
         #[allow(clippy::unwrap_used)]
-        let inner = build_inner(config, None, Arc::new(SystemWallClock)).unwrap();
+        let inner = build_inner(config, scope(), None, Arc::new(SystemWallClock)).unwrap();
         let principal = agent("agent-1");
 
         // A chain that stays live (never decided) for the whole test.
@@ -2932,6 +3039,6 @@ mod tests {
 
         // The live chain survived every eviction pass, regardless of
         // pressure.
-        assert_eq!(inner.state(&live_req.id), Some(RequestState::Requested));
+        assert_eq!(inner.state(&live_req.id, None), Some(RequestState::Requested));
     }
 }

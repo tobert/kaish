@@ -12,9 +12,34 @@ use std::time::{Duration, SystemTime};
 
 use kaish_kernel::ledger::{AttemptGuard, ConditionReport, Ledger, LedgerConfig};
 use kaish_types::approval::{
-    ApprovalRequest, Capture, GrantTerms, LostCause, Outcome, Principal, PrincipalKind,
-    RequestContext, RequestState,
+    ApprovalRequest, GrantTerms, LostCause, Outcome, Principal, PrincipalKind, RequestState,
 };
+
+/// This file's ledger scope (spec §A.7): a fresh kernel id per ledger, and
+/// no session — an unscoped ledger is the single-session shape.
+#[allow(dead_code)]
+fn test_scope() -> kaish_types::approval::ApprovalScope {
+    kaish_types::approval::ApprovalScope::kernel(kaish_types::approval::KernelId::mint())
+}
+
+/// The origin a request posted by this file is stamped with (spec §A.7,
+/// §A.9). One fixed binding: these tests exercise the state machine, not the
+/// replay rules.
+#[allow(dead_code)]
+fn test_origin(principal: kaish_types::approval::Principal) -> kaish_types::approval::RequestOrigin {
+    let scope = test_scope();
+    kaish_types::approval::RequestOrigin::new(
+        scope.clone(),
+        kaish_types::approval::PlanBinding::new(
+            kaish_types::approval::PlanDigest::new("test"),
+            "/",
+            scope,
+        ),
+        principal,
+        kaish_types::approval::Capture::DirectExecution,
+        std::time::Duration::from_secs(60),
+    )
+}
 
 fn agent(id: &str) -> Principal {
     Principal::new(id, PrincipalKind::Agent)
@@ -41,9 +66,9 @@ fn force_drain(approvals: &kaish_kernel::ledger::Approvals) {
 
 #[tokio::test]
 async fn dropped_attempt_guard_settles_as_unknown_cancelled_never_an_exit_code() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
     let req = requester
-        .post_request(draft("plugin.dangerous"), agent("agent-1"), Capture::DirectExecution, RequestContext::default(), Duration::from_secs(60), None)
+        .post_request(draft("plugin.dangerous"), test_origin(agent("agent-1")))
         .await
         .unwrap();
     approver.grant(&req.id, GrantTerms::once_for(&req, far_future())).await.unwrap();
@@ -80,9 +105,9 @@ async fn dropped_attempt_guard_settles_as_unknown_cancelled_never_an_exit_code()
 
 #[tokio::test]
 async fn panicking_tool_future_settles_the_same_way_as_a_drop() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
     let req = requester
-        .post_request(draft("plugin.dangerous"), agent("agent-1"), Capture::DirectExecution, RequestContext::default(), Duration::from_secs(60), None)
+        .post_request(draft("plugin.dangerous"), test_origin(agent("agent-1")))
         .await
         .unwrap();
     approver.grant(&req.id, GrantTerms::once_for(&req, far_future())).await.unwrap();
@@ -111,9 +136,9 @@ async fn panicking_tool_future_settles_the_same_way_as_a_drop() {
 
 #[tokio::test]
 async fn explicit_settle_before_drop_wins_and_the_drop_push_is_a_no_op() {
-    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
     let req = requester
-        .post_request(draft("plugin.dangerous"), agent("agent-1"), Capture::DirectExecution, RequestContext::default(), Duration::from_secs(60), None)
+        .post_request(draft("plugin.dangerous"), test_origin(agent("agent-1")))
         .await
         .unwrap();
     approver.grant(&req.id, GrantTerms::once_for(&req, far_future())).await.unwrap();
@@ -150,17 +175,10 @@ async fn dropped_attempt_guard_does_not_falsely_exhaust_capacity_for_the_next_po
         live_capacity: 1,
         ..Default::default()
     };
-    let (requester, approvals, approver) = Ledger::build(config, None).unwrap();
+    let (requester, approvals, approver) = Ledger::build(config, test_scope(), None).unwrap();
 
     let req_a = requester
-        .post_request(
-            draft("plugin.dangerous"),
-            agent("agent-1"),
-            Capture::DirectExecution,
-            RequestContext::default(),
-            Duration::from_secs(60),
-            None,
-        )
+        .post_request(draft("plugin.dangerous"), test_origin(agent("agent-1")))
         .await
         .unwrap();
     approver.grant(&req_a.id, GrantTerms::once_for(&req_a, far_future())).await.unwrap();
@@ -173,14 +191,7 @@ async fn dropped_attempt_guard_does_not_falsely_exhaust_capacity_for_the_next_po
     drop(AttemptGuard::new(requester.clone(), attempt));
 
     let req_b = requester
-        .post_request(
-            draft("plugin.dangerous"),
-            agent("agent-1"),
-            Capture::DirectExecution,
-            RequestContext::default(),
-            Duration::from_secs(60),
-            None,
-        )
+        .post_request(draft("plugin.dangerous"), test_origin(agent("agent-1")))
         .await;
     assert!(
         req_b.is_ok(),

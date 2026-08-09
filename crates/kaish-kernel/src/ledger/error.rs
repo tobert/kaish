@@ -11,7 +11,8 @@
 use std::fmt;
 
 use kaish_types::approval::{
-    Outcome, Principal, RequestId, RequestState, ResourceRef, StandingId, StateClaim, SubscriptionId,
+    Outcome, Principal, RequestId, RequestState, ResourceRef, SessionId, StandingId, StateClaim,
+    SubscriptionId,
 };
 
 /// Why a ledger transaction did not commit. Every non-`InvariantViolated`
@@ -125,6 +126,17 @@ pub enum LedgerError {
         /// How the draft differs from what was approved.
         detail: String,
     },
+    /// A scoped handle acted on a request belonging to another session
+    /// (spec §A.7). API hygiene, not a process boundary: it stops a
+    /// session's code from reaching another session's requests by accident
+    /// or by confusion, and it does not pretend to stop hostile Rust in the
+    /// same process.
+    OutOfScope {
+        /// The request the caller named.
+        request: RequestId,
+        /// The session the handle is restricted to.
+        session: SessionId,
+    },
     /// A kernel bug: an unmatched `Redeemed`/terminal pair, a `seq` gap, or
     /// a second successful settlement against one grant. Never means
     /// "proceed" (spec §A.1).
@@ -215,6 +227,10 @@ impl fmt::Display for LedgerError {
             Self::DraftMismatch { request, detail } => write!(
                 f,
                 "the replayed invocation does not match request {request}: {detail} — nothing was performed"
+            ),
+            Self::OutOfScope { request, session } => write!(
+                f,
+                "request {request} belongs to another session — this handle is scoped to {session}"
             ),
             Self::InvariantViolated(detail) => {
                 write!(f, "approval ledger invariant violated: {detail}")

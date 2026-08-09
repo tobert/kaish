@@ -433,19 +433,31 @@ fn cmd_log(flags: &LogArgs, ctx: &ExecContext) -> ExecResult {
         Ok(a) => a,
         Err(e) => return e,
     };
-    let entries = access.approvals.log(flags.since.unwrap_or(0));
-    if entries.is_empty() {
+    let records = access.approvals.log(flags.since.unwrap_or(0));
+    if records.is_empty() {
         return empty_list("(no ledger entries)\n");
     }
 
-    let rows: Vec<serde_json::Value> = entries.iter().map(json_value).collect();
-    let nodes: Vec<OutputNode> = entries
+    // The rich payload is the whole versioned record (spec §A.5) — the
+    // `schema_version` and the scope are what tell a reader whose entry this
+    // is and whether it understands it. The table reads the entry inside.
+    let rows: Vec<serde_json::Value> = records.iter().map(json_value).collect();
+    let nodes: Vec<OutputNode> = records
         .iter()
         .zip(&rows)
-        .map(|(entry, row)| {
-            OutputNode::new(entry.seq().to_string()).with_cells(vec![
-                row.get("entry").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
-                row.get("request").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        .map(|(record, row)| {
+            let entry = row.get("entry");
+            OutputNode::new(record.sequence.to_string()).with_cells(vec![
+                entry
+                    .and_then(|v| v.get("entry"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string(),
+                entry
+                    .and_then(|v| v.get("request"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             ])
         })
         .collect();

@@ -4,17 +4,13 @@ expression: block
 ---
 impl Requester {
     /// Post a request. `draft` carries only what a producer supplies
-    /// (`ApprovalRequest::builder`, spec §D.1); every other field is
-    /// stamped here — the caller cannot forge a principal or an invocation.
-    #[allow(clippy::too_many_arguments)]
+    /// (`ApprovalRequest::builder`, spec §D.1); `origin` carries everything
+    /// the kernel stamps — scope, parent, binding, principal, capture — so a
+    /// caller cannot forge a principal or an invocation.
     pub async fn post_request(
         &self,
         draft: ApprovalRequestDraft,
-        principal: Principal,
-        capture: Capture,
-        context: RequestContext,
-        ttl: Duration,
-        job_id: Option<u64>,
+        origin: RequestOrigin,
     ) -> Result<ApprovalRequest, LedgerError> {
         // A dropped guard's queued settlement can be the only thing standing
         // between a closed-but-undrained chain and room for this post:
@@ -28,7 +24,7 @@ impl Requester {
         // so a narrower drain set looked sufficient until it was pointed
         // out).
         self.0.drain_outbox();
-        self.0.post_request(draft, principal, capture, context, ttl, job_id)
+        self.0.post_request(draft, origin)
     }
 
     /// Reserve an attempt by name, using an internal redemption context
@@ -168,6 +164,7 @@ impl Requester {
     pub async fn observed(
         &self,
         operation: OperationId,
+        scope: ApprovalScope,
         by: Principal,
         resources: Vec<ObservedResource>,
         plan: Option<Plan>,
@@ -175,6 +172,6 @@ impl Requester {
         // Same reason as `post_request`: a queued settlement can be what
         // frees the ring capacity this append reserves.
         self.0.drain_outbox();
-        self.0.post_observed(operation, by, resources, plan)
+        self.0.post_observed(operation, scope, by, resources, plan)
     }
 }

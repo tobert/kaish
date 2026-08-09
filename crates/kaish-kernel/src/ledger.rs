@@ -69,9 +69,10 @@ pub(crate) fn sample_view(
     paths: &[&str],
 ) -> kaish_types::approval::ApprovalRequestView {
     use kaish_types::approval::{
-        ApprovalRequest, Capture, Invocation, Principal, PrincipalKind, RequestContext, RequestId,
-        Resource,
+        ApprovalRequest, ApprovalScope, Capture, Invocation, KernelId, PlanBinding, PlanDigest,
+        Principal, PrincipalKind, RequestId, RequestOrigin, Resource,
     };
+    let scope = ApprovalScope::kernel(KernelId::new(1));
     let draft = ApprovalRequest::builder(operation.as_str())
         .risk(operation.risk())
         .reason("the fs.* enforce policy is on")
@@ -83,15 +84,17 @@ pub(crate) fn sample_view(
         .expect("a well-formed draft")
         .stamp(
             RequestId::new(0x0badcafe, 1),
-            Principal::new("session", PrincipalKind::Agent),
-            Capture::Exact(Invocation {
-                tool: "rm".to_string(),
-                argv: paths.iter().map(|p| (*p).to_string()).collect(),
-            }),
-            RequestContext::default(),
             std::time::UNIX_EPOCH,
-            std::time::Duration::from_secs(60),
-            None,
+            RequestOrigin::new(
+                scope.clone(),
+                PlanBinding::new(PlanDigest::new("sample"), "/", scope),
+                Principal::new("session", PrincipalKind::Agent),
+                Capture::Exact(Invocation {
+                    tool: "rm".to_string(),
+                    argv: paths.iter().map(|p| (*p).to_string()).collect(),
+                }),
+                std::time::Duration::from_secs(60),
+            ),
         )
         .into()
 }

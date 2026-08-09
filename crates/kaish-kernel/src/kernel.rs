@@ -411,6 +411,13 @@ pub struct ApprovalConfig {
     /// the authority this kernel mints, and stamped on the requests it
     /// posts. `None` takes the ledger's own placeholder identity.
     pub principal: Option<kaish_types::approval::Principal>,
+    /// Which conversation, connection, or task this kernel is serving (spec
+    /// §A.7). Stamped onto every request and record it produces, and the
+    /// scope a `ApproverHandle::scope`/`Approvals::scope` view filters on.
+    /// `None` — the default — is a single-session kernel like the REPL: its
+    /// requests carry a kernel id and no session, and are therefore
+    /// invisible to every scoped handle.
+    pub session: Option<kaish_types::approval::SessionId>,
     /// The authority this session holds. **Absent means the session may not
     /// approve anything** — that is the enforcement mechanism itself (spec
     /// §E.2, tier 1). Supplying one also adopts its ledger, so two kernels
@@ -436,6 +443,7 @@ impl std::fmt::Debug for ApprovalConfig {
         f.debug_struct("ApprovalConfig")
             .field("approver", &self.approver.is_some())
             .field("principal", &self.principal)
+            .field("session", &self.session)
             .field("approver_handle", &self.approver_handle)
             .field(
                 "resolvers",
@@ -947,6 +955,20 @@ impl KernelConfig {
         self
     }
 
+    /// Name the session this kernel serves (spec §A.7).
+    ///
+    /// Every request and every ledger record this kernel produces carries
+    /// it, so a process hosting several sessions can answer "whose request
+    /// is this?" from the request itself rather than from an external map —
+    /// and a handle scoped to one session sees only that session's requests.
+    ///
+    /// A kernel with no session is a single-session kernel: its requests
+    /// belong to the kernel and no scoped handle sees them.
+    pub fn with_session(mut self, session: kaish_types::approval::SessionId) -> Self {
+        self.approval.session = Some(session);
+        self
+    }
+
     /// Give this session approval authority, and bind it to that handle's
     /// ledger (spec §D.2).
     ///
@@ -1150,6 +1172,10 @@ struct KernelApprovals {
     chain: Arc<crate::ledger::DecisionChain>,
     /// Who this session is.
     principal: kaish_types::approval::Principal,
+    /// Which kernel and session this is (spec §A.7). Stamped on every
+    /// request and record this kernel produces; cloned by `fork`, so a
+    /// background job's requests carry the same scope as the foreground's.
+    scope: kaish_types::approval::ApprovalScope,
     /// The one authority this ledger minted, returned by [`Kernel::build`]
     /// to the embedder. Held privately: an embedder decides which sessions
     /// get a clone, and a session does not help itself to one.
@@ -1181,6 +1207,7 @@ impl KernelApprovals {
             approvals: self.approvals.clone(),
             chain: Arc::clone(&self.chain),
             principal: self.principal.clone(),
+            scope: self.scope.clone(),
             request_ttl: self.request_ttl,
             job_id,
             resolvers: Arc::clone(&self.resolvers),
@@ -1691,10 +1718,20 @@ impl Kernel {
         let ApprovalConfig {
             approver,
             principal,
+            session,
             approver_handle,
             resolvers,
             statement_classifier,
         } = config;
+        // One kernel, one kernel id (spec §A.7) — including a kernel that
+        // joins another's ledger through `with_approver_handle`, which is
+        // exactly the two-kernels-one-log shape the id exists to tell apart.
+        let mut scope = kaish_types::approval::ApprovalScope::kernel(
+            kaish_types::approval::KernelId::mint(),
+        );
+        if let Some(session) = session.clone() {
+            scope = scope.with_session(session);
+        }
 
         let resolvers = crate::ledger::StateResolvers::from_registrations(resolvers)
             .context("the approval ledger's state resolvers conflict")?;
@@ -1711,8 +1748,12 @@ impl Kernel {
             .unwrap_or_else(|| crate::ledger::LedgerConfig::default().request_ttl);
         let (requester, approvals, authority) = match &approver_handle {
             Some(handle) => handle.join(),
-            None => crate::ledger::Ledger::build(ledger_config.unwrap_or_default(), ledger_sink)
-                .context("approval ledger could not mint its id epoch — the OS supplied no entropy")?,
+            None => crate::ledger::Ledger::build(
+                ledger_config.unwrap_or_default(),
+                scope.clone(),
+                ledger_sink,
+            )
+            .context("approval ledger could not mint its id epoch — the OS supplied no entropy")?,
         };
         let authority = match &principal {
             Some(principal) => authority.with_principal(principal.clone()),
@@ -1729,6 +1770,7 @@ impl Kernel {
             requester,
             approvals,
             chain,
+            scope,
             principal: principal.unwrap_or_default(),
             authority,
             session_authority,
@@ -3773,6 +3815,10 @@ impl Kernel {
             // see the stdin hand-off below, which takes it under the same
             // write lock — so the gate this snapshot reaches is the only one
             // that can adopt it.
+            // A forked or backgrounded execution keeps its parenthood: a
+            // gate reached from inside a gated statement is nested under it
+            // (spec §A.7).
+            gate_parent: ec.gate_parent.clone(),
             redemption: None,
             capture_failure: None,
             attempts: Vec::new(),

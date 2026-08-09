@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kaish_types::approval::{
-    ApprovalRequest, ApprovalRequestDraft, AttemptId, AttemptState, Capture, Grant, GrantTerms,
-    Grounds, LedgerEntry, ObservedResource, OperationId, Outcome, Plan, Principal,
-    RequestContext, RequestId, RequestState, StandingGrant, StandingId, Subscription,
+    ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, AttemptState, Grant,
+    GrantTerms, Grounds, LedgerRecord, ObservedResource, OperationId, Outcome, Plan, Principal,
+    RequestId, RequestOrigin, RequestState, SessionId, StandingGrant, StandingId, Subscription,
     SubscriptionId, Token,
 };
 
@@ -27,8 +27,14 @@ pub struct Requester(Arc<LedgerInner>);
 
 /// The read side (spec §A.1). Safe to hand to anyone: pending requests,
 /// states, the log tail. Posts nothing.
+///
+/// The second field is the session this view is restricted to, when
+/// [`Self::scope`] produced it. **The read side needs scoping as much as the
+/// grant side does** (spec §A.7): under the always-on statement tap a request
+/// carries the command text that raised it, so an unscoped reader in a
+/// multi-session process reads every session's commands.
 #[derive(Clone)]
-pub struct Approvals(Option<Arc<LedgerInner>>);
+pub struct Approvals(Option<Arc<LedgerInner>>, Option<SessionId>);
 
 /// The approval side's capability (spec §A.1). No public constructor — the
 /// only way to get one is [`Ledger::build`]. Not `Default`, not
@@ -49,11 +55,15 @@ pub struct Approvals(Option<Arc<LedgerInner>>);
 /// // one from parts nor pattern the fields back out of one it already
 /// // holds, e.g. from a real `Ledger::build` call.
 /// fn peel(handle: ApproverHandle) {
-///     let ApproverHandle(_inner, _authority, _principal) = handle;
+///     let ApproverHandle(_inner, _authority, _principal, _session) = handle;
 /// }
 /// ```
+///
+/// The fourth field is the session this authority is restricted to, when
+/// [`Self::scope`] produced it: a scoped handle can decide only within that
+/// session (spec §A.7).
 #[derive(Clone)]
-pub struct ApproverHandle(Arc<LedgerInner>, AuthorityId, Principal);
+pub struct ApproverHandle(Arc<LedgerInner>, AuthorityId, Principal, Option<SessionId>);
 
 /// Names the authority and the principal it decides as. Carries no ledger
 /// state and no credential — there is nothing here a log line could leak.
@@ -62,6 +72,7 @@ impl std::fmt::Debug for ApproverHandle {
         f.debug_struct("ApproverHandle")
             .field("authority", &self.1 .0)
             .field("principal", &self.2)
+            .field("session", &self.3)
             .finish()
     }
 }
@@ -151,30 +162,27 @@ impl Ledger {
     /// weaker source.
     pub fn build(
         config: LedgerConfig,
+        scope: ApprovalScope,
         sink: Option<Arc<dyn LedgerSink>>,
     ) -> Result<(Requester, Approvals, ApproverHandle), getrandom::Error> {
-        let inner = build_inner(config, sink, Arc::new(SystemWallClock))?;
+        let inner = build_inner(config, scope, sink, Arc::new(SystemWallClock))?;
         Ok((
             Requester(Arc::clone(&inner)),
-            Approvals(Some(Arc::clone(&inner))),
-            ApproverHandle(inner, AuthorityId(1), default_authority_principal(1)),
+            Approvals(Some(Arc::clone(&inner)), None),
+            ApproverHandle(inner, AuthorityId(1), default_authority_principal(1), None),
         ))
     }
 }
 
 impl Requester {
     /// Post a request. `draft` carries only what a producer supplies
-    /// (`ApprovalRequest::builder`, spec §D.1); every other field is
-    /// stamped here — the caller cannot forge a principal or an invocation.
-    #[allow(clippy::too_many_arguments)]
+    /// (`ApprovalRequest::builder`, spec §D.1); `origin` carries everything
+    /// the kernel stamps — scope, parent, binding, principal, capture — so a
+    /// caller cannot forge a principal or an invocation.
     pub async fn post_request(
         &self,
         draft: ApprovalRequestDraft,
-        principal: Principal,
-        capture: Capture,
-        context: RequestContext,
-        ttl: Duration,
-        job_id: Option<u64>,
+        origin: RequestOrigin,
     ) -> Result<ApprovalRequest, LedgerError> {
         // A dropped guard's queued settlement can be the only thing standing
         // between a closed-but-undrained chain and room for this post:
@@ -188,7 +196,7 @@ impl Requester {
         // so a narrower drain set looked sufficient until it was pointed
         // out).
         self.0.drain_outbox();
-        self.0.post_request(draft, principal, capture, context, ttl, job_id)
+        self.0.post_request(draft, origin)
     }
 
     /// Reserve an attempt by name, using an internal redemption context
@@ -328,6 +336,7 @@ impl Requester {
     pub async fn observed(
         &self,
         operation: OperationId,
+        scope: ApprovalScope,
         by: Principal,
         resources: Vec<ObservedResource>,
         plan: Option<Plan>,
@@ -335,7 +344,7 @@ impl Requester {
         // Same reason as `post_request`: a queued settlement can be what
         // frees the ring capacity this append reserves.
         self.0.drain_outbox();
-        self.0.post_observed(operation, by, resources, plan)
+        self.0.post_observed(operation, scope, by, resources, plan)
     }
 }
 
@@ -345,14 +354,36 @@ impl Approvals {
     /// method returns empty/`None`; grants nothing, because it cannot: it
     /// holds no `LedgerInner` to post against even internally.
     pub fn empty() -> Self {
-        Self(None)
+        Self(None, None)
     }
 
-    /// Every currently-`Requested` (undecided) request.
+    /// A read side restricted to one session (spec §A.7). Every method on
+    /// the returned view reports only requests and records raised in
+    /// `session`, and a request with no session at all is invisible to it.
+    ///
+    /// Needed as much as the grant side is: a request carries the command
+    /// text that raised it, so an unscoped reader in a multi-session process
+    /// reads every session's commands.
+    pub fn scope(&self, session: SessionId) -> Self {
+        Self(self.0.clone(), Some(session))
+    }
+
+    /// The session this view is restricted to, if any.
+    pub fn session(&self) -> Option<&SessionId> {
+        self.1.as_ref()
+    }
+
+    /// Every currently-`Requested` (undecided) request in this view's scope.
     pub fn pending(&self) -> Vec<kaish_types::approval::ApprovalRequestView> {
         self.0
             .as_ref()
-            .map(|inner| inner.pending().into_iter().map(Into::into).collect())
+            .map(|inner| {
+                inner
+                    .pending(self.1.as_ref())
+                    .into_iter()
+                    .map(Into::into)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -365,17 +396,20 @@ impl Approvals {
     /// records §E asks an auditor to read. Bounded by the ledger's retention
     /// (`LedgerConfig::retained_entries`), never by the process's lifetime.
     pub fn ids(&self) -> Vec<RequestId> {
-        self.0.as_ref().map(|inner| inner.ids()).unwrap_or_default()
+        self.0
+            .as_ref()
+            .map(|inner| inner.ids(self.1.as_ref()))
+            .unwrap_or_default()
     }
 
     /// The current top-level state of one request, if it exists.
     pub fn state(&self, id: &RequestId) -> Option<RequestState> {
-        self.0.as_ref().and_then(|inner| inner.state(id))
+        self.0.as_ref().and_then(|inner| inner.state(id, self.1.as_ref()))
     }
 
     /// The full read-model — request, decision, and every attempt.
     pub fn get(&self, id: &RequestId) -> Option<RequestChain> {
-        self.0.as_ref().and_then(|inner| inner.chain(id))
+        self.0.as_ref().and_then(|inner| inner.chain(id, self.1.as_ref()))
     }
 
     /// Every live standing grant.
@@ -417,13 +451,23 @@ impl Approvals {
         operation: &kaish_types::approval::OperationId,
         refs: &[kaish_types::approval::ResourceRef],
     ) -> Option<RequestId> {
-        self.0.as_ref().and_then(|inner| inner.match_draft(operation, refs))
+        self.0
+            .as_ref()
+            .and_then(|inner| inner.match_draft(operation, refs, self.1.as_ref()))
     }
 
-    /// The retained log, seq-cursored: every retained entry with
-    /// `seq > since`. Pass `0` for the full retained tail.
-    pub fn log(&self, since: u64) -> Vec<LedgerEntry> {
-        self.0.as_ref().map(|inner| inner.log(since)).unwrap_or_default()
+    /// The retained log, seq-cursored: every retained [`LedgerRecord`] with
+    /// `sequence > since`, restricted to this view's scope. Pass `0` for the
+    /// full retained tail.
+    ///
+    /// Records, not bare entries: a consumer reads the `schema_version` and
+    /// the scope alongside the entry, and an entry a newer writer produced
+    /// surfaces as unknown rather than vanishing (spec §A.5).
+    pub fn log(&self, since: u64) -> Vec<LedgerRecord> {
+        self.0
+            .as_ref()
+            .map(|inner| inner.log(since, self.1.as_ref()))
+            .unwrap_or_default()
     }
 }
 
@@ -445,6 +489,7 @@ impl ApproverHandle {
         terms: GrantTerms,
         grounds: Grounds,
     ) -> Result<Grant, LedgerError> {
+        self.0.check_scope(id, self.3.as_ref())?;
         // `grant` appends and so reserves ring/sink capacity — the same
         // stale-undrained-close concern as `post_request`.
         self.0.drain_outbox();
@@ -454,6 +499,7 @@ impl ApproverHandle {
 
     /// Decide no.
     pub async fn deny(&self, id: &RequestId, reason: &str) -> Result<(), LedgerError> {
+        self.0.check_scope(id, self.3.as_ref())?;
         self.0.drain_outbox();
         let by = self.principal();
         self.0.deny(id, reason.to_string(), by)
@@ -484,6 +530,10 @@ impl ApproverHandle {
     /// retrieval is the one place authority matters on the key path (spec
     /// §D.3): everything else works by presenting whatever key you hold.
     pub fn token_for(&self, id: &RequestId) -> Option<Token> {
+        // A scoped handle retrieves nothing outside its session: the key is
+        // a bearer credential, so handing one over is the widest thing this
+        // handle does (spec §A.2, §A.7).
+        self.0.check_scope(id, self.3.as_ref()).ok()?;
         // Sync, like the rest of this method — `drain_outbox` is plain
         // `Mutex` work with no `.await` inside it (see its doc).
         self.0.drain_outbox();
@@ -510,6 +560,7 @@ impl ApproverHandle {
         id: &RequestId,
         grant_ttl: Duration,
     ) -> Result<Option<Grant>, LedgerError> {
+        self.0.check_scope(id, self.3.as_ref())?;
         self.0.grant_from_standing(id, grant_ttl)
     }
 
@@ -554,9 +605,30 @@ impl ApproverHandle {
     pub fn join(&self) -> (Requester, Approvals, ApproverHandle) {
         (
             Requester(Arc::clone(&self.0)),
-            Approvals(Some(Arc::clone(&self.0))),
+            Approvals(Some(Arc::clone(&self.0)), self.3.clone()),
             self.clone(),
         )
+    }
+
+    /// A view of this authority restricted to one session (spec §A.7). The
+    /// derived handle can grant, deny, and retrieve keys only within that
+    /// scope; every other request is [`LedgerError::OutOfScope`].
+    ///
+    /// This is API hygiene, not a process boundary — see
+    /// [`ApprovalScope`](kaish_types::approval::ApprovalScope).
+    pub fn scope(&self, session: SessionId) -> Self {
+        Self(Arc::clone(&self.0), self.1, self.2.clone(), Some(session))
+    }
+
+    /// The session this authority is restricted to, if any.
+    pub fn session(&self) -> Option<&SessionId> {
+        self.3.as_ref()
+    }
+
+    /// The scope this ledger stamps on a record that owns no request — the
+    /// kernel scope `Ledger::build` was given.
+    pub fn ledger_scope(&self) -> ApprovalScope {
+        self.0.scope()
     }
 
     /// Re-attribute this handle to `principal`. The returned handle shares
@@ -579,7 +651,7 @@ impl ApproverHandle {
     /// taking it from the handle is what proves the request belongs to the
     /// ledger the caller holds authority over.
     pub fn approvals_view(&self) -> Approvals {
-        Approvals(Some(Arc::clone(&self.0)))
+        Approvals(Some(Arc::clone(&self.0)), self.3.clone())
     }
 
     /// The principal recorded as deciding/retrieving through this handle.

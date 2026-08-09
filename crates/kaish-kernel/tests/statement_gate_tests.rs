@@ -25,6 +25,23 @@ use kaish_types::approval::{
 };
 use kaish_types::Value;
 
+/// The entries inside a ledger's records. These tests assert on entry shape;
+/// the [`LedgerRecord`] envelope has its own coverage in `kaish-types` (spec
+/// §A.5), and an entry this build does not recognize cannot occur here.
+#[allow(dead_code)]
+fn entries(records: Vec<kaish_types::approval::LedgerRecord>) -> Vec<LedgerEntry> {
+    records
+        .into_iter()
+        .map(|record| {
+            record
+                .known()
+                .cloned()
+                .expect("this build wrote every record it reads back")
+        })
+        .collect()
+}
+
+
 fn tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("statement-gate-")
@@ -88,9 +105,7 @@ impl Session {
 
     /// Every statement-tap entry's plan, in commit order.
     fn plans(&self) -> Vec<Plan> {
-        self.kernel
-            .approvals()
-            .log(0)
+        entries(self.kernel.approvals().log(0))
             .into_iter()
             .filter_map(|entry| match entry {
                 LedgerEntry::Observed {
@@ -103,9 +118,7 @@ impl Session {
 
     /// Every statement-tap entry, in commit order.
     fn taps(&self) -> Vec<LedgerEntry> {
-        self.kernel
-            .approvals()
-            .log(0)
+        entries(self.kernel.approvals().log(0))
             .into_iter()
             .filter(|entry| {
                 matches!(entry, LedgerEntry::Observed { operation, .. }
@@ -154,7 +167,7 @@ impl Session {
     /// Everything a reader can reach: the whole ledger log plus every VFS
     /// projection under `/v/approvals`. What a credential scan searches.
     async fn readable_surface(&self, ids: &[RequestId]) -> String {
-        let mut surface = serde_json::to_string(&self.kernel.approvals().log(0))
+        let mut surface = serde_json::to_string(&entries(self.kernel.approvals().log(0)))
             .expect("the log serializes");
         surface.push_str(&serde_json::to_string(&self.kernel.approvals().pending()).unwrap());
         for node in ["pending", "standing", "log"] {
@@ -352,10 +365,7 @@ async fn a_deferred_statement_keeps_its_tap_entry_ahead_of_the_request() {
     let result = session.run("rm target.txt").await;
     assert_eq!(result.code, 2, "{}", result.err);
 
-    let kinds: Vec<&str> = session
-        .kernel
-        .approvals()
-        .log(0)
+    let kinds: Vec<&str> = entries(session.kernel.approvals().log(0))
         .iter()
         .map(|e| match e {
             LedgerEntry::Observed { .. } => "Observed",

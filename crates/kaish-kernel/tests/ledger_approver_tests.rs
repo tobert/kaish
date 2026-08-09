@@ -24,11 +24,54 @@ use kaish_kernel::tools::{ToolArgs, ToolCtx, ToolSchema};
 use kaish_kernel::vfs::{MemoryFs, VfsRouter};
 use kaish_kernel::{ExecContext, ExecuteOptions, Kernel, KernelBackend, KernelConfig, LocalBackend, Tool};
 use kaish_types::approval::{
-    ApprovalRequest, ApprovalRequestView, Capture, Decision, Grounds, GrantTerms, LedgerEntry,
-    OperationPattern, Principal, PrincipalKind, RequestContext, RequestState, Resource,
+    ApprovalRequest, ApprovalRequestView, Decision, Grounds, GrantTerms, LedgerEntry,
+    OperationPattern, Principal, PrincipalKind, RequestState, Resource,
     ResourcePattern, RiskClass, StandingGrant, StandingId, StateClaim,
 };
 use kaish_types::{ExecResult, Value};
+
+/// The entries inside a ledger's records. These tests assert on entry shape;
+/// the [`LedgerRecord`] envelope has its own coverage in `kaish-types` (spec
+/// §A.5), and an entry this build does not recognize cannot occur here.
+#[allow(dead_code)]
+fn entries(records: Vec<kaish_types::approval::LedgerRecord>) -> Vec<LedgerEntry> {
+    records
+        .into_iter()
+        .map(|record| {
+            record
+                .known()
+                .cloned()
+                .expect("this build wrote every record it reads back")
+        })
+        .collect()
+}
+
+/// This file's ledger scope (spec §A.7): a fresh kernel id per ledger, and
+/// no session — an unscoped ledger is the single-session shape.
+#[allow(dead_code)]
+fn test_scope() -> kaish_types::approval::ApprovalScope {
+    kaish_types::approval::ApprovalScope::kernel(kaish_types::approval::KernelId::mint())
+}
+
+/// The origin a request posted by this file is stamped with (spec §A.7,
+/// §A.9). One fixed binding: these tests exercise the state machine, not the
+/// replay rules.
+#[allow(dead_code)]
+fn test_origin(principal: kaish_types::approval::Principal) -> kaish_types::approval::RequestOrigin {
+    let scope = test_scope();
+    kaish_types::approval::RequestOrigin::new(
+        scope.clone(),
+        kaish_types::approval::PlanBinding::new(
+            kaish_types::approval::PlanDigest::new("test"),
+            "/",
+            scope,
+        ),
+        principal,
+        kaish_types::approval::Capture::DirectExecution,
+        std::time::Duration::from_secs(60),
+    )
+}
+
 
 // ─────────────────────────────── fixtures ───────────────────────────────
 
@@ -51,14 +94,7 @@ async fn post(requester: &Requester, op: &str, resources: Vec<Resource>) -> Appr
         builder = builder.resource(resource);
     }
     requester
-        .post_request(
-            builder.build().unwrap(),
-            agent("agent-1"),
-            Capture::DirectExecution,
-            RequestContext::default(),
-            Duration::from_secs(60),
-            None,
-        )
+        .post_request(builder.build().unwrap(), test_origin(agent("agent-1")))
         .await
         .unwrap()
 }
@@ -152,7 +188,7 @@ impl Approver for ScriptedApprover {
 
 /// Build a ledger and a chain over it, with an optional approver.
 fn chain_over(approver: Option<Arc<dyn Approver>>) -> (Requester, Approvals, ApproverHandle, DecisionChain) {
-    let (requester, approvals, authority) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let (requester, approvals, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
     let chain = DecisionChain::new(authority.clone(), approvals.clone(), approver);
     (requester, approvals, authority, chain)
 }
@@ -169,12 +205,8 @@ async fn stages_fire_in_order_and_a_policy_grant_short_circuits_decide() {
                 .unwrap()
                 .stamp(
                     kaish_types::approval::RequestId::new(0, 0),
-                    agent("agent-1"),
-                    Capture::DirectExecution,
-                    RequestContext::default(),
                     SystemTime::now(),
-                    Duration::from_secs(60),
-                    None,
+                    test_origin(agent("agent-1")),
                 ),
             far_future(),
         )),
@@ -279,7 +311,7 @@ async fn defer_through_all_four_stages_is_exit_2_with_a_pending_view() {
     assert_eq!(result.code, 2, "deferring all the way through is exit 2");
     assert!(result.err.contains(&request.id.to_string()));
     // Nothing beyond the caller's own `Requested` entry was appended.
-    assert_eq!(approvals.log(0).len(), 1);
+    assert_eq!(entries(approvals.log(0)).len(), 1);
 }
 
 #[tokio::test]
@@ -398,7 +430,7 @@ async fn a_standing_grant_copies_the_requests_transitions_into_the_grants_condit
         grant.conditions[0].expected_from,
         StateClaim::Exact("a1b2c3d".into())
     );
-    assert!(matches!(approvals.log(0).last(), Some(LedgerEntry::Granted { .. })));
+    assert!(matches!(entries(approvals.log(0)).last(), Some(LedgerEntry::Granted { .. })));
 }
 
 #[tokio::test]
@@ -474,8 +506,7 @@ async fn max_uses_consumption_is_exact_under_eight_concurrent_matching_requests(
     assert_eq!(authority.standing_uses(&rule), MAX_USES);
 
     // The log agrees with the counter: one `Granted{Standing}` per use.
-    let from_log = approvals
-        .log(0)
+    let from_log = entries(approvals.log(0))
         .into_iter()
         .filter(|entry| {
             matches!(entry, LedgerEntry::Granted { grant, .. } if grant.grounds == Grounds::Standing { grant: rule })
@@ -559,7 +590,7 @@ impl Approver for LedgerReadingApprover {
     async fn decide(&self, _req: &ApprovalRequestView) -> Decision {
         let approvals = self.approvals.get().expect("approvals installed");
         self.pending_seen.fetch_add(approvals.pending().len(), Ordering::SeqCst);
-        let _ = approvals.log(0);
+        let _ = entries(approvals.log(0));
         let _ = approvals.standing();
         Decision::Defer
     }
@@ -651,11 +682,7 @@ impl Tool for GateTool {
                     .risk(RiskClass::Irreversible)
                     .build()
                     .expect("draft"),
-                kernel.principal().clone(),
-                Capture::DirectExecution,
-                RequestContext::default(),
-                Duration::from_secs(600),
-                None,
+                test_origin(kernel.principal().clone()).with_ttl(Duration::from_secs(600)),
             )
             .await
         {
@@ -702,7 +729,7 @@ fn gate_kernel(approver: Arc<dyn Approver>, authority: ApproverHandle) -> Arc<Ke
 /// script timeout — the whole reason stage 3 holds one (spec §C.2).
 #[tokio::test(start_paused = true)]
 async fn a_ninety_second_decision_does_not_trip_a_thirty_second_script_timeout() {
-    let (_requester, _approvals, authority) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let (_requester, _approvals, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
     let started = Arc::new(AtomicUsize::new(0));
     let approver = Arc::new(SlowApprover {
         delay: Duration::from_secs(90),
@@ -713,12 +740,8 @@ async fn a_ninety_second_decision_does_not_trip_a_thirty_second_script_timeout()
                 .unwrap()
                 .stamp(
                     kaish_types::approval::RequestId::new(0, 0),
-                    agent("agent-1"),
-                    Capture::DirectExecution,
-                    RequestContext::default(),
                     SystemTime::now(),
-                    Duration::from_secs(600),
-                    None,
+                    test_origin(agent("agent-1")).with_ttl(Duration::from_secs(600)),
                 ),
             SystemTime::now() + Duration::from_secs(3_600),
         )),
@@ -748,7 +771,7 @@ async fn a_ninety_second_decision_does_not_trip_a_thirty_second_script_timeout()
 /// forever.
 #[tokio::test(start_paused = true)]
 async fn a_decision_that_overruns_its_own_budget_still_trips_the_watchdog() {
-    let (_requester, approvals, authority) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let (_requester, approvals, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
     let approver = Arc::new(SlowApprover {
         delay: Duration::from_secs(3_600),
         decision: Decision::Deny {
@@ -773,8 +796,7 @@ async fn a_decision_that_overruns_its_own_budget_still_trips_the_watchdog() {
     assert_eq!(approvals.pending().len(), 1);
     // One `Requested`, plus the statement tap's unconditional `Observed`
     // (spec §C.6) for the `gate fs.remove` line itself.
-    let chain_entries: Vec<_> = approvals
-        .log(0)
+    let chain_entries: Vec<_> = entries(approvals.log(0))
         .into_iter()
         .filter(|e| !matches!(e, LedgerEntry::Observed { .. }))
         .collect();
@@ -793,12 +815,8 @@ async fn cancellation_during_decide_posts_nothing_and_never_grants() {
                 .unwrap()
                 .stamp(
                     kaish_types::approval::RequestId::new(0, 0),
-                    agent("agent-1"),
-                    Capture::DirectExecution,
-                    RequestContext::default(),
                     SystemTime::now(),
-                    Duration::from_secs(600),
-                    None,
+                    test_origin(agent("agent-1")).with_ttl(Duration::from_secs(600)),
                 ),
             far_future(),
         )),
@@ -825,7 +843,7 @@ async fn cancellation_during_decide_posts_nothing_and_never_grants() {
         Some(RequestState::Requested),
         "a cancelled decision must leave the request exactly as posted"
     );
-    assert_eq!(approvals.log(0).len(), 1, "nothing beyond the Requested entry was posted");
+    assert_eq!(entries(approvals.log(0)).len(), 1, "nothing beyond the Requested entry was posted");
     assert_eq!(gate_result(&outcome, &request).code, 130);
 }
 
@@ -903,12 +921,8 @@ fn grant_terms_for(operation: &str) -> Decision {
             .unwrap()
             .stamp(
                 kaish_types::approval::RequestId::new(0, 0),
-                agent("agent-1"),
-                Capture::DirectExecution,
-                RequestContext::default(),
                 SystemTime::now(),
-                Duration::from_secs(600),
-                None,
+                test_origin(agent("agent-1")).with_ttl(Duration::from_secs(600)),
             ),
         far_future(),
     ))
@@ -947,7 +961,7 @@ async fn a_cancellation_that_beats_the_commit_leaves_no_live_grant() {
             "from_policy={from_policy}: the grant that beat the cancellation must be undone"
         );
         // The record keeps both halves: the decision, and its undoing.
-        let log = approvals.log(0);
+        let log = entries(approvals.log(0));
         assert!(log.iter().any(|e| matches!(e, LedgerEntry::Granted { .. })));
         assert!(log.iter().any(|e| matches!(e, LedgerEntry::Abandoned { .. })));
         // And the credential is gone — an abandoned chain is closed.
@@ -1003,12 +1017,8 @@ async fn an_approver_that_drops_a_declared_condition_is_refused() {
                 .unwrap()
                 .stamp(
                     kaish_types::approval::RequestId::new(0, 0),
-                    agent("agent-1"),
-                    Capture::DirectExecution,
-                    RequestContext::default(),
                     SystemTime::now(),
-                    Duration::from_secs(60),
-                    None,
+                    test_origin(agent("agent-1")),
                 ),
             far_future(),
         )),
@@ -1083,7 +1093,7 @@ async fn with_deny_self_approval_wires_kernelconfig_through_to_the_minted_ledger
 
 #[tokio::test]
 async fn a_session_given_a_handle_holds_authority_and_joins_its_ledger() {
-    let (_requester, approvals, authority) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let (_requester, approvals, authority) = Ledger::build(LedgerConfig::default(), test_scope(), None).unwrap();
     let kernel = Kernel::new(
         KernelConfig::isolated()
             .with_approver_handle(authority.clone())
