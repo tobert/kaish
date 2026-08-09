@@ -15,6 +15,87 @@ before it ships.
 
 ---
 
+## Revision checks: making a race report itself, not whatever it landed on (2026-08-09)
+
+§B.6 reads as one sentence — a stale-revision decision is refused and recorded —
+but the ordering question underneath it took longer to settle than the code did.
+`grant`, `deny`, and `cancel` each already had a state-machine check: `Requested`
+proceeds, `Granted` is `AlreadyDecided`, anything terminal is `Terminal`. The
+question was where the revision check goes relative to that check, and the
+acceptance test that mattered — "a cancel racing a grant leaves exactly one winner
+and exactly one `RevisionRejected`" — only passes one way. Put the revision check
+*after* the state check and the loser sees whatever state the winner left behind
+(`AlreadyDecided` for a cancel that lost to a grant); put it *before*, and the
+loser is told the truth: its view was stale. The transition table in §B.3 already
+implied the ordering — the "stale revision" rows sit next to `Requested`/`Granted`
+rather than folded into `AlreadyDecided`'s row — but seeing it work against a real
+concurrent test was what made the choice feel inevitable rather than arbitrary.
+
+That ordering also resolves something that looked like a contradiction at first
+read: does a current-but-illegal transition (grant an already-granted request,
+quoting the right revision) still get `AlreadyDecided`, or does revision-checking
+swallow it too? It still gets `AlreadyDecided` — because if the quote matches
+current, by construction nothing has moved since the caller last looked, so the
+state-machine check runs exactly as before. The two checks answer different
+questions and only one of them can fire on any given call: "is your view
+current?" and "is this transition legal?"
+
+**Three decisions the task handed me rather than the spec.** The CLI has no
+revision to remember between commands — a human typing `approvals grant req_123`
+isn't carrying a number in their head — so `cmd_grant`/`cmd_deny`/`cmd_cancel`
+each read the request's chain immediately before acting and quote whatever
+revision that read saw. `cmd_grant` already did this read to build `GrantTerms`
+from the request's declared transitions; the revision just rides along on the
+same snapshot. Teardown was the one I expected to want an exemption and didn't
+give one: `cancel_job_request`/`cancel_scope` quote whatever revision their own
+read saw (a job's cached `PendingApproval`, or a fresh `pending()` scan) rather
+than forcing the cancel through unconditionally. A `StaleRevision` there means a
+human or a standing rule decided the request in the window between teardown's
+read and its cancel, and that decision is correct to leave standing — forcing it
+through would silently undo something that actually happened, which is exactly
+the failure mode the whole design refuses elsewhere. `cancel_one`'s match arm
+grew `StaleRevision` next to `NotFound`/`Terminal`/`AlreadyDecided` — a benign
+race, not a bug to warn about.
+
+**One clippy fight worth a sentence.** The natural shape for `check_revision`'s
+return was `Result<(), (LedgerError, Vec<LedgerRecord>)>` — the entries it
+committed riding home with the error. `clippy::result_large_err` didn't like it:
+144 bytes on every `Result<_, LedgerError>` in the module, paid even on the `Ok`
+path, for one method's payload. The fix ended up cleaner than the thing it
+replaced — `check_revision` takes `&mut Vec<LedgerRecord>` and pushes into the
+caller's own `all_committed` directly, the same contract `materialize_expiry`
+already uses a few lines above it. `too_many_arguments` fired next (eight, one
+over the limit) and asked for the same medicine every method with a git.push
+transition needed for `Grant::from_terms` — a small `RevisionQuote<'a>` struct
+bundling the four values the check actually needs, worth having on its own
+merits since `id`/`quoted`/`by`/`attempted` read better named at a call site than
+positional.
+
+**What surprised me in the test file, not the source.** `ledger_core_tests.rs`
+had four tests exercising exactly the shape revision-checking changes: post,
+decide, decide again, assert the second decision's specific error. Every one of
+them needed a second look, not a mechanical argument insertion — the *first*
+decision in each pair correctly quotes the revision at post time (0), but the
+*second* decision, now checked for staleness before its own legality, needed the
+revision the first decision left behind, fetched fresh
+(`approvals.get(&req.id).unwrap().request.revision`) rather than reused from the
+stale local `req`. Get that wrong and the test still fails, but for the wrong
+reason — `StaleRevision` instead of the `AlreadyDecided`/`Terminal` the test was
+actually written to prove. The four sites were `granting_an_already_decided_
+request_is_rejected`, both closed-state cases inside `terminal_states_reject_
+any_further_transition`, `cancelling_a_cancelled_request_is_terminal`, and
+`cancelling_a_granted_request_is_already_decided` — every test in the file whose
+premise is "decide it twice."
+
+`all_entries()` and its round-trip test in `kaish-types` — the fixture every
+`LedgerEntry` variant round-trips through — turned out to be missing `Cancelled`
+already, from R2, never caught because nothing in that file enumerates variants
+against the enum itself. Added it alongside `RevisionRejected` while the tag list
+was already getting a second entry; free coverage sitting one line away from
+where I needed to be anyway.
+
+---
+
 ## What deleting a clock cost, and what it bought (2026-08-09)
 
 The design half of this is two entries down — "The kernel stops waiting", written

@@ -2507,11 +2507,17 @@ impl Kernel {
     /// holding no authority closes its own requests. It cannot close another
     /// principal's.
     ///
+    /// `rev` is the revision the caller's view of the request was at (spec
+    /// §B.6) — this is what makes a deadline timer racing a human's decision
+    /// safe: whichever commits first invalidates the other's quote, and the
+    /// loser is refused and recorded as `RevisionRejected` rather than
+    /// silently applied against a request that has already moved on.
+    ///
     /// # Errors
     ///
     /// The request is unknown, is already terminal, has an attempt in
-    /// flight, or belongs to another principal in a session with no
-    /// authority.
+    /// flight, quotes a stale revision, or belongs to another principal in a
+    /// session with no authority.
     /// Named `cancel_approval` rather than the spec's bare `cancel`:
     /// [`Kernel::cancel`] already means "interrupt the running execution",
     /// and one name for two unrelated cancellations is exactly the
@@ -2519,10 +2525,11 @@ impl Kernel {
     pub async fn cancel_approval(
         &self,
         request_id: &kaish_types::approval::RequestId,
+        rev: u64,
         reason: kaish_types::approval::CancelReason,
     ) -> Result<()> {
         let ctx = self.exec_ctx.read().await;
-        ctx.cancel_request(request_id, reason)
+        ctx.cancel_request(request_id, rev, reason)
             .await
             .map_err(|e| anyhow::anyhow!(e))
     }

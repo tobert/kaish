@@ -338,11 +338,18 @@ impl Requester {
     /// request is already terminal, or when an attempt against it is in
     /// flight — the operation is running, so nothing is stranded yet.
     ///
+    /// `expected_revision` is the revision the caller's view of the request
+    /// was at (spec §B.6). A cancel quoting a stale one is refused and
+    /// recorded as `RevisionRejected` rather than applied — this is what
+    /// lets a deadline timer and a human's decision race safely: whichever
+    /// commits first invalidates the other's quote.
+    ///
     /// Returns the closed request, so a caller can walk its `supersedes`
     /// chain or re-raise the same intent.
     pub async fn cancel(
         &self,
         id: &RequestId,
+        expected_revision: u64,
         by: Principal,
         reason: CancelReason,
     ) -> Result<ApprovalRequest, LedgerError> {
@@ -350,7 +357,7 @@ impl Requester {
         // drained) would wrongly still look `Reserved` to the in-flight
         // check — the same reason `abandon_request` drains.
         self.0.drain_outbox();
-        self.0.cancel(id, by, reason)
+        self.0.cancel(id, expected_revision, by, reason)
     }
 
     /// Post one `Observed` entry: an `observe` subscription covered a
@@ -508,8 +515,12 @@ impl ApproverHandle {
     /// Decide yes. Fails with `LedgerError::AlreadyDecided` if the request
     /// already has a decision, or `LedgerError::Terminal` if it is no
     /// longer `Requested` for any other reason (expired, voided, ...).
-    pub async fn grant(&self, id: &RequestId, terms: GrantTerms) -> Result<(), LedgerError> {
-        self.grant_with_grounds(id, terms, Grounds::Embedder).await.map(|_| ())
+    ///
+    /// `rev` is the revision the caller's view of the request was at (spec
+    /// §B.6) — a grant quoting a stale one is refused and recorded as
+    /// `RevisionRejected` rather than applied.
+    pub async fn grant(&self, id: &RequestId, rev: u64, terms: GrantTerms) -> Result<(), LedgerError> {
+        self.grant_with_grounds(id, rev, terms, Grounds::Embedder).await.map(|_| ())
     }
 
     /// Decide yes, recording *why* — the grounds the decision chain
@@ -519,6 +530,7 @@ impl ApproverHandle {
     pub async fn grant_with_grounds(
         &self,
         id: &RequestId,
+        rev: u64,
         terms: GrantTerms,
         grounds: Grounds,
     ) -> Result<Grant, LedgerError> {
@@ -527,15 +539,19 @@ impl ApproverHandle {
         // stale-undrained-close concern as `post_request`.
         self.0.drain_outbox();
         let decided_by = self.principal();
-        self.0.grant(id, terms, decided_by, grounds)
+        self.0.grant(id, rev, terms, decided_by, grounds)
     }
 
     /// Decide no.
-    pub async fn deny(&self, id: &RequestId, reason: &str) -> Result<(), LedgerError> {
+    ///
+    /// `rev` is the revision the caller's view of the request was at (spec
+    /// §B.6) — a denial quoting a stale one is refused and recorded as
+    /// `RevisionRejected` rather than applied.
+    pub async fn deny(&self, id: &RequestId, rev: u64, reason: &str) -> Result<(), LedgerError> {
         self.0.check_scope(id, self.3.as_ref())?;
         self.0.drain_outbox();
         let by = self.principal();
-        self.0.deny(id, reason.to_string(), by)
+        self.0.deny(id, rev, reason.to_string(), by)
     }
 
     /// Issue a standing grant. `g.id` is overwritten with a

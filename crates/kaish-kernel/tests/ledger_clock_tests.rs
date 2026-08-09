@@ -110,7 +110,7 @@ async fn an_installed_clock_stamps_the_record_and_answers_the_bounds() {
     let chain = kernel.approvals().get(&id).expect("chain");
     let not_after = clock.now() + Duration::from_secs(300);
     authority
-        .grant(&id, GrantTerms::once_for_view(&chain.request, not_after))
+        .grant(&id, chain.request.revision, GrantTerms::once_for_view(&chain.request, not_after))
         .await
         .unwrap();
     assert_eq!(kernel.approvals().state(&id), Some(RequestState::Granted));
@@ -145,7 +145,7 @@ async fn a_reading_below_the_latch_cannot_un_expire_an_unobserved_grant() {
     let chain = kernel.approvals().get(&id).expect("chain");
     let not_after = clock.now() + Duration::from_secs(300);
     authority
-        .grant(&id, GrantTerms::once_for_view(&chain.request, not_after))
+        .grant(&id, chain.request.revision, GrantTerms::once_for_view(&chain.request, not_after))
         .await
         .unwrap();
 

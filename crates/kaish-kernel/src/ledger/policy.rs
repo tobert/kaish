@@ -337,7 +337,12 @@ impl DecisionChain {
                     .authority
                     .clone()
                     .with_principal(principal)
-                    .grant_with_grounds(&request.id, terms, grounds)
+                    // `request` is the value `post_request` just returned to
+                    // this same call chain, so `request.revision` (0) is what
+                    // the chain has actually observed — the same
+                    // caller-quotes-its-own-read contract spec §B.6 gives
+                    // every other decision path (§D.2).
+                    .grant_with_grounds(&request.id, request.revision, terms, grounds)
                     .await?;
                 self.undo_if_cancelled(request, ChainOutcome::Granted { grant, stage }, ctx)
                     .await
@@ -346,7 +351,7 @@ impl DecisionChain {
                 self.authority
                     .clone()
                     .with_principal(principal)
-                    .deny(&request.id, &reason)
+                    .deny(&request.id, request.revision, &reason)
                     .await?;
                 // A denial needs no undo: it authorizes nothing, and
                 // erasing it would lose the record of a real decision.

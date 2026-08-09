@@ -615,7 +615,7 @@ async fn a_grant_posted_a_decade_after_pending_still_redeems() {
     // is nothing in the ledger for an interval to have run down.
     let much_later = SystemTime::now() + Duration::from_secs(10 * 365 * 24 * 3_600);
     authority
-        .grant(&request.id, GrantTerms::once_for(&request, much_later))
+        .grant(&request.id, request.revision, GrantTerms::once_for(&request, much_later))
         .await
         .unwrap();
     assert_eq!(approvals.state(&request.id), Some(RequestState::Granted));
@@ -812,7 +812,7 @@ async fn kernel_build_mints_one_authority_and_a_plain_session_holds_none() {
     let request = post(kernel.requester(), "fs.remove", vec![]).await;
     assert_eq!(kernel.approvals().pending().len(), 1);
     authority
-        .grant(&request.id, GrantTerms::once_for(&request, far_future()))
+        .grant(&request.id, request.revision, GrantTerms::once_for(&request, far_future()))
         .await
         .unwrap();
     assert_eq!(kernel.approvals().state(&request.id), Some(RequestState::Granted));
@@ -829,7 +829,7 @@ async fn with_deny_self_approval_wires_kernelconfig_through_to_the_minted_ledger
     let request = post(kernel.requester(), "fs.remove", vec![]).await;
     let err = authority
         .with_principal(agent("agent-1"))
-        .grant(&request.id, GrantTerms::once_for(&request, far_future()))
+        .grant(&request.id, request.revision, GrantTerms::once_for(&request, far_future()))
         .await
         .unwrap_err();
     assert!(
@@ -861,7 +861,7 @@ async fn a_configured_principal_is_the_one_recorded_on_a_grant() {
     let (kernel, authority) = Kernel::build(KernelConfig::isolated().with_principal(operator())).expect("build");
     let request = post(kernel.requester(), "fs.remove", vec![]).await;
     authority
-        .grant(&request.id, GrantTerms::once_for(&request, far_future()))
+        .grant(&request.id, request.revision, GrantTerms::once_for(&request, far_future()))
         .await
         .unwrap();
 

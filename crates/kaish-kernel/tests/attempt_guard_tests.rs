@@ -69,7 +69,7 @@ async fn dropped_attempt_guard_settles_as_unknown_cancelled_never_an_exit_code()
         .post_request(draft("plugin.dangerous"), test_origin(agent("agent-1")))
         .await
         .unwrap();
-    approver.grant(&req.id, GrantTerms::once_for(&req, far_future())).await.unwrap();
+    approver.grant(&req.id, req.revision, GrantTerms::once_for(&req, far_future())).await.unwrap();
     let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
 
     // The dispatcher's shape: build the guard, then the tool's future is
@@ -108,7 +108,7 @@ async fn panicking_tool_future_settles_the_same_way_as_a_drop() {
         .post_request(draft("plugin.dangerous"), test_origin(agent("agent-1")))
         .await
         .unwrap();
-    approver.grant(&req.id, GrantTerms::once_for(&req, far_future())).await.unwrap();
+    approver.grant(&req.id, req.revision, GrantTerms::once_for(&req, far_future())).await.unwrap();
     let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
 
     let task_requester = requester.clone();
@@ -139,7 +139,7 @@ async fn explicit_settle_before_drop_wins_and_the_drop_push_is_a_no_op() {
         .post_request(draft("plugin.dangerous"), test_origin(agent("agent-1")))
         .await
         .unwrap();
-    approver.grant(&req.id, GrantTerms::once_for(&req, far_future())).await.unwrap();
+    approver.grant(&req.id, req.revision, GrantTerms::once_for(&req, far_future())).await.unwrap();
     let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
 
     let guard = AttemptGuard::new(requester.clone(), attempt);
@@ -179,7 +179,7 @@ async fn dropped_attempt_guard_does_not_falsely_exhaust_capacity_for_the_next_po
         .post_request(draft("plugin.dangerous"), test_origin(agent("agent-1")))
         .await
         .unwrap();
-    approver.grant(&req_a.id, GrantTerms::once_for(&req_a, far_future())).await.unwrap();
+    approver.grant(&req_a.id, req_a.revision, GrantTerms::once_for(&req_a, far_future())).await.unwrap();
     let attempt = requester.redeem(&req_a.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
 
     // Drop without an explicit settle and without any intervening drain

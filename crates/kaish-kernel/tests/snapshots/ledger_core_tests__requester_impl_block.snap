@@ -1,5 +1,6 @@
 ---
 source: crates/kaish-kernel/tests/ledger_core_tests.rs
+assertion_line: 797
 expression: block
 ---
 impl Requester {
@@ -158,11 +159,18 @@ impl Requester {
     /// request is already terminal, or when an attempt against it is in
     /// flight — the operation is running, so nothing is stranded yet.
     ///
+    /// `expected_revision` is the revision the caller's view of the request
+    /// was at (spec §B.6). A cancel quoting a stale one is refused and
+    /// recorded as `RevisionRejected` rather than applied — this is what
+    /// lets a deadline timer and a human's decision race safely: whichever
+    /// commits first invalidates the other's quote.
+    ///
     /// Returns the closed request, so a caller can walk its `supersedes`
     /// chain or re-raise the same intent.
     pub async fn cancel(
         &self,
         id: &RequestId,
+        expected_revision: u64,
         by: Principal,
         reason: CancelReason,
     ) -> Result<ApprovalRequest, LedgerError> {
@@ -170,7 +178,7 @@ impl Requester {
         // drained) would wrongly still look `Reserved` to the in-flight
         // check — the same reason `abandon_request` drains.
         self.0.drain_outbox();
-        self.0.cancel(id, by, reason)
+        self.0.cancel(id, expected_revision, by, reason)
     }
 
     /// Post one `Observed` entry: an `observe` subscription covered a

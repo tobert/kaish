@@ -106,7 +106,7 @@ impl Session {
         let not_after =
             self.kernel.requester().clock_reading() + std::time::Duration::from_secs(300);
         self.authority
-            .grant(&view.id, GrantTerms::once_for_view(&view, not_after))
+            .grant(&view.id, view.revision, GrantTerms::once_for_view(&view, not_after))
             .await
             .expect("the grant must post");
         let token = self

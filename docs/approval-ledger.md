@@ -1270,6 +1270,15 @@ so a missing teardown path cost sixty seconds of capacity and nothing else. With
 costs a slot permanently — which is why the obligation is written here rather than left to
 each call site to remember.
 
+**Teardown is revision-checked like every other caller — there is no kernel-internal
+exemption (§B.6).** It quotes whatever revision its own read of the request just saw: the
+`ApprovalRequestView` a job cached when it gated, or the fresh `Approvals::pending()` scan a
+scope-wide cancel walks. A stale quote here means a decision landed between that read and
+teardown's cancel — a human granted it, a standing rule fired — and that decision is left
+standing rather than overwritten: forcing the cancel through would discard a real decision,
+and the request's own bounded lifecycle (a live grant's `not_after`) already keeps the
+alternative from leaking past a bound.
+
 **What an embedder builds on this.** Deadlines are the embedder's (§A.10), and `cancel` is
 the whole mechanism they need: a bridge that wants a fifteen-minute horizon runs its own
 timer and calls `cancel(id, rev, DeadlinePassed)`; one that wants none never calls it. The
@@ -2250,6 +2259,15 @@ pattern):
 what is pending and *cancel* its own; it cannot approve itself. Anything else makes the whole
 exercise theater, given that the agent's whole job is running shell commands.
 
+**How the CLI quotes a revision (§B.6).** A human at a prompt does not carry a revision
+number around between commands, so `cancel`/`grant`/`deny` each read the request's chain
+immediately before acting — the same read `grant` already does to build `GrantTerms` from
+the request's own declared transitions — and quote the revision that read just saw. This is
+the same optimistic-concurrency contract every other caller gets, applied to a caller with no
+state of its own to hold a revision in: the common case never notices, and the rare case
+where something else decided the request in the instant between the read and the act is
+refused with a message naming both numbers, not applied against a request that has moved on.
+
 **Multi-pending gates.** `ExecResult.approval` stays a single `Option<Box<…>>` — one
 operation, one request; widening it to a `Vec` would push the multiplicity into every
 consumer for a rare case. The fix is that the pending set is now a first-class queryable
@@ -2811,6 +2829,7 @@ decision records are in `git log`. What each one carried:
 | 10 | The statement gate: `Plan`, the classifier seam, the two-site tap, `Capture::Statement` replay (§C.6) |
 | R1 | Identity, binding, and the versioned record: `ApprovalScope`, `parent`, `revision`, `PlanBinding`, `LedgerRecord` (§A.5, §A.7, §A.9) |
 | R2 | No clock-driven decisions and no waiting: the TTL, the expiry path, `renew`, `Approver::decide`, and the patient hold deleted; `cancel` + `CancelReason` + `ApprovalOutcome::Closed` + `PendingApproval`/`ResumeAction` added; §B.5's teardown obligations wired; §I.5's halt and §I.6's `Policy` rename executed (§A.10, §B.5, §C.1–§C.3, §G) |
+| R3 | Revision checks on every transition: `LedgerError::StaleRevision`, `LedgerEntry::RevisionRejected`, `TransitionKind`; `grant`/`grant_with_grounds`/`deny`/`cancel`/`cancel_approval` all gain a `rev: u64` argument, checked before the state-machine legality check so a race reports as a stale quote rather than whatever transition it happened to land on (§B.6) |
 
 Also landed: `security(kernel): CSPRNG confirmation nonces` (kaish #259), which replaced
 the 32-bit non-CSPRNG generator and made entropy failure loud.
@@ -2818,15 +2837,6 @@ the 32-bit non-CSPRNG generator and made entropy failure loud.
 ---
 
 ### Remaining work
-
-**R3 — `refactor(kernel)!: revision checks on every transition`**
-
-§B.6: `revision` quoted by `grant`/`deny`/`cancel`, `LedgerError::StaleRevision`, and the
-`RevisionRejected` entry.
-
-*Tests:* a decision quoting a stale revision is refused **and** recorded; a cancel racing a
-grant leaves exactly one winner and one `RevisionRejected`; settling twice is still a
-silent no-op, since idempotency and revision-checking must not be confused.
 
 **R4 — `refactor(kernel)!: the classifier contract and assessments`**
 

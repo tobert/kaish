@@ -12,7 +12,7 @@ use std::fmt;
 
 use kaish_types::approval::{
     Outcome, Principal, RequestId, RequestState, ResourceRef, SessionId, StandingId, StateClaim,
-    SubscriptionId,
+    SubscriptionId, TransitionKind,
 };
 
 /// Why a ledger transaction did not commit. Every non-`InvariantViolated`
@@ -149,6 +149,21 @@ pub enum LedgerError {
         /// The principal that would have decided the grant.
         granted_by: Principal,
     },
+    /// A `grant`, `deny`, or `cancel` quoted a revision other than the
+    /// request's current one (spec §B.6 — the late-answer rule). Refused and
+    /// recorded as `LedgerEntry::RevisionRejected` in the same transaction,
+    /// never applied: the caller's view of the request is stale, whatever
+    /// state the request has since moved to.
+    StaleRevision {
+        /// The request the stale decision targeted.
+        request: RequestId,
+        /// The revision the caller quoted.
+        quoted: u64,
+        /// The request's actual revision.
+        current: u64,
+        /// Which kind of transition was attempted.
+        attempted: TransitionKind,
+    },
 }
 
 impl fmt::Display for LedgerError {
@@ -226,6 +241,11 @@ impl fmt::Display for LedgerError {
                 f,
                 "request {request} refused: requested by {requested_by:?}, would be granted by {granted_by:?} \
                  — deny_self_approval refuses a principal approving its own request"
+            ),
+            Self::StaleRevision { request, quoted, current, attempted } => write!(
+                f,
+                "{attempted} on request {request} quoted revision {quoted}, but it is now at revision \
+                 {current} — refused and recorded; re-read the current state and decide again"
             ),
         }
     }

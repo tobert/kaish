@@ -124,12 +124,12 @@ async fn a_scoped_authority_decides_only_within_its_session() {
     let theirs = post_in(&requester, scope_for(kernel, Some("b"))).await;
     let a = authority.scope(session("a"));
 
-    a.grant(&mine.id, GrantTerms::once_for(&mine, far_future()))
+    a.grant(&mine.id, mine.revision, GrantTerms::once_for(&mine, far_future()))
         .await
         .expect("a scoped authority decides inside its own session");
 
     let err = a
-        .grant(&theirs.id, GrantTerms::once_for(&theirs, far_future()))
+        .grant(&theirs.id, theirs.revision, GrantTerms::once_for(&theirs, far_future()))
         .await
         .expect_err("a scoped authority must not decide another session's request");
     assert!(
@@ -141,7 +141,7 @@ async fn a_scoped_authority_decides_only_within_its_session() {
     // Denial and key retrieval hold the same line. Retrieval most of all: the
     // key is a bearer credential (spec §A.2), so handing one over is the
     // widest thing an authority does.
-    assert!(a.deny(&theirs.id, "no").await.is_err());
+    assert!(a.deny(&theirs.id, theirs.revision, "no").await.is_err());
     assert!(a.token_for(&mine.id).is_some());
     assert!(
         a.token_for(&theirs.id).is_none(),
@@ -164,7 +164,7 @@ async fn every_record_carries_the_scope_of_the_request_it_is_about() {
         Ledger::build(LedgerConfig::default(), scope_for(kernel, None), None, std::sync::Arc::new(SystemClock)).unwrap();
     let request = post_in(&requester, scope_for(kernel, Some("a"))).await;
     authority
-        .grant(&request.id, GrantTerms::once_for(&request, far_future()))
+        .grant(&request.id, request.revision, GrantTerms::once_for(&request, far_future()))
         .await
         .unwrap();
 
@@ -204,7 +204,7 @@ async fn every_recorded_transition_bumps_the_revision_and_posting_does_not() {
     assert_eq!(revision(&request.id), 0);
 
     authority
-        .grant(&request.id, GrantTerms::once_for(&request, far_future()))
+        .grant(&request.id, request.revision, GrantTerms::once_for(&request, far_future()))
         .await
         .unwrap();
     assert_eq!(revision(&request.id), 1, "Granted is a transition");
@@ -338,7 +338,7 @@ mod kernel_level {
         async fn grant_and_key(&self, id: &RequestId) -> String {
             let view = self.kernel.approvals().get(id).expect("the chain").request;
             self.authority
-                .grant(id, GrantTerms::once_for_view(&view, far_future()))
+                .grant(id, view.revision, GrantTerms::once_for_view(&view, far_future()))
                 .await
                 .expect("the grant must post");
             self.authority

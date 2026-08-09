@@ -275,11 +275,19 @@ let (kernel, authority) = Kernel::build(config)?;
 let gated = kernel.execute("rm 'my notes.txt'").await?;
 if let Some(req) = gated.approval_request() {
     if approve(&req) {                                    // your policy
-        authority.grant(&req.id, terms).await?;
+        authority.grant(&req.id, req.revision, terms).await?;
         let done = kernel.confirm(&authority, &req.id).await?;  // replays exactly
     }
 }
 ```
+
+`req.revision` is the revision this same read of the request saw — quote it back
+(spec §B.6). A grant, denial, or cancellation quoting anything else is refused as
+`LedgerError::StaleRevision` and recorded as `RevisionRejected` rather than
+applied: your view of the request has gone stale, because something else already
+decided, cancelled, or superseded it since you read it. This is what makes
+out-of-band approval safe across an unbounded gap — a human answering a prompt
+for a request that was cancelled while they were thinking cannot revive it.
 
 **The wait is yours, and that is deliberate.** `approve(&req)` above can return
 immediately, or it can pop a dialog, call a model, or sit in a queue until someone
@@ -400,9 +408,9 @@ which is a failure someone can act on rather than a request that quietly
 vanished.
 
 **So closing what you no longer want is yours to do.**
-`Kernel::cancel_approval(&id, why)` closes an undecided request. (It is not
+`Kernel::cancel_approval(&id, rev, why)` closes an undecided request. (It is not
 spelled `cancel`: `Kernel::cancel` already means "interrupt the running
-execution".) Three properties an embedder should know:
+execution".) Four properties an embedder should know:
 
 - **Cancellation takes no `ApproverHandle`.** It is a requester action: a
   session holding no authority cancels its own requests, which is what lets a
@@ -413,6 +421,11 @@ execution".) Three properties an embedder should know:
   is not undone by the requester losing interest — cancelling a granted request
   exits 1 — and a granted-but-unredeemed chain closes on its own at the grant's
   `not_after`.
+- **`rev` is revision-checked, the same as `grant`/`deny` (§B.6).** Quote the
+  revision your view of the request was at; a stale quote is refused as
+  `LedgerError::StaleRevision` rather than applied. This is what keeps a
+  deadline timer from cancelling a request a human just decided out from under
+  it — whichever transition commits first invalidates the other's quote.
 - **Asking again is a new request, not a revival.** Re-run the command; the
   fresh request starts undecided and is linked to the closed one by
   `supersedes`, so the whole thread of intent stays walkable.
@@ -420,8 +433,8 @@ execution".) Three properties an embedder should know:
 **A deadline is a timer you run, not one the kernel runs.** Set
 `RequestOrigin::with_deadline(Some(when))` if you want the request to *record*
 one — it is compared when the request is next observed — and run your own timer
-that calls `cancel_approval(&id, CancelReason::DeadlinePassed)` when it fires.
-An embedder that wants no horizon never calls it.
+that calls `cancel_approval(&id, rev, CancelReason::DeadlinePassed)` when it
+fires. An embedder that wants no horizon never calls it.
 
 **And the clock those bounds are read against is yours too.**
 `KernelConfig::with_approval_clock(Arc<dyn Clock>)` installs it; the default is
