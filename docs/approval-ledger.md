@@ -163,15 +163,17 @@ This is enforced by types, not convention. One log, three handles:
 pub struct Requester(Arc<LedgerInner>);
 
 /// The read side. Safe to hand to anyone: pending requests, states, log tail.
-/// Posts nothing.
+/// Posts nothing. Detached (`None`) when the kernel has no ledger, and scoped
+/// to one session by `Approvals::scope`.
 #[derive(Clone)]
-pub struct Approvals(Arc<LedgerInner>);
+pub struct Approvals(Option<Arc<LedgerInner>>, Option<SessionId>);
 
 /// The approval side's capability. Minted once per kernel at construction and
 /// handed to the embedder. No public constructor, no `Default`, no
-/// `Deserialize`, not reachable from script or tool code.
+/// `Deserialize`, not reachable from script or tool code. Carries the
+/// principal it posts as, and the session it is scoped to if any.
 #[derive(Clone)]
-pub struct ApproverHandle(Arc<LedgerInner>, AuthorityId);
+pub struct ApproverHandle(Arc<LedgerInner>, Principal, Option<SessionId>);
 ```
 
 A tool holding a `&mut dyn ToolCtx` can reach a `Requester` and an `Approvals` and nothing
@@ -1292,9 +1294,10 @@ restarted under a new name, and who acted is already in the record (§A.2).
 a fresh decision. A standing grant will auto-approve it again; a human will be asked again.
 Nothing about the passage of an hour makes a stale approval better.
 
-`JobStatus::Latched` keeps its name and meaning ("held on an unsatisfied gate"). A latched
-job's held request is a ledger reference, so cancellation has somewhere to write, and a job
-discarded while latched cancels its request with `Withdrawn` rather than orphaning it.
+`JobStatus::Gated` carries the meaning the retired `Latched` had ("held on an unsatisfied
+gate"). A gated job's held request is a ledger reference, so cancellation has somewhere to
+write, and a job discarded while gated cancels its request with `Withdrawn` rather than
+orphaning it.
 
 **Teardown must close what it orphans, and this is a hard requirement rather than
 housekeeping.** A request whose requester is gone — a discarded job, a shut-down session —

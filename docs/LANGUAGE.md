@@ -783,7 +783,7 @@ is `Gated`; exit code **2** and `--confirm=<token>` did not change.
 With approvals enabled, `rm` returns **exit code 2** with a pending request:
 ```sh
 $ rm important.dat
-rm: pending approval req_9c1a4f2e_42 — an operator must grant it
+pending approval req_9c1a4f2e_42 — an operator must grant it
 ```
 
 **Approval output contract.** The message above is written to the result's
@@ -805,7 +805,7 @@ names the operation, never its credential.
   `approval` key (never folded into `data`):
 
   ```json
-  { "error": "rm: pending approval req_9c1a4f2e_42 …",
+  { "error": "pending approval req_9c1a4f2e_42 …",
     "code": 2,
     "approval": { "id": "req_9c1a4f2e_42", "operation": "fs.remove",
                   "resources": [{ "kind": "path", "id": "important.dat" }],
