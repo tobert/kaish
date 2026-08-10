@@ -59,6 +59,14 @@ code is something agents can branch on:
 | 124 | Timeout (`timeout_ms`, default 30 s) | — |
 | 130 | Cancelled | — |
 
+**Assert on the code and the kind, never on the wording.** The exit code is
+contract, and so is the `std::io::ErrorKind` a VFS refusal carries — a write
+anywhere under `/v/approvals` is `ErrorKind::Unsupported` (not
+`PermissionDenied`: no permission would make it work) and the statement exits
+**1**. The text in `err` is prose written for a human and improves between
+releases without notice, so a boundary test that pins it fails on a wording
+change that changed no behavior.
+
 Embedders typically run a fresh kernel per request (variables, functions,
 aliases, `set -o` options, and `cwd` reset each time) while trash and
 approval requests persist across calls — share one ledger with
