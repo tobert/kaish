@@ -6,14 +6,15 @@ use kaish_types::approval::LedgerRecord;
 /// Sizing for one [`super::Ledger`] (spec §D.4). There is no timeout here
 /// and there will not be one: the kernel never reads a clock to decide
 /// anything (spec §A.10), so capacity is the whole backstop against an
-/// embedder that asks and never answers. Every field has
-/// a default matching the spec's stated number; construct with
-/// `LedgerConfig { field: ..., ..Default::default() }` to override one —
-/// deliberately **not** `#[non_exhaustive]`, unlike the rest of this
-/// module's public types, so that functional-update pattern keeps working
-/// for embedders (and this crate's own integration tests) as fields are
-/// added.
+/// embedder that asks and never answers. Every field has a default matching
+/// the spec's stated number; start from [`LedgerConfig::default`] and
+/// override with the `with_*` builder methods below. `#[non_exhaustive]`,
+/// like the rest of this module's public types — a field added later must
+/// not be a breaking change for an embedder outside this crate, so
+/// struct-literal construction (and functional-update syntax) is available
+/// only inside this crate; use the builder from anywhere else.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct LedgerConfig {
     /// Maximum LIVE (unclosed) requests. Closed chains do not count against
     /// it. Default 1024.
@@ -59,6 +60,50 @@ impl Default for LedgerConfig {
             max_token_attempts: 5,
             deny_self_approval: false,
         }
+    }
+}
+
+impl LedgerConfig {
+    /// Maximum LIVE (unclosed) requests. Closed chains do not count against
+    /// it. Default 1024.
+    pub fn with_live_capacity(mut self, live_capacity: usize) -> Self {
+        self.live_capacity = live_capacity;
+        self
+    }
+
+    /// Per-principal share of `live_capacity` — one principal cannot starve
+    /// the others. Default 256.
+    pub fn with_live_capacity_per_principal(mut self, live_capacity_per_principal: usize) -> Self {
+        self.live_capacity_per_principal = live_capacity_per_principal;
+        self
+    }
+
+    /// Retained entries in the audit ring. Default 4096. See the field doc
+    /// on [`LedgerConfig::retained_entries`] for what is and is not
+    /// evictable.
+    pub fn with_retained_entries(mut self, retained_entries: usize) -> Self {
+        self.retained_entries = retained_entries;
+        self
+    }
+
+    /// Bounded sink queue depth. Default 1024 entries.
+    pub fn with_sink_queue(mut self, sink_queue: usize) -> Self {
+        self.sink_queue = sink_queue;
+        self
+    }
+
+    /// The rejection count at which a request's chain voids. Default 5.
+    pub fn with_max_token_attempts(mut self, max_token_attempts: u32) -> Self {
+        self.max_token_attempts = max_token_attempts;
+        self
+    }
+
+    /// Refuse a grant whose issuing principal equals the request's own
+    /// principal. Default false. See the field doc on
+    /// [`LedgerConfig::deny_self_approval`] for the full policy rationale.
+    pub fn with_deny_self_approval(mut self, deny_self_approval: bool) -> Self {
+        self.deny_self_approval = deny_self_approval;
+        self
     }
 }
 

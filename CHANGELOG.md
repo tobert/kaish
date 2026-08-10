@@ -11,6 +11,11 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Changed
+- **`LedgerConfig` is `#[non_exhaustive]`.** A field added later
+  must not silently break an embedder's struct literal. Construct with
+  `LedgerConfig::default()` and the new `with_live_capacity`/
+  `with_live_capacity_per_principal`/`with_retained_entries`/`with_sink_queue`/
+  `with_max_token_attempts`/`with_deny_self_approval` builder methods instead.
 - **BREAKING: a pending approval halts the program — exit 2 stops the statement
   loop, and statements after the gated one do not run.** Previously only a
   *statement-level* gate halted; an `fs.*` gate raised **inside** an `Observe`d

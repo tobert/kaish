@@ -169,10 +169,7 @@ async fn explicit_settle_before_drop_wins_and_the_drop_push_is_a_no_op() {
 /// not make the very next `post_request` see the ledger as full.
 #[tokio::test]
 async fn dropped_attempt_guard_does_not_falsely_exhaust_capacity_for_the_next_post() {
-    let config = LedgerConfig {
-        live_capacity: 1,
-        ..Default::default()
-    };
+    let config = LedgerConfig::default().with_live_capacity(1);
     let (requester, approvals, approver) = Ledger::build(config, test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
 
     let req_a = requester
