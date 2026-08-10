@@ -451,6 +451,9 @@ async fn every_other_transition_against_a_consumed_request_is_terminal() {
 
 /// One ledger holding exactly one request that a successful settlement has
 /// consumed — the fixture the `Consumed`-is-terminal cases share.
+// A panic on a known-good fixture IS the test failing; this is a plain helper
+// fn, so clippy's in-test allowance does not reach it.
+#[allow(clippy::unwrap_used)]
 async fn consumed_request() -> (
     kaish_kernel::ledger::Requester,
     kaish_kernel::ledger::Approvals,
