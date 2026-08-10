@@ -10,90 +10,6 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
-### Changed
-- **A successful settlement moves a request to the new `RequestState::Consumed`**
-  (wire spelling `"consumed"`), instead of leaving it `Granted` with closure
-  tracked on a private flag — a reader of a serialized record could not see
-  closure in the `state` field at all. Redeeming a `Consumed` request still
-  reports the settled outcome and does not re-execute; every other transition
-  refuses with `LedgerError::Terminal` naming `Consumed` (`docs/approval-ledger.md`
-  §B.2, §B.3). Ledger-era surface, never released, so no BREAKING marker.
-- **A rejected key bumps the request's `revision` — now a documented contract**,
-  so an approver holding a revision from before the rejection is refused with
-  `LedgerError::StaleRevision` and must re-read: a bad key advances the count
-  toward the fifth that voids the request, so the risk picture changed.
-- **The `latch` and `nonce` terms are retired** from the Terms table in
-  `README.md` and `CLAUDE.md`, replaced by `request`, `grant`, `key`, and
-  `attempt` — the mechanism they named is gone, and a term with no referent
-  teaches a wrong model of the shell.
-- **BREAKING: `kaish_repl::Repl::process_line` takes a second argument**, a
-  `&mut dyn ApprovalPrompt` naming where a gate gets decided. Pass
-  `&mut kaish_repl::approval::NoPrompt` for the previous behavior: no prompt,
-  and the exit-2 result returned as the kernel produced it.
-- **`LedgerConfig` is `#[non_exhaustive]`.** A field added later
-  must not silently break an embedder's struct literal. Construct with
-  `LedgerConfig::default()` and the new `with_live_capacity`/
-  `with_live_capacity_per_principal`/`with_retained_entries`/`with_sink_queue`/
-  `with_max_token_attempts`/`with_deny_self_approval` builder methods instead.
-- **BREAKING: a pending approval halts the program — exit 2 stops the statement
-  loop, and statements after the gated one do not run.** Previously only a
-  *statement-level* gate halted; an `fs.*` gate raised **inside** an `Observe`d
-  statement (what `set -o approvals` turns on) came back as an ordinary exit-2
-  result and the loop ran the next statement. So `kaish -c 'rm x; echo ok'`
-  printed `ok` and exited 0, and `rm x; touch y` created `y` whether or not
-  `rm x` was ever approved — nothing un-creates it. Exit 2 does not mean
-  *failed*, it means *this has not happened yet*, and the statements after it
-  were written expecting it had. The result carries the pending request on
-  `.approval` and exits **2**; the program stops there and an embedder that
-  wants the remainder re-drives it from `ResumeAction::ConfirmStatement`'s
-  `index + 1`. `set -o approvals` is the opt-in that scopes who sees the
-  change (`docs/approval-ledger.md` §I.5).
-- **BREAKING: the `Approver` trait is `Policy`, and `Approver::policy` is
-  `Policy::evaluate`** (`docs/approval-ledger.md` §I.6). It has one synchronous
-  method and approves nothing — `ApproverHandle`, a different object with a
-  confusingly similar name, is what approves. `KernelConfig::with_approver`
-  becomes `with_policy`; `ApproverHandle` keeps its name.
-- **BREAKING: `ApprovalOutcome::Pending` carries `Box<PendingApproval>`**, not a
-  bare `Box<ApprovalRequestView>` — the view plus the `ResumeAction` that says
-  how to pick the request back up.
-- **`ExecResult.approval` carries the whole `PendingApproval` (view + resume
-  route), not just the view.** `ApprovalOutcome::proceed()` always built the
-  route alongside the view; the result boundary dropped it, so a consumer
-  reading a gated `ExecResult` (the REPL's `fulfill_gate` included) had to
-  re-derive the route from the view's `capture` field itself instead of
-  reading it. `ExecResult::pending_approval()` reads the pairing;
-  `ExecResult::approval_request()` stays the narrower accessor for the view
-  alone. `PendingApproval`/`ResumeAction` move from `kaish-tool-api` to
-  `kaish-types` (re-exported from both, so existing imports are unaffected) —
-  the dependency direction only allows the type carrying `ExecResult.approval`
-  to live in the leaf crate. Ledger-era surface, never released, so no
-  BREAKING marker.
-- **BREAKING: `ApprovalRequest::ttl: Duration` is `deadline: Option<SystemTime>`**,
-  defaulting to `None` — nothing times a request out (§A.10). `RequestOrigin::new`
-  loses its `ttl` argument (four arguments now) and `with_ttl` becomes
-  `with_deadline`.
-- **BREAKING: `approvals renew <id>` is `approvals cancel <id>`.** Nothing expires,
-  so there is no expiry to renew from; what a requester needs instead is a way to
-  end a request nobody is going to answer.
-- **BREAKING: `ApproverHandle::grant`/`grant_with_grounds`/`deny`, `Requester::cancel`,
-  and `Kernel::cancel_approval` take a `rev: u64` argument** naming the revision the
-  caller's view of the request was at (`docs/approval-ledger.md` §B.6) — the value
-  every `ApprovalRequestView`/`ApprovalRequest` already carries on `.revision`. A
-  call quoting anything but the request's current revision is refused with
-  `LedgerError::StaleRevision` and recorded as `RevisionRejected` rather than
-  applied.
-- **BREAKING: comma is significant only inside a `[...]`/`{...}` literal or
-  pattern.** A bare `,` used to lex as its own token everywhere, so
-  `sed -n 1,3p`, `cut -f 1,3`, `sort -k 2,2n`, and `echo a,b,c` were parse
-  errors requiring a quoting workaround, even though the only real
-  grammar uses of `,` are list/record literal separators (`[a, b]`,
-  `{k: v, j: w}`) and brace expansion (`{js,ts}`) — both always inside
-  brackets. The lexer now tracks bracket depth and folds a comma into the
-  surrounding bareword whenever it isn't enclosed by an open `[`/`{`, so
-  the examples above all work unquoted; quoting still works, since it was
-  always harmless. Brace expansion, list literals, and record literals are
-  unaffected — comma stays a separate token wherever a `[...]`/`{...}`
-  pair actually opens.
 
 ### Added
 - **The REPL decides its own gates.** A line that comes back with a pending
@@ -248,8 +164,8 @@ breaking entries are marked **BREAKING**.
   invalidated by an assessment landing mid-thought.
 - **`DecisionContext`** — `Policy::evaluate` gains a third argument carrying the
   recorder, so a policy hook can leave a judgment on the log whatever it returns,
-  including a `Defer` a human later turns into a grant. **BREAKING:** `Policy::evaluate`'s
-  signature changes from `(&self, req, ledger)` to `(&self, req, ledger, ctx)`.
+  including a `Defer` a human later turns into a grant. `Policy::evaluate`'s
+  signature is `(&self, req, ledger, ctx)`.
 - **`AssessmentRecorder` is also reachable from `Requester`** — not only
   `ApproverHandle` — because the statement classifier's own judgment (§C.6) is posted
   before any decision authority is relevant: recording an assessment authorizes
@@ -260,7 +176,11 @@ breaking entries are marked **BREAKING**.
   `OutputData`'s gating.
 - `JobId` serializes `#[serde(transparent)]` as a bare integer.
 - `JobStatus`'s pinned wire spelling is lowercase (`"running"`/`"stopped"`/`"done"`/
-  `"latched"`/`"failed"`), matching the existing `/v/jobs/N/status` text vocabulary.
+  `"gated"`/`"killed"`/`"failed"`), matching the existing `/v/jobs/N/status` text
+  vocabulary. (`"gated"` and `"killed"` land later in this same cycle — the ledger
+  rework retires `"latched"` for `"gated"`, and `kill %N` gains its own terminal
+  status; this bullet states the wire spelling as it stands at the end of the
+  cycle, not as it stood when this type first gained serde.)
 - `Display` stays capitalized for human-facing text — the `jobs` table and the
   `[N]+ Done ...` notifications.
 - **`JobInfo` gained `exit_code: Option<i64>`, `started_at: SystemTime`,
@@ -309,9 +229,9 @@ breaking entries are marked **BREAKING**.
 - `GrantTerms::once_for_view` builds terms from the tokenless `ApprovalRequestView`
   an approver holds; rebuilding an `ApprovalRequest` to reach `once_for` drops the
   request's resources and trips `ConditionsWidened`.
-- **BREAKING: `/v/approvals` mount** (ledger PR 7, `docs/approval-ledger.md` §D.3) —
-  a new reserved VFS path; an embedder mounting there through
-  `Kernel::with_backend`'s `configure_vfs` closure now collides with a kernel mount.
+- **`/v/approvals` mount** (ledger PR 7, `docs/approval-ledger.md` §D.3) —
+  a new reserved VFS path under the kernel's `/v/` namespace; an embedder
+  mounting there through `configure_vfs` collides with the kernel mount.
 - `/v/approvals/{pending,standing,log}` and `/v/approvals/<id>/{request,state,attempts,grant}`
   project the ledger's read side; `log` is NDJSON so a consumer can tail it, one
   `LedgerRecord` per line (`schema_version`, `sequence`, `at`, `scope`, `entry`).
@@ -529,7 +449,7 @@ breaking entries are marked **BREAKING**.
 - **`StatementAssessment` carries `assessor`, `model`, and `confidence`**, recorded
   as an `Assessed` ledger entry — "a model allowed this" is not a reproducible audit
   statement without a version or weight identity.
-- **BREAKING: a panicking classifier gates rather than unwinding into the statement
+- **A panicking classifier gates rather than unwinding into the statement
   loop.** The kernel wraps `classify` in `catch_unwind` and maps a caught panic to
   `Gate` through the same path an `Err` return takes — a classifier runs in front of
   *every* statement, including the ones nobody would ever gate, so a bug on one
@@ -563,6 +483,86 @@ breaking entries are marked **BREAKING**.
   `write` (`fs.overwrite`), `mv` (`fs.rename`), `kaish-trash empty` (`trash.empty`).
 
 ### Changed
+- **A successful settlement moves a request to the new `RequestState::Consumed`**
+  (wire spelling `"consumed"`), instead of leaving it `Granted` with closure
+  tracked on a private flag — a reader of a serialized record could not see
+  closure in the `state` field at all. Redeeming a `Consumed` request still
+  reports the settled outcome and does not re-execute; every other transition
+  refuses with `LedgerError::Terminal` naming `Consumed` (`docs/approval-ledger.md`
+  §B.2, §B.3). Ledger-era surface, never released, so no BREAKING marker.
+- **A rejected key bumps the request's `revision` — now a documented contract**,
+  so an approver holding a revision from before the rejection is refused with
+  `LedgerError::StaleRevision` and must re-read: a bad key advances the count
+  toward the fifth that voids the request, so the risk picture changed.
+- **The `latch` and `nonce` terms are retired** from the Terms table in
+  `README.md` and `CLAUDE.md`, replaced by `request`, `grant`, `key`, and
+  `attempt` — the mechanism they named is gone, and a term with no referent
+  teaches a wrong model of the shell.
+- **BREAKING: `kaish_repl::Repl::process_line` takes a second argument**, a
+  `&mut dyn ApprovalPrompt` naming where a gate gets decided. Pass
+  `&mut kaish_repl::approval::NoPrompt` for the previous behavior: no prompt,
+  and the exit-2 result returned as the kernel produced it.
+- **`LedgerConfig` is `#[non_exhaustive]`.** A field added later
+  must not silently break an embedder's struct literal. Construct with
+  `LedgerConfig::default()` and the new `with_live_capacity`/
+  `with_live_capacity_per_principal`/`with_retained_entries`/`with_sink_queue`/
+  `with_max_token_attempts`/`with_deny_self_approval` builder methods instead.
+- **BREAKING: a pending approval halts the program — exit 2 stops the statement
+  loop, and statements after the gated one do not run.** Previously only a
+  *statement-level* gate halted; an `fs.*` gate raised **inside** an `Observe`d
+  statement (what `set -o approvals` turns on) came back as an ordinary exit-2
+  result and the loop ran the next statement. So `kaish -c 'rm x; echo ok'`
+  printed `ok` and exited 0, and `rm x; touch y` created `y` whether or not
+  `rm x` was ever approved — nothing un-creates it. Exit 2 does not mean
+  *failed*, it means *this has not happened yet*, and the statements after it
+  were written expecting it had. The result carries the pending request on
+  `.approval` and exits **2**; the program stops there and an embedder that
+  wants the remainder re-drives it from `ResumeAction::ConfirmStatement`'s
+  `index + 1`. `set -o approvals` is the opt-in that scopes who sees the
+  change (`docs/approval-ledger.md` §I.5).
+- **The embedder policy trait is `Policy`, with one synchronous method,
+  `Policy::evaluate`** (`docs/approval-ledger.md` §I.6). It approves nothing —
+  `ApproverHandle` is what approves. `KernelConfig::with_policy` installs it;
+  `ApproverHandle` keeps its name.
+- **`ApprovalOutcome::Pending` carries `Box<PendingApproval>`** — the view plus
+  the `ResumeAction` that says how to pick the request back up.
+- **`ExecResult.approval` carries the whole `PendingApproval` (view + resume
+  route), not just the view.** `ApprovalOutcome::proceed()` always built the
+  route alongside the view; the result boundary dropped it, so a consumer
+  reading a gated `ExecResult` (the REPL's `fulfill_gate` included) had to
+  re-derive the route from the view's `capture` field itself instead of
+  reading it. `ExecResult::pending_approval()` reads the pairing;
+  `ExecResult::approval_request()` stays the narrower accessor for the view
+  alone. `PendingApproval`/`ResumeAction` move from `kaish-tool-api` to
+  `kaish-types` (re-exported from both, so existing imports are unaffected) —
+  the dependency direction only allows the type carrying `ExecResult.approval`
+  to live in the leaf crate. Ledger-era surface, never released, so no
+  BREAKING marker.
+- **`ApprovalRequest::deadline` is `Option<SystemTime>`, defaulting to `None`** —
+  nothing times a request out (§A.10); a deadline exists only when the embedder
+  sets one, via `RequestOrigin::with_deadline`.
+- **`approvals cancel <id>` closes an undecided request from the requesting
+  side.** Nothing expires, so cancellation is the one way to end a request
+  nobody is going to answer; asking again links the new request by `supersedes`.
+- **`ApproverHandle::grant`/`grant_with_grounds`/`deny`, `Requester::cancel`,
+  and `Kernel::cancel_approval` take a `rev: u64` argument** naming the revision the
+  caller's view of the request was at (`docs/approval-ledger.md` §B.6) — the value
+  every `ApprovalRequestView`/`ApprovalRequest` already carries on `.revision`. A
+  call quoting anything but the request's current revision is refused with
+  `LedgerError::StaleRevision` and recorded as `RevisionRejected` rather than
+  applied.
+- **BREAKING: comma is significant only inside a `[...]`/`{...}` literal or
+  pattern.** A bare `,` used to lex as its own token everywhere, so
+  `sed -n 1,3p`, `cut -f 1,3`, `sort -k 2,2n`, and `echo a,b,c` were parse
+  errors requiring a quoting workaround, even though the only real
+  grammar uses of `,` are list/record literal separators (`[a, b]`,
+  `{k: v, j: w}`) and brace expansion (`{js,ts}`) — both always inside
+  brackets. The lexer now tracks bracket depth and folds a comma into the
+  surrounding bareword whenever it isn't enclosed by an open `[`/`{`, so
+  the examples above all work unquoted; quoting still works, since it was
+  always harmless. Brace expansion, list literals, and record literals are
+  unaffected — comma stays a separate token wherever a `[...]`/`{...}`
+  pair actually opens.
 - **Twenty-three builtins no longer publish clap mechanism as a parameter's
   description** — `pwd`, `test`, `jq`, `sed`, `mktemp`, `patch`, `scatter`,
   `gather`, `push`, `typeof`, and the rest now describe what the operand does;
@@ -585,12 +585,12 @@ breaking entries are marked **BREAKING**.
   instructions are worse than silence — they invite a `kaish-vfs commit` call
   that does nothing. An embedder that uses overlay opts back in with
   `Recipe::agent_onboarding().with_overlay()`.
-- **BREAKING: `ObservedResource.subscription` is `Option<SubscriptionId>`**
+- **`ObservedResource.subscription` is `Option<SubscriptionId>`**
   (ledger PR 10) — the statement tap records one `cmd` resource per planned
   command and no subscription covers any of them, because `cmd.*` never enters
   the subscription registry. A sentinel id would be a silent lie in an audit
   record. Omitted on the wire when absent, so an `fs.*` entry is unchanged.
-- **BREAKING: `Requester::observed` takes a `plan: Option<Plan>`** (ledger PR 10)
+- **`Requester::observed` takes a `plan: Option<Plan>`** (ledger PR 10)
   — `None` for every `fs.*` caller.
 - **BREAKING:** `Kernel::shutdown` now takes `&self` instead of owned `self`,
   and no longer blocks forever (GH #245) — it cancels every tracked job
@@ -706,13 +706,10 @@ breaking entries are marked **BREAKING**.
 - **A failed argv capture no longer becomes an empty replay.** The dispatch seam
   records `Capture::CaptureFailed` instead of substituting an empty argv, so
   `Kernel::confirm` refuses loudly rather than replaying the wrong command.
-- **BREAKING:** `StandingGrant` is one-shot by default — `max_uses` defaults to
+- **`StandingGrant` is one-shot by default** — `max_uses` defaults to
   `Some(1)` in `StandingGrant::new` (which no longer takes a `max_uses`
   parameter) and on the wire (an omitted field is 1, never unlimited); widening
   is explicit via `with_max_uses(n)` / `unlimited_uses()`.
-- **BREAKING:** `NonceStore::issue` returns `Result<String, getrandom::Error>`
-  instead of `String` — entropy failure has to reach the caller, and the old
-  signature had nowhere to put it.
 - **`grep` over a directory tree allocates 70% fewer bytes** (GH #48) — one
   `grep-searcher` per walk instead of one per file, each owning a 64 KiB line
   buffer.
@@ -723,11 +720,12 @@ breaking entries are marked **BREAKING**.
   runs for every ignore rule against every walked path.
 - All three cuts are allocator churn, not peak memory, and were justified by the
   new GH #48 heap profile; behavior is otherwise unchanged.
-- **`jobs --json` now emits the serialized `JobInfo`** plus a `path` field, so the
-  wire shape follows the type instead of a hand-maintained copy.
-- `status` in that output is lowercase (`"failed"`, not `"Failed"`), in line with
-  `/v/jobs/N/status`'s existing `done:0`/`failed:42` vocabulary — the two disagreed
-  before.
+- **BREAKING: `jobs --json` now emits the serialized `JobInfo`** plus a `path`
+  field, so the wire shape follows the type instead of a hand-maintained copy.
+- **BREAKING: `status` in that output is lowercase (`"failed"`, not `"Failed"`)**,
+  in line with `/v/jobs/N/status`'s existing `done:0`/`failed:42` vocabulary — the
+  two disagreed before. A consumer matching `"Failed"` (the 0.13.0 shape) sees no
+  more matches.
 - Rows gain `exit_code`/`started_at`/`finished_at`/`pgids`, each present only when
   set — `exit_code`/`finished_at` absent for a still-running job, `pgids` absent
   when empty.
@@ -737,7 +735,7 @@ breaking entries are marked **BREAKING**.
   collections.
 - ShellCheck reports nothing about kaish's extensions; the kaish validator is the
   only checker that sees them.
-- **BREAKING: `ToolCtx::request_approval` takes a second `presented: Option<&str>`
+- **`ToolCtx::request_approval` takes a second `presented: Option<&str>`
   argument** (`docs/approval-ledger.md` §D.1) — a plugin now has a path to relay its
   own `--confirm=<token>` the way `ExecContext::request_gate` already does for
   in-tree gate sites; without it kaish-git's key-handoff flow had no way to honor a
@@ -751,34 +749,6 @@ breaking entries are marked **BREAKING**.
   misconfiguration (an agent session handed a handle it shouldn't approve its own
   requests with), not an attacker — the ledger already records both principals on
   every grant regardless of the flag.
-
-### Removed
-- **BREAKING:** `Approver::decide` and `Approver::decide_budget`
-  (`docs/approval-ledger.md` §C.2). The kernel awaited that hook under a patient
-  hold; both ways of awaiting one are wrong — a bounded wait is a clock-driven
-  decision, and an unbounded one is a liveness hazard the kernel cannot cancel on
-  anyone's behalf. Everything it could express is still expressible, in the
-  embedder's own task, after `ApprovalOutcome::Pending` comes back.
-  `ledger::{PatientSource, DEFAULT_DECIDE_BUDGET}` and `ChainStage::Decide` go
-  with it; `ChainContext::new` now takes only the cancellation token.
-  `ToolCtx::patient` is untouched — it is a general tool-author facility and is
-  simply no longer on the gate path.
-- **BREAKING:** `LedgerConfig::request_ttl` (was 60s) and
-  `LedgerConfig::attempt_stale_after` (was 600s). How long an unanswered request
-  should live is embedder policy, and a dropped attempt is already reported by
-  `AttemptGuard`'s outbox — inferring it from elapsed time guesses at something
-  the ledger is told. The recovery sweep no longer closes attempts on a staleness
-  bound; it drains the outbox and materializes deadlines that have passed.
-- **BREAKING:** `Requester::renew`, `Kernel::renew`, `LedgerError::NotRenewable`,
-  and `JobManager::renew_gate`/`Job::renew_gate` — with nothing expiring there is
-  no expiry to renew from. Re-run the command to ask again; the new request links
-  to the closed one by `supersedes`.
-- **BREAKING:** `/v/jobs/{id}/stdout` and `/v/jobs/{id}/stderr` (GH #240) — both
-  filled only once, at job completion, while four docs (`jobfs.rs`, `job.rs`,
-  `docs/LANGUAGE.md`) promised a live stream that never existed; removed rather
-  than made live. A background job's output is not observable through
-  `/v/jobs` at all now, live or after completion — redirect it to a file
-  explicitly (`cmd > /tmp/out &`) and read that back instead.
 
 ### Fixed
 - **A panicked background job no longer reports as an ordinary `exit 1`**
