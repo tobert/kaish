@@ -290,7 +290,11 @@ releases may carry breaking changes.
   internal churn (refactors with no observable effect, version bumps).
 - **Mark breaking changes** by starting the bullet with `**BREAKING:**`. Anything
   that changes default features, the embedder API, language grammar, exit-code
-  contracts, or `--json` shapes is breaking.
+  contracts, or `--json` shapes is breaking — **when the surface it changes shipped
+  in a release**. The marker means "a user or embedder of the last released version
+  must act on upgrade." Surface that never shipped carries no marker and gets no
+  removal bullet: edit its bullets in place to describe the final state; the
+  mid-cycle path lives in `git log`.
 - Bullets are concise and scannable — one line each, written for someone reading
   the shell/embedding surface, not the diff.
 - **At release** (the `/release` skill owns this): rename `## [Unreleased]` to
