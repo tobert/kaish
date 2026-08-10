@@ -74,7 +74,7 @@ execute(&str)          lex → parse → Vec<Stmt> → interpret
                                                              ├─► ToolArgs ─► tool.execute()
 execute_argv(&[Value])  ── build_args_from_argv(&[Value]) ──┘     ▲
                           (no lex, no parse, no expansion)         │
-                                                    validation · --json · latch · dispatch
+                                                    validation · --json · approvals · dispatch
 ```
 
 The shared primitive is **command dispatch + arg binding**, sitting *under* both.
@@ -111,7 +111,7 @@ using the same schema-driven flag/value/repeatable/`consumes` consumption that
 `build_args_async` (`kernel.rs:3062`) already does for AST `Arg`s, minus the
 `Expr` evaluation step (tokens are already values). From `ToolArgs` onward it
 reuses **everything**: validation, `--json` (`GlobalFlags::apply_from_args`),
-latch/nonce, `owns_output`, the snapshot/dispatch block
+the approval gate, `owns_output`, the snapshot/dispatch block
 (`execute_command_depth`). No changes to the 90+ builtins. Effort: small — one
 helper plus a thin public method.
 
@@ -173,17 +173,17 @@ Pin the cases: a `Bytes` positional round-trips intact through a builtin that
 reads `args.positional`; *assert the known failure* (or an explicit reject) for
 one that reads its clap field. Boundary tests, not a coverage sweep.
 
-### ④ The shared tail — validation, `--json`, latch, dispatch
+### ④ The shared tail — validation, `--json`, approvals, dispatch
 
 **Deliberately not** re-tested exhaustively. `execute_argv` reuses it from
-`ToolArgs` onward, so a handful of smoke tests prove *reachability* (a latched `rm`
-via argv still emits a nonce; an argv `ls` with `--json` still applies output
+`ToolArgs` onward, so a handful of smoke tests prove *reachability* (a gated `rm`
+via argv still posts an approval request; an argv `ls` with `--json` still applies output
 format) and the convergence property ② covers the rest transitively. Re-running
 the whole `--json` sweep through the new door would be cargo-culting.
 
 ### Concrete test plan
 
-- `tests/execute_argv_tests.rs` — kernel-routed happy/error/latch/`--json` smoke
+- `tests/execute_argv_tests.rs` — kernel-routed happy/error/gate/`--json` smoke
   (existing `common::kernel_at`/`run` harness, ~20 cases).
 - `tests/execute_argv_equivalence.rs` — the differential ② over the single-command
   corpus.
