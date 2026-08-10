@@ -11,7 +11,7 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Changed
-- **BREAKING: `LedgerConfig` is `#[non_exhaustive]`.** A field added later
+- **`LedgerConfig` is `#[non_exhaustive]`.** A field added later
   must not silently break an embedder's struct literal. Construct with
   `LedgerConfig::default()` and the new `with_live_capacity`/
   `with_live_capacity_per_principal`/`with_retained_entries`/`with_sink_queue`/
