@@ -10,76 +10,6 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
-### Changed
-- **The `latch` and `nonce` terms are retired** from the Terms table in
-  `README.md` and `CLAUDE.md`, replaced by `request`, `grant`, `key`, and
-  `attempt` — the mechanism they named is gone, and a term with no referent
-  teaches a wrong model of the shell.
-- **BREAKING: `kaish_repl::Repl::process_line` takes a second argument**, a
-  `&mut dyn ApprovalPrompt` naming where a gate gets decided. Pass
-  `&mut kaish_repl::approval::NoPrompt` for the previous behavior: no prompt,
-  and the exit-2 result returned as the kernel produced it.
-- **`LedgerConfig` is `#[non_exhaustive]`.** A field added later
-  must not silently break an embedder's struct literal. Construct with
-  `LedgerConfig::default()` and the new `with_live_capacity`/
-  `with_live_capacity_per_principal`/`with_retained_entries`/`with_sink_queue`/
-  `with_max_token_attempts`/`with_deny_self_approval` builder methods instead.
-- **BREAKING: a pending approval halts the program — exit 2 stops the statement
-  loop, and statements after the gated one do not run.** Previously only a
-  *statement-level* gate halted; an `fs.*` gate raised **inside** an `Observe`d
-  statement (what `set -o approvals` turns on) came back as an ordinary exit-2
-  result and the loop ran the next statement. So `kaish -c 'rm x; echo ok'`
-  printed `ok` and exited 0, and `rm x; touch y` created `y` whether or not
-  `rm x` was ever approved — nothing un-creates it. Exit 2 does not mean
-  *failed*, it means *this has not happened yet*, and the statements after it
-  were written expecting it had. The result carries the pending request on
-  `.approval` and exits **2**; the program stops there and an embedder that
-  wants the remainder re-drives it from `ResumeAction::ConfirmStatement`'s
-  `index + 1`. `set -o approvals` is the opt-in that scopes who sees the
-  change (`docs/approval-ledger.md` §I.5).
-- **The embedder policy trait is `Policy`, with one synchronous method,
-  `Policy::evaluate`** (`docs/approval-ledger.md` §I.6). It approves nothing —
-  `ApproverHandle` is what approves. `KernelConfig::with_policy` installs it;
-  `ApproverHandle` keeps its name.
-- **`ApprovalOutcome::Pending` carries `Box<PendingApproval>`** — the view plus
-  the `ResumeAction` that says how to pick the request back up.
-- **`ExecResult.approval` carries the whole `PendingApproval` (view + resume
-  route), not just the view.** `ApprovalOutcome::proceed()` always built the
-  route alongside the view; the result boundary dropped it, so a consumer
-  reading a gated `ExecResult` (the REPL's `fulfill_gate` included) had to
-  re-derive the route from the view's `capture` field itself instead of
-  reading it. `ExecResult::pending_approval()` reads the pairing;
-  `ExecResult::approval_request()` stays the narrower accessor for the view
-  alone. `PendingApproval`/`ResumeAction` move from `kaish-tool-api` to
-  `kaish-types` (re-exported from both, so existing imports are unaffected) —
-  the dependency direction only allows the type carrying `ExecResult.approval`
-  to live in the leaf crate. Ledger-era surface, never released, so no
-  BREAKING marker.
-- **`ApprovalRequest::deadline` is `Option<SystemTime>`, defaulting to `None`** —
-  nothing times a request out (§A.10); a deadline exists only when the embedder
-  sets one, via `RequestOrigin::with_deadline`.
-- **`approvals cancel <id>` closes an undecided request from the requesting
-  side.** Nothing expires, so cancellation is the one way to end a request
-  nobody is going to answer; asking again links the new request by `supersedes`.
-- **`ApproverHandle::grant`/`grant_with_grounds`/`deny`, `Requester::cancel`,
-  and `Kernel::cancel_approval` take a `rev: u64` argument** naming the revision the
-  caller's view of the request was at (`docs/approval-ledger.md` §B.6) — the value
-  every `ApprovalRequestView`/`ApprovalRequest` already carries on `.revision`. A
-  call quoting anything but the request's current revision is refused with
-  `LedgerError::StaleRevision` and recorded as `RevisionRejected` rather than
-  applied.
-- **BREAKING: comma is significant only inside a `[...]`/`{...}` literal or
-  pattern.** A bare `,` used to lex as its own token everywhere, so
-  `sed -n 1,3p`, `cut -f 1,3`, `sort -k 2,2n`, and `echo a,b,c` were parse
-  errors requiring a quoting workaround, even though the only real
-  grammar uses of `,` are list/record literal separators (`[a, b]`,
-  `{k: v, j: w}`) and brace expansion (`{js,ts}`) — both always inside
-  brackets. The lexer now tracks bracket depth and folds a comma into the
-  surrounding bareword whenever it isn't enclosed by an open `[`/`{`, so
-  the examples above all work unquoted; quoting still works, since it was
-  always harmless. Brace expansion, list literals, and record literals are
-  unaffected — comma stays a separate token wherever a `[...]`/`{...}`
-  pair actually opens.
 
 ### Added
 - **The REPL decides its own gates.** A line that comes back with a pending
@@ -299,9 +229,9 @@ breaking entries are marked **BREAKING**.
 - `GrantTerms::once_for_view` builds terms from the tokenless `ApprovalRequestView`
   an approver holds; rebuilding an `ApprovalRequest` to reach `once_for` drops the
   request's resources and trips `ConditionsWidened`.
-- **BREAKING: `/v/approvals` mount** (ledger PR 7, `docs/approval-ledger.md` §D.3) —
-  a new reserved VFS path; an embedder mounting there through
-  `Kernel::with_backend`'s `configure_vfs` closure now collides with a kernel mount.
+- **`/v/approvals` mount** (ledger PR 7, `docs/approval-ledger.md` §D.3) —
+  a new reserved VFS path under the kernel's `/v/` namespace; an embedder
+  mounting there through `configure_vfs` collides with the kernel mount.
 - `/v/approvals/{pending,standing,log}` and `/v/approvals/<id>/{request,state,attempts,grant}`
   project the ledger's read side; `log` is NDJSON so a consumer can tail it, one
   `LedgerRecord` per line (`schema_version`, `sequence`, `at`, `scope`, `entry`).
@@ -553,6 +483,75 @@ breaking entries are marked **BREAKING**.
   `write` (`fs.overwrite`), `mv` (`fs.rename`), `kaish-trash empty` (`trash.empty`).
 
 ### Changed
+- **The `latch` and `nonce` terms are retired** from the Terms table in
+  `README.md` and `CLAUDE.md`, replaced by `request`, `grant`, `key`, and
+  `attempt` — the mechanism they named is gone, and a term with no referent
+  teaches a wrong model of the shell.
+- **BREAKING: `kaish_repl::Repl::process_line` takes a second argument**, a
+  `&mut dyn ApprovalPrompt` naming where a gate gets decided. Pass
+  `&mut kaish_repl::approval::NoPrompt` for the previous behavior: no prompt,
+  and the exit-2 result returned as the kernel produced it.
+- **`LedgerConfig` is `#[non_exhaustive]`.** A field added later
+  must not silently break an embedder's struct literal. Construct with
+  `LedgerConfig::default()` and the new `with_live_capacity`/
+  `with_live_capacity_per_principal`/`with_retained_entries`/`with_sink_queue`/
+  `with_max_token_attempts`/`with_deny_self_approval` builder methods instead.
+- **BREAKING: a pending approval halts the program — exit 2 stops the statement
+  loop, and statements after the gated one do not run.** Previously only a
+  *statement-level* gate halted; an `fs.*` gate raised **inside** an `Observe`d
+  statement (what `set -o approvals` turns on) came back as an ordinary exit-2
+  result and the loop ran the next statement. So `kaish -c 'rm x; echo ok'`
+  printed `ok` and exited 0, and `rm x; touch y` created `y` whether or not
+  `rm x` was ever approved — nothing un-creates it. Exit 2 does not mean
+  *failed*, it means *this has not happened yet*, and the statements after it
+  were written expecting it had. The result carries the pending request on
+  `.approval` and exits **2**; the program stops there and an embedder that
+  wants the remainder re-drives it from `ResumeAction::ConfirmStatement`'s
+  `index + 1`. `set -o approvals` is the opt-in that scopes who sees the
+  change (`docs/approval-ledger.md` §I.5).
+- **The embedder policy trait is `Policy`, with one synchronous method,
+  `Policy::evaluate`** (`docs/approval-ledger.md` §I.6). It approves nothing —
+  `ApproverHandle` is what approves. `KernelConfig::with_policy` installs it;
+  `ApproverHandle` keeps its name.
+- **`ApprovalOutcome::Pending` carries `Box<PendingApproval>`** — the view plus
+  the `ResumeAction` that says how to pick the request back up.
+- **`ExecResult.approval` carries the whole `PendingApproval` (view + resume
+  route), not just the view.** `ApprovalOutcome::proceed()` always built the
+  route alongside the view; the result boundary dropped it, so a consumer
+  reading a gated `ExecResult` (the REPL's `fulfill_gate` included) had to
+  re-derive the route from the view's `capture` field itself instead of
+  reading it. `ExecResult::pending_approval()` reads the pairing;
+  `ExecResult::approval_request()` stays the narrower accessor for the view
+  alone. `PendingApproval`/`ResumeAction` move from `kaish-tool-api` to
+  `kaish-types` (re-exported from both, so existing imports are unaffected) —
+  the dependency direction only allows the type carrying `ExecResult.approval`
+  to live in the leaf crate. Ledger-era surface, never released, so no
+  BREAKING marker.
+- **`ApprovalRequest::deadline` is `Option<SystemTime>`, defaulting to `None`** —
+  nothing times a request out (§A.10); a deadline exists only when the embedder
+  sets one, via `RequestOrigin::with_deadline`.
+- **`approvals cancel <id>` closes an undecided request from the requesting
+  side.** Nothing expires, so cancellation is the one way to end a request
+  nobody is going to answer; asking again links the new request by `supersedes`.
+- **`ApproverHandle::grant`/`grant_with_grounds`/`deny`, `Requester::cancel`,
+  and `Kernel::cancel_approval` take a `rev: u64` argument** naming the revision the
+  caller's view of the request was at (`docs/approval-ledger.md` §B.6) — the value
+  every `ApprovalRequestView`/`ApprovalRequest` already carries on `.revision`. A
+  call quoting anything but the request's current revision is refused with
+  `LedgerError::StaleRevision` and recorded as `RevisionRejected` rather than
+  applied.
+- **BREAKING: comma is significant only inside a `[...]`/`{...}` literal or
+  pattern.** A bare `,` used to lex as its own token everywhere, so
+  `sed -n 1,3p`, `cut -f 1,3`, `sort -k 2,2n`, and `echo a,b,c` were parse
+  errors requiring a quoting workaround, even though the only real
+  grammar uses of `,` are list/record literal separators (`[a, b]`,
+  `{k: v, j: w}`) and brace expansion (`{js,ts}`) — both always inside
+  brackets. The lexer now tracks bracket depth and folds a comma into the
+  surrounding bareword whenever it isn't enclosed by an open `[`/`{`, so
+  the examples above all work unquoted; quoting still works, since it was
+  always harmless. Brace expansion, list literals, and record literals are
+  unaffected — comma stays a separate token wherever a `[...]`/`{...}`
+  pair actually opens.
 - **Twenty-three builtins no longer publish clap mechanism as a parameter's
   description** — `pwd`, `test`, `jq`, `sed`, `mktemp`, `patch`, `scatter`,
   `gather`, `push`, `typeof`, and the rest now describe what the operand does;
