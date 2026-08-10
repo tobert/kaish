@@ -37,14 +37,12 @@ breaking entries are marked **BREAKING**.
   wants the remainder re-drives it from `ResumeAction::ConfirmStatement`'s
   `index + 1`. `set -o approvals` is the opt-in that scopes who sees the
   change (`docs/approval-ledger.md` §I.5).
-- **BREAKING: the `Approver` trait is `Policy`, and `Approver::policy` is
-  `Policy::evaluate`** (`docs/approval-ledger.md` §I.6). It has one synchronous
-  method and approves nothing — `ApproverHandle`, a different object with a
-  confusingly similar name, is what approves. `KernelConfig::with_approver`
-  becomes `with_policy`; `ApproverHandle` keeps its name.
-- **BREAKING: `ApprovalOutcome::Pending` carries `Box<PendingApproval>`**, not a
-  bare `Box<ApprovalRequestView>` — the view plus the `ResumeAction` that says
-  how to pick the request back up.
+- **The embedder policy trait is `Policy`, with one synchronous method,
+  `Policy::evaluate`** (`docs/approval-ledger.md` §I.6). It approves nothing —
+  `ApproverHandle` is what approves. `KernelConfig::with_policy` installs it;
+  `ApproverHandle` keeps its name.
+- **`ApprovalOutcome::Pending` carries `Box<PendingApproval>`** — the view plus
+  the `ResumeAction` that says how to pick the request back up.
 - **`ExecResult.approval` carries the whole `PendingApproval` (view + resume
   route), not just the view.** `ApprovalOutcome::proceed()` always built the
   route alongside the view; the result boundary dropped it, so a consumer
@@ -57,14 +55,13 @@ breaking entries are marked **BREAKING**.
   the dependency direction only allows the type carrying `ExecResult.approval`
   to live in the leaf crate. Ledger-era surface, never released, so no
   BREAKING marker.
-- **BREAKING: `ApprovalRequest::ttl: Duration` is `deadline: Option<SystemTime>`**,
-  defaulting to `None` — nothing times a request out (§A.10). `RequestOrigin::new`
-  loses its `ttl` argument (four arguments now) and `with_ttl` becomes
-  `with_deadline`.
-- **BREAKING: `approvals renew <id>` is `approvals cancel <id>`.** Nothing expires,
-  so there is no expiry to renew from; what a requester needs instead is a way to
-  end a request nobody is going to answer.
-- **BREAKING: `ApproverHandle::grant`/`grant_with_grounds`/`deny`, `Requester::cancel`,
+- **`ApprovalRequest::deadline` is `Option<SystemTime>`, defaulting to `None`** —
+  nothing times a request out (§A.10); a deadline exists only when the embedder
+  sets one, via `RequestOrigin::with_deadline`.
+- **`approvals cancel <id>` closes an undecided request from the requesting
+  side.** Nothing expires, so cancellation is the one way to end a request
+  nobody is going to answer; asking again links the new request by `supersedes`.
+- **`ApproverHandle::grant`/`grant_with_grounds`/`deny`, `Requester::cancel`,
   and `Kernel::cancel_approval` take a `rev: u64` argument** naming the revision the
   caller's view of the request was at (`docs/approval-ledger.md` §B.6) — the value
   every `ApprovalRequestView`/`ApprovalRequest` already carries on `.revision`. A
@@ -237,8 +234,8 @@ breaking entries are marked **BREAKING**.
   invalidated by an assessment landing mid-thought.
 - **`DecisionContext`** — `Policy::evaluate` gains a third argument carrying the
   recorder, so a policy hook can leave a judgment on the log whatever it returns,
-  including a `Defer` a human later turns into a grant. **BREAKING:** `Policy::evaluate`'s
-  signature changes from `(&self, req, ledger)` to `(&self, req, ledger, ctx)`.
+  including a `Defer` a human later turns into a grant. `Policy::evaluate`'s
+  signature is `(&self, req, ledger, ctx)`.
 - **`AssessmentRecorder` is also reachable from `Requester`** — not only
   `ApproverHandle` — because the statement classifier's own judgment (§C.6) is posted
   before any decision authority is relevant: recording an assessment authorizes
@@ -522,7 +519,7 @@ breaking entries are marked **BREAKING**.
 - **`StatementAssessment` carries `assessor`, `model`, and `confidence`**, recorded
   as an `Assessed` ledger entry — "a model allowed this" is not a reproducible audit
   statement without a version or weight identity.
-- **BREAKING: a panicking classifier gates rather than unwinding into the statement
+- **A panicking classifier gates rather than unwinding into the statement
   loop.** The kernel wraps `classify` in `catch_unwind` and maps a caught panic to
   `Gate` through the same path an `Err` return takes — a classifier runs in front of
   *every* statement, including the ones nobody would ever gate, so a bug on one
@@ -578,12 +575,12 @@ breaking entries are marked **BREAKING**.
   instructions are worse than silence — they invite a `kaish-vfs commit` call
   that does nothing. An embedder that uses overlay opts back in with
   `Recipe::agent_onboarding().with_overlay()`.
-- **BREAKING: `ObservedResource.subscription` is `Option<SubscriptionId>`**
+- **`ObservedResource.subscription` is `Option<SubscriptionId>`**
   (ledger PR 10) — the statement tap records one `cmd` resource per planned
   command and no subscription covers any of them, because `cmd.*` never enters
   the subscription registry. A sentinel id would be a silent lie in an audit
   record. Omitted on the wire when absent, so an `fs.*` entry is unchanged.
-- **BREAKING: `Requester::observed` takes a `plan: Option<Plan>`** (ledger PR 10)
+- **`Requester::observed` takes a `plan: Option<Plan>`** (ledger PR 10)
   — `None` for every `fs.*` caller.
 - **BREAKING:** `Kernel::shutdown` now takes `&self` instead of owned `self`,
   and no longer blocks forever (GH #245) — it cancels every tracked job
@@ -699,13 +696,10 @@ breaking entries are marked **BREAKING**.
 - **A failed argv capture no longer becomes an empty replay.** The dispatch seam
   records `Capture::CaptureFailed` instead of substituting an empty argv, so
   `Kernel::confirm` refuses loudly rather than replaying the wrong command.
-- **BREAKING:** `StandingGrant` is one-shot by default — `max_uses` defaults to
+- **`StandingGrant` is one-shot by default** — `max_uses` defaults to
   `Some(1)` in `StandingGrant::new` (which no longer takes a `max_uses`
   parameter) and on the wire (an omitted field is 1, never unlimited); widening
   is explicit via `with_max_uses(n)` / `unlimited_uses()`.
-- **BREAKING:** `NonceStore::issue` returns `Result<String, getrandom::Error>`
-  instead of `String` — entropy failure has to reach the caller, and the old
-  signature had nowhere to put it.
 - **`grep` over a directory tree allocates 70% fewer bytes** (GH #48) — one
   `grep-searcher` per walk instead of one per file, each owning a 64 KiB line
   buffer.
@@ -731,7 +725,7 @@ breaking entries are marked **BREAKING**.
   collections.
 - ShellCheck reports nothing about kaish's extensions; the kaish validator is the
   only checker that sees them.
-- **BREAKING: `ToolCtx::request_approval` takes a second `presented: Option<&str>`
+- **`ToolCtx::request_approval` takes a second `presented: Option<&str>`
   argument** (`docs/approval-ledger.md` §D.1) — a plugin now has a path to relay its
   own `--confirm=<token>` the way `ExecContext::request_gate` already does for
   in-tree gate sites; without it kaish-git's key-handoff flow had no way to honor a
@@ -745,28 +739,6 @@ breaking entries are marked **BREAKING**.
   misconfiguration (an agent session handed a handle it shouldn't approve its own
   requests with), not an attacker — the ledger already records both principals on
   every grant regardless of the flag.
-
-### Removed
-- **BREAKING:** `Approver::decide` and `Approver::decide_budget`
-  (`docs/approval-ledger.md` §C.2). The kernel awaited that hook under a patient
-  hold; both ways of awaiting one are wrong — a bounded wait is a clock-driven
-  decision, and an unbounded one is a liveness hazard the kernel cannot cancel on
-  anyone's behalf. Everything it could express is still expressible, in the
-  embedder's own task, after `ApprovalOutcome::Pending` comes back.
-  `ledger::{PatientSource, DEFAULT_DECIDE_BUDGET}` and `ChainStage::Decide` go
-  with it; `ChainContext::new` now takes only the cancellation token.
-  `ToolCtx::patient` is untouched — it is a general tool-author facility and is
-  simply no longer on the gate path.
-- **BREAKING:** `LedgerConfig::request_ttl` (was 60s) and
-  `LedgerConfig::attempt_stale_after` (was 600s). How long an unanswered request
-  should live is embedder policy, and a dropped attempt is already reported by
-  `AttemptGuard`'s outbox — inferring it from elapsed time guesses at something
-  the ledger is told. The recovery sweep no longer closes attempts on a staleness
-  bound; it drains the outbox and materializes deadlines that have passed.
-- **BREAKING:** `Requester::renew`, `Kernel::renew`, `LedgerError::NotRenewable`,
-  and `JobManager::renew_gate`/`Job::renew_gate` — with nothing expiring there is
-  no expiry to renew from. Re-run the command to ask again; the new request links
-  to the closed one by `supersedes`.
 
 ### Fixed
 - **A panicked background job no longer reports as an ordinary `exit 1`**
