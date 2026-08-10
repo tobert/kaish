@@ -326,8 +326,9 @@ that only wants the view. Read `.resume` off what `pending_approval()`
 returns rather than calling `ResumeAction::for_capture` yourself — that
 function is what built the route the first time, and calling it again at the
 read site is exactly the duplicate-derivation this pairing exists to avoid.
-All three types (`PendingApproval`, `ResumeAction`, `ApprovalRequestView`)
-are re-exported from `kaish_kernel::ledger`.
+`PendingApproval` and `ResumeAction` are re-exported from
+`kaish_kernel::ledger`; `ApprovalRequestView` is reached through
+`PendingApproval::request` (or imported from `kaish_types::approval`).
 
 Two consequences worth planning for:
 
