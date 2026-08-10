@@ -874,7 +874,7 @@ one that reaches the approval side:
 |---|---|
 | `approvals list [--pending\|--all\|--standing]` | Requests awaiting a decision (default), every retained request, or the live standing grants |
 | `approvals show <id>` | One request: what was asked, what was decided, and every attempt |
-| `approvals log [--since <seq>]` | The retained entries, oldest first |
+| `approvals log [--since <seq>] [--limit N]` | The retained entries, oldest first, up to `N` (default 200); names the `--since` for the next page when more remain |
 | `approvals cancel <id>` | Close an undecided request. Needs no authority for your own |
 | `approvals grant <id> [--until <duration>]` | Approve it. Defaults to 5m, and is good for one successful run |
 | `approvals deny <id> [--reason R]` | Refuse it |

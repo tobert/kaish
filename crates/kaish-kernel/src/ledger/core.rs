@@ -492,7 +492,28 @@ pub(crate) struct LedgerInner {
     /// by `subscribe`/`unsubscribe`, so it can never disagree with the
     /// registry for longer than one uncontended store.
     any_subscriptions: AtomicBool,
+    /// Live fan-out for `Approvals::watch` (spec §D.2). Every committed
+    /// entry is sent here, from [`Self::emit_events`],
+    /// after the transaction that produced it has released `state` — the
+    /// same point tracing already emits from, so a watcher never observes
+    /// an entry before a reader taking the lock right after would. `send`
+    /// returning `Err` just means no one is subscribed right now; that is
+    /// not a failure, so the result is discarded. A subscriber that falls
+    /// behind the ring buffer gets `RecvError::Lagged` from `recv`, which
+    /// `LedgerStream` turns into `WatchEvent::Lagged` rather than silently
+    /// dropping the gap.
+    watch_tx: tokio::sync::broadcast::Sender<LedgerRecord>,
 }
+
+/// How many not-yet-delivered records [`LedgerInner::watch`]'s broadcast
+/// channel holds per lagging subscriber before it starts reporting
+/// `WatchEvent::Lagged` instead of the entries themselves. Sized against
+/// [`LedgerConfig::retained_entries`]'s own default (4096): a watcher this
+/// far behind the live tail can always resynchronize by reading
+/// `Approvals::log` from its last seen `seq` instead, so a larger buffer
+/// would only spend memory delaying a report the reader can act on either
+/// way.
+const WATCH_BUFFER: usize = 1024;
 
 /// The four values one `grant`/`deny`/`cancel` call's revision check needs
 /// (spec §B.6), bundled so [`LedgerInner::check_revision`] stays under
@@ -677,7 +698,7 @@ impl LedgerInner {
         let now = self.now(&mut guard);
         let (request, committed) = self.post_request_locked(&mut guard, draft, origin, now)?;
         drop(guard);
-        emit_events(&committed);
+        emit_events(&self.watch_tx, &committed);
         Ok(request)
     }
 
@@ -750,7 +771,7 @@ impl LedgerInner {
         let (result, committed) = self.redeem_locked(&mut guard, id, by, report, now);
         all_committed.extend(committed);
         drop(guard);
-        emit_events(&all_committed);
+        emit_events(&self.watch_tx, &all_committed);
         result
     }
 
@@ -768,7 +789,7 @@ impl LedgerInner {
         let Some(chain) = guard.chains.get(id) else {
             all_committed.extend(self.record_unmatched_key_locked(&mut guard, now));
             drop(guard);
-            emit_events(&all_committed);
+            emit_events(&self.watch_tx, &all_committed);
             return Err(LedgerError::NotAuthorized(id.clone()));
         };
 
@@ -792,7 +813,7 @@ impl LedgerInner {
                 self.terminal_error(id, chain.state, chain.void_reason.clone())
             };
             drop(guard);
-            emit_events(&all_committed);
+            emit_events(&self.watch_tx, &all_committed);
             return Err(err);
         }
 
@@ -811,7 +832,7 @@ impl LedgerInner {
             let (result, committed) = self.redeem_locked(&mut guard, id, by, report, now);
             all_committed.extend(committed);
             drop(guard);
-            emit_events(&all_committed);
+            emit_events(&self.watch_tx, &all_committed);
             return result;
         }
 
@@ -828,7 +849,7 @@ impl LedgerInner {
         // `TokenRejected` entries actually on the log.
         let Some(chain) = guard.chains.get(id) else {
             drop(guard);
-            emit_events(&all_committed);
+            emit_events(&self.watch_tx, &all_committed);
             return Err(LedgerError::NotAuthorized(id.clone()));
         };
         let n = chain.reject_count + 1;
@@ -837,7 +858,7 @@ impl LedgerInner {
             Ok(r) => r,
             Err(err) => {
                 drop(guard);
-                emit_events(&all_committed);
+                emit_events(&self.watch_tx, &all_committed);
                 return Err(err);
             }
         };
@@ -875,7 +896,7 @@ impl LedgerInner {
         }
         all_committed.extend(guard.commit(entries, None, reserved));
         drop(guard);
-        emit_events(&all_committed);
+        emit_events(&self.watch_tx, &all_committed);
         Err(LedgerError::NotAuthorized(id.clone()))
     }
 
@@ -912,7 +933,7 @@ impl LedgerInner {
         let now = self.now(&mut guard);
         let committed = self.record_unmatched_key_locked(&mut guard, now);
         drop(guard);
-        emit_events(&committed);
+        emit_events(&self.watch_tx, &committed);
     }
 
     /// Which request a fresh draft describes (spec §B.4's draft matcher):
@@ -1159,7 +1180,7 @@ impl LedgerInner {
             guard.mark_closed(request_id);
         }
         drop(guard);
-        emit_events(&[committed_entry]);
+        emit_events(&self.watch_tx, &[committed_entry]);
         Ok(true)
     }
 
@@ -1173,19 +1194,19 @@ impl LedgerInner {
         if chain.is_closed() {
             let err = self.terminal_error(id, chain.state, chain.void_reason.clone());
             drop(guard);
-            emit_events(&all_committed);
+            emit_events(&self.watch_tx, &all_committed);
             return Err(err);
         }
         if chain.live_attempt.is_some() {
             drop(guard);
-            emit_events(&all_committed);
+            emit_events(&self.watch_tx, &all_committed);
             return Err(LedgerError::AttemptInFlight(id.clone()));
         }
         let reserved = match guard.reserve_capacity(1, self.config.retained_entries) {
             Ok(r) => r,
             Err(err) => {
                 drop(guard);
-                emit_events(&all_committed);
+                emit_events(&self.watch_tx, &all_committed);
                 return Err(err);
             }
         };
@@ -1206,7 +1227,7 @@ impl LedgerInner {
         }
         guard.mark_closed(id);
         drop(guard);
-        emit_events(&all_committed);
+        emit_events(&self.watch_tx, &all_committed);
         Ok(())
     }
 
@@ -1236,7 +1257,7 @@ impl LedgerInner {
             ($err:expr) => {{
                 let err = $err;
                 drop(guard);
-                emit_events(&all_committed);
+                emit_events(&self.watch_tx, &all_committed);
                 return Err(err);
             }};
         }
@@ -1299,7 +1320,7 @@ impl LedgerInner {
         };
         guard.mark_closed(id);
         drop(guard);
-        emit_events(&all_committed);
+        emit_events(&self.watch_tx, &all_committed);
         Ok(request)
     }
 
@@ -1466,7 +1487,7 @@ impl LedgerInner {
             ($err:expr) => {{
                 let err = $err;
                 drop(guard);
-                emit_events(&all_committed);
+                emit_events(&self.watch_tx, &all_committed);
                 return Err(err);
             }};
         }
@@ -1532,7 +1553,7 @@ impl LedgerInner {
             chain.token = Some(token);
         }
         drop(guard);
-        emit_events(&all_committed);
+        emit_events(&self.watch_tx, &all_committed);
         Ok(grant)
     }
 
@@ -1548,19 +1569,19 @@ impl LedgerInner {
         let mut all_committed = self.materialize_expiry(&mut guard, id, now)?;
         if !guard.chains.contains_key(id) {
             drop(guard);
-            emit_events(&all_committed);
+            emit_events(&self.watch_tx, &all_committed);
             return Err(LedgerError::NotFound(id.clone()));
         }
         // See `cancel`'s identical ordering (spec §B.6).
         let quote = RevisionQuote { id, quoted: rev, by: &by, attempted: TransitionKind::Deny };
         if let Err(err) = self.check_revision(&mut guard, quote, now, &mut all_committed) {
             drop(guard);
-            emit_events(&all_committed);
+            emit_events(&self.watch_tx, &all_committed);
             return Err(err);
         }
         let Some(chain) = guard.chains.get(id) else {
             drop(guard);
-            emit_events(&all_committed);
+            emit_events(&self.watch_tx, &all_committed);
             return Err(LedgerError::InvariantViolated(format!(
                 "deny: request {id} vanished from the live index inside its own transaction"
             )));
@@ -1569,13 +1590,13 @@ impl LedgerInner {
             RequestState::Requested => {}
             RequestState::Granted => {
                 drop(guard);
-                emit_events(&all_committed);
+                emit_events(&self.watch_tx, &all_committed);
                 return Err(LedgerError::AlreadyDecided(id.clone()));
             }
             other => {
                 let err = self.terminal_error(id, other, chain.void_reason.clone());
                 drop(guard);
-                emit_events(&all_committed);
+                emit_events(&self.watch_tx, &all_committed);
                 return Err(err);
             }
         }
@@ -1583,7 +1604,7 @@ impl LedgerInner {
             Ok(r) => r,
             Err(err) => {
                 drop(guard);
-                emit_events(&all_committed);
+                emit_events(&self.watch_tx, &all_committed);
                 return Err(err);
             }
         };
@@ -1604,7 +1625,7 @@ impl LedgerInner {
         }
         guard.mark_closed(id);
         drop(guard);
-        emit_events(&all_committed);
+        emit_events(&self.watch_tx, &all_committed);
         Ok(())
     }
 
@@ -1628,7 +1649,7 @@ impl LedgerInner {
         )];
         let committed = guard.commit(entries, None, reserved);
         drop(guard);
-        emit_events(&committed);
+        emit_events(&self.watch_tx, &committed);
         Ok(id)
     }
 
@@ -1669,14 +1690,14 @@ impl LedgerInner {
             ($err:expr) => {{
                 let err = $err;
                 drop(guard);
-                emit_events(&all_committed);
+                emit_events(&self.watch_tx, &all_committed);
                 return Err(err);
             }};
         }
         macro_rules! no_match {
             () => {{
                 drop(guard);
-                emit_events(&all_committed);
+                emit_events(&self.watch_tx, &all_committed);
                 return Ok(None);
             }};
         }
@@ -1763,7 +1784,7 @@ impl LedgerInner {
             chain.token = Some(token);
         }
         drop(guard);
-        emit_events(&all_committed);
+        emit_events(&self.watch_tx, &all_committed);
         Ok(Some(grant))
     }
 
@@ -1798,7 +1819,7 @@ impl LedgerInner {
         )];
         let committed = guard.commit(entries, None, reserved);
         drop(guard);
-        emit_events(&committed);
+        emit_events(&self.watch_tx, &committed);
         Ok(())
     }
 
@@ -1829,7 +1850,7 @@ impl LedgerInner {
         let committed = guard.commit(entries, None, reserved);
         self.any_subscriptions.store(true, Ordering::Relaxed);
         drop(guard);
-        emit_events(&committed);
+        emit_events(&self.watch_tx, &committed);
         Ok(id)
     }
 
@@ -1867,7 +1888,7 @@ impl LedgerInner {
         self.any_subscriptions
             .store(!guard.subscriptions.is_empty(), Ordering::Relaxed);
         drop(guard);
-        emit_events(&committed);
+        emit_events(&self.watch_tx, &committed);
         Ok(())
     }
 
@@ -1925,7 +1946,7 @@ impl LedgerInner {
         // (spec §A.7).
         let committed = guard.commit(entries, Some(&scope), reserved);
         drop(guard);
-        emit_events(&committed);
+        emit_events(&self.watch_tx, &committed);
         Ok(())
     }
 
@@ -1954,7 +1975,7 @@ impl LedgerInner {
         )];
         let committed = guard.commit(entries, None, reserved);
         drop(guard);
-        emit_events(&committed);
+        emit_events(&self.watch_tx, &committed);
         Some(token)
     }
 
@@ -1984,7 +2005,7 @@ impl LedgerInner {
                 self.materialize_expiry(&mut guard, &id, now)
             };
             if let Ok(committed) = committed {
-                emit_events(&committed);
+                emit_events(&self.watch_tx, &committed);
             }
         }
     }
@@ -2086,6 +2107,32 @@ impl LedgerInner {
             .collect()
     }
 
+    /// Every append from `since` onward: the retained tail as a backlog,
+    /// then the live broadcast (spec §D.2's `Approvals::watch`).
+    ///
+    /// Subscribing to `watch_tx` and reading the backlog happen under the
+    /// **same** lock acquisition, so nothing can land in the gap between
+    /// them: any append still in flight when this call arrives is blocked
+    /// on `state` until this method releases it, at which point it is
+    /// either already in the backlog snapshot (it committed before this
+    /// call took the lock) or it will reach the now-live subscription
+    /// (`emit_events` runs strictly after this call's own guard is
+    /// dropped, because the lock is exclusive). Either way, exactly once.
+    pub(crate) fn watch(&self, since: u64, session: Option<SessionId>) -> super::watch::LedgerStream {
+        let guard = self.lock();
+        let live = self.watch_tx.subscribe();
+        let backlog: VecDeque<LedgerRecord> = guard
+            .ring
+            .iter()
+            .map(|slot| &slot.record)
+            .filter(|record| record.sequence > since)
+            .filter(|record| session.as_ref().is_none_or(|s| record.scope.in_session(s)))
+            .cloned()
+            .collect();
+        drop(guard);
+        super::watch::LedgerStream::new(backlog, live, session)
+    }
+
     /// `Approvals`' read methods return no `Result` (spec §D.2), so unlike
     /// every write-side path, a capacity failure while materializing due
     /// expiry here is swallowed — the read still returns the (briefly)
@@ -2097,7 +2144,7 @@ impl LedgerInner {
         let result = self.materialize_expiry(&mut guard, id, now);
         drop(guard);
         if let Ok(committed) = result {
-            emit_events(&committed);
+            emit_events(&self.watch_tx, &committed);
         }
     }
 }
@@ -2221,8 +2268,16 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 /// without a trace fact" (spec §G). Levels match the spec's Events table.
 /// Called only after every lock this batch of entries was committed under
 /// has been dropped (review finding S6).
-fn emit_events(records: &[LedgerRecord]) {
+///
+/// Also the one place a committed entry reaches `Approvals::watch`'s live
+/// subscribers (spec §D.2) — `watch_tx` is threaded in rather than making
+/// this a method, so the free function stays callable with exactly the
+/// records it is handed and nothing else from `self`. `send` returning
+/// `Err` means no one is subscribed; that is not a failure, so it is
+/// discarded like the analogous case in `push_ring`'s sink delivery.
+fn emit_events(watch_tx: &tokio::sync::broadcast::Sender<LedgerRecord>, records: &[LedgerRecord]) {
     for record in records {
+        let _ = watch_tx.send(record.clone());
         // Every record this function is handed was just built by
         // `push_ring` from an entry this build wrote, so `known()` is always
         // `Some` here. An `Unknown` would mean a record read back from a
@@ -2381,6 +2436,8 @@ pub(crate) fn build_inner(
         sink_dropped_count,
     };
 
+    let (watch_tx, _) = tokio::sync::broadcast::channel(WATCH_BUFFER);
+
     Ok(Arc::new(LedgerInner {
         epoch,
         config,
@@ -2388,6 +2445,7 @@ pub(crate) fn build_inner(
         clock,
         outbox: Mutex::new(Vec::new()),
         any_subscriptions: AtomicBool::new(false),
+        watch_tx,
     }))
 }
 

@@ -693,9 +693,9 @@ attempt shows in the record.
 ### A.8 Redaction: one seam, one type, one thing the kernel does itself
 
 The statement gate is always on (§C.6), so the rendered source of every top-level statement
-reaches five sinks: the classifier's input, the `Observed` entry, `Capture::Statement`,
+reaches four sinks that read the built `Plan`: the classifier's input, the `Observed` entry,
 tracing, and the `/v/approvals` projection. Anything typed literally on a command line
-reaches all five.
+reaches all four.
 
 **What the kernel redacts: its own key, and nothing else.** It knows that string exactly —
 it minted it — so the redaction is exact and needs no detection. The kernel does not hunt
@@ -712,7 +712,8 @@ surface reaching a less-trusted reader — a model's prompt, an out-of-band appr
 where it is live authorization for as long as its grant is. That case is why the kernel
 does this one redaction itself instead of leaving it to the embedder like the rest.
 
-**What the kernel provides for everything else** is the shape, not the policy:
+**What the kernel provides for everything else** is the shape, not the policy —
+`kaish-types::approval::PlannedValue`/`ValueSite`, `kaish-tool-api::{Redactor, RedactionMark}`:
 
 ```rust
 /// One value inside a rendered plan. A sink serializes `PlannedValue`, never
@@ -722,8 +723,9 @@ does this one redaction itself instead of leaving it to the embedder like the re
 pub enum PlannedValue {
     Plain(String),
     Redacted {
-        /// The embedder's own label — "bearer-token", "password". The kernel
-        /// does not interpret it.
+        /// The embedder's own label — "bearer-token", "password", or
+        /// "confirm-key" for the kernel's one built-in redaction. The
+        /// kernel does not interpret it.
         kind: String,
         /// Stable salted digest prefix, when the redactor supplies one, so an
         /// auditor can ask "the same credential as last time?" without
@@ -732,23 +734,47 @@ pub enum PlannedValue {
     },
 }
 
-/// Installed by the embedder at kernel construction. Runs once, at the one
-/// normalization point, before any sink sees the plan.
+/// Where inside a plan a value was found. Command names carry no site of
+/// their own — structural, never a credential, never offered to a redactor.
+#[non_exhaustive]
+pub enum ValueSite {
+    Argument,
+    RedirectTarget,
+}
+
+/// Installed by the embedder at kernel construction
+/// (`KernelConfig::with_redactor`). Runs once, at the one normalization
+/// point (`ast::plan::plan_statement`), before any sink sees the plan.
+/// Synchronous — the kernel never awaits an embedder on the request path
+/// (§0.1), the same reason `StatementClassifier::classify` is.
 pub trait Redactor: Send + Sync {
     fn redact(&self, value: &str, site: ValueSite) -> Option<RedactionMark>;
 }
 ```
 
 Two properties do the work. **One normalization point:** the plan is redacted once, before
-it is classified, observed, captured, attached to a request, or projected — so a sink added
-later inherits the redaction instead of becoming a new leak. Redaction applied per-seam
-instead is how one credential reaches three sinks through three individually-correct
-fixes. **A type that cannot hold an undecided value:** a sink cannot serialize a
-`PlannedValue` without the redaction question having been answered, so forgetting is a
-compile error rather than a review finding.
+it is classified, observed, or projected — so a sink added later inherits the redaction
+instead of becoming a new leak. Redaction applied per-seam instead is how one credential
+reaches three sinks through three individually-correct fixes. **A type that cannot hold an
+undecided value:** a sink cannot serialize a `PlannedValue` without the redaction question
+having been answered, so forgetting is a compile error rather than a review finding.
 
-No `Redactor` installed means every value is `Plain`. That is the honest default for a
-shell: the kernel is not quietly pretending to protect something.
+No `Redactor` installed means every value is `Plain`, except the kernel's own confirm-key
+redaction, which applies unconditionally either way — that is the honest default for a
+shell: the kernel is not quietly pretending to protect something it was not asked to.
+
+**`Capture::Statement`'s replay source is deliberately not one of the sinks above.**
+`Kernel::confirm` re-parses and re-executes it verbatim (§B.4), so an embedder-redacted
+value baked into it would replay as the literal `<kind>` marker instead of the argument a
+human or a model actually meant — a correctness bug, not a privacy improvement. Only the
+kernel's own confirm-key token is stripped from that source (as it always was), because
+redemption authorizes through the `ApproverHandle`, never the literal key, so replay needs
+nothing else out of it. `Capture::Statement` is still projected into `/v/approvals` as part
+of the request view, so an embedder secret typed as an ordinary argument on a statement that
+gets held is visible there until the request is granted or denied — the same exposure this
+section's second paragraph already scopes to "before redemption, to a less-trusted reader,"
+just not closed by this seam for that one field. Closing it would need a second, replay-safe
+representation of the capture; nothing in this lane builds one.
 
 ### A.9 Replay binding
 
@@ -778,7 +804,7 @@ pub struct PlanBinding {
 references — which is exactly what an `fs.*` gate judged. Two rules keep it stable across a
 legitimate redemption. Every `--confirm=` token is stripped first: the credential is the
 *authorization*, not part of what was judged, and without stripping it the held statement
-`rm x` and its re-run `rm --confirm=<redacted> x` digest differently, so every key
+`rm x` and its re-run `rm --confirm=<confirm-key> x` digest differently, so every key
 presentation would read as a moved binding and be re-asked. And the digest covers the plan
 **after** §A.8's redaction seam, so an embedder installing a `Redactor` does not thereby
 invalidate every grant in flight.
@@ -1350,9 +1376,22 @@ pub enum ApprovalOutcome {
     /// A condition of the *ledger*, and retryable. Never used to report a
     /// request's own state.
     LedgerUnavailable { reason: String },
+    /// The execution was cancelled before a grant could be recorded — the
+    /// execution's own cancellation token, not a decision that was raced
+    /// (no hook is awaited on the request path, §C.2, so there is never a
+    /// decision in flight to race). Nothing was granted and nothing runs.
+    Cancelled { request: RequestId },
+    /// A credential was presented for an operation no live or retained
+    /// request describes (§B.4's draft matcher). Nothing was redeemed, and
+    /// the presentation counted against no request.
+    Unmatched { detail: String },
 }
 
 /// What a caller needs to show a pending request and to pick it back up.
+/// Derives `Serialize`/`Deserialize` (with `ResumeAction`, below), so an
+/// ACP-style embedder can persist a pending decision across a process
+/// restart rather than losing it if the process exits before the human
+/// answers.
 #[non_exhaustive]
 pub struct PendingApproval {
     pub request: ApprovalRequestView,
@@ -1383,10 +1422,10 @@ and tells a human nothing about what actually happened to their request.
 
 **Every non-`Authorized` variant fails closed.** `proceed()` is the convenience that maps
 them to the `ExecResult` a tool returns without inspection: `Pending` → exit 2 with the
-view on the control-plane field; `Denied`, `Refused`, `Unsupported`, `LedgerUnavailable` →
-exit 1 with a message naming the reason. This mirrors `gate_overwrites`'s existing `Err(result)`
-contract (`context.rs:828`), which callers already know to return verbatim and never fall
-through.
+view on the control-plane field; `Denied`, `Refused`, `Closed`, `Unsupported`,
+`LedgerUnavailable`, `Cancelled`, `Unmatched` → exit 1 with a message naming the reason.
+This mirrors `gate_overwrites`'s existing `Err(result)` contract (`context.rs:828`), which
+callers already know to return verbatim and never fall through.
 
 **A pending request is never silently dropped from the result, because nothing runs
 after one.** A gate halts the top-level statement loop, whether it was raised on the
@@ -1944,7 +1983,7 @@ And the key-handling rule, which is the kernel's one redaction (§A.8) at this s
   therefore lifts the key, redacts it from the rendering, and removes the whole
   `--confirm=<key>` token from the captured source; the argv that *executes* is
   untouched, because the builtin's own gate may legitimately consume the same key.
-  Removal rather than a `<redacted>` placeholder: a replay is authorized by its
+  Removal rather than a `<confirm-key>` placeholder: a replay is authorized by its
   redemption correlation, so a replayed statement re-presenting a spent key would only
   count a rejection against something. Only a **literal** key is visible to any of this
   — `--confirm=${key}` renders unexpanded and carries no value to lift or to leak,
@@ -2116,6 +2155,8 @@ placeholder is substituted by a frontend holding an `ApproverHandle` (§D.3).
                                              // (default false; for multi-principal embedders — §E.7)
 .with_state_resolver(Arc<dyn StateResolver>) // per resource kind
 .with_statement_classifier(Arc<dyn StatementClassifier>)  // §C.6; absent = every statement Observe
+.with_redactor(Arc<dyn Redactor>)            // §A.8; absent = every value Plain except the
+                                             // kernel's own confirm-key redaction
 
 // Kernel — construction mints exactly one authority capability
 fn build(config: KernelConfig) -> (Kernel, ApproverHandle);
@@ -2192,10 +2233,42 @@ pub struct ApprovalPage {
     pub items: Vec<ApprovalRequestView>,
     pub next: Option<LedgerCursor>,
 }
+
+/// `log`'s page — the same shape as `ApprovalPage`, over `LedgerRecord`
+/// instead of `ApprovalRequestView`. A separate type rather than a generic
+/// `Page<T>`: `log` has no `PageRequest` of its own (its filter is the two
+/// bare arguments above), so the two pages carry different construction
+/// contracts even though their fields read the same.
+#[non_exhaustive]
+pub struct LedgerPage {
+    pub items: Vec<LedgerRecord>,
+    pub next: Option<LedgerCursor>,
+}
 ```
 
 The cursor is the stable `seq`, so a reader that stops and resumes cannot miss an entry or
 see one twice.
+
+```rust
+/// One event `watch` delivers.
+#[non_exhaustive]
+pub enum WatchEvent {
+    Entry(LedgerRecord),
+    /// This consumer fell behind the broadcast buffer and `count` entries
+    /// were dropped before it could read them — reported, never silently
+    /// skipped. Catch up with `log(since, ..)` from the last `seq` this
+    /// stream delivered.
+    Lagged { count: u64 },
+}
+
+/// What `watch` returns: backfills the retained tail from `since`, then
+/// yields new entries live as they land. Call `.next().await` in a loop;
+/// there is no deadline and no polling.
+pub struct LedgerStream { /* .. */ }
+impl LedgerStream {
+    pub async fn next(&mut self) -> Option<WatchEvent>;
+}
+```
 
 **Where the handle comes from.** `Kernel::build` mints exactly one `ApproverHandle` and
 returns it to the embedder, which decides which sessions get a clone. A session that should

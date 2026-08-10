@@ -326,7 +326,11 @@ mod tests {
         assert_eq!(KaishTrash.execute(args, &mut ctx).await.code, 2);
 
         let approvals = ctx.ledger_access.as_ref().expect("a wired ledger").approvals.clone();
-        let id = approvals.pending()[0].id.clone();
+        let id = approvals
+            .pending(kaish_types::approval::PageRequest::first(1))
+            .items[0]
+            .id
+            .clone();
         let chain = approvals.get(&id).expect("the chain");
         authority
             .grant(

@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kaish_types::approval::{
-    ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, AttemptState, CancelReason, Grant,
-    GrantTerms, Grounds, LedgerRecord, ObservedResource, OperationId, Outcome, Plan, Principal,
-    RequestId, RequestOrigin, RequestState, SessionId, StandingGrant, StandingId, Subscription,
-    SubscriptionId, Token,
+    ApprovalPage, ApprovalRequest, ApprovalRequestDraft, ApprovalRequestView, ApprovalScope, AttemptId,
+    AttemptState, CancelReason, Grant, GrantTerms, Grounds, LedgerCursor, LedgerPage, LedgerRecord,
+    ObservedResource, OperationId, Outcome, PageRequest, Plan, Principal, RequestId, RequestOrigin,
+    RequestState, SessionId, StandingGrant, StandingId, Subscription, SubscriptionId, Token,
 };
 
 use super::clock::Clock;
@@ -18,6 +18,7 @@ use super::core::{build_inner, LedgerInner};
 use super::resolver::ConditionReport;
 use super::config::{LedgerConfig, LedgerSink};
 use super::error::LedgerError;
+use super::watch::LedgerStream;
 
 /// The implementation side's handle (spec §A.1). Obtained from `ExecContext`
 /// / `ToolCtx` (PR 3). Can post obligations (`Requested`, `Redeemed`,
@@ -56,36 +57,26 @@ pub struct Approvals(Option<Arc<LedgerInner>>, Option<SessionId>);
 /// // one from parts nor pattern the fields back out of one it already
 /// // holds, e.g. from a real `Ledger::build` call.
 /// fn peel(handle: ApproverHandle) {
-///     let ApproverHandle(_inner, _authority, _principal, _session) = handle;
+///     let ApproverHandle(_inner, _principal, _session) = handle;
 /// }
 /// ```
 ///
-/// The fourth field is the session this authority is restricted to, when
+/// The third field is the session this authority is restricted to, when
 /// [`Self::scope`] produced it: a scoped handle can decide only within that
 /// session (spec §A.7).
 #[derive(Clone)]
-pub struct ApproverHandle(Arc<LedgerInner>, AuthorityId, Principal, Option<SessionId>);
+pub struct ApproverHandle(Arc<LedgerInner>, Principal, Option<SessionId>);
 
-/// Names the authority and the principal it decides as. Carries no ledger
-/// state and no credential — there is nothing here a log line could leak.
+/// Names the principal this handle decides as. Carries no ledger state and
+/// no credential — there is nothing here a log line could leak.
 impl std::fmt::Debug for ApproverHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ApproverHandle")
-            .field("authority", &self.1 .0)
-            .field("principal", &self.2)
-            .field("session", &self.3)
+            .field("principal", &self.1)
+            .field("session", &self.2)
             .finish()
     }
 }
-
-/// A lightweight tag distinguishing which minted authority a clone of
-/// [`ApproverHandle`] descends from. PR 2 mints exactly one per
-/// [`Ledger::build`] call and every clone shares it; nothing in this PR
-/// branches on it yet (`deny_self_approval` and multi-authority embedders
-/// are later-PR territory) — kept because the spec's own type signature
-/// (`ApproverHandle(Arc<LedgerInner>, AuthorityId)`) carries it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AuthorityId(u64);
 
 /// What one execution reserved against a grant. Exposes only its own two
 /// ids — never provenance (spec §C.1): a tool cannot tell whether its grant
@@ -177,7 +168,7 @@ impl Ledger {
         Ok((
             Requester(Arc::clone(&inner)),
             Approvals(Some(Arc::clone(&inner)), None),
-            ApproverHandle(inner, AuthorityId(1), default_authority_principal(1), None),
+            ApproverHandle(inner, default_authority_principal(), None),
         ))
     }
 }
@@ -413,18 +404,41 @@ impl Approvals {
         self.1.as_ref()
     }
 
-    /// Every currently-`Requested` (undecided) request in this view's scope.
-    pub fn pending(&self) -> Vec<kaish_types::approval::ApprovalRequestView> {
-        self.0
-            .as_ref()
-            .map(|inner| {
-                inner
-                    .pending(self.1.as_ref())
-                    .into_iter()
-                    .map(Into::into)
-                    .collect()
-            })
-            .unwrap_or_default()
+    /// One page of the undecided (`Requested`) set, filtered and
+    /// cursor-bounded (spec §D.2). The statement tap posts an `Observed`
+    /// entry per top-level statement, so in a long-lived embedder the
+    /// pending set is unbounded in principle — a caller that stops and
+    /// resumes with the returned cursor sees every request exactly once,
+    /// never twice and never skipped.
+    ///
+    /// `page.limit == 0` returns an empty page with no cursor.
+    /// `page.state`, when set to anything other than `RequestState::Requested`,
+    /// also returns an empty page — this method's source set is `Requested`
+    /// chains only, so no other state can ever match; `Approvals::get` reads
+    /// a request's full history regardless of its current state.
+    pub fn pending(&self, page: PageRequest) -> ApprovalPage {
+        let empty = || ApprovalPage::new(Vec::new(), None);
+        let Some(inner) = self.0.as_ref() else {
+            return empty();
+        };
+        if page.limit == 0 || page.state.is_some_and(|s| s != RequestState::Requested) {
+            return empty();
+        }
+        let mut requests = inner.pending(self.1.as_ref());
+        requests.sort_by_key(|r| r.id.seq());
+        let after = page.cursor.map(LedgerCursor::seq).unwrap_or(0);
+        let mut matched = requests
+            .into_iter()
+            .filter(|r| r.id.seq() > after)
+            .filter(|r| page.scope.as_ref().is_none_or(|s| &r.scope == s))
+            .filter(|r| page.since.is_none_or(|since| r.requested_at >= since));
+        let items: Vec<ApprovalRequestView> = matched.by_ref().take(page.limit).map(Into::into).collect();
+        let next = if items.len() == page.limit && matched.next().is_some() {
+            items.last().map(|v| LedgerCursor(v.id.seq()))
+        } else {
+            None
+        };
+        ApprovalPage::new(items, next)
     }
 
     /// Every request the ledger still holds a chain for — pending, decided,
@@ -496,18 +510,48 @@ impl Approvals {
             .and_then(|inner| inner.match_draft(operation, refs, self.1.as_ref()))
     }
 
-    /// The retained log, seq-cursored: every retained [`LedgerRecord`] with
-    /// `sequence > since`, restricted to this view's scope. Pass `0` for the
-    /// full retained tail.
+    /// One page of the retained log, seq-cursored: up to `limit` retained
+    /// [`LedgerRecord`]s with `sequence > since`, restricted to this view's
+    /// scope. Pass `since: 0` for the full retained tail's first page, and
+    /// the returned cursor's `seq()` as the next call's `since` to keep
+    /// going — a reader that stops and resumes this way can never miss an
+    /// entry or see one twice. `limit == 0` returns an empty page with no
+    /// cursor.
     ///
     /// Records, not bare entries: a consumer reads the `schema_version` and
     /// the scope alongside the entry, and an entry a newer writer produced
     /// surfaces as unknown rather than vanishing (spec §A.5).
-    pub fn log(&self, since: u64) -> Vec<LedgerRecord> {
+    pub fn log(&self, since: u64, limit: usize) -> LedgerPage {
+        let empty = || LedgerPage::new(Vec::new(), None);
+        let Some(inner) = self.0.as_ref() else {
+            return empty();
+        };
+        if limit == 0 {
+            return empty();
+        }
+        let records = inner.log(since, self.1.as_ref());
+        let mut iter = records.into_iter();
+        let items: Vec<LedgerRecord> = iter.by_ref().take(limit).collect();
+        let next = if items.len() == limit && iter.next().is_some() {
+            items.last().map(|r| LedgerCursor(r.sequence))
+        } else {
+            None
+        };
+        LedgerPage::new(items, next)
+    }
+
+    /// Every append, in order, from `since` — the one convenience the
+    /// kernel offers around waiting (spec §D.2). Backfills the retained
+    /// tail first (same records `Self::log` would page through), then
+    /// yields new entries live as they land: no deadline, no filter, and no
+    /// decision parked inside the kernel. A lagging consumer is reported
+    /// through [`super::WatchEvent::Lagged`], never silently skipped —
+    /// catch up with `Self::log(since, ..)` from the reported count.
+    pub fn watch(&self, since: u64) -> LedgerStream {
         self.0
             .as_ref()
-            .map(|inner| inner.log(since, self.1.as_ref()))
-            .unwrap_or_default()
+            .map(|inner| inner.watch(since, self.1.clone()))
+            .unwrap_or_else(LedgerStream::empty)
     }
 }
 
@@ -534,7 +578,7 @@ impl ApproverHandle {
         terms: GrantTerms,
         grounds: Grounds,
     ) -> Result<Grant, LedgerError> {
-        self.0.check_scope(id, self.3.as_ref())?;
+        self.0.check_scope(id, self.2.as_ref())?;
         // `grant` appends and so reserves ring/sink capacity — the same
         // stale-undrained-close concern as `post_request`.
         self.0.drain_outbox();
@@ -548,7 +592,7 @@ impl ApproverHandle {
     /// §B.6) — a denial quoting a stale one is refused and recorded as
     /// `RevisionRejected` rather than applied.
     pub async fn deny(&self, id: &RequestId, rev: u64, reason: &str) -> Result<(), LedgerError> {
-        self.0.check_scope(id, self.3.as_ref())?;
+        self.0.check_scope(id, self.2.as_ref())?;
         self.0.drain_outbox();
         let by = self.principal();
         self.0.deny(id, rev, reason.to_string(), by)
@@ -582,7 +626,7 @@ impl ApproverHandle {
         // A scoped handle retrieves nothing outside its session: the key is
         // a bearer credential, so handing one over is the widest thing this
         // handle does (spec §A.2, §A.7).
-        self.0.check_scope(id, self.3.as_ref()).ok()?;
+        self.0.check_scope(id, self.2.as_ref()).ok()?;
         // Sync, like the rest of this method — `drain_outbox` is plain
         // `Mutex` work with no `.await` inside it (see its doc).
         self.0.drain_outbox();
@@ -609,7 +653,7 @@ impl ApproverHandle {
         id: &RequestId,
         grant_ttl: Duration,
     ) -> Result<Option<Grant>, LedgerError> {
-        self.0.check_scope(id, self.3.as_ref())?;
+        self.0.check_scope(id, self.2.as_ref())?;
         self.0.grant_from_standing(id, grant_ttl)
     }
 
@@ -654,7 +698,7 @@ impl ApproverHandle {
     pub fn join(&self) -> (Requester, Approvals, ApproverHandle) {
         (
             Requester(Arc::clone(&self.0)),
-            Approvals(Some(Arc::clone(&self.0)), self.3.clone()),
+            Approvals(Some(Arc::clone(&self.0)), self.2.clone()),
             self.clone(),
         )
     }
@@ -666,12 +710,12 @@ impl ApproverHandle {
     /// This is API hygiene, not a process boundary — see
     /// [`ApprovalScope`](kaish_types::approval::ApprovalScope).
     pub fn scope(&self, session: SessionId) -> Self {
-        Self(Arc::clone(&self.0), self.1, self.2.clone(), Some(session))
+        Self(Arc::clone(&self.0), self.1.clone(), Some(session))
     }
 
     /// The session this authority is restricted to, if any.
     pub fn session(&self) -> Option<&SessionId> {
-        self.3.as_ref()
+        self.2.as_ref()
     }
 
     /// The scope this ledger stamps on a record that owns no request — the
@@ -690,7 +734,7 @@ impl ApproverHandle {
     /// embedder to say who is who. `KernelConfig::with_principal` is what
     /// calls it in-tree.
     pub fn with_principal(mut self, principal: Principal) -> Self {
-        self.2 = principal;
+        self.1 = principal;
         self
     }
 
@@ -700,7 +744,7 @@ impl ApproverHandle {
     /// taking it from the handle is what proves the request belongs to the
     /// ledger the caller holds authority over.
     pub fn approvals_view(&self) -> Approvals {
-        Approvals(Some(Arc::clone(&self.0)), self.3.clone())
+        Approvals(Some(Arc::clone(&self.0)), self.2.clone())
     }
 
     /// The principal recorded as deciding/retrieving through this handle.
@@ -710,7 +754,7 @@ impl ApproverHandle {
     /// assigns identity still produces a name an auditor can distinguish
     /// from a real one.
     fn principal(&self) -> Principal {
-        self.2.clone()
+        self.1.clone()
     }
 }
 
@@ -718,9 +762,6 @@ impl ApproverHandle {
 /// assigns one. Deliberately not `Principal::default()` (an empty id), which
 /// would collide with every other unnamed actor in the per-principal live
 /// index.
-fn default_authority_principal(authority: u64) -> Principal {
-    Principal::new(
-        format!("approver-handle-{authority}"),
-        kaish_types::approval::PrincipalKind::Automation,
-    )
+fn default_authority_principal() -> Principal {
+    Principal::new("approver-handle-1", kaish_types::approval::PrincipalKind::Automation)
 }

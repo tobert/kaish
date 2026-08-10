@@ -12,9 +12,10 @@
 //! that happen to share a name with their tool-facing counterpart here.
 
 use kaish_types::approval::{
-    ApprovalRequestView, AttemptId, Capture, PlanDigest, RequestId, RequestState, StateClaim,
+    ApprovalRequestView, AttemptId, Capture, PlanDigest, RequestId, RequestState, StateClaim, ValueSite,
 };
 use kaish_types::ExecResult;
+use serde::{Deserialize, Serialize};
 
 /// What one execution reserved against a grant (spec §C.1). Exposes only its
 /// own two ids — never provenance: a tool cannot tell whether its grant came
@@ -206,8 +207,12 @@ impl ApprovalOutcome {
 /// The kernel returns this instead of waiting: a decision it cannot make
 /// itself comes back as data, and the embedder comes back when it has an
 /// answer.
+// Derives `Serialize`/`Deserialize` (ledger PR R5, item b) so an ACP-style
+// embedder can persist a pending decision across a process restart —
+// `ApprovalRequestView`, `Capture`, and `PlanDigest` already carry the same
+// derives, and this type adds nothing that would not round-trip.
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingApproval {
     /// The request, tokenless by construction (spec §A.2).
     pub request: ApprovalRequestView,
@@ -228,7 +233,8 @@ impl PendingApproval {
 /// Structured, because a caller must not have to infer it from the
 /// capture's shape.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
 pub enum ResumeAction {
     /// Re-run the statement with the key; the digest names what was
     /// approved (spec §A.9).
@@ -363,3 +369,121 @@ impl std::fmt::Display for ResolverError {
 }
 
 impl std::error::Error for ResolverError {}
+
+// ───────────────────────── Redaction (spec §A.8) ─────────────────────────
+
+/// Judges values inside a rendered plan, for an embedder that has its own
+/// idea of what a secret looks like. Installed once at kernel construction
+/// (`KernelConfig::with_redactor`) and consulted at kaish-kernel's one
+/// normalization point — before the plan reaches any of its sinks (the
+/// statement classifier, the ledger's `Observed` entry, tracing, and the
+/// `/v/approvals` projection) — so a sink added later inherits the
+/// redaction instead of becoming a new leak.
+///
+/// **What this is not**: the kernel's own redaction of its confirm key
+/// (spec §A.8) never reaches this trait. That one redaction is exact — the
+/// kernel minted the key, so it knows the string outright — and unconditional,
+/// whether or not a `Redactor` is installed. This trait exists for
+/// everything else, and the kernel supplies no default: with no `Redactor`
+/// installed, every non-key value is [`PlannedValue::Plain`], honestly.
+///
+/// Synchronous, like [`crate::statement::StatementClassifier::classify`] —
+/// the kernel never awaits an embedder on the request path.
+///
+/// [`PlannedValue::Plain`]: kaish_types::approval::PlannedValue::Plain
+pub trait Redactor: Send + Sync {
+    /// Judge one value. `Some` marks it secret; `None` leaves it
+    /// [`PlannedValue::Plain`](kaish_types::approval::PlannedValue::Plain).
+    fn redact(&self, value: &str, site: ValueSite) -> Option<RedactionMark>;
+}
+
+/// What an installed [`Redactor`] marks a value with (spec §A.8) — carried
+/// into [`PlannedValue::Redacted`](kaish_types::approval::PlannedValue::Redacted)
+/// verbatim.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedactionMark {
+    /// The embedder's own label — `"bearer-token"`, `"password"`. The
+    /// kernel does not interpret this string.
+    pub kind: String,
+    /// Stable salted digest prefix, when the redactor can supply one, so an
+    /// auditor can ask "the same credential as last time?" without holding
+    /// it. `None` when the redactor has no such digest to offer.
+    pub fingerprint: Option<String>,
+}
+
+impl RedactionMark {
+    /// Mark a value secret, naming what kind of secret it is.
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            fingerprint: None,
+        }
+    }
+
+    /// Attach a stable fingerprint to this mark.
+    pub fn with_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.fingerprint = Some(fingerprint.into());
+        self
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use kaish_types::approval::{
+        ApprovalRequest, ApprovalScope, KernelId, PlanBinding, PlanDigest, Principal, PrincipalKind,
+        RequestOrigin, RiskClass,
+    };
+    use std::time::SystemTime;
+
+    fn sample_view() -> ApprovalRequestView {
+        let scope = ApprovalScope::kernel(KernelId::new(1));
+        let origin = RequestOrigin::new(
+            scope.clone(),
+            PlanBinding::new(PlanDigest::new("sample"), "/", scope),
+            Principal::new("amy", PrincipalKind::Human),
+            Capture::DirectExecution,
+        );
+        let draft = ApprovalRequest::builder("fs.remove")
+            .risk(RiskClass::Irreversible)
+            .reason("gated")
+            .hint("rm --confirm=<token> target.txt")
+            .build()
+            .expect("well-formed draft");
+        draft.stamp(RequestId::new(1, 1), SystemTime::UNIX_EPOCH, origin).into()
+    }
+
+    #[test]
+    fn pending_approval_round_trips_through_serde() {
+        // Ledger PR R5, item b: an ACP-style embedder persists pending
+        // decisions across a process restart, which needs both types on the
+        // serde surface — not just `ApprovalRequestView`, which already had
+        // it.
+        let pending = PendingApproval::new(sample_view());
+        let json = serde_json::to_value(&pending).expect("serialize");
+        let back: PendingApproval = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back.request, pending.request);
+        assert_eq!(back.resume, pending.resume);
+    }
+
+    #[test]
+    fn every_resume_action_variant_round_trips() {
+        let plan_digest = PlanDigest::new("abc123");
+        for resume in [
+            ResumeAction::ConfirmStatement {
+                plan_digest,
+                index: 2,
+            },
+            ResumeAction::RetryOperation,
+            ResumeAction::NotReplayable {
+                reason: "no dispatch seam".to_string(),
+            },
+        ] {
+            let json = serde_json::to_value(&resume).expect("serialize");
+            let back: ResumeAction = serde_json::from_value(json).expect("deserialize");
+            assert_eq!(back, resume);
+        }
+    }
+}

@@ -92,7 +92,7 @@ impl Session {
 
     /// Every retained entry's variant name, in commit order.
     fn entry_kinds(&self) -> Vec<&'static str> {
-        entries(self.kernel.approvals().log(0))
+        entries(self.kernel.approvals().log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items)
             .iter()
             .filter(|e| !is_statement_tap(e))
             .map(|e| match e {
@@ -138,7 +138,7 @@ impl Session {
     /// Grant the single pending request and retrieve its bearer key.
     async fn approve_pending(&self) -> (RequestId, String) {
         let approvals = self.kernel.approvals();
-        let pending = approvals.pending();
+        let pending = approvals.pending(kaish_types::approval::PageRequest::default()).items;
         assert_eq!(pending.len(), 1, "exactly one request must be pending");
         let view = pending[0].clone();
         self.authority
@@ -528,7 +528,7 @@ async fn a_granted_and_redeemed_delete_posts_the_full_chain() {
     for expected in ["Requested", "Granted", "Redeemed", "Settled"] {
         assert!(kinds.contains(&expected), "missing {expected} in {kinds:?}");
     }
-    let settled = entries(session.kernel.approvals().log(0))
+    let settled = entries(session.kernel.approvals().log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items)
         .into_iter()
         .find_map(|e| match e {
             LedgerEntry::Settled { outcome, .. } => Some(outcome),
@@ -793,7 +793,7 @@ async fn a_session_with_no_handle_has_no_reachable_grant_path() {
     let gated = kernel.execute("rm precious.txt").await.expect("rm");
     assert_eq!(gated.code, 2);
     assert!(
-        kernel.approvals().pending().len() == 1,
+        kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items.len() == 1,
         "the request is posted and waiting on an authority the session lacks"
     );
     assert!(dir.path().join("precious.txt").exists());
@@ -944,7 +944,7 @@ async fn a_replay_that_fails_before_its_gate_does_not_strand_the_attempt() {
     assert!(session.run("set -o approvals").await.ok());
     assert_eq!(session.run("rm precious.txt").await.code, 2);
 
-    let id = session.kernel.approvals().pending()[0].id.clone();
+    let id = session.kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items[0].id.clone();
     session.grant(&id).await;
 
     // Delete the target out from under the replay.
@@ -986,7 +986,7 @@ async fn two_concurrent_confirms_each_replay_their_own_request() {
 
     assert_eq!(session.run("rm a.txt").await.code, 2);
     assert_eq!(session.run("rm b.txt").await.code, 2);
-    let pending = session.kernel.approvals().pending();
+    let pending = session.kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items;
     assert_eq!(pending.len(), 2);
     for view in &pending {
         session.grant(&view.id).await;
@@ -1006,9 +1006,9 @@ async fn two_concurrent_confirms_each_replay_their_own_request() {
 
     // Neither replay may have posted a fresh request.
     assert!(
-        session.kernel.approvals().pending().is_empty(),
+        session.kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items.is_empty(),
         "a replay must never post a second request: {:?}",
-        session.kernel.approvals().pending()
+        session.kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items
     );
 }
 

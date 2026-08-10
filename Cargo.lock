@@ -1129,6 +1129,7 @@ dependencies = [
  "async-trait",
  "clap",
  "kaish-types",
+ "serde",
  "serde_json",
  "tokio",
 ]

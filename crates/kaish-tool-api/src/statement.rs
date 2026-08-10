@@ -167,7 +167,7 @@ mod tests {
             "command",
             vec![PlannedCommand::new(
                 "echo",
-                vec!["'rm -rf /'".to_string()],
+                vec![kaish_types::approval::PlannedValue::Plain("'rm -rf /'".to_string())],
                 Vec::new(),
                 false,
             )],

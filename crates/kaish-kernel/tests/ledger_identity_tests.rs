@@ -83,11 +83,11 @@ async fn a_request_raised_in_one_session_is_invisible_to_another_sessions_read_s
     assert_eq!(a.state(&theirs.id), None, "state must not cross the session line");
     assert!(a.get(&theirs.id).is_none(), "get must not cross the session line");
     assert_eq!(
-        a.pending().iter().map(|v| v.id.clone()).collect::<Vec<_>>(),
+        a.pending(kaish_types::approval::PageRequest::default()).items.iter().map(|v| v.id.clone()).collect::<Vec<_>>(),
         vec![mine.id.clone()]
     );
     assert!(
-        a.log(0)
+        a.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items
             .iter()
             .all(|record| record.scope.session_id == Some(session("a"))),
         "the log a scoped reader sees carries only its own session's records"
@@ -168,7 +168,7 @@ async fn every_record_carries_the_scope_of_the_request_it_is_about() {
         .await
         .unwrap();
 
-    let records = approvals.log(0);
+    let records = approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items;
     assert_eq!(records.len(), 2, "Requested then Granted");
     for record in &records {
         assert!(record.schema_is_known());
@@ -250,13 +250,13 @@ async fn a_chainless_observed_record_carries_the_posting_sessions_scope() {
         .await
         .unwrap();
 
-    let scoped = approvals.scope(session("a")).log(0);
+    let scoped = approvals.scope(session("a")).log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items;
     assert_eq!(scoped.len(), 1);
     assert!(matches!(
         scoped[0].known(),
         Some(LedgerEntry::Observed { .. })
     ));
-    assert!(approvals.scope(session("b")).log(0).is_empty());
+    assert!(approvals.scope(session("b")).log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items.is_empty());
 }
 
 // ───────────────────── §A.7 parenthood, §A.9 binding ─────────────────────

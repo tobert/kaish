@@ -318,6 +318,23 @@ Two consequences worth planning for:
   eventually fills the ledger (`live_capacity`). Read `ExecResult.approval` on every
   result, not only the ones you expected to gate.
 
+**Persisting a pending decision across a restart.** `PendingApproval` and
+`ResumeAction` derive `Serialize`/`Deserialize`, so an ACP-style embedder that
+parks a decision outside the process — a queue, a database row, a chat
+message waiting on a human's reply — does not have to lose it if the process
+exits before the answer arrives:
+
+```rust
+let pending: PendingApproval = /* from ExecResult.approval, or ApprovalOutcome::Pending */;
+let json = serde_json::to_string(&pending)?;
+queue.push(json); // survives a restart; `pending.request.id` names the request to grant later
+```
+
+The request the JSON names is still live in the ledger regardless of whether
+the process that raised it restarted — the ledger is what persists the
+chain, not this snapshot; `pending`/`resume` are what a *reader* needed to
+show and re-drive it, not the record of it.
+
 Prefer `confirm` over hand-building the re-run. The `hint` field is a
 *human-display* string and does **not** robustly quote paths (`rm
 --confirm="T" my notes.txt` re-parses as two paths); `confirm` replays the
@@ -461,21 +478,32 @@ one — setting both fails `Kernel::build` loudly.
 otherwise orphan — the last sweeping every live request in that kernel's scope,
 which matters when several kernels share one ledger through
 `with_approver_handle`. What kaish cannot close is a session that goes away
-without calling `shutdown`; enumerate `Approvals::pending()` and cancel what you
-recognize.
+without calling `shutdown`; page through `Approvals::pending(PageRequest::default())`
+and cancel what you recognize.
 
 **Gated backgrounded jobs surface on the job, not on the result.** `cmd &` that
 gates inside tool execution puts the request on `JobInfo.approval` and
 `/v/jobs/{id}/approval`; the statement that spawned it has already returned. An
 embedder that reads only `ExecResult.approval` will not see it. Poll
-`jobs --json` for gated entries, or enumerate `Approvals::pending()`, which is
+`jobs --json` for gated entries, or page `Approvals::pending(..)`, which is
 the authoritative set either way.
 
 **Reading the ledger.** `Kernel::approvals()` is the read side (it grants
-nothing): `pending()`, `ids()`, `get(&id)`, `standing()`, `subscriptions()`,
-`any_subscriptions()`, and `log(since)`.
+nothing): `pending(PageRequest)`, `ids()`, `get(&id)`, `standing()`,
+`subscriptions()`, `any_subscriptions()`, `log(since, limit)`, and `watch(since)`.
 
-`log(since)` returns `LedgerRecord`s, never bare entries: each carries
+`pending`/`log` return a **page**, not a bare `Vec` — `ApprovalPage`/`LedgerPage`,
+each `{ items, next: Option<LedgerCursor> }`. The statement tap posts an
+`Observed` entry per top-level statement, so both sets are unbounded in
+principle; a `next` cursor means more remain. Resume with it —
+`PageRequest::default().with_cursor(next)` for `pending`, `next.seq()` as the
+next call's `since` for `log` — and a reader that stops and resumes this way
+never misses an entry or sees one twice. `PageRequest::default()`'s limit
+(1024) already covers a realistic pending set in one page; reach for the
+builder methods (`.with_limit`, `.with_scope`, `.with_state`, `.with_since`)
+to filter or to page deliberately.
+
+`log(since, limit)` returns `LedgerRecord`s, never bare entries: each carries
 `schema_version`, `sequence`, `at`, and the `scope` the entry belongs to,
 alongside the entry itself. Read `record.known()` for the entry — `None` means
 a **newer writer's entry this build does not recognize**, kept verbatim as
@@ -483,6 +511,39 @@ a **newer writer's entry this build does not recognize**, kept verbatim as
 unknown; never drop it, or the history you report is one you did not verify.
 `record.schema_is_known()` answers the same question for the envelope.
 `LedgerSink::post` receives the same `LedgerRecord`.
+
+**Watching instead of polling.** `Approvals::watch(since)` is the one
+convenience the kernel offers around waiting: it backfills the retained tail
+from `since`, then yields every further append live, in the same order,
+until the stream is dropped. There is no deadline argument and no filter —
+those are policy an embedder builds on top, not something the kernel decides
+for it (§0.1's line: mechanism, not policy).
+
+```rust
+let mut stream = kernel.approvals().watch(0);
+loop {
+    match stream.next().await {
+        Some(WatchEvent::Entry(record)) => {
+            // react to `record.known()` — a Requested you should surface to
+            // a human, a Granted that unblocks a queue, whatever this
+            // embedder's own event loop wants.
+        }
+        Some(WatchEvent::Lagged { count }) => {
+            // this consumer fell behind the broadcast buffer — `count`
+            // entries were dropped, never silently. Catch up before
+            // resuming the live tail:
+            let page = kernel.approvals().log(last_seen_seq, 4096);
+            // .. process page.items, remember the new last_seen_seq ..
+        }
+        None => break, // the ledger itself is gone — process shutdown
+    }
+}
+```
+
+A lagging consumer is reported, not dropped silently — `WatchEvent::Lagged`
+names how many entries this stream's subscriber missed, so the recovery
+above is `Approvals::log` from the last `seq` this stream actually delivered,
+not a guess.
 
 The same read model is projected at **`/v/approvals`** — `pending`,
 `standing`, and `log` at the root, and `{id}/{request,state,attempts,grant}`
@@ -664,17 +725,57 @@ already holds a tool name and an argv.
 `--confirm=<key>` off the statement's own argv before it drafts, so re-running
 the held line with the key an operator hands back redeems **the original
 request** rather than minting a second one. The same pass keeps the credential
-out of the record: the rendering shows `--confirm=<redacted>` and the captured
-source drops the token entirely, because plan and capture both land in the
-ledger and no ledger entry carries a credential. What *executes* is untouched —
-the builtin's own gate may legitimately consume the same key.
+out of the record: the rendering shows `--confirm=<confirm-key>` and the
+captured source drops the token entirely, because plan and capture both land
+in the ledger and no ledger entry carries a credential. What *executes* is
+untouched — the builtin's own gate may legitimately consume the same key.
 
 Only a literal key is visible to any of this. `--confirm=${key}` renders
 unexpanded, so nothing is lifted and nothing needs redacting: what the plan
 cannot see, it cannot leak either. A credential a script puts somewhere the
 taxonomy cannot name — the right-hand side of an assignment — is recorded like
-any other text. The tap redacts what it can identify, and this paragraph is
-where that boundary is stated.
+any other text. The kernel redacts what it minted; everything else is the
+`Redactor` seam below.
+
+**Installing a `Redactor` for everything else.** The kernel's own redaction
+above covers exactly one string — its own confirm key — because it is the
+only secret the kernel can identify without guessing. Every other value in a
+`Plan` (`PlannedCommand::args`, `PlannedRedirect::target`) reaches the
+statement classifier, the ledger's `Observed` entry, and the `/v/approvals`
+projection as `PlannedValue::Plain` unless an embedder installs a `Redactor`
+that says otherwise:
+
+```rust
+use kaish_kernel::ledger::{RedactionMark, Redactor};
+use kaish_types::approval::ValueSite;
+
+struct BearerTokens;
+impl Redactor for BearerTokens {
+    fn redact(&self, value: &str, _site: ValueSite) -> Option<RedactionMark> {
+        value.starts_with("Bearer ").then(|| RedactionMark::new("bearer-token"))
+        // .with_fingerprint(digest) if you want an auditor to be able to
+        // ask "the same credential as last time?" without holding it.
+    }
+}
+
+let config = KernelConfig::repl().with_redactor(Arc::new(BearerTokens));
+```
+
+It runs once, synchronously — like `StatementClassifier::classify`, on the
+execution path of every statement, so it must not block — at the one
+normalization point before the plan reaches any sink, so a sink added later
+inherits the redaction instead of needing its own fix. It is not consulted
+on `--confirm=<key>`: that redaction is unconditional and happens first, and
+`kind: "confirm-key"` is reserved for it (a `Redactor` returning that string
+for something else just means the kind label collides in the record, not a
+security hole). `Capture::Statement`'s replay source is **not** covered by an
+installed `Redactor` — `Kernel::confirm` re-executes it verbatim, so a
+redacted value baked into it would replay as the literal marker instead of
+the argument you meant. If a `Redactor`-marked value can appear on a
+statement that gets held, it is still visible in the request's `capture`
+until the request is granted or denied — narrow the exposure with a tighter
+`StatementClassifier` (gate before the value would be typed) rather than
+expecting the `Redactor` to close it.
 
 **Pinning the policy.** `KernelConfig::with_policy_pinned(true)` makes
 `set +o approvals` fail with **exit 1** and a message naming the pin, rather

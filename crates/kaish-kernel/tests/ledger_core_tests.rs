@@ -112,7 +112,7 @@ async fn post_request_creates_a_requested_chain() {
     let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
     assert_eq!(approvals.state(&req.id), Some(RequestState::Requested));
-    let log = entries(approvals.log(0));
+    let log = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items);
     assert!(matches!(log.last(), Some(LedgerEntry::Requested { .. })));
 }
 
@@ -122,7 +122,7 @@ async fn grant_moves_requested_to_granted_and_appends_granted() {
     let req = post(&requester, "fs.remove").await;
     approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
     assert_eq!(approvals.state(&req.id), Some(RequestState::Granted));
-    assert!(matches!(entries(approvals.log(0)).last(), Some(LedgerEntry::Granted { .. })));
+    assert!(matches!(entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).last(), Some(LedgerEntry::Granted { .. })));
 }
 
 #[tokio::test]
@@ -131,7 +131,7 @@ async fn deny_moves_requested_to_denied_and_appends_denied() {
     let req = post(&requester, "fs.remove").await;
     approver.deny(&req.id, req.revision, "no").await.unwrap();
     assert_eq!(approvals.state(&req.id), Some(RequestState::Denied));
-    assert!(matches!(entries(approvals.log(0)).last(), Some(LedgerEntry::Denied { .. })));
+    assert!(matches!(entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).last(), Some(LedgerEntry::Denied { .. })));
 }
 
 /// §A.10: there is **no** request TTL, so an undecided request with no
@@ -143,11 +143,11 @@ async fn an_undecided_request_with_no_deadline_never_expires() {
     assert_eq!(req.deadline, None, "a request carries no deadline by default");
     // Anything that enumerates the ledger runs the sweep, which is the only
     // place expiry could ever materialize.
-    let _ = approvals.pending();
+    let _ = approvals.pending(kaish_types::approval::PageRequest::default()).items;
     let _ = approvals.ids();
     assert_eq!(approvals.state(&req.id), Some(RequestState::Requested));
     assert!(
-        !entries(approvals.log(0))
+        !entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items)
             .iter()
             .any(|e| matches!(e, LedgerEntry::Expired { .. })),
         "nothing expires a request the embedder set no deadline on"
@@ -163,7 +163,7 @@ async fn an_embedder_set_deadline_materializes_expired_on_read() {
     let req = post_with_deadline(&requester, "fs.remove", deadline).await;
     assert_eq!(approvals.state(&req.id), Some(RequestState::Expired));
     assert!(matches!(
-        entries(approvals.log(0)).last(),
+        entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).last(),
         Some(LedgerEntry::Expired {
             what: kaish_types::approval::Expiring::Request,
             ..
@@ -182,7 +182,7 @@ async fn redeem_before_any_decision_is_not_authorized_and_counts_a_rejection() {
     assert!(matches!(err, LedgerError::NotAuthorized(id) if id == req.id));
     assert_eq!(approvals.state(&req.id), Some(RequestState::Requested), "state must not move");
     assert!(matches!(
-        entries(approvals.log(0)).last(),
+        entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).last(),
         Some(LedgerEntry::TokenRejected { request: Some(id), attempts: 1, .. }) if *id == req.id
     ));
 }
@@ -199,7 +199,7 @@ async fn bad_key_against_a_granted_request_is_not_authorized_and_counts() {
     assert!(matches!(err, LedgerError::NotAuthorized(id) if id == req.id));
     assert_eq!(approvals.state(&req.id), Some(RequestState::Granted), "state must not move");
     assert!(matches!(
-        entries(approvals.log(0)).last(),
+        entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).last(),
         Some(LedgerEntry::TokenRejected { request: Some(id), attempts: 1, .. }) if *id == req.id
     ));
 }
@@ -227,7 +227,7 @@ async fn fifth_bad_key_voids_and_a_later_good_key_fails_naming_the_void() {
         .unwrap_err();
     assert!(matches!(err, LedgerError::NotAuthorized(_)));
     assert_eq!(approvals.state(&req.id), Some(RequestState::Voided));
-    let log = entries(approvals.log(0));
+    let log = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items);
     assert!(matches!(log.get(log.len() - 2), Some(LedgerEntry::TokenRejected { attempts: 5, .. })));
     assert!(matches!(log.last(), Some(LedgerEntry::Voided { .. })));
 
@@ -260,7 +260,7 @@ async fn bad_key_matching_no_live_request_appends_token_rejected_none_and_voids_
         assert!(matches!(err, LedgerError::NotAuthorized(id) if id == bogus));
     }
 
-    let log = entries(approvals.log(0));
+    let log = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items);
     let none_count = log
         .iter()
         .filter(|e| matches!(e, LedgerEntry::TokenRejected { request: None, .. }))
@@ -285,7 +285,7 @@ async fn redeem_with_the_real_credential_succeeds_and_reserves_an_attempt() {
         .unwrap();
     assert_eq!(attempt.request_id(), &req.id);
     assert_eq!(approvals.state(&req.id), Some(RequestState::Granted));
-    assert!(matches!(entries(approvals.log(0)).last(), Some(LedgerEntry::Redeemed { .. })));
+    assert!(matches!(entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).last(), Some(LedgerEntry::Redeemed { .. })));
 }
 
 #[tokio::test]
@@ -318,7 +318,7 @@ async fn condition_failure_refuses_and_voids_reserving_no_attempt() {
     let err = requester.redeem(&req.id, agent("agent-1"), ConditionReport::observed(observed)).await.unwrap_err();
     assert!(matches!(err, LedgerError::Refused { .. }));
     assert_eq!(approvals.state(&req.id), Some(RequestState::Voided));
-    let log = entries(approvals.log(0));
+    let log = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items);
     assert!(matches!(log.get(log.len() - 2), Some(LedgerEntry::Refused { .. })));
     assert!(matches!(log.last(), Some(LedgerEntry::Voided { .. })));
     // No attempt was reserved.
@@ -332,12 +332,12 @@ async fn redeem_while_an_attempt_is_in_flight_is_rejected() {
     let req = post(&requester, "fs.remove").await;
     approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
     let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
-    let before = entries(approvals.log(0)).len();
+    let before = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).len();
 
     let err = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap_err();
     assert!(matches!(err, LedgerError::AttemptInFlight(id) if id == req.id));
     assert_eq!(approvals.state(&req.id), Some(RequestState::Granted), "state must not move");
-    assert_eq!(entries(approvals.log(0)).len(), before, "a rejected in-flight redemption must append nothing");
+    assert_eq!(entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).len(), before, "a rejected in-flight redemption must append nothing");
     let chain = approvals.get(&req.id).unwrap();
     assert_eq!(chain.attempts.len(), 1, "no second attempt was reserved");
     assert_eq!(chain.attempts[0].attempt, attempt.attempt_id());
@@ -351,7 +351,7 @@ async fn redeem_after_a_successful_settlement_reports_the_outcome_and_does_not_r
     let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
     requester.settle(&attempt, Outcome::Exit(0)).await.unwrap();
 
-    let before = entries(approvals.log(0)).len();
+    let before = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).len();
     let err = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap_err();
     match err {
         LedgerError::AlreadySettled { outcome, .. } => {
@@ -359,7 +359,7 @@ async fn redeem_after_a_successful_settlement_reports_the_outcome_and_does_not_r
         }
         other => panic!("expected AlreadySettled, got {other:?}"),
     }
-    assert_eq!(entries(approvals.log(0)).len(), before, "no new Redeemed should have been appended");
+    assert_eq!(entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).len(), before, "no new Redeemed should have been appended");
 }
 
 #[tokio::test]
@@ -406,7 +406,7 @@ async fn grant_not_after_elapsing_materializes_expired() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(approvals.state(&req.id), Some(RequestState::Expired));
     assert!(matches!(
-        entries(approvals.log(0)).last(),
+        entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).last(),
         Some(LedgerEntry::Expired { what: kaish_types::approval::Expiring::Grant, .. })
     ));
 }
@@ -416,11 +416,11 @@ async fn granting_an_already_decided_request_is_rejected() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
     approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
-    let before = entries(approvals.log(0)).clone();
+    let before = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).clone();
     let err = approver.grant(&req.id, approvals.get(&req.id).unwrap().request.revision, terms(&req, far_future())).await.unwrap_err();
     assert!(matches!(err, LedgerError::AlreadyDecided(id) if id == req.id));
     assert_eq!(approvals.state(&req.id), Some(RequestState::Granted), "state must not move");
-    assert_eq!(entries(approvals.log(0)), before, "no new entry from the rejected second decision — the log is byte-for-byte unchanged");
+    assert_eq!(entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items), before, "no new entry from the rejected second decision — the log is byte-for-byte unchanged");
 }
 
 #[tokio::test]
@@ -430,22 +430,22 @@ async fn terminal_states_reject_any_further_transition_and_leave_state_unchanged
         let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
         let req = post(&requester, "fs.remove").await;
         approver.deny(&req.id, req.revision, "no").await.unwrap();
-        let before = entries(approvals.log(0)).clone();
+        let before = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).clone();
         let err = approver.deny(&req.id, approvals.get(&req.id).unwrap().request.revision, "no again").await.unwrap_err();
         assert!(matches!(err, LedgerError::Terminal { state: RequestState::Denied, .. }));
         assert_eq!(approvals.state(&req.id), Some(RequestState::Denied));
-        assert_eq!(entries(approvals.log(0)), before, "a rejected second decision must append nothing");
+        assert_eq!(entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items), before, "a rejected second decision must append nothing");
     }
     // Abandoned.
     {
         let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
         let req = post(&requester, "fs.remove").await;
         requester.abandon_request(&req.id, "job discarded").await.unwrap();
-        let before = entries(approvals.log(0)).clone();
+        let before = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).clone();
         let err = approver.grant(&req.id, approvals.get(&req.id).unwrap().request.revision, terms(&req, far_future())).await.unwrap_err();
         assert!(matches!(err, LedgerError::Terminal { state: RequestState::Abandoned, .. }));
         assert_eq!(approvals.state(&req.id), Some(RequestState::Abandoned));
-        assert_eq!(entries(approvals.log(0)), before, "a grant against an abandoned request must append nothing");
+        assert_eq!(entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items), before, "a grant against an abandoned request must append nothing");
     }
     // Voided (via redemption-time condition failure).
     {
@@ -472,11 +472,11 @@ async fn terminal_states_reject_any_further_transition_and_leave_state_unchanged
         }];
         requester.redeem(&req.id, agent("agent-1"), ConditionReport::observed(observed)).await.unwrap_err();
         assert_eq!(approvals.state(&req.id), Some(RequestState::Voided));
-        let before = entries(approvals.log(0)).clone();
+        let before = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).clone();
         let err = approver.grant(&req.id, approvals.get(&req.id).unwrap().request.revision, terms(&req, far_future())).await.unwrap_err();
         assert!(matches!(err, LedgerError::Terminal { state: RequestState::Voided, .. }));
         assert_eq!(approvals.state(&req.id), Some(RequestState::Voided));
-        assert_eq!(entries(approvals.log(0)), before, "a grant against a voided request must append nothing");
+        assert_eq!(entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items), before, "a grant against a voided request must append nothing");
     }
 }
 
@@ -493,9 +493,9 @@ async fn cancel_closes_an_undecided_request_and_records_the_reason() {
         .unwrap();
     assert_eq!(closed.id, req.id);
     assert_eq!(approvals.state(&req.id), Some(RequestState::Cancelled));
-    assert!(approvals.pending().is_empty(), "the live slot comes back");
+    assert!(approvals.pending(kaish_types::approval::PageRequest::default()).items.is_empty(), "the live slot comes back");
     assert!(matches!(
-        entries(approvals.log(0)).last(),
+        entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).last(),
         Some(LedgerEntry::Cancelled {
             by,
             reason: CancelReason::Withdrawn,
@@ -513,7 +513,7 @@ async fn cancelling_a_cancelled_request_is_terminal_and_appends_nothing() {
         .cancel(&req.id, req.revision, agent("agent-1"), CancelReason::Withdrawn)
         .await
         .unwrap();
-    let before = entries(approvals.log(0)).clone();
+    let before = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).clone();
 
     let err = requester
         .cancel(&req.id, approvals.get(&req.id).unwrap().request.revision, agent("agent-1"), CancelReason::Withdrawn)
@@ -526,7 +526,7 @@ async fn cancelling_a_cancelled_request_is_terminal_and_appends_nothing() {
             ..
         }
     ));
-    assert_eq!(entries(approvals.log(0)), before, "a refused cancellation appends nothing");
+    assert_eq!(entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items), before, "a refused cancellation appends nothing");
 }
 
 /// §B.3: a decided request is not cancellable — a decision that landed is
@@ -576,7 +576,7 @@ async fn granting_with_a_stale_revision_is_refused_and_recorded() {
     bump_revision_without_deciding(&requester, &req.id).await;
     assert_eq!(approvals.get(&req.id).unwrap().request.revision, 1, "TokenRejected bumped the revision");
 
-    let before_len = approvals.log(0).len();
+    let before_len = approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items.len();
     // Quotes 0 — the revision this test read before the bump above, exactly
     // the shape an out-of-band approver holding a stale view is in.
     let err = approver.grant(&req.id, 0, terms(&req, far_future())).await.unwrap_err();
@@ -592,7 +592,7 @@ async fn granting_with_a_stale_revision_is_refused_and_recorded() {
 
     // Recorded, not dropped — and with the request's own scope and a real
     // sequence number, the same as any other entry (spec §B.6).
-    let log = approvals.log(0);
+    let log = approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items;
     assert_eq!(log.len(), before_len + 1, "the refusal is recorded");
     let record = log.last().unwrap();
     assert_eq!(record.scope, req.scope, "scope intact");
@@ -619,13 +619,13 @@ async fn denying_with_a_stale_revision_is_refused_and_recorded() {
     let req = post(&requester, "fs.remove").await;
     bump_revision_without_deciding(&requester, &req.id).await;
 
-    let before_len = approvals.log(0).len();
+    let before_len = approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items.len();
     let err = approver.deny(&req.id, 0, "no").await.unwrap_err();
     assert!(
         matches!(&err, LedgerError::StaleRevision { quoted: 0, current: 1, attempted: kaish_types::approval::TransitionKind::Deny, .. }),
         "{err:?}"
     );
-    assert_eq!(approvals.log(0).len(), before_len + 1, "the refusal is recorded");
+    assert_eq!(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items.len(), before_len + 1, "the refusal is recorded");
     assert_eq!(approvals.state(&req.id), Some(RequestState::Requested), "never applied");
 }
 
@@ -635,7 +635,7 @@ async fn cancelling_with_a_stale_revision_is_refused_and_recorded() {
     let req = post(&requester, "fs.remove").await;
     bump_revision_without_deciding(&requester, &req.id).await;
 
-    let before_len = approvals.log(0).len();
+    let before_len = approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items.len();
     let err = requester
         .cancel(&req.id, 0, agent("agent-1"), CancelReason::Withdrawn)
         .await
@@ -644,7 +644,7 @@ async fn cancelling_with_a_stale_revision_is_refused_and_recorded() {
         matches!(&err, LedgerError::StaleRevision { quoted: 0, current: 1, attempted: kaish_types::approval::TransitionKind::Cancel, .. }),
         "{err:?}"
     );
-    assert_eq!(approvals.log(0).len(), before_len + 1, "the refusal is recorded");
+    assert_eq!(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items.len(), before_len + 1, "the refusal is recorded");
     assert_eq!(approvals.state(&req.id), Some(RequestState::Requested), "never applied");
 }
 
@@ -682,7 +682,7 @@ async fn a_cancel_racing_a_grant_leaves_exactly_one_winner_and_exactly_one_revis
         other => panic!("exactly one side must win the race, got {other:?}"),
     }
 
-    let rejected_count = entries(approvals.log(0))
+    let rejected_count = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items)
         .iter()
         .filter(|e| matches!(e, LedgerEntry::RevisionRejected { .. }))
         .count();
@@ -700,12 +700,12 @@ async fn settling_the_same_attempt_twice_appends_one_entry_and_returns_ok() {
 
     let first = requester.settle(&attempt, Outcome::Exit(0)).await.unwrap();
     assert!(first, "first settlement appends an entry");
-    let count_after_first = entries(approvals.log(0)).iter().filter(|e| matches!(e, LedgerEntry::Settled { .. })).count();
+    let count_after_first = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).iter().filter(|e| matches!(e, LedgerEntry::Settled { .. })).count();
     assert_eq!(count_after_first, 1, "exactly one Settled entry after the first settlement");
 
     let second = requester.settle(&attempt, Outcome::Exit(0)).await.unwrap();
     assert!(!second, "second settlement is a no-op");
-    let count_after_second = entries(approvals.log(0)).iter().filter(|e| matches!(e, LedgerEntry::Settled { .. })).count();
+    let count_after_second = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).iter().filter(|e| matches!(e, LedgerEntry::Settled { .. })).count();
     assert_eq!(count_after_first, count_after_second, "idempotent by AttemptId — no duplicate Settled entry");
 }
 
@@ -741,7 +741,7 @@ async fn concurrent_redemptions_of_one_grant_produce_exactly_one_redeemed() {
     }
     assert_eq!(ok_count, 1, "exactly one racer should win the reservation");
     assert_eq!(in_flight_count, 15);
-    let redeemed_count = entries(approvals.log(0)).iter().filter(|e| matches!(e, LedgerEntry::Redeemed { .. })).count();
+    let redeemed_count = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).iter().filter(|e| matches!(e, LedgerEntry::Redeemed { .. })).count();
     assert_eq!(redeemed_count, 1);
 }
 
@@ -756,7 +756,7 @@ async fn seq_is_gap_free_under_concurrent_posts_from_sixteen_tasks() {
     for task in tasks {
         task.await.unwrap();
     }
-    let mut seqs: Vec<u64> = entries(approvals.log(0)).iter().map(LedgerEntry::seq).collect();
+    let mut seqs: Vec<u64> = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).iter().map(LedgerEntry::seq).collect();
     seqs.sort_unstable();
     let expected: Vec<u64> = (1..=16).collect();
     assert_eq!(seqs, expected, "no gaps and no duplicates across 16 concurrent posts");
@@ -891,7 +891,7 @@ async fn token_for_appends_key_retrieved_naming_the_retriever() {
     approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
     let _token = approver.token_for(&req.id).unwrap();
     assert!(matches!(
-        entries(approvals.log(0)).last(),
+        entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).last(),
         Some(LedgerEntry::KeyRetrieved { request, .. }) if *request == req.id
     ));
 }
@@ -912,11 +912,11 @@ async fn grant_standing_and_revoke_standing_are_pure_record_operations() {
     .with_max_uses(3);
     let id = approver.grant_standing(g).await.unwrap();
     assert_eq!(approvals.standing().len(), 1);
-    assert!(matches!(entries(approvals.log(0)).last(), Some(LedgerEntry::StandingIssued { .. })));
+    assert!(matches!(entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).last(), Some(LedgerEntry::StandingIssued { .. })));
 
     approver.revoke_standing(&id, "no longer needed").await.unwrap();
     assert!(approvals.standing().is_empty());
-    assert!(matches!(entries(approvals.log(0)).last(), Some(LedgerEntry::StandingRevoked { .. })));
+    assert!(matches!(entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).last(), Some(LedgerEntry::StandingRevoked { .. })));
 }
 
 // ─────────────────────── API surface: Requester cannot grant ───────────────────────

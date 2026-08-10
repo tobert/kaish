@@ -121,7 +121,7 @@ impl Session {
 
     /// Every retained entry's variant name, in commit order.
     fn entry_kinds(&self) -> Vec<&'static str> {
-        entries(self.kernel.approvals().log(0))
+        entries(self.kernel.approvals().log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items)
             .iter()
             .filter(|e| !is_statement_tap(e))
             .map(entry_kind)
@@ -130,7 +130,7 @@ impl Session {
 
     /// Every resource on every `Observed` entry, in commit order.
     fn observed_resources(&self) -> Vec<ObservedResource> {
-        entries(self.kernel.approvals().log(0))
+        entries(self.kernel.approvals().log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items)
             .into_iter()
             .filter(|entry| !is_statement_tap(entry))
             .filter_map(|entry| match entry {
@@ -259,7 +259,7 @@ async fn an_observe_subscription_never_blocks_and_never_returns_exit_two() {
     );
     assert!(!target.exists(), "the delete must have run");
     assert!(
-        session.kernel.approvals().pending().is_empty(),
+        session.kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items.is_empty(),
         "an observe subscription must leave nothing undecided"
     );
     assert_eq!(
@@ -321,7 +321,7 @@ async fn subscription_and_revocation_are_themselves_ledger_entries() {
     assert!(session.kernel.approvals().any_subscriptions());
     assert_eq!(session.kernel.approvals().subscriptions().len(), 1);
 
-    match entries(session.kernel.approvals().log(0)).as_slice() {
+    match entries(session.kernel.approvals().log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).as_slice() {
         [LedgerEntry::Subscribed { subscription, .. }] => {
             assert_eq!(subscription.id, id, "the entry carries the allocated id");
             assert_eq!(subscription.mode, SubscriptionMode::Observe);
@@ -342,7 +342,7 @@ async fn subscription_and_revocation_are_themselves_ledger_entries() {
     );
     assert!(session.kernel.approvals().subscriptions().is_empty());
     assert_eq!(session.entry_kinds(), vec!["Subscribed", "Unsubscribed"]);
-    match entries(session.kernel.approvals().log(0)).last() {
+    match entries(session.kernel.approvals().log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).last() {
         Some(LedgerEntry::Unsubscribed { id: revoked, reason, .. }) => {
             assert_eq!(*revoked, id);
             assert_eq!(reason, "the test is done watching");

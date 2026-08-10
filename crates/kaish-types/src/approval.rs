@@ -809,6 +809,81 @@ pub enum StateClaim {
     Unspecified,
 }
 
+// ───────────────────────── Redaction (spec §A.8) ─────────────────────────
+
+/// One value inside a rendered plan. A sink serializes `PlannedValue`, never
+/// a bare `String`, so a value reaches a sink only after something decided
+/// whether it was a secret.
+///
+/// The kernel builds every `PlannedValue` at one normalization point
+/// (`kaish-kernel`'s `ast::plan::plan_statement`), before the plan reaches
+/// any of its sinks — the statement classifier, the ledger's `Observed`
+/// entry, tracing, and the `/v/approvals` projection. A sink added later
+/// reads the same already-decided values instead of re-deriving its own
+/// redaction.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlannedValue {
+    /// Not judged secret. Holds the literal text, exactly as it would render
+    /// on the command line.
+    Plain(String),
+    /// Judged secret, by the kernel's own confirm-key check or an
+    /// embedder-installed redactor (`kaish-tool-api`'s `Redactor` trait) —
+    /// the original text never reaches this variant or anything built from
+    /// it.
+    Redacted {
+        /// The embedder's own label — `"bearer-token"`, `"password"`, or
+        /// `"confirm-key"` for the kernel's one built-in redaction. The
+        /// kernel does not interpret this string.
+        kind: String,
+        /// Stable salted digest prefix, when the redactor supplied one, so an
+        /// auditor can ask "the same credential as last time?" without
+        /// holding it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fingerprint: Option<String>,
+    },
+}
+
+impl PlannedValue {
+    /// Build a value the kernel judged secret.
+    pub fn redacted(kind: impl Into<String>, fingerprint: Option<String>) -> Self {
+        Self::Redacted {
+            kind: kind.into(),
+            fingerprint,
+        }
+    }
+
+    /// The text a sink should show: the literal for `Plain`, or `<kind>` for
+    /// `Redacted` — never the redacted content itself.
+    pub fn display(&self) -> String {
+        match self {
+            Self::Plain(s) => s.clone(),
+            Self::Redacted { kind, .. } => format!("<{kind}>"),
+        }
+    }
+
+    /// Whether this value was judged secret.
+    pub fn is_redacted(&self) -> bool {
+        matches!(self, Self::Redacted { .. })
+    }
+}
+
+/// Where inside a plan a value was found — what a redactor judges alongside
+/// the value itself (spec §A.8).
+///
+/// Command names carry no site of their own: a name is structural (routing,
+/// resource identity), never a credential, so it is never offered to a
+/// redactor and never becomes a `PlannedValue`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueSite {
+    /// One command's argument.
+    Argument,
+    /// One command's redirect target.
+    RedirectTarget,
+}
+
 // ───────────────────────── The statement plan ─────────────────────────
 
 /// What one top-level statement was asked to run (spec §C.6).
@@ -863,10 +938,13 @@ impl Plan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedCommand {
     /// argv0 as written — never resolved through aliases, `PATH`, or the
-    /// tool registry.
+    /// tool registry. Never a [`PlannedValue`]: a command name is structural
+    /// (spec §A.8's `ValueSite`), never a credential.
     pub name: String,
-    /// The arguments, rendered unexpanded.
-    pub args: Vec<String>,
+    /// The arguments, rendered unexpanded — each one already through the
+    /// redaction seam (spec §A.8), so a secret argument reads as
+    /// `PlannedValue::Redacted` here rather than as its literal text.
+    pub args: Vec<PlannedValue>,
     /// The redirections this command declares.
     pub redirects: Vec<PlannedRedirect>,
     /// Whether the enclosing pipeline was backgrounded with `&`.
@@ -878,7 +956,7 @@ impl PlannedCommand {
     /// `#[non_exhaustive]` type.
     pub fn new(
         name: impl Into<String>,
-        args: Vec<String>,
+        args: Vec<PlannedValue>,
         redirects: Vec<PlannedRedirect>,
         background: bool,
     ) -> Self {
@@ -897,17 +975,18 @@ impl PlannedCommand {
 pub struct PlannedRedirect {
     /// The operator as written: `">"`, `">>"`, `"2>"`, `"<"`, `"<<<"`, …
     pub kind: String,
-    /// The target, rendered unexpanded — `> ${LOG}` keeps `${LOG}`.
-    pub target: String,
+    /// The target, rendered unexpanded — `> ${LOG}` keeps `${LOG}` — and
+    /// through the same redaction seam every argument passes (spec §A.8).
+    pub target: PlannedValue,
 }
 
 impl PlannedRedirect {
     /// Name one planned redirection. The only constructor for this
     /// `#[non_exhaustive]` type.
-    pub fn new(kind: impl Into<String>, target: impl Into<String>) -> Self {
+    pub fn new(kind: impl Into<String>, target: PlannedValue) -> Self {
         Self {
             kind: kind.into(),
-            target: target.into(),
+            target,
         }
     }
 }
@@ -2427,6 +2506,163 @@ pub struct UnknownEntry {
     pub fields: BTreeMap<String, serde_json::Value>,
 }
 
+// ───────────────────────── Pagination (spec §D.2) ─────────────────────────
+
+/// A stable resume point into a paginated listing: the `seq` of the last
+/// item a page returned. The statement tap posts an `Observed` entry per
+/// top-level statement, so in a long-lived embedder both the retained log
+/// and the pending set are unbounded in principle — a bare `Vec` would force
+/// every caller to hold the whole thing. Passing this back in on the next
+/// call resumes exactly after it: nothing between two calls is skipped, and
+/// nothing already seen repeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LedgerCursor(pub u64);
+
+impl LedgerCursor {
+    /// The `seq` this cursor resumes after. Takes `self` by value (`Copy`),
+    /// so it composes directly with `Option::map`.
+    pub fn seq(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for LedgerCursor {
+    fn from(seq: u64) -> Self {
+        Self(seq)
+    }
+}
+
+/// One request to list pending requests (spec §D.2). `limit: 0` returns an
+/// empty page with no cursor.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageRequest {
+    /// Resume after this cursor. `None` starts from the beginning.
+    pub cursor: Option<LedgerCursor>,
+    /// The most items one page returns.
+    pub limit: usize,
+    /// Restrict to one session/actor. Independent of handle scoping — this
+    /// filters, that constrains (spec §A.7).
+    pub scope: Option<ApprovalScope>,
+    /// Restrict to one top-level state.
+    pub state: Option<RequestState>,
+    /// Restrict to requests posted at or after this time.
+    pub since: Option<SystemTime>,
+}
+
+/// [`PageRequest::default`]'s `limit` — matches
+/// `LedgerConfig::live_capacity`'s own default (1024), so a caller that
+/// takes the default rather than naming a size still gets every realistic
+/// pending set in one page instead of silently getting nothing back (a
+/// derived `Default` would leave `limit` at `usize`'s `0`, which this
+/// crate's own convention reads as "empty page" — an honest but useless
+/// default for anyone reaching for `..Default::default()`).
+pub const DEFAULT_PAGE_LIMIT: usize = 1024;
+
+impl Default for PageRequest {
+    fn default() -> Self {
+        Self {
+            cursor: None,
+            limit: DEFAULT_PAGE_LIMIT,
+            scope: None,
+            state: None,
+            since: None,
+        }
+    }
+}
+
+impl PageRequest {
+    /// The first page, up to `limit` items, no filter.
+    pub fn first(limit: usize) -> Self {
+        Self {
+            limit,
+            ..Self::default()
+        }
+    }
+
+    /// The page after `cursor`, up to `limit` items, no filter.
+    pub fn after(cursor: LedgerCursor, limit: usize) -> Self {
+        Self {
+            cursor: Some(cursor),
+            limit,
+            ..Self::default()
+        }
+    }
+
+    /// Resume after `cursor` instead of from the beginning. Builder methods,
+    /// not public fields directly settable via `..Default::default()`,
+    /// because this `#[non_exhaustive]` type has no struct-literal
+    /// constructor outside this crate.
+    pub fn with_cursor(mut self, cursor: LedgerCursor) -> Self {
+        self.cursor = Some(cursor);
+        self
+    }
+
+    /// Cap this page at `limit` items.
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
+
+    /// Restrict to one session/actor.
+    pub fn with_scope(mut self, scope: ApprovalScope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+
+    /// Restrict to one top-level state.
+    pub fn with_state(mut self, state: RequestState) -> Self {
+        self.state = Some(state);
+        self
+    }
+
+    /// Restrict to requests posted at or after `since`.
+    pub fn with_since(mut self, since: SystemTime) -> Self {
+        self.since = Some(since);
+        self
+    }
+}
+
+/// One page of pending requests (spec §D.2).
+// `ApprovalRequestView` itself derives only `PartialEq`, not `Eq`, so this
+// stops there too.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApprovalPage {
+    /// This page's items, oldest (lowest `seq`) first.
+    pub items: Vec<ApprovalRequestView>,
+    /// Where the next page starts, or `None` when this page reached the end
+    /// of what matched.
+    pub next: Option<LedgerCursor>,
+}
+
+impl ApprovalPage {
+    /// Build a page. The only constructor for this `#[non_exhaustive]` type
+    /// — `kaish-kernel`'s `Approvals::pending` is the one caller.
+    pub fn new(items: Vec<ApprovalRequestView>, next: Option<LedgerCursor>) -> Self {
+        Self { items, next }
+    }
+}
+
+/// One page of the retained ledger log (spec §D.2's `Approvals::log`).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LedgerPage {
+    /// This page's records, `seq`-ordered.
+    pub items: Vec<LedgerRecord>,
+    /// Where the next page starts, or `None` when this page reached the end
+    /// of the retained tail.
+    pub next: Option<LedgerCursor>,
+}
+
+impl LedgerPage {
+    /// Build a page. The only constructor for this `#[non_exhaustive]` type
+    /// — `kaish-kernel`'s `Approvals::log` is the one caller.
+    pub fn new(items: Vec<LedgerRecord>, next: Option<LedgerCursor>) -> Self {
+        Self { items, next }
+    }
+}
+
 /// Test-only: a stamped, tokenless view, for exercising the control-plane
 /// `.approval` field on `ExecResult`/`ToolResult`/`JobInfo` without standing
 /// up a live ledger. One builder shared by every module's tests so the shape
@@ -2832,6 +3068,79 @@ mod tests {
     }
 
     #[test]
+    fn approval_request_view_mirrors_every_request_field() {
+        // The compile-visible field-parity guard for `From<ApprovalRequest>
+        // for ApprovalRequestView` (docs/approval-ledger.md, ledger PR R5,
+        // item c). Both destructures below are exhaustive — no `..` — so a
+        // field added to `ApprovalRequest` with no matching arm here is a
+        // compile error, not a review finding; and every `assert_eq!` below
+        // is what proves the `From` impl actually carries the field across
+        // rather than merely compiling one that happens to drop it.
+        let req = sample_request();
+        let view: ApprovalRequestView = req.clone().into();
+
+        let ApprovalRequest {
+            id,
+            scope,
+            parent,
+            revision,
+            binding,
+            operation,
+            risk,
+            resources,
+            principal,
+            capture,
+            context,
+            job_id,
+            reason,
+            hint,
+            requested_at,
+            deadline,
+            supersedes,
+            plan,
+        } = req;
+        let ApprovalRequestView {
+            id: view_id,
+            scope: view_scope,
+            parent: view_parent,
+            revision: view_revision,
+            binding: view_binding,
+            operation: view_operation,
+            risk: view_risk,
+            resources: view_resources,
+            principal: view_principal,
+            capture: view_capture,
+            context: view_context,
+            job_id: view_job_id,
+            reason: view_reason,
+            hint: view_hint,
+            requested_at: view_requested_at,
+            deadline: view_deadline,
+            supersedes: view_supersedes,
+            plan: view_plan,
+        } = view;
+
+        assert_eq!(id, view_id, "id");
+        assert_eq!(scope, view_scope, "scope");
+        assert_eq!(parent, view_parent, "parent");
+        assert_eq!(revision, view_revision, "revision");
+        assert_eq!(binding, view_binding, "binding");
+        assert_eq!(operation, view_operation, "operation");
+        assert_eq!(risk, view_risk, "risk");
+        assert_eq!(resources, view_resources, "resources");
+        assert_eq!(principal, view_principal, "principal");
+        assert_eq!(capture, view_capture, "capture");
+        assert_eq!(context, view_context, "context");
+        assert_eq!(job_id, view_job_id, "job_id");
+        assert_eq!(reason, view_reason, "reason");
+        assert_eq!(hint, view_hint, "hint");
+        assert_eq!(requested_at, view_requested_at, "requested_at");
+        assert_eq!(deadline, view_deadline, "deadline");
+        assert_eq!(supersedes, view_supersedes, "supersedes");
+        assert_eq!(plan, view_plan, "plan");
+    }
+
+    #[test]
     fn grant_has_no_redemption_limit_field() {
         let grant = Grant {
             request: RequestId::new(1, 1),
@@ -3115,8 +3424,8 @@ mod tests {
             "command",
             vec![PlannedCommand::new(
                 "cargo",
-                vec!["build".to_string()],
-                vec![PlannedRedirect::new(">", "${LOG}")],
+                vec![PlannedValue::Plain("build".to_string())],
+                vec![PlannedRedirect::new(">", PlannedValue::Plain("${LOG}".to_string()))],
                 false,
             )],
         )
@@ -3183,6 +3492,35 @@ mod tests {
         assert!(json.get("deny").is_some(), "expected snake_case tag: {json}");
         let defer = serde_json::to_value(Decision::Defer).expect("serialize");
         assert_eq!(defer, serde_json::json!("defer"));
+    }
+
+    /// How many [`LedgerEntry`] variants this build knows about.
+    ///
+    /// `LedgerEntry` is `#[non_exhaustive]` even within this crate's own
+    /// tests once a downstream match uses a wildcard arm, so a compile-time
+    /// exhaustive match (the trick [`LedgerEntry::seq`]/[`LedgerEntry::at`]
+    /// use) cannot be the guard for `all_entries()` — nothing forces that
+    /// fixture to grow when the enum does. This constant is the guard
+    /// instead: **bump it every time `LedgerEntry` gains a variant**, and add
+    /// that variant to `all_entries()` and [`EXPECTED_TAGS`] in the same
+    /// change. A ledger PR R4 review found the fixture had silently missed a
+    /// variant for two days — this test is what would have caught it.
+    const LEDGER_ENTRY_VARIANT_COUNT: usize = 18;
+
+    #[test]
+    fn all_entries_fixture_covers_every_variant() {
+        assert_eq!(
+            all_entries().len(),
+            LEDGER_ENTRY_VARIANT_COUNT,
+            "all_entries() must carry one sample per LedgerEntry variant — bump \
+             LEDGER_ENTRY_VARIANT_COUNT and add the new variant's sample here"
+        );
+        assert_eq!(
+            EXPECTED_TAGS.len(),
+            LEDGER_ENTRY_VARIANT_COUNT,
+            "EXPECTED_TAGS must carry one tag per LedgerEntry variant, in the same order \
+             all_entries() builds them"
+        );
     }
 
     const EXPECTED_TAGS: &[&str] = &[
@@ -3264,7 +3602,10 @@ mod tests {
         assert_eq!(back.commands[0].redirects[0].kind, ">");
         // Unexpanded: the target keeps `${LOG}` as written, because a
         // classifier judges what was asked, not what it resolved to.
-        assert_eq!(back.commands[0].redirects[0].target, "${LOG}");
+        assert_eq!(
+            back.commands[0].redirects[0].target,
+            PlannedValue::Plain("${LOG}".to_string())
+        );
     }
 
     #[test]

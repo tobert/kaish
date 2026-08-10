@@ -20,8 +20,8 @@ use kaish_kernel::ledger::{
 };
 use kaish_kernel::{Kernel, KernelConfig};
 use kaish_types::approval::{
-    AttemptState, Capture, GrantTerms, LedgerEntry, OperationPattern, Outcome, Plan, Principal,
-    PrincipalKind, RequestId, ResourcePattern, RiskClass, StandingGrant,
+    AttemptState, Capture, GrantTerms, LedgerEntry, OperationPattern, Outcome, Plan, PlannedValue,
+    Principal, PrincipalKind, RequestId, ResourcePattern, RiskClass, StandingGrant,
 };
 use kaish_types::Value;
 
@@ -105,7 +105,7 @@ impl Session {
 
     /// Every statement-tap entry's plan, in commit order.
     fn plans(&self) -> Vec<Plan> {
-        entries(self.kernel.approvals().log(0))
+        entries(self.kernel.approvals().log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items)
             .into_iter()
             .filter_map(|entry| match entry {
                 LedgerEntry::Observed {
@@ -118,7 +118,7 @@ impl Session {
 
     /// Every statement-tap entry, in commit order.
     fn taps(&self) -> Vec<LedgerEntry> {
-        entries(self.kernel.approvals().log(0))
+        entries(self.kernel.approvals().log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items)
             .into_iter()
             .filter(|entry| {
                 matches!(entry, LedgerEntry::Observed { operation, .. }
@@ -168,9 +168,9 @@ impl Session {
     /// Everything a reader can reach: the whole ledger log plus every VFS
     /// projection under `/v/approvals`. What a credential scan searches.
     async fn readable_surface(&self, ids: &[RequestId]) -> String {
-        let mut surface = serde_json::to_string(&entries(self.kernel.approvals().log(0)))
+        let mut surface = serde_json::to_string(&entries(self.kernel.approvals().log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items))
             .expect("the log serializes");
-        surface.push_str(&serde_json::to_string(&self.kernel.approvals().pending()).unwrap());
+        surface.push_str(&serde_json::to_string(&self.kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items).unwrap());
         for node in ["pending", "standing", "log"] {
             surface.push_str(&self.run(&format!("cat /v/approvals/{node}")).await.text_out());
         }
@@ -366,7 +366,7 @@ async fn a_deferred_statement_keeps_its_tap_entry_ahead_of_the_request() {
     let result = session.run("rm target.txt").await;
     assert_eq!(result.code, 2, "{}", result.err);
 
-    let kinds: Vec<&str> = entries(session.kernel.approvals().log(0))
+    let kinds: Vec<&str> = entries(session.kernel.approvals().log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items)
         .iter()
         .map(|e| match e {
             LedgerEntry::Observed { .. } => "Observed",
@@ -566,7 +566,7 @@ async fn re_running_a_held_statement_with_the_key_redeems_the_original_request()
     assert_eq!(chain.attempts[0].state, AttemptState::Settled);
     assert_eq!(chain.attempts[0].outcome, Some(Outcome::Exit(0)));
     assert!(
-        session.kernel.approvals().pending().is_empty(),
+        session.kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items.is_empty(),
         "the chain must be closed, not left pending"
     );
 }
@@ -593,7 +593,7 @@ async fn no_readable_surface_carries_a_key_a_re_run_presented() {
         .last()
         .cloned()
         .expect("a plan for the re-run");
-    assert_eq!(re_run.rendered, "rm --confirm=<redacted> target.txt");
+    assert_eq!(re_run.rendered, "rm --confirm=<confirm-key> target.txt");
 
     let ids = session.request_ids();
     let surface = session.readable_surface(&ids).await;
@@ -664,7 +664,10 @@ async fn a_variable_carried_key_renders_as_written_and_carries_no_value() {
     let presenting = plans.last().expect("a plan");
     assert_eq!(presenting.rendered, "rm --confirm=${key} nothing.txt");
     assert!(
-        !presenting.rendered.contains(secret) && !presenting.commands[0].args.contains(&secret.to_string()),
+        !presenting.rendered.contains(secret)
+            && !presenting.commands[0]
+                .args
+                .contains(&PlannedValue::Plain(secret.to_string())),
         "the statement that presents the key must record no value: {presenting:?}"
     );
 }
@@ -872,7 +875,10 @@ async fn the_plan_reaches_the_ledger_unexpanded() {
     let plans = session.plans();
     let last = plans.last().expect("a plan");
     assert_eq!(last.rendered, "echo \"${target}\" > out.txt");
-    assert_eq!(last.commands[0].redirects[0].target, "out.txt");
+    assert_eq!(
+        last.commands[0].redirects[0].target,
+        PlannedValue::Plain("out.txt".to_string())
+    );
 }
 
 /// A `--confirm=<token>` value never reaches the ledger (spec §A.2): no
@@ -890,7 +896,7 @@ async fn a_presented_credential_is_redacted_from_the_plan() {
         last.rendered
     );
     assert!(
-        last.rendered.contains("--confirm=<redacted>"),
+        last.rendered.contains("--confirm=<confirm-key>"),
         "the record must still show that a key was presented: {}",
         last.rendered
     );

@@ -38,6 +38,7 @@ mod resolver;
 mod standing;
 mod subscription;
 mod teardown;
+mod watch;
 
 pub use attempt_guard::AttemptGuard;
 pub use clock::{Clock, SystemClock};
@@ -55,9 +56,12 @@ pub(crate) use teardown::{cancel_job_request, cancel_scope};
 // beside `StateResolver` and for the same reason: it names no kernel type.
 // Re-exported here because an embedder registers it through `KernelConfig`,
 // next to `with_policy` and `with_state_resolver`.
-pub use kaish_tool_api::{CommandNameClassifier, StatementClassifier, StatementPosture};
+pub use kaish_tool_api::{
+    CommandNameClassifier, RedactionMark, Redactor, StatementClassifier, StatementPosture,
+};
 pub(crate) use resolver::{conditions_to_observe, digest_path};
 pub use handles::{ApproverHandle, AttemptHandle, AttemptView, Approvals, Ledger, RequestChain, Requester};
+pub use watch::{LedgerStream, WatchEvent};
 
 /// Test-only: a stamped, tokenless view for exercising the control-plane
 /// `.approval` field (job rows, scatter rows, pipeline overrides) without

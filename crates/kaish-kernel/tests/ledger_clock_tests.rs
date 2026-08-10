@@ -100,7 +100,7 @@ async fn an_installed_clock_stamps_the_record_and_answers_the_bounds() {
     let id = post(&kernel, &authority).await;
 
     // The stamp is the installed clock's reading, not the system clock's.
-    let stamped = kernel.approvals().log(0)[0].at;
+    let stamped = kernel.approvals().log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items[0].at;
     assert_eq!(
         stamped,
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000),
@@ -164,7 +164,7 @@ async fn a_reading_below_the_latch_cannot_un_expire_an_unobserved_grant() {
     assert!(
         !kernel
             .approvals()
-            .pending()
+            .pending(kaish_types::approval::PageRequest::default()).items
             .iter()
             .any(|view| view.id == id),
         "and it must not reappear in the pending set"
@@ -189,7 +189,7 @@ async fn entry_stamps_never_regress_through_the_kernel_seam() {
 
     let stamps: Vec<SystemTime> = kernel
         .approvals()
-        .log(0)
+        .log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items
         .into_iter()
         .map(|record| record.at)
         .collect();

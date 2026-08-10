@@ -491,7 +491,7 @@ async fn a_session_cancels_its_own_request_and_not_another_principals() {
         "cancelled"
     );
     assert!(
-        session.kernel.approvals().pending().is_empty(),
+        session.kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items.is_empty(),
         "a cancelled request returns its live slot"
     );
 
@@ -723,7 +723,7 @@ async fn wait_on_two_gated_jobs_reports_both_and_surfaces_one() {
     );
 
     let surfaced = waited.approval_request().expect("one request on .approval");
-    let pending = session.kernel.approvals().pending();
+    let pending = session.kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items;
     assert_eq!(pending.len(), 2, "both requests are live");
     assert!(
         pending.iter().any(|view| view.id == surfaced.id),

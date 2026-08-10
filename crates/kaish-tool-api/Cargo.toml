@@ -16,6 +16,10 @@ kaish-types = { path = "../kaish-types", version = "0.13.0", features = [] }
 
 async-trait = { workspace = true }
 clap = { workspace = true }
+# `PendingApproval`/`ResumeAction` derive Serialize/Deserialize (ledger PR
+# R5, item b) so an ACP-style embedder can persist pending decisions across
+# a restart.
+serde = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

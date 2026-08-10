@@ -15,12 +15,33 @@
 //!
 //! The collection walk also lifts out any literal `--confirm=<key>` the
 //! statement's argv carries ([`StatementPlan::presented_keys`]) — the same
-//! two spellings the rendering redacts. One predicate decides all three of
-//! lift, redact, and render, so they cannot disagree about what the statement
+//! spellings the rendering redacts. One predicate decides all three of lift,
+//! redact, and render, so they cannot disagree about what the statement
 //! presented.
+//!
+//! [`plan_statement`] is **the one normalization point** the redaction seam
+//! promises (spec §A.8): every argument and redirect target this module
+//! plans passes through the same private normalization step exactly once,
+//! here, before the `Plan` reaches any of its sinks — the statement
+//! classifier, the ledger's `Observed` entry, tracing, and the
+//! `/v/approvals` projection all read the same already-decided
+//! `Plan::commands`, never the raw AST. The kernel's own confirm-key
+//! redaction and an embedder-installed [`Redactor`] both land through this
+//! one path, so a sink added later inherits both instead of needing its own
+//! fix.
+//!
+//! **Not normalized here**: [`redact_keys`], which builds
+//! `Capture::Statement`'s replay source. `Kernel::confirm` re-parses and
+//! re-executes that source verbatim, so it must stay exactly what the user
+//! typed — an embedder-redacted value baked into it would replay as the
+//! literal marker text instead of the real argument. Only the kernel's own
+//! confirm-key token is stripped there, because redemption authorizes
+//! through the `ApproverHandle`, never the literal key, so replay needs
+//! nothing else out of it.
 
-use kaish_types::approval::{Plan, PlannedCommand, PlannedRedirect, PLAN_RENDER_LIMIT};
+use kaish_types::approval::{Plan, PlannedCommand, PlannedRedirect, PlannedValue, ValueSite, PLAN_RENDER_LIMIT};
 use kaish_types::Value;
+use kaish_tool_api::Redactor;
 
 use super::types::{
     Arg, Assignment, BinaryOp, CaseStmt, Command, Expr, ForLoop, IfStmt, ListElem, Pipeline,
@@ -42,16 +63,30 @@ pub struct StatementPlan {
     pub presented_keys: Vec<String>,
 }
 
-/// Build the plan for one top-level statement.
-pub fn plan_statement(stmt: &Stmt) -> StatementPlan {
-    let collected = collect(stmt);
+/// Build the plan for one top-level statement. `redactor` is the
+/// embedder-installed [`Redactor`] (`KernelConfig::with_redactor`), when one
+/// is registered — `None` leaves every non-key value [`PlannedValue::Plain`]
+/// (spec §A.8's honest default).
+pub fn plan_statement(stmt: &Stmt, redactor: Option<&dyn Redactor>) -> StatementPlan {
+    let collected = collect(stmt, redactor);
     StatementPlan {
         plan: Plan::new(
-            truncate_rendering(render_stmt(stmt)),
+            truncate_rendering(render_stmt(stmt, redactor)),
             stmt.kind_name(),
             collected.commands,
         ),
         presented_keys: collected.keys,
+    }
+}
+
+/// The one normalization point every argument and redirect target passes
+/// through (spec §A.8). `raw` is the value's fully rendered text — already
+/// through `render_expr`, so it is exactly what would have reached the sink
+/// unmarked before this seam existed.
+fn normalize(raw: String, site: ValueSite, redactor: Option<&dyn Redactor>) -> PlannedValue {
+    match redactor.and_then(|r| r.redact(&raw, site)) {
+        Some(mark) => PlannedValue::redacted(mark.kind, mark.fingerprint),
+        None => PlannedValue::Plain(raw),
     }
 }
 
@@ -61,14 +96,14 @@ pub fn plan_statement(stmt: &Stmt) -> StatementPlan {
 /// What a [`PlanBinding`](kaish_types::approval::PlanBinding) digests is the
 /// operation that was *judged*, and the credential is not part of that — it
 /// is the authorization for it (spec §A.9). Without this, the held statement
-/// `rm x` and its re-run `rm --confirm=<redacted> x` would digest
+/// `rm x` and its re-run `rm --confirm=<confirm-key> x` would digest
 /// differently, and every key presentation would be read as a moved binding
 /// and re-asked, which is exactly the loop the binding exists to prevent.
 ///
 /// Unlike [`redact_keys`], this does not need to know the key: it removes the
-/// whole token whether it carries a literal credential, the `<redacted>`
-/// placeholder a rendered plan shows, or an unexpanded `${key}` the plan
-/// could not lift.
+/// whole token whether it carries a literal credential, the `<confirm-key>`
+/// marker a rendered plan shows, or an unexpanded `${key}` the plan could not
+/// lift.
 pub fn strip_confirm_tokens(rendered: &str) -> String {
     rendered
         .split_whitespace()
@@ -86,7 +121,7 @@ pub fn strip_confirm_tokens(rendered: &str) -> String {
 /// whole `--confirm=<key>` token goes, not just its value: a replay runs
 /// under a redemption correlation and is authorized by that, so a replayed
 /// statement re-presenting a spent key would only count a rejection against
-/// some request. Leaving `<redacted>` in the argv would do exactly that.
+/// some request. Leaving `<confirm-key>` in the argv would do exactly that.
 pub fn redact_keys(source: &str, keys: &[String]) -> String {
     let mut out = source.to_string();
     for key in keys {
@@ -139,85 +174,82 @@ struct Collected {
 /// A `for` body's commands, an `if` condition's command, and a `$(…)`
 /// substitution's commands are all in here: each is a command this statement
 /// would run, so each is a `cmd` resource a standing grant has to cover.
-fn collect(stmt: &Stmt) -> Collected {
+fn collect(stmt: &Stmt, redactor: Option<&dyn Redactor>) -> Collected {
     let mut out = Collected::default();
-    collect_stmt(stmt, false, &mut out);
+    collect_stmt(stmt, false, &mut out, redactor);
     out
 }
 
 /// Every command the statement contains, in source order.
-pub fn planned_commands(stmt: &Stmt) -> Vec<PlannedCommand> {
-    collect(stmt).commands
+pub fn planned_commands(stmt: &Stmt, redactor: Option<&dyn Redactor>) -> Vec<PlannedCommand> {
+    collect(stmt, redactor).commands
 }
 
-fn collect_stmt(stmt: &Stmt, background: bool, out: &mut Collected) {
+fn collect_stmt(stmt: &Stmt, background: bool, out: &mut Collected, redactor: Option<&dyn Redactor>) {
     match stmt {
-        Stmt::Assignment(a) => collect_expr(&a.value, background, out),
-        Stmt::Command(cmd) => collect_command(cmd, background, out),
+        Stmt::Assignment(a) => collect_expr(&a.value, background, out, redactor),
+        Stmt::Command(cmd) => collect_command(cmd, background, out, redactor),
         Stmt::Pipeline(p) => {
             for cmd in &p.commands {
-                collect_command(cmd, background || p.background, out);
+                collect_command(cmd, background || p.background, out, redactor);
             }
         }
         Stmt::If(s) => {
-            collect_expr(&s.condition, background, out);
-            collect_block(&s.then_branch, background, out);
+            collect_expr(&s.condition, background, out, redactor);
+            collect_block(&s.then_branch, background, out, redactor);
             if let Some(else_branch) = &s.else_branch {
-                collect_block(else_branch, background, out);
+                collect_block(else_branch, background, out, redactor);
             }
         }
         Stmt::For(s) => {
             for item in &s.items {
-                collect_expr(item, background, out);
+                collect_expr(item, background, out, redactor);
             }
-            collect_block(&s.body, background, out);
+            collect_block(&s.body, background, out, redactor);
         }
         Stmt::While(s) => {
-            collect_expr(&s.condition, background, out);
-            collect_block(&s.body, background, out);
+            collect_expr(&s.condition, background, out, redactor);
+            collect_block(&s.body, background, out, redactor);
         }
         Stmt::Case(s) => {
-            collect_expr(&s.expr, background, out);
+            collect_expr(&s.expr, background, out, redactor);
             for branch in &s.branches {
-                collect_block(&branch.body, background, out);
+                collect_block(&branch.body, background, out, redactor);
             }
         }
         Stmt::Return(e) | Stmt::Exit(e) => {
             if let Some(e) = e {
-                collect_expr(e, background, out);
+                collect_expr(e, background, out, redactor);
             }
         }
-        Stmt::ToolDef(def) => collect_block(&def.body, background, out),
-        Stmt::Test(t) => collect_test(t, background, out),
+        Stmt::ToolDef(def) => collect_block(&def.body, background, out, redactor),
+        Stmt::Test(t) => collect_test(t, background, out, redactor),
         Stmt::AndChain { left, right } | Stmt::OrChain { left, right } => {
-            collect_stmt(left, background, out);
-            collect_stmt(right, background, out);
+            collect_stmt(left, background, out, redactor);
+            collect_stmt(right, background, out, redactor);
         }
         Stmt::EnvScoped { assignments, body } => {
             for a in assignments {
-                collect_expr(&a.value, background, out);
+                collect_expr(&a.value, background, out, redactor);
             }
-            collect_stmt(body, background, out);
+            collect_stmt(body, background, out, redactor);
         }
         Stmt::Break(_) | Stmt::Continue(_) | Stmt::Empty => {}
     }
 }
 
-fn collect_block(stmts: &[Stmt], background: bool, out: &mut Collected) {
+fn collect_block(stmts: &[Stmt], background: bool, out: &mut Collected, redactor: Option<&dyn Redactor>) {
     for stmt in stmts {
-        collect_stmt(stmt, background, out);
+        collect_stmt(stmt, background, out, redactor);
     }
 }
 
-fn collect_command(cmd: &Command, background: bool, out: &mut Collected) {
-    let mut args = Vec::new();
-    for arg in &cmd.args {
-        args.push(render_arg(arg));
-    }
+fn collect_command(cmd: &Command, background: bool, out: &mut Collected, redactor: Option<&dyn Redactor>) {
+    let args: Vec<PlannedValue> = cmd.args.iter().map(|arg| plan_arg(arg, redactor).1).collect();
     let redirects = cmd
         .redirects
         .iter()
-        .map(|r| PlannedRedirect::new(r.kind.to_string(), render_expr(&r.target)))
+        .map(|r| PlannedRedirect::new(r.kind.to_string(), plan_redirect_target(&r.target, redactor)))
         .collect();
     out.commands.push(PlannedCommand::new(
         cmd.name.clone(),
@@ -237,47 +269,47 @@ fn collect_command(cmd: &Command, background: bool, out: &mut Collected) {
     // targets are commands too, and they run before it does.
     for arg in &cmd.args {
         match arg {
-            Arg::Positional(e) => collect_expr(e, background, out),
+            Arg::Positional(e) => collect_expr(e, background, out, redactor),
             Arg::Named { value, .. } | Arg::WordAssign { value, .. } => {
-                collect_expr(value, background, out)
+                collect_expr(value, background, out, redactor)
             }
             Arg::ShortFlag(_) | Arg::LongFlag(_) | Arg::DoubleDash => {}
         }
     }
     for redirect in &cmd.redirects {
-        collect_expr(&redirect.target, background, out);
+        collect_expr(&redirect.target, background, out, redactor);
     }
 }
 
-fn collect_expr(expr: &Expr, background: bool, out: &mut Collected) {
+fn collect_expr(expr: &Expr, background: bool, out: &mut Collected, redactor: Option<&dyn Redactor>) {
     match expr {
-        Expr::Command(cmd) => collect_command(cmd, background, out),
-        Expr::CommandSubst(stmts) => collect_block(stmts, background, out),
+        Expr::Command(cmd) => collect_command(cmd, background, out, redactor),
+        Expr::CommandSubst(stmts) => collect_block(stmts, background, out, redactor),
         Expr::BinaryOp { left, right, .. } => {
-            collect_expr(left, background, out);
-            collect_expr(right, background, out);
+            collect_expr(left, background, out, redactor);
+            collect_expr(right, background, out, redactor);
         }
-        Expr::Interpolated(parts) => collect_parts(parts, background, out),
+        Expr::Interpolated(parts) => collect_parts(parts, background, out, redactor),
         Expr::HereDocBody { parts, .. } => {
             for part in parts {
-                collect_part(&part.part, background, out);
+                collect_part(&part.part, background, out, redactor);
             }
         }
-        Expr::Test(t) => collect_test(t, background, out),
-        Expr::VarWithDefault { default, .. } => collect_parts(default, background, out),
+        Expr::Test(t) => collect_test(t, background, out, redactor),
+        Expr::VarWithDefault { default, .. } => collect_parts(default, background, out, redactor),
         Expr::ListLiteral(elems) => {
             for elem in elems {
                 match elem {
-                    ListElem::Item(e) | ListElem::Spread(e) => collect_expr(e, background, out),
+                    ListElem::Item(e) | ListElem::Spread(e) => collect_expr(e, background, out, redactor),
                 }
             }
         }
         Expr::RecordLiteral(entries) => {
             for entry in entries {
                 if let RecordKey::Interpolated(parts) = &entry.key {
-                    collect_parts(parts, background, out);
+                    collect_parts(parts, background, out, redactor);
                 }
-                collect_expr(&entry.value, background, out);
+                collect_expr(&entry.value, background, out, redactor);
             }
         }
         Expr::Literal(_)
@@ -293,16 +325,16 @@ fn collect_expr(expr: &Expr, background: bool, out: &mut Collected) {
     }
 }
 
-fn collect_parts(parts: &[StringPart], background: bool, out: &mut Collected) {
+fn collect_parts(parts: &[StringPart], background: bool, out: &mut Collected, redactor: Option<&dyn Redactor>) {
     for part in parts {
-        collect_part(part, background, out);
+        collect_part(part, background, out, redactor);
     }
 }
 
-fn collect_part(part: &StringPart, background: bool, out: &mut Collected) {
+fn collect_part(part: &StringPart, background: bool, out: &mut Collected, redactor: Option<&dyn Redactor>) {
     match part {
-        StringPart::CommandSubst(stmts) => collect_block(stmts, background, out),
-        StringPart::VarWithDefault { default, .. } => collect_parts(default, background, out),
+        StringPart::CommandSubst(stmts) => collect_block(stmts, background, out, redactor),
+        StringPart::VarWithDefault { default, .. } => collect_parts(default, background, out, redactor),
         StringPart::Literal(_)
         | StringPart::Var(_)
         | StringPart::VarLength(_)
@@ -315,51 +347,51 @@ fn collect_part(part: &StringPart, background: bool, out: &mut Collected) {
     }
 }
 
-fn collect_test(test: &TestExpr, background: bool, out: &mut Collected) {
+fn collect_test(test: &TestExpr, background: bool, out: &mut Collected, redactor: Option<&dyn Redactor>) {
     match test {
-        TestExpr::FileTest { path, .. } => collect_expr(path, background, out),
-        TestExpr::StringTest { value, .. } => collect_expr(value, background, out),
+        TestExpr::FileTest { path, .. } => collect_expr(path, background, out, redactor),
+        TestExpr::StringTest { value, .. } => collect_expr(value, background, out, redactor),
         TestExpr::Comparison { left, right, .. }
         | TestExpr::In { left, right }
         | TestExpr::NotIn { left, right } => {
-            collect_expr(left, background, out);
-            collect_expr(right, background, out);
+            collect_expr(left, background, out, redactor);
+            collect_expr(right, background, out, redactor);
         }
         TestExpr::And { left, right } | TestExpr::Or { left, right } => {
-            collect_test(left, background, out);
-            collect_test(right, background, out);
+            collect_test(left, background, out, redactor);
+            collect_test(right, background, out, redactor);
         }
-        TestExpr::Not { expr } => collect_test(expr, background, out),
+        TestExpr::Not { expr } => collect_test(expr, background, out, redactor),
     }
 }
 
 // ───────────────────────── Rendering ─────────────────────────
 
 /// Render one statement back to shell text, unexpanded.
-pub fn render_stmt(stmt: &Stmt) -> String {
+pub fn render_stmt(stmt: &Stmt, redactor: Option<&dyn Redactor>) -> String {
     match stmt {
-        Stmt::Assignment(a) => render_assignment(a),
-        Stmt::Command(cmd) => render_command(cmd),
-        Stmt::Pipeline(p) => render_pipeline(p),
-        Stmt::If(s) => render_if(s),
-        Stmt::For(s) => render_for(s),
-        Stmt::While(s) => render_while(s),
-        Stmt::Case(s) => render_case(s),
+        Stmt::Assignment(a) => render_assignment(a, redactor),
+        Stmt::Command(cmd) => render_command(cmd, redactor),
+        Stmt::Pipeline(p) => render_pipeline(p, redactor),
+        Stmt::If(s) => render_if(s, redactor),
+        Stmt::For(s) => render_for(s, redactor),
+        Stmt::While(s) => render_while(s, redactor),
+        Stmt::Case(s) => render_case(s, redactor),
         Stmt::Break(n) => render_keyword("break", n.map(|n| n.to_string())),
         Stmt::Continue(n) => render_keyword("continue", n.map(|n| n.to_string())),
-        Stmt::Return(e) => render_keyword("return", e.as_ref().map(|e| render_expr(e))),
-        Stmt::Exit(e) => render_keyword("exit", e.as_ref().map(|e| render_expr(e))),
-        Stmt::ToolDef(def) => render_tooldef(def),
-        Stmt::Test(t) => format!("[[ {} ]]", render_test(t)),
+        Stmt::Return(e) => render_keyword("return", e.as_ref().map(|e| render_expr(e, redactor))),
+        Stmt::Exit(e) => render_keyword("exit", e.as_ref().map(|e| render_expr(e, redactor))),
+        Stmt::ToolDef(def) => render_tooldef(def, redactor),
+        Stmt::Test(t) => format!("[[ {} ]]", render_test(t, redactor)),
         Stmt::AndChain { left, right } => {
-            format!("{} && {}", render_stmt(left), render_stmt(right))
+            format!("{} && {}", render_stmt(left, redactor), render_stmt(right, redactor))
         }
         Stmt::OrChain { left, right } => {
-            format!("{} || {}", render_stmt(left), render_stmt(right))
+            format!("{} || {}", render_stmt(left, redactor), render_stmt(right, redactor))
         }
         Stmt::EnvScoped { assignments, body } => {
-            let prefix: Vec<String> = assignments.iter().map(render_assignment).collect();
-            format!("{} {}", prefix.join(" "), render_stmt(body))
+            let prefix: Vec<String> = assignments.iter().map(|a| render_assignment(a, redactor)).collect();
+            format!("{} {}", prefix.join(" "), render_stmt(body, redactor))
         }
         Stmt::Empty => String::new(),
     }
@@ -372,45 +404,49 @@ fn render_keyword(word: &str, operand: Option<String>) -> String {
     }
 }
 
-fn render_block(stmts: &[Stmt]) -> String {
+fn render_block(stmts: &[Stmt], redactor: Option<&dyn Redactor>) -> String {
     stmts
         .iter()
         .filter(|s| !matches!(s, Stmt::Empty))
-        .map(render_stmt)
+        .map(|s| render_stmt(s, redactor))
         .collect::<Vec<_>>()
         .join("; ")
 }
 
-fn render_assignment(a: &Assignment) -> String {
+fn render_assignment(a: &Assignment, redactor: Option<&dyn Redactor>) -> String {
     let path = render_varpath(&a.path);
     if a.local {
-        format!("local {} = {}", path, render_expr(&a.value))
+        format!("local {} = {}", path, render_expr(&a.value, redactor))
     } else {
-        format!("{}={}", path, render_expr(&a.value))
+        format!("{}={}", path, render_expr(&a.value, redactor))
     }
 }
 
 /// Render one command: argv0, every argument form, and every redirect.
-pub fn render_command(cmd: &Command) -> String {
+pub fn render_command(cmd: &Command, redactor: Option<&dyn Redactor>) -> String {
     let mut parts = vec![cmd.name.clone()];
     for arg in &cmd.args {
-        parts.push(render_arg(arg));
+        parts.push(plan_arg(arg, redactor).0);
     }
     for redirect in &cmd.redirects {
-        parts.push(render_redirect(redirect));
+        parts.push(render_redirect(redirect, redactor));
     }
     parts.join(" ")
 }
 
-/// The one argument whose value never reaches a plan: `--confirm=<token>`
-/// carries a redemption credential, and a plan is written straight into the
-/// ledger and projected into `/v/approvals` (spec §A.2 — no entry carries a
-/// credential).
+/// The one argument whose value never reaches a plan unredacted:
+/// `--confirm=<token>` carries a redemption credential, and a plan is
+/// written straight into the ledger and projected into `/v/approvals`
+/// (spec §A.2 — no entry carries a credential). This is the kernel's own,
+/// unconditional redaction (spec §A.8) — it never asks an installed
+/// [`Redactor`], because the kernel minted this exact string and knows it
+/// outright.
 const CONFIRM_KEY: &str = "confirm";
 
-/// What a redacted credential renders as. Names the flag so the record still
-/// shows that a key was presented; shows none of it.
-const REDACTED: &str = "<redacted>";
+/// The [`PlannedValue::Redacted`] `kind` the kernel's confirm-key redaction
+/// marks a value with, so an auditor reading `Plan::commands` can tell the
+/// kernel's own redaction apart from an embedder's.
+const CONFIRM_KEY_KIND: &str = "confirm-key";
 
 /// The literal credential this argument presents, if it is a `confirm`
 /// argument carrying one.
@@ -431,45 +467,88 @@ fn presented_key(arg: &Arg) -> Option<String> {
     }
 }
 
-fn render_arg(arg: &Arg) -> String {
-    // A `confirm` argument carrying a *literal* is a credential and is
-    // redacted; one carrying `${key}` or `$(…)` is not, and renders as
-    // written like every other unexpanded value. One predicate decides all
-    // three of lift, redact, and render, so they cannot disagree.
+/// Plan one argument: its flat text (for [`render_command`]) and its
+/// [`PlannedValue`] (for [`PlannedCommand::args`]), both derived from the
+/// same one redaction decision (spec §A.8) — so the two representations
+/// cannot disagree about what this argument was.
+///
+/// A `confirm` argument carrying a *literal* is the kernel's own credential
+/// and is redacted unconditionally; every other value's flag/key prefix (if
+/// any) stays visible even when its value is redacted, so the record still
+/// shows *that* a value was presented at that flag, never *what*.
+fn plan_arg(arg: &Arg, redactor: Option<&dyn Redactor>) -> (String, PlannedValue) {
     if presented_key(arg).is_some() {
-        return match arg {
+        let value = PlannedValue::redacted(CONFIRM_KEY_KIND, None);
+        let text = match arg {
             // `dd` takes its operands as bare `key=value`, so `confirm=<key>`
             // is a second spelling of the same credential.
-            Arg::WordAssign { key, .. } => format!("{key}={REDACTED}"),
-            _ => format!("--{CONFIRM_KEY}={REDACTED}"),
+            Arg::WordAssign { key, .. } => format!("{key}={}", value.display()),
+            _ => format!("--{CONFIRM_KEY}={}", value.display()),
         };
+        return (text, value);
     }
-    match arg {
-        Arg::Positional(e) => render_expr(e),
-        Arg::Named { key, value } => format!("--{}={}", key, render_expr(value)),
-        Arg::WordAssign { key, value } => format!("{}={}", key, render_expr(value)),
-        Arg::ShortFlag(f) => format!("-{f}"),
-        Arg::LongFlag(f) => format!("--{f}"),
-        Arg::DoubleDash => "--".to_string(),
-    }
+    let (text, value) = match arg {
+        Arg::Positional(e) => {
+            let value = normalize(render_expr(e, redactor), ValueSite::Argument, redactor);
+            (value.display(), value)
+        }
+        Arg::Named { key, value: e } => {
+            let value = normalize(render_expr(e, redactor), ValueSite::Argument, redactor);
+            (format!("--{key}={}", value.display()), value)
+        }
+        Arg::WordAssign { key, value: e } => {
+            let value = normalize(render_expr(e, redactor), ValueSite::Argument, redactor);
+            (format!("{key}={}", value.display()), value)
+        }
+        Arg::ShortFlag(f) => {
+            let text = format!("-{f}");
+            (text.clone(), PlannedValue::Plain(text))
+        }
+        Arg::LongFlag(f) => {
+            let text = format!("--{f}");
+            (text.clone(), PlannedValue::Plain(text))
+        }
+        Arg::DoubleDash => ("--".to_string(), PlannedValue::Plain("--".to_string())),
+    };
+    // A redacted `--key=value` loses its `key=` prefix in the *structured*
+    // value (`PlannedValue::Redacted` has nowhere to put one) but keeps it
+    // in the flat text above; a plain value keeps the full composed text in
+    // both, so `PlannedCommand::args` round-trips into `render_command`'s
+    // output unless something was actually judged secret.
+    let structured = if value.is_redacted() {
+        value
+    } else {
+        PlannedValue::Plain(text.clone())
+    };
+    (text, structured)
 }
 
-fn render_redirect(redirect: &Redirect) -> String {
+/// Plan one redirect's target through the same normalization `plan_arg`
+/// applies to arguments (spec §A.8's `ValueSite::RedirectTarget`).
+fn plan_redirect_target(target: &Expr, redactor: Option<&dyn Redactor>) -> PlannedValue {
+    normalize(render_expr(target, redactor), ValueSite::RedirectTarget, redactor)
+}
+
+fn render_redirect(redirect: &Redirect, redactor: Option<&dyn Redactor>) -> String {
     // A merge redirect (`2>&1`, `1>&2`) is the whole operator: its target
     // expression is a placeholder, and printing it would invent a filename.
     match redirect.kind {
         super::types::RedirectKind::MergeStderr | super::types::RedirectKind::MergeStdout => {
             redirect.kind.to_string()
         }
-        _ => format!("{} {}", redirect.kind, render_expr(&redirect.target)),
+        _ => format!(
+            "{} {}",
+            redirect.kind,
+            plan_redirect_target(&redirect.target, redactor).display()
+        ),
     }
 }
 
-fn render_pipeline(p: &Pipeline) -> String {
+fn render_pipeline(p: &Pipeline, redactor: Option<&dyn Redactor>) -> String {
     let body = p
         .commands
         .iter()
-        .map(render_command)
+        .map(|cmd| render_command(cmd, redactor))
         .collect::<Vec<_>>()
         .join(" | ");
     if p.background {
@@ -479,14 +558,14 @@ fn render_pipeline(p: &Pipeline) -> String {
     }
 }
 
-fn render_if(s: &IfStmt) -> String {
+fn render_if(s: &IfStmt, redactor: Option<&dyn Redactor>) -> String {
     let mut out = format!(
         "if {}; then {}",
-        render_expr(&s.condition),
-        render_block(&s.then_branch)
+        render_expr(&s.condition, redactor),
+        render_block(&s.then_branch, redactor)
     );
     if let Some(else_branch) = &s.else_branch {
-        let rendered = render_block(else_branch);
+        let rendered = render_block(else_branch, redactor);
         if !rendered.is_empty() {
             out.push_str(&format!("; else {rendered}"));
         }
@@ -495,39 +574,39 @@ fn render_if(s: &IfStmt) -> String {
     out
 }
 
-fn render_for(s: &ForLoop) -> String {
-    let items: Vec<String> = s.items.iter().map(render_expr).collect();
+fn render_for(s: &ForLoop, redactor: Option<&dyn Redactor>) -> String {
+    let items: Vec<String> = s.items.iter().map(|e| render_expr(e, redactor)).collect();
     format!(
         "for {} in {}; do {}; done",
         s.variable,
         items.join(" "),
-        render_block(&s.body)
+        render_block(&s.body, redactor)
     )
 }
 
-fn render_while(s: &WhileLoop) -> String {
+fn render_while(s: &WhileLoop, redactor: Option<&dyn Redactor>) -> String {
     format!(
         "while {}; do {}; done",
-        render_expr(&s.condition),
-        render_block(&s.body)
+        render_expr(&s.condition, redactor),
+        render_block(&s.body, redactor)
     )
 }
 
-fn render_case(s: &CaseStmt) -> String {
+fn render_case(s: &CaseStmt, redactor: Option<&dyn Redactor>) -> String {
     let branches: Vec<String> = s
         .branches
         .iter()
-        .map(|b| format!("{}) {} ;;", b.patterns.join("|"), render_block(&b.body)))
+        .map(|b| format!("{}) {} ;;", b.patterns.join("|"), render_block(&b.body, redactor)))
         .collect();
-    format!("case {} in {} esac", render_expr(&s.expr), branches.join(" "))
+    format!("case {} in {} esac", render_expr(&s.expr, redactor), branches.join(" "))
 }
 
-fn render_tooldef(def: &ToolDef) -> String {
+fn render_tooldef(def: &ToolDef, redactor: Option<&dyn Redactor>) -> String {
     let params: Vec<String> = def
         .params
         .iter()
         .map(|p| match &p.default {
-            Some(default) => format!("{}={}", p.name, render_expr(default)),
+            Some(default) => format!("{}={}", p.name, render_expr(default, redactor)),
             None => p.name.clone(),
         })
         .collect();
@@ -535,20 +614,20 @@ fn render_tooldef(def: &ToolDef) -> String {
         "tool {}({}) {{ {} }}",
         def.name,
         params.join(", "),
-        render_block(&def.body)
+        render_block(&def.body, redactor)
     )
 }
 
 /// Render one expression back to shell text, unexpanded: a variable
 /// reference stays `${NAME}` and a substitution stays `$(…)`.
-pub fn render_expr(expr: &Expr) -> String {
+pub fn render_expr(expr: &Expr, redactor: Option<&dyn Redactor>) -> String {
     match expr {
         Expr::Literal(v) => render_literal(v),
         Expr::VarRef(path) => format!("${{{}}}", render_varpath(path)),
-        Expr::Interpolated(parts) => format!("\"{}\"", render_parts(parts)),
+        Expr::Interpolated(parts) => format!("\"{}\"", render_parts(parts, redactor)),
         Expr::HereDocBody { parts, strip_tabs } => {
             let dash = if *strip_tabs { "-" } else { "" };
-            let body: Vec<String> = parts.iter().map(|sp| render_part(&sp.part)).collect();
+            let body: Vec<String> = parts.iter().map(|sp| render_part(&sp.part, redactor)).collect();
             format!("<<{dash}EOF\n{}\nEOF", body.join(""))
         }
         Expr::BinaryOp { left, op, right } => {
@@ -556,19 +635,19 @@ pub fn render_expr(expr: &Expr) -> String {
                 BinaryOp::And => "&&",
                 BinaryOp::Or => "||",
             };
-            format!("{} {} {}", render_expr(left), op, render_expr(right))
+            format!("{} {} {}", render_expr(left, redactor), op, render_expr(right, redactor))
         }
-        Expr::CommandSubst(stmts) => format!("$({})", render_block(stmts)),
-        Expr::Test(t) => format!("[[ {} ]]", render_test(t)),
+        Expr::CommandSubst(stmts) => format!("$({})", render_block(stmts, redactor)),
+        Expr::Test(t) => format!("[[ {} ]]", render_test(t, redactor)),
         Expr::Positional(n) => format!("${n}"),
         Expr::AllArgs => "$@".to_string(),
         Expr::ArgCount => "$#".to_string(),
         Expr::VarLength(path) => format!("${{#{}}}", render_varpath(path)),
         Expr::VarWithDefault { path, default } => {
-            format!("${{{}:-{}}}", render_varpath(path), render_parts(default))
+            format!("${{{}:-{}}}", render_varpath(path), render_parts(default, redactor))
         }
         Expr::Arithmetic(e) => format!("$(({e}))"),
-        Expr::Command(cmd) => render_command(cmd),
+        Expr::Command(cmd) => render_command(cmd, redactor),
         Expr::LastExitCode => "$?".to_string(),
         Expr::CurrentPid => "$$".to_string(),
         Expr::GlobPattern(p) => p.clone(),
@@ -576,8 +655,8 @@ pub fn render_expr(expr: &Expr) -> String {
             let parts: Vec<String> = elems
                 .iter()
                 .map(|e| match e {
-                    ListElem::Item(e) => render_expr(e),
-                    ListElem::Spread(e) => format!("...{}", render_expr(e)),
+                    ListElem::Item(e) => render_expr(e, redactor),
+                    ListElem::Spread(e) => format!("...{}", render_expr(e, redactor)),
                 })
                 .collect();
             format!("[{}]", parts.join(" "))
@@ -589,9 +668,9 @@ pub fn render_expr(expr: &Expr) -> String {
                     let key = match &entry.key {
                         RecordKey::Bare(k) => k.clone(),
                         RecordKey::Quoted(k) => format!("\"{k}\""),
-                        RecordKey::Interpolated(parts) => format!("\"{}\"", render_parts(parts)),
+                        RecordKey::Interpolated(parts) => format!("\"{}\"", render_parts(parts, redactor)),
                     };
-                    format!("{key}: {}", render_expr(&entry.value))
+                    format!("{key}: {}", render_expr(&entry.value, redactor))
                 })
                 .collect();
             format!("{{{}}}", parts.join(", "))
@@ -628,45 +707,47 @@ fn quote_word(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-fn render_parts(parts: &[StringPart]) -> String {
-    parts.iter().map(render_part).collect::<Vec<_>>().join("")
+fn render_parts(parts: &[StringPart], redactor: Option<&dyn Redactor>) -> String {
+    parts.iter().map(|p| render_part(p, redactor)).collect::<Vec<_>>().join("")
 }
 
-fn render_part(part: &StringPart) -> String {
+fn render_part(part: &StringPart, redactor: Option<&dyn Redactor>) -> String {
     match part {
         StringPart::Literal(s) => s.replace('\\', "\\\\").replace('"', "\\\""),
         StringPart::Var(path) => format!("${{{}}}", render_varpath(path)),
         StringPart::VarWithDefault { path, default } => {
-            format!("${{{}:-{}}}", render_varpath(path), render_parts(default))
+            format!("${{{}:-{}}}", render_varpath(path), render_parts(default, redactor))
         }
         StringPart::VarLength(path) => format!("${{#{}}}", render_varpath(path)),
         StringPart::Positional(n) => format!("${n}"),
         StringPart::AllArgs => "$@".to_string(),
         StringPart::ArgCount => "$#".to_string(),
         StringPart::Arithmetic(e) => format!("$(({e}))"),
-        StringPart::CommandSubst(stmts) => format!("$({})", render_block(stmts)),
+        StringPart::CommandSubst(stmts) => format!("$({})", render_block(stmts, redactor)),
         StringPart::LastExitCode => "$?".to_string(),
         StringPart::CurrentPid => "$$".to_string(),
     }
 }
 
-fn render_test(test: &TestExpr) -> String {
+fn render_test(test: &TestExpr, redactor: Option<&dyn Redactor>) -> String {
     match test {
-        TestExpr::FileTest { op, path } => format!("{} {}", op, render_expr(path)),
-        TestExpr::StringTest { op, value } => format!("{} {}", op, render_expr(value)),
+        TestExpr::FileTest { op, path } => format!("{} {}", op, render_expr(path, redactor)),
+        TestExpr::StringTest { op, value } => format!("{} {}", op, render_expr(value, redactor)),
         TestExpr::Comparison { left, op, right } => {
-            format!("{} {} {}", render_expr(left), op, render_expr(right))
+            format!("{} {} {}", render_expr(left, redactor), op, render_expr(right, redactor))
         }
         TestExpr::And { left, right } => {
-            format!("{} && {}", render_test(left), render_test(right))
+            format!("{} && {}", render_test(left, redactor), render_test(right, redactor))
         }
-        TestExpr::Or { left, right } => format!("{} || {}", render_test(left), render_test(right)),
-        TestExpr::Not { expr } => format!("! {}", render_test(expr)),
+        TestExpr::Or { left, right } => {
+            format!("{} || {}", render_test(left, redactor), render_test(right, redactor))
+        }
+        TestExpr::Not { expr } => format!("! {}", render_test(expr, redactor)),
         TestExpr::In { left, right } => {
-            format!("{} in {}", render_expr(left), render_expr(right))
+            format!("{} in {}", render_expr(left, redactor), render_expr(right, redactor))
         }
         TestExpr::NotIn { left, right } => {
-            format!("{} not in {}", render_expr(left), render_expr(right))
+            format!("{} not in {}", render_expr(left, redactor), render_expr(right, redactor))
         }
     }
 }
@@ -709,7 +790,7 @@ mod tests {
             .into_iter()
             .find(|s| !matches!(s, Stmt::Empty))
             .expect("one statement");
-        plan_statement(&stmt)
+        plan_statement(&stmt, None)
     }
 
     fn plan_of(source: &str) -> Plan {
@@ -756,14 +837,20 @@ mod tests {
             .map(|r| r.kind.as_str())
             .collect();
         assert_eq!(kinds, vec![">", "2>", "<"]);
-        assert_eq!(plan.commands[0].redirects[0].target, "out.txt");
+        assert_eq!(
+            plan.commands[0].redirects[0].target,
+            PlannedValue::Plain("out.txt".to_string())
+        );
         assert!(plan.rendered.contains("> out.txt"), "got: {}", plan.rendered);
     }
 
     #[test]
     fn a_redirect_target_stays_unexpanded() {
         let plan = plan_of("echo hi > ${LOG}");
-        assert_eq!(plan.commands[0].redirects[0].target, "${LOG}");
+        assert_eq!(
+            plan.commands[0].redirects[0].target,
+            PlannedValue::Plain("${LOG}".to_string())
+        );
     }
 
     #[test]
@@ -783,12 +870,12 @@ mod tests {
         assert_eq!(
             args,
             &vec![
-                "-v".to_string(),
-                "--force".to_string(),
-                "--key=value".to_string(),
-                "word".to_string(),
-                "--".to_string(),
-                "--after".to_string(),
+                PlannedValue::Plain("-v".to_string()),
+                PlannedValue::Plain("--force".to_string()),
+                PlannedValue::Plain("--key=value".to_string()),
+                PlannedValue::Plain("word".to_string()),
+                PlannedValue::Plain("--".to_string()),
+                PlannedValue::Plain("--after".to_string()),
             ]
         );
     }
@@ -868,10 +955,13 @@ mod tests {
     fn a_literal_key_is_lifted_and_redacted() {
         let planned = planned_of("rm --confirm=deadbeef target.txt");
         assert_eq!(planned.presented_keys, vec!["deadbeef".to_string()]);
-        assert_eq!(planned.plan.rendered, "rm --confirm=<redacted> target.txt");
+        assert_eq!(planned.plan.rendered, "rm --confirm=<confirm-key> target.txt");
         assert_eq!(
             planned.plan.commands[0].args,
-            vec!["--confirm=<redacted>".to_string(), "target.txt".to_string()]
+            vec![
+                PlannedValue::redacted("confirm-key", None),
+                PlannedValue::Plain("target.txt".to_string()),
+            ]
         );
     }
 
@@ -882,7 +972,7 @@ mod tests {
         let planned = planned_of("dd if=a of=b confirm=deadbeef");
         assert_eq!(planned.presented_keys, vec!["deadbeef".to_string()]);
         assert!(
-            planned.plan.rendered.ends_with("confirm=<redacted>"),
+            planned.plan.rendered.ends_with("confirm=<confirm-key>"),
             "got: {}",
             planned.plan.rendered
         );

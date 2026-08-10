@@ -334,10 +334,33 @@ breaking entries are marked **BREAKING**.
   produced deserializes as `RecordedEntry::Unknown` with its sequence and scope
   intact — a gap in an audit log has to be visible as a gap, and a reader that
   dropped it would report a clean history it never verified.
-- **Approval listings are paginated** — `Approvals::pending`/`log` take a
-  `PageRequest` (cursor on the stable `seq`, plus scope/state/time filters) and
-  return a page. The statement tap posts an entry per top-level statement, so an
-  unbounded listing was never going to hold in a long-lived embedder.
+- **Approval listings are paginated** (`docs/approval-ledger.md` §D.2) —
+  `Approvals::pending(PageRequest) -> ApprovalPage` (cursor on the stable `seq`,
+  plus scope/state/time filters) and `Approvals::log(since, limit) -> LedgerPage`
+  both return a bounded page with a `next` cursor, never a bare `Vec`. The
+  statement tap posts an entry per top-level statement, so an unbounded listing
+  was never going to hold in a long-lived embedder; resuming from the returned
+  cursor sees every entry exactly once, never twice and never skipped.
+- **`Approvals::watch(since) -> LedgerStream`** (`docs/approval-ledger.md` §D.2) —
+  the one convenience the kernel offers around waiting: backfills the retained
+  tail from `since`, then yields every further append live, in order, with no
+  deadline and no filter. A lagging consumer gets `WatchEvent::Lagged { count }`,
+  never a silently dropped entry — without it, every non-REPL embedder was
+  writing its own polling loop against `Approvals::log`.
+- **`approvals log` gains `--limit`** (default 200) — a page of the retained log,
+  naming the `--since` a caller passes to keep going when more remain, instead of
+  an unbounded read. `approvals list`'s pending set pages internally at 1024
+  (`LedgerConfig::live_capacity`'s own default) with the same "more remain"
+  advisory; it has no `--limit` flag of its own, matching the spec's CLI surface.
+- **`PendingApproval` and `ResumeAction` derive `Serialize`/`Deserialize`**
+  (`kaish-tool-api`) — an ACP-style embedder can persist a pending decision
+  across a process restart instead of losing it if the process exits before a
+  human answers.
+- **A compile-time field-parity guard on `ApprovalRequestView`** — a test fully
+  destructures `ApprovalRequest` (no `..`) and asserts each field's mapping into
+  the view, so a field added to `ApprovalRequest` with no matching update here
+  breaks the build instead of silently vanishing from what an approver, a
+  classifier, or `/v/approvals` can see.
 - **`Approvals::ids()`** lists every request the ledger still holds, decided ones
   included — the enumeration `/v/approvals` and `approvals list --all` read.
 - **`RequestId::seq()`** returns the id's allocation sequence; sorting the id text
@@ -389,19 +412,26 @@ breaking entries are marked **BREAKING**.
 - **Re-running a held statement with `--confirm=<key>` redeems the original
   request** — the gate reads the key off the statement's own argv before drafting,
   so a re-run never mints a second request and leaves the first pending.
-- A `--confirm=<key>` argument renders as `--confirm=<redacted>` and its token is
-  dropped from `Capture::Statement`'s source — plan and capture both land in the
-  ledger, and no ledger entry carries a credential. Only a literal key is affected
-  (`--confirm=${key}` renders unexpanded and carries no value either way), and
-  nothing is stripped from the argv that executes.
-- **`PlannedValue` and the `Redactor` seam** (`docs/approval-ledger.md` §A.8) — plan
-  values serialize as `Plain` or `Redacted { kind, fingerprint }`, never as a bare
-  string, and one normalization point runs before the plan is classified, observed,
-  captured, attached, or projected, so a sink added later inherits the redaction.
-  The kernel redacts exactly one thing — its own approval key, which it can do
-  exactly because it minted it. It does not detect credentials in general: that is
-  an embedder-installed `Redactor`, because a shell cannot define what a secret is
-  and a spec promising best-effort detection would be making a guarantee it breaks.
+- A `--confirm=<key>` argument renders as `--confirm=<confirm-key>` and its token
+  is dropped from `Capture::Statement`'s source — plan and capture both land in
+  the ledger, and no ledger entry carries a credential. Only a literal key is
+  affected (`--confirm=${key}` renders unexpanded and carries no value either
+  way), and nothing is stripped from the argv that executes.
+- **`PlannedValue` and the `Redactor` seam** (`docs/approval-ledger.md` §A.8) —
+  `PlannedCommand::args` and `PlannedRedirect::target` serialize as `PlannedValue`
+  (`Plain` or `Redacted { kind, fingerprint }`), never as a bare string, and one
+  normalization point (`ast::plan::plan_statement`) runs before the plan reaches
+  any sink that reads it — the statement classifier, the ledger's `Observed`
+  entry, tracing, and the `/v/approvals` projection — so a sink added later
+  inherits the redaction instead of needing its own fix. `Capture::Statement`'s
+  replay source is not one of those sinks: `Kernel::confirm` re-executes it
+  verbatim, so only the kernel's own confirm-key token is stripped from it, as
+  before. `KernelConfig::with_redactor` installs an embedder's `Redactor`. The
+  kernel redacts exactly one thing unconditionally — its own approval key, which
+  it can do exactly because it minted it. It does not detect credentials in
+  general: that is an embedder-installed `Redactor`, because a shell cannot
+  define what a secret is and a spec promising best-effort detection would be
+  making a guarantee it breaks.
   With no `Redactor` installed every value is `Plain`, and nothing pretends
   otherwise.
 - **`KernelConfig::with_statement_classifier`** and

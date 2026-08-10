@@ -511,7 +511,7 @@ mod tests {
             .expect("a wired ledger")
             .approvals
             .clone();
-        let pending = approvals.pending();
+        let pending = approvals.pending(kaish_types::approval::PageRequest::default()).items;
         assert_eq!(pending.len(), 1, "exactly one request must be pending");
         let id = pending[0].id.clone();
         let chain = approvals.get(&id).expect("the chain");
@@ -552,11 +552,11 @@ mod tests {
 
         let approvals = ctx.ledger_access.as_ref().expect("a wired ledger").approvals.clone();
         assert!(
-            approvals.log(0).is_empty(),
+            approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items.is_empty(),
             "an unsubscribed, ungated rm must post NOTHING: {:?}",
-            approvals.log(0)
+            approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items
         );
-        assert!(approvals.pending().is_empty());
+        assert!(approvals.pending(kaish_types::approval::PageRequest::default()).items.is_empty());
     }
 
     /// The entries inside this ledger's records. These tests assert on entry
@@ -565,7 +565,8 @@ mod tests {
         approvals: &crate::ledger::Approvals,
     ) -> Vec<kaish_types::approval::LedgerEntry> {
         approvals
-            .log(0)
+            .log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT)
+            .items
             .into_iter()
             .map(|record| {
                 record

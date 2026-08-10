@@ -279,14 +279,14 @@ async fn defer_through_both_stages_is_exit_2_with_a_pending_view() {
     // Stage 3: the request stays `Requested`, nothing was decided, and the
     // gate site returns exit 2 carrying the pending view.
     assert_eq!(approvals.state(&request.id), Some(RequestState::Requested));
-    let pending = approvals.pending();
+    let pending = approvals.pending(kaish_types::approval::PageRequest::default()).items;
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id, request.id);
     let result = gate_result(&outcome, &request);
     assert_eq!(result.code, 2, "deferring all the way through is exit 2");
     assert!(result.err.contains(&request.id.to_string()));
     // Nothing beyond the caller's own `Requested` entry was appended.
-    assert_eq!(entries(approvals.log(0)).len(), 1);
+    assert_eq!(entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).len(), 1);
 }
 
 #[tokio::test]
@@ -405,7 +405,7 @@ async fn a_standing_grant_copies_the_requests_transitions_into_the_grants_condit
         grant.conditions[0].expected_from,
         StateClaim::Exact("a1b2c3d".into())
     );
-    assert!(matches!(entries(approvals.log(0)).last(), Some(LedgerEntry::Granted { .. })));
+    assert!(matches!(entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).last(), Some(LedgerEntry::Granted { .. })));
 }
 
 #[tokio::test]
@@ -481,7 +481,7 @@ async fn max_uses_consumption_is_exact_under_eight_concurrent_matching_requests(
     assert_eq!(authority.standing_uses(&rule), MAX_USES);
 
     // The log agrees with the counter: one `Granted{Standing}` per use.
-    let from_log = entries(approvals.log(0))
+    let from_log = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items)
         .into_iter()
         .filter(|entry| {
             matches!(entry, LedgerEntry::Granted { grant, .. } if grant.grounds == Grounds::Standing { grant: rule })
@@ -556,8 +556,8 @@ struct LedgerReadingPolicy {
 impl Policy for LedgerReadingPolicy {
     fn evaluate(&self, _req: &ApprovalRequestView, ledger: &Approvals) -> Decision {
         // Stage 2 gets the read side as an argument and may use it freely.
-        self.pending_seen.fetch_add(ledger.pending().len(), Ordering::SeqCst);
-        let _ = entries(ledger.log(0));
+        self.pending_seen.fetch_add(ledger.pending(kaish_types::approval::PageRequest::default()).items.len(), Ordering::SeqCst);
+        let _ = entries(ledger.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items);
         let _ = ledger.standing();
         Decision::Defer
     }
@@ -724,7 +724,7 @@ async fn a_cancellation_that_beats_the_commit_leaves_no_live_grant() {
         "the grant that beat the cancellation must be undone"
     );
     // The record keeps both halves: the decision, and its undoing.
-    let log = entries(approvals.log(0));
+    let log = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items);
     assert!(log.iter().any(|e| matches!(e, LedgerEntry::Granted { .. })));
     assert!(log.iter().any(|e| matches!(e, LedgerEntry::Abandoned { .. })));
     assert_eq!(gate_result(&outcome, &request).code, 130);
@@ -810,7 +810,7 @@ async fn kernel_build_mints_one_authority_and_a_plain_session_holds_none() {
     );
     // The minted authority works: it can decide against this kernel's ledger.
     let request = post(kernel.requester(), "fs.remove", vec![]).await;
-    assert_eq!(kernel.approvals().pending().len(), 1);
+    assert_eq!(kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items.len(), 1);
     authority
         .grant(&request.id, request.revision, GrantTerms::once_for(&request, far_future()))
         .await
@@ -852,8 +852,8 @@ async fn a_session_given_a_handle_holds_authority_and_joins_its_ledger() {
     assert_eq!(kernel.principal(), &operator());
     // One ledger, two views of it.
     let request = post(kernel.requester(), "fs.remove", vec![]).await;
-    assert_eq!(approvals.pending().len(), 1, "the kernel joined the supplied ledger");
-    assert_eq!(approvals.pending()[0].id, request.id);
+    assert_eq!(approvals.pending(kaish_types::approval::PageRequest::default()).items.len(), 1, "the kernel joined the supplied ledger");
+    assert_eq!(approvals.pending(kaish_types::approval::PageRequest::default()).items[0].id, request.id);
 }
 
 #[tokio::test]
@@ -881,7 +881,7 @@ async fn a_fork_shares_its_parents_ledger() {
     let fork = kernel.fork().await;
     post(fork.requester(), "fs.remove", vec![]).await;
     assert_eq!(
-        kernel.approvals().pending().len(),
+        kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items.len(),
         1,
         "a background job's requests must land in the log the foreground reads"
     );
