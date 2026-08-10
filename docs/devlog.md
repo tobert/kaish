@@ -15,6 +15,54 @@ before it ships.
 
 ---
 
+## ExecResult carries the resume route it was built with (2026-08-10)
+
+The previous entry's own verdict named the fix before this branch existed: "the
+pending decision on `ExecResult` should carry the `ResumeAction` it was built
+with, rather than making every frontend re-derive it." `fulfill_gate` was the
+proof that mattered — the REPL, a plain embedder with no privileged hook, had
+to call `ResumeAction::for_capture(&view.capture, &view.binding.plan_digest)`
+itself to get the route `proceed()` had already computed and thrown away at the
+result boundary.
+
+The fix is the field carrying what the constructor actually builds:
+`ExecResult.approval` is now `Option<Box<PendingApproval>>`, not
+`Option<Box<ApprovalRequestView>>`. `proceed()` stores the whole
+`PendingApproval` it builds instead of unpacking `.request` and dropping
+`.resume`; `fulfill_gate` reads `gated.pending_approval()` and is done — no
+`for_capture` call left in a consumer.
+
+The interesting part was where `PendingApproval`/`ResumeAction` had to live.
+They were defined in `kaish-tool-api`, which depends on `kaish-types` (where
+`ExecResult` lives) and not the other way — so `ExecResult` could not name
+them without an illegal back-edge. They moved down into `kaish-types`, next to
+`ApprovalRequestView`, `Capture`, and everything else they are built from;
+`kaish-tool-api` re-exports both names so no import at any call site had to
+change. One accidental win: `ResumeAction::for_capture`'s match over `Capture`
+had carried a defensive wildcard arm for `Capture`'s `#[non_exhaustive]`
+marker since it lived in a foreign crate. Inside `kaish-types`, `Capture` is a
+local type and the match is already exhaustive — the wildcard is now
+unreachable and dropped, so a future `Capture` variant fails this match at
+compile time instead of silently falling through it.
+
+Two boundaries got a second look and were left alone on purpose. `ToolResult`
+(the `KernelBackend` FFI-shaped result) keeps `approval: Option<Box<ApprovalRequestView>>`
+— a backend tool crossing that boundary has no in-process `Kernel::confirm` to
+resume through, so the route has nothing to mean there; the `ExecResult ↔
+ToolResult` conversions project to the view on the way out and re-derive the
+route with `PendingApproval::new` (a pure function of the view's own
+`capture`/`binding`) on the way back in — exact, not a guess. And the `--json`
+envelope's `"approval"` key stays the flat view it always was: `docs/approval-ledger.md`
+§A.2 names `--json` as one of the surfaces that sees the tokenless view, and
+the resume route is a Rust-level convenience for a caller driving the kernel
+in-process, not part of that wire contract. Both boundaries got a pinning
+test so the shape stays a decision, not a drift.
+
+Ledger-era surface, never released — no `BREAKING` changelog marker for a
+field type nobody outside this repo has depended on yet.
+
+---
+
 ## The REPL fulfils its own gates, and the design survives its first real consumer (2026-08-10)
 
 PR 11 of the approval ledger was written as the design's own proof: the REPL is a

@@ -257,10 +257,11 @@ mints the request, `job.rs:223-230` only stamps the job id later). So the public
 tokenless *by construction*:
 
 ```rust
-/// What every consumer sees: `ExecResult.approval`, `JobInfo.approval`,
-/// `/v/approvals`, `--json`, an `Approver`'s input. There is no credential
-/// field, so there is nothing to redact and nothing to leak through
-/// clone / serde / VFS / telemetry.
+/// This is what `JobInfo.approval`, `/v/approvals`, `--json`, and a
+/// `Policy`'s input all see; `ExecResult.approval` carries this view paired
+/// with its resume route, as `PendingApproval.request`. There is no
+/// credential field, so there is nothing to redact and nothing to leak
+/// through clone / serde / VFS / telemetry.
 #[non_exhaustive]
 pub struct ApprovalRequestView { /* every §A.3 field; there is no credential field to omit */ }
 ```
@@ -1425,15 +1426,18 @@ and tells a human nothing about what actually happened to their request.
 
 **Every non-`Authorized` variant fails closed.** `proceed()` is the convenience that maps
 them to the `ExecResult` a tool returns without inspection: `Pending` → exit 2 with the
-view on the control-plane field; `Denied`, `Refused`, `Closed`, `Unsupported`,
-`LedgerUnavailable`, `Cancelled`, `Unmatched` → exit 1 with a message naming the reason.
-This mirrors `gate_overwrites`'s existing `Err(result)` contract (`context.rs:828`), which
-callers already know to return verbatim and never fall through.
+whole `PendingApproval` — view and resume route together — on the control-plane field;
+`Denied`, `Refused`, `Closed`, `Unsupported`, `LedgerUnavailable`, `Cancelled`, `Unmatched`
+→ exit 1 with a message naming the reason. This mirrors `gate_overwrites`'s existing
+`Err(result)` contract (`context.rs:828`), which callers already know to return verbatim
+and never fall through. `ExecResult::pending_approval()` reads the whole pairing back;
+`ExecResult::approval_request()` stays the narrower accessor for a caller that wants only
+the tokenless view.
 
 **A pending request is never silently dropped from the result, because nothing runs
 after one.** A gate halts the top-level statement loop, whether it was raised on the
 statement itself or by an `fs.*` operation inside it (§I.5, resolved). So the pending
-view on the control-plane field is always the last statement's, `accumulate_result`'s
+decision on the control-plane field is always the last statement's, `accumulate_result`'s
 unconditional assignment is correct, and there is nothing after the gate to overwrite it
 with `None`. There is no carry rule, and there should not be one: it would be a second
 mechanism for a case the halt already makes unreachable.

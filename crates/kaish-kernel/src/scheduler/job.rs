@@ -1310,7 +1310,7 @@ mod tests {
                     &["x"],
                 );
                 view.job_id = Some(1);
-                result.approval = Some(Box::new(view));
+                result.approval = Some(Box::new(crate::ledger::PendingApproval::new(view)));
                 result
             })
             .await;
@@ -1549,9 +1549,8 @@ mod tests {
         let id = manager.register("rm precious.txt".to_string(), rx).await;
 
         let mut gated = ExecResult::failure(2, "rm: approval required");
-        gated.approval = Some(Box::new(crate::ledger::sample_view(
-            crate::ledger::KernelOperation::FsRemove,
-            &["precious.txt"],
+        gated.approval = Some(Box::new(crate::ledger::PendingApproval::new(
+            crate::ledger::sample_view(crate::ledger::KernelOperation::FsRemove, &["precious.txt"]),
         )));
         tx.send(gated).expect("send gated result");
         tokio::time::sleep(Duration::from_millis(10)).await;

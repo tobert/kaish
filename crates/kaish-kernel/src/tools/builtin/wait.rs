@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
-use kaish_types::approval::ApprovalRequestView;
+use kaish_types::approval::{ApprovalRequestView, PendingApproval};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
@@ -208,7 +208,7 @@ fn finish(output: String, any_failed: bool, held: Gates) -> ExecResult {
         );
         let mut result = ExecResult::from_output(2, output.clone(), message);
         result.set_output(Some(OutputData::text(output)));
-        result.approval = Some(Box::new(view));
+        result.approval = Some(Box::new(PendingApproval::new(view)));
         result
     } else if any_failed {
         let mut result = ExecResult::from_output(1, output.clone(), "");

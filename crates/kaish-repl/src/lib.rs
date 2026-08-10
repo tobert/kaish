@@ -606,21 +606,23 @@ impl Repl {
         gated: ExecResult,
         prompt: &mut dyn ApprovalPrompt,
     ) -> ExecResult {
-        let Some(view) = gated.approval_request() else {
+        let Some(pending) = gated.pending_approval() else {
             return gated;
         };
+        let view = &pending.request;
         // Tokenless: no credential exists before a decision — a request's key
         // is minted by the grant — so the prompt shows the producer's
         // `<token>` placeholder and nothing else could be substituted here.
-        let rendered = approval::render_request(&view, None);
+        let rendered = approval::render_request(view, None);
         let Some(answer) = prompt.ask(&rendered) else {
             return gated;
         };
-        // How this request continues, read as a structured route rather than
-        // inferred from the capture's shape (spec §C.1). `ExecResult.approval`
-        // carries the view alone, so the REPL rebuilds it here.
-        let resume = ResumeAction::for_capture(&view.capture, &view.binding.plan_digest);
-        self.runtime.block_on(self.decide(line, &view, &resume, answer))
+        // How this request continues, read straight off the carried
+        // decision (spec §C.1) rather than re-derived from the capture's
+        // shape — `ExecResult.approval` carries the whole PendingApproval,
+        // route included, precisely so this call site does not have to
+        // (kaish#312).
+        self.runtime.block_on(self.decide(line, view, &pending.resume, answer))
     }
 
     /// Post the decision and, on a grant, replay the held operation.

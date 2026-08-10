@@ -224,9 +224,10 @@ contract:
 - **`ExecResult.err`** (which a frontend routes to stderr) carries the
   human-readable message;
 - **stdout** is empty (nothing happened, so there is no success output);
-- **`ExecResult.approval`** carries the request as a first-class typed field —
-  `Option<Box<ApprovalRequestView>>`, control-plane and distinct from the
-  data-plane `.data`.
+- **`ExecResult.approval`** carries the pending decision as a first-class
+  typed field — `Option<Box<PendingApproval>>`, control-plane and distinct
+  from the data-plane `.data`. `PendingApproval { request, resume }` pairs
+  the tokenless view with the route that resumes it.
 
 The view is the whole inspect contract, and it is **tokenless by
 construction** — there is no credential field to redact, so it is safe to log,
@@ -317,13 +318,17 @@ capture's shape: `ConfirmStatement { plan_digest, index }` for a held statement,
 `RetryOperation` for an invocation `Kernel::confirm` can replay, and
 `NotReplayable { reason }` for a capture the kernel cannot re-issue at all.
 
-**`ExecResult.approval` carries the view alone, so rebuild the route from it**
-— `ResumeAction::for_capture(&view.capture, &view.binding.plan_digest)` is the
-same derivation the kernel makes, and it is what an embedder reading a gated
-result calls. The `PendingApproval` pairing exists on the `ApprovalOutcome`
-a tool's gate site sees; the result field is the frontend's copy of the
-request, not of the decision. All three types are re-exported from
-`kaish_kernel::ledger`.
+**`ExecResult.approval` carries the whole `PendingApproval` — read the route,
+don't rebuild it.** `ExecResult::pending_approval()` hands back the same
+`{ request, resume }` pair `ApprovalOutcome::Pending` carried at the gate
+site; `result.approval_request()` stays the narrower accessor for a caller
+that only wants the view. Read `.resume` off what `pending_approval()`
+returns rather than calling `ResumeAction::for_capture` yourself — that
+function is what built the route the first time, and calling it again at the
+read site is exactly the duplicate-derivation this pairing exists to avoid.
+`PendingApproval` and `ResumeAction` are re-exported from
+`kaish_kernel::ledger`; `ApprovalRequestView` is reached through
+`PendingApproval::request` (or imported from `kaish_types::approval`).
 
 Two consequences worth planning for:
 
@@ -346,7 +351,7 @@ message waiting on a human's reply — does not have to lose it if the process
 exits before the answer arrives:
 
 ```rust
-let pending: PendingApproval = /* from ExecResult.approval, or ApprovalOutcome::Pending */;
+let pending: PendingApproval = gated.pending_approval().expect("a gated result");
 let json = serde_json::to_string(&pending)?;
 queue.push(json); // survives a restart; `pending.request.id` names the request to grant later
 ```

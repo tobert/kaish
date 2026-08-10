@@ -132,25 +132,30 @@ pub struct ExecResult {
     /// application-level hints, etc.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub baggage: BTreeMap<String, String>,
-    /// A pending approval request — the *control-plane* signal a gated
+    /// A pending approval decision — the *control-plane* signal a gated
     /// destructive op (`rm`/`kaish-trash`/an overwrite under the `fs.*`
     /// enforce policy) raises alongside exit code 2. First-class and typed,
     /// distinct from the data-plane `.data`: a stdout redirect clears
-    /// `.data` but never this. Read it via [`Self::approval_request`]; a
-    /// gate site sets it through `ApprovalOutcome::proceed()`
-    /// (`kaish-tool-api`).
+    /// `.data` but never this. A gate site sets it through
+    /// `ApprovalOutcome::proceed()` (`kaish-tool-api`), which builds the
+    /// whole [`crate::approval::PendingApproval`] — the tokenless view *and*
+    /// the route that resumes it — so a caller reads
+    /// [`Self::pending_approval`] instead of re-deriving the route from the
+    /// view's `capture` field itself (kaish#312: the REPL had to do exactly
+    /// that before this field carried the route it needed). Read just the
+    /// view via [`Self::approval_request`].
     ///
     /// The view is tokenless by construction (`docs/approval-ledger.md`
     /// §A.2) — it names the request, never its credential, so it is safe to
     /// serialize into `--json`, `/v/jobs/{id}/approval`, and a job listing.
     ///
     /// Boxed: `ExecResult` is returned up every level of deep `$()`/pipeline
-    /// recursion, so an inline view would fatten every stack frame and cost
+    /// recursion, so an inline value would fatten every stack frame and cost
     /// interpreter stack headroom (GH #46/#47). The box is allocated only
     /// when a gate actually fires. Serializes identically to an unboxed
     /// `Option` (Box is transparent to serde).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approval: Option<Box<crate::approval::ApprovalRequestView>>,
+    pub approval: Option<Box<crate::approval::PendingApproval>>,
 }
 
 impl ExecResult {
@@ -492,7 +497,23 @@ impl ExecResult {
     /// 2, but no gate) returns `None`. Unlike the data-plane `.data`,
     /// `.approval` survives `--json` formatting, so this is safe to call
     /// before or after it.
+    ///
+    /// Projects [`Self::pending_approval`]'s `request` field — call that
+    /// instead when the caller also needs the resume route, so the route
+    /// is read rather than re-derived.
     pub fn approval_request(&self) -> Option<crate::approval::ApprovalRequestView> {
+        self.approval.as_deref().map(|pending| pending.request.clone())
+    }
+
+    /// The whole pending decision, if this result is a deferred gate: the
+    /// tokenless view and the route that resumes it, together, exactly as
+    /// `ApprovalOutcome::proceed()` built them. A caller that needs to pick
+    /// the gate back up (the REPL's `fulfill_gate`, an embedder replaying a
+    /// granted statement) reads [`crate::approval::PendingApproval::resume`]
+    /// off the returned value rather than re-deriving it from the view's
+    /// `capture` field — see [`Self::approval`]'s doc for why that
+    /// distinction exists.
+    pub fn pending_approval(&self) -> Option<crate::approval::PendingApproval> {
         self.approval.as_deref().cloned()
     }
 
@@ -876,16 +897,22 @@ mod tests {
         assert!(json_result.data.is_none());
     }
 
-    use crate::approval::sample_view;
+    use crate::approval::{sample_view, PendingApproval};
 
     fn approval_view(paths: &[&str]) -> crate::approval::ApprovalRequestView {
         sample_view("fs.remove", paths)
     }
 
+    /// A boxed [`PendingApproval`] wrapping a sample view — what a real gate
+    /// site's `ApprovalOutcome::proceed()` actually puts on `.approval`.
+    fn approval_pending(paths: &[&str]) -> Box<PendingApproval> {
+        Box::new(PendingApproval::new(approval_view(paths)))
+    }
+
     #[test]
     fn approval_request_reads_the_approval_field() {
         let mut result = ExecResult::failure(2, "rm: approval required");
-        result.approval = Some(Box::new(approval_view(&["important.dat"])));
+        result.approval = Some(approval_pending(&["important.dat"]));
 
         let req = result.approval_request().expect("an approval request");
         assert_eq!(req.operation.as_str(), "fs.remove");
@@ -898,11 +925,33 @@ mod tests {
     #[test]
     fn approval_request_handles_an_operation_with_no_resources() {
         let mut result = ExecResult::failure(2, "kaish-trash empty: approval required");
-        result.approval = Some(Box::new(sample_view("trash.empty", &[])));
+        result.approval = Some(Box::new(PendingApproval::new(sample_view("trash.empty", &[]))));
 
         let req = result.approval_request().expect("an approval request");
         assert_eq!(req.operation.as_str(), "trash.empty");
         assert!(req.resources.is_empty());
+    }
+
+    #[test]
+    fn pending_approval_carries_the_resume_route_alongside_the_view() {
+        // kaish#312: `.approval` carries the whole PendingApproval, not just
+        // the view, so a caller reads the resume route instead of
+        // re-deriving it from the view's capture shape.
+        let mut result = ExecResult::failure(2, "rm: approval required");
+        result.approval = Some(approval_pending(&["important.dat"]));
+
+        let pending = result.pending_approval().expect("a pending decision");
+        assert_eq!(pending.request.operation.as_str(), "fs.remove");
+        assert_eq!(
+            pending.resume,
+            crate::approval::ResumeAction::for_capture(
+                &pending.request.capture,
+                &pending.request.binding.plan_digest
+            ),
+            "the carried resume must be the same route `for_capture` would derive"
+        );
+        // And `approval_request()` still projects just the view, unchanged.
+        assert_eq!(result.approval_request().unwrap(), pending.request);
     }
 
     #[test]
@@ -931,7 +980,7 @@ mod tests {
         // precious > log still gates). Guards the plane split at the type
         // level.
         let mut result = ExecResult::success_data(Value::Json(serde_json::json!([1, 2, 3])));
-        result.approval = Some(Box::new(approval_view(&["precious.txt"])));
+        result.approval = Some(approval_pending(&["precious.txt"]));
         result.clear_stdout();
         assert!(result.data.is_none(), "data-plane .data must clear");
         assert!(

@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::approval::ApprovalRequestView;
+use crate::approval::PendingApproval;
 use crate::result::ExecResult;
 
 // ============================================================
@@ -549,7 +549,14 @@ pub enum OutputFormat {
 /// diagnostic-shaped, so something readable belongs under `error` either
 /// way. A tool that also attached structured data to the result keeps it
 /// reachable under `data`, alongside (never clobbered by) the request.
-fn approval_envelope(result: &ExecResult, approval: &ApprovalRequestView) -> serde_json::Value {
+///
+/// `"approval"` serializes just [`PendingApproval::request`] — the tokenless
+/// view, unchanged shape from before `.approval` grew a resume route.
+/// `docs/approval-ledger.md` §A.2 names `--json` as one of the surfaces that
+/// sees the view; the resume route is a Rust-level addition
+/// (`ExecResult::pending_approval`) for a caller driving the kernel
+/// in-process, not part of that wire contract.
+fn approval_envelope(result: &ExecResult, pending: &PendingApproval) -> serde_json::Value {
     let error = if !result.err.is_empty() {
         result.err.clone()
     } else {
@@ -566,7 +573,7 @@ fn approval_envelope(result: &ExecResult, approval: &ApprovalRequestView) -> ser
     // this cannot fail; a serialization error is dropped rather than
     // replacing the envelope with `null`, and the `error`/`code` fields still
     // reach the caller.
-    if let Ok(v) = serde_json::to_value(approval) {
+    if let Ok(v) = serde_json::to_value(&pending.request) {
         obj["approval"] = v;
     }
     obj
@@ -962,7 +969,7 @@ mod tests {
         result.set_output(Some(OutputData::text("[1] Gated\n")));
         assert!(result.has_output(), "precondition: this result DOES have output");
         let view = crate::approval::sample_view("fs.remove", &["precious.txt"]);
-        result.approval = Some(Box::new(view.clone()));
+        result.approval = Some(Box::new(crate::approval::PendingApproval::new(view.clone())));
 
         let formatted = apply_output_format(result, OutputFormat::Json);
         let out = formatted.text_out().into_owned();
@@ -974,6 +981,19 @@ mod tests {
         );
         assert_eq!(parsed["approval"]["operation"], "fs.remove");
         assert_eq!(parsed["code"], 2);
+        // The `--json` envelope's `"approval"` shape is unchanged by
+        // ExecResult.approval growing a resume route (kaish#312): still the
+        // flat view, never nested under "request"/"resume" keys. The route
+        // is a Rust-level addition read via `pending_approval()`, not part
+        // of this wire contract.
+        assert!(
+            parsed["approval"]["request"].is_null(),
+            "the envelope must stay the flat view, not PendingApproval's shape: {parsed}"
+        );
+        assert!(
+            parsed["approval"]["resume"].is_null(),
+            "the envelope must not leak the resume route onto the wire: {parsed}"
+        );
         // The view is tokenless by construction (spec §A.2): no *field* of the
         // envelope is a credential, which is why it is safe to log. The hint
         // deliberately contains the literal placeholder `<token>` — display

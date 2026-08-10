@@ -40,8 +40,19 @@ breaking entries are marked **BREAKING**.
   becomes `with_policy`; `ApproverHandle` keeps its name.
 - **BREAKING: `ApprovalOutcome::Pending` carries `Box<PendingApproval>`**, not a
   bare `Box<ApprovalRequestView>` — the view plus the `ResumeAction` that says
-  how to pick the request back up. `ExecResult.approval` is unchanged and still
-  carries the tokenless view.
+  how to pick the request back up.
+- **`ExecResult.approval` carries the whole `PendingApproval` (view + resume
+  route), not just the view.** `ApprovalOutcome::proceed()` always built the
+  route alongside the view; the result boundary dropped it, so a consumer
+  reading a gated `ExecResult` (the REPL's `fulfill_gate` included) had to
+  re-derive the route from the view's `capture` field itself instead of
+  reading it. `ExecResult::pending_approval()` reads the pairing;
+  `ExecResult::approval_request()` stays the narrower accessor for the view
+  alone. `PendingApproval`/`ResumeAction` move from `kaish-tool-api` to
+  `kaish-types` (re-exported from both, so existing imports are unaffected) —
+  the dependency direction only allows the type carrying `ExecResult.approval`
+  to live in the leaf crate. Ledger-era surface, never released, so no
+  BREAKING marker.
 - **BREAKING: `ApprovalRequest::ttl: Duration` is `deadline: Option<SystemTime>`**,
   defaulting to `None` — nothing times a request out (§A.10). `RequestOrigin::new`
   loses its `ttl` argument (four arguments now) and `with_ttl` becomes
