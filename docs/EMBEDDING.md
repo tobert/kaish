@@ -586,11 +586,21 @@ plus `Repl::fulfill_gate`/`decide` in `lib.rs` are the whole of it — get
 `Pending` back from `execute`, render it, read one answer, `grant_with_grounds`
 + `Kernel::confirm`, or `deny`. Copy its two rules whatever your frontend is:
 
-- **An approval prompt is never the agent's output stream.** The REPL renders
-  the request to stderr and asks only when stdin and stdout are both terminals,
-  so a piped or captured session gets the exit-2 result and no question. An
-  embedder that multiplexes a model's stdout must segregate the prompt the same
-  way — a question a model can read as data is a question it can answer.
+- **An approval prompt is never the agent's output stream.** This is a
+  requirement, not a preference: a question a model can read as data is a
+  question it can answer, and an approval surface a model can reach is not an
+  approval surface. The REPL renders the request to **stderr** and asks only
+  when **stdin and stdout are both terminals**; a piped or captured session
+  gets the exit-2 result and no question at all. Segregate the prompt the same
+  way in whatever you build — a separate pty, a UI channel, a socket the model's
+  side cannot write.
+
+  **Put the terminal check beside the write, not at the construction site.**
+  `TerminalPrompt::ask` calls `IsTerminal` on the line immediately above
+  `eprint!`, so the rule lives where the output happens and there is no
+  configuration path that can construct a prompt that asks into a pipe. A check
+  made once at startup is a check that stops being true when a frontend is
+  reused, re-parented, or handed a different stream, and it fails open.
 - **Anything that is not an answer denies.** `n`, an empty line, Ctrl-C,
   Ctrl-D, a terminal that went away: all of them close the request. A gate left
   live because nobody could be asked is a slot nothing will ever return.
@@ -606,9 +616,54 @@ pending and withdraw its own requests, and cannot approve itself.
 To decide a request raised in one `execute()` call from
 a *later* call — or from a different kernel — share the ledger with
 `KernelConfig::with_approver_handle()`; the default is a fresh ledger per
-kernel. `KernelConfig::with_ledger(config)` tunes retention and the
-rejected-credential limit, and `with_ledger_sink(sink)` posts every record to
-an audit sink as it commits.
+kernel. `KernelConfig::with_ledger(LedgerConfig::default().with_…())` tunes
+capacity, retention, the sink queue, and the rejected-credential limit;
+`LedgerConfig` is `#[non_exhaustive]`, so use the builder rather than a struct
+literal.
+
+**The audit sink, and what a slow or failing one costs you.**
+`KernelConfig::with_ledger_sink(Arc<dyn LedgerSink>)` posts every `LedgerRecord`
+to your sink as it commits, in commit order, from a background drain task. Your
+`post` must be fast and non-blocking: it always has a queue slot reserved for it
+already, so it never negotiates capacity with the ledger and only ever does its
+own I/O.
+
+```rust
+pub trait LedgerSink: Send + Sync {
+    fn post(&self, record: &LedgerRecord) -> Result<(), LedgerSinkError>;
+}
+```
+
+Four rules, each of which will bite an embedder that writes to a network log:
+
+- **A full queue refuses new privileged operations — exit 1.** The queue is
+  `LedgerConfig::sink_queue` deep (default **1024**). Once every permit is
+  reserved, the next `post_request`/`grant`/`deny` fails with
+  `LedgerError::SinkUnavailable`, which reaches the gate site as
+  `ApprovalOutcome::LedgerUnavailable` and exits **1**. The ledger never blocks
+  the executor and never drops an audit record to make room.
+- **A terminal entry is never refused.** `Settled`, and attempt-level
+  `Abandoned`, have their slot banked with the `Redeemed` entry that opened the
+  attempt, before the attempt is allowed to begin — an operation that already
+  ran can always record what happened, whatever the queue is doing.
+- **An `Err` trips the sink permanently. There is no retry.** The drain task
+  stops consuming, and the failed record plus everything queued behind it is
+  counted as undelivered and named in every later refusal: `"audit sink failed;
+  N audit entries undelivered — refusing further privileged operations until the
+  process is restarted"`. The loss is accounted, never silent. Recovery is a
+  process restart; there is no reset call, deliberately, because an unrecorded
+  privileged operation is exactly the corruption this design refuses.
+- **Buffering is your call to make explicitly.** A sink fronting something that
+  can be unavailable — a network collector, a remote audit service — should
+  buffer internally and return `Ok` quickly, accepting the buffering risk in
+  your own code. The kernel will not silently trade a complete record for
+  availability on your behalf.
+
+The sink is an **export, not a source of truth**. It is post-only: nothing reads
+back through it, so a restart does not reconstruct prior chains from sink output
+(`docs/approval-ledger.md` §B.1 — v1 is in-process only, with no durability
+claim). What recovery there is happens in-process: a periodic sweep closes
+attempts whose guard was dropped without draining, as `Abandoned`.
 
 **Hosting several sessions in one process.** Every request carries an
 `ApprovalScope` — a kernel id, an optional session, and an optional actor — so
@@ -1674,6 +1729,15 @@ The `kaish_kernel` crate root re-exports the embedding surface:
   `xdg_cache_home`, `xdg_runtime_dir`, `expand_tilde`
 - **VFS** (module `kaish_kernel::vfs`): `Filesystem`, `VfsRouter`,
   `MemoryFs`, `LocalFs`, `MountInfo`
+- **Approvals** (module `kaish_kernel::ledger`): `Ledger`, `Approvals`,
+  `Requester`, `ApproverHandle`, `AttemptHandle`, `RequestChain`,
+  `LedgerConfig`, `LedgerSink`, `LedgerSinkError`, `LedgerError`,
+  `Clock`, `SystemClock`, `Policy`, `StateResolver`, `PathResolver`,
+  `ResolverError`, `StatementClassifier`, `CommandNameClassifier`,
+  `StatementPosture`, `StatementAssessment`, `ClassificationError`,
+  `ExecutionContext`, `MountDescriptor`, `Redactor`, `RedactionMark`,
+  `ApprovalOutcome`, `PendingApproval`, `ResumeAction`, `LedgerStream`,
+  `WatchEvent`, `AssessmentRecorder`, `KernelOperation`
 
 Pure data types (`ExecResult`, `OutputData`, `Value`, `ToolSchema`,
 `ToolArgs`, …) live in the leaf crate `kaish-types`; the tool author API

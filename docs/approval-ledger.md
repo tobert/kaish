@@ -1,6 +1,8 @@
 # The kaish approval ledger
 
-**Status:** living design doc — spec current as of 2026-08-09. The ledger core, the latch cutover, and the statement gate have landed; §H names what remains before 0.14.0.
+**Status:** living design doc — spec current as of 2026-08-10. Every lane in §H has landed:
+the ledger core, the latch cutover, the statement gate, the five rework lanes, and the REPL
+that fulfils its own gates. §I carries what is still open.
 This file in kaish `docs/` is the canonical copy (migrated from kaish-extras 2026-08-01;
 the extras copy is superseded).
 **Target:** kaish kernel (post-0.13) · **Motivating embedder:** kaijutsu · **First in-kernel consumer:** kaish-git's write profile
@@ -125,11 +127,16 @@ document uses; it does not use synonyms for them.
 | **resume** | To pick a pending request back up once it is decided, by the route `ResumeAction` names: re-run the statement with the key, or `Kernel::confirm` the captured invocation (§C.1, §B.4). |
 
 **`latch` and `nonce` retire with the mechanism.** A latch is now a request in the
-`Requested` state; a nonce is now a name plus a key. Two spellings of the retired word
-survive, because the §F.2 rename table is the whole break and does not reach them: the
-shell option (now `set -o approvals`), and `JobStatus::Gated` (wire spelling `"gated"`), which is
-pinned. §I asks whether they should change. PR 9 updates the Terms tables in `CLAUDE.md`
-and `README.md` to match this one.
+`Requested` state; a nonce is now a name plus a key. No spelling of the retired word
+survives (§I.4): the shell option is `set -o approvals`, and the held-job status is
+`JobStatus::Gated`, wire spelling `"gated"`. `set -o latch` is not an option kaish has —
+`set` ignores an unknown `-o` name for bash compatibility, so it exits **0** and changes
+nothing. The Terms tables in `CLAUDE.md` and `README.md` carry this table's vocabulary;
+`latch` and `nonce` are retired from both.
+
+One word survives in a different sense, and it is not this one: the ledger **latches** its
+view of the installed clock (§A.5), meaning it holds the largest reading it has taken. That
+is a monotonicity mechanism, not a confirmation hold.
 
 ---
 
@@ -144,7 +151,7 @@ split is the load-bearing property; everything else in this document serves it.
 | Posting side | Held by | Entries it may post |
 |---|---|---|
 | **Obligations** | the implementation side — kernel gate sites, plugins via `ToolCtx` (`Requester`) | `Requested`, `Redeemed`, `Settled` |
-| **Authorizations** | the approval side — human via REPL, `Policy` hook, standing policy, embedder (`ApproverHandle`) | `Granted`, `Denied`, `KeyRetrieved`, `StandingIssued`, `StandingRevoked` |
+| **Authorizations** | the approval side — human via REPL, `Policy` hook, standing policy, embedder (`ApproverHandle`) | `Granted`, `Denied`, `KeyRetrieved`, `StandingIssued`, `StandingRevoked`, `Subscribed`, `Unsubscribed` |
 | **Derived** | the ledger itself, on observation | `Expired`, `Refused`, `Voided`, `Abandoned`, `TokenRejected` |
 
 This is enforced by types, not convention. One log, three handles:
@@ -485,10 +492,17 @@ pub enum LedgerEntry {
     Voided      { seq: u64, at: SystemTime, request: RequestId, reason: String },
     StandingIssued  { seq: u64, at: SystemTime, grant: StandingGrant },
     StandingRevoked { seq: u64, at: SystemTime, id: StandingId, by: Principal, reason: String },
-    /// An `observe` subscription covered a mutation, which proceeded (§C.5).
-    /// A record with no chain behind it: no request, no grant, no attempt.
-    /// Each resource carries the display path, the resolved path the glob
-    /// matched, and the covering subscription's id.
+    /// A subscription was registered, or revoked (§C.5). An audit scope that
+    /// changed with no record of the change makes the record it produced
+    /// unreadable, so both halves are entries.
+    Subscribed      { seq: u64, at: SystemTime, subscription: Subscription },
+    Unsubscribed    { seq: u64, at: SystemTime, id: SubscriptionId, by: Principal, reason: String },
+    /// An `observe` subscription covered a mutation, which proceeded (§C.5),
+    /// or the statement tap recorded a top-level statement (§C.6). A record
+    /// with no chain behind it: no request, no grant, no attempt. An `fs.*`
+    /// resource carries the display path, the resolved path the glob
+    /// matched, and the covering subscription's id; a `cmd` resource from
+    /// the tap is covered by no subscription and carries none.
     Observed    { seq: u64, at: SystemTime, operation: OperationId, by: Principal,
                   resources: Vec<ObservedResource>, plan: Option<Plan> },
     /// A bad credential was presented. `request` is `Some` when the presenting
@@ -1632,12 +1646,18 @@ pub struct StandingGrant {
 
 Matching rules, chosen for loudness:
 
-- **All-or-nothing.** Every resource on the request must be matched by some pattern in the
-  standing grant. A request touching four refs where the rule covers three **Defers** — it
-  does not auto-approve the three and gate the one. Partial authorization of a batch is
-  exactly how you get a surprising outcome.
+- **All-or-nothing, with set semantics.** Every resource on the request must be matched by
+  some pattern in the standing grant. A request touching four refs where the rule covers
+  three **Defers** — it does not auto-approve the three and gate the one. Partial
+  authorization of a batch is exactly how you get a surprising outcome. One pattern may
+  cover several resources, and a duplicate resource imposes no extra requirement: the rule
+  answers "is every resource covered?", not "is there a pattern per resource?".
 - **Kind must match exactly**; only `id` is globbed (via `kaish-glob`, so the semantics are
   the ones the rest of kaish already uses).
+- **Precedence is issue order.** When several rules cover one request, the lowest
+  `StandingId` wins and only the winner is charged a use. Deterministic beats "most
+  specific" — specificity would need a metric nobody has defined, and two rules that
+  disagree about which is narrower would auto-approve by coin flip.
 - **Transitions are not matched, they are conditioned.** A standing grant does not care
   what the oids are; it copies the request's declared transitions into the resulting
   grant's `conditions`, so the redemption-time check still fires. "Auto-approve commits to
@@ -1647,9 +1667,9 @@ Matching rules, chosen for loudness:
   (`unlimited_uses`); an omitted field on the wire is the one-shot default, never
   unlimited. Automation that fires repeatedly is an act the record can point to, not a
   default it fell into.
-- `max_uses` is consumed inside the same critical section that appends the `Granted`
-  entry (§B.1; charged at decision time — the PR 4 review settled the §C.4-versus-§B.1
-  wording in favor of the concurrency test's phrasing). Exhaustion appends nothing
+- `max_uses` is charged at decision time, inside the same critical section that appends
+  the `Granted` entry (§B.1) — so two requests racing one single-use rule cannot both be
+  auto-approved. Exhaustion appends nothing
   special: the rule stops matching and the request Defers to the next stage. The
   `StandingIssued` entry plus the count of `Granted{grounds: Standing{id}}` entries
   reconstructs the usage history.
@@ -1688,10 +1708,9 @@ ledger must not tax it by default.
   grant machinery to record a fact nobody decided, and put a second glob matcher behind
   the filter that could — and in review, did — disagree with it.)
 - **`enforce`** — matching operations go through the real decision chain (§C.2). This is
-  what `set -o approvals` becomes: an enforce subscription over `fs.*`. The cutover (§H, PR 5)
-  ships exactly that one degenerate case — whole namespace, no glob, no `observe` — because
-  it is what replaces the flag. Glob scoping, `observe`, and the registry generalize it
-  afterwards.
+  what `set -o approvals` is: an enforce subscription over `fs.*` — whole namespace, no
+  glob, no `observe`. Glob scoping, `observe`, and the registry generalize that one
+  degenerate case.
 
 **Scope is a glob over (operation-class, resource path)** via `kaish-glob`: subscribe
 `fs.write` + `fs.remove` under `/workspace/**` as `observe`, and everything else —
@@ -1705,8 +1724,8 @@ Those two rules together are the whole posting posture, and they replace the ear
 "gate sites always post" framing, which could not coexist with the free-when-unsubscribed
 requirement.
 
-**Decided while building PR 8** — four questions this section left open, answered in the
-code and recorded here so they are not re-litigated:
+**Four questions this section left open**, answered in the code and recorded here so they
+are not re-litigated:
 
 1. **`enforce` beats `observe`** when both cover one path. Enforce is the strictly
    stronger posture and its record is a superset of observe's, so the other precedence
@@ -1756,14 +1775,11 @@ that skipped the survivable ones would answer a different question.
 
 The registry lives on the approval side and is consulted at the gate before
 `request_approval` does any work. The incremental mechanism is small — the `Observed`
-entry, the registry with its atomic any-subscription flag, and the glob filter. It changes
-no default posture, so it lands after the cutover rather than gating it (§H, PR 8).
+entry, the registry with its atomic any-subscription flag, and the glob filter — and it
+changes no default posture: a kernel nobody subscribed behaves exactly as it did before
+subscriptions existed.
 
 ### C.6 The statement gate — observe-all at the command level
-
-*Added 2026-08-05 from Amy's 2026-08-04/05 rulings: statement-level gating; observe-all
-non-optional; classifier scopes, chain decides; the plan lives in both resources and a
-typed field; one operation id.*
 
 Every top-level statement is recorded, and a classifier decides which ones must ask
 first. This is the second observability layer, above `fs.*` (§C.5), and the two are
@@ -1911,12 +1927,12 @@ a classifier:
 - A classifier may **raise** posture to `Gate` freely. It may never lower a posture the
   kernel's own static rules set — a model is an escalation path, not an override.
 - Dangerous syntax classes keep static gate floors that no classifier can clear.
-  **Landed scope (R4):** the floor is consulted only when a classifier is registered — a
-  kernel with none keeps its pre-R4 default of `Observe` everywhere at this layer, with
-  every `fs.*`/tool-level gate unaffected — and is seeded with exactly one class:
-  `kaish-trash empty`, mirroring that operation's `always_enforced` status at the `fs.*`
-  layer (§F.1). A broader taxonomy (recursive delete of `/`, generic `rm -rf` detection) has
-  no settled design and is real follow-up work, not part of this floor.
+  **The floor's scope:** it is consulted only when a classifier is registered — a kernel
+  with none is `Observe` everywhere at this layer, with every `fs.*`/tool-level gate
+  unaffected — and it is seeded with exactly one class: `kaish-trash empty`, mirroring that
+  operation's `always_enforced` status at the `fs.*` layer (§F.1). A broader taxonomy
+  (recursive delete of `/`, generic `rm -rf` detection) has no settled design and is real
+  follow-up work, not part of this floor.
 - The statement gate is not the only enforcement. Plugin and `fs.*` gates still fire
   underneath it (§A.7's parenthood), so a classifier's false negative costs defense in
   depth rather than all of it.
@@ -2016,8 +2032,8 @@ And the key-handling rule, which is the kernel's one redaction (§A.8) at this s
   any other text; the tap redacts what it can identify, and says so.
 
 The default tap is advisory, not a durable audit trail — an embedder that needs a
-completeness guarantee uses the sink's reliability, and `EMBEDDING.md`'s tap section
-(PR 10) carries that caveat where embedders read it.
+completeness guarantee uses the sink's reliability. `docs/EMBEDDING.md`, "The statement
+tap" carries that caveat where embedders read it.
 
 ### C.7 Assessments — recording how a decision was reached
 
@@ -2182,13 +2198,20 @@ placeholder is substituted by a frontend holding an `ApproverHandle` (§D.3).
 
 ```rust
 // KernelConfig — replaces with_nonce_store (see §F)
-.with_ledger(Ledger)                         // share one ledger across kernels in this process
+.with_ledger(LedgerConfig)                   // sizing: capacity, retention, sink queue (§D.4)
 .with_ledger_sink(Arc<dyn LedgerSink>)       // export
+.with_approval_clock(Arc<dyn Clock>)         // §A.5; default SystemClock. Incompatible with
+                                             // with_approver_handle, which adopts a ledger
+                                             // that already has one — both fails `build`
 .with_policy(Arc<dyn Policy>)                // synchronous policy only — the kernel
                                              // never awaits an embedder (§0.1, §C.2)
 .with_principal(Principal)
 .with_session(SessionId)                     // §A.7; absent = a single-session kernel
-.with_approver_handle(ApproverHandle)        // this session may grant; absent = it may not
+.with_approver_handle(ApproverHandle)        // this session may grant, and adopts that
+                                             // handle's ledger — the way several kernels
+                                             // share one log
+.with_own_authority(bool)                    // one kernel that is itself the operator keeps
+                                             // a clone of the handle `build` minted
 .with_policy_pinned(bool)                    // script can't disable an enforce subscription
 .with_deny_self_approval(bool)               // refuse a grant whose principal is the requester's
                                              // (default false; for multi-principal embedders — §E.7)
@@ -2198,7 +2221,7 @@ placeholder is substituted by a frontend holding an `ApproverHandle` (§D.3).
                                              // kernel's own confirm-key redaction
 
 // Kernel — construction mints exactly one authority capability
-fn build(config: KernelConfig) -> (Kernel, ApproverHandle);
+fn build(config: KernelConfig) -> Result<(Kernel, ApproverHandle)>;
 fn approvals(&self) -> Approvals;                          // read side, no authority
 /// Close an undecided request (§B.5). Requester action: no authority needed
 /// for your own request. Revision-checked (§B.6). Spelled `cancel_approval`
@@ -2216,11 +2239,17 @@ async fn confirm(&self, by: &ApproverHandle, id: &RequestId) -> Result<ExecResul
 // Every state-changing call is revision-checked (§B.6): a decision quoting a
 // stale revision is refused and recorded, never applied.
 async fn grant(&self, id: &RequestId, rev: u64, terms: GrantTerms) -> Result<()>;
+/// The same grant, naming the `Grounds` — what a frontend deciding at a
+/// terminal posts, so the log tells a human's answer from an embedder's.
+async fn grant_with_grounds(&self, id: &RequestId, rev: u64, terms: GrantTerms,
+                            grounds: Grounds) -> Result<Grant>;
 async fn deny(&self, id: &RequestId, rev: u64, reason: &str) -> Result<()>;
 async fn grant_standing(&self, g: StandingGrant) -> Result<StandingId>;
 async fn revoke_standing(&self, id: &StandingId, reason: &str) -> Result<()>;
 async fn subscribe(&self, s: Subscription) -> Result<SubscriptionId>;   // §C.5
+async fn unsubscribe(&self, id: &SubscriptionId, reason: &str) -> Result<()>;
 fn token_for(&self, id: &RequestId) -> Option<Token>;      // appends KeyRetrieved (§A.2)
+fn assessments(&self) -> AssessmentRecorder;               // §C.7
 /// A view of this handle restricted to one session (§A.7). The derived
 /// handle can decide only within that scope.
 fn scope(&self, session: SessionId) -> ApproverHandle;
@@ -2433,9 +2462,11 @@ pub struct LedgerConfig {
 }
 
 pub trait LedgerSink: Send + Sync {
-    /// Append. A sink error **fails the request closed** — an unrecorded
-    /// privileged operation is exactly the corruption we refuse.
-    fn post(&self, entry: &LedgerEntry) -> Result<(), LedgerSinkError>;
+    /// Append. A sink receives a `LedgerRecord`, never a bare `LedgerEntry`:
+    /// the envelope carries the `schema_version` and the scope a later reader
+    /// needs (§A.5). An `Err` **fails every later request closed** — an
+    /// unrecorded privileged operation is exactly the corruption we refuse.
+    fn post(&self, record: &LedgerRecord) -> Result<(), LedgerSinkError>;
 }
 ```
 
@@ -2448,8 +2479,9 @@ rather than dropping a record. It is exit 1 and not exit 2 because exit 2 means 
 is pending", and there is no request to decide. That is crash-over-corruption applied to
 memory pressure, and it is a real
 scenario for a long-running agent that gates thousands of operations and never settles
-them. Per-principal quotas and a `ledger.live_requests` metric make the DoS case visible
-before it becomes an outage.
+them. The per-principal quota keeps one principal from spending the whole budget. There is
+**no exported metric for the live count** — an embedder that wants to watch the number
+walks `Approvals::pending(PageRequest)` (§D.2), which is the authoritative set anyway.
 
 **These limits carry more weight than they look like they do.** Since nothing expires
 (§A.10), the live index is relieved only by decisions, settlements, and cancellations —
@@ -2460,24 +2492,40 @@ long human latencies should raise `live_capacity` to match its own concurrency a
 the metric.
 
 **Sink backpressure fails closed, and never blocks the reactor.** The sink is fed by a
-bounded async queue of 1024 entries. When the queue is full, the ledger does not block the
-executor and does not drop audit records: it refuses new privileged operations with
-`ApprovalOutcome::LedgerUnavailable { reason: "audit sink backpressure" }`, which is exit 1
-at the gate site. Already-granted attempts settle normally, so nothing is left half-done.
-An embedder that writes to a network log and cannot tolerate its unavailability should
-buffer internally and return `Ok`, accepting the buffering risk explicitly. The kernel will
-not make that call silently — that line belongs in `EMBEDDING.md`.
+bounded async queue of 1024 entries (`LedgerConfig::sink_queue`), drained by a background
+task that calls `post` once per record, in commit order. Every entry is delivered through a
+queue permit *reserved synchronously at admission* — never awaited — so `post` always has a
+slot waiting and never negotiates capacity with the ledger.
 
-**Recovery.** On construction with a sink that supports replay, the ledger reads back the
-tail and appends `Abandoned{attempt, reason: "process exited mid-attempt"}` for every
-`Redeemed` with no terminal successor. A periodic sweep does the same for attempts whose
-guard was dropped without draining the outbox (§C.1). Without that sweep, a ledger
-accumulates permanently unbalanced chains and the invariant becomes unenforceable.
-Restart-time recovery *from* the sink is explicitly deferred: `LedgerSink` (§D.4, as
-shipped in ledger PR 2) is post-only — there is nothing to read back through it — so
-construction-time reconstruction from prior sink output needs a separate, future
-recovery-source API, consistent with §B.1's "v1 is in-process only, no durability claim."
-The periodic sweep (in-process, no restart involved) is what ledger PR 2 actually ships.
+When all `sink_queue` permits are reserved, the ledger does not block the executor and does
+not drop audit records: the next obligation (`post_request`, `grant`, `deny`, …) is refused
+with `LedgerError::SinkUnavailable`, which reaches the gate site as
+`ApprovalOutcome::LedgerUnavailable` and exits **1**. Two carve-outs make that survivable:
+
+- **A terminal entry is never refused.** `Settled`, and attempt-level `Abandoned`, have
+  their queue slot reserved together with the `Redeemed` entry that opened the attempt,
+  before the attempt is allowed to begin. An operation that already ran must always be able
+  to record what happened.
+- **An `Err` from `post` trips the sink for the life of the ledger — there is no retry.**
+  The drain task stops consuming, and the failed record plus everything queued behind it is
+  counted as undelivered and named in every later refusal: `"audit sink failed; N audit
+  entries undelivered — refusing further privileged operations until the process is
+  restarted"`. The loss is accounted, never silent. Recovery is a process restart.
+
+An embedder that writes to a network log and cannot tolerate its unavailability should
+buffer internally and return `Ok`, accepting the buffering risk explicitly. The kernel does
+not make that call on the embedder's behalf — `docs/EMBEDDING.md`, "The audit sink" says so
+where embedders read it.
+
+**Recovery is the in-process sweep, and nothing else.** A periodic sweep appends
+`Abandoned{attempt, reason}` for every attempt whose guard was dropped without draining the
+outbox (§C.1). Without it a ledger accumulates permanently unbalanced chains and the
+invariant becomes unenforceable.
+
+Restart-time recovery *from* the sink is deliberately not built. `LedgerSink` is post-only
+— there is nothing to read back through it — so reconstructing a prior process's chains at
+construction would need a separate recovery-source API, which §B.1's "v1 is in-process
+only, no durability claim" says the ledger does not have.
 
 ---
 
@@ -2540,7 +2588,7 @@ Three tiers. Each is real against a different adversary, and each weaker tier is
 about what it does not hold against.
 
 1. **The type system (in-process, free).** `Requester` has no method that produces a
-   `Grant` (compile-fail tested, PR 2); `ApproverHandle` has no public constructor, is
+   `Grant`, and a compile-fail test holds that; `ApproverHandle` has no public constructor, is
    minted once at kernel construction, and is absent from
    `agent()`/`agent_with_root()`/`isolated()` sessions; no builtin but `approvals` bridges
    to it. Holds against command-level agents and portable tools. Does not hold against
@@ -2692,8 +2740,8 @@ The walkthroughs above are use cases, not requirements — kaish's job is the ri
    human, client model, clearance model — judges operation + risk class + resources +
    transitions, never a shell command string. A narrow-toolset worker (a future
    kaibo-coder: essentials like `cargo build`, possibly dynamic tools) has no command line
-   to show, and dynamic tools post their own operations through `ToolCtx::request_approval`
-   (PR 3). This hardens the §A.6 taxonomy rule from "nice for audit" to load-bearing: if an
+   to show, and dynamic tools post their own operations through `ToolCtx::request_approval`.
+   This hardens the §A.6 taxonomy rule from "nice for audit" to load-bearing: if an
    operation's resources don't carry enough to judge it, review degrades to
    rubber-stamping.
 3. **The name-only view suffices for every remote approver.** Grant and confirm work by
@@ -2760,7 +2808,7 @@ those is a field above.
 | `ExecResult.latch: Option<Box<LatchRequest>>` | `ExecResult.approval: Option<Box<ApprovalRequestView>>` |
 | `ExecResult::latch_request()` | `ExecResult::approval_request()` |
 | `--json` envelope key `"latch"` | `"approval"` |
-| `KernelConfig::with_nonce_store(NonceStore)` | `KernelConfig::with_ledger(Ledger)` |
+| `KernelConfig::with_nonce_store(NonceStore)` | `KernelConfig::with_ledger(LedgerConfig)` for sizing, `with_approver_handle(handle)` to share one ledger across kernels |
 | `kaish_kernel::nonce::{NonceStore, NonceScope}` | removed |
 | `Kernel::confirm(&req)` | `Kernel::confirm(&handle, &request_id)` |
 | re-presenting a nonce after success re-ran the operation | a key presented after a successful settlement reports the settled outcome and does not re-execute (§B.4) |
@@ -2813,9 +2861,7 @@ approvals)`, `set +o approvals | cat`, and `set +o approvals &` are **parse erro
 of the four shapes this item worried about never reach the builtin at all. That is a
 stronger guarantee than the refusal, but it belongs to the grammar rather than to the pin,
 so the pin still has to hold on its own: if `set` ever becomes an ordinary command those
-shapes start reaching the builtin, and the refusal is what catches them. This was originally planned as a
-standalone PR against `NonceStore`; it moved into the cutover because hardening a structure
-that is about to be deleted is wasted motion (§H).
+shapes start reaching the builtin, and the refusal is what catches them.
 
 **4. Single successful redemption, universally.** Today's nonce is reusable within its TTL
 (`nonce.rs:124`, tests at `:209-217`), so one approval can run a destructive operation
@@ -2842,8 +2888,8 @@ touches them, not blockers here:
 - `cas_overwrite` is still not OS-atomic (no write-temp-then-rename primitive). Unchanged by
   this design, and per §B.1 the ledger does not claim to fix it.
 
-**Shipped since this list was written:** `ToolSchema.operations: Vec<String>` (0.14.0, the
-"ledger spec gaps" PR) — the dotted operation ids a tool can post, so `kaish-tools --json`
+**6. A tool declares what it can ask for.** `ToolSchema.operations: Vec<String>` carries
+the dotted operation ids a tool can post, so `kaish-tools --json`
 advertises what a tool can request instead of leaving a policy engine to sniff for
 `--confirm`. Populated for every in-tree gate producer: `rm` (`fs.remove`),
 `cp`/`dd`/`patch`/`sed`/`tee`/`write` (`fs.overwrite`), `mv` (`fs.rename`), `kaish-trash empty`
@@ -2918,17 +2964,16 @@ unknown) · `approval.voided` (warn) · `approval.standing_issued` (info) ·
 
 ---
 
-## H. Kaish PR breakdown
+## H. What each lane carried
 
-Dependency order; each PR carries its own tests, docs, and changelog bullets. No
-compatibility steps and no parallel old/new types — the ledger is unreleased, so a change
-to it is a rewrite rather than a migration.
+**Every lane has landed.** The ledger core and the latch cutover, the statement gate, the
+five rework lanes, the REPL, and this consolidation pass. Their contents *are* the body of
+this document, so the table below is a reading index into `git log`, not a plan — no lane
+here describes work that is still ahead. No compatibility steps and no parallel old/new
+types were built along the way: the ledger was unreleased throughout, so a change to it was
+a rewrite rather than a migration.
 
-**Landed.** PRs 1–8 built the ledger and cut the latch over to it; PR 10 built the
-statement gate (§C.6). Their contents are the body of this document, and their
-decision records are in `git log`. What each one carried:
-
-| PR | Carried |
+| Lane | Carried |
 |---|---|
 | 1 | `kaish-types::approval` — the vocabulary (§A) |
 | 2 | The ledger core: state machine, credential index, partitioned retention, sink backpressure (§A, §B, §D.4) |
@@ -2943,59 +2988,12 @@ decision records are in `git log`. What each one carried:
 | R2 | No clock-driven decisions and no waiting: the TTL, the expiry path, `renew`, `Approver::decide`, and the patient hold deleted; `cancel` + `CancelReason` + `ApprovalOutcome::Closed` + `PendingApproval`/`ResumeAction` added; §B.5's teardown obligations wired; §I.5's halt and §I.6's `Policy` rename executed (§A.10, §B.5, §C.1–§C.3, §G) |
 | R3 | Revision checks on every transition: `LedgerError::StaleRevision`, `LedgerEntry::RevisionRejected`, `TransitionKind`; `grant`/`grant_with_grounds`/`deny`/`cancel`/`cancel_approval` all gain a `rev: u64` argument, checked before the state-machine legality check so a race reports as a stale quote rather than whatever transition it happened to land on (§B.6) |
 | R4 | The classifier contract and assessments: `StatementClassificationInput`/`ExecutionContext`/`StatementAssessment`, `classify` returning `Result` with `Err` and a caught panic both mapping to `Gate`, the kernel-owned static gate floor (seeded with `kaish-trash empty`), `DecisionContext`, `AssessmentRecorder` (reachable from `Requester` and `ApproverHandle`), and the `Assessed` entry (§C.6, §C.7) |
+| R5 | The redaction seam and the embedder's read surface: `PlannedValue`/`ValueSite`, the one normalization point in `plan_statement`, the `Redactor` trait with the approval key as the sole in-kernel redaction, and `PageRequest`/`ApprovalPage`/`LedgerPage` with the bounded, cursored `log` (§A.8, §D.2) |
+| 11 | The REPL fulfils its own gates: `with_own_authority`, the stderr-and-TTY-only prompt, `y`/`a`/deny in the REPL's own read loop, hint-placeholder substitution on retrieval, and the reference `CommandNameClassifier` behind `kaish --gate` (§C.3). This lane is the design's own proof: the REPL is a plain embedder with no privileged hook, so a human at a prompt being served by `Pending` + `grant` + `confirm` is what shows §C.2 is sufficient |
+| 9 | This consolidation pass: §H folded into history, `EMBEDDING.md`'s sink and prompt contracts, `LANGUAGE.md`'s approvals semantics, the `set -o latch` retirement in help, and the Terms tables in `CLAUDE.md` and `README.md` |
 
 Also landed: `security(kernel): CSPRNG confirmation nonces` (kaish #259), which replaced
 the 32-bit non-CSPRNG generator and made entropy failure loud.
-
----
-
-### Remaining work
-
-**R5 — `refactor(kernel)!: redaction seam and pagination`**
-
-§A.8's `PlannedValue`, the single normalization point, and the `Redactor` trait, with the
-approval key as the one in-kernel redaction; §D.2's `PageRequest`/`ApprovalPage` and the
-bounded `log`.
-
-*Tests:* a value reaches no sink as a bare `String`; an installed `Redactor` covers all
-five sinks including one added by the test; with no `Redactor`, values are `Plain` and
-nothing pretends otherwise; a listing over more entries than one page returns a cursor that
-neither repeats nor skips.
-
----
-
-**PR 11 — `feat(repl): the REPL fulfills its own gates`**
-
-The reference REPL retains the `ApproverHandle` from `Kernel::build`, prompts on a
-`Pending` result and grants from its own read loop (§C.3), substitutes the hint's
-`<token>` placeholder on retrieval, ships the static/regex `StatementClassifier` as the
-reference example, and makes `approvals grant` work at the prompt. Closes the gap where the
-REPL described in §C.3/§D.3 could not fulfil its own gates — gated `rm` said "an operator
-must grant it" and there was no operator.
-
-This lane is also the design's own proof: the REPL is a plain embedder with no privileged
-hook, so if a human at a prompt cannot be served by `Pending` + `grant` + `confirm`, §C.2
-is wrong and this is where that shows.
-
-*Tests:* a TTY session prompts, grants, and the held statement completes; a non-TTY
-session returns exit 2 and never writes a prompt; Ctrl-C at the prompt denies and leaves no
-live request; `approvals grant` succeeds in the REPL session and still exits 1 in an
-`agent()` session; the rendered re-run line carries the real token only in an
-authority-holding session.
-
----
-
-**PR 9 — `docs: the approval ledger`**
-
-`docs/approval-ledger.md` edited down to what shipped, `EMBEDDING.md`'s destructive-op-rails
-section rewritten (including the sink-backpressure contract and the PTY-segregation
-requirement for embedders — an approval prompt must never be blended into the agent's
-stdout), `LANGUAGE.md`'s latch/trash semantics updated, `kaish-help` fragments for
-`approvals` and the retired `set -o latch`, the Terms tables in `CLAUDE.md` and `README.md`
-brought into line with §0's vocabulary (retire `latch` and `nonce`; add `request`, `grant`,
-`key`, `attempt`), and the devlog entry. Per the house convention each of PRs 1–8 carries
-its own doc and changelog edits; this one is the consolidation pass and the design doc's
-permanent home.
 
 ---
 
@@ -3007,14 +3005,16 @@ permanent home.
    request is relieved only by a decision or a cancel (§A.10). So the numbers bind on a
    session holding many undecided requests at once — which is precisely the ACP-style
    workload, where a human may be slow and several asks may stack up. Open until a real
-   workload says otherwise; the metric (`ledger.live_requests`) exists so the answer is
-   measurable rather than argued.
-2. **Standing-grant matching semantics.** §C.4 fixes all-or-nothing, exact-kind, and
-   globbed-id, and the gpt review's remaining questions have no recorded answer: set versus
-   multiset semantics for duplicate resources; whether one pattern may match several
-   resources; precedence when several rules match; and whether a broad string glob should
-   be allowed at all against a typed resource like a git ref, where a typed matcher would
-   be safer. PR 4 cannot ship without answers, because they are its contract.
+   workload says otherwise, and the live count is not exported as a metric, so today the
+   answer has to be measured by walking `Approvals::pending(..)` rather than read off a
+   gauge. Exporting one is unclaimed work.
+2. **A string glob against a typed resource.** §C.4 settles the rest of this question —
+   all-or-nothing with set semantics, exact-kind, globbed-id, issue-order precedence — and
+   the code carries each. What has no recorded answer is whether a broad string glob
+   should be allowed against a *typed* resource at all: `refs/heads/*` is a `kaish-glob`
+   pattern over an opaque string, and a matcher that knew what a git ref is would be
+   harder to write a surprising rule with. No in-tree resource kind is typed enough for
+   the difference to bite; the first plugin kind that is will have to answer it.
 3. **Requirements raised in review with no decision recorded.** Resource canonicalization
    before matching and before recording — path symlinks, ref normalization, encoding, case
    sensitivity. `PlanBinding` (§A.9) settles the *replay* half of this by recording the
@@ -3032,7 +3032,7 @@ permanent home.
    help text.** `set -o latch` becomes `set -o approvals` (with `KAISH_LATCH` →
    `KAISH_APPROVALS` and `KernelConfig::with_latch` → `with_approvals`), and
    `JobStatus::Latched` becomes `JobStatus::Gated` with the wire spelling `"gated"`. Both
-   rows are in the §F.2 rename table and both land in the cutover (PR 5). What does **not**
+   rows are in the §F.2 rename table and both landed in the cutover. What does **not**
    change: exit code **2**, the `--confirm=<token>` flag spelling, and `Kernel::confirm` —
    "confirm" is not latch vocabulary. `trash` is untouched.
 5. ~~**Should a tool-level deferral halt the top-level loop?**~~ **Resolved 2026-08-09

@@ -15,6 +15,98 @@ before it ships.
 
 ---
 
+## The consolidation pass, and the five places the spec had drifted (2026-08-10)
+
+PR 9 was supposed to be the tidy-up: fold §H's remaining-work lanes into the
+landed table now that R5, the REPL, and the `PendingApproval` widening have all
+shipped, sweep the future tense, refresh the Terms tables, done. It was that.
+It was also the first time anybody read the whole 3,000-line spec end to end
+against the code that had grown under it, and reading it that way is a
+different activity from reviewing a lane's diff. A lane review asks "does this
+diff do what its PR body says?" Eleven of those passed. What none of them could
+ask is "does the spec still describe the thing we built?"
+
+Five places it did not. None of them is a bug — every one is the spec having
+been written before the code and never corrected afterwards, which is the
+failure mode a living design doc has instead of bit rot.
+
+**`LedgerSink::post` takes a `LedgerRecord`.** §D.4 said `&LedgerEntry`. The
+envelope — `schema_version`, `sequence`, `scope` — is the whole reason an
+external reader can tell whose record it is holding and whether it understands
+it, and the sink is the one consumer that is definitionally external. The spec
+had the envelope right in §A.5 and the sink signature wrong two sections later.
+
+**`Subscribed` and `Unsubscribed` are entries and the spec had neither.** Not
+in §A.1's posting table, not in §A.5's enum. The code comment on
+`ApproverHandle::subscribe` gets the reasoning exactly right — "an audit scope
+that changed with no record of the change would make the record it produced
+unreadable" — and the spec never learned it.
+
+**`with_ledger` takes a `LedgerConfig`.** §D.2 said `.with_ledger(Ledger)  //
+share one ledger across kernels in this process`, which is two errors in one
+line: the argument is sizing, and sharing is `with_approver_handle`, which
+adopts the handle's ledger. `Kernel::build` returns a `Result`, not a bare
+tuple. And `with_own_authority` and `with_approval_clock` — both real, both
+load-bearing for the REPL and for any embedder that wants a testable clock —
+were absent from the embedder API section entirely.
+
+**There is no `ledger.live_requests` metric.** §D.4 and §I.1 both leaned on it:
+"per-principal quotas and a `ledger.live_requests` metric make the DoS case
+visible before it becomes an outage," and "the metric exists so the answer is
+measurable rather than argued." It does not exist. The counts are
+`LedgerState::live_count_total` and `live_count_by_principal`, both private,
+neither exported. This one is the one that stings, because §A.10's whole
+argument for deleting expiry rests on the failure being *visible*: "the failure
+mode is *the ledger is full*, with a number, at a point where someone can act."
+The number is real — `LedgerError::LiveCapacity` names the limit — but nothing
+lets you watch the count approach it. Both sections now say the live count is
+not exported and that walking `Approvals::pending(..)` is how you watch it.
+Exporting a gauge is unclaimed work; it rides in the PR body rather than an
+issue, because a merged PR is a sufficient record.
+
+**§0 said two spellings of the retired word survive. Neither does.** That
+paragraph was written before §I.4 was resolved and named the shell option and
+`JobStatus::Latched` as the survivors; the cutover renamed both. What actually
+survives is worse and the spec did not mention it: `set` ignores an unknown
+`-o` name and exits **0**, for bash compatibility, so `set -o latch` turns
+nothing on and says nothing about it. Somebody typing it wants a gate and gets
+silence. That is the exact shape of failure kaish refuses everywhere else, and
+it is sitting in a `_ => {}` arm in `set.rs` under the comment "silently ignore
+for bash compatibility." We documented it in three places rather than changing
+it — a `set` that rejects unknown options is a behavior change with its own
+blast radius and does not belong in a docs PR — but it should be said out loud
+that documenting a silent no-op is a consolation prize, not a fix.
+
+A sixth thing turned up that was never in the spec at all: `rm` never trashes a
+symlink. `decide_rm_action` unlinks the link and, under `approvals`, gates it —
+because trashing the link would move its *target* to Trash, and the link is
+trivially recreatable while the target may not be. So "trash wins over
+approvals," which LANGUAGE.md and the help fragment both stated flatly, has an
+exception precisely where following the general rule would delete the wrong
+thing. That branch has been in `rm.rs` since the trash rail shipped and no
+reader-facing text mentioned it.
+
+The Terms table produced the one genuinely interesting decision. Retiring
+`latch` and `nonce` is easy: the mechanism is gone, and a term with no referent
+teaches a wrong model. But `latch` is *in active use in the corpus* in a
+different sense — the ledger latches its view of the installed clock, holding
+the largest reading it has taken so an expired grant stays expired. Two senses
+of one word is exactly the collision the table exists to catch, and the
+temptation was to add a second row. We did not: the clock latch is a mechanism
+an embedder does not need in order to predict behavior (the guarantee is
+"monotone non-decreasing", and that is what `EMBEDDING.md` promises), so it
+carries no guarantee to publish. §0 says the collision out loud instead, next
+to the retirement, so the next person who greps for `latch` and finds forty
+hits in `core.rs` knows immediately which sense they are in.
+
+Two questions stayed deliberately unanswered, both Amy's: whether
+`chain.closed_by_settlement` becomes a `RequestState` variant or gets blessed
+as a documented flag, and whether `TokenRejected`'s revision-bump earns a
+documenting line. §B.3's lowercase "closed" and the silence around
+`bumps_revision`'s wildcard arm are load-bearing neutrality, not oversights.
+Consolidation touched sentences on both sides of each and left the wording
+exactly as it stood.
+
 ## ExecResult carries the resume route it was built with (2026-08-10)
 
 The previous entry's own verdict named the fix before this branch existed: "the

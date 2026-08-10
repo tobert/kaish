@@ -775,6 +775,11 @@ approval.
 Environment variables `KAISH_APPROVALS=1` and `KAISH_TRASH=1` enable at kernel
 startup.
 
+`set` ignores an unknown `-o` name and exits **0**, for bash compatibility. So
+`set -o latch` — the old spelling, retired with the confirmation latch — turns
+nothing on and reports nothing. The option is `approvals`; the held-job status
+is `Gated`; exit code **2** and `--confirm=<token>` did not change.
+
 With approvals enabled, `rm` returns **exit code 2** with a pending request:
 ```sh
 $ rm important.dat
@@ -789,9 +794,11 @@ from the result rather than scraping the stderr text. It is control-plane,
 distinct from the data-plane `.data`, and it is **tokenless**: the request
 names the operation, never its credential.
 
-- **No `--json`** — `ExecResult.approval` is the typed request
-  `Some(ApprovalRequestView { id, operation, resources, hint, deadline, … })`
-  (embedders read it via `approval_request()`).
+- **No `--json`** — `ExecResult.approval` is
+  `Some(PendingApproval { request, resume })`: the tokenless
+  `ApprovalRequestView { id, operation, resources, hint, deadline, … }` paired
+  with the `ResumeAction` naming how to pick it back up. Embedders read the
+  pair with `pending_approval()`, or the view alone with `approval_request()`.
 
 - **`--json`** — the result is a non-zero exit with a diagnostic, so it's wrapped
   in the standard JSON error envelope; the request is surfaced under its own
@@ -825,6 +832,11 @@ Files under 10MB and all directories go to trash (configurable via
 `kaish-trash config max-size`); larger files are deleted permanently. Excluded
 paths (`/tmp`, `/v/*`) bypass trash. If the trash operation fails, `rm` returns
 an error — it never silently falls through to permanent delete.
+
+**A symlink never goes to trash**, so `trash` does not win over `approvals` for
+one: `rm` unlinks the link itself and asks for approval when `approvals` is on.
+Trashing it would move the link's *target* to Trash, and the link is trivially
+recreatable while its target may not be.
 
 The `kaish-trash` builtin manages trashed files: `list`, `restore`, `empty`, `config`.
 

@@ -11,6 +11,10 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Changed
+- **The `latch` and `nonce` terms are retired** from the Terms table in
+  `README.md` and `CLAUDE.md`, replaced by `request`, `grant`, `key`, and
+  `attempt` — the mechanism they named is gone, and a term with no referent
+  teaches a wrong model of the shell.
 - **BREAKING: `kaish_repl::Repl::process_line` takes a second argument**, a
   `&mut dyn ApprovalPrompt` naming where a gate gets decided. Pass
   `&mut kaish_repl::approval::NoPrompt` for the previous behavior: no prompt,
