@@ -742,6 +742,45 @@ async fn granting_with_a_stale_revision_is_refused_and_recorded() {
     assert_eq!(approvals.get(&req.id).unwrap().request.revision, 1);
 }
 
+/// §A.7 + §F.3: a rejected key bumps `revision`, and that is a contract.
+/// The rejection moves the request one step closer to the fifth that voids
+/// it, so the risk an approver read is no longer the risk in front of it —
+/// the grant is refused until the approver re-reads.
+#[tokio::test]
+async fn a_rejected_key_forces_an_approver_to_re_read_before_granting() {
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
+    // What the approver read when it started deliberating.
+    let quoted = approvals.get(&req.id).unwrap().request.revision;
+
+    // A bad key arrives while the approver is thinking.
+    let err = requester
+        .redeem_with_token(&req.id, "wrong", agent("agent-1"), ConditionReport::none())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LedgerError::NotAuthorized(_)), "{err:?}");
+    let current = approvals.get(&req.id).unwrap().request.revision;
+    assert_eq!(current, quoted + 1, "a rejected key bumps the revision");
+
+    // The approver's now-stale answer is refused, and the refusal is on the
+    // log — a late answer to a changed picture is a readable fact (§B.6).
+    let err = approver.grant(&req.id, quoted, terms(&req, far_future())).await.unwrap_err();
+    assert!(
+        matches!(&err, LedgerError::StaleRevision { quoted: q, current: c, .. } if *q == quoted && *c == current),
+        "{err:?}"
+    );
+    assert!(matches!(
+        entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).last(),
+        Some(LedgerEntry::RevisionRejected { .. })
+    ));
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Requested), "never applied");
+
+    // Re-read, then decide: the same grant lands.
+    let fresh = approvals.get(&req.id).unwrap().request.revision;
+    approver.grant(&req.id, fresh, terms(&req, far_future())).await.unwrap();
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Granted));
+}
+
 #[tokio::test]
 async fn denying_with_a_stale_revision_is_refused_and_recorded() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();

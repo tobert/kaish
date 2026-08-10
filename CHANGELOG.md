@@ -18,6 +18,10 @@ breaking entries are marked **BREAKING**.
   reports the settled outcome and does not re-execute; every other transition
   refuses with `LedgerError::Terminal` naming `Consumed` (`docs/approval-ledger.md`
   §B.2, §B.3). Ledger-era surface, never released, so no BREAKING marker.
+- **A rejected key bumps the request's `revision` — now a documented contract**,
+  so an approver holding a revision from before the rejection is refused with
+  `LedgerError::StaleRevision` and must re-read: a bad key advances the count
+  toward the fifth that voids the request, so the risk picture changed.
 - **The `latch` and `nonce` terms are retired** from the Terms table in
   `README.md` and `CLAUDE.md`, replaced by `request`, `grant`, `key`, and
   `attempt` — the mechanism they named is gone, and a term with no referent
