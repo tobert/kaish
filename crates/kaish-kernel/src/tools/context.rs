@@ -235,7 +235,7 @@ pub struct ExecContext {
     pub(crate) redemption: Option<RedemptionContext>,
 
     /// Why capturing this invocation failed, when it did (spec §B.4). Set at
-    /// the dispatch seam in place of the empty argv the latch substituted;
+    /// the dispatch seam when the invocation cannot be captured verbatim;
     /// a request posted with this set records `Capture::CaptureFailed`, and
     /// `confirm` refuses to replay it naming the variant.
     pub(crate) capture_failure: Option<String>,

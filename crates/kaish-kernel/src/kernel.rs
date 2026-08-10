@@ -2209,8 +2209,8 @@ impl Kernel {
     /// wrapping the other. From argv classification onward `execute_argv` reuses
     /// the exact path a `Stmt::Command` takes — command resolution (aliases, user
     /// tools, `.kai` scripts, externals, backend tools), arg binding, the `--json`
-    /// transform, and the approval gate — so a gated `rm` still emits a
-    /// nonce and an `ls --json` still applies output formatting. The kernel's
+    /// transform, and the approval gate — so a gated `rm` still emits an
+    /// approval request and an `ls --json` still applies output formatting. The kernel's
     /// pre-execution *syntax* validator does not run: argv has no shell syntax to
     /// validate (a tool's own `validate()`/clap parse still runs at dispatch).
     ///
@@ -7124,7 +7124,7 @@ pub(crate) async fn bind_tool_args(
     };
     // Bind against the leaf's params, but MERGE the root schema's params on
     // top as "global" flags: a value-flag declared at the tool's top level
-    // (e.g. kj's `--confirm <nonce>`) must bind at every leaf, including when
+    // (e.g. kj's `--confirm <token>`) must bind at every leaf, including when
     // it trails the subcommand path (`kj context retag a b --confirm <n>`).
     // The leaf wins on name conflicts. For a flat tool, leaf == root, so the
     // merge is a harmless no-op.
@@ -8418,7 +8418,7 @@ mod tests {
     async fn test_kernel_reset_preserves_approvals_and_trash_config() {
         // An embedder configuring `with_approvals(true)` must not have the
         // confirmation gate silently disabled by a later `reset()` — that
-        // would let a destructive command through with no nonce and no
+        // would let a destructive command through with no approval and no
         // error, exactly the "silent fallback" the gate exists to prevent.
         let kernel = Kernel::new(
             KernelConfig::transient()

@@ -294,7 +294,7 @@ async fn double_dash_ends_option_parsing() {
 /// A literal `--` also ends option parsing for control tokens like
 /// `--discard`, not just the signal shorthand — `kill -- --discard %1`
 /// must try to signal a target literally named `--discard`, not discard
-/// job 1's latch.
+/// job 1's held approval request.
 ///
 /// Same operand-count note as the test above: `--discard` and `%1` are two
 /// targets, so job 1 is signalled on its own account. The old "job 1 must be

@@ -166,7 +166,7 @@ impl Tool for Sed {
 
         let quiet = parsed.quiet || args.has_flag("quiet") || args.has_flag("n");
 
-        // In-place editing (-i [SUFFIX]) and its confirm nonce — captured before
+        // In-place editing (-i [SUFFIX]) and its approval key — captured before
         // `parsed` is shadowed by the built program below. Read raw too: the
         // kernel may surface `-i.bak` as named["i"]=".bak" or bare `-i` as a flag.
         let in_place = parsed.in_place || args.has_flag("i");

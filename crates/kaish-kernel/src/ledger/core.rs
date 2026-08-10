@@ -535,7 +535,10 @@ struct RevisionQuote<'a> {
 }
 
 impl LedgerInner {
-    #[allow(clippy::expect_used)] // mirrors nonce.rs's own poisoned-mutex stance
+    // A poisoned mutex means a panic ran while the log was mid-write, so the
+    // state behind it is not trustworthy. Panicking here is the loud outcome;
+    // handing back a torn log would be the silent one.
+    #[allow(clippy::expect_used)]
     fn lock(&self) -> std::sync::MutexGuard<'_, LedgerState> {
         self.state.lock().expect("approval ledger mutex poisoned")
     }
@@ -2426,10 +2429,9 @@ fn emit_events(watch_tx: &tokio::sync::broadcast::Sender<LedgerRecord>, records:
     }
 }
 
-/// 128 bits from `getrandom`, 32 lowercase hex — identical construction to
-/// `nonce.rs`'s `generate_nonce` (kaish #259), duplicated rather than shared
-/// because `nonce.rs` is deleted outright in the cutover (PR 5) and this
-/// type should not depend on code scheduled for removal.
+/// 128 bits from `getrandom`, 32 lowercase hex. Entropy failure propagates to
+/// the caller — there is no fallback generator, because a predictable key
+/// confirms nothing.
 fn generate_credential() -> Result<String, getrandom::Error> {
     let mut entropy = [0u8; 16];
     getrandom::fill(&mut entropy)?;
