@@ -1110,6 +1110,7 @@ dependencies = [
  "directories",
  "kaish-client",
  "kaish-kernel",
+ "kaish-types",
  "nix 0.29.0",
  "owo-colors",
  "rustyline",
