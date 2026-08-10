@@ -454,6 +454,13 @@ impl std::fmt::Display for SessionId {
 
 /// The actor an operation runs on behalf of, when the embedder distinguishes
 /// one from the session — a subagent under a user (spec §A.7).
+///
+/// **No kernel path sets one today.** `Kernel` builds its own
+/// [`ApprovalScope`] from its kernel id and `KernelConfig::with_session`, and
+/// there is no `with_actor` beside it, so `actor_id` stays `None` on every
+/// request the kernel raises. The type, the field, and
+/// [`ApprovalScope::with_actor`] are the wire shape a multi-actor embedder
+/// needs, reserved so adding the seam later is not a record-format change.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PrincipalId(String);
@@ -518,7 +525,8 @@ impl ApprovalScope {
         self
     }
 
-    /// Name the actor this scope runs on behalf of.
+    /// Name the actor this scope runs on behalf of. Reserved: nothing inside
+    /// the kernel calls this — see [`PrincipalId`].
     pub fn with_actor(mut self, actor: PrincipalId) -> Self {
         self.actor_id = Some(actor);
         self

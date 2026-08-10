@@ -560,9 +560,12 @@ impl Repl {
 
         // Execute via the client with SIGINT handling.
         // A per-execute signal listener catches Ctrl-C during execution,
-        // cancels the kernel, and returns exit code 130.
+        // cancels the kernel, and returns exit code 130. `tokio::signal::unix`
+        // exists only on unix, the same reason `init_terminal` is gated above;
+        // elsewhere the execute runs uninterrupted rather than not compiling.
         let client = self.client.clone();
         let input = trimmed.to_string();
+        #[cfg(unix)]
         let result = self.runtime.block_on(async {
             let mut sigint = tokio::signal::unix::signal(
                 tokio::signal::unix::SignalKind::interrupt(),
@@ -575,6 +578,8 @@ impl Repl {
                 }
             }
         });
+        #[cfg(not(unix))]
+        let result = self.runtime.block_on(async { client.execute(&input).await });
 
         match result {
             Ok(exec_result) => {

@@ -11,8 +11,8 @@
 use std::fmt;
 
 use kaish_types::approval::{
-    Outcome, Principal, RequestId, RequestState, ResourceRef, SessionId, StandingId, StateClaim,
-    SubscriptionId, TransitionKind,
+    LostCause, Outcome, Principal, RequestId, RequestState, ResourceRef, SessionId, StandingId,
+    StateClaim, SubscriptionId, TransitionKind,
 };
 
 /// Why a ledger transaction did not commit. Every non-`InvariantViolated`
@@ -197,7 +197,8 @@ impl fmt::Display for LedgerError {
             Self::AlreadySettled { id, outcome } => match outcome {
                 Some(outcome) => write!(
                     f,
-                    "request {id} already settled ({outcome:?}) — not re-executing; present a new request to retry"
+                    "request {id} already settled — {} — not re-executing; present a new request to retry",
+                    render_outcome(outcome)
                 ),
                 None => write!(
                     f,
@@ -216,19 +217,22 @@ impl fmt::Display for LedgerError {
             ),
             Self::LiveCapacityPerPrincipal { principal, limit } => write!(
                 f,
-                "approval ledger at capacity for principal {principal:?} ({limit} live requests) — settle or abandon its pending approvals"
+                "approval ledger at capacity for principal {principal} ({limit} live requests) — settle or abandon its pending approvals"
             ),
             Self::RingAtCapacity => write!(
                 f,
-                "approval ledger's retained-entry ring is full and its oldest entry belongs to a still-live request — settle or abandon it before more entries can be recorded"
+                "approval ledger's history is full and its oldest entry belongs to a still-live request — settle or abandon that request before more entries can be recorded"
             ),
-            Self::SinkUnavailable(reason) => {
-                write!(f, "approval ledger audit sink unavailable: {reason}")
-            }
+            Self::SinkUnavailable(reason) => write!(
+                f,
+                "the approval ledger is refusing new requests because its audit sink is not accepting records: {reason} — an unrecorded decision is worse than a refused one"
+            ),
             Self::ConditionsWidened { request, resource, expected } => write!(
                 f,
-                "grant for request {request} widens the request's declared transition on {}:{} (expected {expected:?} preserved) — an approver may narrow, never widen",
-                resource.kind, resource.id
+                "grant for request {request} widens the request's declared transition on {}:{} (expected {} preserved) — an approver may narrow, never widen",
+                resource.kind,
+                resource.id,
+                render_state_claim(expected)
             ),
             Self::DraftMismatch { request, detail } => write!(
                 f,
@@ -243,8 +247,9 @@ impl fmt::Display for LedgerError {
             }
             Self::SelfApproval { request, requested_by, granted_by } => write!(
                 f,
-                "request {request} refused: requested by {requested_by:?}, would be granted by {granted_by:?} \
-                 — deny_self_approval refuses a principal approving its own request"
+                "a principal may not approve its own request: {request} was requested by {} and would be \
+                 granted by {} — set `deny_self_approval` to false if this kernel is legitimately both sides",
+                requested_by.id, granted_by.id
             ),
             Self::StaleRevision { request, quoted, current, attempted } => write!(
                 f,
@@ -256,3 +261,37 @@ impl fmt::Display for LedgerError {
 }
 
 impl std::error::Error for LedgerError {}
+
+/// A [`StateClaim`] as an operator reads it. `ConditionsWidened` names the
+/// claim a grant failed to preserve, and `{:?}` would print the enum instead
+/// of the digest or id the reader has to compare against.
+pub(crate) fn render_state_claim(claim: &StateClaim) -> String {
+    match claim {
+        StateClaim::Unspecified => "no claimed prior state".to_string(),
+        StateClaim::Absent => "absent".to_string(),
+        StateClaim::Exact(id) => id.clone(),
+        StateClaim::Digest { alg, hex } => format!("{alg}:{hex}"),
+        // `StateClaim` is `#[non_exhaustive]`; an unrecognized claim is still
+        // a claim, and still has to render as something an operator can read.
+        other => format!("{other:?}"),
+    }
+}
+
+/// An [`Outcome`] as an operator reads it — what the settled run reported, in
+/// the words the exit-code contract uses. Both enums are `#[non_exhaustive]`,
+/// so an unrecognized variant still has to render as something readable.
+fn render_outcome(outcome: &Outcome) -> String {
+    match outcome {
+        Outcome::Exit(code) => format!("the run reported exit {code}"),
+        Outcome::Error(detail) => format!("the run reported an error: {detail}"),
+        Outcome::Unknown { cause } => format!(
+            "the executor went away before reporting ({}), so whether the operation took effect is unknown",
+            match cause {
+                LostCause::Cancelled => "cancelled".to_string(),
+                LostCause::ExecutorLost => "executor lost".to_string(),
+                other => format!("{other:?}"),
+            }
+        ),
+        other => format!("{other:?}"),
+    }
+}

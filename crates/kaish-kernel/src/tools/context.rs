@@ -467,17 +467,13 @@ fn transitions_match(
     Ok(())
 }
 
-/// One resource's prior-state claim, for a diagnostic an operator reads.
+/// One resource's prior-state claim, for a diagnostic an operator reads. A
+/// missing transition reads the same as an unspecified one — neither claims
+/// anything about the prior state.
 fn render_claim(transition: Option<&kaish_types::approval::Transition>) -> String {
-    use kaish_types::approval::StateClaim;
     match transition.map(|t| &t.from) {
-        None | Some(StateClaim::Unspecified) => "no claimed prior state".to_string(),
-        Some(StateClaim::Absent) => "absent".to_string(),
-        Some(StateClaim::Exact(id)) => id.clone(),
-        Some(StateClaim::Digest { alg, hex }) => format!("{alg}:{hex}"),
-        // `StateClaim` is `#[non_exhaustive]`; an unrecognized claim is still
-        // a claim, and still has to render as something an operator can read.
-        Some(other) => format!("{other:?}"),
+        None => "no claimed prior state".to_string(),
+        Some(claim) => crate::ledger::error::render_state_claim(claim),
     }
 }
 
