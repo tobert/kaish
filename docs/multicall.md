@@ -209,5 +209,5 @@ Author: design session 2026-06-22/23 (multicall curiosity → embeddable-modes
 design check).
 Related: [EMBEDDING.md](EMBEDDING.md), [LANGUAGE.md](LANGUAGE.md),
 [binary-data.md](binary-data.md) (the `to_argv` lossiness / typed-`Value`
-context), [issues.md](issues.md). CLAUDE.md "Contributor conventions" for the
+context). CLAUDE.md "Contributor conventions" for the
 two-layer clap arg model and `to_argv()` gotchas.
