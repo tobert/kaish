@@ -766,6 +766,16 @@ one; a 10,000-path `rm` posts one; a `$(…)`, a sourced script, and a user
 tool's body post none of their own, because their statements belong to the
 enclosing top-level statement's plan.
 
+**So every kernel's log accumulates, including one with approvals off** —
+"approvals off" means nothing gates, not that nothing is observed, and a
+kernel that never raises a request still records a `cmd.execute` entry per
+statement (the `cat` that reads the log included). Growth is bounded at
+`LedgerConfig::retained_entries`, **4096** entries by default and settable with
+`with_retained_entries`; a chainless observation always evicts freely, so the
+oldest ones age out rather than filling the ledger. Read them with `approvals
+log --limit N` (200 by default, `--since SEQ` to page) or `cat
+/v/approvals/log`.
+
 **The tap is advisory, not a durable audit trail.** A tap append that cannot
 commit — sink backpressure, a full retention ring — emits a **warn** event and
 the statement **still runs**. Nobody opted into a completeness guarantee here;
