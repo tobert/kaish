@@ -260,7 +260,10 @@ an `awk` that never surprises.
   script runs `kaish-vfs commit`.
 - `set -o approvals` (or `KAISH_APPROVALS=1`) gates destructive commands behind
   an approval — the command returns exit 2 and a typed request naming the
-  operation and the paths, instead of acting.
+  operation and the paths, instead of acting. At an interactive terminal the
+  REPL asks and runs the command on `y`; a piped or captured session is never
+  asked and gets the exit-2 request. `kaish --gate <cmd[,cmd...]>` widens what
+  asks to every statement planning one of those commands.
 - `set -o trash` (or `KAISH_TRASH=1`) diverts deletes to the freedesktop.org
   Trash instead of removing them. Trash wins over approvals: a delete the trash
   can catch needs no approval, because the trash IS the recovery net.

@@ -894,10 +894,19 @@ token.
 `approval` field and names the total in its message
 (``wait: 3 approvals pending — run `approvals list` ``).
 
-- **REPL** — one kernel per session; requests persist across commands naturally.
+- **REPL** — one kernel per session; requests persist across commands
+  naturally, and the session holds approval authority, so `grant`, `deny`, and
+  `revoke` work at the prompt. A gated line asks there: the request prints to
+  stderr, then `y` grants and runs it, `a` grants it and stops asking for that
+  operation on those resources for the session, and `n`, Enter, or Ctrl-C
+  denies. A piped or captured session is never asked and gets exit **2** with
+  the request pending. `kaish --gate <cmd[,cmd...]>` widens what asks to every
+  statement planning one of those commands.
 - **Embedders** — share one ledger across kernels with
   `KernelConfig::with_approver_handle()`, or accept the default (a fresh ledger
-  per kernel). An embedder can also pin the policy with
+  per kernel). A single-kernel embedder that is itself the operator installs
+  its own authority with `KernelConfig::with_own_authority(true)`. An embedder
+  can also pin the policy with
   `KernelConfig::with_policy_pinned(true)`, after which `set +o approvals`
   fails with exit 1 instead of disarming the session.
 
