@@ -322,6 +322,10 @@ set +o glob               # disable bare glob expansion
 
 Env vars: `KAISH_APPROVALS=1`, `KAISH_TRASH=1` enable at startup.
 
+`set` ignores an unknown `-o` name and exits **0**. `set -o latch` is the
+retired spelling and turns nothing on — the option is `approvals`. Exit code
+**2** and `--confirm=<token>` are unchanged.
+
 **Approvals:** `set -o approvals` gates every filesystem mutation with no
 recoverable prior copy. A gated command exits **2** and returns a typed
 approval request naming the operation (`fs.remove`, `fs.overwrite`,
@@ -371,7 +375,9 @@ instead of disarming the session.
 
 **Trash:** Files <= 10MB and directories always trash. `/tmp`, `/v/*` excluded.
 Trash wins over approvals — a delete the trash can catch needs no approval,
-because the trash IS the recovery net. A truncating overwrite under `trash`
+because the trash IS the recovery net. A **symlink** is the exception: `rm`
+unlinks the link rather than trashing its target, so it still asks under
+`approvals`. A truncating overwrite under `trash`
 snapshots the file's prior content first (recoverable from Trash). If trash
 fails, the op errors (no silent fallthrough to a destructive delete/overwrite).
 Configure threshold: `kaish-trash config max-size <bytes>`.
