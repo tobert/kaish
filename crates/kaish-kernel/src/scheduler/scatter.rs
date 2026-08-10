@@ -561,10 +561,14 @@ fn result_row(i: usize, r: &ScatterResult) -> serde_json::Value {
     // A held worker (exit 2 under the `fs.*` enforce policy) is otherwise
     // indistinguishable from a plain failure in the row — carry the request
     // so a caller can act on the gate straight from the row (GH #124 part 3).
-    // The view is plain data, so serialization cannot fail; a failure is
-    // dropped rather than replacing the row.
-    if let Some(approval) = &r.result.approval
-        && let Ok(v) = serde_json::to_value(approval)
+    // Just the view, matching `apply_output_format`'s `--json` envelope: the
+    // resume route ExecResult.approval also carries (kaish#312) is a
+    // Rust-level concern for a caller driving the kernel in-process, not
+    // part of this row's wire shape. The view is plain data, so
+    // serialization cannot fail; a failure is dropped rather than replacing
+    // the row.
+    if let Some(pending) = &r.result.approval
+        && let Ok(v) = serde_json::to_value(&pending.request)
     {
         row.insert("approval".into(), v);
     }
@@ -1001,7 +1005,7 @@ mod tests {
         );
 
         let mut r = ExecResult::failure(2, "rm: approval required");
-        r.approval = Some(Box::new(view.clone()));
+        r.approval = Some(Box::new(crate::ledger::PendingApproval::new(view.clone())));
         let results = vec![ScatterResult { item: item("a"), result: r, timed_out: false }];
         let out = gather_results(&results, &GatherOptions::default());
         assert_eq!(out.code, 123, "a held worker still counts as failed for gather's exit code");

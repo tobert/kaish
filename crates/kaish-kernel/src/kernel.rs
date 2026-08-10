@@ -5241,7 +5241,7 @@ impl Kernel {
         // from an ordinary failure, and inside `$(…)` the outer statement even
         // reads as success. The latch had this same gap; a dropped
         // control-plane signal IS the silent bypass, so it gets fixed here.
-        let mut last_approval: Option<Box<kaish_types::approval::ApprovalRequestView>> = None;
+        let mut last_approval: Option<Box<kaish_types::approval::PendingApproval>> = None;
 
         fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
             match r.out_bytes() {
@@ -5365,7 +5365,7 @@ impl Kernel {
         // from an ordinary failure, and inside `$(…)` the outer statement even
         // reads as success. The latch had this same gap; a dropped
         // control-plane signal IS the silent bypass, so it gets fixed here.
-        let mut last_approval: Option<Box<kaish_types::approval::ApprovalRequestView>> = None;
+        let mut last_approval: Option<Box<kaish_types::approval::PendingApproval>> = None;
 
         // Append a statement's stdout as raw bytes (binary) or its UTF-8 bytes.
         fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
@@ -5504,7 +5504,7 @@ impl Kernel {
         // from an ordinary failure, and inside `$(…)` the outer statement even
         // reads as success. The latch had this same gap; a dropped
         // control-plane signal IS the silent bypass, so it gets fixed here.
-        let mut last_approval: Option<Box<kaish_types::approval::ApprovalRequestView>> = None;
+        let mut last_approval: Option<Box<kaish_types::approval::PendingApproval>> = None;
 
         for stmt in program.statements {
             if matches!(stmt, crate::ast::Stmt::Empty) {
@@ -5693,7 +5693,7 @@ impl Kernel {
             // from an ordinary failure, and inside `$(…)` the outer statement even
             // reads as success. The latch had this same gap; a dropped
             // control-plane signal IS the silent bypass, so it gets fixed here.
-            let mut last_approval: Option<Box<kaish_types::approval::ApprovalRequestView>> = None;
+            let mut last_approval: Option<Box<kaish_types::approval::PendingApproval>> = None;
             let mut exec_error: Option<anyhow::Error> = None;
             let mut exit_code: Option<i64> = None;
 

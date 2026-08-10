@@ -1341,8 +1341,9 @@ static REQUESTS_CONSTRUCTED: AtomicU64 = AtomicU64::new(0);
 /// The public view of a request: everything in [`ApprovalRequest`] and
 /// nothing else — deliberately no credential field, so there is nothing to
 /// redact and nothing to leak through clone/serde/VFS/telemetry (spec §A.2).
-/// This is what `ExecResult.approval`, `JobInfo.approval`, `/v/approvals`,
-/// and a `Policy`'s input all see.
+/// This is what `JobInfo.approval`, `/v/approvals`, `--json`, and a
+/// `Policy`'s input all see; `ExecResult.approval` carries this view paired
+/// with its resume route, as [`PendingApproval::request`].
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApprovalRequestView {
@@ -1419,6 +1420,99 @@ impl From<ApprovalRequest> for ApprovalRequestView {
 impl From<&ApprovalRequest> for ApprovalRequestView {
     fn from(req: &ApprovalRequest) -> Self {
         req.clone().into()
+    }
+}
+
+// ───────────────────────── The result-boundary pending decision ─────────────────────────
+
+/// What a caller needs to show a pending request and to pick it back up
+/// (spec §C.1).
+///
+/// The kernel returns this instead of waiting: a decision it cannot make
+/// itself comes back as data, and the embedder comes back when it has an
+/// answer. `ExecResult.approval` carries this whole type — both the
+/// tokenless view and the route that resumes it — so a caller reads
+/// [`Self::resume`] instead of re-deriving it from [`Capture`]'s shape (the
+/// mistake this type exists to make impossible: two call sites computing the
+/// same route independently can drift, one carried value cannot).
+// Derives `Serialize`/`Deserialize` (ledger PR R5, item b) so an ACP-style
+// embedder can persist a pending decision across a process restart —
+// `ApprovalRequestView`, `Capture`, and `PlanDigest` already carry the same
+// derives, and this type adds nothing that would not round-trip.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingApproval {
+    /// The request, tokenless by construction (spec §A.2).
+    pub request: ApprovalRequestView,
+    /// How this request continues once it is decided.
+    pub resume: ResumeAction,
+}
+
+impl PendingApproval {
+    /// Pair a pending request with the route that resumes it, derived from
+    /// how the invocation was captured (spec §B.4's capture statuses).
+    pub fn new(request: ApprovalRequestView) -> Self {
+        let resume = ResumeAction::for_capture(&request.capture, &request.binding.plan_digest);
+        Self { request, resume }
+    }
+}
+
+/// How a pending request continues once it is decided (spec §C.1).
+/// Structured, because a caller must not have to infer it from the
+/// capture's shape.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ResumeAction {
+    /// Re-run the statement with the key; the digest names what was
+    /// approved (spec §A.9).
+    ConfirmStatement {
+        /// The digest of the statement that was judged.
+        plan_digest: PlanDigest,
+        /// The held statement's position in the submitted program. The
+        /// kernel halted there and ran nothing after it, so an embedder
+        /// continuing the program picks up at `index + 1` (spec §C.2).
+        index: usize,
+    },
+    /// Replay the captured invocation via `Kernel::confirm`.
+    RetryOperation,
+    /// Grantable and redeemable, but the kernel cannot replay it — the
+    /// caller must re-issue the operation itself.
+    NotReplayable {
+        /// Which capture status the request carries, and why it cannot be
+        /// replayed.
+        reason: String,
+    },
+}
+
+impl ResumeAction {
+    /// The route a capture implies. `Exact` replays through
+    /// `Kernel::confirm`; a statement re-runs by index; everything else
+    /// names why the kernel cannot re-issue it.
+    pub fn for_capture(capture: &Capture, plan_digest: &PlanDigest) -> Self {
+        match capture {
+            Capture::Exact(_) => Self::RetryOperation,
+            Capture::Statement { index, .. } => Self::ConfirmStatement {
+                plan_digest: plan_digest.clone(),
+                index: *index,
+            },
+            Capture::DirectExecution => Self::NotReplayable {
+                reason: "the operation ran with no dispatch seam above it, so there is no \
+                         invocation to replay"
+                    .to_string(),
+            },
+            Capture::Unavailable { reason } => Self::NotReplayable {
+                reason: reason.clone(),
+            },
+            Capture::CaptureFailed { reason } => Self::NotReplayable {
+                reason: reason.clone(),
+            },
+            // No wildcard arm: `Capture` and this function are both defined
+            // in this crate (unlike when this lived in `kaish-tool-api`,
+            // where `Capture` was foreign and `#[non_exhaustive]` forced
+            // one), so a new variant fails this match at compile time
+            // instead of silently falling through here.
+        }
     }
 }
 
@@ -4098,6 +4192,50 @@ mod tests {
     fn every_entry_reports_the_timestamp_it_carries() {
         for entry in all_entries() {
             assert_eq!(entry.at(), SystemTime::UNIX_EPOCH, "{entry:?}");
+        }
+    }
+
+    // ── PendingApproval / ResumeAction (moved from kaish-tool-api with the
+    // types themselves — kaish-tool-api cannot depend back on kaish-types'
+    // downstream consumers, but the types belong in the leaf crate) ──
+
+    #[test]
+    fn pending_approval_round_trips_through_serde() {
+        // Ledger PR R5, item b: an ACP-style embedder persists pending
+        // decisions across a process restart, which needs both types on the
+        // serde surface — not just `ApprovalRequestView`, which already had
+        // it.
+        let pending = PendingApproval::new(sample_view("fs.remove", &["precious.txt"]));
+        let json = serde_json::to_value(&pending).expect("serialize");
+        let back: PendingApproval = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back.request, pending.request);
+        assert_eq!(back.resume, pending.resume);
+    }
+
+    #[test]
+    fn pending_approval_new_derives_resume_from_the_view_s_capture() {
+        // The whole point of pairing resume with the view at construction:
+        // a caller never has to inspect `capture` itself to know the route.
+        let exact = PendingApproval::new(sample_view("fs.remove", &["x"]));
+        assert_eq!(exact.resume, ResumeAction::RetryOperation, "sample_view captures Exact");
+    }
+
+    #[test]
+    fn every_resume_action_variant_round_trips() {
+        let plan_digest = PlanDigest::new("abc123");
+        for resume in [
+            ResumeAction::ConfirmStatement {
+                plan_digest,
+                index: 2,
+            },
+            ResumeAction::RetryOperation,
+            ResumeAction::NotReplayable {
+                reason: "no dispatch seam".to_string(),
+            },
+        ] {
+            let json = serde_json::to_value(&resume).expect("serialize");
+            let back: ResumeAction = serde_json::from_value(json).expect("deserialize");
+            assert_eq!(back, resume);
         }
     }
 }
