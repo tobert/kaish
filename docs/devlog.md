@@ -15,6 +15,71 @@ before it ships.
 
 ---
 
+## The eighth state gets a name (2026-08-10)
+
+The previous entry ended by naming two questions and deliberately not
+answering them: whether `chain.closed_by_settlement` becomes a `RequestState`
+variant or gets blessed as a documented flag, and whether `TokenRejected`'s
+revision bump earns a documenting line. Amy ruled on both. Both toward the
+same answer: make it explicit.
+
+The first one was the real work. The request state machine had eight states
+and the enum had seven. A chain whose attempt settled `Exit(0)` or `Unknown`
+stayed `RequestState::Granted` while a private bool flipped true, and five
+sites in `core.rs` special-cased `Granted && closed_by_settlement` to behave
+as terminal. The spec's B.3 table wrote that state as lowercase "closed" —
+lowercase because the type had no name to capitalize. And an embedder reading
+a serialized record could not see closure in the `state` field at all; it had
+to walk the entry log for a `Settled` and decide for itself whether the
+outcome was one of the two that close.
+
+Choosing the name was most of the thinking, and three obvious candidates were
+all wrong for reasons worth writing down. Not `Settled`: that is already the
+entry name, and the entry fires for outcomes that do *not* close — a non-zero
+exit leaves the grant live for a retry — so a state spelled `Settled` would
+be true of chains that are still open. Not `Closed`: `mark_closed` applies to
+all six terminal states, so the word already carries the broader concept and
+a variant would collide with it. Not `Completed` or `Done` or `Fulfilled`:
+the Terms table shipped "'The operation ran' is a fact about an attempt,
+never about a request" two days ago, and `Outcome::Unknown` reaches this state
+in exactly the case where nobody knows whether it ran.
+
+`Consumed` came from the spec's own vocabulary. A.1 and the `grant` row of the
+Terms table both say a failed attempt "does not consume" the grant; the
+positive form of that sentence names the state a successful one produces. It
+names the grant, not the work, which is precisely the distinction the Terms
+table asks for.
+
+Two things fell out of the change that the flag had been hiding. The expiry
+skip became structural: `materialize_expiry` used to test
+`Granted && !closed_by_settlement` before looking at `not_after`, and now it
+simply never sees a consumed chain as `Granted`, so an `Expired` entry can no
+longer be appended after the operation ran. And `settle()` needs a guard the
+flag did not: a chain that closed some *other* way — voided by a fifth bad
+key, expired past `not_after` — while its attempt was still `Reserved` must
+keep the state that closed it. Setting `Consumed` unconditionally would erase
+the `void_reason` the terminal error reports. With a bool there was no state
+to overwrite, so the hazard did not exist; promoting it to a variant created
+the hazard and the fix in the same edit.
+
+One behavior deliberately changed, because the ruling said so: `grant`,
+`deny`, `cancel`, and `abandon` against a consumed chain used to answer
+`AlreadyDecided` (the chain was nominally `Granted`, after all) and now answer
+`Terminal` naming `Consumed`. The B.4 nuance survives untouched and is the one
+exception: redemption still reports the settled outcome and re-executes
+nothing. That arm moved out of a post-match flag check and into the state
+match itself, at both redeem sites, which is where a reader looks for it.
+
+The second ruling was small and is mostly a paragraph. `bumps_revision` names
+four entries that are not transitions of their request and explains each;
+`TokenRejected` bumped too, but only by falling out of the wildcard arm.
+Reading the code you could not tell whether that was a decision. It is: a
+rejected key advances the count toward the fifth that voids the request, so
+the risk an approver read is not the risk in front of it any more, and being
+forced to re-read is the safe direction. Named arm, rustdoc line, and a test
+that walks the sequence the contract exists for — read, bad key, stale answer
+refused, fresh read, grant.
+
 ## The consolidation pass, and the five places the spec had drifted (2026-08-10)
 
 PR 9 was supposed to be the tidy-up: fold §H's remaining-work lanes into the
