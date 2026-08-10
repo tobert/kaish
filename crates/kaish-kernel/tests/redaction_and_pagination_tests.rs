@@ -21,9 +21,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use kaish_kernel::interpreter::ExecResult;
-use kaish_kernel::ledger::{RedactionMark, Redactor, StatementClassifier, StatementPosture};
+use kaish_kernel::ledger::{
+    ClassificationError, RedactionMark, Redactor, StatementAssessment, StatementClassificationInput,
+    StatementClassifier, StatementPosture,
+};
 use kaish_kernel::{Kernel, KernelConfig};
-use kaish_types::approval::{LedgerEntry, PageRequest, Plan, PlannedValue, RiskClass, ValueSite};
+use kaish_types::approval::{AssessorId, LedgerEntry, PageRequest, Plan, PlannedValue, RiskClass, ValueSite};
 
 fn tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -102,9 +105,15 @@ impl CapturesPlans {
 }
 
 impl StatementClassifier for CapturesPlans {
-    fn classify(&self, plan: &Plan) -> StatementPosture {
-        self.seen.lock().expect("test mutex").push(plan.clone());
-        StatementPosture::Observe
+    fn classify(
+        &self,
+        input: &StatementClassificationInput<'_>,
+    ) -> Result<StatementAssessment, ClassificationError> {
+        self.seen.lock().expect("test mutex").push(input.plan.clone());
+        Ok(StatementAssessment::new(
+            StatementPosture::Observe,
+            AssessorId::new("captures-plans-test-fixture"),
+        ))
     }
 }
 
@@ -231,8 +240,14 @@ async fn an_installed_redactor_covers_every_sink_including_one_this_test_adds() 
 struct GateEverything;
 
 impl StatementClassifier for GateEverything {
-    fn classify(&self, _plan: &Plan) -> StatementPosture {
-        StatementPosture::gate("the test gates everything", RiskClass::Reversible)
+    fn classify(
+        &self,
+        _input: &StatementClassificationInput<'_>,
+    ) -> Result<StatementAssessment, ClassificationError> {
+        Ok(StatementAssessment::new(
+            StatementPosture::gate("the test gates everything", RiskClass::Reversible),
+            AssessorId::new("gate-everything-test-fixture"),
+        ))
     }
 }
 

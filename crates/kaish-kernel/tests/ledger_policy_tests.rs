@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use kaish_kernel::ledger::{Approvals, ApproverHandle, ChainContext, ChainOutcome, ChainStage, ConditionReport, DecisionChain, Ledger, LedgerConfig, LedgerError, Policy, Requester, SystemClock};
+use kaish_kernel::ledger::{Approvals, ApproverHandle, ChainContext, ChainOutcome, ChainStage, ConditionReport, DecisionChain, DecisionContext, Ledger, LedgerConfig, LedgerError, Policy, Requester, SystemClock};
 use kaish_kernel::{Kernel, KernelConfig};
 use kaish_types::approval::{
     ApprovalRequest, ApprovalRequestView, Decision, Grounds, GrantTerms, LedgerEntry,
@@ -161,7 +161,12 @@ impl ScriptedPolicy {
 }
 
 impl Policy for ScriptedPolicy {
-    fn evaluate(&self, req: &ApprovalRequestView, _ledger: &Approvals) -> Decision {
+    fn evaluate(
+        &self,
+        req: &ApprovalRequestView,
+        _ledger: &Approvals,
+        _ctx: &DecisionContext,
+    ) -> Decision {
         self.calls.lock().unwrap().push("evaluate");
         self.seen.lock().unwrap().push(req.clone());
         self.decision.lock().unwrap().clone().unwrap_or(Decision::Defer)
@@ -554,7 +559,12 @@ struct LedgerReadingPolicy {
 }
 
 impl Policy for LedgerReadingPolicy {
-    fn evaluate(&self, _req: &ApprovalRequestView, ledger: &Approvals) -> Decision {
+    fn evaluate(
+        &self,
+        _req: &ApprovalRequestView,
+        ledger: &Approvals,
+        _ctx: &DecisionContext,
+    ) -> Decision {
         // Stage 2 gets the read side as an argument and may use it freely.
         self.pending_seen.fetch_add(ledger.pending(kaish_types::approval::PageRequest::default()).items.len(), Ordering::SeqCst);
         let _ = entries(ledger.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items);
@@ -667,7 +677,12 @@ struct CancelsWhileGranting {
 }
 
 impl Policy for CancelsWhileGranting {
-    fn evaluate(&self, _req: &ApprovalRequestView, _ledger: &Approvals) -> Decision {
+    fn evaluate(
+        &self,
+        _req: &ApprovalRequestView,
+        _ledger: &Approvals,
+        _ctx: &DecisionContext,
+    ) -> Decision {
         self.decision.clone()
     }
 

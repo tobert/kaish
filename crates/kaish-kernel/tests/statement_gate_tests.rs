@@ -16,14 +16,22 @@ use std::sync::Arc;
 
 use kaish_kernel::interpreter::ExecResult;
 use kaish_kernel::ledger::{
-    ApproverHandle, CommandNameClassifier, LedgerConfig, StatementClassifier, StatementPosture,
+    ApproverHandle, ClassificationError, CommandNameClassifier, ExecutionContext, LedgerConfig,
+    StatementAssessment, StatementClassificationInput, StatementClassifier, StatementPosture,
 };
 use kaish_kernel::{Kernel, KernelConfig};
 use kaish_types::approval::{
-    AttemptState, Capture, GrantTerms, LedgerEntry, OperationPattern, Outcome, Plan, PlannedValue,
-    Principal, PrincipalKind, RequestId, ResourcePattern, RiskClass, StandingGrant,
+    ApprovalScope, AssessorId, AttemptState, Capture, GrantTerms, KernelId, LedgerEntry,
+    OperationPattern, Outcome, Plan, PlannedValue, Principal, PrincipalKind, RequestId, ResourcePattern,
+    RiskClass, StandingGrant,
 };
 use kaish_types::Value;
+
+/// A minimal `ExecutionContext` for classifier calls this file drives
+/// directly (outside a real kernel).
+fn test_execution_context() -> ExecutionContext {
+    ExecutionContext::new("/", ApprovalScope::kernel(KernelId::new(1)))
+}
 
 /// The entries inside a ledger's records. These tests assert on entry shape;
 /// the [`LedgerRecord`] envelope has its own coverage in `kaish-types` (spec
@@ -193,8 +201,14 @@ impl Session {
 struct GateEverything;
 
 impl StatementClassifier for GateEverything {
-    fn classify(&self, _plan: &Plan) -> StatementPosture {
-        StatementPosture::gate("the test gates everything", RiskClass::Reversible)
+    fn classify(
+        &self,
+        _input: &StatementClassificationInput<'_>,
+    ) -> Result<StatementAssessment, ClassificationError> {
+        Ok(StatementAssessment::new(
+            StatementPosture::gate("the test gates everything", RiskClass::Reversible),
+            AssessorId::new("gate-everything-test-fixture"),
+        ))
     }
 }
 
@@ -358,7 +372,9 @@ async fn a_gated_statement_defers_to_exit_2_with_nothing_executed() {
 
 /// The tap records the **ask**, not the execution: a statement that defers
 /// and never runs still keeps its tap entry, and that entry precedes the
-/// `Requested` one.
+/// `Requested` one. `Assessed` follows `Requested` — the classifier's own
+/// judgment is recorded once the request it explains actually exists (spec
+/// §C.7), never ahead of it.
 #[tokio::test]
 async fn a_deferred_statement_keeps_its_tap_entry_ahead_of_the_request() {
     let session = Session::gating_rm();
@@ -371,10 +387,11 @@ async fn a_deferred_statement_keeps_its_tap_entry_ahead_of_the_request() {
         .map(|e| match e {
             LedgerEntry::Observed { .. } => "Observed",
             LedgerEntry::Requested { .. } => "Requested",
+            LedgerEntry::Assessed { .. } => "Assessed",
             other => panic!("unexpected entry {other:?}"),
         })
         .collect();
-    assert_eq!(kinds, vec!["Observed", "Requested"]);
+    assert_eq!(kinds, vec!["Observed", "Requested", "Assessed"]);
 }
 
 /// A standing grant over `cmd` resources auto-approves, and the statement
@@ -768,23 +785,192 @@ async fn a_replay_that_errors_still_settles_its_attempt() {
 // The classifier's panic contract
 // ============================================================================
 
-/// A classifier that panics takes the execution down with it — documented on
-/// `StatementClassifier::classify` and matching `Policy::evaluate`, which
-/// kaish does not guard either. Swallowing it would run the statement under a
-/// posture nothing decided.
+/// A classifier that panics gates rather than taking the statement loop down
+/// with it (spec §C.6, R4): the tap wraps `classify` in `catch_unwind` and
+/// maps a caught panic to `Gate` the same way it maps an `Err` return —
+/// `Observe` is a bypass, and a classifier that cannot answer must not be
+/// able to turn the statement gate off. This inverts the pre-R4 contract
+/// (`Policy::evaluate` still propagates a panic unguarded — see its own doc
+/// for why the two hooks diverge): a classifier runs in front of *every*
+/// statement, including the ones nobody would ever gate, so its own failure
+/// must default to the conservative answer instead of taking the whole
+/// program down over one broken rule.
 struct PanickingClassifier;
 
 impl StatementClassifier for PanickingClassifier {
-    fn classify(&self, _plan: &Plan) -> StatementPosture {
+    fn classify(
+        &self,
+        _input: &StatementClassificationInput<'_>,
+    ) -> Result<StatementAssessment, ClassificationError> {
         panic!("the embedder's classifier is broken");
     }
 }
 
 #[tokio::test]
-#[should_panic(expected = "the embedder's classifier is broken")]
-async fn a_panicking_classifier_propagates_rather_than_being_swallowed() {
+async fn a_panicking_classifier_gates_rather_than_unwinding_into_the_statement_loop() {
     let session = Session::build(Some(Arc::new(PanickingClassifier)), None);
-    let _ = session.run("echo hi").await;
+    let result = session.run("echo hi").await;
+    assert_eq!(
+        result.code, 2,
+        "a panicking classifier must gate (exit 2), not crash the statement loop: {}",
+        result.err
+    );
+    assert!(
+        result.approval_request().is_some(),
+        "the gate must carry a pending request the caller can act on"
+    );
+}
+
+/// A classifier returning `Err` gates and does not observe (spec §C.6):
+/// `Err` maps to `Gate`, never to `Observe`, and never silently. Distinct
+/// from the panic case above — this is the classifier's own honest "I
+/// cannot judge this" answer, not a bug taking the process down.
+struct ErroringClassifier;
+
+impl StatementClassifier for ErroringClassifier {
+    fn classify(
+        &self,
+        _input: &StatementClassificationInput<'_>,
+    ) -> Result<StatementAssessment, ClassificationError> {
+        Err(ClassificationError::new("the model backing this classifier is unreachable"))
+    }
+}
+
+#[tokio::test]
+async fn an_erroring_classifier_gates_and_does_not_observe() {
+    let session = Session::build(Some(Arc::new(ErroringClassifier)), None);
+    let result = session.run("echo hi").await;
+    assert_eq!(
+        result.code, 2,
+        "a classifier Err must gate (exit 2), never silently Observe: {}",
+        result.err
+    );
+    let id = result.approval_request().expect("a pending request").id;
+    let taps = session.taps();
+    assert_eq!(
+        taps.len(),
+        1,
+        "the statement is still recorded once — Err changes the posture, not whether it is tapped"
+    );
+    // "Does not observe" means the statement never ran unrecorded and
+    // unasked — it is held pending, not silently executed.
+    assert_eq!(session.kernel.approvals().get(&id).unwrap().state, kaish_types::approval::RequestState::Requested);
+}
+
+// ============================================================================
+// The static gate floor (spec §C.6): a classifier can raise, never lower
+// ============================================================================
+
+/// A classifier that always answers `Observe`, whatever it is shown — the
+/// floor test's whole point is that this classifier's own answer must not
+/// win.
+struct AlwaysObserve;
+
+impl StatementClassifier for AlwaysObserve {
+    fn classify(
+        &self,
+        _input: &StatementClassificationInput<'_>,
+    ) -> Result<StatementAssessment, ClassificationError> {
+        Ok(StatementAssessment::new(
+            StatementPosture::Observe,
+            AssessorId::new("always-observe-test-fixture"),
+        ))
+    }
+}
+
+/// A classifier cannot lower a posture the kernel's own static rules set
+/// (spec §C.6). `kaish-trash empty` sits behind the one static floor R4
+/// seeded (`KernelOperation::TrashEmpty` is `always_enforced` at the `fs.*`
+/// layer too — spec §F.1) — it must still gate even under a classifier that
+/// always says `Observe`.
+#[tokio::test]
+async fn a_classifier_cannot_lower_the_static_floor_on_trash_empty() {
+    let session = Session::build(Some(Arc::new(AlwaysObserve)), None);
+    let result = session.run("kaish-trash empty").await;
+    assert_eq!(
+        result.code, 2,
+        "the static floor must gate kaish-trash empty regardless of the classifier's Observe: {}",
+        result.err
+    );
+    assert!(
+        result.approval_request().is_some(),
+        "the gate must carry a pending request"
+    );
+}
+
+/// The floor never *fires* for a statement it does not name — an
+/// `AlwaysObserve` classifier plus an unrelated statement really does
+/// observe-and-run, which is what makes the test above meaningful rather
+/// than every statement gating regardless of classifier input.
+#[tokio::test]
+async fn the_static_floor_does_not_gate_unrelated_statements() {
+    let session = Session::build(Some(Arc::new(AlwaysObserve)), None);
+    let result = session.run("echo hi").await;
+    assert_eq!(result.code, 0, "{}", result.err);
+    assert_eq!(result.text_out().trim(), "hi");
+}
+
+// ============================================================================
+// `ExecutionContext` carries no host path (spec §C.6)
+// ============================================================================
+
+/// Records every `cwd` it is shown, then observes everything — a spy, not a
+/// judgment.
+struct RecordingClassifier {
+    seen_cwds: std::sync::Mutex<Vec<String>>,
+}
+
+impl RecordingClassifier {
+    fn new() -> Self {
+        Self {
+            seen_cwds: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl StatementClassifier for RecordingClassifier {
+    fn classify(
+        &self,
+        input: &StatementClassificationInput<'_>,
+    ) -> Result<StatementAssessment, ClassificationError> {
+        self.seen_cwds.lock().unwrap().push(input.context.cwd.clone());
+        // Gates, so the same statement also produces a real request with a
+        // `PlanBinding` this test can compare `ExecutionContext.cwd`
+        // against.
+        Ok(StatementAssessment::new(
+            StatementPosture::gate("recording fixture always gates", RiskClass::Reversible),
+            AssessorId::new("recording-test-fixture"),
+        ))
+    }
+}
+
+/// `ExecutionContext.cwd` is a `String`, not a `PathBuf` or any other
+/// host-specific type — the same convention `PlanBinding::cwd` already uses
+/// for the identical reason (spec §A.9): kaish has no `VirtualPath`
+/// newtype, so "never a host path" is a statement about which *spelling* a
+/// consumer gets, not a type that could carry OS-specific quirks (a raw
+/// `PathBuf`'s platform separator, a `Path` that borrows a lifetime tied to
+/// the kernel's own process). Pinned here by checking that the two seams
+/// which both descend from `self.cwd` — the statement's `PlanBinding` (an
+/// already-shipped part of the request) and what the classifier is shown —
+/// report the identical string for the identical statement, so a future
+/// change cannot let one seam start leaking something the other does not.
+#[tokio::test]
+async fn execution_context_cwd_is_the_same_logical_spelling_plan_binding_uses() {
+    let classifier = Arc::new(RecordingClassifier::new());
+    let session = Session::build(Some(classifier.clone() as Arc<dyn StatementClassifier>), None);
+    let held = session.run("echo hi").await;
+    assert_eq!(held.code, 2, "the recording classifier always gates: {}", held.err);
+
+    let id = held.approval_request().expect("a pending request").id;
+    let chain = session.kernel.approvals().get(&id).expect("the chain");
+
+    let seen = classifier.seen_cwds.lock().unwrap();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(
+        seen[0], chain.request.binding.cwd,
+        "ExecutionContext.cwd and PlanBinding.cwd must report the same logical spelling for the same statement"
+    );
 }
 
 // ============================================================================
@@ -940,13 +1126,15 @@ async fn the_plan_discriminates_at_least_as_well_as_the_raw_line() {
     let mut plan_hits = 0usize;
     let mut raw_hits = 0usize;
     let mut disagreements = 0usize;
+    let ctx = test_execution_context();
     for (source, truth) in corpus {
         session.run(source).await;
         let plan = session.plans().last().cloned().expect("a plan per statement");
-        let by_plan = !matches!(
-            classifier.classify(&plan),
-            kaish_kernel::ledger::StatementPosture::Observe
-        );
+        let by_plan = classifier
+            .classify(&StatementClassificationInput::new(&plan, &ctx))
+            .expect("the reference classifier never errors")
+            .posture
+            .is_gate();
         let by_raw = raw_line_says_rm(source);
         if by_plan == *truth {
             plan_hits += 1;

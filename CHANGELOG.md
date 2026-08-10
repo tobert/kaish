@@ -178,6 +178,20 @@ breaking entries are marked **BREAKING**.
   router/specialist/LLM/human pipeline can attribute each judgment with model identity.
   Most deliberation now happens between `Pending` and `grant`, in the embedder's own
   task; the `Granted` entry stays the kernel's authorization boundary wherever it ran.
+- **`ApprovalAssessment` and `LedgerEntry::Assessed`** (kaish-types) — one attributed
+  judgment (`assessor`, `stage`, `outcome`, `reason`, `risk`, `confidence`, `model`,
+  `latency`). Never a decision — only `Granted`/`Denied` decide — and appending one
+  never bumps `ApprovalRequest::revision`, for the same reason `KeyRetrieved` does
+  not: an approver still deliberating must not have the revision it is holding
+  invalidated by an assessment landing mid-thought.
+- **`DecisionContext`** — `Policy::evaluate` gains a third argument carrying the
+  recorder, so a policy hook can leave a judgment on the log whatever it returns,
+  including a `Defer` a human later turns into a grant. **BREAKING:** `Policy::evaluate`'s
+  signature changes from `(&self, req, ledger)` to `(&self, req, ledger, ctx)`.
+- **`AssessmentRecorder` is also reachable from `Requester`** — not only
+  `ApproverHandle` — because the statement classifier's own judgment (§C.6) is posted
+  before any decision authority is relevant: recording an assessment authorizes
+  nothing, so the obligation side records it the same way it records `Observed`.
 - **`JobId`/`JobStatus`/`JobInfo` (kaish-types) now derive `Serialize`/`Deserialize`**
   (GH #241) — the last type family in kaish-types without serde.
 - `schemars::JsonSchema` on those types sits behind the `schema` feature, matching
@@ -453,6 +467,19 @@ breaking entries are marked **BREAKING**.
 - **`StatementAssessment` carries `assessor`, `model`, and `confidence`**, recorded
   as an `Assessed` ledger entry — "a model allowed this" is not a reproducible audit
   statement without a version or weight identity.
+- **BREAKING: a panicking classifier gates rather than unwinding into the statement
+  loop.** The kernel wraps `classify` in `catch_unwind` and maps a caught panic to
+  `Gate` through the same path an `Err` return takes — a classifier runs in front of
+  *every* statement, including the ones nobody would ever gate, so a bug on one
+  unrelated line must not crash every later statement in the same program. This is
+  deliberately a looser contract than `Policy::evaluate`'s, which still propagates a
+  panic unguarded: `evaluate` only runs once a decision is genuinely being asked for.
+- **A kernel-owned static gate floor no registered classifier can lower.** Seeded
+  with one dangerous syntax class for this lane: `kaish-trash empty` gates even
+  under a classifier that always answers `Observe`, mirroring the `trash.empty`
+  operation's existing `always_enforced` status at the `fs.*` layer. Only consulted
+  when a classifier is registered — a kernel with none keeps its prior default of
+  `Observe` everywhere at this layer, with `fs.*`/tool-level gates unaffected.
 - **`CommandNameClassifier`** is the reference classifier: it gates when any
   planned command's argv0 is in a named set, which tells `rm f` from `echo 'rm f'`
   and from `grep rm log` (measured 9/9 against raw-line token matching's 6/9).

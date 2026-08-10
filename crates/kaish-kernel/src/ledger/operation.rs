@@ -8,7 +8,9 @@
 //! belongs to the kernel, and a policy engine's vocabulary stays honest
 //! because of it.
 
-use kaish_types::approval::{OperationId, RiskClass};
+use kaish_types::approval::{OperationId, Plan, RiskClass};
+
+use kaish_tool_api::StatementPosture;
 
 /// Every operation a kernel gate site can post. Closed by design: the
 /// `id`/`risk` matches below are exhaustive, so a new gate site must name
@@ -82,6 +84,53 @@ impl KernelOperation {
     }
 }
 
+/// The kernel's static gate floor for one top-level statement (spec §C.6):
+/// "dangerous syntax classes keep a static gate floor that no classifier can
+/// clear." Combined with a *registered* classifier's own answer by
+/// [`StatementPosture::at_least`] — a classifier may raise the resulting
+/// posture further, never lower it below what this returns.
+///
+/// **Only consulted when a classifier is registered.** The rule this
+/// function exists for is about bounding a classifier's answer — "a
+/// classifier may raise... it may never lower" (spec §C.6) has a
+/// classifier as its subject. A kernel with none registered keeps its
+/// pre-R4 default: every statement is `Observe` at this layer, and
+/// `kaish-trash empty` still gates at its own always-enforced `trash.empty`
+/// site regardless (spec §F.1) — this floor is defense in depth layered
+/// under an embedder's classifier, not a second, independent gate site.
+///
+/// **Scope for this PR**: seeded with exactly the one dangerous syntax class
+/// the kernel already treats as unconditional at the `fs.*` layer
+/// (`KernelOperation::always_enforced`, spec §F.1) — a `kaish-trash empty`
+/// invocation, because it discards the recovery net every other `fs.*` gate
+/// depends on. A broader static taxonomy ("recursive delete of `/`", generic
+/// `rm -rf` detection) is real future work with no settled design in the spec
+/// (§I has no ruling on it) — inventing one here would be scope creep this
+/// lane was not asked to carry. `None` means no floor applies; the
+/// classifier's own answer stands unmodified.
+///
+/// [`StatementClassifier`]: kaish_tool_api::StatementClassifier
+pub(crate) fn static_gate_floor(plan: &Plan) -> Option<StatementPosture> {
+    let empties_the_trash = plan.commands.iter().any(|command| {
+        command.name == "kaish-trash"
+            && command.args.first().is_some_and(|arg| match arg {
+                kaish_types::approval::PlannedValue::Plain(s) => s == "empty",
+                // A redacted first argument means this floor cannot rule out
+                // `empty` — count it as a match rather than silently skipping
+                // the one static floor this operation has. `PlannedValue` is
+                // `#[non_exhaustive]`, so a variant this build does not know
+                // about gets the same conservative answer.
+                _ => true,
+            })
+    });
+    empties_the_trash.then(|| {
+        StatementPosture::gate(
+            "kaish-trash empty discards the recovery net — no classifier may observe this away",
+            KernelOperation::TrashEmpty.risk(),
+        )
+    })
+}
+
 impl std::fmt::Display for KernelOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -92,6 +141,43 @@ impl std::fmt::Display for KernelOperation {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use kaish_types::approval::PlannedCommand;
+
+    fn plan_of(commands: Vec<PlannedCommand>) -> Plan {
+        Plan::new("<test>", "command", commands)
+    }
+
+    #[test]
+    fn kaish_trash_empty_hits_the_static_floor() {
+        let plan = plan_of(vec![PlannedCommand::new(
+            "kaish-trash",
+            vec![kaish_types::approval::PlannedValue::Plain("empty".to_string())],
+            Vec::new(),
+            false,
+        )]);
+        let floor = static_gate_floor(&plan).expect("kaish-trash empty must set a floor");
+        assert!(floor.is_gate());
+        assert!(matches!(floor, StatementPosture::Gate { risk, .. } if risk == KernelOperation::TrashEmpty.risk()));
+    }
+
+    #[test]
+    fn kaish_trash_list_sets_no_floor() {
+        // Only `empty` discards the recovery net — every other subcommand is
+        // ordinary reversible reading or bookkeeping.
+        let plan = plan_of(vec![PlannedCommand::new(
+            "kaish-trash",
+            vec![kaish_types::approval::PlannedValue::Plain("list".to_string())],
+            Vec::new(),
+            false,
+        )]);
+        assert_eq!(static_gate_floor(&plan), None);
+    }
+
+    #[test]
+    fn an_unrelated_statement_sets_no_floor() {
+        let plan = plan_of(vec![PlannedCommand::new("echo", vec![kaish_types::approval::PlannedValue::Plain("hi".to_string())], Vec::new(), false)]);
+        assert_eq!(static_gate_floor(&plan), None);
+    }
 
     const ALL: &[KernelOperation] = &[
         KernelOperation::FsRemove,

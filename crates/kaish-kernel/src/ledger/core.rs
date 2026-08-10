@@ -32,7 +32,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use kaish_types::approval::{
-    ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, AttemptState, Condition,
+    ApprovalAssessment, ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AttemptId, AttemptState,
+    Condition,
     CancelReason, Expiring, Grant, GrantTerms, Grounds, LedgerEntry, LedgerRecord, Observation,
     ObservedResource,
     OperationId, Outcome, Plan, Principal, RequestId, RequestOrigin, RequestState, ResourceRef,
@@ -78,6 +79,12 @@ struct Chain {
     /// `LedgerState::chains` (review finding S4) — never while `>0` (an
     /// entry still points at it) or while live.
     ring_refs: usize,
+    /// Every `Assessed` judgment appended against this request, in append
+    /// order (spec §C.7). Held here — not reconstructed by scanning the ring
+    /// on read — so an assessment survives ring eviction pressure the same
+    /// way `grant` does: the chain is the ledger's authoritative record, the
+    /// ring is its append log.
+    assessments: Vec<ApprovalAssessment>,
 }
 
 struct AttemptRecord {
@@ -742,6 +749,7 @@ impl LedgerInner {
             live_attempt: None,
             closed_by_settlement: false,
             ring_refs: 0,
+            assessments: Vec::new(),
         };
         guard.chains.insert(id.clone(), chain);
         guard.live_count_total += 1;
@@ -1950,6 +1958,41 @@ impl LedgerInner {
         Ok(())
     }
 
+    /// Post an `Assessed` entry naming `assessment.request`'s judgment (spec
+    /// §C.7). Requires the chain to exist — an assessment about a request
+    /// nobody posted is a caller bug, not a state the ledger should absorb.
+    ///
+    /// Appending never bumps `revision` (see
+    /// [`LedgerEntry::bumps_revision`]'s doc), and it is stored directly on
+    /// the chain, so it survives ring eviction the same way `grant` does —
+    /// [`LedgerState::chain`] reads it back from there, not by re-scanning
+    /// the ring.
+    pub(crate) fn post_assessment(&self, assessment: ApprovalAssessment) -> Result<(), LedgerError> {
+        let mut guard = self.lock();
+        let now = self.now(&mut guard);
+        let request = assessment.request.clone();
+        if !guard.chains.contains_key(&request) {
+            return Err(LedgerError::NotFound(request));
+        }
+        let reserved = guard.reserve_capacity(1, self.config.retained_entries)?;
+        let seq = guard.alloc_seq();
+        let entries = vec![(
+            LedgerEntry::Assessed {
+                seq,
+                at: now,
+                assessment: assessment.clone(),
+            },
+            Some(request.clone()),
+        )];
+        let committed = guard.commit(entries, None, reserved);
+        if let Some(chain) = guard.chains.get_mut(&request) {
+            chain.assessments.push(assessment);
+        }
+        drop(guard);
+        emit_events(&self.watch_tx, &committed);
+        Ok(())
+    }
+
     /// Retrieve the credential. Appends `KeyRetrieved` naming `by`, and
     /// returns `None` — never handing out the key — when that entry cannot
     /// be recorded (review finding S2: accountability is the record, not
@@ -2084,6 +2127,7 @@ impl LedgerInner {
                     outcome: record.outcome.clone(),
                 })
                 .collect(),
+            assessments: chain.assessments.clone(),
         })
     }
 
@@ -2346,6 +2390,15 @@ fn emit_events(watch_tx: &tokio::sync::broadcast::Sender<LedgerRecord>, records:
                     current = current,
                     attempted = %attempted,
                     "approval.revision_rejected"
+                );
+            }
+            LedgerEntry::Assessed { assessment, .. } => {
+                tracing::info!(
+                    request_id = %assessment.request,
+                    assessor = %assessment.assessor,
+                    stage = ?assessment.stage,
+                    outcome = ?assessment.outcome,
+                    "approval.assessed"
                 );
             }
             // `LedgerEntry` is `#[non_exhaustive]` from this crate's side,
