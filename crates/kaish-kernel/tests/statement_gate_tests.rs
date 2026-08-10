@@ -982,10 +982,7 @@ async fn execution_context_cwd_is_the_same_logical_spelling_plan_binding_uses() 
 /// (spec §D.4); this one refuses deterministically, so it is what the two
 /// tests below pin.
 fn refusing_ledger() -> LedgerConfig {
-    LedgerConfig {
-        retained_entries: 0,
-        ..Default::default()
-    }
+    LedgerConfig::default().with_retained_entries(0)
 }
 
 /// A tap that cannot commit warns, and the statement **still runs**. The tap
