@@ -770,10 +770,7 @@ async fn ring_refuses_loudly_rather_than_evicting_a_live_chain() {
     // Requested entry already occupies a slot forever (the chain never
     // closes), so a second post should be refused once the ring cannot
     // evict anything.
-    let config = LedgerConfig {
-        retained_entries: 1,
-        ..Default::default()
-    };
+    let config = LedgerConfig::default().with_retained_entries(1);
     let (requester, _approvals, _approver) = Ledger::build(config, test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let _first = post(&requester, "fs.remove").await;
     // The ring holds exactly the first Requested entry now, and that
@@ -787,10 +784,7 @@ async fn ring_refuses_loudly_rather_than_evicting_a_live_chain() {
 
 #[tokio::test]
 async fn ring_evicts_closed_chains_to_make_room() {
-    let config = LedgerConfig {
-        retained_entries: 2,
-        ..Default::default()
-    };
+    let config = LedgerConfig::default().with_retained_entries(2);
     let (requester, approvals, approver) = Ledger::build(config, test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req1 = post(&requester, "fs.remove").await;
     approver.deny(&req1.id, req1.revision, "no").await.unwrap(); // closes req1 — its 2 entries become evictable
@@ -826,10 +820,7 @@ async fn full_sink_queue_returns_ledger_unavailable_rather_than_blocking_or_drop
     // Depth 1: the background drain task is never polled (no `.await`
     // yields control back to it before we saturate the channel), so the
     // second post should see the queue still full.
-    let config = LedgerConfig {
-        sink_queue: 1,
-        ..Default::default()
-    };
+    let config = LedgerConfig::default().with_sink_queue(1);
     let (requester, _approvals, _approver) = Ledger::build(config, test_scope(), Some(sink), std::sync::Arc::new(SystemClock)).unwrap();
     // Neither call below has any internal `.await` point (the transaction
     // is fully synchronous — see `core.rs`'s module doc), so the background
@@ -869,10 +860,7 @@ async fn a_sink_error_fails_subsequent_requests_closed() {
 
 #[tokio::test]
 async fn live_capacity_refuses_a_new_request_rather_than_evicting() {
-    let config = LedgerConfig {
-        live_capacity: 1,
-        ..Default::default()
-    };
+    let config = LedgerConfig::default().with_live_capacity(1);
     let (requester, _approvals, _approver) = Ledger::build(config, test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let _first = post(&requester, "fs.remove").await;
     let err = requester
@@ -978,10 +966,7 @@ async fn deny_self_approval_off_by_default_lets_the_requesting_principal_grant()
 
 #[tokio::test]
 async fn deny_self_approval_refuses_a_grant_from_the_requesting_principal() {
-    let config = LedgerConfig {
-        deny_self_approval: true,
-        ..LedgerConfig::default()
-    };
+    let config = LedgerConfig::default().with_deny_self_approval(true);
     let (requester, approvals, approver) = Ledger::build(config, test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
     let err = approver
@@ -1015,10 +1000,7 @@ async fn deny_self_approval_refuses_a_grant_from_the_requesting_principal() {
 
 #[tokio::test]
 async fn deny_self_approval_on_still_allows_a_grant_from_a_distinct_principal() {
-    let config = LedgerConfig {
-        deny_self_approval: true,
-        ..LedgerConfig::default()
-    };
+    let config = LedgerConfig::default().with_deny_self_approval(true);
     let (requester, approvals, approver) = Ledger::build(config, test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
     approver
@@ -1035,10 +1017,7 @@ async fn deny_self_approval_refuses_a_standing_grant_issued_by_the_requesting_pr
     // rule whose own `issued_by` is the requester's principal must be
     // refused the same way an explicit grant is (one chokepoint, spec's
     // "not three checks").
-    let config = LedgerConfig {
-        deny_self_approval: true,
-        ..LedgerConfig::default()
-    };
+    let config = LedgerConfig::default().with_deny_self_approval(true);
     let (requester, approvals, approver) = Ledger::build(config, test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
     let req = post(&requester, "fs.remove").await;
     let rule = StandingGrant::new(
