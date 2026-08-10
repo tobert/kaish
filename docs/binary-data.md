@@ -34,7 +34,7 @@ edge: `cat` multi-file / `-n` still rejects binary with `invalid UTF-8`
 `U+FFFD` expansion; fixed in GH #176 (2026-07-17) to refuse invalid UTF-8
 loudly instead — `-c`/`-l` are pure byte-level counts and are unaffected.
 Author: design notes from a 2026-06-13 session (out of the synthetic-`/dev` work)
-Related: [LANGUAGE.md](LANGUAGE.md), [issues.md](issues.md), `docs/help/vfs.md`,
+Related: [LANGUAGE.md](LANGUAGE.md), `docs/help/vfs.md`,
 `project_dev_fs.md` (auto-memory), `arch_no_json_sniffing.md` (auto-memory)
 Review: DeepSeek V4-Pro adversarial pass 2026-06-13 — folded in the `if=`
 keyword conflict (blocker), `OutputPayload` enum, `Value::Blob` overlap, the

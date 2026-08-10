@@ -95,7 +95,7 @@ impl Tool for Dd {
                     Ok(n) => skip = n,
                     Err(e) => return ExecResult::failure(2, format!("dd: skip: {e}")),
                 },
-                // Confirmation nonce for a approval-gated `of=` overwrite (dd's
+                // The key that redeems an approval-gated `of=` overwrite (dd's
                 // key=value idiom rather than the `--confirm` flag form).
                 "confirm" => confirm = Some(val.to_string()),
                 other => {

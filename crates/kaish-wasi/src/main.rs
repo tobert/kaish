@@ -15,6 +15,11 @@
 //! echo 'seq 1 10 | sort -rn | head -3' | wasmtime kaish-wasi.wasm
 //! ```
 
+// A one-shot WASI binary has nowhere to propagate a startup failure to: the
+// runtime and the kernel are built before there is a stdout protocol to report
+// on, so a panic is the loud outcome and the only one available.
+#![allow(clippy::expect_used)]
+
 use std::io::{self, BufRead, Write};
 
 use kaish_kernel::{Kernel, KernelConfig};
@@ -58,6 +63,8 @@ async fn run() {
                     "out": "",
                     "err": e.to_string(),
                 });
+                // Errors ignored: stdout is the only channel this binary has,
+                // so a failure to write the error has nowhere left to report.
                 let _ = serde_json::to_writer(&mut stdout, &json);
                 let _ = stdout.write_all(b"\n");
                 let _ = stdout.flush();
@@ -71,6 +78,7 @@ async fn run() {
             "err": if result.err.is_empty() { None } else { Some(&result.err) },
         });
 
+        // Errors ignored for the same reason as above.
         let _ = serde_json::to_writer(&mut stdout, &json);
         let _ = stdout.write_all(b"\n");
         let _ = stdout.flush();

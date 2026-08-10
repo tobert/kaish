@@ -362,9 +362,10 @@ Hard-won rules that aren't obvious from the code. Violating these silently break
   `with_output_and_text` when a builtin needs a custom pipe representation;
   `to_argv()` injects a `--` separator, so don't unit-test clap builtins via raw
   `positional` (route through an `execute_argv`-style entrypoint).
-- **Capability features are opt-in axes** (`localfs`, `subprocess`, `host`,
-  `os-integration`, `tokens`); default is `["localfs"]`. A localfs-only build does
-  not spawn subprocesses. `full`/`native` are aliases for all five. New OS-touching
+- **Capability features are opt-in axes** (`localfs`, `overlay`, `subprocess`,
+  `host`, `os-integration`, `tokens`); default is `["localfs", "overlay"]`. A
+  default build does not spawn subprocesses. `full`/`native` are aliases for all
+  six, and `overlay` and `subprocess` each imply `localfs`. New OS-touching
   code must sit behind the right axis and compile out cleanly without it (the
   `--no-default-features` gates in Build Commands enforce this).
 - **Feature-gate integration-test files that need a capability, not just the

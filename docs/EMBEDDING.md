@@ -59,6 +59,14 @@ code is something agents can branch on:
 | 124 | Timeout (`timeout_ms`, default 30 s) | — |
 | 130 | Cancelled | — |
 
+**Assert on the code and the kind, never on the wording.** The exit code is
+contract, and so is the `std::io::ErrorKind` a VFS refusal carries — a write
+anywhere under `/v/approvals` is `ErrorKind::Unsupported` (not
+`PermissionDenied`: no permission would make it work) and the statement exits
+**1**. The text in `err` is prose written for a human and improves between
+releases without notice, so a boundary test that pins it fails on a wording
+change that changed no behavior.
+
 Embedders typically run a fresh kernel per request (variables, functions,
 aliases, `set -o` options, and `cwd` reset each time) while trash and
 approval requests persist across calls — share one ledger with
@@ -757,6 +765,16 @@ The cost is one entry per top-level statement. A 1,000-iteration loop posts
 one; a 10,000-path `rm` posts one; a `$(…)`, a sourced script, and a user
 tool's body post none of their own, because their statements belong to the
 enclosing top-level statement's plan.
+
+**So every kernel's log accumulates, including one with approvals off** —
+"approvals off" means nothing gates, not that nothing is observed, and a
+kernel that never raises a request still records a `cmd.execute` entry per
+statement (the `cat` that reads the log included). Growth is bounded at
+`LedgerConfig::retained_entries`, **4096** entries by default and settable with
+`with_retained_entries`; a chainless observation always evicts freely, so the
+oldest ones age out rather than filling the ledger. Read them with `approvals
+log --limit N` (200 by default, `--since SEQ` to page) or `cat
+/v/approvals/log`.
 
 **The tap is advisory, not a durable audit trail.** A tap append that cannot
 commit — sink backpressure, a full retention ring — emits a **warn** event and

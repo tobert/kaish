@@ -60,6 +60,19 @@ clap_complete = "4"
 # REPL (L4)
 rustyline = "17"
 
+# Display-width-aware column alignment — CJK and emoji are wider than one
+# column, so byte or char counts misalign every table the kernel and the REPL
+# print (#130). Features differ per crate; only the version is shared.
+unicode-width = "0.2"
+
+# Unix process/signal/terminal syscalls behind the `subprocess` axis (kernel)
+# and the REPL's PTY tests. Each crate picks its own features.
+nix = "0.29"
+
+# JSON Schema generation for tool `outputSchema` — optional in both crates
+# that use it, pulled in by their `schema` features.
+schemars = "1"
+
 # Base64 encoding/decoding
 base64 = "0.22"
 

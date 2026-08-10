@@ -137,7 +137,7 @@ fn approval_str(result: &ExecResult, key: &str) -> String {
 // ============================================================================
 
 #[tokio::test]
-async fn latch_gates_rm_then_confirm_hint_deletes() {
+async fn gate_holds_rm_then_confirm_hint_deletes() {
     let dir = tempdir();
     std::fs::write(dir.path().join("precious.txt"), "data").expect("write");
     let session = kernel_at(dir.path());
@@ -180,7 +180,7 @@ async fn latch_gates_rm_then_confirm_hint_deletes() {
 }
 
 #[tokio::test]
-async fn latch_json_surfaces_the_request_under_approval_key() {
+async fn gate_json_surfaces_the_request_under_approval_key() {
     // `--json` on a gated op surfaces the pending request under a dedicated
     // `approval` key in the error envelope — control-plane, never folded into
     // `data`. And `.approval` survives formatting, so approval_request() still
@@ -213,7 +213,7 @@ async fn latch_json_surfaces_the_request_under_approval_key() {
 }
 
 #[tokio::test]
-async fn latch_survives_stdout_redirect() {
+async fn gate_survives_stdout_redirect() {
     // A stdout redirect on a gated `rm` must NOT disable the gate.
     // `apply_redirects` clears the *data-plane* `.data` (the structured
     // view of stdout) on a stdout redirect — but the approval request is a
@@ -246,7 +246,7 @@ async fn latch_survives_stdout_redirect() {
 }
 
 #[tokio::test]
-async fn latch_captures_the_exact_invocation() {
+async fn gate_captures_the_exact_invocation() {
     // The gate stamps the dispatch seam's captured invocation on `.capture`,
     // so an embedder can inspect precisely what `Kernel::confirm` will replay.
     use kaish_types::approval::Capture;
@@ -398,7 +398,7 @@ async fn confirm_replays_a_subcommand_gate() {
 // own doc comment on `confirm`. Deleted rather than faked.
 
 #[tokio::test]
-async fn latch_bogus_token_fails_and_file_survives() {
+async fn gate_bogus_token_fails_and_file_survives() {
     let dir = tempdir();
     std::fs::write(dir.path().join("precious.txt"), "data").expect("write");
     let session = kernel_at(dir.path());
@@ -420,7 +420,7 @@ async fn latch_bogus_token_fails_and_file_survives() {
 }
 
 #[tokio::test]
-async fn latch_batches_multiple_paths_under_one_request() {
+async fn gate_batches_multiple_paths_under_one_request() {
     let dir = tempdir();
     std::fs::write(dir.path().join("a.txt"), "a").expect("write");
     std::fs::write(dir.path().join("b.txt"), "b").expect("write");
@@ -443,7 +443,7 @@ async fn latch_batches_multiple_paths_under_one_request() {
 }
 
 #[tokio::test]
-async fn latch_off_by_default_rm_deletes_directly() {
+async fn gate_off_by_default_rm_deletes_directly() {
     let dir = tempdir();
     std::fs::write(dir.path().join("plain.txt"), "x").expect("write");
     let session = kernel_at(dir.path());
@@ -454,7 +454,7 @@ async fn latch_off_by_default_rm_deletes_directly() {
 }
 
 #[tokio::test]
-async fn latch_in_a_pipeline_stage_overrides_later_success() {
+async fn gate_in_a_pipeline_stage_overrides_later_success() {
     // GH #125: an approval gate raised by an EARLIER pipeline stage must
     // survive a later stage's nominal success. `rm x | echo done` used to exit
     // 0 with the gate dropped (only the last stage's result survived), so an
@@ -485,9 +485,9 @@ async fn latch_in_a_pipeline_stage_overrides_later_success() {
 }
 
 #[tokio::test]
-async fn latch_first_stage_wins_when_two_stages_gate() {
+async fn gate_first_stage_wins_when_two_stages_gate() {
     // Two gated stages in one pipeline: first gate wins (matches wait.rs
-    // classify()'s first-latch-wins). `rm a | rm b` under the enforce policy
+    // classify()'s first-gate-wins). `rm a | rm b` under the enforce policy
     // surfaces a's request, and BOTH files survive (each stage gated
     // independently).
     let dir = tempdir();
@@ -743,16 +743,16 @@ async fn tee_overwrite_under_trash_snapshots_prior_bytes_first() {
 }
 
 #[tokio::test]
-async fn tee_overwrite_under_latch_requires_confirm() {
+async fn tee_overwrite_under_approvals_requires_confirm() {
     let dir = tempdir();
     std::fs::write(dir.path().join("doc.txt"), "keep").expect("write");
     let mock = Arc::new(MockTrash::default());
     let session = kernel_with_trash(dir.path(), &mock);
 
-    // latch on, trash off: the overwrite must be confirmed.
+    // approvals on, trash off: the overwrite must be confirmed.
     run(&session, "set -o approvals").await;
     let r = run(&session, "echo new | tee doc.txt").await;
-    assert_eq!(r.code, 2, "latch gates the overwrite: {}", r.err);
+    assert_eq!(r.code, 2, "the gate holds the overwrite: {}", r.err);
     assert!(approval_str(&r, "hint").contains("--confirm="));
     assert_eq!(
         std::fs::read_to_string(dir.path().join("doc.txt")).expect("read"),
@@ -843,7 +843,7 @@ async fn patch_overwrite_under_trash_snapshots_prior_bytes() {
 }
 
 #[tokio::test]
-async fn patch_overwrite_under_latch_requires_confirm() {
+async fn patch_overwrite_under_approvals_requires_confirm() {
     let dir = tempdir();
     std::fs::write(dir.path().join("f.txt"), "old\n").expect("write");
     let mock = Arc::new(MockTrash::default());
@@ -851,7 +851,7 @@ async fn patch_overwrite_under_latch_requires_confirm() {
 
     run(&session, "set -o approvals").await;
     let r = run(&session, PATCH_SCRIPT).await;
-    assert_eq!(r.code, 2, "latch gates the patch: {}", r.err);
+    assert_eq!(r.code, 2, "the gate holds the patch: {}", r.err);
     assert!(approval_str(&r, "hint").contains("--confirm="));
     assert_eq!(
         std::fs::read_to_string(dir.path().join("f.txt")).expect("read"),
@@ -903,7 +903,7 @@ async fn patch_explicit_file_multi_group_diff_snapshots_once() {
 }
 
 #[tokio::test]
-async fn patch_explicit_file_multi_group_latch_lists_target_once() {
+async fn patch_explicit_file_multi_group_gate_lists_target_once() {
     // The gate's resource list and hint must not list the same explicit
     // target once per hunk-group.
     let dir = tempdir();
@@ -918,7 +918,7 @@ async fn patch_explicit_file_multi_group_latch_lists_target_once() {
 
     run(&session, "set -o approvals").await;
     let r = run(&session, script).await;
-    assert_eq!(r.code, 2, "latch gates: {}", r.err);
+    assert_eq!(r.code, 2, "the gate holds: {}", r.err);
     let req = r.approval_request().expect("a pending approval request");
     assert_eq!(
         req.resources.len(),
@@ -978,7 +978,7 @@ async fn sed_in_place_under_trash_snapshots_prior_bytes() {
 }
 
 #[tokio::test]
-async fn sed_in_place_under_latch_requires_confirm() {
+async fn sed_in_place_under_approvals_requires_confirm() {
     let dir = tempdir();
     std::fs::write(dir.path().join("f.txt"), "old\n").expect("write");
     let mock = Arc::new(MockTrash::default());
@@ -986,7 +986,7 @@ async fn sed_in_place_under_latch_requires_confirm() {
 
     run(&session, "set -o approvals").await;
     let r = run(&session, "sed -i 's/old/new/' f.txt").await;
-    assert_eq!(r.code, 2, "latch gates the in-place edit: {}", r.err);
+    assert_eq!(r.code, 2, "the gate holds the in-place edit: {}", r.err);
     assert!(approval_str(&r, "hint").contains("--confirm="));
     assert_eq!(
         std::fs::read_to_string(dir.path().join("f.txt")).expect("read"),
@@ -1004,7 +1004,7 @@ async fn sed_in_place_under_latch_requires_confirm() {
 }
 
 #[tokio::test]
-async fn sed_in_place_latch_hint_is_runnable_once_granted() {
+async fn sed_in_place_gate_hint_is_runnable_once_granted() {
     // Regression: the hint must reinject `-i` and the expression. A bare
     // `sed --confirm=<token> f.txt` would read f.txt as the expression and
     // hang on stdin. The hint is display-only and carries a `<token>`
@@ -1017,7 +1017,7 @@ async fn sed_in_place_latch_hint_is_runnable_once_granted() {
 
     run(&session, "set -o approvals").await;
     let r = run(&session, "sed -i 's/old/new/' f.txt").await;
-    assert_eq!(r.code, 2, "latch gates: {}", r.err);
+    assert_eq!(r.code, 2, "the gate holds: {}", r.err);
 
     let hint = approval_str(&r, "hint");
     assert!(hint.contains("-i"), "hint keeps -i: {hint}");
@@ -1102,7 +1102,7 @@ async fn write_overwrite_under_trash_snapshots_prior_bytes() {
 }
 
 #[tokio::test]
-async fn write_overwrite_under_latch_requires_confirm() {
+async fn write_overwrite_under_approvals_requires_confirm() {
     let dir = tempdir();
     std::fs::write(dir.path().join("doc.txt"), "keep").expect("write");
     let mock = Arc::new(MockTrash::default());
@@ -1110,7 +1110,7 @@ async fn write_overwrite_under_latch_requires_confirm() {
 
     run(&session, "set -o approvals").await;
     let r = run(&session, "write doc.txt \"new\"").await;
-    assert_eq!(r.code, 2, "latch gates write: {}", r.err);
+    assert_eq!(r.code, 2, "the gate holds write: {}", r.err);
     assert!(approval_str(&r, "hint").contains("--confirm="));
     assert_eq!(std::fs::read_to_string(dir.path().join("doc.txt")).unwrap(), "keep");
 
@@ -1132,7 +1132,7 @@ async fn write_new_file_does_not_gate() {
 }
 
 #[tokio::test]
-async fn overwrite_too_big_for_trash_falls_through_to_latch() {
+async fn overwrite_too_big_for_trash_falls_through_to_the_gate() {
     let dir = tempdir();
     std::fs::write(dir.path().join("big.txt"), "0123456789").expect("write"); // 10 bytes
     let mock = Arc::new(MockTrash::default());
@@ -1154,7 +1154,7 @@ async fn overwrite_too_big_for_trash_falls_through_to_latch() {
 }
 
 #[tokio::test]
-async fn cp_overwrite_under_latch_requires_confirm() {
+async fn cp_overwrite_under_approvals_requires_confirm() {
     let dir = tempdir();
     std::fs::write(dir.path().join("src.txt"), "fresh").expect("write");
     std::fs::write(dir.path().join("dst.txt"), "old").expect("write");
@@ -1207,7 +1207,7 @@ async fn cp_into_existing_directory_does_not_gate_the_dir() {
 }
 
 #[tokio::test]
-async fn mv_overwrite_under_latch_requires_confirm() {
+async fn mv_overwrite_under_approvals_requires_confirm() {
     let dir = tempdir();
     std::fs::write(dir.path().join("src.txt"), "fresh").expect("write");
     std::fs::write(dir.path().join("dst.txt"), "old").expect("write");
@@ -1246,7 +1246,7 @@ async fn mv_overwrite_under_trash_snapshots_prior_bytes() {
 }
 
 #[tokio::test]
-async fn dd_of_overwrite_under_latch_requires_confirm() {
+async fn dd_of_overwrite_under_approvals_requires_confirm() {
     let dir = tempdir();
     std::fs::write(dir.path().join("in.bin"), "fresh").expect("write");
     std::fs::write(dir.path().join("out.bin"), "old").expect("write");
@@ -1294,7 +1294,7 @@ async fn dd_of_overwrite_under_trash_snapshots_prior_bytes() {
 /// The capstone: background a gated `rm`, surface the request via `wait`, and
 /// fulfill it with `Kernel::confirm` — the whole point of #96.
 #[tokio::test]
-async fn backgrounded_latch_is_reachable_and_confirmable() {
+async fn backgrounded_gate_is_reachable_and_confirmable() {
     let dir = tempdir();
     let session = kernel_at(dir.path());
     let precious = dir.path().join("precious.txt");
@@ -1420,7 +1420,7 @@ async fn confirm_of_an_already_settled_request_reports_the_outcome_and_does_not_
 /// `jobs` and `/v/jobs/{id}/status` name the gated state distinctly, not
 /// the generic "Failed".
 #[tokio::test]
-async fn backgrounded_latch_shows_distinct_status() {
+async fn backgrounded_gate_shows_distinct_status() {
     let dir = tempdir();
     let session = kernel_at(dir.path());
     std::fs::write(dir.path().join("p.txt"), "x").expect("write");
@@ -1471,7 +1471,7 @@ async fn jobs_json_row_carries_the_approval_object() {
 /// `/v/jobs/{id}/approval` renders the stored approval request as JSON
 /// naming the request, so a VFS consumer can read (and then confirm) it.
 #[tokio::test]
-async fn backgrounded_latch_vfs_node_renders_json() {
+async fn backgrounded_gate_vfs_node_renders_json() {
     let dir = tempdir();
     let session = kernel_at(dir.path());
     std::fs::write(dir.path().join("p.txt"), "x").expect("write");
@@ -1497,7 +1497,7 @@ async fn backgrounded_latch_vfs_node_renders_json() {
 /// only approval request for the gated operation, so reaping silently
 /// destroys the pending confirmation (the #96 guarantee).
 #[tokio::test]
-async fn jobs_cleanup_keeps_latched_job() {
+async fn jobs_cleanup_keeps_gated_job() {
     let dir = tempdir();
     let session = kernel_at(dir.path());
     let precious = dir.path().join("precious.txt");
@@ -1537,7 +1537,7 @@ async fn jobs_cleanup_keeps_latched_job() {
 /// `kill %N` on a gated job refuses instead of silently destroying the only
 /// handle to the pending confirmation.
 #[tokio::test]
-async fn kill_refuses_latched_job() {
+async fn kill_refuses_gated_job() {
     let dir = tempdir();
     let session = kernel_at(dir.path());
     let precious = dir.path().join("precious.txt");
@@ -1574,7 +1574,7 @@ async fn kill_refuses_latched_job() {
 /// `kill --discard %N` is the explicit way to abandon a pending gate: loud
 /// about what it destroyed, and the gated operation never runs.
 #[tokio::test]
-async fn kill_discard_abandons_latch_loudly() {
+async fn kill_discard_abandons_the_request_loudly() {
     let dir = tempdir();
     let session = kernel_at(dir.path());
     let precious = dir.path().join("precious.txt");

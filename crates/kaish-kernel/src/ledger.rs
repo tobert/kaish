@@ -29,7 +29,7 @@ mod attempt_guard;
 mod clock;
 mod config;
 mod core;
-mod error;
+pub(crate) mod error;
 mod handles;
 mod operation;
 mod patterns;

@@ -1287,7 +1287,7 @@ These bash features are omitted because they're confusing, error-prone, or ambig
 | Shell brace expansion `echo {a,b,c}` | Tools support globs with braces internally | SC1083 |
 | Process substitution `<(cmd)` | Use temp files | — |
 | Backtick substitution `` `cmd` `` | Use `$(cmd)` — a bare backtick is a lexer error, not silently accepted | SC2006 |
-| Single bracket tests `[ ]` and the `test` command | Neither exists; use `[[ ]]` for all conditionals | SC2039 |
+| Single bracket tests `[ ]` | Does not exist; use `[[ ]]` or the `test` builtin, which share one set of operators | SC2039 |
 | `eval` | Explicit is better | SC2091 |
 
 ## ShellCheck Alignment
@@ -1362,7 +1362,7 @@ These are documented limitations of the current implementation:
 
 ### Execution
 
-- **Scatter results in completion order** — The 散 (scatter) construct returns results in the order jobs complete, not input order. This is inherent to parallel execution—first done, first returned.
+- **Scatter results are in item order** — The 散 (scatter) construct runs items in parallel but returns their results in the order the items were given, never the order the jobs finished. A row's position identifies its item, so a caller can zip results back to inputs without an index.
 - **Redirect targets are a single word** — Command substitution *works* in redirect targets and here-doc bodies (`cmd > $(gen-path)`, `cat < $(find-cfg)`). Because the target is one word and kaish doesn't paste adjacent tokens, quote any target that mixes literal text with an expansion: `> "/tmp/$(id -u).log"`, not the unquoted `> /tmp/$(id -u).log` (which is a parse error). See [Quoting](#quoting).
 - **Recursion is depth-guarded** — Command substitution (`$(...)`), shell-function calls, `.kai` script execution, and `source`/`.` all re-enter the interpreter on the native stack; a runaway or mutually recursive script (`f() { f; }; f`) hits a cap (`MAX_RECURSION_DEPTH`, 48 levels) and fails loudly with `maximum recursion depth exceeded` instead of overflowing the stack. See `docs/EMBEDDING.md` for the embedder-side stack-sizing contract.
 

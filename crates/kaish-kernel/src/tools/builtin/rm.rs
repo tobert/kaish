@@ -854,14 +854,14 @@ mod tests {
 
     #[test]
     fn test_decide_rm_action_trash_small_with_approvals() {
-        // Small file → trash catches it, latch irrelevant
+        // Small file → trash catches it, approvals irrelevant
         let real = PathBuf::from("/home/user/file.txt");
         let action = decide_rm_action(true, true, Some(&real), Some(100), 10_000_000, false, false);
         assert_eq!(action, RmAction::Trash(real));
     }
 
     #[test]
-    fn test_decide_rm_action_trash_large_no_latch() {
+    fn test_decide_rm_action_trash_large_no_approvals() {
         let real = PathBuf::from("/home/user/bigfile.bin");
         let action = decide_rm_action(true, false, Some(&real), Some(100_000_000), 10_000_000, false, false);
         assert_eq!(action, RmAction::Delete);
@@ -912,7 +912,7 @@ mod tests {
     #[test]
     fn test_decide_rm_action_dir_trashes_with_approvals() {
         let real = PathBuf::from("/home/user/mydir");
-        // Directory always trashes when trash enabled — latch irrelevant
+        // Directory always trashes when trash enabled — approvals irrelevant
         let action = decide_rm_action(true, true, Some(&real), Some(0), 10_000_000, true, false);
         assert_eq!(action, RmAction::Trash(real));
     }
@@ -949,16 +949,16 @@ mod tests {
         let large = 100_000_000u64;
         let max = 10_000_000u64;
 
-        // (trash, latch, size, is_dir, is_symlink) → expected outcome
+        // (trash, enforce, size, is_dir, is_symlink) → expected outcome
         let cases = vec![
             (false, false, small, false, false, Outcome::Deleted),
             (false, true,  small, false, false, Outcome::Gated),
             (true,  false, small, false, false, Outcome::Trashed),
-            (true,  true,  small, false, false, Outcome::Trashed),   // trash catches small, latch irrelevant
+            (true,  true,  small, false, false, Outcome::Trashed),   // trash catches small, approvals irrelevant
             (false, false, large, false, false, Outcome::Deleted),
             (false, true,  large, false, false, Outcome::Gated),
-            (true,  false, large, false, false, Outcome::Deleted),    // too big for trash, no latch → delete
-            (true,  true,  large, false, false, Outcome::Gated),    // too big for trash + latch → gate
+            (true,  false, large, false, false, Outcome::Deleted),    // too big for trash, no gate → delete
+            (true,  true,  large, false, false, Outcome::Gated),    // too big for trash + approvals → gate
             // Directories always trash (size irrelevant)
             (true,  false, 0,     true,  false, Outcome::Trashed),
             (true,  true,  0,     true,  false, Outcome::Trashed),
@@ -966,7 +966,7 @@ mod tests {
             (false, false, 0,     true,  false, Outcome::Deleted),
             (false, true,  0,     true,  false, Outcome::Gated),
             // Symlinks NEVER trash (trashing follows to the target); they unlink
-            // directly, but latch still gates. is_dir is moot for a symlink.
+            // directly, but the gate still applies. is_dir is moot for a symlink.
             (true,  false, small, false, true,  Outcome::Deleted),
             (true,  true,  small, false, true,  Outcome::Gated),
             (true,  false, 0,     true,  true,  Outcome::Deleted),    // symlink-to-dir: still just unlink
@@ -974,13 +974,13 @@ mod tests {
             (false, true,  small, false, true,  Outcome::Gated),
         ];
 
-        for (trash, latch, size, is_dir, is_symlink, expected) in cases {
-            let action = decide_rm_action(trash, latch, Some(&real), Some(size), max, is_dir, is_symlink);
+        for (trash, enforce, size, is_dir, is_symlink, expected) in cases {
+            let action = decide_rm_action(trash, enforce, Some(&real), Some(size), max, is_dir, is_symlink);
             let outcome = matrix_action_to_outcome(&action);
             assert_eq!(
                 outcome, expected,
-                "trash={}, latch={}, size={}, is_dir={}, is_symlink={}: expected {:?}, got {:?}",
-                trash, latch, size, is_dir, is_symlink, expected, outcome
+                "trash={}, enforce={}, size={}, is_dir={}, is_symlink={}: expected {:?}, got {:?}",
+                trash, enforce, size, is_dir, is_symlink, expected, outcome
             );
         }
     }

@@ -727,7 +727,7 @@ impl PipelineRunner {
         // Checked LAST (so it wins over the gate override above): mirrors the
         // existing precedent that ANY stage panicking overrides `last_result`
         // regardless of which stage, and keeps a gate raised earlier in the same
-        // run HELD (unconfirmed) rather than presenting a ready-to-confirm nonce
+        // run HELD (unconfirmed) rather than presenting a ready-to-redeem key
         // after a crash elsewhere in the pipeline.
         if !panics.is_empty() {
             last_result = ExecResult::failure(
@@ -774,7 +774,7 @@ impl PipelineRunner {
 /// any `schema_param_lookup` taken from it.
 ///
 /// **Global value flags.** A space-form value flag declared on the *root*
-/// (e.g. kj's global `--confirm <nonce>`) can legitimately precede the
+/// (e.g. kj's global `--confirm <token>`) can legitimately precede the
 /// subcommand path. Its value is a positional in the AST, so routing must not
 /// mistake it for a subcommand selector — `select_leaf` skips the value of any
 /// root-declared non-bool flag it sees. Leaf-specific value flags can't precede
@@ -1144,7 +1144,7 @@ mod select_leaf_tests {
     use crate::tools::ParamSchema;
 
     /// `kj`-shaped tree: kj → context (alias ctx) → {list (alias ls), create}.
-    /// Root carries a global `--confirm <nonce>` value flag and a `--verbose`
+    /// Root carries a global `--confirm <token>` value flag and a `--verbose`
     /// bool; `create` carries a leaf `--type` value flag — enough to exercise
     /// global-flag skipping and leaf binding.
     fn kj_schema() -> ToolSchema {
@@ -1220,11 +1220,11 @@ mod select_leaf_tests {
     #[test]
     fn root_value_flag_space_form_before_path_skips_its_value() {
         let schema = kj_schema();
-        // `kj --confirm nonce context create` — `nonce` is --confirm's value,
+        // `kj --confirm token context create` — `token` is --confirm's value,
         // NOT a subcommand selector; routing skips it and reaches create.
         let args = vec![
             Arg::LongFlag("confirm".into()),
-            word("nonce"),
+            word("token"),
             word("context"),
             word("create"),
         ];

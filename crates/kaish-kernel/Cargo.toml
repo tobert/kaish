@@ -35,11 +35,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 # Optional: JSON Schema generation (used by MCP server for outputSchema)
-schemars = { version = "1", optional = true }
+schemars = { workspace = true, optional = true }
 
-# Display-width-aware padding for printf's %Ns width specifier (CJK/emoji are
-# wider than 1 byte/col) — same crate kaish-repl uses for table alignment (#130).
-unicode-width = "0.2"
+# printf's %Ns width specifier pads by display column, not byte count.
+unicode-width = { workspace = true }
 
 # Logging / Telemetry. opentelemetry + its SDK propagators turn the
 # embedder-supplied W3C trace context on ExecuteOptions into an OTel Context
@@ -101,7 +100,7 @@ tiktoken-rs = { workspace = true, optional = true }
 dhat = { version = "0.3", optional = true }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["signal", "process", "term"], optional = true }
+nix = { workspace = true, features = ["signal", "process", "term"], optional = true }
 
 [features]
 # Default is the minimal "on-the-fly text processing" surface: real-file I/O
