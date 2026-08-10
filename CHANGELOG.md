@@ -249,7 +249,11 @@ breaking entries are marked **BREAKING**.
   `OutputData`'s gating.
 - `JobId` serializes `#[serde(transparent)]` as a bare integer.
 - `JobStatus`'s pinned wire spelling is lowercase (`"running"`/`"stopped"`/`"done"`/
-  `"latched"`/`"failed"`), matching the existing `/v/jobs/N/status` text vocabulary.
+  `"gated"`/`"killed"`/`"failed"`), matching the existing `/v/jobs/N/status` text
+  vocabulary. (`"gated"` and `"killed"` land later in this same cycle — the ledger
+  rework retires `"latched"` for `"gated"`, and `kill %N` gains its own terminal
+  status; this bullet states the wire spelling as it stands at the end of the
+  cycle, not as it stood when this type first gained serde.)
 - `Display` stays capitalized for human-facing text — the `jobs` table and the
   `[N]+ Done ...` notifications.
 - **`JobInfo` gained `exit_code: Option<i64>`, `started_at: SystemTime`,
@@ -712,11 +716,12 @@ breaking entries are marked **BREAKING**.
   runs for every ignore rule against every walked path.
 - All three cuts are allocator churn, not peak memory, and were justified by the
   new GH #48 heap profile; behavior is otherwise unchanged.
-- **`jobs --json` now emits the serialized `JobInfo`** plus a `path` field, so the
-  wire shape follows the type instead of a hand-maintained copy.
-- `status` in that output is lowercase (`"failed"`, not `"Failed"`), in line with
-  `/v/jobs/N/status`'s existing `done:0`/`failed:42` vocabulary — the two disagreed
-  before.
+- **BREAKING: `jobs --json` now emits the serialized `JobInfo`** plus a `path`
+  field, so the wire shape follows the type instead of a hand-maintained copy.
+- **BREAKING: `status` in that output is lowercase (`"failed"`, not `"Failed"`)**,
+  in line with `/v/jobs/N/status`'s existing `done:0`/`failed:42` vocabulary — the
+  two disagreed before. A consumer matching `"Failed"` (the 0.13.0 shape) sees no
+  more matches.
 - Rows gain `exit_code`/`started_at`/`finished_at`/`pgids`, each present only when
   set — `exit_code`/`finished_at` absent for a still-running job, `pgids` absent
   when empty.
@@ -762,12 +767,6 @@ breaking entries are marked **BREAKING**.
   and `JobManager::renew_gate`/`Job::renew_gate` — with nothing expiring there is
   no expiry to renew from. Re-run the command to ask again; the new request links
   to the closed one by `supersedes`.
-- **BREAKING:** `/v/jobs/{id}/stdout` and `/v/jobs/{id}/stderr` (GH #240) — both
-  filled only once, at job completion, while four docs (`jobfs.rs`, `job.rs`,
-  `docs/LANGUAGE.md`) promised a live stream that never existed; removed rather
-  than made live. A background job's output is not observable through
-  `/v/jobs` at all now, live or after completion — redirect it to a file
-  explicitly (`cmd > /tmp/out &`) and read that back instead.
 
 ### Fixed
 - **A panicked background job no longer reports as an ordinary `exit 1`**
