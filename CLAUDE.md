@@ -271,9 +271,11 @@ every entry below was verified to be in real use in the governed prose.
 | typed | adjective | A value keeps its JSON type through substitution. It is not stringified. |
 | overlay | noun, adjective | Copy-on-write mode. Writes land in a virtual upper layer until committed. |
 | trash | noun, verb | Recoverable deletion under `set -o trash`. A trash failure is an error, never a permanent delete. |
-| nonce | noun | The confirmation token a latch-gated operation requires. |
+| request | noun | One privileged operation asking to proceed. It does not run until a matching grant exists. |
+| grant | noun, verb | One decision to allow a request, or the act of making it. A grant authorizes exactly one *successful* run; a failed attempt does not consume it. |
+| key | noun | The credential that redeems one request — what `--confirm=<token>` carries. The kernel holds it: no public type has a field for it, and only an approval authority can retrieve it. |
+| attempt | noun | One execution reserved against a grant, with its own outcome. "The operation ran" is a fact about an attempt, never about a request. |
 | spill | verb, noun | To write oversize output to a file, or the file that results. |
-| latch | noun, verb | The confirmation hold that a destructive operation waits on. |
 | escape hatch | noun | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows, single quotes out of expansion. Never a workaround: an escape hatch is part of the design, and every restriction that has one names it. |
 
 ## Changelog
