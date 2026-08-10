@@ -255,6 +255,19 @@ and you decide which sessions get a clone. `Kernel::new` is `build` with the
 handle dropped, which is the right posture for a session that must not approve
 its own work.
 
+Two doors install it *on a session*, which is what makes `approvals
+grant`/`deny`/`revoke` work there:
+
+- `KernelConfig::with_approver_handle(handle)` — for a second kernel, which
+  also adopts that handle's ledger, so several kernels share one log.
+- `KernelConfig::with_own_authority(true)` — for the embedder that is itself
+  the operator, with one kernel and no earlier handle to adopt. The reference
+  REPL uses this; `Kernel::build` still returns the handle, and a clone is left
+  on the session.
+
+Neither is the default. An agent session is built with neither and has no
+method that grants.
+
 **Inspect** with the typed accessor (works before or after `--json` —
 `.approval` survives formatting):
 
@@ -303,6 +316,14 @@ and end an abandoned request with `cancel` rather than letting it sit live.
 capture's shape: `ConfirmStatement { plan_digest, index }` for a held statement,
 `RetryOperation` for an invocation `Kernel::confirm` can replay, and
 `NotReplayable { reason }` for a capture the kernel cannot re-issue at all.
+
+**`ExecResult.approval` carries the view alone, so rebuild the route from it**
+— `ResumeAction::for_capture(&view.capture, &view.binding.plan_digest)` is the
+same derivation the kernel makes, and it is what an embedder reading a gated
+result calls. The `PendingApproval` pairing exists on the `ApprovalOutcome`
+a tool's gate site sees; the result field is the frontend's copy of the
+request, not of the decision. All three types are re-exported from
+`kaish_kernel::ledger`.
 
 Two consequences worth planning for:
 
@@ -554,9 +575,25 @@ write files" equivalent to "the agent can approve its own operations". No
 projection carries a credential; there is no redaction step, because no
 projected type has a credential field.
 
-**Deciding from inside a session.** `KernelConfig::with_approver_handle()`
-installs an authority *on the session*, which is what lets `approvals
-grant`/`deny`/`revoke` work there. Without one those three exit **1** naming
+**The reference REPL is a worked example of all of the above**, and it is a
+plain embedder with no privileged hook: `crates/kaish-repl/src/approval.rs`
+plus `Repl::fulfill_gate`/`decide` in `lib.rs` are the whole of it — get
+`Pending` back from `execute`, render it, read one answer, `grant_with_grounds`
++ `Kernel::confirm`, or `deny`. Copy its two rules whatever your frontend is:
+
+- **An approval prompt is never the agent's output stream.** The REPL renders
+  the request to stderr and asks only when stdin and stdout are both terminals,
+  so a piped or captured session gets the exit-2 result and no question. An
+  embedder that multiplexes a model's stdout must segregate the prompt the same
+  way — a question a model can read as data is a question it can answer.
+- **Anything that is not an answer denies.** `n`, an empty line, Ctrl-C,
+  Ctrl-D, a terminal that went away: all of them close the request. A gate left
+  live because nobody could be asked is a slot nothing will ever return.
+
+**Deciding from inside a session.** `KernelConfig::with_approver_handle()` (or
+`with_own_authority(true)` for a single-kernel embedder) installs an authority
+*on the session*, which is what lets `approvals grant`/`deny`/`revoke` work
+there. Without one those three exit **1** naming
 the reason, while `list`, `show`, `log`, and `cancel` keep working. That is
 the whole separation: an agent that can run any shell command can see what is
 pending and withdraw its own requests, and cannot approve itself.

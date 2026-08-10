@@ -11,6 +11,10 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Changed
+- **BREAKING: `kaish_repl::Repl::process_line` takes a second argument**, a
+  `&mut dyn ApprovalPrompt` naming where a gate gets decided. Pass
+  `&mut kaish_repl::approval::NoPrompt` for the previous behavior: no prompt,
+  and the exit-2 result returned as the kernel produced it.
 - **`LedgerConfig` is `#[non_exhaustive]`.** A field added later
   must not silently break an embedder's struct literal. Construct with
   `LedgerConfig::default()` and the new `with_live_capacity`/
@@ -66,6 +70,33 @@ breaking entries are marked **BREAKING**.
   pair actually opens.
 
 ### Added
+- **The REPL decides its own gates.** A line that comes back with a pending
+  approval now asks at the prompt — the request, then `grant? [y/a/N]` — where
+  `y` grants and replays it, `a` also issues a session standing grant for that
+  operation on those resources, and `n`, Enter, Ctrl-C, or Ctrl-D denies and
+  closes the request. The prompt renders to **stderr** and is written only when
+  stdin and stdout are both terminals, so it can never blend into piped or
+  captured output; a non-terminal session keeps the exit-2 contract unchanged
+  and is never prompted. `Kernel::confirm` replays the held statement and
+  nothing after it, so the REPL names how many statements on the line did not
+  run rather than leaving a half-run line unremarked.
+- **`approvals grant`/`deny`/`revoke` work at the REPL prompt**, because the
+  REPL session now holds the authority its own kernel mints.
+- **`kaish --gate <cmd[,cmd...]>`** — install the reference
+  `CommandNameClassifier` over those command names, so every statement planning
+  one asks first (`docs/approval-ledger.md` §C.6). It matches the parsed plan's
+  argv0, so `echo 'rm -rf /'` does not match `--gate rm`. `-c` and script runs
+  have no terminal to ask at: they exit **2** with the request pending, for an
+  operator to decide out of band.
+- **`KernelConfig::with_own_authority(bool)`** — install the authority this
+  kernel mints on its own session, for the single-kernel embedder that is
+  itself the operator. `with_approver_handle` adopts a handle and so needs a
+  kernel that already exists; the REPL has none to take one from. Default
+  `false`, which is still the enforcement: an agent session has no method that
+  grants.
+- **`kaish_kernel::ledger` re-exports `ApprovalOutcome`, `PendingApproval`, and
+  `ResumeAction`** — the types an embedder names when it reads a gate back;
+  they were reachable only through a direct `kaish-tool-api` dependency.
 - **`KernelConfig::with_kill_children_on_parent_death(bool)`** — arms Linux's
   `PR_SET_PDEATHSIG(SIGKILL)` on external commands, so a `kill -9`'d or
   crashed kaish process cannot orphan them; `setpgid`, pidfd kills, and

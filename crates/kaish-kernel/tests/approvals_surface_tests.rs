@@ -361,6 +361,58 @@ async fn grant_is_refused_without_authority_and_permitted_with_it() {
     );
 }
 
+/// The **single-kernel operator** (spec §D.2, PR 11): one `Kernel::build`,
+/// with the authority it mints installed on its own session.
+///
+/// `with_approver_handle` cannot serve this posture — it adopts a handle, and
+/// an embedder whose one kernel is the operator has no earlier kernel to take
+/// one from. The reference REPL is exactly that embedder, and building a
+/// throwaway kernel to obtain a handle would put a kernel id in the record
+/// that names no session anyone can point at.
+#[tokio::test]
+async fn a_session_may_hold_the_authority_its_own_kernel_minted() {
+    let dir = tempdir();
+    let precious = dir.path().join("precious.txt");
+    std::fs::write(&precious, "keep me").expect("write");
+
+    let session = build(
+        KernelConfig::repl()
+            .with_cwd(dir.path().to_path_buf())
+            .with_approvals(true)
+            .with_trash(false)
+            .with_own_authority(true),
+    );
+    assert!(
+        session.kernel.session_authority().is_some(),
+        "one build, one kernel, and the session holds the authority"
+    );
+
+    let gated = session.run("rm precious.txt").await;
+    let id = gated.approval_request().expect("a gated request").id;
+    let granted = session.run(&format!("approvals grant {id}")).await;
+    assert_eq!(granted.code, 0, "{}", granted.err);
+    assert_eq!(
+        session.kernel.approvals().state(&id),
+        Some(kaish_types::approval::RequestState::Granted)
+    );
+}
+
+/// And the default is still no: `Kernel::build` alone hands the handle to the
+/// embedder and leaves the session without one. Flipping
+/// `with_own_authority`'s default would silently give every agent session the
+/// authority the whole separation withholds.
+#[tokio::test]
+async fn own_authority_is_off_unless_a_session_asks_for_it() {
+    let dir = tempdir();
+    let session = build(
+        KernelConfig::repl()
+            .with_cwd(dir.path().to_path_buf())
+            .with_approvals(false)
+            .with_trash(false),
+    );
+    assert!(session.kernel.session_authority().is_none());
+}
+
 /// `deny` and `revoke` are behind the same gate as `grant` — all three are
 /// approval-side actions, and a session either has that authority or does not.
 #[tokio::test]

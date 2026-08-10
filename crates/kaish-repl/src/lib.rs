@@ -8,11 +8,13 @@
 //! - Result formatting with OutputData
 //! - Command history via rustyline
 
+pub mod approval;
 pub mod format;
 
 use std::borrow::Cow;
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
@@ -28,7 +30,13 @@ use kaish_client::completion::{detect_completion_context, is_word_delimiter, Com
 use kaish_client::{EmbeddedClient, KernelClient};
 use kaish_kernel::ast::Value;
 use kaish_kernel::interpreter::ExecResult;
+use kaish_kernel::ledger::{
+    ApproverHandle, CommandNameClassifier, ResumeAction, StatementClassifier,
+};
 use kaish_kernel::{ExecuteOptions, Kernel, KernelConfig};
+use kaish_types::approval::{ApprovalRequestView, GrantTerms, Grounds, RiskClass};
+
+use crate::approval::{Answer, ApprovalPrompt};
 
 /// Snapshot the OS environment as a map of `String` → `Value::String`.
 ///
@@ -421,6 +429,57 @@ impl Helper for KaishHelper {}
 pub struct Repl {
     client: EmbeddedClient,
     runtime: Runtime,
+    /// The one approval authority this kernel minted
+    /// (`docs/approval-ledger.md` §D.2). The REPL keeps it because the REPL
+    /// is the operator: it grants what the human answers `y` to and replays
+    /// the held statement with [`Kernel::confirm`]. Whether the *session*
+    /// may also `approvals grant` is the config's business
+    /// ([`KernelConfig::with_own_authority`]), not this field's.
+    authority: ApproverHandle,
+}
+
+/// The `KernelConfig` the interactive REPL runs on: passthrough filesystem,
+/// the OS environment, a human principal, and the approval authority
+/// installed on its own session so `approvals grant` works at the prompt
+/// (spec §C.3).
+pub fn interactive_config() -> KernelConfig {
+    KernelConfig::repl()
+        .with_interactive(true)
+        .with_initial_vars(os_env_vars())
+        .with_principal(terminal_principal())
+        .with_own_authority(true)
+}
+
+/// Who the person at the terminal is, for the record. `$USER` when the
+/// environment names one, `terminal` otherwise — a name an auditor can read,
+/// never an empty id.
+///
+/// The kernel trusts this assignment (spec §A.3): it is the frontend's job to
+/// say who its session belongs to, and the REPL's answer is "the human who
+/// started it".
+fn terminal_principal() -> kaish_types::approval::Principal {
+    let id = std::env::var("USER")
+        .ok()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "terminal".to_string());
+    kaish_types::approval::Principal::new(id, kaish_types::approval::PrincipalKind::Human)
+}
+
+/// The reference [`StatementClassifier`] over a set of command names, for
+/// `kaish --gate rm,kaish-trash` (spec §C.6).
+///
+/// [`CommandNameClassifier`] matches `argv0` in the parsed plan, so `rm
+/// notes.txt` gates and `echo 'rm notes.txt'` does not — the discrimination
+/// the plan buys over the raw line. The risk it names is `Irreversible`,
+/// which is `cmd.execute`'s own class: the operation covers `ls` and `rm -rf`
+/// alike, so the conservative claim is the only honest one a name-matching
+/// rule can make.
+pub fn gate_classifier(names: Vec<String>) -> Arc<dyn StatementClassifier> {
+    Arc::new(CommandNameClassifier::new(
+        names,
+        "the session gates this command",
+        RiskClass::Irreversible,
+    ))
 }
 
 /// Build the tokio runtime kaish execution runs on, with worker threads sized
@@ -440,27 +499,17 @@ pub fn build_runtime() -> Result<tokio::runtime::Runtime> {
 impl Repl {
     /// Create a new REPL instance with passthrough filesystem access.
     pub fn new() -> Result<Self> {
-        let config = KernelConfig::repl()
-            .with_interactive(true)
-            .with_initial_vars(os_env_vars());
-        let mut kernel = Kernel::new(config).context("Failed to create kernel")?;
-        let runtime = build_runtime()?;
-
-        // Initialize terminal job control if stdin is a TTY. See `new()`.
-        #[cfg(unix)]
-        if std::io::stdin().is_terminal() {
-            kernel.init_terminal();
-        }
-
-        Ok(Self {
-            client: EmbeddedClient::new(kernel),
-            runtime,
-        })
+        Self::with_config(interactive_config())
     }
 
     /// Create a new REPL with a custom kernel configuration.
+    ///
+    /// The config decides whether this session may decide its own gates:
+    /// [`interactive_config`] sets [`KernelConfig::with_own_authority`], and
+    /// a config without it builds a REPL that can see pending requests and
+    /// cancel them but not grant them.
     pub fn with_config(config: KernelConfig) -> Result<Self> {
-        let mut kernel = Kernel::new(config).context("Failed to create kernel")?;
+        let (mut kernel, authority) = Kernel::build(config).context("Failed to create kernel")?;
         let runtime = build_runtime()?;
 
         // Initialize terminal job control if stdin is a TTY. This needs the
@@ -474,19 +523,29 @@ impl Repl {
         Ok(Self {
             client: EmbeddedClient::new(kernel),
             runtime,
+            authority,
         })
     }
 
     /// Create a new REPL rooted at the given path.
     pub fn with_root(root: PathBuf) -> Result<Self> {
-        let config = KernelConfig::repl()
-            .with_cwd(root)
-            .with_initial_vars(os_env_vars());
-        Self::with_config(config)
+        Self::with_config(interactive_config().with_cwd(root))
+    }
+
+    /// The approval authority this REPL's kernel minted (spec §D.2). An
+    /// embedder driving [`Repl`] as a library decides gates through this.
+    pub fn authority(&self) -> &ApproverHandle {
+        &self.authority
     }
 
     /// Process a single line of input.
-    pub fn process_line(&mut self, line: &str) -> ProcessResult {
+    ///
+    /// `prompt` is where a gate gets decided. A line that ends in **exit 2**
+    /// with a pending approval request is offered to the human through it
+    /// (spec §C.3); [`NoPrompt`](approval::NoPrompt) — a frontend with no
+    /// terminal — leaves the exit-2 result exactly as the kernel produced
+    /// it, which is the non-interactive contract.
+    pub fn process_line(&mut self, line: &str, prompt: &mut dyn ApprovalPrompt) -> ProcessResult {
         let trimmed = line.trim();
 
         // Skip empty lines
@@ -519,6 +578,7 @@ impl Repl {
 
         match result {
             Ok(exec_result) => {
+                let exec_result = self.fulfill_gate(trimmed, exec_result, prompt);
                 if exec_result.ok() && !exec_result.has_output() && exec_result.text_out().is_empty() {
                     ProcessResult::Empty
                 } else {
@@ -528,6 +588,122 @@ impl Repl {
             Err(e) => ProcessResult::Output(format!("Error: {}", e)),
         }
     }
+
+    /// Offer a pending approval request to the human, and act on the answer
+    /// (spec §C.3). Returns the result to display: the replayed operation's
+    /// when the request was granted, the denial otherwise, and the original
+    /// exit-2 result untouched when there was nothing to ask or nowhere to
+    /// ask it.
+    ///
+    /// This is the whole of the REPL's gate handling, and it is above the
+    /// kernel on purpose: `execute` has already returned, so nothing is
+    /// holding a statement open while the human reads the prompt (spec
+    /// §C.2). The REPL's wait is a `readline`, which is the right and only
+    /// bound.
+    fn fulfill_gate(
+        &self,
+        line: &str,
+        gated: ExecResult,
+        prompt: &mut dyn ApprovalPrompt,
+    ) -> ExecResult {
+        let Some(view) = gated.approval_request() else {
+            return gated;
+        };
+        // Tokenless: no credential exists before a decision — a request's key
+        // is minted by the grant — so the prompt shows the producer's
+        // `<token>` placeholder and nothing else could be substituted here.
+        let rendered = approval::render_request(&view, None);
+        let Some(answer) = prompt.ask(&rendered) else {
+            return gated;
+        };
+        // How this request continues, read as a structured route rather than
+        // inferred from the capture's shape (spec §C.1). `ExecResult.approval`
+        // carries the view alone, so the REPL rebuilds it here.
+        let resume = ResumeAction::for_capture(&view.capture, &view.binding.plan_digest);
+        self.runtime.block_on(self.decide(line, &view, &resume, answer))
+    }
+
+    /// Post the decision and, on a grant, replay the held operation.
+    async fn decide(
+        &self,
+        line: &str,
+        view: &ApprovalRequestView,
+        resume: &ResumeAction,
+        answer: Answer,
+    ) -> ExecResult {
+        if answer == Answer::Deny {
+            // `n`, an empty line, and Ctrl-C all land here: the request is
+            // closed, not left live for someone to grant later by accident.
+            return match self
+                .authority
+                .deny(&view.id, view.revision, "declined at terminal")
+                .await
+            {
+                Ok(()) => ExecResult::failure(1, format!("{} denied — nothing ran", view.id)),
+                Err(e) => ExecResult::failure(1, format!("{} could not be denied: {e}", view.id)),
+            };
+        }
+
+        // `a` issues the standing rule *before* the grant, so the record
+        // reads in the order the human decided: the rule that will
+        // auto-approve the next one, then this one's own grant.
+        if answer == Answer::Session {
+            let rule = approval::session_standing_grant(
+                view,
+                self.client.kernel().principal().clone(),
+            );
+            match self.authority.grant_standing(rule).await {
+                // stderr, like the prompt itself: the whole gate exchange is
+                // a conversation with the human, never the line's output.
+                Ok(id) => {
+                    eprintln!("standing grant {id} issued — `approvals revoke {id}` retires it")
+                }
+                // A standing rule that could not be recorded must not become
+                // a silent one-time grant with no record of the "always":
+                // say so, and fall through to the one-time grant the human
+                // also asked for.
+                Err(e) => eprintln!("kaish: the standing grant was not recorded: {e}"),
+            }
+        }
+
+        let terms = GrantTerms::once_for_view(view, approval::grant_deadline());
+        if let Err(e) = self
+            .authority
+            .grant_with_grounds(
+                &view.id,
+                view.revision,
+                terms,
+                Grounds::Human {
+                    channel: approval::GRANT_CHANNEL.to_string(),
+                },
+            )
+            .await
+        {
+            return ExecResult::failure(1, format!("{} could not be granted: {e}", view.id));
+        }
+
+        match self.client.kernel().confirm(&self.authority, &view.id).await {
+            Ok(mut replayed) => {
+                // The kernel replays `Capture::Exact` and `Capture::Statement`
+                // and refuses everything else. When it refuses — or the
+                // replay itself failed — the human still holds a granted
+                // request, so hand over the re-run line with the real key in
+                // it (retrieval is authority's privilege, spec §D.3) rather
+                // than leaving them with a grant they cannot spend.
+                if !replayed.ok() && !view.hint.is_empty() {
+                    let token = self.authority.token_for(&view.id);
+                    let rerun = approval::rerun_line(&view.hint, token.as_ref());
+                    replayed.err =
+                        format!("{}\nre-run it yourself: {rerun}\n", replayed.err.trim_end());
+                }
+                if let Some(note) = unrun_remainder(line, resume) {
+                    eprintln!("{note}");
+                }
+                replayed
+            }
+            Err(e) => ExecResult::failure(1, format!("{} was granted but not replayed: {e}", view.id)),
+        }
+    }
 }
 
 impl Default for Repl {
@@ -535,6 +711,41 @@ impl Default for Repl {
     fn default() -> Self {
         Self::new().expect("Failed to create REPL")
     }
+}
+
+// ── The remainder a confirm does not run ────────────────────────────
+
+/// The warning for a granted statement that had statements after it on the
+/// same line, or `None` when nothing was left behind.
+///
+/// **`Kernel::confirm` replays the held statement and nothing after it**
+/// (spec §C.2), so `rm a; echo done` runs `rm a` on approval and never runs
+/// `echo done`. The kernel is right not to hold a program open across a
+/// human's decision, and the REPL is the wrong place to invent resumption:
+/// [`ResumeAction::ConfirmStatement`] gives the index the program stopped at,
+/// but statements carry no source spans, so slicing the tail back out of the
+/// line the user typed would need an unparser the REPL does not have. What it
+/// can do is refuse to be quiet about it — the alternative is a line that
+/// half-ran with no indication of which half.
+fn unrun_remainder(line: &str, resume: &ResumeAction) -> Option<String> {
+    let ResumeAction::ConfirmStatement { index, .. } = resume else {
+        return None;
+    };
+    // The line parsed once already to reach the gate. If it somehow does not
+    // now, say nothing rather than guess at a count.
+    let program = kaish_kernel::parser::parse(line).ok()?;
+    let remaining = program
+        .statements
+        .iter()
+        .skip(index + 1)
+        .filter(|stmt| !matches!(stmt, kaish_kernel::ast::Stmt::Empty))
+        .count();
+    (remaining > 0).then(|| {
+        format!(
+            "kaish: {remaining} statement(s) after the approved one did not run — an approval \
+             halts the line, so re-run them yourself"
+        )
+    })
 }
 
 // ── Formatting ──────────────────────────────────────────────────────
@@ -707,6 +918,14 @@ fn notify_finished_jobs(repl: &Repl) {
 /// When `overlay` is `true`, writes are virtual (copy-on-write overlay).
 /// Use `kaish-vfs commit` to apply changes to real files.
 pub fn run_with_overlay(overlay: bool) -> Result<()> {
+    run_interactive(interactive_config().with_overlay(overlay), overlay)
+}
+
+/// Run the interactive REPL on `config`.
+///
+/// One loop, whatever the entry point: `kaish`, `kaish --overlay`, and
+/// `kaish --gate rm` differ only in the config they hand in.
+pub fn run_interactive(config: KernelConfig, overlay: bool) -> Result<()> {
     println!("会sh — kaish v{}", env!("CARGO_PKG_VERSION"));
     use kaish_kernel::help::{compose, Recipe, SchemaContent};
 
@@ -715,10 +934,6 @@ pub fn run_with_overlay(overlay: bool) -> Result<()> {
     }
     println!("{}", compose(&Recipe::repl_welcome(), &SchemaContent::new(&[])));
 
-    let config = KernelConfig::repl()
-        .with_interactive(true)
-        .with_initial_vars(os_env_vars())
-        .with_overlay(overlay);
     let mut repl = Repl::with_config(config)?;
 
     // Source RC file (interactive only)
@@ -746,7 +961,12 @@ pub fn run_with_overlay(overlay: bool) -> Result<()> {
                     tracing::warn!("Failed to add history entry: {}", e);
                 }
 
-                match repl.process_line(&line) {
+                // The gate prompt reads through this same editor, so Ctrl-C
+                // at an approval question is ordinary input handling in the
+                // REPL's own read loop rather than a signal racing a
+                // decision (spec §C.3).
+                let outcome = repl.process_line(&line, &mut approval::TerminalPrompt::new(&mut rl));
+                match outcome {
                     ProcessResult::Output(output) => {
                         if output.ends_with('\n') {
                             print!("{}", output);
@@ -783,76 +1003,7 @@ pub fn run_with_overlay(overlay: bool) -> Result<()> {
 
 /// Run the REPL.
 pub fn run() -> Result<()> {
-    println!("会sh — kaish v{}", env!("CARGO_PKG_VERSION"));
-    // Welcome text comes from the canonical kaish-help corpus (via the kernel
-    // re-export), so it stays in sync with the MCP/embedder instructions.
-    use kaish_kernel::help::{compose, Recipe, SchemaContent};
-    println!("{}", compose(&Recipe::repl_welcome(), &SchemaContent::new(&[])));
-
-    let mut repl = Repl::new()?;
-
-    // Source RC file (interactive only)
-    load_rc_file(&repl);
-
-    // Build the helper with a client handle (sharing the REPL's kernel) and
-    // a runtime handle. Boxed as a trait object so completion runs purely
-    // through the KernelClient abstraction.
-    let helper = KaishHelper::new(
-        Box::new(repl.client.clone()),
-        repl.runtime.handle().clone(),
-    );
-
-    let mut rl: Editor<KaishHelper, DefaultHistory> =
-        Editor::new().context("Failed to create editor")?;
-    rl.set_helper(Some(helper));
-
-    let history_path = load_history(&mut rl);
-
-    loop {
-        notify_finished_jobs(&repl);
-        // Dynamic prompt: call kaish_prompt() if defined, else default
-        let prompt_string = resolve_prompt(&repl);
-        let prompt: &str = &prompt_string;
-
-        match rl.readline(prompt) {
-            Ok(line) => {
-                if let Err(e) = rl.add_history_entry(line.as_str()) {
-                    tracing::warn!("Failed to add history entry: {}", e);
-                }
-
-                match repl.process_line(&line) {
-                    ProcessResult::Output(output) => {
-                        if output.ends_with('\n') {
-                            print!("{}", output);
-                        } else {
-                            println!("{}", output);
-                        }
-                    }
-                    ProcessResult::Empty => {}
-                    ProcessResult::Exit => {
-                        save_history(&mut rl, &history_path);
-                        return Ok(());
-                    }
-                }
-            }
-            Err(ReadlineError::Interrupted) => {
-                println!("^C");
-                continue;
-            }
-            Err(ReadlineError::Eof) => {
-                println!("^D");
-                break;
-            }
-            Err(err) => {
-                eprintln!("Error: {}", err);
-                break;
-            }
-        }
-    }
-
-    save_history(&mut rl, &history_path);
-
-    Ok(())
+    run_interactive(interactive_config(), false)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -1088,6 +1239,50 @@ mod tests {
 
     // GH #129: an rc-file source that returns `Ok(ExecResult)` with a nonzero
     // exit code used to be silently discarded — only a hard `Err` warned.
+    /// `ConfirmStatement`'s `index` is the only thing that says how much of
+    /// the line the kernel will not replay, and it says it by number: the
+    /// REPL re-parses to count what is after it, and cannot re-run any of it
+    /// (see [`unrun_remainder`]).
+    #[test]
+    fn the_remainder_of_a_held_line_is_counted_and_named() {
+        let resume = ResumeAction::ConfirmStatement {
+            plan_digest: kaish_types::approval::PlanDigest::new("0badcafe"),
+            index: 0,
+        };
+        let note = unrun_remainder("rm a; touch b; touch c", &resume)
+            .expect("two statements followed the held one");
+        assert!(note.contains('2'), "{note}");
+        assert!(note.contains("did not run"), "{note}");
+    }
+
+    #[test]
+    fn a_held_line_with_nothing_after_it_says_nothing() {
+        let resume = ResumeAction::ConfirmStatement {
+            plan_digest: kaish_types::approval::PlanDigest::new("0badcafe"),
+            index: 0,
+        };
+        assert_eq!(unrun_remainder("rm a", &resume), None);
+        // A trailing separator is not a statement anybody typed.
+        assert_eq!(unrun_remainder("rm a;", &resume), None);
+        // The last statement of a longer line leaves nothing behind either.
+        let last = ResumeAction::ConfirmStatement {
+            plan_digest: kaish_types::approval::PlanDigest::new("0badcafe"),
+            index: 1,
+        };
+        assert_eq!(unrun_remainder("touch a; rm b", &last), None);
+    }
+
+    #[test]
+    fn a_replayable_invocation_leaves_no_remainder_to_report() {
+        // `RetryOperation` is a `Capture::Exact` replay — an `fs.*` gate
+        // inside one statement, which the same halt rule covers, but the
+        // request names no index, so there is nothing to count.
+        assert_eq!(
+            unrun_remainder("rm a; touch b", &ResumeAction::RetryOperation),
+            None
+        );
+    }
+
     #[test]
     fn rc_file_warning_none_when_source_succeeds() {
         let path = std::path::Path::new("/home/user/.config/kaish/init.kai");

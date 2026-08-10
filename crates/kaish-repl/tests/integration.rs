@@ -5,6 +5,7 @@
 //! Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use kaish_repl::approval::NoPrompt;
 use kaish_repl::{ProcessResult, Repl};
 
 /// Helper to run multiple lines through a REPL and collect outputs.
@@ -53,7 +54,7 @@ fn run_script(script: &str) -> Vec<String> {
 
         // If we're at top level (depth 0), process the block
         if block_depth == 0 && !current_block.is_empty() {
-            match repl.process_line(&current_block) {
+            match repl.process_line(&current_block, &mut NoPrompt) {
                 ProcessResult::Output(output) => outputs.push(output),
                 ProcessResult::Empty => {}
                 ProcessResult::Exit => break,
@@ -64,7 +65,7 @@ fn run_script(script: &str) -> Vec<String> {
 
     // Process any remaining content
     if !current_block.is_empty() {
-        match repl.process_line(&current_block) {
+        match repl.process_line(&current_block, &mut NoPrompt) {
             ProcessResult::Output(output) => outputs.push(output),
             ProcessResult::Empty => {}
             ProcessResult::Exit => {}
@@ -1253,14 +1254,14 @@ fn kaish_status_output() {
 #[test]
 fn exit_still_works() {
     let mut repl = Repl::new().expect("Failed to create REPL");
-    let result = repl.process_line("exit");
+    let result = repl.process_line("exit", &mut NoPrompt);
     assert!(matches!(result, ProcessResult::Exit));
 }
 
 #[test]
 fn quit_still_works() {
     let mut repl = Repl::new().expect("Failed to create REPL");
-    let result = repl.process_line("quit");
+    let result = repl.process_line("quit", &mut NoPrompt);
     assert!(matches!(result, ProcessResult::Exit));
 }
 
@@ -1303,7 +1304,7 @@ fn builtin_h_flag_does_not_show_help_when_claimed() {
 /// Run a single command and return its ProcessResult directly.
 fn run_one(cmd: &str) -> ProcessResult {
     let mut repl = Repl::new().expect("Failed to create REPL");
-    repl.process_line(cmd)
+    repl.process_line(cmd, &mut NoPrompt)
 }
 
 #[test]
@@ -1364,8 +1365,8 @@ fn cd_dash_produces_output() {
     let path = tmp.path().display().to_string();
     // cd - prints the new directory, like bash
     let mut repl = Repl::new().expect("Failed to create REPL");
-    repl.process_line(&format!("cd {path}"));
-    let result = repl.process_line("cd -");
+    repl.process_line(&format!("cd {path}"), &mut NoPrompt);
+    let result = repl.process_line("cd -", &mut NoPrompt);
     match result {
         ProcessResult::Output(s) => assert!(!s.is_empty(), "cd - should print new dir: {:?}", s),
         ProcessResult::Empty => panic!("cd - should print the new directory"),

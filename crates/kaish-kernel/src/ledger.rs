@@ -62,6 +62,11 @@ pub use kaish_tool_api::{
     MountDescriptor, RedactionMark, Redactor, StatementAssessment, StatementClassificationInput,
     StatementClassifier, StatementPosture,
 };
+// What a caller reads back from a gate (spec §C.1), re-exported for the same
+// reason: an embedder deciding one names these types, and it should not have
+// to depend on `kaish-tool-api` to say what `ExecResult.approval` means or
+// how to resume it.
+pub use kaish_tool_api::{ApprovalOutcome, PendingApproval, ResumeAction};
 pub(crate) use resolver::{conditions_to_observe, digest_path};
 pub use handles::{
     ApproverHandle, AssessmentRecorder, AttemptHandle, AttemptView, Approvals, DecisionContext, Ledger,

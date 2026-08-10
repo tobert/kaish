@@ -423,6 +423,15 @@ pub struct ApprovalConfig {
     /// §E.2, tier 1). Supplying one also adopts its ledger, so two kernels
     /// built from one handle share a single log.
     pub approver_handle: Option<crate::ledger::ApproverHandle>,
+    /// Whether this session holds the authority its **own** kernel mints
+    /// (spec §D.2). `false` — the default — is the agent posture:
+    /// [`Kernel::build`] hands the handle to the embedder and the session
+    /// has no method that grants.
+    ///
+    /// Set through [`KernelConfig::with_own_authority`], for the embedder
+    /// that is itself the operator. [`Self::approver_handle`] gives the
+    /// session authority too, and additionally adopts that handle's ledger.
+    pub own_authority: bool,
     /// The state resolvers redemption consults, one per non-`path` resource
     /// kind (spec §B.4). The kernel serves `path` itself; a resolver
     /// claiming that kind, or a second resolver for a kind already
@@ -455,6 +464,7 @@ impl std::fmt::Debug for ApprovalConfig {
             .field("principal", &self.principal)
             .field("session", &self.session)
             .field("approver_handle", &self.approver_handle)
+            .field("own_authority", &self.own_authority)
             .field(
                 "resolvers",
                 &self.resolvers.iter().map(|r| r.kind()).collect::<Vec<_>>(),
@@ -1028,6 +1038,27 @@ impl KernelConfig {
         self
     }
 
+    /// Give this session the authority its **own** kernel mints, for an
+    /// embedder that is itself the operator (spec §D.2).
+    ///
+    /// [`Self::with_approver_handle`] is the multi-kernel door: it installs
+    /// an authority *and* adopts that handle's ledger, so it needs a handle
+    /// that already exists. A single-kernel embedder whose one session is
+    /// the operator — the reference REPL, a desktop app with a human in
+    /// front of it — has no earlier kernel to take a handle from, and
+    /// building a throwaway one to obtain it would put a kernel id in the
+    /// record that names nothing. This says the same thing directly:
+    /// [`Kernel::build`] returns the handle *and* leaves a clone on the
+    /// session, so `approvals grant` works at that session's own prompt.
+    ///
+    /// **The default is `false`, and that is the enforcement** (§E.2, tier
+    /// 1): an agent session is built without this and has no method that
+    /// grants. Pass it only where a human decides.
+    pub fn with_own_authority(mut self, holds: bool) -> Self {
+        self.approval.own_authority = holds;
+        self
+    }
+
     /// Register a [`StateResolver`](crate::ledger::StateResolver) for one
     /// resource kind, so a grant over that kind's resources is re-checked at
     /// redemption (spec §B.4).
@@ -1314,8 +1345,9 @@ impl Kernel {
     /// separation: the only way to obtain an
     /// [`ApproverHandle`](crate::ledger::ApproverHandle) is to build
     /// a kernel, and the embedder then decides which sessions get a clone
-    /// (through [`KernelConfig::with_approver_handle`]). A session built
-    /// without one has no method that grants.
+    /// (through [`KernelConfig::with_approver_handle`], or
+    /// [`KernelConfig::with_own_authority`] for the session that is itself
+    /// the operator). A session built without one has no method that grants.
     ///
     /// When the config already carries a handle, this returns that same
     /// handle and the kernel joins its ledger rather than minting a fresh
@@ -1784,6 +1816,7 @@ impl Kernel {
             principal,
             session,
             approver_handle,
+            own_authority,
             resolvers,
             statement_classifier,
             clock,
@@ -1825,7 +1858,11 @@ impl Kernel {
             Some(principal) => authority.with_principal(principal.clone()),
             None => authority,
         };
-        let session_authority = approver_handle.map(|_| authority.clone());
+        // Either door installs the same capability: an adopted handle, or
+        // this kernel's own (spec §D.2). Withholding both is what keeps a
+        // session from approving itself.
+        let session_authority =
+            (approver_handle.is_some() || own_authority).then(|| authority.clone());
         let chain = Arc::new(crate::ledger::DecisionChain::new(
             authority.clone(),
             approvals.clone(),

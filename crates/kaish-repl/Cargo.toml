@@ -21,6 +21,7 @@ path = "src/main.rs"
 # (external commands + job control, git, host introspection, tokens, trash).
 kaish-kernel = { path = "../kaish-kernel", version = "0.13.0", features = ["full"] }
 kaish-client = { path = "../kaish-client", version = "0.13.0" }
+kaish-types = { path = "../kaish-types", version = "0.13.0" }
 
 # Line editing
 rustyline = { workspace = true }

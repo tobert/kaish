@@ -644,13 +644,21 @@ failed attempt leaves the grant live to retry. The prompt prints to stderr
 surfaced under an `approval` key in the error envelope when `--json` is on.
 It never carries the token.
 
+**At a terminal, the REPL asks.** It prints the request to stderr and reads
+one answer: `y` grants and runs it, `a` grants it and stops asking for that
+operation on those resources for the rest of the session, and `n`, Enter, or
+Ctrl-C denies and closes the request. A piped or captured session is never
+asked — it gets exit **2** and the pending request. `kaish --gate
+<cmd[,cmd...]>` widens what asks to every statement planning one of those
+commands.
+
 **Reading and deciding:** `approvals list` names what is pending, `approvals
 show <id>` one request with its decision and attempts, and `approvals log`
 the retained entries. `/v/approvals` projects the same read model as files
 and is read-only — every write returns `Unsupported`, because granting by
 file write would make "can write files" mean "can approve itself".
 `approvals grant`, `deny`, and `revoke` exit **1** in a session with no
-approval authority.
+approval authority; the REPL session holds one, an agent session does not.
 
 **A gate stops the program.** Exit **2** means *this has not happened yet*,
 so the statements after it do not run: `rm x; echo ok` with `rm` gated prints

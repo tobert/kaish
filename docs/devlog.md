@@ -15,6 +15,90 @@ before it ships.
 
 ---
 
+## The REPL fulfils its own gates, and the design survives its first real consumer (2026-08-10)
+
+PR 11 of the approval ledger was written as the design's own proof: the REPL is a
+plain embedder with no privileged hook, so if a human at a prompt cannot be served
+by `Pending` + `grant` + `confirm`, §C.2 is wrong and this is where it shows.
+
+It is not wrong. The whole prompt flow is about seventy lines above the kernel —
+`fulfill_gate` reads `ExecResult.approval`, renders it, asks, and then either
+`grant_with_grounds` + `Kernel::confirm` or `deny`. Nothing in the kernel is held
+open while the human reads; the REPL's wait is a `readline`, which is the right
+and only bound. §C.3 predicted "about fifteen lines"; the extra fifty are
+rendering, the standing-grant path for `a`, and telling the truth about what did
+not run.
+
+Three things the constraint made awkward, all of them worth the trip:
+
+**A single-kernel embedder could not hold its own authority.** `with_approver_handle`
+installs an authority *and* adopts that handle's ledger, so it needs a handle,
+which needs an earlier kernel. The REPL has none. The workaround available with
+today's API is to build a throwaway kernel purely to mint a handle and then throw
+it away — which puts a kernel id in the record that names no session anyone can
+point at. `KernelConfig::with_own_authority(bool)` says the thing directly:
+`Kernel::build` returns the handle *and* leaves a clone on the session. The
+default stays `false`, because the default *is* the enforcement.
+
+**Ctrl-C at the prompt had to be a keystroke, not a signal.** §C.3 says so and
+the reason is now concrete: after the first `execute`, tokio owns SIGINT
+process-wide with `SA_RESTART`, so a plain `read` on the terminal would neither
+be interrupted nor killed — Ctrl-C would do *nothing* until the user pressed
+Enter. Reading the answer through rustyline, which holds the terminal in raw
+mode, turns `^C` into an ordinary `Interrupted` return. The PTY test spawns kaish
+with ISIG genuinely on, so it fails if that ever stops being true.
+
+**The prompt cannot be output.** The request renders to stderr, and the question
+is only written when stdin *and* stdout are both terminals — the check lives
+beside the write rather than at a distant construction site. `cli_approval_tests`
+proves the negative the spec asks for: with every stream a pipe, neither `grant?`
+nor `[y/a/N]` appears anywhere a caller could collect it, and the line exits 2.
+
+The reference classifier question answered itself: R4's `CommandNameClassifier`
+already matches the parsed plan's argv0, and a regex over the rendered line would
+be strictly worse — it re-introduces the `echo 'rm -rf /'` false positive the plan
+exists to remove. So the REPL *ships* the one that exists rather than adding a
+second: `kaish --gate rm,kaish-trash`.
+
+### ResumeAction: what the first consumer actually needed
+
+The pre-tag question was whether `ConfirmStatement { plan_digest, index }`
+suffices without packaged source text. Two findings, and they point in different
+directions.
+
+`index` was never used to *resume*, because it cannot be. `Kernel::confirm`
+re-parses the captured source and runs statement `index` itself, so the REPL
+hands over an id and gets a result — the happy path never touches `index` at all.
+What the REPL wanted `index` for was the opposite: naming what it would *not* run.
+`echo one; touch b` with `echo` gated runs statement 0 on approval and never
+touches statement 1, and a line that half-runs in silence is exactly the failure
+mode this design keeps refusing elsewhere. Counting the remainder took a re-parse
+(`parser::parse(line)` and skip `index + 1`) — cheap, but shell-grammar work an
+embedder holding an opaque program string should not have to do. Re-*running* the
+remainder is not available at all: statements carry no source spans, so slicing
+the tail back out of the line needs an unparser nobody has.
+
+The sharper finding is one level up. `ExecResult.approval` carries the
+`ApprovalRequestView` alone: `proceed()` builds a `PendingApproval`, puts the view
+on the field, and drops the `ResumeAction`. So the frontend §C.1 wrote that field
+for has to rebuild the route with `ResumeAction::for_capture(&view.capture,
+&view.binding.plan_digest)` — inferring it from the capture's shape, which is the
+one thing the type was introduced to prevent. The recipe in `EMBEDDING.md` said
+otherwise and has been corrected to what a consumer must actually write.
+
+Verdict: **document as is; do not package source text into the variant.** The
+kernel already holds the source in `Capture::Statement` and replays from it, so a
+copy in `ResumeAction` would be a second spelling of the same bytes, and the
+embedder that would use it — one re-driving a remainder — needs a *rendering* of
+statements `index + 1 ..`, which no amount of raw source gives it without a
+parser. If that use case ever earns first-class support, the right shape is a
+kernel-side "continue this program from index N" call, not a text field on a
+resume hint. What should change before the tag is smaller and independent: the
+pending decision on `ExecResult` should carry the `ResumeAction` it was built
+with, rather than making every frontend re-derive it.
+
+---
+
 ## Revision checks: making a race report itself, not whatever it landed on (2026-08-09)
 
 §B.6 reads as one sentence — a stale-revision decision is refused and recorded —
