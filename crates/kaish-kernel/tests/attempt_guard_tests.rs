@@ -91,9 +91,9 @@ async fn dropped_attempt_guard_settles_as_unknown_cancelled_never_an_exit_code()
         !matches!(settled.outcome, Some(Outcome::Exit(_))),
         "a dropped guard must never settle as an exit code"
     );
-    // Unknown closes the chain (spec §B.2) — it stays nominally `Granted`
-    // (there is no separate "closed" state) but is not reservable again.
-    assert_eq!(approvals.state(&req.id), Some(RequestState::Granted));
+    // Unknown consumes the grant (spec §B.2) — the chain reads `Consumed`
+    // and is not reservable again.
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Consumed));
     let err = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap_err();
     assert!(
         matches!(err, kaish_kernel::ledger::LedgerError::AlreadySettled { .. }),
@@ -196,7 +196,7 @@ async fn dropped_attempt_guard_does_not_falsely_exhaust_capacity_for_the_next_po
     );
 
     // Confirm the mechanism, not just the outcome: A really did close.
-    assert_eq!(approvals.state(&req_a.id), Some(RequestState::Granted));
+    assert_eq!(approvals.state(&req_a.id), Some(RequestState::Consumed));
     let chain_a = approvals.get(&req_a.id).unwrap();
     assert!(matches!(
         chain_a.attempts[0].outcome,

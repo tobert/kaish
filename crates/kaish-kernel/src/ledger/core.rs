@@ -69,11 +69,6 @@ struct Chain {
     /// At most one attempt may be `Reserved` against a chain at a time
     /// (spec §A.1's "no other attempt against g was still live").
     live_attempt: Option<AttemptId>,
-    /// Set when an attempt against this (still nominally `Granted`) chain
-    /// settled successfully or `Unknown` — the two outcomes that close a
-    /// chain (spec §B.2). `RequestState` has no separate "closed" variant,
-    /// so this flag is what `is_closed` reads for the `Granted` case.
-    closed_by_settlement: bool,
     /// How many entries currently in the ring name this request. Reaching
     /// zero on an already-closed chain is what makes it evictable from
     /// `LedgerState::chains` (review finding S4) — never while `>0` (an
@@ -102,12 +97,13 @@ impl Chain {
     fn is_closed(&self) -> bool {
         matches!(
             self.state,
-            RequestState::Denied
+            RequestState::Consumed
+                | RequestState::Denied
                 | RequestState::Cancelled
                 | RequestState::Expired
                 | RequestState::Voided
                 | RequestState::Abandoned
-        ) || (self.state == RequestState::Granted && self.closed_by_settlement)
+        )
     }
 }
 
@@ -438,8 +434,8 @@ impl LedgerState {
 
     /// Maintain the live counters and drop the credential for a chain the
     /// caller has just transitioned into a closed state (spec §A.2 — the
-    /// credential is dropped when the chain closes). Callers set
-    /// `state`/`closed_by_settlement` themselves *before* calling this, and
+    /// credential is dropped when the chain closes). Callers set `state`
+    /// themselves *before* calling this, and
     /// only when the chain was not already closed (see each call site's
     /// `was_already_closed` check — review finding B2) — this runs exactly
     /// once per chain, so the counters never go negative in practice;
@@ -666,7 +662,11 @@ impl LedgerInner {
                 Some(deadline) if now >= deadline => Some(Expiring::Request),
                 _ => None,
             },
-            RequestState::Granted if !chain.closed_by_settlement => match &chain.grant {
+            // Only a live grant can expire. A chain a settlement already
+            // consumed is `Consumed`, not `Granted`, so it falls to the
+            // catch-all below and no `Expired` entry is ever appended after
+            // the operation ran.
+            RequestState::Granted => match &chain.grant {
                 Some(grant) if now >= grant.not_after => Some(Expiring::Grant),
                 _ => None,
             },
@@ -747,7 +747,6 @@ impl LedgerInner {
             void_reason: None,
             attempts: HashMap::new(),
             live_attempt: None,
-            closed_by_settlement: false,
             ring_refs: 0,
             assessments: Vec::new(),
         };
@@ -801,14 +800,14 @@ impl LedgerInner {
             return Err(LedgerError::NotAuthorized(id.clone()));
         };
 
-        // A request that already closed (Denied/Expired/Voided/Abandoned, or
-        // Granted-and-settled) is a *known* request, not an absent one — any
+        // A request that already closed (Consumed/Denied/Expired/Voided/
+        // Abandoned) is a *known* request, not an absent one — any
         // presentation against it (right or wrong; its credential is gone,
         // cleared at close) fails naming what happened, with no further
         // `TokenRejected` bookkeeping against an already-dead chain (spec
         // §F.3: "a later good key fails naming the void").
         if chain.is_closed() {
-            let err = if chain.state == RequestState::Granted && chain.closed_by_settlement {
+            let err = if chain.state == RequestState::Consumed {
                 let outcome = chain
                     .attempts
                     .values()
@@ -999,23 +998,26 @@ impl LedgerInner {
         match chain.state {
             RequestState::Requested => return (Err(LedgerError::NotAuthorized(id.clone())), Vec::new()),
             RequestState::Granted => {}
+            // The one closed state that does not answer `Terminal`: a
+            // redemption against a consumed grant reports what the
+            // settlement did and re-executes nothing (spec §B.4).
+            RequestState::Consumed => {
+                let outcome = chain
+                    .attempts
+                    .values()
+                    .find_map(|a| if matches!(a.state, AttemptState::Settled) { a.outcome.clone() } else { None });
+                return (
+                    Err(LedgerError::AlreadySettled {
+                        id: id.clone(),
+                        outcome,
+                    }),
+                    Vec::new(),
+                );
+            }
             other => {
                 let err = self.terminal_error(id, other, chain.void_reason.clone());
                 return (Err(err), Vec::new());
             }
-        }
-        if chain.closed_by_settlement {
-            let outcome = chain
-                .attempts
-                .values()
-                .find_map(|a| if matches!(a.state, AttemptState::Settled) { a.outcome.clone() } else { None });
-            return (
-                Err(LedgerError::AlreadySettled {
-                    id: id.clone(),
-                    outcome,
-                }),
-                Vec::new(),
-            );
         }
         if chain.live_attempt.is_some() {
             return (Err(LedgerError::AttemptInFlight(id.clone())), Vec::new());
@@ -1140,7 +1142,7 @@ impl LedgerInner {
             return Ok(false);
         }
         let closes = matches!(outcome, Outcome::Exit(0) | Outcome::Unknown { .. });
-        if closes && chain.closed_by_settlement {
+        if closes && chain.state == RequestState::Consumed {
             debug_assert!(false, "a second successful settlement was attempted against one grant");
             return Err(LedgerError::InvariantViolated(format!(
                 "request {request_id} already has a successful (or Unknown) settlement — a grant authorizes exactly one"
@@ -1180,8 +1182,13 @@ impl LedgerInner {
                 record.outcome = Some(outcome);
             }
             chain.live_attempt = None;
-            if closes {
-                chain.closed_by_settlement = true;
+            // Only a settlement that closes a still-open chain moves the
+            // state. A chain that already closed some other way keeps the
+            // state that closed it — overwriting `Voided` with `Consumed`
+            // here would erase why the grant died, and its `void_reason`
+            // would then describe a state nothing reports.
+            if closes && !was_already_closed {
+                chain.state = RequestState::Consumed;
             }
         }
         if closes && !was_already_closed {
@@ -1359,6 +1366,11 @@ impl LedgerInner {
         self.lock().scope.clone()
     }
 
+    /// The error a transition against an unmovable request answers with.
+    /// `Consumed` gets `Terminal` here like every other closed state — the
+    /// one exception is redemption, which reports the settled outcome
+    /// instead (spec §B.4) and is handled at both redeem sites before they
+    /// reach this.
     fn terminal_error(&self, id: &RequestId, state: RequestState, void_reason: Option<String>) -> LedgerError {
         match state {
             RequestState::Granted => LedgerError::AlreadyDecided(id.clone()),
@@ -3003,7 +3015,7 @@ mod tests {
             .settle(&req.id, attempt, Outcome::Exit(0))
             .expect("a terminal entry must never be refused by ring capacity");
         assert!(appended);
-        assert_eq!(inner.state(&req.id, None), Some(RequestState::Granted));
+        assert_eq!(inner.state(&req.id, None), Some(RequestState::Consumed));
         #[allow(clippy::unwrap_used)]
         let chain = inner.chain(&req.id, None).unwrap();
         assert!(matches!(

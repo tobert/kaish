@@ -8,7 +8,7 @@
 //! ├── log                      ← NDJSON of the retained log, seq-ordered
 //! └── {request-id}/
 //!     ├── request              ← the request as pretty JSON
-//!     ├── state                ← "requested" | "granted" | "expired" | …
+//!     ├── state                ← "requested" | "granted" | "consumed" | …
 //!     ├── attempts             ← JSON array of attempts and their outcomes
 //!     └── grant                ← the grant as pretty JSON, empty until decided
 //! ```

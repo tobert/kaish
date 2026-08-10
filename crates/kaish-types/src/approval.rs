@@ -2195,6 +2195,19 @@ pub enum RequestState {
     Requested,
     /// Decided yes. May still be reserving/settling attempts.
     Granted,
+    /// A successful settlement consumed the grant, and the chain accepts no
+    /// further transitions (spec §B.2). A grant authorizes exactly one
+    /// successful settlement — `Outcome::Exit(0)`, or `Outcome::Unknown`
+    /// when the executor went away and nobody can say what happened — so
+    /// this is the terminal state the ordinary path ends in.
+    ///
+    /// It names the grant, not the work: a request never claims the
+    /// operation ran. Redeeming here reports the settled outcome and does
+    /// **not** re-execute (spec §B.4); every other transition refuses with
+    /// `LedgerError::Terminal`. A *failed* attempt does not consume the
+    /// grant, so a reported non-zero exit or error leaves the request
+    /// `Granted` and a retry may redeem again.
+    Consumed,
     /// Decided no.
     Denied,
     /// Closed from the requesting side with no decision (spec §B.5). Asking
@@ -2687,12 +2700,23 @@ impl LedgerEntry {
     /// is deliberating (spec §C.7), often several per request, and bumping
     /// on each one would invalidate the revision that approver's eventual
     /// `grant`/`deny` quotes before it ever gets there.
+    ///
+    /// `TokenRejected` **does** bump, and that is a contract, not an
+    /// accident: a bad key advances the attempt counter toward the fifth
+    /// rejection that voids the request (spec §F.3), so the risk an approver
+    /// would be deciding on genuinely changed. Forcing a re-read before the
+    /// grant is the safe direction — an approver quoting a revision from
+    /// before the rejections grants against a picture that no longer holds.
     pub fn bumps_revision(&self) -> bool {
         match self {
             Self::Requested { .. }
             | Self::KeyRetrieved { .. }
             | Self::RevisionRejected { .. }
             | Self::Assessed { .. } => false,
+            // Named rather than left to the wildcard: see the doc above —
+            // a rejection moves the request toward `Voided`, so a decision
+            // quoting a pre-rejection revision is stale.
+            Self::TokenRejected { .. } => self.request().is_some(),
             _ => self.request().is_some(),
         }
     }
@@ -4169,6 +4193,31 @@ mod tests {
                 "wrong revision-bump rule for {entry:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_rejected_key_bumps_the_revision_of_the_request_it_names() {
+        // The contract, not an accident of the catch-all arm: a bad key
+        // advances the attempt counter toward the fifth rejection that
+        // voids the request, so an approver holding a revision from before
+        // it must re-read before deciding (spec §A.7, §F.3).
+        let bump = LedgerEntry::TokenRejected {
+            seq: 1,
+            at: SystemTime::UNIX_EPOCH,
+            request: Some(RequestId::new(1, 1)),
+            attempts: 3,
+        };
+        assert!(bump.bumps_revision(), "a rejection against a named request bumps");
+
+        // A presentation matching no request counts against nothing, so
+        // there is no revision to bump (spec §F.3).
+        let unmatched = LedgerEntry::TokenRejected {
+            seq: 2,
+            at: SystemTime::UNIX_EPOCH,
+            request: None,
+            attempts: 0,
+        };
+        assert!(!unmatched.bumps_revision(), "an unmatched rejection bumps nothing");
     }
 
     #[test]

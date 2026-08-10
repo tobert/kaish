@@ -30,11 +30,15 @@ pub enum LedgerError {
     /// A redemption was attempted while another attempt against the same
     /// grant is still `Reserved`.
     AttemptInFlight(RequestId),
-    /// The request is in a terminal state (`Denied`, `Cancelled`,
-    /// `Expired`, `Voided`, or `Abandoned`) and accepts no further
-    /// transitions.
+    /// The request is in a terminal state (`Consumed`, `Denied`,
+    /// `Cancelled`, `Expired`, `Voided`, or `Abandoned`) and accepts no
+    /// further transitions.
     /// `detail` carries the specific reason for `Voided` (spec §F.3's "a
     /// later good key fails naming the void").
+    ///
+    /// Redemption against a `Consumed` request answers
+    /// [`Self::AlreadySettled`] instead — it carries the outcome the
+    /// settlement reported (spec §B.4).
     Terminal {
         /// The request that is terminal.
         id: RequestId,

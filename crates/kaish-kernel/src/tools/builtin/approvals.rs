@@ -849,6 +849,7 @@ mod tests {
         use kaish_types::approval::RequestState;
         assert_eq!(state_word(RequestState::Requested), "requested");
         assert_eq!(state_word(RequestState::Granted), "granted");
+        assert_eq!(state_word(RequestState::Consumed), "consumed");
         assert_eq!(state_word(RequestState::Expired), "expired");
     }
 }
