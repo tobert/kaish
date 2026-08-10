@@ -2578,7 +2578,12 @@ impl kaish_tool_api::ToolCtx for ExecContext {
 
     fn approvals(&self) -> kaish_tool_api::Approvals {
         match &self.ledger_access {
-            Some(access) => kaish_tool_api::Approvals::from_pending(access.approvals.pending()),
+            // `PageRequest::default()`'s limit already covers every
+            // realistic pending set (spec §D.4's `live_capacity`); a tool
+            // reading this snapshot has no cursor of its own to page with.
+            Some(access) => kaish_tool_api::Approvals::from_pending(
+                access.approvals.pending(kaish_types::approval::PageRequest::default()).items,
+            ),
             None => kaish_tool_api::Approvals::empty(),
         }
     }

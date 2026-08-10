@@ -95,7 +95,7 @@ impl Session {
     /// its transitions, which become the redemption's conditions — and
     /// return its id and bearer key.
     async fn approve_pending(&self) -> (RequestId, String) {
-        let pending = self.kernel.approvals().pending();
+        let pending = self.kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items;
         assert_eq!(pending.len(), 1, "exactly one request must be pending");
         let view = pending[0].clone();
         // `not_after` is compared against a reading from the ledger's own
@@ -120,7 +120,7 @@ impl Session {
 
     /// Every retained entry's variant name, in commit order.
     fn entry_kinds(&self) -> Vec<&'static str> {
-        entries(self.kernel.approvals().log(0))
+        entries(self.kernel.approvals().log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items)
             .iter()
             .filter(|e| !is_statement_tap(e))
             .map(entry_kind)
@@ -129,7 +129,7 @@ impl Session {
 
     /// The `observed` set the one `Redeemed` entry recorded, if there is one.
     fn redeemed_observations(&self) -> Option<Vec<kaish_types::approval::Observation>> {
-        entries(self.kernel.approvals().log(0)).into_iter().find_map(|e| match e {
+        entries(self.kernel.approvals().log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).into_iter().find_map(|e| match e {
             LedgerEntry::Redeemed { observed, .. } => Some(observed),
             _ => None,
         })
@@ -401,7 +401,7 @@ async fn an_observation_is_stamped_from_the_installed_clock() {
     let redeemed_at = session
         .kernel
         .approvals()
-        .log(0)
+        .log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items
         .into_iter()
         .filter(|record| matches!(record.known(), Some(LedgerEntry::Redeemed { .. })))
         .map(|record| record.at)
@@ -798,7 +798,7 @@ async fn the_path_resolver_reads_through_the_backend() {
     session.run("set -o approvals").await;
     session.run("write t.txt 'replacement'").await;
 
-    let pending = session.kernel.approvals().pending();
+    let pending = session.kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items;
     let resource = &pending[0].resources[0];
     assert_eq!(resource.kind, "path");
     let transition = resource
@@ -910,7 +910,7 @@ struct RacingBackend {
 impl RacingBackend {
     fn racing(&self, path: &Path) -> bool {
         path == self.raced
-            && entries(self.approvals.log(0))
+            && entries(self.approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items)
                 .iter()
                 .any(|e| matches!(e, LedgerEntry::Redeemed { .. }))
     }

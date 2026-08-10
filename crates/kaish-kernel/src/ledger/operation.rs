@@ -112,7 +112,16 @@ impl KernelOperation {
 /// [`StatementClassifier`]: kaish_tool_api::StatementClassifier
 pub(crate) fn static_gate_floor(plan: &Plan) -> Option<StatementPosture> {
     let empties_the_trash = plan.commands.iter().any(|command| {
-        command.name == "kaish-trash" && command.args.first().map(String::as_str) == Some("empty")
+        command.name == "kaish-trash"
+            && command.args.first().is_some_and(|arg| match arg {
+                kaish_types::approval::PlannedValue::Plain(s) => s == "empty",
+                // A redacted first argument means this floor cannot rule out
+                // `empty` — count it as a match rather than silently skipping
+                // the one static floor this operation has. `PlannedValue` is
+                // `#[non_exhaustive]`, so a variant this build does not know
+                // about gets the same conservative answer.
+                _ => true,
+            })
     });
     empties_the_trash.then(|| {
         StatementPosture::gate(
@@ -142,7 +151,7 @@ mod tests {
     fn kaish_trash_empty_hits_the_static_floor() {
         let plan = plan_of(vec![PlannedCommand::new(
             "kaish-trash",
-            vec!["empty".to_string()],
+            vec![kaish_types::approval::PlannedValue::Plain("empty".to_string())],
             Vec::new(),
             false,
         )]);
@@ -157,7 +166,7 @@ mod tests {
         // ordinary reversible reading or bookkeeping.
         let plan = plan_of(vec![PlannedCommand::new(
             "kaish-trash",
-            vec!["list".to_string()],
+            vec![kaish_types::approval::PlannedValue::Plain("list".to_string())],
             Vec::new(),
             false,
         )]);
@@ -166,7 +175,7 @@ mod tests {
 
     #[test]
     fn an_unrelated_statement_sets_no_floor() {
-        let plan = plan_of(vec![PlannedCommand::new("echo", vec!["hi".to_string()], Vec::new(), false)]);
+        let plan = plan_of(vec![PlannedCommand::new("echo", vec![kaish_types::approval::PlannedValue::Plain("hi".to_string())], Vec::new(), false)]);
         assert_eq!(static_gate_floor(&plan), None);
     }
 

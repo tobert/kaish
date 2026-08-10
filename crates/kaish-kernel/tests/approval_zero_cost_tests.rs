@@ -91,7 +91,7 @@ async fn an_unsubscribed_ten_thousand_path_delete_posts_nothing_and_builds_no_re
         "an unsubscribed {PATHS}-path delete built {} approval requests — 0 are allowed",
         after - before
     );
-    let log = entries(kernel.approvals().log(0));
+    let log = entries(kernel.approvals().log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items);
     assert_eq!(
         log.len(),
         1,

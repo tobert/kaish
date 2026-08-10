@@ -106,7 +106,7 @@ async fn assessments_appended_while_deliberating_survive_an_abandoned_request() 
     assert_eq!(chain.assessments[0].outcome, AssessmentOutcome::Escalate);
 
     // It is on the log too, not only reconstructible from the chain.
-    let assessed_count = entries(approvals.log(0))
+    let assessed_count = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items)
         .into_iter()
         .filter(|e| matches!(e, LedgerEntry::Assessed { .. }))
         .count();

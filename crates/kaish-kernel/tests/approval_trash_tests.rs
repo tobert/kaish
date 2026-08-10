@@ -56,7 +56,7 @@ impl Session {
     /// As [`Self::approve_pending`], also returning the request's id.
     async fn approve_pending_id(&self) -> (RequestId, String) {
         let approvals = self.kernel.approvals();
-        let pending = approvals.pending();
+        let pending = approvals.pending(kaish_types::approval::PageRequest::default()).items;
         assert_eq!(
             pending.len(),
             1,
@@ -91,7 +91,7 @@ impl Session {
     /// `Kernel::confirm` — the approval side's own fulfillment path.
     async fn confirm_pending(&self) -> ExecResult {
         let approvals = self.kernel.approvals();
-        let pending = approvals.pending();
+        let pending = approvals.pending(kaish_types::approval::PageRequest::default()).items;
         assert_eq!(pending.len(), 1, "exactly one request must be pending");
         let id = pending[0].id.clone();
         self.grant(&id).await;

@@ -106,7 +106,11 @@ impl ApprovalsFs {
 
     fn root_file(&self, name: &str) -> io::Result<Vec<u8>> {
         match name {
-            "pending" => pretty(&self.approvals.pending()),
+            // A bare JSON array, same shape this file has always had — the
+            // projection loops every page of `Approvals::pending` internally
+            // (spec §D.2) rather than exposing the cursor here, because a
+            // one-shot file read has nowhere to carry a `next` token to.
+            "pending" => pretty(&self.all_pending()),
             "standing" => pretty(&self.approvals.standing()),
             "log" => {
                 // NDJSON, sequence-ordered: one versioned record per line, so
@@ -114,9 +118,11 @@ impl ApprovalsFs {
                 // re-reading a growing array. Each line is a `LedgerRecord`
                 // (spec §A.5) — `schema_version`, `sequence`, `at`, `scope`,
                 // and the entry itself under `entry` — so a reader knows what
-                // it is holding and whose it is.
+                // it is holding and whose it is. Loops every page of
+                // `Approvals::log` (spec §D.2) for the same reason `pending`
+                // does above.
                 let mut out = String::new();
-                for record in self.approvals.log(0) {
+                for record in self.all_log() {
                     out.push_str(&serialize(&record)?);
                     out.push('\n');
                 }
@@ -124,6 +130,49 @@ impl ApprovalsFs {
             }
             _ => Err(io::Error::new(io::ErrorKind::NotFound, format!("unknown file: {name}"))),
         }
+    }
+
+    /// Every pending request, walking `Approvals::pending`'s pages to the
+    /// end. The live set is bounded by `LedgerConfig::live_capacity`
+    /// (default 1024), which `PageRequest::default`'s own limit already
+    /// covers in one page in the common case; this loop is what stays
+    /// correct if that ever isn't true, rather than silently truncating.
+    fn all_pending(&self) -> Vec<kaish_types::approval::ApprovalRequestView> {
+        let mut items = Vec::new();
+        let mut cursor = None;
+        loop {
+            let mut page_request = kaish_types::approval::PageRequest::default();
+            if let Some(cursor) = cursor {
+                page_request = page_request.with_cursor(cursor);
+            }
+            let page = self.approvals.pending(page_request);
+            let next = page.next;
+            items.extend(page.items);
+            match next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        items
+    }
+
+    /// Every retained log record from `seq` 0, walking `Approvals::log`'s
+    /// pages to the end — same reasoning as [`Self::all_pending`].
+    fn all_log(&self) -> Vec<kaish_types::approval::LedgerRecord> {
+        let mut items = Vec::new();
+        let mut since = 0;
+        loop {
+            let page = self
+                .approvals
+                .log(since, kaish_types::approval::DEFAULT_PAGE_LIMIT);
+            let next = page.next;
+            items.extend(page.items);
+            match next {
+                Some(next) => since = next.seq(),
+                None => break,
+            }
+        }
+        items
     }
 
     fn request_file(&self, id: &str, name: &str) -> io::Result<Vec<u8>> {

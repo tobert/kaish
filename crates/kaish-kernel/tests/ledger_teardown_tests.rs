@@ -78,7 +78,7 @@ async fn a_discarded_job_closes_its_held_request() {
     let dir = tempdir();
     let kernel = session(dir.path());
     let id = gated_background_job(&kernel, dir.path(), "precious.txt").await;
-    assert_eq!(kernel.approvals().pending().len(), 1);
+    assert_eq!(kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items.len(), 1);
 
     let discarded = run(&kernel, "kill --discard %1").await;
     assert_eq!(discarded.code, 0, "discard: {}", discarded.err);
@@ -89,7 +89,7 @@ async fn a_discarded_job_closes_its_held_request() {
         "a discarded job's held request must be closed, not orphaned"
     );
     assert!(
-        kernel.approvals().pending().is_empty(),
+        kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items.is_empty(),
         "the live count must return to zero — nothing else will ever close it"
     );
     assert!(dir.path().join("precious.txt").exists(), "nothing ran");
@@ -104,7 +104,7 @@ async fn cancelling_every_job_closes_their_held_requests() {
     let kernel = session(dir.path());
     let first = gated_background_job(&kernel, dir.path(), "one.txt").await;
     let second = gated_background_job(&kernel, dir.path(), "two.txt").await;
-    assert_eq!(kernel.approvals().pending().len(), 2);
+    assert_eq!(kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items.len(), 2);
 
     kernel.cancel_all_jobs().await;
 
@@ -115,7 +115,7 @@ async fn cancelling_every_job_closes_their_held_requests() {
             "a cancelled job's held request must be closed"
         );
     }
-    assert!(kernel.approvals().pending().is_empty());
+    assert!(kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items.is_empty());
 }
 
 /// Row 3: a session shuts down, and closes **only its own scope's** requests.
@@ -151,7 +151,7 @@ async fn a_session_shutdown_closes_only_its_own_scopes_requests() {
     run(&staying, "set -o approvals").await;
     let theirs = run(&staying, "rm theirs.txt").await;
     let theirs = theirs.approval_request().expect("a gated request").id;
-    assert_eq!(staying.approvals().pending().len(), 2, "one shared ledger");
+    assert_eq!(staying.approvals().pending(kaish_types::approval::PageRequest::default()).items.len(), 2, "one shared ledger");
 
     leaving.shutdown().await.expect("shutdown");
 
@@ -165,7 +165,7 @@ async fn a_session_shutdown_closes_only_its_own_scopes_requests() {
         Some(RequestState::Requested),
         "and must not close another session's request"
     );
-    assert_eq!(staying.approvals().pending().len(), 1);
+    assert_eq!(staying.approvals().pending(kaish_types::approval::PageRequest::default()).items.len(), 1);
 }
 
 /// Row 4: a kernel shuts down with a gated job outstanding. Both levers fire
@@ -182,14 +182,14 @@ async fn kernel_shutdown_closes_a_gated_jobs_outstanding_request() {
     std::fs::write(dir.path().join("foreground.txt"), "keep me").expect("write");
     let foreground = run(&kernel, "rm foreground.txt").await;
     let foreground = foreground.approval_request().expect("a gated request").id;
-    assert_eq!(kernel.approvals().pending().len(), 2);
+    assert_eq!(kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items.len(), 2);
 
     kernel.shutdown().await.expect("shutdown");
 
     assert_eq!(kernel.approvals().state(&backgrounded), Some(RequestState::Cancelled));
     assert_eq!(kernel.approvals().state(&foreground), Some(RequestState::Cancelled));
     assert!(
-        kernel.approvals().pending().is_empty(),
+        kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items.is_empty(),
         "shutdown must return every live slot in this kernel's scope"
     );
 }
@@ -220,7 +220,7 @@ async fn a_tool_level_gate_halts_the_program_and_carries_the_pending_request() {
         .approval_request()
         .expect("the result must carry the pending request");
     assert_eq!(pending.operation.as_str(), "fs.remove");
-    assert_eq!(kernel.approvals().pending().len(), 1);
+    assert_eq!(kernel.approvals().pending(kaish_types::approval::PageRequest::default()).items.len(), 1);
     assert!(dir.path().join("x").exists(), "and nothing was deleted");
 }
 

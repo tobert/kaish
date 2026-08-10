@@ -59,7 +59,7 @@ fn far_future() -> SystemTime {
 /// `Approvals::pending()` runs the full sweep, and PR 3 wires the sweep to
 /// drain the outbox first (spec §C.1).
 fn force_drain(approvals: &kaish_kernel::ledger::Approvals) {
-    let _ = approvals.pending();
+    let _ = approvals.pending(kaish_types::approval::PageRequest::default()).items;
 }
 
 #[tokio::test]

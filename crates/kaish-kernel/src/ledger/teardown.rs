@@ -73,16 +73,32 @@ pub(crate) async fn cancel_scope(
     scope: &ApprovalScope,
     reason: CancelReason,
 ) -> usize {
+    // Every live request in scope, not just one page: teardown must not
+    // strand a request past `TEARDOWN_PAGE_LIMIT` just because the pending
+    // set happened to be larger than one page (spec §D.2's pagination is for
+    // a reader that may stop early; this sweep may not).
+    const TEARDOWN_PAGE_LIMIT: usize = 256;
     let mut closed = 0;
-    for view in approvals.pending() {
-        if &view.scope != scope {
-            continue;
+    let mut cursor = None;
+    loop {
+        let mut page_request = kaish_types::approval::PageRequest::first(TEARDOWN_PAGE_LIMIT)
+            .with_scope(scope.clone());
+        if let Some(cursor) = cursor {
+            page_request = page_request.with_cursor(cursor);
         }
-        // Fresh from this same `pending()` scan (spec §B.6) — the closest a
-        // read-then-act call can get to "current", and still a genuine race
-        // window against whatever the ledger lock serializes next.
-        if cancel_one(requester, by, &view.id, view.revision, reason.clone()).await {
-            closed += 1;
+        let page = approvals.pending(page_request);
+        for view in &page.items {
+            // Fresh from this same `pending()` scan (spec §B.6) — the
+            // closest a read-then-act call can get to "current", and still
+            // a genuine race window against whatever the ledger lock
+            // serializes next.
+            if cancel_one(requester, by, &view.id, view.revision, reason.clone()).await {
+                closed += 1;
+            }
+        }
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
         }
     }
     closed

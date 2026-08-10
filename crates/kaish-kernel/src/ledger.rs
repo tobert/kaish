@@ -38,6 +38,7 @@ mod resolver;
 mod standing;
 mod subscription;
 mod teardown;
+mod watch;
 
 pub use attempt_guard::AttemptGuard;
 pub use clock::{Clock, SystemClock};
@@ -58,14 +59,15 @@ pub(crate) use teardown::{cancel_job_request, cancel_scope};
 // next to `with_policy` and `with_state_resolver`.
 pub use kaish_tool_api::{
     ClassificationError, CommandNameClassifier, ExecutionContext, MountAccess, MountClass,
-    MountDescriptor, StatementAssessment, StatementClassificationInput, StatementClassifier,
-    StatementPosture,
+    MountDescriptor, RedactionMark, Redactor, StatementAssessment, StatementClassificationInput,
+    StatementClassifier, StatementPosture,
 };
 pub(crate) use resolver::{conditions_to_observe, digest_path};
 pub use handles::{
     ApproverHandle, AssessmentRecorder, AttemptHandle, AttemptView, Approvals, DecisionContext, Ledger,
     RequestChain, Requester,
 };
+pub use watch::{LedgerStream, WatchEvent};
 
 /// Test-only: a stamped, tokenless view for exercising the control-plane
 /// `.approval` field (job rows, scatter rows, pipeline overrides) without

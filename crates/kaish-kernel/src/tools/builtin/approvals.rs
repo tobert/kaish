@@ -83,6 +83,13 @@ struct LogArgs {
     /// read to page forward without re-reading the tail.
     #[arg(long = "since")]
     since: Option<u64>,
+
+    /// The most entries to show. Defaults to 200; the ledger's own retention
+    /// (`LedgerConfig::retained_entries`, default 4096) is the hard ceiling.
+    /// When more remain, the output names the `SEQ` to pass to `--since` for
+    /// the next page.
+    #[arg(long = "limit")]
+    limit: Option<usize>,
 }
 
 #[derive(Args, Debug)]
@@ -314,21 +321,33 @@ fn cmd_list(flags: &ListArgs, ctx: &ExecContext) -> ExecResult {
         );
     }
 
-    // Pending is the default: the set an operator has to act on.
-    let views = if flags.all {
-        access
-            .approvals
-            .ids()
-            .into_iter()
-            .filter_map(|id| access.approvals.get(&id).map(|chain| (chain.state, chain.request)))
-            .collect::<Vec<_>>()
+    // Pending is the default: the set an operator has to act on. `list` has
+    // no `--limit`/cursor flags of its own (unlike `log`) — the ledger's own
+    // `live_capacity` (default 1024) already bounds how many undecided
+    // requests can exist at once, so one page at that size covers every real
+    // pending set. A `next` beyond it still gets a named, caller-visible
+    // advisory rather than a silent truncation.
+    let (views, next) = if flags.all {
+        (
+            access
+                .approvals
+                .ids()
+                .into_iter()
+                .filter_map(|id| access.approvals.get(&id).map(|chain| (chain.state, chain.request)))
+                .collect::<Vec<_>>(),
+            None,
+        )
     } else {
-        access
+        let page = access
             .approvals
-            .pending()
-            .into_iter()
-            .map(|view| (kaish_types::approval::RequestState::Requested, view))
-            .collect()
+            .pending(kaish_types::approval::PageRequest::first(LIST_PENDING_LIMIT));
+        (
+            page.items
+                .into_iter()
+                .map(|view| (kaish_types::approval::RequestState::Requested, view))
+                .collect(),
+            page.next,
+        )
     };
 
     if views.is_empty() {
@@ -348,7 +367,7 @@ fn cmd_list(flags: &ListArgs, ctx: &ExecContext) -> ExecResult {
         })
         .collect();
     let rows: Vec<_> = views.iter().map(|(_, view)| view).collect();
-    ExecResult::with_output(
+    let mut result = ExecResult::with_output(
         OutputData::table(
             vec![
                 "ID".to_string(),
@@ -360,8 +379,22 @@ fn cmd_list(flags: &ListArgs, ctx: &ExecContext) -> ExecResult {
             nodes,
         )
         .with_rich_json(json_or_null(&rows)),
-    )
+    );
+    if let Some(cursor) = next {
+        result.err = format!(
+            "... more than {LIST_PENDING_LIMIT} pending — read the ledger's log from seq {} for the rest\n",
+            cursor.seq()
+        );
+    }
+    result
 }
+
+/// `approvals list`'s internal page size for the pending set. Shares
+/// `PageRequest::default`'s own limit — which matches `LedgerConfig::live_capacity`'s
+/// default — so this covers every realistic pending set in one page without
+/// exposing a `--limit` flag the spec's CLI surface does not name for `list`
+/// (unlike `log`).
+const LIST_PENDING_LIMIT: usize = kaish_types::approval::DEFAULT_PAGE_LIMIT;
 
 fn cmd_show(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
     let access = match ledger(ctx) {
@@ -428,21 +461,28 @@ fn cmd_show(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
     ExecResult::with_output_and_text(OutputData::text(text.clone()).with_rich_json(rich), text)
 }
 
+/// Default page size for `approvals log` with no `--limit` — generous enough
+/// for a terminal scrollback, well short of `LedgerConfig::retained_entries`'s
+/// own default (4096), so an unbounded ledger never means an unbounded read.
+const DEFAULT_LOG_LIMIT: usize = 200;
+
 fn cmd_log(flags: &LogArgs, ctx: &ExecContext) -> ExecResult {
     let access = match ledger(ctx) {
         Ok(a) => a,
         Err(e) => return e,
     };
-    let records = access.approvals.log(flags.since.unwrap_or(0));
-    if records.is_empty() {
+    let limit = flags.limit.unwrap_or(DEFAULT_LOG_LIMIT);
+    let page = access.approvals.log(flags.since.unwrap_or(0), limit);
+    if page.items.is_empty() {
         return empty_list("(no ledger entries)\n");
     }
 
     // The rich payload is the whole versioned record (spec §A.5) — the
     // `schema_version` and the scope are what tell a reader whose entry this
     // is and whether it understands it. The table reads the entry inside.
-    let rows: Vec<serde_json::Value> = records.iter().map(json_value).collect();
-    let nodes: Vec<OutputNode> = records
+    let rows: Vec<serde_json::Value> = page.items.iter().map(json_value).collect();
+    let mut nodes: Vec<OutputNode> = page
+        .items
         .iter()
         .zip(&rows)
         .map(|(record, row)| {
@@ -461,13 +501,33 @@ fn cmd_log(flags: &LogArgs, ctx: &ExecContext) -> ExecResult {
             ])
         })
         .collect();
-    ExecResult::with_output(
+    // A page that filled means more may remain — name the exact `--since` a
+    // caller passes to keep going, rather than leaving a truncated read that
+    // looks complete.
+    let text = page.next.map(|cursor| {
+        format!("... more entries — `approvals log --since {}` for the next page\n", cursor.seq())
+    });
+    if let Some(cursor) = page.next {
+        nodes.push(OutputNode::new("...").with_cells(vec![
+            "more".to_string(),
+            format!("--since {}", cursor.seq()),
+        ]));
+    }
+    let rich = serde_json::json!({
+        "items": rows,
+        "next": page.next.map(|c| c.seq()),
+    });
+    let mut result = ExecResult::with_output(
         OutputData::table(
             vec!["SEQ".to_string(), "ENTRY".to_string(), "REQUEST".to_string()],
             nodes,
         )
-        .with_rich_json(serde_json::Value::Array(rows)),
-    )
+        .with_rich_json(rich),
+    );
+    if let Some(text) = text {
+        result.err = text;
+    }
+    result
 }
 
 async fn cmd_cancel(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
@@ -679,7 +739,7 @@ mod tests {
                 .unwrap_or_default()
         };
         assert_eq!(param_names("list"), vec!["pending", "all", "standing"]);
-        assert_eq!(param_names("log"), vec!["since"]);
+        assert_eq!(param_names("log"), vec!["since", "limit"]);
         assert_eq!(param_names("grant"), vec!["until"]);
         assert_eq!(param_names("deny"), vec!["reason"]);
         assert!(param_names("show").is_empty());
