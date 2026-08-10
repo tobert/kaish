@@ -751,6 +751,12 @@ breaking entries are marked **BREAKING**.
   every grant regardless of the flag.
 
 ### Fixed
+- **`help limits` and `docs/LANGUAGE.md` said scatter returns results in
+  completion order.** It returns them in item order and always has — `help
+  scatter` and the code agree; the two docs were wrong, not the behavior.
+- **`docs/LANGUAGE.md` listed the `test` builtin as nonexistent** alongside
+  `[ ]` — `test` has shipped since 0.11.0, so the reference was steering agents
+  around a builtin they have. Only `[ ]` is missing.
 - **A panicked background job no longer reports as an ordinary `exit 1`**
   (GH #247) — `execute_background` uses a oneshot channel exclusively, so a
   panic inside the spawned task dropped the sender with no result, and the

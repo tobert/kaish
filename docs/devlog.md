@@ -15,6 +15,85 @@ before it ships.
 
 ---
 
+## Pre-release polish — reading the docs against the code (2026-08-10)
+
+The charter was a holistic consistency-and-debt sweep before 0.14.0, with one
+instruction that shaped everything: fix what you surface, in the same motion.
+No findings list. So this entry is about what a code-first read of the prose
+turns up when nobody is allowed to write the finding down and move on.
+
+The retired-word sweep was the cheap half. `latch` and `nonce` were retired
+with the mechanism, and the cutover renamed the API, the option, the wire
+spelling, and the Terms table — but comments and test names are not API, so
+nobody's compiler complained. Twenty-six `latch_*` test names in
+`approval_trash_tests.rs`, a `--confirm <nonce>` placeholder in the subcommand
+router, and — the one that actually mattered — two comments in `ledger/core.rs`
+pointing at `nonce.rs`, one of them in the future tense: "`nonce.rs` is deleted
+outright in the cutover (PR 5)". The cutover was months ago. A comment written
+about a change that has since landed reads as a live plan.
+
+The instructive part is which survivals are correct. The ledger genuinely
+*latches* its clock — a verb, not the retired noun — and both help content and
+`kernel.rs` deliberately teach that `set -o latch` turns nothing on, because an
+agent that types the old spelling gets exit 0 and silence otherwise. Grep found
+sixty hits; about half were load-bearing. There is no mechanical version of
+this sweep.
+
+Three claims had stopped being true. LANGUAGE.md printed the gate's stderr line
+as `rm: pending approval …` — the message is built once, in
+`ApprovalOutcome::proceed`, with no tool prefix, and a test pins the exact
+string. The spec's §A.2 code block still showed `ApproverHandle(Arc<LedgerInner>,
+AuthorityId)`, a type that does not exist. And §B.5 said `JobStatus::Latched`
+keeps its name while §I.4, four hundred lines down in the same file, records
+Amy retiring exactly that spelling. Two sections of one document disagreeing is
+the failure mode a living spec has that a changelog does not.
+
+Two external reviews came in mid-sweep. Both earned their keep, and both had to
+be checked. Deepseek's code pass found five `LedgerError` messages rendering a
+type through `{:?}` where the reader needs the value — `AlreadySettled` printing
+`Exit(0)` instead of saying the run reported exit 0 — plus a REPL that called
+`tokio::signal::unix` unconditionally twelve lines below a correctly
+`#[cfg(unix)]`-gated `init_terminal`. All real. It also proposed narrowing three
+"stranded" public types; all three turned out to be structurally reachable
+(`AttemptView` is the type of a public field, `StateResolverConflict` is a
+public fn's error type), and `pub(crate)` on any of them is a compile error. One
+grep each. Gemini's docs pass found four things and was right four times,
+including the highest-harm bug in the wave: LANGUAGE.md's "intentionally
+missing" table said the `test` command does not exist. It has been a builtin
+since 0.11.0. The reference was telling agents to contort scripts around
+something they already have.
+
+Two dispositions worth recording. Deepseek wanted `#[doc(hidden)]` on
+`PrincipalId` and `ApprovalScope::with_actor` — genuinely dead, no caller
+anywhere, and no path from `KernelConfig` since `Kernel` builds the scope itself
+and there is no `with_actor` beside `with_session`. But `ApprovalScope.actor_id`
+is a public documented field and `ApprovalScope` is `#[non_exhaustive]`, so
+`with_actor` is the *only* way an embedder could ever set it. Hiding the
+constructor of a visible field documents nothing and confuses more. They say so
+instead: nothing in the kernel sets an actor, and this is reserved wire shape.
+And `SelfApproval`'s message still names `deny_self_approval`, which style.md
+records as an open question — an error naming a config field. Kept, on the
+grounds that the reader who can act *is* the embedder who set the flag, so the
+name is the pointer to the fix rather than a leak. Restructured so constraint
+and consequence lead and the flag lands last, as the escape hatch.
+
+Grepping for one finding found another twice. Gemini flagged LANGUAGE.md's
+claim that scatter returns results in completion order — the code collects
+handles in item order and awaits them in that order, and scatter's own output
+docs say "in item order" twice. Grepping the phrase turned up `help limits`
+saying the same wrong thing, which put it in direct contradiction with `help
+scatter` in the same help system. Same shape as the CLAUDE.md capability-feature
+list: EMBEDDING.md's table already had all six axes and the correct default;
+the contributor doc still said five and `["localfs"]` — the worse place for it
+to be wrong, since that is the doc a seventh axis gets added by.
+
+The TODO inventory came back empty, which is worth recording as a fact rather
+than a non-event: zero `TODO`/`FIXME` markers in production code and docs, every
+hit a test fixture or a `grep` example. The ladder in CLAUDE.md — small PR,
+inline TODO, PR body, issue — is being walked.
+
+---
+
 ## The eighth state gets a name (2026-08-10)
 
 The previous entry ended by naming two questions and deliberately not
