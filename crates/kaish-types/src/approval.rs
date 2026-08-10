@@ -2195,6 +2195,19 @@ pub enum RequestState {
     Requested,
     /// Decided yes. May still be reserving/settling attempts.
     Granted,
+    /// A successful settlement consumed the grant, and the chain accepts no
+    /// further transitions (spec §B.2). A grant authorizes exactly one
+    /// successful settlement — `Outcome::Exit(0)`, or `Outcome::Unknown`
+    /// when the executor went away and nobody can say what happened — so
+    /// this is the terminal state the ordinary path ends in.
+    ///
+    /// It names the grant, not the work: a request never claims the
+    /// operation ran. Redeeming here reports the settled outcome and does
+    /// **not** re-execute (spec §B.4); every other transition refuses with
+    /// `LedgerError::Terminal`. A *failed* attempt does not consume the
+    /// grant, so a reported non-zero exit or error leaves the request
+    /// `Granted` and a retry may redeem again.
+    Consumed,
     /// Decided no.
     Denied,
     /// Closed from the requesting side with no decision (spec §B.5). Asking

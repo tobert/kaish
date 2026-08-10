@@ -350,6 +350,7 @@ async fn redeem_after_a_successful_settlement_reports_the_outcome_and_does_not_r
     approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
     let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
     requester.settle(&attempt, Outcome::Exit(0)).await.unwrap();
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Consumed));
 
     let before = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).len();
     let err = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap_err();
@@ -360,6 +361,134 @@ async fn redeem_after_a_successful_settlement_reports_the_outcome_and_does_not_r
         other => panic!("expected AlreadySettled, got {other:?}"),
     }
     assert_eq!(entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).len(), before, "no new Redeemed should have been appended");
+
+    // The key path answers the same way: the credential is gone (cleared at
+    // close), and what comes back is the settled outcome, not `Terminal`.
+    let err = requester
+        .redeem_with_token(&req.id, "whatever", agent("agent-1"), ConditionReport::none())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, LedgerError::AlreadySettled { outcome: Some(Outcome::Exit(0)), .. }),
+        "a key presented after a consumed grant reports the outcome, got {err:?}"
+    );
+}
+
+/// §B.2/§B.3: a successful settlement consumes the grant, and the request
+/// says so in its own `state` — a reader of a record does not have to
+/// derive closure from the `Settled` entry.
+#[tokio::test]
+async fn a_successful_settlement_moves_the_request_to_consumed() {
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
+    approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
+    let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
+    let before_revision = approvals.get(&req.id).unwrap().request.revision;
+    let before_len = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).len();
+
+    requester.settle(&attempt, Outcome::Exit(0)).await.unwrap();
+
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Consumed));
+    // The state transition rides the `Settled` entry — no second entry, and
+    // so exactly one revision bump for the two facts.
+    let log = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items);
+    assert_eq!(log.len(), before_len + 1, "closing appends the `Settled` entry and nothing else");
+    assert!(matches!(
+        log.last(),
+        Some(LedgerEntry::Settled { outcome: Outcome::Exit(0), .. })
+    ));
+    assert_eq!(
+        approvals.get(&req.id).unwrap().request.revision,
+        before_revision + 1,
+        "one entry, one bump — the state move must not bump a second time"
+    );
+    // The slot comes back: `Consumed` is closed, so it stops counting live.
+    assert!(approvals.pending(kaish_types::approval::PageRequest::default()).items.is_empty());
+}
+
+/// §B.3: `Consumed` is terminal like the rest. Redemption is the one
+/// exception (it reports the outcome — see the test above); everything else
+/// refuses with `Terminal` naming `Consumed`, and appends nothing.
+#[tokio::test]
+async fn every_other_transition_against_a_consumed_request_is_terminal() {
+    // Each case quotes the *current* revision — a stale quote would be
+    // refused as a race (§B.6) before the state check ever ran, and this
+    // test is about the state check.
+    // grant
+    {
+        let (_requester, approvals, approver, req) = consumed_request().await;
+        let rev = approvals.get(&req.id).unwrap().request.revision;
+        let before = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).clone();
+        let err = approver.grant(&req.id, rev, terms(&req, far_future())).await.unwrap_err();
+        assert!(matches!(err, LedgerError::Terminal { state: RequestState::Consumed, .. }), "{err:?}");
+        assert_eq!(entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items), before, "a refused grant appends nothing");
+    }
+    // deny
+    {
+        let (_requester, approvals, approver, req) = consumed_request().await;
+        let rev = approvals.get(&req.id).unwrap().request.revision;
+        let err = approver.deny(&req.id, rev, "too late").await.unwrap_err();
+        assert!(matches!(err, LedgerError::Terminal { state: RequestState::Consumed, .. }), "{err:?}");
+    }
+    // cancel
+    {
+        let (requester, approvals, _approver, req) = consumed_request().await;
+        let rev = approvals.get(&req.id).unwrap().request.revision;
+        let err = requester
+            .cancel(&req.id, rev, agent("agent-1"), CancelReason::Withdrawn)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LedgerError::Terminal { state: RequestState::Consumed, .. }), "{err:?}");
+    }
+    // abandon
+    {
+        let (requester, approvals, _approver, req) = consumed_request().await;
+        let err = requester.abandon_request(&req.id, "job discarded").await.unwrap_err();
+        assert!(matches!(err, LedgerError::Terminal { state: RequestState::Consumed, .. }), "{err:?}");
+        assert_eq!(approvals.state(&req.id), Some(RequestState::Consumed), "state must not move");
+    }
+}
+
+/// One ledger holding exactly one request that a successful settlement has
+/// consumed — the fixture the `Consumed`-is-terminal cases share.
+async fn consumed_request() -> (
+    kaish_kernel::ledger::Requester,
+    kaish_kernel::ledger::Approvals,
+    kaish_kernel::ledger::ApproverHandle,
+    ApprovalRequest,
+) {
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
+    approver.grant(&req.id, req.revision, terms(&req, far_future())).await.unwrap();
+    let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
+    requester.settle(&attempt, Outcome::Exit(0)).await.unwrap();
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Consumed));
+    (requester, approvals, approver, req)
+}
+
+/// §A.10 + §B.2: expiry materializes on observation, and only for a *live*
+/// grant. A consumed grant is no longer `Granted`, so nothing after it ever
+/// reports `Expired` for an operation that already ran.
+#[tokio::test]
+async fn a_consumed_request_never_materializes_expired() {
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), test_scope(), None, std::sync::Arc::new(SystemClock)).unwrap();
+    let req = post(&requester, "fs.remove").await;
+    approver
+        .grant(&req.id, req.revision, terms(&req, SystemTime::now() + Duration::from_millis(20)))
+        .await
+        .unwrap();
+    let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
+    requester.settle(&attempt, Outcome::Exit(0)).await.unwrap();
+    let before = entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items).clone();
+
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Consumed), "not_after cannot reopen a closed chain");
+    assert_eq!(
+        entries(approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items),
+        before,
+        "no `Expired` entry may land after the grant was consumed"
+    );
 }
 
 #[tokio::test]

@@ -72,7 +72,7 @@ The requests `set -o approvals` raises, and what was decided about them:
 /v/approvals/standing     JSON array of live standing grants
 /v/approvals/log          NDJSON of the retained entries, oldest first
 /v/approvals/{id}/request the request as JSON
-/v/approvals/{id}/state   "requested" | "granted" | "denied" | "expired" | ...
+/v/approvals/{id}/state   "requested" | "granted" | "consumed" | "denied" | ...
 /v/approvals/{id}/attempts JSON array of attempts and their outcomes
 /v/approvals/{id}/grant   the grant as JSON, empty until it is decided
 ```

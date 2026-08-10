@@ -202,8 +202,9 @@ pub struct AttemptId(u64);
 
 > An operation may execute **iff** a redemption reserved an attempt against a chain
 > `Requested(r) → Granted(g)` where `g.request == r.id`, `g` had not expired, **no attempt
-> against `g` had settled successfully or with `Outcome::Unknown`** (either closes the
-> chain — §B.2), **no other attempt against `g` was still live**, and **every condition in
+> against `g` had settled successfully or with `Outcome::Unknown`** (either consumes the
+> grant and closes the chain as `Consumed` — §B.2), **no other attempt against `g` was
+> still live**, and **every condition in
 > `g.conditions` evaluated true against the world it observed**.
 > Reservation appends `Redeemed{request, attempt, by}`; the attempt ends with exactly one
 > `Settled{request, attempt, outcome}` or `Abandoned{request, attempt, reason}`.
@@ -989,8 +990,9 @@ stateDiagram-v2
     Granted --> Voided    : 5 rejected credentials
     Granted --> Expired   : grant not_after
     Granted --> Abandoned : job discarded / session shutdown
-    Granted --> [*]       : an attempt settled successfully — the chain closes
+    Granted --> Consumed  : an attempt settled successfully — the grant is spent
 
+    Consumed --> [*]  : redeeming again reports the settled outcome (§B.4)
     Cancelled --> [*] : ask again — a NEW request links via `supersedes`
     Expired --> [*]   : ask again — a NEW request links via `supersedes`
     Denied --> [*]
@@ -1022,10 +1024,14 @@ reported: an exit code, an error, or `Outcome::Unknown` when the executor went a
 guard said so (§C.1). `Abandoned` means nothing ever reported and the sweep closed the
 chain. Neither means "no effect happened".
 
-**Success is what closes a chain.** A request is closed when an attempt settled successfully
-(`Outcome::Exit(0)`) or with `Outcome::Unknown` (see below), or when it can no longer
-authorize an execution — `Denied`, `Cancelled`, `Expired`, `Voided`, `Abandoned` — and every attempt it
-spawned is terminal. Nothing stays live because
+**Success is what closes a chain, and the state says so.** A request is `Consumed` when an
+attempt settled successfully (`Outcome::Exit(0)`) or with `Outcome::Unknown` (see below):
+the grant a successful settlement was spent on authorizes exactly one, so there is nothing
+further to transition to. `Consumed` names the grant, not the work — a request never claims
+the operation ran, which is a fact about an attempt (§A.1) and is why `Unknown` lands in the
+same state as `Exit(0)`. A request is closed in that state, or in any of the states where it
+can no longer authorize an execution — `Denied`, `Cancelled`, `Expired`, `Voided`,
+`Abandoned` — and every attempt it spawned is terminal. Nothing stays live because
 a limit was never reached: there is no limit to reach (§A.1). Only closed chains are
 evictable (§D.4), which is why the common case — one request, one grant, one attempt, one
 success — costs the live index nothing beyond the operation's own duration. A refused
@@ -1063,14 +1069,15 @@ Request level:
 | `Granted` | `redeem`, conditions hold | `Granted` | `Redeemed{attempt, by}` | — |
 | `Granted` | `redeem`, condition fails | `Voided` | `Refused` + `Voided` | operation must re-request |
 | `Granted` | `redeem` while an attempt is live | `Granted` | none | `LedgerError::AttemptInFlight` — exit 1, loud |
-| `Granted` | `redeem` after a successful settlement | closed | none | reports the settled outcome and does **not** re-execute (§B.4) |
-| `Granted` | attempt settles `Exit(0)` | closed | `Settled` | — |
+| `Granted` | attempt settles `Exit(0)` | `Consumed` | `Settled` | — |
 | `Granted` | attempt settles non-zero / `Error` | `Granted` | `Settled` | grant stays live until `not_after`; retry may redeem again |
-| `Granted` | attempt settles `Unknown` | closed | `Settled` | effects unknown — a retry needs a fresh request |
+| `Granted` | attempt settles `Unknown` | `Consumed` | `Settled` | effects unknown — a retry needs a fresh request |
 | `Granted` | `not_after` elapsed | `Expired` | `Expired{what: Grant}` | — |
 | `Granted` | `grant` again | ✗ | none | `LedgerError::AlreadyDecided` |
 | `Requested`/`Granted` | `grant` or `deny`, stale revision | unchanged | `RevisionRejected{quoted, current}` | `LedgerError::StaleRevision` — the late-answer rule (§B.6) |
-| `Denied`/`Voided`/`Abandoned`/`Cancelled` | anything | ✗ | none | `LedgerError::Terminal` |
+| `Consumed` | `redeem` | unchanged | none | `LedgerError::AlreadySettled` — reports the settled outcome and does **not** re-execute (§B.4) |
+| `Consumed` | `not_after` elapsed | unchanged | none | only a live grant expires; a consumed one is already closed |
+| `Consumed`/`Denied`/`Voided`/`Abandoned`/`Cancelled` | anything else | ✗ | none | `LedgerError::Terminal` |
 | `Cancelled`/`Expired`/`Denied` | ask again | new `Requested` | `Requested{supersedes}` | — |
 
 The `TokenRejected{Some}` rows above cover the *bearer-key* redemption form (a presented
@@ -1136,9 +1143,11 @@ handle (§D.2).
 
 **A key presented after a successful settlement does not re-execute.** The kernel reports
 the settled outcome instead: the recorded exit code, with a message naming when it settled.
-This is a deliberate break with the latch, where re-presenting a nonce silently ran the
-operation again. A retry that arrives after success now gets the truth ("this already ran,
-here is what it did") rather than a second deletion.
+This is the one transition a `Consumed` request answers with something other than
+`LedgerError::Terminal` — every other one refuses naming the state. It is a deliberate break
+with the latch, where re-presenting a nonce silently ran the operation again. A retry that
+arrives after success now gets the truth ("this already ran, here is what it did") rather
+than a second deletion.
 
 **Only exactly-captured invocations are replayable.** Today the dispatch seam substitutes
 an empty argv when it has nothing (`kernel.rs:3310-3321`), which is a silent fallback into a
