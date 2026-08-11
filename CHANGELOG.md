@@ -756,6 +756,11 @@ breaking entries are marked **BREAKING**.
   ledger could not say who asked. Both now share one `noninteractive_config()`
   and record an `Automation` principal named by `$USER`, because what separates
   them from the REPL is not who launched the process but that no one can be asked.
+- **`EmbeddedClient::transient()` and `with_defaults()` recorded an empty
+  principal on every approval request** — the same hole, one door over: both
+  now name an `embedded` `Automation` principal, and the struct's doc example
+  shows `with_principal` instead of the omitted-principal construction it used
+  to teach.
 - **`help limits` and `docs/LANGUAGE.md` said scatter returns results in
   completion order.** It returns them in item order and always has — `help
   scatter` and the code agree; the two docs were wrong, not the behavior.
