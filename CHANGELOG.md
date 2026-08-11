@@ -76,6 +76,8 @@ breaking entries are marked **BREAKING**.
   `cancel` quote the revision they act on; a stale quote is refused with
   `LedgerError::StaleRevision` and recorded as `RevisionRejected`, so a late
   out-of-band answer cannot revive a cancelled request.
+- **A cancelled execution never leaves a live grant**, even when the
+  cancellation lands after the decision.
 - **`ApprovalScope`, `parent`, `revision`, and `PlanBinding` on every request**
   (§A.7, §A.9) — scoped reads (`OutOfScope` outside a session), a nested gate
   names its parent (recorded, never authorizing), and a key presented outside

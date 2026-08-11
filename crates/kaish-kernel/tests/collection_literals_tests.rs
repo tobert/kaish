@@ -513,7 +513,7 @@ async fn bracket_char_class_containing_rbracket_in_test_parses() {
 // is unaffected. Pinned `#[ignore]` so the current behavior is documented and a
 // future fix that makes it pass is visible (remove the ignore + flip to a
 // success assertion). Robust fix if it ever matters: a context-aware test-region
-// pass or matching char-classes as units before glob-fusion (see issues.md).
+// pass or matching char-classes as units before glob-fusion.
 #[tokio::test]
 #[ignore = "known limitation: `]`-char-class + later single-`=` bracket-glob in one [[ ]] errors loud"]
 async fn rbracket_char_class_plus_later_eq_comparison_currently_errors() {
