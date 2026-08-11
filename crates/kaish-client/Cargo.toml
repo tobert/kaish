@@ -41,6 +41,7 @@ tracing = { workspace = true }
 # depend on which crates happened to build.
 kaish-kernel = { path = "../kaish-kernel", version = "0.13.0", features = ["localfs"] }
 proptest = { workspace = true }
+tempfile = { workspace = true }
 # Tests drive the async client API; the library itself needs no runtime —
 # and must not pull one in: wasm builds (kaish-extras) break on tokio/net.
 tokio = { version = "1", features = ["rt", "macros"] }
