@@ -1053,7 +1053,7 @@ impl ExecContext {
     /// builtins (`grep`, `sed`, `awk`, `cut`, `sort`, `jq`, …): a binary stream
     /// is a loud error, not a mangle. Returns `Ok(None)` when there is no stdin
     /// at all. The `Err` is a ready-to-use message; callers prefix their name.
-    /// See `docs/binary-data.md` and `docs/issues.md`.
+    /// See `docs/binary-data.md`.
     pub async fn read_stdin_to_text(&mut self) -> Result<Option<String>, String> {
         match self.read_stdin_to_bytes().await {
             None => Ok(None),

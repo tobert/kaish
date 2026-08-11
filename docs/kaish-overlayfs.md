@@ -270,7 +270,7 @@ Counting and limiting are different concerns; split them:
 
 Evidence this isn't theoretical: kaibo's live probe pushed 17.4 MB into an
 unquota'd `/` `MemoryFs` in ~1 s, exit 0, via a redirect loop (kaibo
-`docs/issues.md` P2, 2026-06-10). The same probe *cleared* the output-spill
+finding, P2, 2026-06-10). The same probe *cleared* the output-spill
 path: `SpillMode::Memory` truncates (bounded), so scratch writes are the one
 unbounded path. This design supersedes the `QuotaFs` wrapper idea from the
 first draft: a wrapper undercounts (it can't see overlay bases), stacks

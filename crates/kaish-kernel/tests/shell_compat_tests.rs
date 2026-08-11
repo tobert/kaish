@@ -30,7 +30,7 @@
 
 mod common;
 
-// ---- $() full statement grammar (docs/issues.md #5) -----------------------
+// ---- $() full statement grammar -------------------------------------------
 // $() bodies accept the full statement grammar — &&/|| chains, ; sequences,
 // multi-line bodies, and # comments — not just a single pipeline.
 
@@ -221,7 +221,7 @@ shell_compat! {
     eq: "1 2",
 }
 
-// ---- Inline env prefix `FOO=bar cmd` (docs/issues.md #1) ------------------
+// ---- Inline env prefix `FOO=bar cmd` --------------------------------------
 // An inline assignment prefix is scoped to the one command — it does NOT leak
 // into the rest of the script (the bash-divergence bug this fixes).
 
@@ -804,7 +804,7 @@ shell_compat! {
     eq: "done",
 }
 
-// ---- standalone [[ ]] writes $? (docs/issues.md P1, found during PR-D) ----
+// ---- standalone [[ ]] writes $? (found during PR-D) -----------------------
 // A bare test statement must store its result in $? like any command. It
 // evaluated the test but never wrote $?, so a following read was stale.
 

@@ -6,7 +6,7 @@
 //! kernel's glob pre-expansion and flag canonicalization. That bypass let a
 //! real bug ship green: `ls crates/*/Cargo.toml` lists only the first match
 //! because the kernel expands the glob into N positionals but `ls` reads only
-//! `positional[0]` (docs/issues.md, P2).
+//! `positional[0]`.
 //!
 //! These tests drive real command strings through `kernel.execute()` over a
 //! `tempfile::tempdir()` root, so they exercise the same path a REPL/MCP user
@@ -115,8 +115,8 @@ async fn ls_long_format_includes_file() {
 // ---------------------------------------------------------------------------
 // Multiple paths / glob expansion — the kernel-contract cases the old
 // direct-`.execute()` unit tests could not see. EXPECTED TO FAIL until `ls`
-// iterates all positionals (docs/issues.md P2: "ls <glob> only lists the
-// first match under kernel pre-expansion").
+// iterates all positionals ("ls <glob> only lists the first match under
+// kernel pre-expansion").
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

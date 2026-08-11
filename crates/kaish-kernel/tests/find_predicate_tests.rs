@@ -1,6 +1,6 @@
 //! Kernel-routed tests for `find` predicate correctness.
 //!
-//! Covers the bug cluster identified in docs/issues.md (P1):
+//! Covers the P1 find bug cluster:
 //!  (a) `find <regular-file>` should print the file path and exit 0.
 //!  (b) `find -maxdepth 0` should print only the start path, not children.
 //!  (c) `-mindepth N` should exclude results shallower than N.

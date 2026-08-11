@@ -1,7 +1,6 @@
 //! Kernel-routed regression tests for the pre-0.10 fidelity bundle.
 //!
-//! Each fix turns a previously *silent* wrong behavior loud or correct
-//! (`docs/issues.md`):
+//! Each fix turns a previously *silent* wrong behavior loud or correct:
 //!   - `sed -e <numeric>` was silently dropped → now a loud error.
 //!   - `cp -p`/`--preserve` was parsed then discarded → now rejected (the VFS
 //!     has no attributes to preserve, so the flag is no longer advertised).
