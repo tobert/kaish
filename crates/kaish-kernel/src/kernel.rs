@@ -7433,7 +7433,7 @@ pub(crate) async fn bind_tool_args(
                     // before a real positional (`--force file.txt`). Defaulting
                     // to bool here silently divorces the value and misroutes it
                     // — a privilege-escalation-by-typo against deny-by-default
-                    // embedders (docs/issues.md). Fail loud instead of guessing.
+                    // embedders. Fail loud instead of guessing.
                     let ambiguous_value = (lookup.is_none()
                         && leaf.is_some_and(|s| s.map_positionals)
                         && !consumed.contains(&(i + 1)))
@@ -10428,7 +10428,7 @@ AFTER="yes"'"#)
     //
     // A backend/MCP tool whose schema does NOT declare a flag must not let
     // `--flag value` (space form) silently divorce the value: that was a
-    // privilege-escalation-by-typo against kaijutsu (see docs/issues.md).
+    // privilege-escalation-by-typo against kaijutsu.
     // kaish fails loud rather than guessing.
 
     use crate::tools::{ParamSchema, ToolSchema};

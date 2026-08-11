@@ -201,8 +201,8 @@ async fn cut_selects_field() {
     let dir = tempdir().unwrap();
     touch(dir.path(), "csv.txt", "one,two,three\n");
     let kernel = kernel_at(dir.path());
-    // The delimiter must be quoted: a bare `,` (`cut -d ,` or `cut -d,`) is a
-    // parse error in kaish — see docs/issues.md (bash-porting ergonomics gap).
+    // Quoting the delimiter is optional: a bare `,` (`cut -d ,` or `cut -d,`)
+    // folds into a bareword outside brackets (a parse error before 0.14.0).
     let (out, code) = run(&kernel, "cut -d ',' -f 2 csv.txt").await;
     assert_eq!(code, 0, "cut should succeed: {out:?}");
     assert_eq!(out, "two", "cut should select the second field: {out:?}");
@@ -723,7 +723,7 @@ async fn date_json_emits_fields_through_kernel() {
 // --- Negative cases: agents branch on exit codes, so a builtin must fail with
 // the right code AND a message naming the cause. These pin the specific code +
 // an error substring; a regression to a happy-path swallow would break them.
-// (See docs/issues.md: builtin_kernel_tests was 100% happy-path.)
+// (builtin_kernel_tests was 100% happy-path before these.)
 
 /// Run a script and return (trimmed stdout, stderr, exit code).
 async fn run_err(kernel: &kaish_kernel::Kernel, script: &str) -> (String, String, i64) {

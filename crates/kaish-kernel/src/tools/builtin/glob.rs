@@ -461,7 +461,7 @@ mod tests {
         // skips hidden entries, so the `.work` component was never descended —
         // which is exactly how `tempfile`'s `/tmp/.tmpXXXX/*.txt` resolved to
         // zero matches. The fix walks from the pattern's static directory
-        // (`/.work/data`) instead of `/`. See docs/issues.md.
+        // (`/.work/data`) instead of `/`.
         let mut vfs = VfsRouter::new();
         let mem = MemoryFs::new();
         mem.mkdir(Path::new(".work")).await.unwrap();

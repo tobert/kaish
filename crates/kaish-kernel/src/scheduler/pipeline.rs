@@ -404,8 +404,9 @@ impl PipelineRunner {
         // These are builtins with simple key=value syntax, no schema-driven parsing needed.
         // build_tool_args is fallible: a bad/subscripted collection access in a
         // scatter/gather flag value (`scatter --as ${u[nope]}`) must fail loud here,
-        // not silently coalesce to a dropped flag (see docs/issues.md's now-closed
-        // "reduced sync path" entry). Mirrors run_single's dispatch-error handling.
+        // not silently coalesce to a dropped flag (the now-closed reduced-sync-path
+        // swallow; its arithmetic half was GH #183). Mirrors run_single's
+        // dispatch-error handling.
         let scatter_schema = self.tools.get("scatter").map(|t| t.schema());
         let gather_schema = self.tools.get("gather").map(|t| t.schema());
         let scatter_args = match build_tool_args(&scatter_cmd.args, ctx, scatter_schema.as_ref()).await {
@@ -949,7 +950,7 @@ pub async fn build_tool_args(
 /// it. Before this, every arm here discarded the error via
 /// `.ok()`/`if let Ok(..)`, so a bad subscript OR a bad arithmetic expansion
 /// in a scatter/gather flag value silently dropped the argument instead of
-/// failing (docs/issues.md, now closed; the arithmetic swallow was GH #183).
+/// failing (now closed; the arithmetic swallow was GH #183).
 pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Result<Option<Value>, String> {
     match expr {
         Expr::Literal(value) => Ok(Some(eval_literal(value, ctx))),

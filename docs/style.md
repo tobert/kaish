@@ -19,7 +19,7 @@ dictionary is copyrighted and aerospace-shaped, so we keep our own.
 | Partial (terms and boundary; relax the rest) | `docs/LANGUAGE.md`, `docs/EMBEDDING.md`, `docs/NAMING.md`, and `///` rustdoc on `pub` items in `kaish-kernel`, `kaish-types`, and `kaish-tool-api` |
 | Terms only, plus one line per bullet | `CHANGELOG.md` |
 | Terms only | `README.md` and the design docs under `docs/` |
-| Exempt | `docs/devlog.md`, `signoff.md`, `docs/designing-syntax-with-llms.md` |
+| Exempt | `signoff.md`, `docs/designing-syntax-with-llms.md` |
 
 Exempt text tells a story from a point of view, and a story needs a voice.
 

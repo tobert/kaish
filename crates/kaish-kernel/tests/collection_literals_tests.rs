@@ -234,7 +234,7 @@ async fn nested_record_in_record() {
 
 #[tokio::test]
 async fn deeply_nested_glued_list_literal_matches_spaced_nesting() {
-    // `x=[[a] [b]]` was flagged in docs/issues.md P3 as a deferred loud error —
+    // `x=[[a] [b]]` was once flagged as a deferred loud error —
     // "deeply-nested glued literals aren't unfused by the lexer's value-position
     // suppression." That was true against the pending-counter suppression this
     // file's nesting tests were written under; the later `[[ ]]` test-depth
@@ -503,9 +503,9 @@ async fn bracket_char_class_containing_rbracket_in_test_parses() {
     assert_eq!(out, "nm");
 }
 
-// KNOWN LIMITATION (low severity, LOUD — never silent corruption; see
-// docs/issues.md "compute_value_context: `[[`/`]]` detection vs `]`-containing
-// glob char-classes"). A `]`-char-class glob (`[]]`) followed by a *later*
+// KNOWN LIMITATION (low severity, LOUD — never silent corruption:
+// compute_value_context's `[[`/`]]` detection vs `]`-containing glob
+// char-classes). A `]`-char-class glob (`[]]`) followed by a *later*
 // single-`=` bracket-glob comparison inside the SAME `[[ ]]` test desyncs the
 // forward pass's `test_depth`, so the second comparison's RHS is mis-suppressed
 // and hits `primary_expr_parser` (no list-literal arm) → a loud PARSE ERROR,
@@ -513,9 +513,9 @@ async fn bracket_char_class_containing_rbracket_in_test_parses() {
 // is unaffected. Pinned `#[ignore]` so the current behavior is documented and a
 // future fix that makes it pass is visible (remove the ignore + flip to a
 // success assertion). Robust fix if it ever matters: a context-aware test-region
-// pass or matching char-classes as units before glob-fusion (see issues.md).
+// pass or matching char-classes as units before glob-fusion.
 #[tokio::test]
-#[ignore = "known limitation: `]`-char-class + later single-`=` bracket-glob in one [[ ]] errors loud; see docs/issues.md"]
+#[ignore = "known limitation: `]`-char-class + later single-`=` bracket-glob in one [[ ]] errors loud"]
 async fn rbracket_char_class_plus_later_eq_comparison_currently_errors() {
     let k = setup().await;
     let result = k

@@ -172,7 +172,7 @@ async fn sed_valid_on_real_file_passes() {
 }
 
 // ============================================================================
-// sed — repeated `-e` expressions (docs/issues.md P1 regression guard)
+// sed — repeated `-e` expressions (P1 regression guard)
 // ============================================================================
 
 /// `sed -e A -e B` must apply BOTH expressions, in order. The pre-fix kernel

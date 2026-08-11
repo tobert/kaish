@@ -1,6 +1,6 @@
 //! Kernel-routed tests for `printf` format flags, precision, and conversions.
 //!
-//! These test the bugs identified in docs/issues.md P1:
+//! These test the P1 printf bugs:
 //! - `+`/space/`#` flags ignored
 //! - `.precision` ignored for `%s` and `%d`/`%x`/`%o`
 //! - precision doesn't override `0` flag
