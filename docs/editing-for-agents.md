@@ -85,7 +85,7 @@ The obvious "kaish magic" move is a content-anchored `edit` builtin
   argv+stdin needs awkward two-block heredoc gymnastics (old *and* new content as
   separate multi-line blocks). When the shell surface fights that hard, the tool
   isn't shell-shaped.
-- **The in-shell edit reflex is already covered** by `sed -i` (issues.md P2) plus
+- **The in-shell edit reflex is already covered** by `sed -i` plus
   `tee`/`patch` — the POSIX-80% answer. An agent wanting hashline-anchored editing
   is reaching past the shell, into the embedder.
 

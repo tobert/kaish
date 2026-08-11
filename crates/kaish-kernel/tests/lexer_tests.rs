@@ -344,7 +344,7 @@ fn lexer_double_quoted_strings(#[case] input: &str, #[case] expected: &[&str]) {
 #[rstest]
 #[case::string_unterminated(r#""unterminated"#)]
 fn lexer_string_errors(#[case] input: &str) {
-    // KNOWN GAP (docs/issues.md): an unterminated double-quoted string never
+    // KNOWN GAP: an unterminated double-quoted string never
     // matches the logos `String` token regex, so it surfaces the generic
     // `UnexpectedCharacter` rather than the curated `UnterminatedString` (which
     // only the interpolated/complete-string helper emits). Pinning the *actual*

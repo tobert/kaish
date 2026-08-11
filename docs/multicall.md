@@ -2,7 +2,7 @@
 
 Status: **`execute_argv` landed 2026-06-29; multicall binary still deferred.**
 The load-bearing half — `Kernel::execute_argv(name, &[Value])` — shipped (see
-[devlog.md](devlog.md) and [EMBEDDING.md](EMBEDDING.md)). The implementation
+[EMBEDDING.md](EMBEDDING.md)). The implementation
 deviates from the §"Proposed API" sketch below in one deliberate way: instead of a
 parallel `build_args_from_argv` that builds `ToolArgs` (a second binder that could
 drift), the only new code is an `argv_to_args(&[Value]) -> Vec<Arg>` classifier

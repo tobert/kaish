@@ -199,12 +199,6 @@ Tests live in `crates/kaish-kernel/tests/`. Snapshots in `crates/kaish-kernel/te
 - `crates/kaish-help/src/` — composition surface: `fragments.rs` (the English
   fragment registry, concept-organized) + `compose.rs` (recipes). Design:
   `docs/composable-help.md`.
-- `docs/devlog.md` — a durable narrative from the agent's perspective; write your
-  story there. Open work lives in GitHub Issues. **Write the devlog
-  entry late — just before signoff or opening a PR**, so it carries with the PR
-  and reflects the work as actually landed. Don't write it early or mid-flight:
-  the decisions aren't settled yet, and an entry written ahead of the change it
-  describes goes stale before it ships.
 
 **Keep in sync:** When adding builtins or changing syntax, update the relevant help files.
 The builtin list in `help builtins` is generated dynamically from tool schemas.
@@ -246,7 +240,7 @@ Full weight applies to help content, `fragments.rs` bodies, builtin schema text
 diagnostic string a builtin or the kernel returns** — an agent reads a failure message
 more often than any help topic. Partial weight to `LANGUAGE.md`/`EMBEDDING.md`/`NAMING.md`
 and `///` rustdoc on `pub` items. Terms only to `README.md` and the design docs.
-`devlog.md`, `signoff.md`, and `designing-syntax-with-llms.md` are exempt — they tell a
+`signoff.md` and `designing-syntax-with-llms.md` are exempt — they tell a
 story and need a voice. kaibo and kaish-extras adopt this by reference as they evolve;
 kaijutsu is exempt.
 

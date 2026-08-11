@@ -637,7 +637,7 @@ nobody knows how to react to is decoration:
 
 ### A.6 Anti-drift for the operation taxonomy
 
-Follow `classify_command`'s template (`docs/devlog.md:1568-1585`): in-tree operations come
+Follow `classify_command`'s template: in-tree operations come
 from a closed enum, and the mapping from enum to dotted string is an exhaustive match, so
 **adding a gate site without registering its operation is a compile error**.
 

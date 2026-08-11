@@ -43,7 +43,7 @@ async fn numeric_field_gt_number_literal_is_numeric_compare() {
     assert_eq!(out, "GT\n", "$1=10 > 9 must compare numerically (not string where 10<9)");
 }
 
-/// Variant with the common `$1 > 5` idiom mentioned in issues.md.
+/// Variant with the common `$1 > 5` idiom.
 /// Input "6" with threshold 5 — numeric compare: 6>5=true; string compare: "6">"5"=true.
 /// Input "10" with threshold 5 — numeric: 10>5=true; string "10">"5"=false (1<5 in ASCII).
 #[tokio::test]

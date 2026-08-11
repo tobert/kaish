@@ -1,6 +1,6 @@
 //! Kernel-routed tests for `find` predicate correctness.
 //!
-//! Covers the bug cluster identified in docs/issues.md (P1):
+//! Covers the P1 find bug cluster:
 //!  (a) `find <regular-file>` should print the file path and exit 0.
 //!  (b) `find -maxdepth 0` should print only the start path, not children.
 //!  (c) `-mindepth N` should exclude results shallower than N.
@@ -239,8 +239,8 @@ async fn find_file_operand_honors_size_filter() {
     assert!(out.is_empty(), "-size +1k should exclude a 4-byte file: {out:?}");
 
     // 4 bytes IS > 0 → printed (the short-circuit applies the filter and passes).
-    // (`-size -1k` would be the natural inclusion test, but kaish's lexer can't
-    // parse a `-N` size token yet — a separate limitation, noted in issues.md.)
+    // (`-size -1k` would be the natural inclusion test; the bare `-N` size
+    // token once failed to lex, but parses now.)
     let (out, code) = run(&kernel, "find small.txt -size +0").await;
     assert_eq!(code, 0, "{out:?}");
     assert!(out.contains("small.txt"), "-size +0 should include a 4-byte file: {out:?}");

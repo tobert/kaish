@@ -919,7 +919,7 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
         return Err(vec![ParseError {
             // Redirects carry no AST span, so anchor at the start of the
             // source; the message is the actionable part. Precise columns
-            // would require spanning `Redirect` (deferred — see docs/issues.md).
+            // would require spanning `Redirect` — deferred.
             span: (0..0).into(),
             message: "multiple stdin redirects on one command are ambiguous; \
                       use exactly one of `<`, `<<`, or `<<<`"
@@ -1648,7 +1648,7 @@ where
     // `choice` merge keeps that alternative's error regardless of which span
     // our custom error carries. So we accept the command here and reject it
     // structurally after parsing, where the message is fully under our control
-    // (verified empirically 2026-06-07; see docs/issues.md).
+    // (verified empirically 2026-06-07).
     command_name
         .then(args_list_parser())
         .then(redirect_parser(primary_expr_parser()).repeated().collect::<Vec<_>>())
@@ -1798,8 +1798,7 @@ where
     // `--flag$(echo x)` → a flag glued to one). kaish does no token pasting,
     // so an unquoted interpolated word fragments into separate args; the fix
     // is to quote the whole word. Single-token words (`file.txt`, `v1.2.3`)
-    // are one arg and never trigger this. See `reject_glued_args` and
-    // docs/issues.md #2.
+    // are one arg and never trigger this. See `reject_glued_args`.
     let pre_dash = arg_before_double_dash_parser()
         .map_with(|arg, e| -> (Arg, Span) { (arg, e.span()) })
         .repeated()
@@ -2757,7 +2756,7 @@ where
     // statement grammar a command substitution body accepts — pipelines,
     // `&&`/`||` chains, and (via the sequence below) `;`/newline separators and
     // `#` comments. Control structures (`if`/`for`/`while`/`case`) are
-    // intentionally out of scope here (see docs/issues.md).
+    // intentionally out of scope here.
     let chained = pipeline_stmt.clone().foldl(
         choice((
             just(Token::And).to(true), // true = &&
@@ -4078,7 +4077,7 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Argv-splat rejection (adjacent unquoted words — docs/issues.md #2)
+    // Argv-splat rejection (adjacent unquoted words)
     // ═══════════════════════════════════════════════════════════════════════════
 
     fn parse_err_message(source: &str) -> String {

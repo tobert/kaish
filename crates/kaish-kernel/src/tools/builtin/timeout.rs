@@ -221,7 +221,7 @@ mod tests {
         assert!(result.text_out().contains("works"));
     }
 
-    /// Regression guard for the dispatcher re-entrancy deadlock (docs/issues.md):
+    /// Regression guard for the dispatcher re-entrancy deadlock:
     /// `timeout` re-dispatches its inner command through `ctx.dispatcher`, which
     /// needs `exec_ctx.write()`. If `execute_command` ever again holds that write
     /// guard across `tool.execute`, this hangs forever. The outer

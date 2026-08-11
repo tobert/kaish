@@ -86,7 +86,7 @@ async fn combined_bools_then_glued_value_flag() {
 
 #[tokio::test]
 async fn combined_bools_then_value_flag_takes_next_positional() {
-    // `grep -ivC 3` — the headline case from issues.md. `i`,`v` are bools and
+    // `grep -ivC 3` — the headline case. `i`,`v` are bools and
     // `C` is value-taking as the LAST char, so it must consume the next
     // positional `3` (context). Before the fix `C` was a bool and `3` was a
     // stray positional → arity error.
@@ -110,9 +110,9 @@ async fn glued_first_char_repeatable_accumulates() {
     // not keep only the last (which left "1\n3"). Matches the separated
     // `-e 1d -e 2d`. (code-review finding: the first-char glued arm did a plain
     // `named.insert` and ignored `repeatable`, clobbering earlier values.)
-    // NB: piped (no file operand) on purpose — the file-positional form
-    // (`sed -e1d f`) is separately blocked by the schema-less validation
-    // arg-builder; tracked in issues.md.
+    // NB: piped (no file operand) on purpose. (The file-positional form
+    // `sed -e1d f` was once blocked by the schema-less validation
+    // arg-builder; it works now, verified live.)
     let tmp = tempfile::tempdir().unwrap();
     let kernel = kernel_at(tmp.path());
 

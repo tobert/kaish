@@ -272,8 +272,7 @@ async fn timed_out_worker_reports_124_and_gather_123() {
 // `PipelineRunner::run`. Before this fix that twin discarded a bad or
 // subscripted collection access (`PathError`) as a silently-skipped
 // flag/arg instead of failing, unlike the four primary eval sites (`echo`,
-// assignment, `$(( ))`, `"${…}"`). See docs/issues.md (closed by this fix)
-// and CHANGELOG.md.
+// assignment, `$(( ))`, `"${…}"`). Closed by this fix; see CHANGELOG.md.
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
