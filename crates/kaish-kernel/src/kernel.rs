@@ -447,11 +447,6 @@ pub struct ApprovalConfig {
     /// Ignored when [`Self::approver_handle`] is set, because that adopts a
     /// ledger that already has one.
     pub clock: Option<Arc<dyn crate::ledger::Clock>>,
-    /// Judges which values inside a rendered plan are secret (spec §A.8).
-    /// `None` — the default — leaves every non-key value
-    /// `PlannedValue::Plain`; the kernel's own confirm-key redaction applies
-    /// either way.
-    pub redactor: Option<Arc<dyn crate::ledger::Redactor>>,
 }
 
 /// Names what is configured without printing an opaque `dyn Policy`
@@ -470,7 +465,6 @@ impl std::fmt::Debug for ApprovalConfig {
                 &self.resolvers.iter().map(|r| r.kind()).collect::<Vec<_>>(),
             )
             .field("statement_classifier", &self.statement_classifier.is_some())
-            .field("redactor", &self.redactor.is_some())
             .finish()
     }
 }
@@ -1098,25 +1092,6 @@ impl KernelConfig {
         self
     }
 
-    /// Install what judges which values inside a rendered plan are secret
-    /// (spec §A.8).
-    ///
-    /// Runs at the one normalization point — `ast::plan::plan_statement` —
-    /// before the plan reaches any of its sinks: the statement classifier,
-    /// the ledger's `Observed` entry, tracing, and the `/v/approvals`
-    /// projection. A sink added later reads the same already-decided
-    /// values, so it inherits the redaction instead of needing its own fix.
-    ///
-    /// **Distinct from the kernel's own confirm-key redaction**, which
-    /// applies whether or not this is set: the kernel minted that string
-    /// and knows it outright, so it never asks this trait. With no
-    /// `Redactor` installed — the default — every other value is
-    /// `PlannedValue::Plain`; that is the honest default for a shell, not a
-    /// silent promise of protection this build does not keep.
-    pub fn with_redactor(mut self, redactor: Arc<dyn crate::ledger::Redactor>) -> Self {
-        self.approval.redactor = Some(redactor);
-        self
-    }
 }
 
 /// The two replayable capture forms [`Kernel::confirm`] dispatches
@@ -1297,10 +1272,6 @@ struct KernelApprovals {
     /// (spec §C.6). `None` — the default — makes every statement `Observe`:
     /// recorded and run.
     statement_classifier: Option<Arc<dyn crate::ledger::StatementClassifier>>,
-    /// What judges which values inside a rendered plan are secret (spec
-    /// §A.8). `None` — the default — leaves every non-key value
-    /// `PlannedValue::Plain`.
-    redactor: Option<Arc<dyn crate::ledger::Redactor>>,
 }
 
 impl KernelApprovals {
@@ -1831,7 +1802,6 @@ impl Kernel {
             resolvers,
             statement_classifier,
             clock,
-            redactor,
         } = config;
         // One kernel, one kernel id (spec §A.7) — including a kernel that
         // joins another's ledger through `with_approver_handle`, which is
@@ -1890,7 +1860,6 @@ impl Kernel {
             session_authority,
             resolvers: Arc::new(resolvers),
             statement_classifier,
-            redactor,
         })
     }
 
@@ -1925,11 +1894,10 @@ impl Kernel {
         self.approvals.session_authority.as_ref()
     }
 
-    /// Plan every statement of `source` through this kernel's installed
-    /// [`Redactor`](crate::ledger::Redactor), without executing anything —
-    /// [`plan_program`](crate::ast::plan::plan_program) with the kernel's own
-    /// redaction applied, so what an embedder reads here matches what this
-    /// kernel's gate and record would show for the same source.
+    /// Plan every statement of `source` without executing anything —
+    /// [`plan_program`](crate::ast::plan::plan_program) as a method, so an
+    /// embedder holding a kernel reads the same metadata the kernel's gate
+    /// and record read for the same source.
     ///
     /// # Errors
     ///
@@ -1938,7 +1906,7 @@ impl Kernel {
         &self,
         source: &str,
     ) -> Result<Vec<crate::ast::plan::PlannedStatement>, Vec<crate::parser::ParseError>> {
-        crate::ast::plan::plan_program(source, self.approvals.redactor.as_deref())
+        crate::ast::plan::plan_program(source)
     }
 
     /// Get the kernel name.
@@ -2300,7 +2268,7 @@ impl Kernel {
             // gate does not watch is not a gate. Its capture is `Exact`, not
             // `Statement`: it already holds a tool name and an argv, and
             // `confirm`'s existing arm replays that form.
-            let planned = crate::ast::plan::plan_statement(&stmt, self.approvals.redactor.as_deref());
+            let planned = crate::ast::plan::plan_statement(&stmt);
             let capture = argv_capture(name, argv, &planned.presented_keys);
             let gated = match self.tap_statement(planned, capture).await {
                 crate::tools::StatementTap::Proceed { gated } => gated,
@@ -2570,7 +2538,7 @@ impl Kernel {
             // The captured source was recorded credential-free, so a replayed
             // statement presents no key: the redemption correlation on the
             // context is what authorizes it.
-            let planned = crate::ast::plan::plan_statement(stmt, self.approvals.redactor.as_deref());
+            let planned = crate::ast::plan::plan_statement(stmt);
             let gated = match self.tap_statement(planned, capture).await {
                 crate::tools::StatementTap::Proceed { gated } => gated,
                 crate::tools::StatementTap::Halt(held) => return Ok(*held),
@@ -3197,11 +3165,7 @@ impl Kernel {
             program
                 .statements
                 .iter()
-                // `presented_keys` extraction reads only `Arg` shape, never
-                // the redaction decision, so no `Redactor` is needed here —
-                // passing `None` costs nothing since the answer is the same
-                // either way.
-                .flat_map(|stmt| crate::ast::plan::plan_statement(stmt, None).presented_keys)
+                .flat_map(|stmt| crate::ast::plan::plan_statement(stmt).presented_keys)
                 .collect()
         } else {
             Vec::new()
@@ -3226,7 +3190,7 @@ impl Kernel {
             // exactly this index — with every `--confirm=<key>` removed from
             // the recorded source, because the capture lands in the ledger
             // and no entry may carry a credential (spec §A.2).
-            let planned = crate::ast::plan::plan_statement(&stmt, self.approvals.redactor.as_deref());
+            let planned = crate::ast::plan::plan_statement(&stmt);
             let capture = kaish_types::approval::Capture::Statement {
                 source: crate::ast::plan::redact_keys(input, &program_keys),
                 index,

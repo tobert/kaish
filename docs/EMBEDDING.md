@@ -890,48 +890,21 @@ Only a literal key is visible to any of this. `--confirm=${key}` renders
 unexpanded, so nothing is lifted and nothing needs redacting: what the plan
 cannot see, it cannot leak either. A credential a script puts somewhere the
 taxonomy cannot name — the right-hand side of an assignment — is recorded like
-any other text. The kernel redacts what it minted; everything else is the
-`Redactor` seam below.
+any other text. The kernel redacts what it minted; nothing else — the kernel
+ships no secret detector, because a shell cannot define what a secret is.
 
-**Installing a `Redactor` for everything else.** The kernel's own redaction
-above covers exactly one string — its own confirm key — because it is the
-only secret the kernel can identify without guessing. Every other value in a
-`Plan` (`PlannedCommand::args`, `PlannedRedirect::target`) reaches the
-statement classifier, the ledger's `Observed` entry, and the `/v/approvals`
-projection as `PlannedValue::Plain` unless an embedder installs a `Redactor`
-that says otherwise:
-
-```rust
-use kaish_kernel::ledger::{RedactionMark, Redactor};
-use kaish_types::approval::ValueSite;
-
-struct BearerTokens;
-impl Redactor for BearerTokens {
-    fn redact(&self, value: &str, _site: ValueSite) -> Option<RedactionMark> {
-        value.starts_with("Bearer ").then(|| RedactionMark::new("bearer-token"))
-        // .with_fingerprint(digest) if you want an auditor to be able to
-        // ask "the same credential as last time?" without holding it.
-    }
-}
-
-let config = KernelConfig::repl().with_redactor(Arc::new(BearerTokens));
-```
-
-It runs once, synchronously — like `StatementClassifier::classify`, on the
-execution path of every statement, so it must not block — at the one
-normalization point before the plan reaches any sink, so a sink added later
-inherits the redaction instead of needing its own fix. It is not consulted
-on `--confirm=<key>`: that redaction is unconditional and happens first, and
-`kind: "confirm-key"` is reserved for it (a `Redactor` returning that string
-for something else just means the kind label collides in the record, not a
-security hole). `Capture::Statement`'s replay source is **not** covered by an
-installed `Redactor` — `Kernel::confirm` re-executes it verbatim, so a
-redacted value baked into it would replay as the literal marker instead of
-the argument you meant. If a `Redactor`-marked value can appear on a
-statement that gets held, it is still visible in the request's `capture`
-until the request is granted or denied — narrow the exposure with a tighter
-`StatementClassifier` (gate before the value would be typed) rather than
-expecting the `Redactor` to close it.
+**Embedder-side redaction.** Every other value in a `Plan`
+(`PlannedCommand::args`, `PlannedRedirect::target`) is `PlannedValue::Plain`.
+An embedder with its own idea of what a secret looks like redacts over the
+surfaces it holds: the plans `plan_program` returns before anything runs, and
+the records its `LedgerSink` receives before persisting them. The
+`PlannedValue::Redacted { kind, fingerprint }` variant is the shared
+vocabulary for that pass — the same shape the kernel's confirm-key redaction
+produces. Two kernel-held surfaces cannot be rewritten from outside
+(`/v/approvals` and the retained in-kernel log), so a secret typed as a
+*literal* argument on a held statement is visible there until the request is
+decided; secrets that travel as variables never were — a plan renders
+`${TOKEN}` unexpanded.
 
 **Pinning the policy.** `KernelConfig::with_policy_pinned(true)` makes
 `set +o approvals` fail with **exit 1** and a message naming the pin, rather
@@ -1442,13 +1415,25 @@ the kernel supplies only the classification.
 
 ### Statement metadata without the ledger: `plan_program`
 
-`plan_program(source, redactor)` returns one `PlannedStatement` per statement of
+`plan_program(source)` returns one `PlannedStatement` per statement of
 `source` — its position (`index`) and its `Plan`: the statement rendered back
-to shell text **unexpanded**, its kind, and every command it contains, loop
-bodies and `$(...)` substitutions included. Nothing executes: a plan is parse
-information, and `${HOME}` appears as written. `Kernel::plan_program(source)`
-is the same read through the kernel's installed `Redactor`, so a secret
-argument reads as redacted here exactly as it would in the kernel's own record.
+to shell text **unexpanded**, its kind, every command it contains (loop
+bodies and `$(...)` substitutions included), and its variable analysis —
+`free_variables` (session names the statement reads) and `bound_variables`
+(names it writes or binds itself). Nothing executes: a plan is parse
+information, and `${HOME}` appears as written. kaish has no `eval` and no
+indirect expansion, so `free_variables` is complete, not best-effort — and
+`Kernel::get_var` closes the loop:
+
+```rust
+for planned in kernel.plan_program(script)? {
+    for name in &planned.plan.free_variables {
+        let value = kernel.get_var(name).await;  // judge with live state in hand
+    }
+}
+```
+
+`Kernel::plan_program(source)` is the same read as a method on a kernel.
 
 This is the same walk that feeds the kernel's statement gate, and the two stay
 correlated end-to-end:
@@ -1791,7 +1776,7 @@ The `kaish_kernel` crate root re-exports the embedding surface:
   `Clock`, `SystemClock`, `Policy`, `StateResolver`, `PathResolver`,
   `ResolverError`, `StatementClassifier`, `CommandNameClassifier`,
   `StatementPosture`, `StatementAssessment`, `ClassificationError`,
-  `ExecutionContext`, `MountDescriptor`, `Redactor`, `RedactionMark`,
+  `ExecutionContext`, `MountDescriptor`,
   `ApprovalOutcome`, `PendingApproval`, `ResumeAction`, `LedgerStream`,
   `WatchEvent`, `AssessmentRecorder`, `KernelOperation`
 

@@ -59,7 +59,7 @@ pub(crate) use teardown::{cancel_job_request, cancel_scope};
 // next to `with_policy` and `with_state_resolver`.
 pub use kaish_tool_api::{
     ClassificationError, CommandNameClassifier, ExecutionContext, MountAccess, MountClass,
-    MountDescriptor, RedactionMark, Redactor, StatementAssessment, StatementClassificationInput,
+    MountDescriptor, StatementAssessment, StatementClassificationInput,
     StatementClassifier, StatementPosture,
 };
 // What a caller reads back from a gate (spec §C.1), re-exported for the same

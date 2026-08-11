@@ -2,9 +2,9 @@
 //! and pagination.
 //!
 //! Four groups, matching §H's acceptance list for this lane:
-//! - the redaction seam: no bare `String` reaches a sink, an installed
-//!   `Redactor` covers every sink that reads a `Plan` (including one this
-//!   file adds), and with none installed every value stays `Plain`;
+//! - the redaction seam: no bare `String` reaches a sink, and every
+//!   non-key value stays `Plain` — the kernel redacts only its own
+//!   confirm key;
 //! - `Approvals::pending` pagination: a listing over more than one page
 //!   returns a cursor that neither repeats nor skips;
 //! - `Approvals::log` pagination: the same guarantee over the retained log;
@@ -18,15 +18,15 @@
 #![cfg(feature = "localfs")]
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use kaish_kernel::interpreter::ExecResult;
 use kaish_kernel::ledger::{
-    ClassificationError, RedactionMark, Redactor, StatementAssessment, StatementClassificationInput,
+    ClassificationError, StatementAssessment, StatementClassificationInput,
     StatementClassifier, StatementPosture,
 };
 use kaish_kernel::{Kernel, KernelConfig};
-use kaish_types::approval::{AssessorId, LedgerEntry, PageRequest, Plan, PlannedValue, RiskClass, ValueSite};
+use kaish_types::approval::{AssessorId, LedgerEntry, PageRequest, Plan, PlannedValue, RiskClass};
 
 fn tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -65,58 +65,6 @@ fn observed_plans(kernel: &Kernel) -> Vec<Plan> {
         .collect()
 }
 
-/// A `Redactor` that marks one exact literal secret, and nothing else —
-/// standing in for an embedder's own credential detector. Records every
-/// value it was asked to judge, so a test can assert the seam offered it
-/// every argument and redirect target, not just the one it matched.
-struct MarksOneSecret {
-    secret: &'static str,
-    judged: Mutex<Vec<String>>,
-}
-
-impl MarksOneSecret {
-    fn new(secret: &'static str) -> Self {
-        Self {
-            secret,
-            judged: Mutex::new(Vec::new()),
-        }
-    }
-}
-
-impl Redactor for MarksOneSecret {
-    fn redact(&self, value: &str, _site: ValueSite) -> Option<RedactionMark> {
-        self.judged.lock().expect("test mutex").push(value.to_string());
-        (value == self.secret).then(|| RedactionMark::new("test-secret"))
-    }
-}
-
-/// A `StatementClassifier` that never gates — it exists only to capture
-/// every `Plan` it is asked to classify, so a test can assert the
-/// classifier's own input already carries the redaction (spec §A.8's first
-/// sink) rather than the raw plan.
-struct CapturesPlans {
-    seen: Mutex<Vec<Plan>>,
-}
-
-impl CapturesPlans {
-    fn new() -> Self {
-        Self { seen: Mutex::new(Vec::new()) }
-    }
-}
-
-impl StatementClassifier for CapturesPlans {
-    fn classify(
-        &self,
-        input: &StatementClassificationInput<'_>,
-    ) -> Result<StatementAssessment, ClassificationError> {
-        self.seen.lock().expect("test mutex").push(input.plan.clone());
-        Ok(StatementAssessment::new(
-            StatementPosture::Observe,
-            AssessorId::new("captures-plans-test-fixture"),
-        ))
-    }
-}
-
 // ============================================================================
 // The redaction seam (spec §A.8)
 // ============================================================================
@@ -145,11 +93,11 @@ async fn a_value_reaches_no_sink_as_a_bare_string() {
     assert_eq!(plan.commands[0].args.len(), 2, "sanity: both words planned");
 }
 
-/// With no `Redactor` installed, every value is `Plain` — the honest
-/// default (spec §A.8), not a silent promise of protection this build does
-/// not keep.
+/// Every non-key value is `Plain` (spec §A.8) — the kernel ships no
+/// secret detector, so nothing pretends otherwise; embedder-side redaction
+/// happens over the plans and records the embedder holds.
 #[tokio::test]
-async fn with_no_redactor_every_value_is_plain() {
+async fn every_non_key_value_is_plain() {
     let dir = tempdir();
     let kernel = kernel_at(dir.path());
     run(&kernel, "echo not-a-secret").await;
@@ -161,76 +109,6 @@ async fn with_no_redactor_every_value_is_plain() {
         vec![PlannedValue::Plain("not-a-secret".to_string())]
     );
     assert!(!plan.commands[0].args[0].is_redacted());
-}
-
-/// An installed `Redactor` covers every sink that reads a `Plan` — the
-/// classifier's input, the ledger's `Observed` entry, the `/v/approvals`
-/// projection, and a fourth reader this test adds — because all four read
-/// the *same* already-redacted `Plan` the one normalization point built
-/// (`ast::plan::plan_statement`). None of them re-derives its own
-/// redaction, which is the property this test is actually checking.
-#[tokio::test]
-async fn an_installed_redactor_covers_every_sink_including_one_this_test_adds() {
-    let dir = tempdir();
-    let secret = "sk-live-deadbeefcafe";
-    let redactor = Arc::new(MarksOneSecret::new(secret));
-    let classifier = Arc::new(CapturesPlans::new());
-    let kernel = Kernel::new(
-        KernelConfig::repl()
-            .with_cwd(dir.path().to_path_buf())
-            .with_approvals(false)
-            .with_trash(false)
-            .with_redactor(redactor.clone())
-            .with_statement_classifier(classifier.clone()),
-    )
-    .expect("kernel");
-
-    run(&kernel, &format!("echo {secret}")).await;
-
-    // Sink 1: the classifier's own input. Scoped so the `MutexGuard` — a
-    // plain `std::sync::Mutex`, not async-aware — is dropped well before
-    // this function's next `.await`, never straddling one.
-    let classified_plan = {
-        let classified = classifier.seen.lock().expect("test mutex");
-        classified.last().expect("the classifier ran").clone()
-    };
-    assert!(
-        classified_plan.commands[0].args[0].is_redacted(),
-        "the classifier must see the redacted plan, not the raw one: {classified_plan:?}"
-    );
-    assert!(!classified_plan.rendered.contains(secret));
-
-    // Sink 2: the ledger's `Observed` entry.
-    let plans = observed_plans(&kernel);
-    let observed_plan = plans.last().expect("an Observed entry with a plan");
-    assert!(observed_plan.commands[0].args[0].is_redacted());
-    assert!(!observed_plan.rendered.contains(secret));
-
-    // Sink 3: the `/v/approvals` projection — read as text, the surface a
-    // less-trusted reader actually gets.
-    let log_result = run(&kernel, "cat /v/approvals/log").await;
-    let log_text = log_result.text_out();
-    assert!(
-        !log_text.contains(secret),
-        "the secret leaked into /v/approvals/log: {log_text}"
-    );
-    assert!(
-        log_text.contains("test-secret"),
-        "the redaction kind must still be visible: {log_text}"
-    );
-
-    // Sink 4: a reader this test adds, reusing the same `Plan` sink 2 already
-    // read — inheriting the redaction with no logic of its own, which is
-    // exactly the "sink added later" case §A.8 designs for.
-    fn a_new_sink_reads_the_plan(plan: &Plan) -> bool {
-        plan.commands.iter().any(|c| c.args.iter().any(PlannedValue::is_redacted))
-    }
-    assert!(a_new_sink_reads_the_plan(observed_plan));
-
-    // The redactor was consulted on the real argument text, not on some
-    // pre-redacted stand-in — proving the marking, not just the shape.
-    let judged = redactor.judged.lock().expect("test mutex");
-    assert!(judged.iter().any(|v| v == secret), "the redactor never saw the secret to judge: {judged:?}");
 }
 
 // ============================================================================

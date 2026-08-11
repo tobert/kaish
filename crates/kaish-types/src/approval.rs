@@ -836,16 +836,15 @@ pub enum PlannedValue {
     /// Not judged secret. Holds the literal text, exactly as it would render
     /// on the command line.
     Plain(String),
-    /// Judged secret, by the kernel's own confirm-key check or an
-    /// embedder-installed redactor (`kaish-tool-api`'s `Redactor` trait) —
+    /// Judged secret — today only by the kernel's own confirm-key check;
     /// the original text never reaches this variant or anything built from
-    /// it.
+    /// it. The variant is the vocabulary an embedder-side redaction pass can
+    /// also produce over plans it holds.
     Redacted {
-        /// The embedder's own label — `"bearer-token"`, `"password"`, or
-        /// `"confirm-key"` for the kernel's one built-in redaction. The
-        /// kernel does not interpret this string.
+        /// What kind of secret — `"confirm-key"` for the kernel's one
+        /// built-in redaction. The kernel does not interpret this string.
         kind: String,
-        /// Stable salted digest prefix, when the redactor supplied one, so an
+        /// Stable salted digest prefix, when the producer supplied one, so an
         /// auditor can ask "the same credential as last time?" without
         /// holding it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -877,21 +876,6 @@ impl PlannedValue {
     }
 }
 
-/// Where inside a plan a value was found — what a redactor judges alongside
-/// the value itself (spec §A.8).
-///
-/// Command names carry no site of their own: a name is structural (routing,
-/// resource identity), never a credential, so it is never offered to a
-/// redactor and never becomes a `PlannedValue`.
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValueSite {
-    /// One command's argument.
-    Argument,
-    /// One command's redirect target.
-    RedirectTarget,
-}
-
 // ───────────────────────── The statement plan ─────────────────────────
 
 /// What one top-level statement was asked to run (spec §C.6).
@@ -916,6 +900,22 @@ pub struct Plan {
     /// Every command the statement contains, control-structure bodies
     /// included.
     pub commands: Vec<PlannedCommand>,
+    /// Session variables the statement reads and does not itself write —
+    /// sorted, deduplicated root names. kaish has no `eval` and no indirect
+    /// expansion, so this set is complete, not best-effort: every variable
+    /// the statement can read is lexically present. An embedder peeks the
+    /// current values with `Kernel::get_var` to judge the statement against
+    /// live state. Special forms (`$1`, `$?`, `$$`, `$@`, `$#`) are not
+    /// session variables and are not listed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub free_variables: Vec<String>,
+    /// Names the statement itself writes or binds anywhere within it — an
+    /// assignment target, a `for` variable, an env-prefix name, a tool-def
+    /// parameter. Peeking session state for these is misleading (the
+    /// statement supplies its own value), so a name that is both read and
+    /// written lands here, never in `free_variables` — the safe direction.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bound_variables: Vec<String>,
 }
 
 /// The byte limit [`Plan::rendered`] is truncated at: 8 KiB. A statement
@@ -937,7 +937,16 @@ impl Plan {
             rendered: rendered.into(),
             statement_kind: statement_kind.into(),
             commands,
+            free_variables: Vec::new(),
+            bound_variables: Vec::new(),
         }
+    }
+
+    /// Attach the statement's variable analysis (sorted, deduplicated).
+    pub fn with_variables(mut self, free: Vec<String>, bound: Vec<String>) -> Self {
+        self.free_variables = free;
+        self.bound_variables = bound;
+        self
     }
 }
 
@@ -946,12 +955,12 @@ impl Plan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedCommand {
     /// argv0 as written — never resolved through aliases, `PATH`, or the
-    /// tool registry. Never a [`PlannedValue`]: a command name is structural
-    /// (spec §A.8's `ValueSite`), never a credential.
+    /// tool registry. Never a [`PlannedValue`]: a command name is structural,
+    /// never a credential.
     pub name: String,
-    /// The arguments, rendered unexpanded — each one already through the
-    /// redaction seam (spec §A.8), so a secret argument reads as
-    /// `PlannedValue::Redacted` here rather than as its literal text.
+    /// The arguments, rendered unexpanded — a presented confirm key reads as
+    /// `PlannedValue::Redacted` here rather than as its literal text
+    /// (spec §A.8).
     pub args: Vec<PlannedValue>,
     /// The redirections this command declares.
     pub redirects: Vec<PlannedRedirect>,

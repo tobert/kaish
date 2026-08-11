@@ -15,8 +15,10 @@ breaking entries are marked **BREAKING**.
   statement's `Plan` plus its parsed index, without executing anything, so an
   embedder composes its own policy machinery over the same metadata the
   kernel's gate reads. The index matches `ResumeAction::ConfirmStatement`,
-  the binding digest is computable from the rendered plan, and literal
-  `--confirm` keys are redacted, never returned.
+  the binding digest is computable from the rendered plan, literal
+  `--confirm` keys are redacted (never returned), and `Kernel::get_var` over
+  `free_variables` judges a statement against live session state before
+  anything runs.
 - **The approval ledger** (`docs/approval-ledger.md`) — `kaish_types::approval`
   (requests, grants, attempts, standing grants, the `LedgerEntry` log in a
   versioned `LedgerRecord` envelope) plus `kaish_kernel::ledger` (the state
@@ -108,12 +110,14 @@ breaking entries are marked **BREAKING**.
   `Observed` entry under `cmd.execute`, carrying its `Plan`. Cost is
   O(top-level statements) and there is no off switch; a tap that cannot commit
   warns and the statement still runs — it is a second opinion, not a gate.
-- **`Plan`/`PlannedCommand`/`PlannedValue` and the `Redactor` seam** (§A.8) —
-  the statement rendered back unexpanded (`${HOME}` as written; truncated at
-  8 KiB with a marker naming the limit), every value through one normalization
-  point before every sink. The kernel unconditionally redacts exactly one
-  thing — its own confirm key; `KernelConfig::with_redactor` installs embedder
-  redaction, and with none installed every value is `Plain`.
+- **`Plan`/`PlannedCommand`/`PlannedValue`** (§A.8) — the statement rendered
+  back unexpanded (`${HOME}` as written; truncated at 8 KiB with a marker
+  naming the limit), plus `free_variables`/`bound_variables`: the session
+  names the statement reads and the names it binds itself — complete, not
+  best-effort, because kaish has no `eval` and no indirect expansion. The
+  kernel redacts exactly one value — its own confirm key; every other value
+  is `Plain`, and embedder-defined redaction is an embedder-side pass over
+  the plans and records the embedder holds.
 - **`KernelConfig::with_statement_classifier`** — a `StatementClassifier`
   gates statements through the same decision chain a gated `rm` runs; `Err`
   and panics map to `Gate`, never `Observe`, and a kernel-owned static floor
