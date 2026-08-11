@@ -278,7 +278,7 @@ Examples:
 /// Run a script file.
 fn run_script(path: &str, overlay: bool, gates: &[String]) -> Result<ExitCode> {
     use kaish_client::EmbeddedClient;
-    use kaish_kernel::{Kernel, KernelConfig};
+    use kaish_kernel::Kernel;
 
     // Read the script
     let source = std::fs::read_to_string(path)
@@ -298,15 +298,7 @@ fn run_script(path: &str, overlay: bool, gates: &[String]) -> Result<ExitCode> {
 
     // Non-interactive: pipe stdout so command substitution captures output.
     // The streaming callback below still prints output for the user.
-    // No approval authority and no prompt: a script is not a terminal, so a
-    // gated statement exits 2 with its request pending and an operator
-    // decides it out of band (`docs/approval-ledger.md` §C.3).
-    let config = with_gate(
-        KernelConfig::repl()
-            .with_initial_vars(kaish_repl::os_env_vars())
-            .with_overlay(overlay),
-        gates,
-    );
+    let config = with_gate(kaish_repl::noninteractive_config(overlay), gates);
     let kernel = Kernel::new(config)
         .context("Failed to create kernel")?;
 
@@ -330,17 +322,11 @@ fn run_script(path: &str, overlay: bool, gates: &[String]) -> Result<ExitCode> {
 /// Execute a command string and exit.
 fn run_command(cmd: &str, overlay: bool, gates: &[String]) -> Result<ExitCode> {
     use kaish_client::EmbeddedClient;
-    use kaish_kernel::{Kernel, KernelConfig};
+    use kaish_kernel::Kernel;
 
     // Non-interactive: pipe stdout so command substitution captures output.
     // The streaming callback below still prints output for the user.
-    // No authority and no prompt here either — see `run_script`.
-    let config = with_gate(
-        KernelConfig::repl()
-            .with_initial_vars(kaish_repl::os_env_vars())
-            .with_overlay(overlay),
-        gates,
-    );
+    let config = with_gate(kaish_repl::noninteractive_config(overlay), gates);
     let kernel = Kernel::new(config)
         .context("Failed to create kernel")?;
 
