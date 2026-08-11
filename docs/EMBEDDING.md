@@ -1440,6 +1440,44 @@ escape as internal (`/v/bin/cat` and `.kai`/backend tools over-report as
 `External`). The consent UX and the block-the-script loop are embedder policy —
 the kernel supplies only the classification.
 
+### Statement metadata without the ledger: `plan_program`
+
+`plan_program(source, redactor)` returns one `PlannedStatement` per statement of
+`source` — its position (`index`) and its `Plan`: the statement rendered back
+to shell text **unexpanded**, its kind, and every command it contains, loop
+bodies and `$(...)` substitutions included. Nothing executes: a plan is parse
+information, and `${HOME}` appears as written. `Kernel::plan_program(source)`
+is the same read through the kernel's installed `Redactor`, so a secret
+argument reads as redacted here exactly as it would in the kernel's own record.
+
+This is the same walk that feeds the kernel's statement gate, and the two stay
+correlated end-to-end:
+
+- `PlannedStatement.index` is the index a held statement's
+  `ResumeAction::ConfirmStatement` quotes and `Kernel::confirm` replays.
+- The grant's binding digest is computable from the metadata alone: SHA-256 of
+  `strip_confirm_tokens(plan.rendered)`.
+- Every literal `--confirm=<key>` is redacted from the plans and **not
+  returned** — the caller holds `source` and needs no second copy of its
+  credentials.
+
+```rust
+use kaish_kernel::plan_program;
+
+for planned in plan_program(src, None).map_err(|_errors| /* parse errors */ ())? {
+    for cmd in &planned.plan.commands {
+        // cmd.name, cmd.args (redaction-aware), cmd.redirects, cmd.background
+    }
+    // Judge planned.plan however your policy needs, keyed by planned.index.
+}
+```
+
+What this surface does **not** give you is the enforcement the ledger keeps:
+single-successful-run redemption, revision checks, and condition re-checks are
+decisions made under the kernel's lock about state only it holds, and metadata
+cannot replace them. Compose policy over the plans; leave redemption to the
+kernel.
+
 ## Path Composition with XDG Primitives
 
 kaish exports XDG base directory primitives so embedders can compose their

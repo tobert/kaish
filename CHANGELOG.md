@@ -12,6 +12,12 @@ breaking entries are marked **BREAKING**.
 
 
 ### Added
+- **`plan_program(source, redactor)` and `Kernel::plan_program(source)`** —
+  every statement's `Plan` plus its index, without executing anything, so an
+  embedder can compose its own policy machinery over the same metadata the
+  kernel's statement gate reads. The index matches
+  `ResumeAction::ConfirmStatement`, the binding digest is computable from the
+  rendered plan, and literal `--confirm` keys are redacted, never returned.
 - **The REPL decides its own gates.** A line that comes back with a pending
   approval now asks at the prompt — the request, then `grant? [y/a/N]` — where
   `y` grants and replays it, `a` also issues a session standing grant for that

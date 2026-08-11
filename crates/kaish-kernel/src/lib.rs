@@ -101,3 +101,7 @@ pub use interpreter::expand_tilde;
 
 // Tool registration (for embedders registering custom tools)
 pub use tools::{LedgerAccess, Tool, ToolRegistry, ExecContext};
+
+// Statement metadata without execution (embedders compose their own
+// approval machinery over it — see docs/EMBEDDING.md)
+pub use ast::plan::{plan_program, PlannedStatement};
