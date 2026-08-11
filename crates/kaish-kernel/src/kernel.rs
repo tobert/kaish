@@ -1925,6 +1925,22 @@ impl Kernel {
         self.approvals.session_authority.as_ref()
     }
 
+    /// Plan every statement of `source` through this kernel's installed
+    /// [`Redactor`](crate::ledger::Redactor), without executing anything —
+    /// [`plan_program`](crate::ast::plan::plan_program) with the kernel's own
+    /// redaction applied, so what an embedder reads here matches what this
+    /// kernel's gate and record would show for the same source.
+    ///
+    /// # Errors
+    ///
+    /// Returns the parse errors when `source` does not parse.
+    pub fn plan_program(
+        &self,
+        source: &str,
+    ) -> Result<Vec<crate::ast::plan::PlannedStatement>, Vec<crate::parser::ParseError>> {
+        crate::ast::plan::plan_program(source, self.approvals.redactor.as_deref())
+    }
+
     /// Get the kernel name.
     pub fn name(&self) -> &str {
         &self.name

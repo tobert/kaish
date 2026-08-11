@@ -11,6 +11,12 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`plan_program(source)` and `Kernel::plan_program(source)`** — every
+  statement's `Plan` plus its parsed index, without executing anything, so an
+  embedder composes its own policy machinery over the same metadata the
+  kernel's gate reads. The index matches `ResumeAction::ConfirmStatement`,
+  the binding digest is computable from the rendered plan, and literal
+  `--confirm` keys are redacted, never returned.
 - **The approval ledger** (`docs/approval-ledger.md`) — `kaish_types::approval`
   (requests, grants, attempts, standing grants, the `LedgerEntry` log in a
   versioned `LedgerRecord` envelope) plus `kaish_kernel::ledger` (the state

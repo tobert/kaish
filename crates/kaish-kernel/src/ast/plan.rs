@@ -63,6 +63,60 @@ pub struct StatementPlan {
     pub presented_keys: Vec<String>,
 }
 
+/// One statement of a planned program: its [`Plan`] and where it sits in the
+/// parsed source.
+///
+/// `index` is the statement's position in the parsed program — the same
+/// number a [`Capture::Statement`](kaish_types::approval::Capture) records
+/// and a
+/// [`ResumeAction::ConfirmStatement`](kaish_types::approval::ResumeAction)
+/// quotes, so a plan built here correlates with any request the kernel later
+/// raises for the same statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedStatement {
+    /// The statement's position in the parsed program.
+    pub index: usize,
+    /// What the statement was asked to run, with every credential redacted.
+    pub plan: Plan,
+}
+
+/// Plan every statement of `source` without executing anything.
+///
+/// A plan is parse information: `${HOME}` and `$(...)` appear exactly as
+/// written, no substitution has run, and no filesystem has been touched. The
+/// same walk feeds the kernel's own statement gate, so what an embedder reads
+/// here is what a [`StatementClassifier`](crate::ledger::StatementClassifier)
+/// would judge and what the ledger's `Observed` entries record — one
+/// metadata surface, whether or not the kaish ledger is the one consuming it.
+///
+/// Every literal `--confirm=<key>` is redacted from the plans and **not
+/// returned**: the caller holds `source` and can read its own credentials;
+/// this function adds no second copy.
+///
+/// # Errors
+///
+/// Returns the parse errors when `source` does not parse. Each error's
+/// [`format`](crate::parser::ParseError::format) renders a diagnostic against
+/// the source.
+pub fn plan_program(
+    source: &str,
+    redactor: Option<&dyn Redactor>,
+) -> Result<Vec<PlannedStatement>, Vec<crate::parser::ParseError>> {
+    let program = crate::parser::parse(source)?;
+    Ok(program
+        .statements
+        .iter()
+        .enumerate()
+        // An empty statement runs nothing and plans nothing; skipping it here
+        // is why `index` is carried explicitly instead of implied by position.
+        .filter(|(_, stmt)| !matches!(stmt, Stmt::Empty))
+        .map(|(index, stmt)| PlannedStatement {
+            index,
+            plan: plan_statement(stmt, redactor).plan,
+        })
+        .collect())
+}
+
 /// Build the plan for one top-level statement. `redactor` is the
 /// embedder-installed [`Redactor`] (`KernelConfig::with_redactor`), when one
 /// is registered — `None` leaves every non-key value [`PlannedValue::Plain`]
@@ -1007,6 +1061,44 @@ mod tests {
         let source = "rm target.txt";
         assert_eq!(redact_keys(source, &[]), source);
         assert_eq!(redact_keys(source, &["deadbeef".to_string()]), source);
+    }
+
+    // ── plan_program: the program-level surface ──
+
+    #[test]
+    fn plan_program_indexes_agree_with_the_parsed_program() {
+        let source = "echo one\n\n# a comment\necho two && echo three\nX=5";
+        let program = parse(source).expect("the fixture parses");
+        let expected: Vec<(usize, String)> = program
+            .statements
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !matches!(s, Stmt::Empty))
+            .map(|(i, s)| (i, s.kind_name().to_string()))
+            .collect();
+        let plans = plan_program(source, None).expect("the fixture parses");
+        assert_eq!(
+            plans
+                .iter()
+                .map(|p| (p.index, p.plan.statement_kind.clone()))
+                .collect::<Vec<_>>(),
+            expected,
+            "an index here must be usable against Capture::Statement's index"
+        );
+    }
+
+    #[test]
+    fn plan_program_redacts_a_presented_key_and_returns_no_copy_of_it() {
+        // `PlannedStatement` has no key field by design — the caller holds
+        // the source. What must hold is that the plan itself is redacted.
+        let plans = plan_program("rm --confirm=deadbeef x.txt", None).expect("parses");
+        assert_eq!(plans[0].plan.rendered, "rm --confirm=<confirm-key> x.txt");
+    }
+
+    #[test]
+    fn plan_program_returns_the_parse_errors_for_a_broken_source() {
+        let errors = plan_program("echo 'unclosed", None).expect_err("must not parse");
+        assert!(!errors.is_empty());
     }
 
     #[test]
