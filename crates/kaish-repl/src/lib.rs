@@ -450,6 +450,24 @@ pub fn interactive_config() -> KernelConfig {
         .with_own_authority(true)
 }
 
+/// The `KernelConfig` `kaish -c` and `kaish script.kai` run on: the same
+/// passthrough filesystem and OS environment as the interactive REPL, an
+/// [`Automation`](kaish_types::approval::PrincipalKind::Automation) principal,
+/// and **no approval authority** — a non-interactive run is not a terminal, so
+/// a gated statement exits 2 with its request pending and an operator decides
+/// it out of band (`docs/approval-ledger.md` §C.3).
+///
+/// Both non-interactive entry points share this one constructor because the
+/// alternative drifted: `-c` and script runs each built their own config,
+/// neither named a principal, and every request they raised went into the
+/// record unattributed.
+pub fn noninteractive_config(overlay: bool) -> KernelConfig {
+    KernelConfig::repl()
+        .with_initial_vars(os_env_vars())
+        .with_overlay(overlay)
+        .with_principal(noninteractive_principal())
+}
+
 /// Who the person at the terminal is, for the record. `$USER` when the
 /// environment names one, `terminal` otherwise — a name an auditor can read,
 /// never an empty id.
@@ -458,11 +476,37 @@ pub fn interactive_config() -> KernelConfig {
 /// say who its session belongs to, and the REPL's answer is "the human who
 /// started it".
 fn terminal_principal() -> kaish_types::approval::Principal {
-    let id = std::env::var("USER")
-        .ok()
+    principal_named_by_env("terminal", kaish_types::approval::PrincipalKind::Human)
+}
+
+/// Who a `kaish -c` or script run belongs to, for the record.
+///
+/// `Automation`, not `Human`, because the distinction the record needs is not
+/// who launched the process but **whether anyone can be asked**: these runs
+/// have no prompt, so every gate they raise is settled by an operator out of
+/// band. The id still names the account, so an auditor reading the log sees
+/// whose automation it was.
+pub fn noninteractive_principal() -> kaish_types::approval::Principal {
+    principal_named_by_env("unattended", kaish_types::approval::PrincipalKind::Automation)
+}
+
+/// `$USER`, or `fallback` when the environment names no one.
+fn principal_named_by_env(
+    fallback: &str,
+    kind: kaish_types::approval::PrincipalKind,
+) -> kaish_types::approval::Principal {
+    kaish_types::approval::Principal::new(principal_id(std::env::var("USER").ok(), fallback), kind)
+}
+
+/// The id to record, given what the environment said. **Never empty** — an
+/// unattributed request is one an auditor cannot trace back, and a frontend
+/// always knows more than nothing about who it runs for. An empty `$USER` is
+/// the environment naming no one, so it falls back rather than passing an
+/// empty string through.
+fn principal_id(from_env: Option<String>, fallback: &str) -> String {
+    from_env
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "terminal".to_string());
-    kaish_types::approval::Principal::new(id, kaish_types::approval::PrincipalKind::Human)
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 /// The reference [`StatementClassifier`] over a set of command names, for
@@ -1018,6 +1062,24 @@ pub fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_principal_id_is_never_empty() {
+        assert_eq!(principal_id(Some("amy".to_string()), "unattended"), "amy");
+        // An empty `$USER` is the environment naming no one, not a name.
+        assert_eq!(principal_id(Some(String::new()), "unattended"), "unattended");
+        assert_eq!(principal_id(None, "unattended"), "unattended");
+    }
+
+    #[test]
+    fn the_two_frontends_record_different_kinds_of_principal() {
+        use kaish_types::approval::PrincipalKind;
+        // What separates them is not who launched the process but whether
+        // anyone can be asked: the REPL prompts, `-c` and scripts cannot.
+        assert_eq!(terminal_principal().kind, PrincipalKind::Human);
+        assert_eq!(noninteractive_principal().kind, PrincipalKind::Automation);
+        assert!(!noninteractive_principal().id.is_empty());
+    }
 
     /// Build an env getter over a fixed set of pairs — keeps trace-env tests
     /// off the process-global environment (which races under `cargo test`).

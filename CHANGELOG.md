@@ -751,6 +751,11 @@ breaking entries are marked **BREAKING**.
   every grant regardless of the flag.
 
 ### Fixed
+- **`kaish -c` and script runs recorded an empty principal on every approval
+  request** — each built its own `KernelConfig` and neither named one, so the
+  ledger could not say who asked. Both now share one `noninteractive_config()`
+  and record an `Automation` principal named by `$USER`, because what separates
+  them from the REPL is not who launched the process but that no one can be asked.
 - **`help limits` and `docs/LANGUAGE.md` said scatter returns results in
   completion order.** It returns them in item order and always has — `help
   scatter` and the code agree; the two docs were wrong, not the behavior.

@@ -77,3 +77,74 @@ fn a_quoted_command_name_is_an_argument_and_does_not_gate() {
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(stdout.trim(), "rm -rf /");
 }
+
+// ── Every request names who raised it ────────────────────────────────
+
+/// Pull the `approval` envelope out of a `--json` result on stdout.
+fn approval_envelope(stdout: &str) -> serde_json::Value {
+    let line = stdout
+        .lines()
+        .find(|line| line.contains("\"approval\""))
+        .unwrap_or_else(|| panic!("no --json approval envelope in: {stdout}"));
+    let parsed: serde_json::Value = serde_json::from_str(line).expect("the envelope is JSON");
+    parsed["approval"].clone()
+}
+
+/// Who a non-interactive run says it is. `$USER` when the environment names
+/// one — the harness inherits the caller's — and the fallback otherwise, so
+/// this asserts the *shape* the record must never have rather than a name
+/// that depends on where the tests run.
+fn assert_attributed(principal: &serde_json::Value, context: &str) {
+    let id = principal["id"].as_str().expect("an id");
+    assert!(
+        !id.is_empty(),
+        "{context}: a request with an empty principal id cannot be traced back to anyone: \
+         {principal}"
+    );
+    assert_eq!(
+        principal["kind"], "automation",
+        "{context}: a run with no prompt is automation, whoever launched it: {principal}"
+    );
+}
+
+#[test]
+fn a_gated_request_from_dash_c_names_its_principal() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("notes.txt");
+    std::fs::write(&target, "hi").expect("write the fixture");
+
+    let (code, stdout, stderr) = run(&[
+        "-c",
+        &format!(
+            "set -o approvals; rm --json {}",
+            target.to_str().expect("utf-8 path")
+        ),
+    ]);
+
+    assert_eq!(code, 2, "the delete is held\nout: {stdout}\nerr: {stderr}");
+    assert_attributed(&approval_envelope(&stdout)["principal"], "kaish -c");
+}
+
+#[test]
+fn a_gated_request_from_a_script_names_its_principal() {
+    // The second non-interactive door. It had the same empty principal for a
+    // release because it built its own config; both now share one
+    // constructor, and this is what keeps them from drifting apart again.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("notes.txt");
+    std::fs::write(&target, "hi").expect("write the fixture");
+    let script = dir.path().join("gate.kai");
+    std::fs::write(
+        &script,
+        format!(
+            "set -o approvals\nrm --json {}\n",
+            target.to_str().expect("utf-8 path")
+        ),
+    )
+    .expect("write the script");
+
+    let (code, stdout, stderr) = run(&[script.to_str().expect("utf-8 path")]);
+
+    assert_eq!(code, 2, "the delete is held\nout: {stdout}\nerr: {stderr}");
+    assert_attributed(&approval_envelope(&stdout)["principal"], "kaish script.kai");
+}
