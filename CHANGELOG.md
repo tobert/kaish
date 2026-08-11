@@ -328,6 +328,12 @@ breaking entries are marked **BREAKING**.
   brace-free glob patterns skip brace expansion.
 
 ### Fixed
+- **A gate raised inside `$(…)` or a condition command is now surfaced, not
+  just enforced** — the enclosing statement halts (exit 2, the request on
+  `.approval`) instead of running on the empty expansion, reading the held
+  condition as false, or taking a `||` fallback. The operation was already
+  held; the program continued anyway and the request stranded behind an
+  exit 0.
 - **`kaish -c` and script runs recorded an empty principal on every approval
   request** — both now share one `noninteractive_config()` and record an
   `Automation` principal named by `$USER`, because what separates them from
