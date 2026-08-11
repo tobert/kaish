@@ -2291,6 +2291,17 @@ impl Kernel {
                 crate::tools::StatementTap::Halt(held) => return Ok(*held),
             };
             let result = self.execute_pipeline(&pipeline).await?;
+            // A gate raised while evaluating inside the dispatched tool — a
+            // user tool body's `$(…)` — surfaces as this call's own held
+            // result, and must not strand in the slot for the next serialized
+            // call to mis-take (spec §I.5; the statement loop and the confirm
+            // replay door take the slot the same way).
+            if let Some(held) = self.take_eval_hold() {
+                if gated {
+                    self.exec_ctx.write().await.settle_attempts(held.code).await;
+                }
+                return Ok(*held);
+            }
             if gated {
                 self.exec_ctx.write().await.settle_attempts(result.code).await;
             }
@@ -3846,6 +3857,11 @@ impl Kernel {
                         // overwrite the request in the accumulated result.
                         // The stash check covers a hold whose typed error a
                         // layer below already stringified out of the result.
+                        // On a stash-based hold the returned `left_result` is
+                        // that stringified failure, not the held result — the
+                        // statement boundary discards it and surfaces the
+                        // slot's result instead. Do not "fix" this by taking
+                        // the slot here: only statement boundaries take it.
                         if left_result.approval.is_some() || self.eval_hold_pending() {
                             return Ok(ControlFlow::ok(left_result));
                         }

@@ -239,6 +239,46 @@ async fn a_user_tool_body_gate_surfaces_at_the_call() {
     assert_held(&result, dir.path(), "gate inside a user tool body");
 }
 
+/// The stash-based chain guard: the gate is inside the left side's `$()`,
+/// so its typed error gets stringified by the argument builder and the
+/// left result carries no `.approval` — only the stash knows. The fallback
+/// still must not run.
+#[tokio::test]
+async fn an_eval_hold_in_a_chain_left_side_does_not_run_the_fallback() {
+    let dir = tempdir();
+    let kernel = approvals_kernel(dir.path()).await;
+    let result = kernel
+        .execute("echo $(rm victim.txt) || touch fallback.txt")
+        .await
+        .expect("execute");
+    assert_held(&result, dir.path(), "stash-based || guard");
+    assert!(
+        !dir.path().join("fallback.txt").exists(),
+        "pending is not failure: the fallback may not run on a stringified hold"
+    );
+}
+
+/// The argv door takes the slot too (the review's find): a user tool whose
+/// body holds inside `$(…)`, invoked via `execute_argv`, surfaces the held
+/// result — and the slot must not strand for the next call to mis-take.
+#[tokio::test]
+async fn execute_argv_surfaces_a_tool_body_hold_and_strands_nothing() {
+    let dir = tempdir();
+    let kernel = approvals_kernel(dir.path()).await;
+    kernel
+        .execute("zap() { echo $(rm victim.txt); }")
+        .await
+        .expect("define tool");
+
+    let result = kernel.execute_argv("zap", &[]).await.expect("execute_argv");
+    assert_held(&result, dir.path(), "execute_argv over a holding tool body");
+
+    // The slot is empty again: an innocent follow-up statement runs clean.
+    let after = kernel.execute("echo fine").await.expect("execute");
+    assert_eq!(after.code, 0, "a stale slot must not halt the next call: {}", after.err);
+    assert_eq!(after.text_out().trim(), "fine");
+}
+
 // ── The stranded-request regression itself ──────────────────────────────
 
 #[tokio::test]
