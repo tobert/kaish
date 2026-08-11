@@ -466,7 +466,7 @@ impl ToolArgs {
     /// true` binds `command = Bool(true)`. Those keys are left in `named` so
     /// `to_argv()` renders `--command=true` and clap's `Option<String>` field
     /// accepts it; collapsing them to a bare `--command` drops the value and
-    /// makes clap error "a value is required". (See docs/issues.md.)
+    /// makes clap error "a value is required".
     ///
     /// Idempotent. Non-bool named entries are left alone.
     pub fn flagify_bool_named(&mut self, schema: &ToolSchema) {

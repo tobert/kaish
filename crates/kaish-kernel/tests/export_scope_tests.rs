@@ -5,7 +5,7 @@
 //! Regression: `export` wrote the value via `set` (innermost frame), so the
 //! function's pushed frame was popped on return and the value vanished — even
 //! though the export *marking* (a flat set) survived, leaving an exported name
-//! with no value. See docs/issues.md P2 "Interpreter item".
+//! with no value.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]

@@ -36,6 +36,21 @@ fn generate_blob_id() -> String {
     format!("{:x}-{:x}", timestamp, count)
 }
 
+/// Who a kernel built by [`EmbeddedClient::transient`] or
+/// [`EmbeddedClient::with_defaults`] runs for, for the record.
+///
+/// `Automation`, not `Unknown` or `Human`: these convenience constructors
+/// wire no approval authority, so a gate they raise is settled out of band
+/// by whoever operates the process — the same distinction GH #317 drew for
+/// `kaish -c` and script runs. The id names the door that built the
+/// kernel — **never empty**, because an unattributed request cannot be
+/// traced back to anyone. An embedder that knows who it runs for names them
+/// instead via `KernelConfig::with_principal`; this is only the fallback for
+/// the constructors that ask for nothing.
+pub fn embedded_principal() -> kaish_types::approval::Principal {
+    kaish_types::approval::Principal::new("embedded", kaish_types::approval::PrincipalKind::Automation)
+}
+
 /// A client that wraps a `Kernel` directly for in-process access.
 ///
 /// # Example
@@ -43,8 +58,13 @@ fn generate_blob_id() -> String {
 /// ```ignore
 /// use kaish_client::EmbeddedClient;
 /// use kaish_kernel::{Kernel, KernelConfig};
+/// use kaish_types::approval::{Principal, PrincipalKind};
 ///
-/// let kernel = Kernel::new(KernelConfig::transient())?;
+/// // Name who this kernel runs for — an unnamed principal cannot be traced
+/// // back to anyone once it raises an approval request.
+/// let kernel = Kernel::new(
+///     KernelConfig::transient().with_principal(Principal::new("my-agent", PrincipalKind::Agent)),
+/// )?;
 /// let client = EmbeddedClient::new(kernel);
 ///
 /// let result = client.execute("X=42").await?;
@@ -68,14 +88,14 @@ impl EmbeddedClient {
 
     /// Create a new embedded client with a transient (non-persistent) kernel.
     pub fn transient() -> ClientResult<Self> {
-        let kernel = Kernel::new(KernelConfig::transient())
+        let kernel = Kernel::new(KernelConfig::transient().with_principal(embedded_principal()))
             .map_err(ClientError::Other)?;
         Ok(Self::new(kernel))
     }
 
     /// Create a new embedded client with default configuration.
     pub fn with_defaults() -> ClientResult<Self> {
-        let kernel = Kernel::new(KernelConfig::default())
+        let kernel = Kernel::new(KernelConfig::default().with_principal(embedded_principal()))
             .map_err(ClientError::Other)?;
         Ok(Self::new(kernel))
     }
@@ -470,6 +490,69 @@ mod tests {
 
         let deleted = client.delete_blob("nonexistent-blob-id").await.expect("delete_blob failed");
         assert!(!deleted, "deleting nonexistent blob should return false");
+    }
+
+    // ── Every request names who raised it ────────────────────────────────
+
+    /// `EmbeddedClient::transient()` wires no approval authority, so a gate
+    /// it raises is settled out of band — but the request must still say who
+    /// asked. GH #317 fixed the same hole for the REPL's `-c`/script doors;
+    /// `transient()`/`with_defaults()` are the third and fourth doors that
+    /// built a bare `KernelConfig` and never named a principal.
+    #[tokio::test]
+    async fn transient_names_an_embedded_principal_on_a_gated_request() {
+        use kaish_types::approval::PrincipalKind;
+
+        // /tmp is real LocalFs even in Sandboxed mode (kernel.rs's Sandboxed
+        // doc), so a tempdir fixture is reachable without touching $HOME.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("notes.txt");
+        std::fs::write(&target, "hi").expect("write the fixture");
+
+        let client = EmbeddedClient::transient().expect("failed to create client");
+        client
+            .execute("set -o approvals")
+            .await
+            .expect("enabling approvals failed");
+        let result = client
+            .execute(&format!("rm {}", target.to_str().expect("utf-8 path")))
+            .await
+            .expect("execute failed");
+
+        let pending = result
+            .approval
+            .as_ref()
+            .expect("rm under approvals must raise a request");
+        assert_eq!(
+            pending.request.principal.id, "embedded",
+            "an unnamed principal cannot be traced back to anyone"
+        );
+        assert_eq!(pending.request.principal.kind, PrincipalKind::Automation);
+    }
+
+    /// `with_defaults()` builds `KernelConfig::default()` directly, same as
+    /// `transient()` — cover it without executing anything, since its
+    /// sandbox root is `$HOME` and this test must not touch real files there.
+    #[tokio::test]
+    async fn with_defaults_names_an_embedded_principal() {
+        use kaish_types::approval::PrincipalKind;
+
+        let client = EmbeddedClient::with_defaults().expect("failed to create client");
+        let principal = client.kernel().principal();
+        assert_eq!(principal.id, "embedded");
+        assert_eq!(principal.kind, PrincipalKind::Automation);
+    }
+
+    #[test]
+    fn embedded_principal_names_a_real_actor() {
+        use kaish_types::approval::PrincipalKind;
+
+        let principal = embedded_principal();
+        assert!(
+            !principal.id.is_empty(),
+            "an empty principal id cannot be traced back to anyone"
+        );
+        assert_eq!(principal.kind, PrincipalKind::Automation);
     }
 
     #[tokio::test]

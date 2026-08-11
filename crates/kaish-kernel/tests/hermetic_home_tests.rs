@@ -3,7 +3,7 @@
 //! a regression (re-introducing `std::env::var("HOME")` in construction, tilde
 //! expansion, or `cd`) fails loudly.
 //!
-//! See docs/issues.md "Kernel reads host HOME unconditionally".
+//! Pins the "kernel reads host HOME unconditionally" fix.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]

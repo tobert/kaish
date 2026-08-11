@@ -121,7 +121,7 @@ impl Tool for Ls {
         // `one_per_line` is parsed so that `-1` is recognized as a flag (not an
         // error). Canonical (piped) output is already one-per-line for nodes;
         // the interactive multi-column renderer will need to respect this flag
-        // separately — tracked in docs/issues.md.
+        // separately — deferred.
         let _one_per_line = parsed.one;
 
         let opts = ListOptions {

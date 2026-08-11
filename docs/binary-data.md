@@ -369,4 +369,4 @@ DevFs tests in `tests/sandbox_mode_tests.rs`.
   `random --bytes N` alone returns `Bytes`. Bikeshed `--int`/range later.
 - **`getrandom` platform behavior.** Linux `getrandom(2)` blocks until the pool
   is seeded (fine); WASI/older-macOS quality and the existing entropy-failure
-  message gap (`issues.md` mktemp note) should be documented for `/dev/urandom`.
+  message gap (the mktemp note) should be documented for `/dev/urandom`.

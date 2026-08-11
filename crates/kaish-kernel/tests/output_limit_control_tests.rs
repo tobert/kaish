@@ -1,6 +1,6 @@
 //! Kernel-routed tests for runtime output-limit control.
 //!
-//! These pin the bug cluster from docs/issues.md (2026-06-09): every
+//! These pin the 2026-06-09 bug cluster: every
 //! documented way to adjust the output limit at runtime used to fail —
 //! `set -o output-limit=SIZE` was a parse error, `kaish-output-limit set N`
 //! collided with the `set` keyword token, and even the paths that parsed

@@ -1,4 +1,4 @@
-//! Small independent correctness/surprise fixes batched from `docs/issues.md`:
+//! Small independent correctness/surprise fixes, batched:
 //!
 //! 1. `grep -c` exits 1 on zero matches (GNU parity) — was exit 0.
 //! 2. `$(cmd)` trims only trailing newlines, not all trailing whitespace —

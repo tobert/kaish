@@ -171,7 +171,7 @@ impl<'a> Validator<'a> {
         // If we have a schema, validate args against it. Pass the schema so the
         // arg-builder binds glued/value short-flags the same way execute does —
         // otherwise a tool whose validate() reads positionals semantically (sed,
-        // awk) misreads them (docs/issues.md: schema-blind validation builder).
+        // awk) misreads them (the schema-blind validation builder).
         if let Some(tool) = self.registry.get(&cmd.name) {
             let schema = tool.schema();
             let tool_args = build_tool_args_for_validation(&cmd.args, Some(&schema));
@@ -998,7 +998,7 @@ mod tests {
 
     #[test]
     fn glued_value_flags_dont_false_error_at_validation() {
-        // Regression for the schema-blind validation builder (docs/issues.md):
+        // Regression for the schema-blind validation builder:
         // `sed -e1d -e2d FILE` must validate clean. Before schema-aware binding,
         // the glued `-e` values weren't split, so `collect_expressions` fell back
         // to parsing the FILE PATH as the sed program — a path-dependent false

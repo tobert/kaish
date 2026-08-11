@@ -3,7 +3,7 @@
 //! `[[ -f ~/x ]]` must expand `~` to the session HOME before stat'ing, the
 //! same way argv positionals do. The async `eval_test_async` path (the real
 //! kernel path) used to stat the literal `~/x`, so every `~`-prefixed file test
-//! was false. See docs/issues.md P2 "Interpreter trio".
+//! was false.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
