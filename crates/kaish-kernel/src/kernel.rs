@@ -1244,6 +1244,16 @@ pub struct Kernel {
     /// the recursion chain is single-threaded (top-level `execute` is
     /// serialized by `execute_lock`; concurrency happens on forks).
     recursion_depth: AtomicUsize,
+    /// The held result of a gate raised during expression evaluation, stashed
+    /// at the raise site because the `HeldByGate` error that unwinds the
+    /// statement can be caught and stringified on the way up (the pipeline's
+    /// redirect and argument builders convert eval errors to `failure(1, …)`
+    /// results). The statement loop takes this after every statement and
+    /// surfaces it as the statement's own held result — whatever the
+    /// intermediate layers did to the error. Per-kernel like
+    /// [`Self::recursion_depth`]: top-level `execute` is serialized by
+    /// `execute_lock`, and forks get a fresh empty slot.
+    held_in_eval: std::sync::Mutex<Option<Box<ExecResult>>>,
     /// This kernel's approval side (spec §D.2). Shared by every fork, so a
     /// background job's requests land in the same log the foreground reads.
     approvals: KernelApprovals,
@@ -1786,6 +1796,7 @@ impl Kernel {
             self_weak: std::sync::OnceLock::new(),
             execute_lock: tokio::sync::Mutex::new(()),
             recursion_depth: AtomicUsize::new(0),
+            held_in_eval: std::sync::Mutex::new(None),
             approvals,
             bg_job_id: None,
             // Overlay handle is set by Kernel::new after assemble returns;
@@ -2055,6 +2066,8 @@ impl Kernel {
             // A fork runs on a fresh stack (spawned task) — its recursion
             // budget is independent of the parent's current depth (GH #46).
             recursion_depth: AtomicUsize::new(0),
+            // A fork surfaces its own holds; the parent's slot stays put.
+            held_in_eval: std::sync::Mutex::new(None),
             bg_job_id,
             // Arc-clone the overlay handle so forks (background jobs, scatter
             // workers, pipeline stages) can reach the same overlay transaction
@@ -2535,7 +2548,18 @@ impl Kernel {
                 crate::tools::StatementTap::Proceed { gated } => gated,
                 crate::tools::StatementTap::Halt(held) => return Ok(*held),
             };
-            let flow = self.execute_stmt_flow(stmt).await?;
+            let flow_result = self.execute_stmt_flow(stmt).await;
+            // A fresh gate raised while *evaluating* the replayed statement —
+            // a defense-in-depth gate inside its `$(…)` — surfaces as this
+            // replay's own held result, and must not strand in the slot for a
+            // later door to mis-take (spec §I.5).
+            if let Some(held) = self.take_eval_hold() {
+                if gated {
+                    self.exec_ctx.write().await.settle_attempts(held.code).await;
+                }
+                return Ok(*held);
+            }
+            let flow = flow_result?;
             let drained = {
                 let mut receiver = self.stderr_receiver.lock().await;
                 receiver.drain_lossy()
@@ -3192,7 +3216,32 @@ impl Kernel {
                 }
             };
 
-            let flow = self.execute_stmt_flow(&stmt).await?;
+            // A gate raised during *evaluation* — a `$(…)` body or a
+            // condition command — means the statement never got the value it
+            // needed: it surfaces the gate site's own held result and the
+            // program halts here, exactly as a statement-level hold does
+            // (spec §I.5). The stash is authoritative because the unwinding
+            // `HeldByGate` error can be stringified into an ordinary failure,
+            // or swallowed into an apparent success, by an intermediate catch
+            // (the pipeline's redirect and argument builders) — the slot
+            // survives whatever happened to the error.
+            let flow_result = self.execute_stmt_flow(&stmt).await;
+            if let Some(held) = self.take_eval_hold() {
+                let held_result = *held;
+                if gated {
+                    // The statement tap reserved an attempt for this
+                    // statement; the inner hold ends it at exit 2.
+                    let held_flow = ControlFlow::Normal(held_result.clone());
+                    self.settle_statement_attempt(&held_flow).await;
+                }
+                on_output(&held_result);
+                accumulate_result(&mut result, &held_result);
+                if !surfaced_warnings.is_empty() {
+                    result.err = format!("{surfaced_warnings}{}", result.err);
+                }
+                return Ok(result);
+            }
+            let flow = flow_result?;
             if gated {
                 self.settle_statement_attempt(&flow).await;
             }
@@ -3743,6 +3792,12 @@ impl Kernel {
                     ControlFlow::Normal(mut left_result) => {
                         self.drain_stderr_into(&mut left_result).await;
                         self.update_last_result(&left_result).await;
+                        // Pending is not failure (spec §I.5) — see the
+                        // `OrChain` twin. The stash check matters here for a
+                        // hold swallowed into an apparent success below.
+                        if left_result.approval.is_some() || self.eval_hold_pending() {
+                            return Ok(ControlFlow::ok(left_result));
+                        }
                         if left_result.ok() {
                             let right_flow = self.execute_stmt_flow(right).await?;
                             match right_flow {
@@ -3785,6 +3840,15 @@ impl Kernel {
                     ControlFlow::Normal(mut left_result) => {
                         self.drain_stderr_into(&mut left_result).await;
                         self.update_last_result(&left_result).await;
+                        // Pending is not failure (spec §I.5): a fallback
+                        // written for failure must not run on a decision
+                        // nobody has made yet — and running it would also
+                        // overwrite the request in the accumulated result.
+                        // The stash check covers a hold whose typed error a
+                        // layer below already stringified out of the result.
+                        if left_result.approval.is_some() || self.eval_hold_pending() {
+                            return Ok(ControlFlow::ok(left_result));
+                        }
                         if !left_result.ok() {
                             let right_flow = self.execute_stmt_flow(right).await?;
                             match right_flow {
@@ -4744,6 +4808,16 @@ impl Kernel {
                 // Now propagate the error
                 let result = run_result?;
 
+                // A held body stops the enclosing statement before its
+                // missing output is used (spec §I.5) — the request rides up
+                // as a typed error the statement loop converts back into a
+                // held result, and is stashed for the boundary in case an
+                // intermediate catch stringifies the error.
+                if result.approval.is_some() {
+                    self.stash_eval_hold(&result);
+                    return Err(anyhow::Error::new(HeldByGate(Box::new(result))));
+                }
+
                 // A binary result is preserved as bytes — never lossy-decoded to
                 // a string. No trailing-newline trim (every byte is significant).
                 if let Some(bytes) = result.out_bytes() {
@@ -4822,6 +4896,18 @@ impl Kernel {
             Expr::Command(cmd) => {
                 // Execute command and return boolean based on exit code
                 let result = self.execute_command(&cmd.name, &cmd.args).await?;
+                // Pending is not failure (spec §I.5): a held condition must
+                // not read as false — neither branch may run on a decision
+                // nobody has made yet. The second arm catches a hold from
+                // deeper inside the command whose typed error an intermediate
+                // layer already stringified into an ordinary failure.
+                if result.approval.is_some() {
+                    self.stash_eval_hold(&result);
+                    return Err(anyhow::Error::new(HeldByGate(Box::new(result))));
+                }
+                if let Some(held) = self.clone_eval_hold() {
+                    return Err(anyhow::Error::new(HeldByGate(held)));
+                }
                 Ok(Value::Bool(result.code == 0))
             }
             Expr::LastExitCode => {
@@ -5133,6 +5219,14 @@ impl Kernel {
                 // Now propagate the error
                 let result = run_result?;
 
+                // A held body stops the enclosing statement before its
+                // missing output is spliced in (spec §I.5) — same conversion
+                // and stash as the bare `$(…)` arm.
+                if result.approval.is_some() {
+                    self.stash_eval_hold(&result);
+                    return Err(anyhow::Error::new(HeldByGate(Box::new(result))));
+                }
+
                 // Embedding binary into a string is a text context: fail loud
                 // rather than splice in U+FFFD garbage.
                 match result.try_text_out() {
@@ -5335,6 +5429,46 @@ impl Kernel {
     ///
     /// The guard is constructed *before* the ceiling check so the error path
     /// unwinds it too — the counter is always balanced, even when we reject.
+    /// Record a gate raised during expression evaluation. The paired
+    /// [`Self::take_eval_hold`] surfaces it at the statement boundary even
+    /// when the unwinding [`HeldByGate`] error is stringified — or swallowed
+    /// outright — by an intermediate catch (the pipeline's redirect and
+    /// argument builders convert eval errors to `failure(1, …)` results).
+    fn stash_eval_hold(&self, held: &ExecResult) {
+        let mut slot = match self.held_in_eval.lock() {
+            Ok(guard) => guard,
+            // A poisoned lock means a panic elsewhere; the slot itself is a
+            // plain Option and still usable.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = Some(Box::new(held.clone()));
+    }
+
+    /// Whether an eval-raised hold is waiting to be surfaced.
+    fn eval_hold_pending(&self) -> bool {
+        match self.held_in_eval.lock() {
+            Ok(guard) => guard.is_some(),
+            Err(poisoned) => poisoned.into_inner().is_some(),
+        }
+    }
+
+    /// A copy of the pending eval-raised hold, leaving the slot set for the
+    /// statement boundary to take.
+    fn clone_eval_hold(&self) -> Option<Box<ExecResult>> {
+        match self.held_in_eval.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Take the pending eval-raised hold, emptying the slot.
+    fn take_eval_hold(&self) -> Option<Box<ExecResult>> {
+        match self.held_in_eval.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        }
+    }
+
     fn enter_recursion(&self, what: &str) -> Result<RecursionGuard<'_>> {
         let depth = self.recursion_depth.fetch_add(1, Ordering::Relaxed) + 1;
         let guard = RecursionGuard { counter: &self.recursion_depth };
@@ -7604,6 +7738,28 @@ fn finalize_output(
 /// each command's output concatenates raw, matching bash (`printf a; printf b`
 /// and `printf a && printf b` both yield `ab`; a trailing newline only appears
 /// when a command emits its own, as `echo` does).
+/// A gate raised while *evaluating* an expression — a `$(…)` body or a
+/// condition command — carried as a typed error to the statement loop, which
+/// surfaces it as the enclosing statement's own held result (spec §I.5).
+///
+/// Without this, the enclosing statement runs on a missing value: the
+/// substitution expands to empty, the condition reads as false, and the
+/// pending request is stranded behind an exit 0 — enforcement held the
+/// operation, but nothing told the caller. The boxed result is the gate
+/// site's own (exit 2, the request on `.approval`, the message naming it),
+/// so the surfaced result is exactly what a direct invocation would return.
+#[derive(Debug)]
+struct HeldByGate(Box<ExecResult>);
+
+impl std::fmt::Display for HeldByGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The inner result's err already names the operation and request.
+        write!(f, "{}", self.0.err.trim_end())
+    }
+}
+
+impl std::error::Error for HeldByGate {}
+
 fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     // Materialize lazy OutputData into .out before accumulating.
     // Without this, the first command's output stays in .output while
