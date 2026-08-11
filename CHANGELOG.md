@@ -62,8 +62,11 @@ breaking entries are marked **BREAKING**.
   `Requester::cancel`/`Kernel::cancel_approval(&id, rev, reason)` close an
   undecided request, asking again links the new request by `supersedes`, and
   teardown (`kill --discard %N`, `cancel_all_jobs`, `shutdown`) cancels the
-  requests it would otherwise strand. `ApprovalRequest::deadline` defaults to
-  `None` and is compared on observation, never enforced on a timer.
+  requests it would otherwise strand. Cancellation takes no `ApproverHandle`
+  — the owning principal cancels without authority, so a gated agent can
+  withdraw its own request; cancelling another principal's request without
+  authority exits 1. `ApprovalRequest::deadline` defaults to `None` and is
+  compared on observation, never enforced on a timer.
 - **The embedder installs the clock** (§A.5) — `ledger::{Clock, SystemClock}`
   + `KernelConfig::with_approval_clock`; one clock per ledger, and the ledger
   latches a monotone non-decreasing view so an expired grant stays expired
@@ -79,6 +82,10 @@ breaking entries are marked **BREAKING**.
   the judged context redeems nothing: the ledger posts a fresh request instead.
 - **`ApprovalOutcome::Closed { request, state, detail }`** — "this request is
   over" is distinct from `LedgerUnavailable`'s "retry".
+- **`GrantTerms::once_for_view`** builds terms from the tokenless
+  `ApprovalRequestView` an approver holds — rebuilding an `ApprovalRequest`
+  to reach `once_for` drops the request's resources and trips
+  `ConditionsWidened`.
 - **Paginated listings and `Approvals::watch(since)`** (§D.2) —
   `pending(PageRequest)` and `log(since, limit)` return bounded pages with
   cursors, never a bare `Vec`; `watch` backfills the retained tail then streams
@@ -186,7 +193,7 @@ breaking entries are marked **BREAKING**.
 
   | Was | Becomes |
   |---|---|
-  | `ExecResult.latch: Option<Box<LatchRequest>>` | `ExecResult.approval: Option<Box<ApprovalRequestView>>` |
+  | `ExecResult.latch: Option<Box<LatchRequest>>` | `ExecResult.approval: Option<Box<PendingApproval>>` |
   | `ExecResult::latch_request()` | `ExecResult::approval_request()` |
   | `--json` envelope key `"latch"` | `"approval"` |
   | `KernelConfig::with_nonce_store(NonceStore)` | `KernelConfig::with_ledger(LedgerConfig)` / `with_ledger_sink(sink)` |
@@ -205,8 +212,9 @@ breaking entries are marked **BREAKING**.
   `clear_stdout`, survives the `ExecResult`/`ToolResult` roundtrip, overrides
   a later pipeline stage's success, rides scatter rows).
 - **BREAKING:** `ExecResult.latch`/`latch_request()` are removed — read
-  `ExecResult.approval`/`approval_request()`; the payload is a tokenless
-  `ApprovalRequestView`, safe to log and serialize.
+  `ExecResult.approval` (the whole `PendingApproval`: view + resume route)
+  or `approval_request()` (the `ApprovalRequestView` alone). Both are
+  tokenless by construction, safe to log and serialize.
 - **BREAKING:** the `--json` envelope key for a gated result is `"approval"`,
   carrying the request view rather than a nonce record.
 - **BREAKING:** `JobInfo.latch` is `JobInfo.approval` (`with_approval`), and
@@ -249,9 +257,11 @@ breaking entries are marked **BREAKING**.
 - **BREAKING: `kill %N` confirms the death** — bounded by `kill_grace + 3s`,
   prints what it did, and `--no-wait` returns at dispatch (#244).
 - **BREAKING: `jobs --json` emits the serialized `JobInfo`** plus a `path`
-  field, and `status` is lowercase (`"failed"`, not 0.13.0's `"Failed"`);
-  rows gain `exit_code`/`started_at`/`finished_at`/`pgids`, each present only
-  when set.
+  field, so the wire shape follows the type; rows gain
+  `exit_code`/`started_at`/`finished_at`/`pgids`, each present only when set.
+- **BREAKING: `status` in `jobs --json` is lowercase** (`"failed"`, not
+  0.13.0's `"Failed"`), matching `/v/jobs/N/status`'s vocabulary — the two
+  disagreed before.
 - **BREAKING: `kaish-help`'s overlay-mode guidance is opt-in** — the
   `--overlay` paragraph left the default recipes for its own
   `Concept::Overlay`; an overlay-using embedder opts back in with
