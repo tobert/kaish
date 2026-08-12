@@ -25,30 +25,6 @@ use kaish_kernel::ast::Value;
 use kaish_kernel::interpreter::ExecResult;
 use kaish_kernel::{Kernel, KernelConfig};
 
-/// This file's ledger scope (spec §A.7): a fresh kernel id per ledger, and
-/// no session — an unscoped ledger is the single-session shape.
-#[allow(dead_code)]
-fn test_scope() -> kaish_types::approval::ApprovalScope {
-    kaish_types::approval::ApprovalScope::kernel(kaish_types::approval::KernelId::mint())
-}
-
-/// The origin a request posted by this file is stamped with (spec §A.7,
-/// §A.9). One fixed binding: these tests exercise the state machine, not the
-/// replay rules.
-#[allow(dead_code)]
-fn test_origin(principal: kaish_types::approval::Principal) -> kaish_types::approval::RequestOrigin {
-    let scope = test_scope();
-    kaish_types::approval::RequestOrigin::new(
-        scope.clone(),
-        kaish_types::approval::PlanBinding::new(
-            kaish_types::approval::PlanDigest::new("test"),
-            "/",
-            scope,
-        ),
-        principal,
-        kaish_types::approval::Capture::DirectExecution)
-}
-
 
 fn tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()

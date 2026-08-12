@@ -691,18 +691,10 @@ impl PipelineRunner {
         let mut panics: Vec<String> = Vec::new();
         // GH #125: a confirmation gate (`set -o approvals`) raised by an EARLIER
         // stage must not be swallowed by a later stage's nominal success —
-        // `rm x | echo done` used to exit 0 with `.approval` dropped even though
-        // `rm` genuinely gated (the op never ran; only its stderr text hinted at
-        // the gate). The first gate wins if more than one stage gates,
-        // mirroring `wait.rs`'s `classify()` precedent — captured here in
-        // stage order, so the first `Some` set below IS the first stage.
-        let mut gated: Option<ExecResult> = None;
+
         for (i, handle) in handles.into_iter().enumerate() {
             match handle.await {
                 Ok((result, stage_ctx)) => {
-                    if result.approval.is_some() {
-                        gated.get_or_insert_with(|| result.clone());
-                    }
                     if i == last_idx {
                         last_result = result;
                         // Sync last stage's scope and cwd changes back
@@ -718,12 +710,6 @@ impl PipelineRunner {
             }
         }
 
-        // A pending gate is a control-plane fact about the WHOLE pipeline, not
-        // stage-local trivia — override the last stage's nominal result so the
-        // exit code (2) and the structured `.approval` both survive.
-        if let Some(gate) = gated {
-            last_result = gate;
-        }
 
         // Checked LAST (so it wins over the gate override above): mirrors the
         // existing precedent that ANY stage panicking overrides `last_result`

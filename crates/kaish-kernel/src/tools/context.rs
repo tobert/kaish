@@ -5,9 +5,6 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use kaish_types::approval::{
-    RequestId,
-};
 
 use crate::ast::Value;
 use crate::backend::{KernelBackend, LocalBackend};
@@ -202,25 +199,6 @@ pub struct ExecContext {
     #[cfg(all(feature = "localfs", feature = "overlay"))]
     pub overlay_handle: Option<Arc<crate::kernel::OverlayHandle>>,
 
-    /// What this context needs to post approval requests against a real
-    /// ledger (`docs/approval-ledger.md`, ledger PR 3). `None` — today's only
-    /// value in production — is what makes `ToolCtx::request_approval`
-    /// return `Unsupported`: no `KernelConfig::with_ledger` exists yet
-    /// (that builder is PR 4), so nothing sets this outside a test.
-
-
-
-
-    /// The request currently being satisfied above this one, if any (spec
-    /// §A.7). The statement gate sets it when it authorizes a statement, so
-    /// an `fs.*` gate underneath names the statement's request as `parent`
-    /// and a UI can render one nested prompt instead of two unrelated ones.
-    ///
-    /// Propagated to pipeline stages and forks — a nested gate is nested
-    /// however deep the execution went to reach it — and cleared when the
-    /// statement settles. Parenthood is a display and audit relationship
-    /// only: a grant on a parent never authorizes a child (spec §A.7).
-    pub(crate) gate_parent: Option<RequestId>,
 }
 
 /// What the write-model gate chose for a single truncating overwrite.
@@ -396,7 +374,6 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            gate_parent: None,
         }
     }
 
@@ -437,7 +414,6 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            gate_parent: None,
         }
     }
 
@@ -475,7 +451,6 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            gate_parent: None,
         }
     }
 
@@ -513,7 +488,6 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            gate_parent: None,
         }
     }
 
@@ -554,7 +528,6 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            gate_parent: None,
         }
     }
 
@@ -592,7 +565,6 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            gate_parent: None,
         }
     }
 
@@ -798,7 +770,6 @@ impl ExecContext {
             // Parenthood does travel: a gate reached from inside a gated
             // statement is nested under it however many stages deep the
             // execution went (spec §A.7). It authorizes nothing on its own.
-            gate_parent: self.gate_parent.clone(),
         }
     }
 

@@ -230,10 +230,6 @@ impl Job {
         self.try_poll();
         match &self.result {
             Some(r) if r.ok() => JobStatus::Done,
-            // A gated destructive op (exit 2 with a stored approval
-            // request) is *held*, not failed — surface it distinctly so
-            // `Kernel::confirm` can still fulfill it (GH #96).
-            Some(r) if r.approval_request().is_some() => JobStatus::Gated,
             Some(_) if self.killed => JobStatus::Killed,
             Some(_) => JobStatus::Failed,
             None => JobStatus::Running,
@@ -262,26 +258,10 @@ impl Job {
         self.try_poll();
         match &self.result {
             Some(r) if r.ok() => "done:0".to_string(),
-            Some(r) if r.approval_request().is_some() => "gated".to_string(),
             Some(r) if self.killed => format!("killed:{}", r.code),
             Some(r) => format!("failed:{}", r.code),
             None => "running".to_string(),
         }
-    }
-
-    /// The job's pending approval request, if it is held
-    /// (`JobStatus::Gated`). `None` otherwise. Backs `JobInfo.approval` and
-    /// the `/v/jobs/{id}/approval` node so a backgrounded gate is fulfillable
-    /// (#96).
-    ///
-    /// Reads `job_id` straight off the record rather than stamping it here:
-    /// the request was posted by a fork that already knew which job it ran
-    /// for, so correlation is stamped **once**, at post time. The latch had
-    /// two stamping sites (this chokepoint and `wait`'s own `classify`) and
-    /// they could drift; the ledger has one.
-    pub fn approval(&mut self) -> Option<kaish_types::approval::ApprovalRequestView> {
-        self.try_poll();
-        self.result.as_ref().and_then(|r| r.approval_request())
     }
 
     /// Write job output to a temp file.
@@ -489,16 +469,11 @@ impl Job {
     /// already did that poll to decide reap-safety before calling this. The
     /// single chokepoint that populates every `JobInfo` field (GH #243), so
     /// the three call sites can't drift on which fields they remember to set.
-    fn to_info(
-        &self,
-        status: JobStatus,
-        approval: Option<kaish_types::approval::ApprovalRequestView>,
-    ) -> JobInfo {
+    fn to_info(&self, status: JobStatus) -> JobInfo {
         let exit_code = self.result.as_ref().map(|r| r.code);
         JobInfo::new(self.id, self.command.clone(), status)
             .with_output_file(self.output_file.clone())
             .with_pid(self.pid)
-            .with_approval(approval)
             .with_exit_code(exit_code)
             .with_started_at(self.started_at)
             .with_finished_at(self.finished_at)
@@ -884,8 +859,7 @@ impl JobManager {
             .values_mut()
             .map(|job| {
                 let status = job.status();
-                let approval = job.approval();
-                job.to_info(status, approval)
+                job.to_info(status)
             })
             .collect();
         infos.sort_by_key(|info| info.id);
@@ -921,7 +895,7 @@ impl JobManager {
         let mut jobs = self.jobs.lock().await;
         let done_ids: Vec<JobId> = jobs
             .iter_mut()
-            .filter_map(|(id, job)| (job.is_done() && job.approval().is_none()).then_some(*id))
+            .filter_map(|(id, job)| job.is_done().then_some(*id))
             .collect();
 
         let mut removed = Vec::with_capacity(done_ids.len());
@@ -930,8 +904,7 @@ impl JobManager {
                 continue;
             };
             let status = job.status();
-            let approval = job.approval();
-            let info = job.to_info(status, approval);
+            let info = job.to_info(status);
             job.cleanup_files();
             removed.push(info);
         }
@@ -962,7 +935,7 @@ impl JobManager {
         let mut finished: Vec<(JobId, SystemTime)> = jobs
             .iter_mut()
             .filter_map(|(id, job)| {
-                (job.is_done() && job.approval().is_none())
+                job.is_done()
                     .then(|| (*id, job.finished_at.unwrap_or(job.started_at)))
             })
             .collect();
@@ -986,23 +959,12 @@ impl JobManager {
         jobs.contains_key(&id)
     }
 
-    /// Whether the job's cached result is a pending approval gate
-    /// (`JobStatus::Gated`). Consumers that would drop the job (`kill`,
-    /// cleanup paths) check this so a held request is never destroyed
-    /// silently. Keeps the `gated` spelling the status itself keeps
-    /// (`docs/approval-ledger.md` §F.2).
-    pub async fn is_gated(&self, id: JobId) -> bool {
-        let mut jobs = self.jobs.lock().await;
-        jobs.get_mut(&id).is_some_and(|job| job.approval().is_some())
-    }
-
     /// Get info for a specific job.
     pub async fn get(&self, id: JobId) -> Option<JobInfo> {
         let mut jobs = self.jobs.lock().await;
         jobs.get_mut(&id).map(|job| {
             let status = job.status();
-            let approval = job.approval();
-            job.to_info(status, approval)
+            job.to_info(status)
         })
     }
 
@@ -1016,15 +978,6 @@ impl JobManager {
     pub async fn get_status_string(&self, id: JobId) -> Option<String> {
         let mut jobs = self.jobs.lock().await;
         jobs.get_mut(&id).map(|job| job.status_string())
-    }
-
-    /// Get a held job's pending approval request (for
-    /// `/v/jobs/{id}/approval` and any embedder reaching a backgrounded
-    /// gate). `Some(None)` vs `None` distinguishes "job exists, not held"
-    /// from "no such job"; jobfs flattens both to an empty node body. GH #96.
-    pub async fn get_approval(&self, id: JobId) -> Option<kaish_types::approval::ApprovalRequestView> {
-        let mut jobs = self.jobs.lock().await;
-        jobs.get_mut(&id).and_then(|job| job.approval())
     }
 
     /// List all job IDs, sorted (GH #247 — see [`Self::list`]'s doc for why
@@ -1183,11 +1136,6 @@ impl JobManager {
     }
 
     /// Remove a job from tracking.
-    ///
-    /// NOTE: this bypasses the gate guard — a caller that might hit a held
-    /// job must check [`is_gated`](Self::is_gated) first (see the `kill`
-    /// builtin), or the job's pending approval request is destroyed with it.
-    /// `cleanup()` is the gate-safe bulk path.
     pub async fn remove(&self, id: JobId) {
         let mut jobs = self.jobs.lock().await;
         if let Some(mut job) = jobs.remove(&id) {

@@ -3,7 +3,6 @@
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
-use kaish_types::approval::{ApprovalRequestView, PendingApproval};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
@@ -70,7 +69,6 @@ impl Tool for Wait {
         if !args.positional.is_empty() {
             let mut output = String::new();
             let mut any_failed = false;
-            let mut held = Gates::default();
 
             for spec in &args.positional {
                 let id = match spec {
@@ -93,7 +91,7 @@ impl Tool for Wait {
                             manager.get(id).await.map(|info| info.status),
                             Some(crate::scheduler::JobStatus::Killed)
                         );
-                        let status = classify(&result, killed, &mut any_failed, &mut held);
+                        let status = classify(&result, killed, &mut any_failed);
                         output.push_str(&format!("[{}] {}\n", id, status));
                     }
                     // `wait` returns None for a missing job AND for a stopped
@@ -114,7 +112,7 @@ impl Tool for Wait {
                 }
             }
 
-            finish(output, any_failed, held)
+            finish(output, any_failed)
         } else {
             // Wait for all jobs
             let results = manager.wait_all().await;
@@ -125,18 +123,17 @@ impl Tool for Wait {
 
             let mut output = String::new();
             let mut any_failed = false;
-            let mut held = Gates::default();
 
             for (id, result) in results {
                 let killed = matches!(
                     manager.get(id).await.map(|info| info.status),
                     Some(crate::scheduler::JobStatus::Killed)
                 );
-                let status = classify(&result, killed, &mut any_failed, &mut held);
+                let status = classify(&result, killed, &mut any_failed);
                 output.push_str(&format!("[{}] {}\n", id, status));
             }
 
-            finish(output, any_failed, held)
+            finish(output, any_failed)
         }
     }
 }
@@ -153,23 +150,9 @@ impl Tool for Wait {
 /// posted (the fork that runs a background job stamps it), so `wait` reads
 /// the same correlation `jobs` and `/v/jobs/{id}/approval` read, and the two
 /// cannot drift.
-fn classify(
-    result: &ExecResult,
-    killed: bool,
-    any_failed: &mut bool,
-    held: &mut Gates,
-) -> &'static str {
+fn classify(result: &ExecResult, killed: bool, any_failed: &mut bool) -> &'static str {
     if result.ok() {
         "Done"
-    } else if let Some(view) = result.approval_request() {
-        // The first held request wins on `.approval` — one operation, one
-        // request, and widening the field to a `Vec` would push the
-        // multiplicity into every consumer for a rare case. The *count* is
-        // kept instead, so `wait`'s message can say how many are waiting and
-        // point at the surface that enumerates them (spec §D.3).
-        held.first.get_or_insert(view);
-        held.count += 1;
-        "Gated"
     } else {
         *any_failed = true;
         // A kill is not an organic failure — say so (GH #244). The exit code
@@ -182,35 +165,9 @@ fn classify(
     }
 }
 
-/// The gated jobs one `wait` call saw: the first request, which is what
-/// reaches `.approval`, and how many there were, which is what the message
-/// reports.
-#[derive(Default)]
-struct Gates {
-    first: Option<ApprovalRequestView>,
-    count: usize,
-}
-
-/// Assemble `wait`'s result: a surfaced backgrounded gate wins (exit 2 with
-/// the request on the control-plane `.approval` field, mirroring a foreground
-/// gate); otherwise any failure is exit 1; otherwise success.
-///
-/// When more than one waited job is gated, `.approval` still carries one —
-/// but the message names the total and points at `approvals list`, so a
-/// caller that sees "3 approvals pending" is never left thinking the one it
-/// got back was the only one (spec §D.3, multi-pending gates).
-fn finish(output: String, any_failed: bool, held: Gates) -> ExecResult {
-    if let Some(view) = held.first {
-        let plural = if held.count == 1 { "approval" } else { "approvals" };
-        let message = format!(
-            "wait: {} {plural} pending — run `approvals list`\n",
-            held.count
-        );
-        let mut result = ExecResult::from_output(2, output.clone(), message);
-        result.set_output(Some(OutputData::text(output)));
-        result.approval = Some(Box::new(PendingApproval::new(view)));
-        result
-    } else if any_failed {
+/// Assemble `wait`'s result: any failure is exit 1; otherwise success.
+fn finish(output: String, any_failed: bool) -> ExecResult {
+    if any_failed {
         let mut result = ExecResult::from_output(1, output.clone(), "");
         result.set_output(Some(OutputData::text(output)));
         result

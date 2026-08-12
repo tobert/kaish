@@ -598,36 +598,3 @@ async fn dd_of_overwrite_under_trash_snapshots_prior_bytes() {
 // approval node, and `JobStatus` mapped exit 2 to `Failed`. So a backgrounded
 // gate could never be *fulfilled* — the request was unreachable. These pin
 // the surfaces.
-
-/// `kill --discard` on a job that doesn't exist fails loudly, and on a
-/// running (non-gated) job it degrades to a plain kill — pinned so the
-/// flag never becomes a silent no-op or a silent success.
-#[tokio::test]
-async fn kill_discard_edge_cases() {
-    let dir = tempdir();
-    let session = kernel_at(dir.path());
-
-    let missing = run(&session, "kill --discard %7").await;
-    assert_eq!(missing.code, 1, "nonexistent job is loud: {missing:?}");
-    assert!(missing.err.contains("not found"), "names the problem: {}", missing.err);
-
-    // A running, non-gated job: --discard is a no-op qualifier; the job
-    // is killed normally.
-    run(&session, "sleep 30 &").await;
-    let killed = run(&session, "kill --discard %1").await;
-    assert_eq!(killed.code, 0, "plain kill still works under --discard: {killed:?}");
-    let jobs = run(&session, "jobs").await;
-    assert!(
-        !jobs.text_out().contains("Running"),
-        "job gone after kill: {}",
-        jobs.text_out()
-    );
-
-    // --discard conflicts with --signal: discarding delivers nothing.
-    std::fs::write(dir.path().join("p.txt"), "x").expect("write");
-    run(&session, "set -o approvals").await;
-    run(&session, "rm p.txt &").await;
-    run(&session, "wait 2").await;
-    let conflict = run(&session, "kill --discard --signal STOP %2").await;
-    assert_eq!(conflict.code, 2, "--discard + --signal is a usage error: {conflict:?}");
-}

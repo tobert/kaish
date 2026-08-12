@@ -148,22 +148,6 @@ impl Filesystem for JobFs {
                     .await
                     .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "job not found"))
             }
-            "approval" => {
-                // A held job's pending approval request as JSON, so a VFS
-                // consumer can read it and fulfill a backgrounded gate (GH
-                // #96). Tokenless by construction (`docs/approval-ledger.md`
-                // §A.2), so this node carries no credential. Empty body when
-                // the job is not held — a consumer reads, then parses only if
-                // non-empty.
-                match self.jobs.get_approval(job_id).await {
-                    Some(approval) => {
-                        let json = serde_json::to_string_pretty(&approval)
-                            .map_err(|e| io::Error::other(format!("approval serialize: {e}")))?;
-                        Ok(format!("{json}\n").into_bytes())
-                    }
-                    None => Ok(Vec::new()),
-                }
-            }
             _ => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("unknown file: {}", file),

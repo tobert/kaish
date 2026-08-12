@@ -1,11 +1,9 @@
-//! The statement plan: an AST rendered back to shell text, **unexpanded**
-//! (`docs/approval-ledger.md` §C.6).
+//! The statement plan: an AST rendered back to shell text, **unexpanded**.
 //!
 //! A plan is parse information. It is built after validation and before
-//! execution, so `${HOME}` and `$(...)` appear exactly as written — a
-//! classifier judges what was asked, not what it resolved to, and the
-//! substitution that would resolve them has not run and must not run before
-//! a gate decides.
+//! execution, so `${HOME}` and `$(...)` appear exactly as written — an
+//! embedder judges what was asked, not what it resolved to, and the
+//! substitution that would resolve them has not run.
 //!
 //! Two products, one AST walk each: [`render_stmt`] produces the text, and
 //! [`planned_commands`] produces one [`PlannedCommand`] per command the
@@ -13,30 +11,20 @@
 //! command substitutions included, because every one of them is a command
 //! this statement would run.
 //!
+//! The same walk collects the statement's variables: the names it reads
+//! (`free_variables`) and the names it writes (`bound_variables`). A name
+//! that is both lands bound, never free.
+//!
 //! The collection walk also lifts out any literal `--confirm=<key>` the
 //! statement's argv carries ([`StatementPlan::presented_keys`]) — the same
 //! spellings the rendering redacts. One predicate decides all three of lift,
 //! redact, and render, so they cannot disagree about what the statement
 //! presented.
 //!
-//! [`plan_statement`] is **the one redaction point** the seam promises
-//! (spec §A.8): the kernel redacts exactly one thing — its own confirm
-//! key, which it minted and knows outright — and it does so here, before
-//! the `Plan` reaches any of its sinks. The statement classifier, the
-//! ledger's `Observed` entry, tracing, and the `/v/approvals` projection
-//! all read the same already-redacted `Plan::commands`, never the raw AST.
-//! Embedder-defined redaction is an embedder-side pass over the plans and
-//! records it holds — the kernel ships no detector, because a shell cannot
-//! define what a secret is.
-//!
-//! **Not normalized here**: [`redact_keys`], which builds
-//! `Capture::Statement`'s replay source. `Kernel::confirm` re-parses and
-//! re-executes that source verbatim, so it must stay exactly what the user
-//! typed — an embedder-redacted value baked into it would replay as the
-//! literal marker text instead of the real argument. Only the kernel's own
-//! confirm-key token is stripped there, because redemption authorizes
-//! through the `ApproverHandle`, never the literal key, so replay needs
-//! nothing else out of it.
+//! Redaction is the kernel's own confirm key and nothing else: it minted that
+//! key and knows it outright. kaish ships no secret detector — a shell cannot
+//! define what a secret is — so an embedder that wants more redacts the plans
+//! and records it holds.
 
 use std::collections::BTreeSet;
 
@@ -66,12 +54,8 @@ pub struct StatementPlan {
 /// One statement of a planned program: its [`Plan`] and where it sits in the
 /// parsed source.
 ///
-/// `index` is the statement's position in the parsed program — the same
-/// number a [`Capture::Statement`](kaish_types::approval::Capture) records
-/// and a
-/// [`ResumeAction::ConfirmStatement`](kaish_types::approval::ResumeAction)
-/// quotes, so a plan built here correlates with any request the kernel later
-/// raises for the same statement.
+/// `index` is the statement's position in the parsed program, so an embedder
+/// can name which statement it is talking about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedStatement {
     /// The statement's position in the parsed program.
@@ -151,7 +135,7 @@ pub fn plan_statement(stmt: &Stmt) -> StatementPlan {
 /// Remove every `--confirm=` (or `confirm=`) token from rendered plan text,
 /// whatever it carries.
 ///
-/// What a [`PlanBinding`](kaish_types::approval::PlanBinding) digests is the
+/// What the plan digest covers is the
 /// operation that was *judged*, and the credential is not part of that — it
 /// is the authorization for it (spec §A.9). Without this, the held statement
 /// `rm x` and its re-run `rm --confirm=<confirm-key> x` would digest

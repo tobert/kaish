@@ -52,7 +52,7 @@ pub struct Kill;
 
 /// clap-derived argv layer for kill — schema/help generation only. Real
 /// binding happens by hand over `args.positional` in `execute()` (`raw_argv`,
-/// see the module docs above): `signal`/`discard` are never populated by a
+/// see the module docs above): `signal` is never populated by a
 /// real parse (raw_argv keeps `flags`/`named` empty, so clap only ever sees
 /// the declared defaults), and `targets` is a validation-only sink — per
 /// CLAUDE.md's clap-builtin convention, never read directly.
@@ -65,13 +65,6 @@ struct KillArgs {
     /// `-<N>` (numeric) or `-KILL`/`-STOP`/... (name, e.g. `-SIGKILL`).
     #[arg(short = 's', long, default_value_t = String::from("TERM"))]
     signal: String,
-
-    /// Abandon a gated (approval-pending) job. Without this flag, kill
-    /// refuses to destroy a job's pending approval request. Conflicts with
-    /// a signal (--signal/-s, or a shorthand): discarding a gate delivers
-    /// nothing to anyone.
-    #[arg(long, conflicts_with = "signal")]
-    discard: bool,
 
     /// Return as soon as the termination is dispatched instead of waiting
     /// for the job to exit. By default kill waits, bounded by the kernel's
@@ -155,7 +148,6 @@ impl Tool for Kill {
         // form); `shorthand_signal` is a leading `-9`/`-STOP`-style token.
         // Kept separate so mixing the two forms can be flagged as ambiguous
         // instead of silently preferring one.
-        let mut discard = false;
         let mut no_wait = false;
         let mut explicit_signal: Option<String> = None;
         let mut shorthand_signal: Option<String> = None;
@@ -190,7 +182,6 @@ impl Tool for Kill {
                     // raw_argv-aware pre-apply already handled it); nothing
                     // to do here but recognize and skip it, not error.
                     "--json" => {}
-                    "--discard" => discard = true,
                     "--no-wait" => no_wait = true,
                     "-s" | "--signal" => {
                         i += 1;
@@ -229,7 +220,7 @@ impl Tool for Kill {
                                 2,
                                 format!(
                                     "kill: unrecognized option {s} — kill accepts --signal/-s \
-                                     NAME, --discard, or a signal shorthand (-TERM/-KILL/-INT/\
+                                     NAME or a signal shorthand (-TERM/-KILL/-INT/\
                                      -HUP/-STOP/-CONT/-QUIT/-USR1/-USR2, case-insensitive, \
                                      optional SIG prefix) or -<N> (e.g. -9); see `help kill`"
                                 ),
@@ -243,22 +234,6 @@ impl Tool for Kill {
             i += 1;
         }
 
-        if discard && (explicit_signal.is_some() || shorthand_signal.is_some()) {
-            return ExecResult::failure(
-                2,
-                "kill: --discard cannot be combined with a signal (--signal/-s or a \
-                 shorthand) — discarding a gate delivers nothing to anyone"
-                    .to_string(),
-            );
-        }
-        if discard && no_wait {
-            return ExecResult::failure(
-                2,
-                "kill: --discard cannot be combined with --no-wait — discarding a gate \
-                 is immediate; there is nothing to wait for"
-                    .to_string(),
-            );
-        }
         if explicit_signal.is_some() && shorthand_signal.is_some() {
             return ExecResult::failure(
                 2,
@@ -297,7 +272,7 @@ impl Tool for Kill {
                 }
             };
 
-            let result = kill_one(ctx, &target_str, &signal_name, discard, no_wait).await;
+            let result = kill_one(ctx, &target_str, &signal_name, no_wait).await;
             if result.code != 0 {
                 any_failed = true;
             }
@@ -331,7 +306,6 @@ async fn kill_one(
     ctx: &ExecContext,
     target_str: &str,
     signal_name: &str,
-    discard: bool,
     no_wait: bool,
 ) -> ExecResult {
     // Job reference `%N` — kaish-level job control, available in every build.
@@ -347,31 +321,7 @@ async fn kill_one(
             None => return ExecResult::failure(1, "kill: no job manager"),
         };
         // A gated job's cached result is the only reference to its pending
-        // approval request — killing it would silently destroy the gate
-        // (GH #96). Refuse unless the caller explicitly discards.
-        //
-        // TOCTOU note: a Running job can race into Gated between this
-        // check and kill_job's cancel+remove. That's acceptable — the
-        // guard protects an already-visible approval request from
-        // accidental destruction; a job killed while still running is the
-        // caller's stated intent, whatever it was about to become.
-        if manager.is_gated(job_id).await {
-            if !discard {
-                return ExecResult::failure(
-                    1,
-                    format!(
-                        "kill: job {job_id} is gated awaiting approval — \
-                         fulfill it (see /v/jobs/{job_id}/approval) or abandon \
-                         it with: kill --discard %{job_id}"
-                    ),
-                );
-            }
-            manager.cancel(job_id).await;
-            manager.remove(job_id).await;
-            return ExecResult::success(format!(
-                "kill: discarded the pending approval request for job {job_id}"
-            ));
-        }
+
         // A job that already finished keeps its entry (and result) until
         // reaped — a second kill is a clean no-op that says so, keeping the
         // MCP surface idempotent: before GH #244, "I killed job 1" and

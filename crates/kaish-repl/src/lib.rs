@@ -435,11 +435,7 @@ pub fn interactive_config() -> KernelConfig {
 }
 
 /// The `KernelConfig` `kaish -c` and `kaish script.kai` run on: the same
-/// passthrough filesystem and OS environment as the interactive REPL, an
-/// [`Automation`](kaish_types::approval::PrincipalKind::Automation) principal,
-/// and **no approval authority** — a non-interactive run is not a terminal, so
-/// a gated statement exits 2 with its request pending and an operator decides
-/// it out of band (`docs/approval-ledger.md` §C.3).
+/// passthrough filesystem and OS environment as the interactive REPL.
 ///
 /// Both non-interactive entry points share this one constructor because the
 /// alternative drifted: `-c` and script runs each built their own config,

@@ -567,11 +567,7 @@ fn result_row(i: usize, r: &ScatterResult) -> serde_json::Value {
     // part of this row's wire shape. The view is plain data, so
     // serialization cannot fail; a failure is dropped rather than replacing
     // the row.
-    if let Some(pending) = &r.result.approval
-        && let Ok(v) = serde_json::to_value(&pending.request)
-    {
-        row.insert("approval".into(), v);
-    }
+
     if r.timed_out {
         row.insert("timed_out".into(), serde_json::json!(true));
     }

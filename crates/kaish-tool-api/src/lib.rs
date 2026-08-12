@@ -30,14 +30,8 @@ mod clap_schema;
 mod ctx;
 mod global_flags;
 mod issue;
-mod statement;
 mod tool;
 
-pub use statement::{
-    ClassificationError, CommandNameClassifier, ExecutionContext, MountAccess, MountClass,
-    MountDescriptor, StatementAssessment, StatementClassificationInput, StatementClassifier,
-    StatementPosture, COMMAND_NAME_CLASSIFIER_ASSESSOR,
-};
 pub use backend::KernelBackend;
 pub use clap_schema::{params_from_clap, schema_from_clap, schema_tree_from_clap};
 pub use ctx::{PatientGuard, ToolCtx};

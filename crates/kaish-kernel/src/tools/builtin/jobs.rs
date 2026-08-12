@@ -96,14 +96,7 @@ impl Tool for Jobs {
             manager.cleanup().await;
             let remaining = manager.list().await;
             let removed = before - remaining.len();
-            let held = remaining.iter().filter(|j| j.approval.is_some()).count();
-            let mut msg = format!("Cleaned up {} completed job(s)\n", removed);
-            if held > 0 {
-                msg.push_str(&format!(
-                    "Kept {held} gated job(s) awaiting approval — \
-                     grant the request or abandon with kill --discard %N\n"
-                ));
-            }
+            let msg = format!("Cleaned up {} completed job(s)\n", removed);
             return ExecResult::with_output(OutputData::text(msg));
         }
 

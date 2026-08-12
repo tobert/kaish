@@ -848,16 +848,6 @@ pub struct Kernel {
     /// the recursion chain is single-threaded (top-level `execute` is
     /// serialized by `execute_lock`; concurrency happens on forks).
     recursion_depth: AtomicUsize,
-    /// The held result of a gate raised during expression evaluation, stashed
-    /// at the raise site because the `HeldByGate` error that unwinds the
-    /// statement can be caught and stringified on the way up (the pipeline's
-    /// redirect and argument builders convert eval errors to `failure(1, …)`
-    /// results). The statement loop takes this after every statement and
-    /// surfaces it as the statement's own held result — whatever the
-    /// intermediate layers did to the error. Per-kernel like
-    /// [`Self::recursion_depth`]: top-level `execute` is serialized by
-    /// `execute_lock`, and forks get a fresh empty slot.
-    held_in_eval: std::sync::Mutex<Option<Box<ExecResult>>>,
 }
 
 /// RAII balance for [`Kernel::recursion_depth`]: increments on construction
@@ -1291,7 +1281,6 @@ impl Kernel {
             self_weak: std::sync::OnceLock::new(),
             execute_lock: tokio::sync::Mutex::new(()),
             recursion_depth: AtomicUsize::new(0),
-            held_in_eval: std::sync::Mutex::new(None),
             bg_job_id: None,
             // Overlay handle is set by Kernel::new after assemble returns;
             // assemble itself doesn't know the handle (it's constructed in setup_vfs).
@@ -1457,7 +1446,6 @@ impl Kernel {
             // budget is independent of the parent's current depth (GH #46).
             recursion_depth: AtomicUsize::new(0),
             // A fork surfaces its own holds; the parent's slot stays put.
-            held_in_eval: std::sync::Mutex::new(None),
             bg_job_id,
             // Arc-clone the overlay handle so forks (background jobs, scatter
             // workers, pipeline stages) can reach the same overlay transaction
@@ -1669,9 +1657,6 @@ impl Kernel {
             // user tool body's `$(…)` — surfaces as this call's own held
             // result, and must not strand in the slot for the next serialized
             // call to mis-take.
-            if let Some(held) = self.take_eval_hold() {
-                return Ok(*held);
-            }
             Ok(result)
         };
         let result = self.run_under_watchdog(timeout, &cancel, work).await?;
@@ -2242,25 +2227,7 @@ impl Kernel {
             // The statement tap and gate (spec §C.6) — one of exactly two
             // sites. It runs before `execute_stmt_flow`, so a held statement
             // has run *nothing*: no substitution, no redirect opened, no
-            // A gate raised during *evaluation* — a `$(…)` body or a
-            // condition command — means the statement never got the value it
-            // needed: it surfaces the gate site's own held result and the
-            // program halts here, exactly as a statement-level hold does
-            // (spec §I.5). The stash is authoritative because the unwinding
-            // `HeldByGate` error can be stringified into an ordinary failure,
-            // or swallowed into an apparent success, by an intermediate catch
-            // (the pipeline's redirect and argument builders) — the slot
-            // survives whatever happened to the error.
             let flow_result = self.execute_stmt_flow(&stmt).await;
-            if let Some(held) = self.take_eval_hold() {
-                let held_result = *held;
-                on_output(&held_result);
-                accumulate_result(&mut result, &held_result);
-                if !surfaced_warnings.is_empty() {
-                    result.err = format!("{surfaced_warnings}{}", result.err);
-                }
-                return Ok(result);
-            }
             let flow = flow_result?;
 
             // Drain any stderr written by pipeline stages during this statement.
@@ -2289,7 +2256,6 @@ impl Kernel {
                     // (`docs/approval-ledger.md` §I.5). Without this,
                     // `rm x; touch y` creates `y` whether or not `rm x` is
                     // ever approved, and nothing un-creates it.
-                    let held = r.approval.is_some();
                     on_output(&r);
                     // Carry the last statement's structured output for MCP TOON encoding.
                     // Must be done here (not in accumulate_result) because accumulate_result
@@ -2297,12 +2263,6 @@ impl Kernel {
                     let last_output = r.output().cloned();
                     accumulate_result(&mut result, &r);
                     result.set_output(last_output);
-                    if held {
-                        if !surfaced_warnings.is_empty() {
-                            result.err = format!("{surfaced_warnings}{}", result.err);
-                        }
-                        return Ok(result);
-                    }
                 }
                 ControlFlow::Exit { code } => {
                     if !drained_stderr.is_empty() {
@@ -2766,9 +2726,6 @@ impl Kernel {
                         // Pending is not failure (spec §I.5) — see the
                         // `OrChain` twin. The stash check matters here for a
                         // hold swallowed into an apparent success below.
-                        if left_result.approval.is_some() || self.eval_hold_pending() {
-                            return Ok(ControlFlow::ok(left_result));
-                        }
                         if left_result.ok() {
                             let right_flow = self.execute_stmt_flow(right).await?;
                             match right_flow {
@@ -2822,9 +2779,6 @@ impl Kernel {
                         // statement boundary discards it and surfaces the
                         // slot's result instead. Do not "fix" this by taking
                         // the slot here: only statement boundaries take it.
-                        if left_result.approval.is_some() || self.eval_hold_pending() {
-                            return Ok(ControlFlow::ok(left_result));
-                        }
                         if !left_result.ok() {
                             let right_flow = self.execute_stmt_flow(right).await?;
                             match right_flow {
@@ -2982,7 +2936,6 @@ impl Kernel {
             // A forked or backgrounded execution keeps its parenthood: a
             // gate reached from inside a gated statement is nested under it
             // (spec §A.7).
-            gate_parent: ec.gate_parent.clone(),
         })
     }
 
@@ -3781,10 +3734,6 @@ impl Kernel {
                 // as a typed error the statement loop converts back into a
                 // held result, and is stashed for the boundary in case an
                 // intermediate catch stringifies the error.
-                if result.approval.is_some() {
-                    self.stash_eval_hold(&result);
-                    return Err(anyhow::Error::new(HeldByGate(Box::new(result))));
-                }
 
                 // A binary result is preserved as bytes — never lossy-decoded to
                 // a string. No trailing-newline trim (every byte is significant).
@@ -3864,18 +3813,6 @@ impl Kernel {
             Expr::Command(cmd) => {
                 // Execute command and return boolean based on exit code
                 let result = self.execute_command(&cmd.name, &cmd.args).await?;
-                // Pending is not failure (spec §I.5): a held condition must
-                // not read as false — neither branch may run on a decision
-                // nobody has made yet. The second arm catches a hold from
-                // deeper inside the command whose typed error an intermediate
-                // layer already stringified into an ordinary failure.
-                if result.approval.is_some() {
-                    self.stash_eval_hold(&result);
-                    return Err(anyhow::Error::new(HeldByGate(Box::new(result))));
-                }
-                if let Some(held) = self.clone_eval_hold() {
-                    return Err(anyhow::Error::new(HeldByGate(held)));
-                }
                 Ok(Value::Bool(result.code == 0))
             }
             Expr::LastExitCode => {
@@ -4190,10 +4127,6 @@ impl Kernel {
                 // A held body stops the enclosing statement before its
                 // missing output is spliced in (spec §I.5) — same conversion
                 // and stash as the bare `$(…)` arm.
-                if result.approval.is_some() {
-                    self.stash_eval_hold(&result);
-                    return Err(anyhow::Error::new(HeldByGate(Box::new(result))));
-                }
 
                 // Embedding binary into a string is a text context: fail loud
                 // rather than splice in U+FFFD garbage.
@@ -4303,7 +4236,6 @@ impl Kernel {
         // from an ordinary failure, and inside `$(…)` the outer statement even
         // reads as success. The latch had this same gap; a dropped
         // control-plane signal IS the silent bypass, so it gets fixed here.
-        let mut last_approval: Option<Box<kaish_types::approval::PendingApproval>> = None;
 
         fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
             match r.out_bytes() {
@@ -4334,7 +4266,6 @@ impl Kernel {
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
                             last_data = r.data;
-                            last_approval = r.approval;
                         }
                         ControlFlow::Return { value } => {
                             push_out(&mut accumulated_out, &value);
@@ -4352,7 +4283,6 @@ impl Kernel {
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
                             last_data = r.data;
-                            last_approval = r.approval;
                         }
                     }
                 }
@@ -4378,63 +4308,7 @@ impl Kernel {
         let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
         result.err = accumulated_err;
         result.data = last_data;
-        result.approval = last_approval;
         Ok(result)
-    }
-
-    /// Execute a command-substitution body — a block of statements — and return
-    /// the combined result. Stdout/stderr accumulate across statements with **no
-    /// inserted separator** (matching bash and the `;`/`&&`/`||` output model),
-    /// and the last statement's exit code and structured `.data` ride through,
-    /// so `for x in $(seq 3)` still iterates the array and `$(printf a; printf b)`
-    /// captures `ab`. Scope/cwd snapshotting (so `$(cd / && pwd)` cannot leak the
-    /// cwd) is the caller's responsibility.
-    /// Enter one level of dynamic statement-engine re-entry (command
-    /// substitution / function call / script source), returning an RAII guard
-    /// that releases the level on drop. Past [`MAX_RECURSION_DEPTH`] it returns
-    /// a loud, catchable error instead of letting the native stack overflow
-    /// (GH #46). `what` names the re-entry kind for the message.
-    ///
-    /// The guard is constructed *before* the ceiling check so the error path
-    /// unwinds it too — the counter is always balanced, even when we reject.
-    /// Record a gate raised during expression evaluation. The paired
-    /// [`Self::take_eval_hold`] surfaces it at the statement boundary even
-    /// when the unwinding [`HeldByGate`] error is stringified — or swallowed
-    /// outright — by an intermediate catch (the pipeline's redirect and
-    /// argument builders convert eval errors to `failure(1, …)` results).
-    fn stash_eval_hold(&self, held: &ExecResult) {
-        let mut slot = match self.held_in_eval.lock() {
-            Ok(guard) => guard,
-            // A poisoned lock means a panic elsewhere; the slot itself is a
-            // plain Option and still usable.
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *slot = Some(Box::new(held.clone()));
-    }
-
-    /// Whether an eval-raised hold is waiting to be surfaced.
-    fn eval_hold_pending(&self) -> bool {
-        match self.held_in_eval.lock() {
-            Ok(guard) => guard.is_some(),
-            Err(poisoned) => poisoned.into_inner().is_some(),
-        }
-    }
-
-    /// A copy of the pending eval-raised hold, leaving the slot set for the
-    /// statement boundary to take.
-    fn clone_eval_hold(&self) -> Option<Box<ExecResult>> {
-        match self.held_in_eval.lock() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
-    }
-
-    /// Take the pending eval-raised hold, emptying the slot.
-    fn take_eval_hold(&self) -> Option<Box<ExecResult>> {
-        match self.held_in_eval.lock() {
-            Ok(mut guard) => guard.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        }
     }
 
     fn enter_recursion(&self, what: &str) -> Result<RecursionGuard<'_>> {
@@ -4467,7 +4341,6 @@ impl Kernel {
         // from an ordinary failure, and inside `$(…)` the outer statement even
         // reads as success. The latch had this same gap; a dropped
         // control-plane signal IS the silent bypass, so it gets fixed here.
-        let mut last_approval: Option<Box<kaish_types::approval::PendingApproval>> = None;
 
         // Append a statement's stdout as raw bytes (binary) or its UTF-8 bytes.
         fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
@@ -4498,7 +4371,6 @@ impl Kernel {
                     accumulated_err.push_str(&r.err);
                     last_code = r.code;
                     last_data = r.data;
-                    last_approval = r.approval;
                 }
                 ControlFlow::Return { value } => {
                     push_out(&mut accumulated_out, &value);
@@ -4517,7 +4389,6 @@ impl Kernel {
         let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(last_code);
         result.err = accumulated_err;
         result.data = last_data;
-        result.approval = last_approval;
         Ok(result)
     }
 
@@ -4606,7 +4477,6 @@ impl Kernel {
         // from an ordinary failure, and inside `$(…)` the outer statement even
         // reads as success. The latch had this same gap; a dropped
         // control-plane signal IS the silent bypass, so it gets fixed here.
-        let mut last_approval: Option<Box<kaish_types::approval::PendingApproval>> = None;
 
         for stmt in program.statements {
             if matches!(stmt, crate::ast::Stmt::Empty) {
@@ -4628,7 +4498,6 @@ impl Kernel {
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
                             last_data = r.data.clone();
-                            last_approval = r.approval.clone();
                             self.update_last_result(&r).await;
                         }
                         ControlFlow::Break { .. } | ControlFlow::Continue { .. } => {
@@ -4651,7 +4520,6 @@ impl Kernel {
                                 ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
                             result.err = accumulated_err;
                             result.data = last_data;
-                            result.approval = last_approval;
                             return Ok(result);
                         }
                     }
@@ -4665,7 +4533,6 @@ impl Kernel {
         let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(last_code);
         result.err = accumulated_err;
         result.data = last_data;
-        result.approval = last_approval;
         Ok(result)
     }
 
@@ -4793,7 +4660,6 @@ impl Kernel {
             // from an ordinary failure, and inside `$(…)` the outer statement even
             // reads as success. The latch had this same gap; a dropped
             // control-plane signal IS the silent bypass, so it gets fixed here.
-            let mut last_approval: Option<Box<kaish_types::approval::PendingApproval>> = None;
             let mut exec_error: Option<anyhow::Error> = None;
             let mut exit_code: Option<i64> = None;
 
@@ -4817,7 +4683,6 @@ impl Kernel {
                                 accumulated_err.push_str(&r.err);
                                 last_code = r.code;
                                 last_data = r.data;
-                                last_approval = r.approval;
                             }
                             ControlFlow::Return { value } => {
                                 push_out(&mut accumulated_out, &value);
@@ -4835,7 +4700,6 @@ impl Kernel {
                                 accumulated_err.push_str(&r.err);
                                 last_code = r.code;
                                 last_data = r.data;
-                                last_approval = r.approval;
                             }
                         }
                     }
@@ -4860,7 +4724,6 @@ impl Kernel {
             let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
             result.err = accumulated_err;
             result.data = last_data;
-            result.approval = last_approval;
             return Ok(Some(result));
         }
 
@@ -6677,28 +6540,6 @@ fn finalize_output(
 /// each command's output concatenates raw, matching bash (`printf a; printf b`
 /// and `printf a && printf b` both yield `ab`; a trailing newline only appears
 /// when a command emits its own, as `echo` does).
-/// A gate raised while *evaluating* an expression — a `$(…)` body or a
-/// condition command — carried as a typed error to the statement loop, which
-/// surfaces it as the enclosing statement's own held result (spec §I.5).
-///
-/// Without this, the enclosing statement runs on a missing value: the
-/// substitution expands to empty, the condition reads as false, and the
-/// pending request is stranded behind an exit 0 — enforcement held the
-/// operation, but nothing told the caller. The boxed result is the gate
-/// site's own (exit 2, the request on `.approval`, the message naming it),
-/// so the surfaced result is exactly what a direct invocation would return.
-#[derive(Debug)]
-struct HeldByGate(Box<ExecResult>);
-
-impl std::fmt::Display for HeldByGate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The inner result's err already names the operation and request.
-        write!(f, "{}", self.0.err.trim_end())
-    }
-}
-
-impl std::error::Error for HeldByGate {}
-
 fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     // Materialize lazy OutputData into .out before accumulating.
     // Without this, the first command's output stays in .output while
@@ -6729,7 +6570,6 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     // field through accumulation, or the request is lost. It is always the
     // *last* result's, because a statement that carries one halts the
     // top-level loop (spec §I.5) — nothing runs after it to overwrite it.
-    accumulated.approval = new.approval.clone();
 }
 
 /// Fold a loop's accumulated output into a break/continue signal that is
