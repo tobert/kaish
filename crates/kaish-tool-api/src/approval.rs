@@ -310,6 +310,3 @@ impl std::fmt::Display for ResolverError {
 
 impl std::error::Error for ResolverError {}
 
-// ───────────────────────── Redaction (spec §A.8) ─────────────────────────
-
-
