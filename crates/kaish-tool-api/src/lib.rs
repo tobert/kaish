@@ -34,10 +34,6 @@
 //!   before they run (ledger PR 10). An embedder registers one with
 //!   `KernelConfig::with_statement_classifier`; [`CommandNameClassifier`] is
 //!   the reference implementation.
-//! - [`Redactor`] — judges which values inside a rendered plan are secret
-//!   (ledger PR R5, spec §A.8). An embedder registers one with
-//!   `KernelConfig::with_redactor`; with none installed, every value is
-//!   `PlannedValue::Plain`.
 //!
 //! The pure-data types tools traffic in (`Value`, `ToolArgs`, `ToolSchema`,
 //! `ExecResult`, `OutputData`, …) live one layer down in `kaish-types`.
@@ -52,7 +48,7 @@ mod statement;
 mod tool;
 
 pub use approval::{
-    ApprovalOutcome, Approvals, AttemptHandle, PendingApproval, RedactionMark, Redactor, ResolverError,
+    ApprovalOutcome, Approvals, AttemptHandle, PendingApproval, ResolverError,
     ResumeAction, StateResolver,
 };
 pub use statement::{

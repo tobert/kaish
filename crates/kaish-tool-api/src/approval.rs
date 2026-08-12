@@ -11,7 +11,7 @@
 //! handles behind `Kernel::approvals()` (spec §D.2) and are unrelated types
 //! that happen to share a name with their tool-facing counterpart here.
 
-use kaish_types::approval::{AttemptId, RequestId, RequestState, StateClaim, ValueSite};
+use kaish_types::approval::{AttemptId, RequestId, RequestState, StateClaim};
 use kaish_types::ExecResult;
 
 /// What one execution reserved against a grant (spec §C.1). Exposes only its
@@ -310,60 +310,3 @@ impl std::fmt::Display for ResolverError {
 
 impl std::error::Error for ResolverError {}
 
-// ───────────────────────── Redaction (spec §A.8) ─────────────────────────
-
-/// Judges values inside a rendered plan, for an embedder that has its own
-/// idea of what a secret looks like. Installed once at kernel construction
-/// (`KernelConfig::with_redactor`) and consulted at kaish-kernel's one
-/// normalization point — before the plan reaches any of its sinks (the
-/// statement classifier, the ledger's `Observed` entry, tracing, and the
-/// `/v/approvals` projection) — so a sink added later inherits the
-/// redaction instead of becoming a new leak.
-///
-/// **What this is not**: the kernel's own redaction of its confirm key
-/// (spec §A.8) never reaches this trait. That one redaction is exact — the
-/// kernel minted the key, so it knows the string outright — and unconditional,
-/// whether or not a `Redactor` is installed. This trait exists for
-/// everything else, and the kernel supplies no default: with no `Redactor`
-/// installed, every non-key value is [`PlannedValue::Plain`], honestly.
-///
-/// Synchronous, like [`crate::statement::StatementClassifier::classify`] —
-/// the kernel never awaits an embedder on the request path.
-///
-/// [`PlannedValue::Plain`]: kaish_types::approval::PlannedValue::Plain
-pub trait Redactor: Send + Sync {
-    /// Judge one value. `Some` marks it secret; `None` leaves it
-    /// [`PlannedValue::Plain`](kaish_types::approval::PlannedValue::Plain).
-    fn redact(&self, value: &str, site: ValueSite) -> Option<RedactionMark>;
-}
-
-/// What an installed [`Redactor`] marks a value with (spec §A.8) — carried
-/// into [`PlannedValue::Redacted`](kaish_types::approval::PlannedValue::Redacted)
-/// verbatim.
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RedactionMark {
-    /// The embedder's own label — `"bearer-token"`, `"password"`. The
-    /// kernel does not interpret this string.
-    pub kind: String,
-    /// Stable salted digest prefix, when the redactor can supply one, so an
-    /// auditor can ask "the same credential as last time?" without holding
-    /// it. `None` when the redactor has no such digest to offer.
-    pub fingerprint: Option<String>,
-}
-
-impl RedactionMark {
-    /// Mark a value secret, naming what kind of secret it is.
-    pub fn new(kind: impl Into<String>) -> Self {
-        Self {
-            kind: kind.into(),
-            fingerprint: None,
-        }
-    }
-
-    /// Attach a stable fingerprint to this mark.
-    pub fn with_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
-        self.fingerprint = Some(fingerprint.into());
-        self
-    }
-}

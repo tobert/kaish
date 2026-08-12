@@ -90,10 +90,9 @@ this produces and §C.1 for what comes back.
 heuristics, because it minted the credential and knows the string. It does not detect
 credentials in general — no flag-name lists, no URL-userinfo parsing, no entropy scoring.
 A shell cannot win that game and a spec that promises best-effort secret detection has
-made a guarantee it cannot keep. What the kernel provides instead is one normalization
-point every sink passes through and a value type that cannot serialize an undecided value,
-so an embedder that installs a redactor gets it applied everywhere, including to sinks
-added later. See §A.8.
+made a guarantee it cannot keep. What the kernel provides instead is one redaction
+point every sink passes through and the `PlannedValue` vocabulary — embedder-defined
+redaction is an embedder-side pass over the plans and records the embedder holds. See §A.8.
 
 The same line resolves the rest of this design: the kernel supplies the classifier's input
 wrapper and the rule that a classifier error means `Gate` (§C.6), and the embedder supplies
@@ -733,56 +732,41 @@ surface reaching a less-trusted reader — a model's prompt, an out-of-band appr
 where it is live authorization for as long as its grant is. That case is why the kernel
 does this one redaction itself instead of leaving it to the embedder like the rest.
 
-**What the kernel provides for everything else** is the shape, not the policy —
-`kaish-types::approval::PlannedValue`/`ValueSite`, `kaish-tool-api::{Redactor, RedactionMark}`:
+**What the kernel provides for everything else** is the vocabulary, not a hook —
+`kaish-types::approval::PlannedValue`:
 
 ```rust
 /// One value inside a rendered plan. A sink serializes `PlannedValue`, never
-/// a bare `String`, so a value reaches a sink only after something decided
-/// whether it was a secret.
+/// a bare `String`, so a value reaches a sink only after the redaction
+/// question was answered.
 #[non_exhaustive]
 pub enum PlannedValue {
     Plain(String),
     Redacted {
-        /// The embedder's own label — "bearer-token", "password", or
-        /// "confirm-key" for the kernel's one built-in redaction. The
-        /// kernel does not interpret it.
+        /// What kind of secret — "confirm-key" for the kernel's one
+        /// built-in redaction. The kernel does not interpret it.
         kind: String,
-        /// Stable salted digest prefix, when the redactor supplies one, so an
-        /// auditor can ask "the same credential as last time?" without
+        /// Stable salted digest prefix, when the producer supplied one, so
+        /// an auditor can ask "the same credential as last time?" without
         /// holding it.
         fingerprint: Option<String>,
     },
 }
-
-/// Where inside a plan a value was found. Command names carry no site of
-/// their own — structural, never a credential, never offered to a redactor.
-#[non_exhaustive]
-pub enum ValueSite {
-    Argument,
-    RedirectTarget,
-}
-
-/// Installed by the embedder at kernel construction
-/// (`KernelConfig::with_redactor`). Runs once, at the one normalization
-/// point (`ast::plan::plan_statement`), before any sink sees the plan.
-/// Synchronous — the kernel never awaits an embedder on the request path
-/// (§0.1), the same reason `StatementClassifier::classify` is.
-pub trait Redactor: Send + Sync {
-    fn redact(&self, value: &str, site: ValueSite) -> Option<RedactionMark>;
-}
 ```
 
-Two properties do the work. **One normalization point:** the plan is redacted once, before
-it is classified, observed, or projected — so a sink added later inherits the redaction
-instead of becoming a new leak. Redaction applied per-seam instead is how one credential
-reaches three sinks through three individually-correct fixes. **A type that cannot hold an
-undecided value:** a sink cannot serialize a `PlannedValue` without the redaction question
-having been answered, so forgetting is a compile error rather than a review finding.
+Embedder-defined redaction is an **embedder-side pass** over the surfaces the embedder
+holds — the plans `plan_program` returns before execution, and the records its
+`LedgerSink` receives before persisting. There is no in-kernel detector hook: the two
+surfaces only the kernel writes (`/v/approvals` and the retained in-kernel log) show
+values as typed, so a literal secret on a held statement is visible there until the
+request is decided — and a secret that travels as a variable never was, because a plan
+renders `${TOKEN}` unexpanded. An embedder that cannot accept that exposure gates the
+statement earlier (a tighter classifier) rather than expecting a redaction hook to
+close it.
 
-No `Redactor` installed means every value is `Plain`, except the kernel's own confirm-key
-redaction, which applies unconditionally either way — that is the honest default for a
-shell: the kernel is not quietly pretending to protect something it was not asked to.
+Every non-key value is `Plain`, and the kernel's own confirm-key redaction applies
+unconditionally — the honest default for a shell: nothing quietly pretends to protect
+what it was not asked to.
 
 **`Capture::Statement`'s replay source is deliberately not one of the sinks above.**
 `Kernel::confirm` re-parses and re-executes it verbatim (§B.4), so an embedder-redacted
@@ -827,8 +811,8 @@ legitimate redemption. Every `--confirm=` token is stripped first: the credentia
 *authorization*, not part of what was judged, and without stripping it the held statement
 `rm x` and its re-run `rm --confirm=<confirm-key> x` digest differently, so every key
 presentation would read as a moved binding and be re-asked. And the digest covers the plan
-**after** §A.8's redaction seam, so an embedder installing a `Redactor` does not thereby
-invalidate every grant in flight.
+**after** §A.8's confirm-key redaction, so the digest of a held statement and its keyed
+re-run agree.
 
 > **A grant may be redeemed only by an attempt whose binding matches the one the grant was
 > decided against, and whose operation and resources the grant covers. Anything else is a
@@ -1799,6 +1783,15 @@ independent by design: the filesystem layer records what a command **touched**; 
 statement layer records what was **asked to run**, before any of it runs. An embedder
 joins them through trace context, not through the kernel.
 
+> **Design posture (2026-08-11): this tier does not grow.** The classifier judges the
+> same unexpanded `Plan` an embedder reads through `plan_program` before submitting
+> anything — pre-execution judgment belongs to the embedder, over metadata it holds.
+> What keeps this tier in the kernel is only what an outside gate cannot promise: the
+> record itself (every statement observed, whatever door it entered by), and the static
+> floor no classifier can lower. New judging capability lands embedder-side on the plan
+> surface; the effect-site gates (§C.1, §C.5) and redemption-time verification (§B.4)
+> stay the kernel's, because they act after expansion, at the operation, under the lock.
+
 **The unit is the top-level statement.** One REPL line's statement, one statement of a
 `.kai` script, or one `execute_argv` invocation (which bypasses the statement loop and is
 covered explicitly — a door the gate does not watch is not a gate). Nested statements —
@@ -2229,8 +2222,6 @@ placeholder is substituted by a frontend holding an `ApproverHandle` (§D.3).
                                              // (default false; for multi-principal embedders — §E.7)
 .with_state_resolver(Arc<dyn StateResolver>) // per resource kind
 .with_statement_classifier(Arc<dyn StatementClassifier>)  // §C.6; absent = every statement Observe
-.with_redactor(Arc<dyn Redactor>)            // §A.8; absent = every value Plain except the
-                                             // kernel's own confirm-key redaction
 
 // Kernel — construction mints exactly one authority capability
 fn build(config: KernelConfig) -> Result<(Kernel, ApproverHandle)>;
@@ -3000,7 +2991,7 @@ a rewrite rather than a migration.
 | R2 | No clock-driven decisions and no waiting: the TTL, the expiry path, `renew`, `Approver::decide`, and the patient hold deleted; `cancel` + `CancelReason` + `ApprovalOutcome::Closed` + `PendingApproval`/`ResumeAction` added; §B.5's teardown obligations wired; §I.5's halt and §I.6's `Policy` rename executed (§A.10, §B.5, §C.1–§C.3, §G) |
 | R3 | Revision checks on every transition: `LedgerError::StaleRevision`, `LedgerEntry::RevisionRejected`, `TransitionKind`; `grant`/`grant_with_grounds`/`deny`/`cancel`/`cancel_approval` all gain a `rev: u64` argument, checked before the state-machine legality check so a race reports as a stale quote rather than whatever transition it happened to land on (§B.6) |
 | R4 | The classifier contract and assessments: `StatementClassificationInput`/`ExecutionContext`/`StatementAssessment`, `classify` returning `Result` with `Err` and a caught panic both mapping to `Gate`, the kernel-owned static gate floor (seeded with `kaish-trash empty`), `DecisionContext`, `AssessmentRecorder` (reachable from `Requester` and `ApproverHandle`), and the `Assessed` entry (§C.6, §C.7) |
-| R5 | The redaction seam and the embedder's read surface: `PlannedValue`/`ValueSite`, the one normalization point in `plan_statement`, the `Redactor` trait with the approval key as the sole in-kernel redaction, and `PageRequest`/`ApprovalPage`/`LedgerPage` with the bounded, cursored `log` (§A.8, §D.2) |
+| R5 | The redaction seam and the embedder's read surface: `PlannedValue`, the one redaction point in `plan_statement` with the approval key as the sole in-kernel redaction, and `PageRequest`/`ApprovalPage`/`LedgerPage` with the bounded, cursored `log` (§A.8, §D.2) |
 | 11 | The REPL fulfils its own gates: `with_own_authority`, the stderr-and-TTY-only prompt, `y`/`a`/deny in the REPL's own read loop, hint-placeholder substitution on retrieval, and the reference `CommandNameClassifier` behind `kaish --gate` (§C.3). This lane is the design's own proof: the REPL is a plain embedder with no privileged hook, so a human at a prompt being served by `Pending` + `grant` + `confirm` is what shows §C.2 is sufficient |
 | 9 | This consolidation pass: §H folded into history, `EMBEDDING.md`'s sink and prompt contracts, `LANGUAGE.md`'s approvals semantics, the `set -o latch` retirement in help, and the Terms tables in `CLAUDE.md` and `README.md` |
 

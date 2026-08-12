@@ -16,9 +16,9 @@
 
 use std::sync::Arc;
 
-use kaish_kernel::ledger::{CommandNameClassifier, RedactionMark, Redactor};
+use kaish_kernel::ledger::CommandNameClassifier;
 use kaish_kernel::{plan_program, Kernel, KernelConfig};
-use kaish_types::approval::{PlanDigest, ResumeAction, RiskClass, ValueSite};
+use kaish_types::approval::{PlanDigest, ResumeAction, RiskClass};
 use sha2::{Digest, Sha256};
 
 fn tempdir() -> tempfile::TempDir {
@@ -90,7 +90,7 @@ async fn a_held_statement_quotes_the_planned_index_and_digest() {
 /// filesystem and no ledger anywhere in sight.
 #[test]
 fn plan_program_needs_no_kernel() {
-    let plans = plan_program("echo before\nrm f.txt\necho after", None).expect("parses");
+    let plans = plan_program("echo before\nrm f.txt\necho after").expect("parses");
     assert_eq!(
         plans
             .iter()
@@ -114,41 +114,36 @@ async fn planning_executes_nothing() {
     assert!(target.exists(), "planning must not run the statement");
 }
 
-/// A redactor marks one secret value.
-struct MarksOneSecret;
+/// The plan names the session variables a statement reads, and the peek
+/// loop the metadata surface promises works against live state: plan, then
+/// `get_var` each free variable, and judge with the value in hand.
+#[tokio::test]
+async fn free_variables_feed_the_get_var_peek_loop() {
+    let dir = tempdir();
+    let kernel = gating_kernel(dir.path());
+    kernel
+        .execute("TARGET=precious.txt")
+        .await
+        .expect("assignment");
 
-impl Redactor for MarksOneSecret {
-    fn redact(&self, value: &str, _site: ValueSite) -> Option<RedactionMark> {
-        (value == "hunter2").then(|| RedactionMark::new("test-secret"))
-    }
+    let plans = kernel.plan_program("rm ${TARGET}").expect("plans");
+    assert_eq!(plans[0].plan.free_variables, vec!["TARGET".to_string()]);
+    assert!(plans[0].plan.bound_variables.is_empty());
+
+    let value = kernel
+        .get_var(&plans[0].plan.free_variables[0])
+        .await
+        .expect("TARGET is set");
+    assert_eq!(value, kaish_types::Value::String("precious.txt".to_string()));
 }
 
-/// `Kernel::plan_program` reads through the kernel's installed redactor —
-/// the same seam the gate and the record read through (spec §A.8) — so an
-/// embedder composing its own machinery over these plans inherits the same
-/// redaction instead of needing its own.
-#[tokio::test]
-async fn the_kernel_method_applies_the_installed_redactor() {
-    let dir = tempdir();
-    let (kernel, _authority) = Kernel::build(
-        KernelConfig::repl()
-            .with_cwd(dir.path().to_path_buf())
-            .with_approvals(false)
-            .with_trash(false)
-            .with_redactor(Arc::new(MarksOneSecret)),
-    )
-    .expect("kernel");
-
-    let plans = kernel
-        .plan_program("deploy --password=hunter2 web")
-        .expect("plans");
-    assert!(
-        !plans[0].plan.rendered.contains("hunter2"),
-        "the secret must not survive into the plan: {}",
-        plans[0].plan.rendered
-    );
-
-    // The free function with no redactor is the honest default: plain text.
-    let plain = plan_program("deploy --password=hunter2 web", None).expect("plans");
-    assert!(plain[0].plan.rendered.contains("hunter2"));
+/// A name the statement itself binds is never listed free — peeking session
+/// state for a `for` variable would judge the statement against a value the
+/// statement replaces.
+#[test]
+fn bound_names_never_read_as_free() {
+    let plans =
+        plan_program("for f in $(ls ${DIR}); do rm $f; done").expect("parses");
+    assert_eq!(plans[0].plan.free_variables, vec!["DIR".to_string()]);
+    assert_eq!(plans[0].plan.bound_variables, vec!["f".to_string()]);
 }
