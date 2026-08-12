@@ -34,9 +34,6 @@
 //!   before they run (ledger PR 10). An embedder registers one with
 //!   `KernelConfig::with_statement_classifier`; [`CommandNameClassifier`] is
 //!   the reference implementation.
-//!   (ledger PR R5, spec §A.8). An embedder registers one with
-//!   `KernelConfig::with_redactor`; with none installed, every value is
-//!   `PlannedValue::Plain`.
 //!
 //! The pure-data types tools traffic in (`Value`, `ToolArgs`, `ToolSchema`,
 //! `ExecResult`, `OutputData`, …) live one layer down in `kaish-types`.
