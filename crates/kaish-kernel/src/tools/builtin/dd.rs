@@ -65,7 +65,6 @@ impl Tool for Dd {
         let mut bs: u64 = 512;
         let mut count: Option<u64> = None;
         let mut skip: u64 = 0;
-        let mut confirm: Option<String> = None;
 
         for operand in &args.positional {
             let raw = match operand {
@@ -95,9 +94,6 @@ impl Tool for Dd {
                     Ok(n) => skip = n,
                     Err(e) => return ExecResult::failure(2, format!("dd: skip: {e}")),
                 },
-                // The key that redeems an approval-gated `of=` overwrite (dd's
-                // key=value idiom rather than the `--confirm` flag form).
-                "confirm" => confirm = Some(val.to_string()),
                 other => {
                     return ExecResult::failure(2, format!("dd: unknown operand {other:?}"))
                 }
@@ -168,7 +164,7 @@ impl Tool for Dd {
                 // Gate the truncating `of=` overwrite through approvals + trash. The
                 // the re-run hint reinjects the operands `dd` can't run without
                 // (otherwise the advertised command would do nothing).
-                let hint_cmd = {
+                let _hint_cmd = {
                     let mut s = format!("dd if={input} of={out} bs={bs}");
                     if let Some(c) = count {
                         s.push_str(&format!(" count={c}"));

@@ -114,7 +114,7 @@ impl Tool for Mv {
                 .map(|info| !info.is_dir())
                 .unwrap_or(false);
             if dst_is_existing_file {
-                let src_display = &sources[0];
+                let _src_display = &sources[0];
                 if let Err(blocked) = ctx
                     .snapshot_overwrites("mv",
                         &[(dest.clone(), false)])

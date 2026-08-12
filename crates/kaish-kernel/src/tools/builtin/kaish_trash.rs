@@ -154,22 +154,17 @@ async fn cmd_empty(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         _ => None,
     });
 
-    // `trash.empty` gates every time, independent of any subscription or
-    // policy (spec §F.1): it discards the recovery net that makes every other
-    // fs.* operation survivable, so it is not something a session can turn
-    // off. This is also why the dispatch seam captures the invocation
-    // unconditionally — see `kernel.rs`'s capture site.
-    if let Err(result) = ctx
-        .request_gate(
-            KernelOperation::TrashEmpty,
-            Vec::new(),
-            "emptying the trash is irreversible",
-            "kaish-trash empty --confirm=<token>".to_string(),
-            confirm.as_deref(),
-        )
-        .await
-    {
-        return crate::tools::prefix_error("kaish-trash empty", result);
+    // Emptying the trash discards the recovery net every other fs.* operation
+    // depends on, and it is the one destructive act with nothing behind it —
+    // so it always asks. This is a flag check, not a policy: `--confirm`
+    // takes no token, nothing is recorded, and no session setting turns it
+    // off. An embedder that wants a richer decision reads the plan first.
+    if confirm.is_none() {
+        return ExecResult::failure(
+            2,
+            "kaish-trash empty: emptying the trash is irreversible; re-run as \
+             `kaish-trash empty --confirm` to proceed",
+        );
     }
 
     let trash = match get_backend(ctx, "empty") {
@@ -210,12 +205,10 @@ async fn cmd_config(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
     // Show current config
     let enabled = ctx.scope.trash_enabled();
     let max_size = ctx.scope.trash_max_size();
-    let enforce = ctx.scope.approvals_enabled();
 
     let nodes = vec![
         OutputNode::new("enabled").with_cells(vec![enabled.to_string()]),
         OutputNode::new("max_size").with_cells(vec![format_size(max_size)]),
-        OutputNode::new("approvals").with_cells(vec![enforce.to_string()]),
     ];
 
     ExecResult::with_output(OutputData::table(

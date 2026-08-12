@@ -143,7 +143,7 @@ impl Tool for Rm {
 
         let recursive = parsed.recursive || parsed.recursive_upper;
         let force = parsed.force;
-        let confirm = parsed.confirm.clone();
+        let _confirm = parsed.confirm.clone();
 
         let trash_enabled = ctx.scope.trash_enabled();
         let trash_max_size = ctx.scope.trash_max_size();

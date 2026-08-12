@@ -170,7 +170,7 @@ impl Tool for Sed {
         // `parsed` is shadowed by the built program below. Read raw too: the
         // kernel may surface `-i.bak` as named["i"]=".bak" or bare `-i` as a flag.
         let in_place = parsed.in_place || args.has_flag("i");
-        let confirm = parsed.confirm.clone();
+        let _confirm = parsed.confirm.clone();
         // Regex dialect: `-E`/`-r` is strict ERE; default rewrites GNU BRE metas.
         // Captured before `parsed` is shadowed by the built program below.
         let extended = parsed.extended;

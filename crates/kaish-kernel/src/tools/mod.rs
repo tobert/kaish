@@ -24,7 +24,7 @@ pub use builtin::register_builtins;
 pub use builtin::{resolve_in_path, virtual_cwd_error};
 pub use clap_schema::{params_from_clap, schema_from_clap, schema_tree_from_clap};
 pub use context::{ExecContext, GateExpectations, OutputContext, OverwriteExpectation};
-pub(crate) use context::{cas_overwrite, is_trash_excluded, prefix_error, StatementTap};
+pub(crate) use context::{cas_overwrite, is_trash_excluded};
 pub use global_flags::GlobalFlags;
 pub use registry::ToolRegistry;
 pub use traits::{is_global_output_flag, validate_against_schema, Tool, ToolArgs, ToolCtx, ToolSchema, ParamSchema};

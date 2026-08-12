@@ -731,39 +731,8 @@ impl KernelConfig {
         self
     }
 
-    /// Give this session the authority its **own** kernel mints, for an
-    /// embedder that is itself the operator (spec §D.2).
-    ///
-    /// [`Self::with_approver_handle`] is the multi-kernel door: it installs
-    /// an authority *and* adopts that handle's ledger, so it needs a handle
-    /// that already exists. A single-kernel embedder whose one session is
-    /// the operator — the reference REPL, a desktop app with a human in
-    /// front of it — has no earlier kernel to take a handle from, and
-    /// building a throwaway one to obtain it would put a kernel id in the
-    /// record that names nothing. This says the same thing directly:
-    /// [`Kernel::build`] returns the handle *and* leaves a clone on the
-    /// session, so `approvals grant` works at that session's own prompt.
-    ///
-    /// **The default is `false`, and that is the enforcement** (§E.2, tier
-    /// 1): an agent session is built without this and has no method that
-    /// grants. Pass it only where a human decides.
-    pub fn with_own_authority(mut self, holds: bool) -> Self {
-        self.approval.own_authority = holds;
-        self
-    }
-
 }
 
-/// The two replayable capture forms [`Kernel::confirm`] dispatches
-/// (`docs/approval-ledger.md` §B.4, §C.6).
-enum Replay {
-    /// An exactly-captured tool invocation, re-dispatched through the argv
-    /// door.
-    Argv(kaish_types::approval::Invocation),
-    /// One top-level statement, re-parsed from the captured source and run
-    /// through the statement machinery.
-    Statement(Box<Stmt>),
-}
 
 /// Handle to an active overlay session, kept on the kernel and shared to
 /// `ExecContext` so the `kaish-vfs` builtin can reach the `OverlayFs`.
@@ -1710,110 +1679,6 @@ impl Kernel {
         Ok(result)
     }
 
-    /// Replay exactly one held statement, with the execute lock **held** and
-    /// a redemption correlation already stamped on the shared context
-    /// (`docs/approval-ledger.md` §C.6).
-    ///
-    /// Runs the statement machinery, not the program loop: earlier statements
-    /// of the captured source already ran in this session, and their effects
-    /// — variables, cwd — are session state that still holds. Re-running them
-    /// would repeat work nobody asked to repeat.
-    async fn replay_statement_locked(
-        &self,
-        stmt: &Stmt,
-        capture: kaish_types::approval::Capture,
-    ) -> Result<ExecResult> {
-        let cancel = self.reset_cancel();
-        let timeout = self.request_timeout;
-        if timeout == Some(Duration::ZERO) {
-            return Ok(ExecResult::failure(124, "timeout: timed out after 0s".to_string()));
-        }
-
-        // Tap and statement run under one watchdog, as they do at both other
-        // doors: the gate this replay re-enters is inside the bound the
-        // caller asked for, not outside it.
-        let work = async {
-            // The captured source was recorded credential-free, so a replayed
-            // statement presents no key: the redemption correlation on the
-            // context is what authorizes it.
-            let planned = crate::ast::plan::plan_statement(stmt);
-            let gated = match self.tap_statement(planned, capture).await {
-                crate::tools::StatementTap::Proceed { gated } => gated,
-                crate::tools::StatementTap::Halt(held) => return Ok(*held),
-            };
-            let flow_result = self.execute_stmt_flow(stmt).await;
-            // A fresh gate raised while *evaluating* the replayed statement —
-            // a defense-in-depth gate inside its `$(…)` — surfaces as this
-            // replay's own held result, and must not strand in the slot for a
-            // later door to mis-take (spec §I.5).
-            if let Some(held) = self.take_eval_hold() {
-                return Ok(*held);
-            }
-            let flow = flow_result?;
-            let drained = {
-                let mut receiver = self.stderr_receiver.lock().await;
-                receiver.drain_lossy()
-            };
-            let mut result = match flow {
-                ControlFlow::Normal(r) => r,
-                ControlFlow::Exit { code } => ExecResult::success("").with_code(code),
-                ControlFlow::Return { value } => value,
-                ControlFlow::Break { result, .. } | ControlFlow::Continue { result, .. } => result,
-            };
-            if !drained.is_empty() {
-                result.err = format!("{}{}", drained, result.err);
-            }
-            Ok(result)
-        };
-        let result = self.run_under_watchdog(timeout, &cancel, work).await?;
-        self.update_last_result(&result).await;
-        Ok(result)
-    }
-
-    /// Close an undecided approval request (`docs/approval-ledger.md` §B.5).
-    ///
-    /// **Nothing times a request out** (spec §A.10), so this is the only way
-    /// a request nobody decides ever ends. An embedder that wants a horizon
-    /// runs its own timer and calls this with
-    /// [`CancelReason::DeadlinePassed`](kaish_types::approval::CancelReason::DeadlinePassed);
-    /// one that wants none never calls it.
-    ///
-    /// **Cancelling is not denying.** A cancelled request is closed with no
-    /// decision recorded against it, and asking again posts a **new**
-    /// request linked by `supersedes` — the thread of intent stays walkable.
-    ///
-    /// Takes no [`ApproverHandle`](crate::ledger::ApproverHandle), unlike
-    /// [`Self::confirm`]: cancellation is a *requester* action, so a session
-    /// holding no authority closes its own requests. It cannot close another
-    /// principal's.
-    ///
-    /// `rev` is the revision the caller's view of the request was at (spec
-    /// §B.6) — this is what makes a deadline timer racing a human's decision
-    /// safe: whichever commits first invalidates the other's quote, and the
-    /// loser is refused and recorded as `RevisionRejected` rather than
-    /// silently applied against a request that has already moved on.
-    ///
-    /// # Errors
-    ///
-    /// The request is unknown, is already terminal, has an attempt in
-    /// flight, quotes a stale revision, or belongs to another principal in a
-    /// session with no authority.
-    /// Named `cancel_approval` rather than the spec's bare `cancel`:
-    /// [`Kernel::cancel`] already means "interrupt the running execution",
-    /// and one name for two unrelated cancellations is exactly the
-    /// collision the style guide's one-term-one-meaning rule forbids.
-    pub async fn cancel_approval(
-        &self,
-        request_id: &kaish_types::approval::RequestId,
-        rev: u64,
-        reason: kaish_types::approval::CancelReason,
-    ) -> Result<()> {
-        let ctx = self.exec_ctx.read().await;
-        ctx.cancel_request(request_id, rev, reason)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
-    }
-
     /// Run `work` under the movable-deadline watchdog for `timeout`, shared by the
     /// string door ([`Self::execute_with_options`]) and the argv door
     /// ([`Self::execute_argv`]).
@@ -2353,7 +2218,7 @@ impl Kernel {
         // statement held on line 5 — redacting only the held statement's own
         // key would leave that one behind. Scanned once, and only for a source
         // that mentions the flag at all, so the ordinary line pays nothing.
-        let program_keys: Vec<String> = if input.contains("confirm=") {
+        let _program_keys: Vec<String> = if input.contains("confirm=") {
             program
                 .statements
                 .iter()
@@ -2363,7 +2228,7 @@ impl Kernel {
             Vec::new()
         };
 
-        for (index, stmt) in program.statements.into_iter().enumerate() {
+        for (_index, stmt) in program.statements.into_iter().enumerate() {
             if matches!(stmt, Stmt::Empty) {
                 continue;
             }
@@ -2377,28 +2242,6 @@ impl Kernel {
             // The statement tap and gate (spec §C.6) — one of exactly two
             // sites. It runs before `execute_stmt_flow`, so a held statement
             // has run *nothing*: no substitution, no redirect opened, no
-            // first loop iteration. The capture is source-plus-index because
-            // statements carry no source spans; `confirm` re-parses and runs
-            // exactly this index — with every `--confirm=<key>` removed from
-            // the recorded source, because the capture lands in the ledger
-            // and no entry may carry a credential (spec §A.2).
-            let planned = crate::ast::plan::plan_statement(&stmt);
-            let capture = kaish_types::approval::Capture::Statement {
-                source: crate::ast::plan::redact_keys(input, &program_keys),
-                index,
-            };
-            let gated = match self.tap_statement(planned, capture).await {
-                crate::tools::StatementTap::Proceed { gated } => gated,
-                crate::tools::StatementTap::Halt(held) => {
-                    on_output(&held);
-                    accumulate_result(&mut result, &held);
-                    if !surfaced_warnings.is_empty() {
-                        result.err = format!("{surfaced_warnings}{}", result.err);
-                    }
-                    return Ok(result);
-                }
-            };
-
             // A gate raised during *evaluation* — a `$(…)` body or a
             // condition command — means the statement never got the value it
             // needed: it surfaces the gate site's own held result and the
@@ -2411,12 +2254,6 @@ impl Kernel {
             let flow_result = self.execute_stmt_flow(&stmt).await;
             if let Some(held) = self.take_eval_hold() {
                 let held_result = *held;
-                if gated {
-                    // The statement tap reserved an attempt for this
-                    // statement; the inner hold ends it at exit 2.
-                    let held_flow = ControlFlow::Normal(held_result.clone());
-                    self.settle_statement_attempt(&held_flow).await;
-                }
                 on_output(&held_result);
                 accumulate_result(&mut result, &held_result);
                 if !surfaced_warnings.is_empty() {
@@ -2425,9 +2262,6 @@ impl Kernel {
                 return Ok(result);
             }
             let flow = flow_result?;
-            if gated {
-                self.settle_statement_attempt(&flow).await;
-            }
 
             // Drain any stderr written by pipeline stages during this statement.
             // This captures stderr from intermediate pipeline stages that would
@@ -2508,18 +2342,6 @@ impl Kernel {
             result.err = format!("{surfaced_warnings}{}", result.err);
         }
         Ok(result)
-    }
-
-    /// Settle the attempt the statement gate reserved, with what the
-    /// statement actually did. One call per authorized statement — an
-    /// attempt left `Reserved` blocks every later redemption of its grant.
-    async fn settle_statement_attempt(&self, flow: &ControlFlow) {
-        let code = match flow {
-            ControlFlow::Normal(r) => r.code,
-            ControlFlow::Exit { code } => *code,
-            ControlFlow::Return { value } => value.code,
-            ControlFlow::Break { result, .. } | ControlFlow::Continue { result, .. } => result.code,
-        };
     }
 
     /// Execute a single statement, returning control flow information.
@@ -3161,8 +2983,6 @@ impl Kernel {
             // gate reached from inside a gated statement is nested under it
             // (spec §A.7).
             gate_parent: ec.gate_parent.clone(),
-            redemption: None,
-            capture_failure: None,
         })
     }
 
@@ -3678,9 +3498,8 @@ impl Kernel {
         // empty argv, which was a silent fallback into a *wrong* replay
         // (spec §B.4). It records `Capture::CaptureFailed` instead, so
         // `confirm` refuses to replay it and says why.
-        match tool_args.to_argv() {
-            Ok(argv) => ctx.current_invocation = Some(Box::new((name.to_string(), argv))),
-            Err(e) => ctx.set_capture_failed(e.to_string()),
+        if let Ok(argv) = tool_args.to_argv() {
+            ctx.current_invocation = Some(Box::new((name.to_string(), argv)));
         }
 
         let result = tool.execute(tool_args, &mut *ctx).await;
@@ -6991,59 +6810,6 @@ fn apply_tilde_expansion(value: Value, home: Option<&str>) -> Value {
 /// typed passthrough the string-native door cannot offer.
 pub(crate) fn argv_to_args(argv: &[Value]) -> Vec<Arg> {
     argv.iter().map(classify_argv_token).collect()
-}
-
-/// How an [`Kernel::execute_argv`] call is captured for replay (spec §B.4):
-/// the tool name and its argv as text, which is exactly what `Kernel::confirm`
-/// re-dispatches.
-///
-/// Binary is the one thing that cannot make the crossing. `Value::Bytes`
-/// records `CaptureFailed` naming the size rather than a lossy placeholder a
-/// replay would run as a literal string — a wrong replay is worse than a
-/// refused one.
-///
-/// `presented_keys` are the credentials this argv carries; their tokens are
-/// dropped from the capture. The record must not hold a credential (spec
-/// §A.2), and a replay is authorized by its redemption correlation, so
-/// re-presenting a spent key would only count a rejection somewhere.
-fn argv_capture(
-    name: &str,
-    argv: &[Value],
-    presented_keys: &[String],
-) -> kaish_types::approval::Capture {
-    use kaish_types::approval::{Capture, Invocation};
-    let mut tokens = Vec::with_capacity(argv.len());
-    for value in argv {
-        match value {
-            Value::String(s) if presents_a_key(s, presented_keys) => continue,
-            Value::String(s) => tokens.push(s.clone()),
-            Value::Int(i) => tokens.push(i.to_string()),
-            Value::Float(f) => tokens.push(f.to_string()),
-            Value::Bool(b) => tokens.push(b.to_string()),
-            Value::Null => tokens.push(String::new()),
-            Value::Json(j) => tokens.push(j.to_string()),
-            Value::Bytes(data) => {
-                return Capture::CaptureFailed {
-                    reason: format!(
-                        "argv carries {} bytes of binary, which has no text form to replay",
-                        data.len()
-                    ),
-                }
-            }
-        }
-    }
-    Capture::Exact(Invocation {
-        tool: name.to_string(),
-        argv: tokens,
-    })
-}
-
-/// Whether one argv token is a `--confirm=<key>` (or `confirm=<key>`) for
-/// one of the credentials this statement presented.
-fn presents_a_key(token: &str, presented_keys: &[String]) -> bool {
-    presented_keys.iter().any(|key| {
-        token == format!("--confirm={key}") || token == format!("confirm={key}")
-    })
 }
 
 fn classify_argv_token(token: &Value) -> Arg {

@@ -6,16 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use kaish_types::approval::{
-    ApprovalAssessment, ApprovalRequest, ApprovalRequestDraft, ApprovalScope, AssessmentOutcome,
-    AssessmentStage, AssessorId, AttemptId, CancelReason, Capture, Condition,
-    Invocation, KernelId, Observation, ObservedResource, OperationId, Outcome, Plan, PlanBinding,
-    PlanDigest,
-    Principal, RequestId, RequestState, Resource, ResourceRef,
-};
-use sha2::{Digest, Sha256};
-use kaish_tool_api::{
-    ExecutionContext, StatementAssessment, StatementClassificationInput, StatementClassifier,
-    StatementPosture,
+    RequestId,
 };
 
 use crate::ast::Value;
@@ -23,7 +14,6 @@ use crate::backend::{KernelBackend, LocalBackend};
 use crate::dispatch::PipelinePosition;
 use crate::ignore_config::IgnoreConfig;
 use crate::interpreter::{ExecResult, Scope};
-use crate::operation::KernelOperation;
 use crate::output_limit::OutputLimitConfig;
 use crate::scheduler::{JobManager, PipeReader, PipeWriter, StderrStream};
 use crate::tools::ToolRegistry;
@@ -219,22 +209,7 @@ pub struct ExecContext {
     /// (that builder is PR 4), so nothing sets this outside a test.
 
 
-    /// Kernel-internal replay correlation (`docs/approval-ledger.md` §B.4).
-    /// `Kernel::confirm` reserves the attempt against an already-granted
-    /// request and stamps it here before dispatching the captured
-    /// invocation; the gate site's fresh draft is then *matched* against
-    /// that request rather than posting a second one. Consumed by the first
-    /// gate it reaches, so a replayed command with two gates cannot reuse
-    /// one authorization twice.
-    ///
-    /// Never crosses a public API and never reaches a tool.
-    pub(crate) redemption: Option<RedemptionContext>,
 
-    /// Why capturing this invocation failed, when it did (spec §B.4). Set at
-    /// the dispatch seam when the invocation cannot be captured verbatim;
-    /// a request posted with this set records `Capture::CaptureFailed`, and
-    /// `confirm` refuses to replay it naming the variant.
-    pub(crate) capture_failure: Option<String>,
 
     /// The request currently being satisfied above this one, if any (spec
     /// §A.7). The statement gate sets it when it authorizes a statement, so
@@ -246,46 +221,6 @@ pub struct ExecContext {
     /// statement settles. Parenthood is a display and audit relationship
     /// only: a grant on a parent never authorizes a child (spec §A.7).
     pub(crate) gate_parent: Option<RequestId>,
-
-}
-
-/// The resource kind a statement's commands are named under (spec §C.6):
-/// one `cmd` resource per planned command, matched by a standing grant with
-/// the same exact-kind/globbed-id rule everything else uses.
-pub(crate) const CMD_KIND: &str = "cmd";
-
-/// What the statement tap decided (spec §C.6). See
-/// [`ExecContext::tap_statement`].
-pub(crate) enum StatementTap {
-    /// Run the statement. `gated` is true when a gate authorized it, and
-    /// the caller must settle the reserved attempt with the statement's exit
-    /// code once it finishes.
-    Proceed {
-        /// Whether an attempt is reserved and awaiting settlement.
-        gated: bool,
-    },
-    /// Return this result verbatim. **Nothing of the statement has run** —
-    /// no substitution, no redirect opened, no first loop iteration.
-    Halt(Box<ExecResult>),
-}
-
-/// What a redemption path decided: it produced an outcome, or the operation
-/// has moved out of the context its grant was decided in and must ask again
-/// (spec §A.9).
-///
-/// A distinct type rather than a sentinel outcome, because the two are not
-/// the same answer: `Authorized` is final and the caller returns it, and
-
-
-/// Kernel-internal correlation between a replay and the request it fulfills
-/// (`docs/approval-ledger.md` §B.4). Never crosses a public API, never
-/// reaches a tool.
-#[derive(Debug, Clone)]
-pub(crate) struct RedemptionContext {
-    /// The granted request being replayed.
-    pub request_id: RequestId,
-    /// The attempt `Kernel::confirm` already reserved against it.
-    pub attempt_id: AttemptId,
 }
 
 /// What the write-model gate chose for a single truncating overwrite.
@@ -335,30 +270,6 @@ pub type GateExpectations = std::collections::HashMap<PathBuf, OverwriteExpectat
 /// `/v` prefix exclusion here would silently strip it.
 pub(crate) fn is_trash_excluded(real_path: Option<&Path>) -> bool {
     matches!(real_path, Some(rp) if rp.starts_with("/tmp"))
-}
-
-/// Extract a human-readable message from a caught panic payload (spec
-/// §C.6's `classify_statement` `catch_unwind`). `panic!("literal")` and
-/// `panic!("{}", x)` cover the overwhelming majority of panics in practice;
-/// anything else is named honestly rather than guessed at.
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "non-string panic payload".to_string()
-    }
-}
-
-/// Prefix a gate result's diagnostic with the command that raised it, the way
-/// every other builtin error reads (`rm: …`), without disturbing the typed
-/// control-plane payload riding alongside it.
-pub(crate) fn prefix_error(command: &str, mut result: ExecResult) -> ExecResult {
-    if !result.err.is_empty() && !result.err.starts_with(command) {
-        result.err = format!("{command}: {}", result.err);
-    }
-    result
 }
 
 /// Decide how to gate a truncating overwrite, mirroring `rm`'s trash/approval
@@ -485,8 +396,6 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            redemption: None,
-            capture_failure: None,
             gate_parent: None,
         }
     }
@@ -528,8 +437,6 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            redemption: None,
-            capture_failure: None,
             gate_parent: None,
         }
     }
@@ -568,8 +475,6 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            redemption: None,
-            capture_failure: None,
             gate_parent: None,
         }
     }
@@ -608,8 +513,6 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            redemption: None,
-            capture_failure: None,
             gate_parent: None,
         }
     }
@@ -651,8 +554,6 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            redemption: None,
-            capture_failure: None,
             gate_parent: None,
         }
     }
@@ -691,8 +592,6 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            redemption: None,
-            capture_failure: None,
             gate_parent: None,
         }
     }
@@ -896,8 +795,6 @@ impl ExecContext {
             // Per-invocation: a child stage correlates its own replay and
             // owns its own reservations. Copying either would let one gate's
             // authorization travel to another command.
-            redemption: None,
-            capture_failure: None,
             // Parenthood does travel: a gate reached from inside a gated
             // statement is nested under it however many stages deep the
             // execution went (spec §A.7). It authorizes nothing on its own.
