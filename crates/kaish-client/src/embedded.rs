@@ -36,21 +36,6 @@ fn generate_blob_id() -> String {
     format!("{:x}-{:x}", timestamp, count)
 }
 
-/// Who a kernel built by [`EmbeddedClient::transient`] or
-/// [`EmbeddedClient::with_defaults`] runs for, for the record.
-///
-/// `Automation`, not `Unknown` or `Human`: these convenience constructors
-/// wire no approval authority, so a gate they raise is settled out of band
-/// by whoever operates the process — the same distinction GH #317 drew for
-/// `kaish -c` and script runs. The id names the door that built the
-/// kernel — **never empty**, because an unattributed request cannot be
-/// traced back to anyone. An embedder that knows who it runs for names them
-/// instead via `KernelConfig::with_principal`; this is only the fallback for
-/// the constructors that ask for nothing.
-pub fn embedded_principal() -> kaish_types::approval::Principal {
-    kaish_types::approval::Principal::new("embedded", kaish_types::approval::PrincipalKind::Automation)
-}
-
 /// A client that wraps a `Kernel` directly for in-process access.
 ///
 /// # Example
@@ -88,14 +73,14 @@ impl EmbeddedClient {
 
     /// Create a new embedded client with a transient (non-persistent) kernel.
     pub fn transient() -> ClientResult<Self> {
-        let kernel = Kernel::new(KernelConfig::transient().with_principal(embedded_principal()))
+        let kernel = Kernel::new(KernelConfig::transient())
             .map_err(ClientError::Other)?;
         Ok(Self::new(kernel))
     }
 
     /// Create a new embedded client with default configuration.
     pub fn with_defaults() -> ClientResult<Self> {
-        let kernel = Kernel::new(KernelConfig::default().with_principal(embedded_principal()))
+        let kernel = Kernel::new(KernelConfig::default())
             .map_err(ClientError::Other)?;
         Ok(Self::new(kernel))
     }

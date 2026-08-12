@@ -8,13 +8,11 @@
 //! - Result formatting with OutputData
 //! - Command history via rustyline
 
-pub mod approval;
 pub mod format;
 
 use std::borrow::Cow;
 use std::io::IsTerminal;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
@@ -30,13 +28,8 @@ use kaish_client::completion::{detect_completion_context, is_word_delimiter, Com
 use kaish_client::{EmbeddedClient, KernelClient};
 use kaish_kernel::ast::Value;
 use kaish_kernel::interpreter::ExecResult;
-use kaish_kernel::ledger::{
-    ApproverHandle, CommandNameClassifier, ResumeAction, StatementClassifier,
-};
 use kaish_kernel::{ExecuteOptions, Kernel, KernelConfig};
-use kaish_types::approval::{ApprovalRequestView, GrantTerms, Grounds, RiskClass};
 
-use crate::approval::{Answer, ApprovalPrompt};
 
 /// Snapshot the OS environment as a map of `String` → `Value::String`.
 ///
@@ -429,13 +422,6 @@ impl Helper for KaishHelper {}
 pub struct Repl {
     client: EmbeddedClient,
     runtime: Runtime,
-    /// The one approval authority this kernel minted
-    /// (`docs/approval-ledger.md` §D.2). The REPL keeps it because the REPL
-    /// is the operator: it grants what the human answers `y` to and replays
-    /// the held statement with [`Kernel::confirm`]. Whether the *session*
-    /// may also `approvals grant` is the config's business
-    /// ([`KernelConfig::with_own_authority`]), not this field's.
-    authority: ApproverHandle,
 }
 
 /// The `KernelConfig` the interactive REPL runs on: passthrough filesystem,
@@ -446,8 +432,6 @@ pub fn interactive_config() -> KernelConfig {
     KernelConfig::repl()
         .with_interactive(true)
         .with_initial_vars(os_env_vars())
-        .with_principal(terminal_principal())
-        .with_own_authority(true)
 }
 
 /// The `KernelConfig` `kaish -c` and `kaish script.kai` run on: the same
@@ -465,65 +449,6 @@ pub fn noninteractive_config(overlay: bool) -> KernelConfig {
     KernelConfig::repl()
         .with_initial_vars(os_env_vars())
         .with_overlay(overlay)
-        .with_principal(noninteractive_principal())
-}
-
-/// Who the person at the terminal is, for the record. `$USER` when the
-/// environment names one, `terminal` otherwise — a name an auditor can read,
-/// never an empty id.
-///
-/// The kernel trusts this assignment (spec §A.3): it is the frontend's job to
-/// say who its session belongs to, and the REPL's answer is "the human who
-/// started it".
-fn terminal_principal() -> kaish_types::approval::Principal {
-    principal_named_by_env("terminal", kaish_types::approval::PrincipalKind::Human)
-}
-
-/// Who a `kaish -c` or script run belongs to, for the record.
-///
-/// `Automation`, not `Human`, because the distinction the record needs is not
-/// who launched the process but **whether anyone can be asked**: these runs
-/// have no prompt, so every gate they raise is settled by an operator out of
-/// band. The id still names the account, so an auditor reading the log sees
-/// whose automation it was.
-pub fn noninteractive_principal() -> kaish_types::approval::Principal {
-    principal_named_by_env("unattended", kaish_types::approval::PrincipalKind::Automation)
-}
-
-/// `$USER`, or `fallback` when the environment names no one.
-fn principal_named_by_env(
-    fallback: &str,
-    kind: kaish_types::approval::PrincipalKind,
-) -> kaish_types::approval::Principal {
-    kaish_types::approval::Principal::new(principal_id(std::env::var("USER").ok(), fallback), kind)
-}
-
-/// The id to record, given what the environment said. **Never empty** — an
-/// unattributed request is one an auditor cannot trace back, and a frontend
-/// always knows more than nothing about who it runs for. An empty `$USER` is
-/// the environment naming no one, so it falls back rather than passing an
-/// empty string through.
-fn principal_id(from_env: Option<String>, fallback: &str) -> String {
-    from_env
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| fallback.to_string())
-}
-
-/// The reference [`StatementClassifier`] over a set of command names, for
-/// `kaish --gate rm,kaish-trash` (spec §C.6).
-///
-/// [`CommandNameClassifier`] matches `argv0` in the parsed plan, so `rm
-/// notes.txt` gates and `echo 'rm notes.txt'` does not — the discrimination
-/// the plan buys over the raw line. The risk it names is `Irreversible`,
-/// which is `cmd.execute`'s own class: the operation covers `ls` and `rm -rf`
-/// alike, so the conservative claim is the only honest one a name-matching
-/// rule can make.
-pub fn gate_classifier(names: Vec<String>) -> Arc<dyn StatementClassifier> {
-    Arc::new(CommandNameClassifier::new(
-        names,
-        "the session gates this command",
-        RiskClass::Irreversible,
-    ))
 }
 
 /// Build the tokio runtime kaish execution runs on, with worker threads sized
@@ -553,7 +478,7 @@ impl Repl {
     /// a config without it builds a REPL that can see pending requests and
     /// cancel them but not grant them.
     pub fn with_config(config: KernelConfig) -> Result<Self> {
-        let (mut kernel, authority) = Kernel::build(config).context("Failed to create kernel")?;
+        let mut kernel = Kernel::new(config).context("Failed to create kernel")?;
         let runtime = build_runtime()?;
 
         // Initialize terminal job control if stdin is a TTY. This needs the
@@ -567,19 +492,12 @@ impl Repl {
         Ok(Self {
             client: EmbeddedClient::new(kernel),
             runtime,
-            authority,
         })
     }
 
     /// Create a new REPL rooted at the given path.
     pub fn with_root(root: PathBuf) -> Result<Self> {
         Self::with_config(interactive_config().with_cwd(root))
-    }
-
-    /// The approval authority this REPL's kernel minted (spec §D.2). An
-    /// embedder driving [`Repl`] as a library decides gates through this.
-    pub fn authority(&self) -> &ApproverHandle {
-        &self.authority
     }
 
     /// Process a single line of input.
@@ -589,7 +507,7 @@ impl Repl {
     /// (spec §C.3); [`NoPrompt`](approval::NoPrompt) — a frontend with no
     /// terminal — leaves the exit-2 result exactly as the kernel produced
     /// it, which is the non-interactive contract.
-    pub fn process_line(&mut self, line: &str, prompt: &mut dyn ApprovalPrompt) -> ProcessResult {
+    pub fn process_line(&mut self, line: &str) -> ProcessResult {
         let trimmed = line.trim();
 
         // Skip empty lines
@@ -627,7 +545,6 @@ impl Repl {
 
         match result {
             Ok(exec_result) => {
-                let exec_result = self.fulfill_gate(trimmed, exec_result, prompt);
                 if exec_result.ok() && !exec_result.has_output() && exec_result.text_out().is_empty() {
                     ProcessResult::Empty
                 } else {
@@ -638,123 +555,6 @@ impl Repl {
         }
     }
 
-    /// Offer a pending approval request to the human, and act on the answer
-    /// (spec §C.3). Returns the result to display: the replayed operation's
-    /// when the request was granted, the denial otherwise, and the original
-    /// exit-2 result untouched when there was nothing to ask or nowhere to
-    /// ask it.
-    ///
-    /// This is the whole of the REPL's gate handling, and it is above the
-    /// kernel on purpose: `execute` has already returned, so nothing is
-    /// holding a statement open while the human reads the prompt (spec
-    /// §C.2). The REPL's wait is a `readline`, which is the right and only
-    /// bound.
-    fn fulfill_gate(
-        &self,
-        line: &str,
-        gated: ExecResult,
-        prompt: &mut dyn ApprovalPrompt,
-    ) -> ExecResult {
-        let Some(pending) = gated.pending_approval() else {
-            return gated;
-        };
-        let view = &pending.request;
-        // Tokenless: no credential exists before a decision — a request's key
-        // is minted by the grant — so the prompt shows the producer's
-        // `<token>` placeholder and nothing else could be substituted here.
-        let rendered = approval::render_request(view, None);
-        let Some(answer) = prompt.ask(&rendered) else {
-            return gated;
-        };
-        // How this request continues, read straight off the carried
-        // decision (spec §C.1) rather than re-derived from the capture's
-        // shape — `ExecResult.approval` carries the whole PendingApproval,
-        // route included, precisely so this call site does not have to
-        // (kaish#312).
-        self.runtime.block_on(self.decide(line, view, &pending.resume, answer))
-    }
-
-    /// Post the decision and, on a grant, replay the held operation.
-    async fn decide(
-        &self,
-        line: &str,
-        view: &ApprovalRequestView,
-        resume: &ResumeAction,
-        answer: Answer,
-    ) -> ExecResult {
-        if answer == Answer::Deny {
-            // `n`, an empty line, and Ctrl-C all land here: the request is
-            // closed, not left live for someone to grant later by accident.
-            return match self
-                .authority
-                .deny(&view.id, view.revision, "declined at terminal")
-                .await
-            {
-                Ok(()) => ExecResult::failure(1, format!("{} denied — nothing ran", view.id)),
-                Err(e) => ExecResult::failure(1, format!("{} could not be denied: {e}", view.id)),
-            };
-        }
-
-        // `a` issues the standing rule *before* the grant, so the record
-        // reads in the order the human decided: the rule that will
-        // auto-approve the next one, then this one's own grant.
-        if answer == Answer::Session {
-            let rule = approval::session_standing_grant(
-                view,
-                self.client.kernel().principal().clone(),
-            );
-            match self.authority.grant_standing(rule).await {
-                // stderr, like the prompt itself: the whole gate exchange is
-                // a conversation with the human, never the line's output.
-                Ok(id) => {
-                    eprintln!("standing grant {id} issued — `approvals revoke {id}` retires it")
-                }
-                // A standing rule that could not be recorded must not become
-                // a silent one-time grant with no record of the "always":
-                // say so, and fall through to the one-time grant the human
-                // also asked for.
-                Err(e) => eprintln!("kaish: the standing grant was not recorded: {e}"),
-            }
-        }
-
-        let terms = GrantTerms::once_for_view(view, approval::grant_deadline());
-        if let Err(e) = self
-            .authority
-            .grant_with_grounds(
-                &view.id,
-                view.revision,
-                terms,
-                Grounds::Human {
-                    channel: approval::GRANT_CHANNEL.to_string(),
-                },
-            )
-            .await
-        {
-            return ExecResult::failure(1, format!("{} could not be granted: {e}", view.id));
-        }
-
-        match self.client.kernel().confirm(&self.authority, &view.id).await {
-            Ok(mut replayed) => {
-                // The kernel replays `Capture::Exact` and `Capture::Statement`
-                // and refuses everything else. When it refuses — or the
-                // replay itself failed — the human still holds a granted
-                // request, so hand over the re-run line with the real key in
-                // it (retrieval is authority's privilege, spec §D.3) rather
-                // than leaving them with a grant they cannot spend.
-                if !replayed.ok() && !view.hint.is_empty() {
-                    let token = self.authority.token_for(&view.id);
-                    let rerun = approval::rerun_line(&view.hint, token.as_ref());
-                    replayed.err =
-                        format!("{}\nre-run it yourself: {rerun}\n", replayed.err.trim_end());
-                }
-                if let Some(note) = unrun_remainder(line, resume) {
-                    eprintln!("{note}");
-                }
-                replayed
-            }
-            Err(e) => ExecResult::failure(1, format!("{} was granted but not replayed: {e}", view.id)),
-        }
-    }
 }
 
 impl Default for Repl {
@@ -765,39 +565,6 @@ impl Default for Repl {
 }
 
 // ── The remainder a confirm does not run ────────────────────────────
-
-/// The warning for a granted statement that had statements after it on the
-/// same line, or `None` when nothing was left behind.
-///
-/// **`Kernel::confirm` replays the held statement and nothing after it**
-/// (spec §C.2), so `rm a; echo done` runs `rm a` on approval and never runs
-/// `echo done`. The kernel is right not to hold a program open across a
-/// human's decision, and the REPL is the wrong place to invent resumption:
-/// [`ResumeAction::ConfirmStatement`] gives the index the program stopped at,
-/// but statements carry no source spans, so slicing the tail back out of the
-/// line the user typed would need an unparser the REPL does not have. What it
-/// can do is refuse to be quiet about it — the alternative is a line that
-/// half-ran with no indication of which half.
-fn unrun_remainder(line: &str, resume: &ResumeAction) -> Option<String> {
-    let ResumeAction::ConfirmStatement { index, .. } = resume else {
-        return None;
-    };
-    // The line parsed once already to reach the gate. If it somehow does not
-    // now, say nothing rather than guess at a count.
-    let program = kaish_kernel::parser::parse(line).ok()?;
-    let remaining = program
-        .statements
-        .iter()
-        .skip(index + 1)
-        .filter(|stmt| !matches!(stmt, kaish_kernel::ast::Stmt::Empty))
-        .count();
-    (remaining > 0).then(|| {
-        format!(
-            "kaish: {remaining} statement(s) after the approved one did not run — an approval \
-             halts the line, so re-run them yourself"
-        )
-    })
-}
 
 // ── Formatting ──────────────────────────────────────────────────────
 
@@ -1016,7 +783,7 @@ pub fn run_interactive(config: KernelConfig, overlay: bool) -> Result<()> {
                 // at an approval question is ordinary input handling in the
                 // REPL's own read loop rather than a signal racing a
                 // decision (spec §C.3).
-                let outcome = repl.process_line(&line, &mut approval::TerminalPrompt::new(&mut rl));
+                let outcome = repl.process_line(&line);
                 match outcome {
                     ProcessResult::Output(output) => {
                         if output.ends_with('\n') {
