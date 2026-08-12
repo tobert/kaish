@@ -18,9 +18,11 @@ pub struct KaishTrash;
 #[derive(Parser, Debug)]
 #[command(name = "kaish-trash", about = "Manage the freedesktop.org Trash")]
 struct KaishTrashArgs {
-    /// Approval token for `empty` (`--confirm=<token>`).
-    #[arg(id = "confirm", long = "confirm")]
-    _confirm: Option<String>,
+    /// Acknowledge that `empty` is irreversible. Takes no value: emptying
+    /// the trash discards the recovery net every other operation depends on,
+    /// so it always asks.
+    #[arg(long = "confirm")]
+    confirm: bool,
 
     #[command(flatten)]
     global: GlobalFlags,
@@ -80,7 +82,7 @@ impl Tool for KaishTrash {
         match subcmd.as_str() {
             "list" => cmd_list(&args, ctx).await,
             "restore" => cmd_restore(&args, ctx).await,
-            "empty" => cmd_empty(&args, ctx).await,
+            "empty" => cmd_empty(parsed.confirm, ctx).await,
             "config" => cmd_config(&args, ctx).await,
             other => ExecResult::failure(1, format!("kaish-trash: unknown subcommand: {}", other)),
         }
@@ -148,18 +150,13 @@ async fn cmd_restore(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
     }
 }
 
-async fn cmd_empty(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-    let confirm = args.get_named("confirm").and_then(|v| match v {
-        Value::String(s) => Some(s.clone()),
-        _ => None,
-    });
-
+async fn cmd_empty(confirmed: bool, ctx: &mut ExecContext) -> ExecResult {
     // Emptying the trash discards the recovery net every other fs.* operation
     // depends on, and it is the one destructive act with nothing behind it —
     // so it always asks. This is a flag check, not a policy: `--confirm`
-    // takes no token, nothing is recorded, and no session setting turns it
+    // takes no value, nothing is recorded, and no session setting turns it
     // off. An embedder that wants a richer decision reads the plan first.
-    if confirm.is_none() {
+    if !confirmed {
         return ExecResult::failure(
             2,
             "kaish-trash empty: emptying the trash is irreversible; re-run as \
@@ -284,38 +281,6 @@ mod tests {
         assert!(result.ok());
         assert!(result.text_out().contains("50.0MB"));
         assert_eq!(ctx.scope.trash_max_size(), 52_428_800);
-    }
-
-    #[tokio::test]
-    async fn empty_always_asks_and_nothing_turns_it_off() {
-        // Emptying the trash discards the recovery net every other fs.*
-        // operation depends on, so it always asks — there is no session
-        // setting that disables this and no token involved.
-        let mut ctx = make_ctx();
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("empty".into()));
-
-        let result = KaishTrash.execute(args, &mut ctx).await;
-        assert_eq!(result.code, 2, "a bare `empty` must refuse: {result:?}");
-        assert!(result.err.contains("irreversible"), "{}", result.err);
-        assert!(result.err.contains("--confirm"), "{}", result.err);
-    }
-
-    #[tokio::test]
-    async fn empty_proceeds_once_confirmed() {
-        // The flag is the whole ceremony: no token, nothing recorded.
-        let mut ctx = make_ctx();
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("empty".into()));
-        args.named.insert("confirm".to_string(), Value::String(String::new()));
-
-        let result = KaishTrash.execute(args, &mut ctx).await;
-        assert_ne!(
-            result.code, 2,
-            "a confirmed empty must not still be refused: {result:?}"
-        );
     }
 
     #[tokio::test]

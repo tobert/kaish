@@ -122,6 +122,6 @@ lower layer to wrap. The error message says so.
 
 ## JobFs and byte counting
 
-JobFs (at `/v/jobs`) is synthesized — each read projects small status,
-command, and approval strings from the job table. JobFs byte counting is not
-included in overlay resident bytes or the vfs-memory budget.
+JobFs (at `/v/jobs`) is synthesized — each read projects small status and
+command strings from the job table. JobFs byte counting is not included in
+overlay resident bytes or the vfs-memory budget.

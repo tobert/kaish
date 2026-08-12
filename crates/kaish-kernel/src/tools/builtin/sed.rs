@@ -55,9 +55,6 @@ struct SedArgs {
     #[arg(short = 'i', long = "in-place")]
     in_place: bool,
 
-    /// Approval token for a gated in-place overwrite (`--confirm=<token>`).
-    #[arg(long = "confirm")]
-    confirm: Option<String>,
 
     #[command(flatten)]
     global: GlobalFlags,
@@ -170,7 +167,6 @@ impl Tool for Sed {
         // `parsed` is shadowed by the built program below. Read raw too: the
         // kernel may surface `-i.bak` as named["i"]=".bak" or bare `-i` as a flag.
         let in_place = parsed.in_place || args.has_flag("i");
-        let _confirm = parsed.confirm.clone();
         // Regex dialect: `-E`/`-r` is strict ERE; default rewrites GNU BRE metas.
         // Captured before `parsed` is shadowed by the built program below.
         let extended = parsed.extended;
@@ -221,11 +217,6 @@ impl Tool for Sed {
                 );
             }
 
-            // Gate every target with one nonce before touching any file. The
-            // the hint must reinject the flags the operation can't run without:
-            // a bare `sed --confirm=… file` would read `file` as the expression
-            // and then hang on stdin. Rebuild `-i [-n] -e '<expr>'…` so the
-            // advertised re-run actually does the in-place edit.
             let mut hint_prefix = String::from("sed -i");
             if quiet {
                 hint_prefix.push_str(" -n");

@@ -20,9 +20,6 @@ struct TeeArgs {
     #[arg(id = "append", short = 'a', long = "append")]
     _append: bool,
 
-    /// Approval token for a gated overwrite (`--confirm=<token>`).
-    #[arg(long = "confirm")]
-    confirm: Option<String>,
 
     #[command(flatten)]
     global: GlobalFlags,

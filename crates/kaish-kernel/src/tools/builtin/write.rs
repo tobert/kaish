@@ -25,9 +25,6 @@ struct WriteArgs {
     #[arg(long)]
     content: Option<String>,
 
-    /// Approval token for a gated overwrite (`--confirm=<token>`).
-    #[arg(long = "confirm")]
-    confirm: Option<String>,
 
     #[command(flatten)]
     global: GlobalFlags,

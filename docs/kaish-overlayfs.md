@@ -244,9 +244,9 @@ Counting and limiting are different concerns; split them:
   — disk residency is the host's concern (page cache, `df`); this counter is
   about RAM. `OverlayFs` counts its **base snapshots** too — overlay-owned RAM
   regardless of upper choice, the hidden 2×. `JobFs` is intentionally excluded:
-  it holds no file content — each read projects small status, command, and
-  approval strings from the job table; charging those against the
-  `vfs-memory` budget would be incorrect. Zero config, no wrapper to remember:
+  it holds no file content — each read projects small status and command
+  strings from the job table; charging those against the `vfs-memory` budget
+  would be incorrect. Zero config, no wrapper to remember:
   unbounded growth becomes structurally impossible to *miss*, which is the
   kaish way.
 - **Limiting is a shared `ByteBudget`** (`Arc`: atomic used + limit), accepted
@@ -312,7 +312,7 @@ drifts.
   `diff [path...]`, `commit`, `reset [path]`.
 - **JobFs resident counting**: intentionally excluded from `resident_bytes()`
   and the `vfs-memory` budget. JobFs holds no file content — reads project
-  status, command, and approval strings from the job table.
+  status and command strings from the job table.
 - **Budget defaults**: `KernelConfig::agent()` / `agent_with_root()` default to
   64 MiB with label `"vfs-memory"`. Opt out with `without_vfs_budget()`.
 

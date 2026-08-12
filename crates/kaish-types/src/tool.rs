@@ -260,7 +260,7 @@ pub struct ToolSchema {
     pub glob_passthrough: bool,
     /// Dotted operation ids this tool can post through
     /// `ToolCtx::request_approval` / `ExecContext::request_gate`
-    /// (`docs/approval-ledger.md` §A.6, §F.3) — what a policy engine reads
+    /// — what an embedder reads
     /// off `tools --json` to discover gateable operations instead of
     /// sniffing for a `--confirm` flag. Empty for a tool that never gates
     /// anything. A flat tool with several behaviors behind one schema

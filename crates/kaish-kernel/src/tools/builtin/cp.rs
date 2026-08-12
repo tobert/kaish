@@ -20,9 +20,6 @@ struct CpArgs {
     #[arg(short = 'r', long = "recursive")]
     recursive: bool,
 
-    /// Approval token for a gated overwrite (`--confirm=<token>`).
-    #[arg(long = "confirm")]
-    confirm: Option<String>,
 
     /// Do not overwrite existing files (-n)
     #[arg(short = 'n', long = "no-clobber", visible_alias = "no_clobber")]

@@ -598,3 +598,37 @@ async fn dd_of_overwrite_under_trash_snapshots_prior_bytes() {
 // approval node, and `JobStatus` mapped exit 2 to `Failed`. So a backgrounded
 // gate could never be *fulfilled* — the request was unreachable. These pin
 // the surfaces.
+
+/// `kaish-trash empty` always asks, and the flag it names actually works.
+///
+/// Routed through `kernel.execute` on purpose: an earlier version of this
+/// test built `ToolArgs` by hand and passed because it never touched clap —
+/// while the real `--confirm` was declared as `Option<String>` and rejected
+/// the valueless spelling the refusal message told the user to run. The
+/// message and the flag have to agree, and only the dispatch chain proves it.
+#[tokio::test]
+async fn trash_empty_asks_and_the_confirm_flag_it_names_is_accepted() {
+    let dir = tempdir();
+    let session = kernel_at(dir.path());
+
+    let refused = run(&session, "kaish-trash empty").await;
+    assert_eq!(refused.code, 2, "a bare empty must refuse: {refused:?}");
+    assert!(refused.err.contains("irreversible"), "{}", refused.err);
+    assert!(
+        refused.err.contains("--confirm"),
+        "the refusal must name the flag: {}",
+        refused.err
+    );
+
+    // Exactly the spelling the message just advertised.
+    let confirmed = run(&session, "kaish-trash empty --confirm").await;
+    assert_ne!(
+        confirmed.code, 2,
+        "the advertised re-run must not be refused again: {confirmed:?}"
+    );
+    assert!(
+        !confirmed.err.contains("a value is required"),
+        "--confirm must take no value: {}",
+        confirmed.err
+    );
+}

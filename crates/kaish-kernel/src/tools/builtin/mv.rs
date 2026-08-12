@@ -16,9 +16,6 @@ pub struct Mv;
 #[derive(Parser, Debug)]
 #[command(name = "mv", about = "Move (rename) files and directories")]
 struct MvArgs {
-    /// Approval token for a gated overwrite (`--confirm=<token>`).
-    #[arg(long = "confirm")]
-    confirm: Option<String>,
 
     /// Do not overwrite existing files (-n)
     #[arg(short = 'n', long = "no-clobber", visible_alias = "no_clobber")]

@@ -114,7 +114,7 @@ pub enum Concept {
     Syntax,       // grammar: variables, expansion, quoting, pipes, control flow, …
     Foundations,  // the operating contract — guarantees AND the idioms that follow:
                   // no word splitting → use `split`; structured output → use --json;
-                  // newline-split → `for line in $(cmd)`; crash-not-corrupt; approvals.
+                  // newline-split → `for line in $(cmd)`; crash-not-corrupt; trash-on-delete.
                   // The agent-onboarding spine. (was "Consistency" — resolved Q2)
     Builtins,     // generated: tool index + per-tool help (from ToolSchema)
     Limits,       // intentionally-missing + known limitations + ShellCheck alignment
@@ -154,9 +154,9 @@ English is the always-complete base set. Translations are *additive* fragment fi
 
 Audience is a **lens / filter** over shared content — not a fork. Most fragments
 are shared (`audience: None`); the rare divergence is `Some(Agent)`/`Some(Human)`.
-"Same fact, different emphasis" (e.g. the approval-gate flow: agents need the exit-2
-protocol, humans need "it'll ask you to confirm") is a **Variant**, not an audience
-split. Hard boundary (resolved Q1): if it's about *kaish* — the language, the
+"Same fact, different emphasis" (e.g. the glob-expansion flow: agents need the
+zero-match exit-1 contract, humans need "quote the pattern to skip expansion")
+is a **Variant**, not an audience split. Hard boundary (resolved Q1): if it's about *kaish* — the language, the
 guarantees — it's shared content here; if it's about *the frontend* — keybindings,
 an embedder's UI chrome — it does **not** live in kaish-help, it stays in the REPL /
 kaijutsu / kaibo.

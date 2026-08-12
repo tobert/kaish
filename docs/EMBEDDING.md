@@ -334,7 +334,7 @@ and external commands launched from inside the kernel see only the
 variables kaish has marked as exported.
 
 > **One exception, and it only ever turns a rail *on*.** Four `KernelConfig`
-> presets read `KAISH_APPROVALS` and `KAISH_TRASH` from the process
+> presets read `KAISH_TRASH` from the process
 > environment at construction (`repl()` and the agent presets — the ones a
 > frontend uses). Nothing else in the kernel touches `std::env`, and the
 > direction is safe: env can enable the trash, never
@@ -926,7 +926,7 @@ job state:
 ```
 /v/jobs/
 ├── 1/
-│   └── status    # "running", "stopped", "done:0", "gated", "killed:N", or "failed:N"
+│   └── status    # "running", "stopped", "done:0", "killed:N", or "failed:N"
 │   ├── command   # Original command string
 │   ├── stdout    # Job's stdout so far — live while it runs
 │   ├── stderr    # Job's stderr so far — live while it runs
@@ -995,7 +995,7 @@ returns its result (GH #244). `kill %N` waits for the job to actually unwind
 (bounded by `kill_grace` + 3s) before exiting 0; `kill --no-wait %N` returns
 at dispatch. The `JobManager` keeps at most 100 finished jobs — enforced at
 registration and whenever completion is observed (`list`, `wait`); oldest
-evicted first, gated jobs never evicted — tune with
+evicted first — tune with
 `JobManager::set_finished_retention`. A session that registers jobs and then
 never calls anything holds what it registered; there is no background
 sweeper.
@@ -1004,7 +1004,7 @@ sweeper.
 `Deserialize` (plus `schemars::JsonSchema` behind the `schema` feature), so an
 embedder can serialize `JobManager::list()`/`get()` output directly rather
 than hand-rolling a mirror struct. `JobStatus`'s wire spelling under
-serde is lowercase (`"running"`/`"stopped"`/`"done"`/`"gated"`/`"killed"`/`"failed"`),
+serde is lowercase (`"running"`/`"stopped"`/`"done"`/`"killed"`/`"failed"`),
 matching the `/v/jobs/N/status` text vocabulary above — not the capitalized
 `Display` impl used for human-facing text (the `jobs` table). `JobInfo` also
 carries `exit_code: Option<i64>` (set once the job finishes), `started_at` /

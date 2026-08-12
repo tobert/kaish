@@ -2253,7 +2253,7 @@ impl Kernel {
                     // the way a statement-level gate does, and for the same
                     // reason: exit 2 means "this has not happened yet", and
                     // the statements after it were written expecting it had
-                    // (`docs/approval-ledger.md` §I.5). Without this,
+                    // Without this,
                     // `rm x; touch y` creates `y` whether or not `rm x` is
                     // ever approved, and nothing un-creates it.
                     on_output(&r);
@@ -5541,7 +5541,6 @@ impl Kernel {
     /// unwind, bounded as [`Self::shutdown`] does).
     ///
     /// **A gated job's held request is cancelled here**
-    /// (`docs/approval-ledger.md` §B.5, "a job is cancelled or killed").
     /// Nothing times a request out, so a job cancelled with a request still
     /// `Requested` would hold a live ledger slot for the life of the
     /// process — and forever, in an embedder where several kernels share
@@ -5567,7 +5566,7 @@ impl Kernel {
     ///
     /// Cancels every tracked background job ([`Self::cancel_all_jobs`]),
     /// closes every approval request left live in this kernel's scope
-    /// (`docs/approval-ledger.md` §B.5 — nothing times one out, so a kernel
+    /// (nothing times a job out, so a kernel
     /// that shares a ledger with other sessions would strand them), then
     /// waits up to `kill_grace + 3s` **per job** — the same bound `kill %N`
     /// gives a single target (GH #244) — for it to actually unwind. The

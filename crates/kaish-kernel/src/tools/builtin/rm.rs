@@ -30,9 +30,6 @@ struct RmArgs {
     #[arg(short = 'f', long = "force")]
     force: bool,
 
-    /// Approval token for a gated delete (`--confirm=<token>`).
-    #[arg(long = "confirm")]
-    confirm: Option<String>,
 
     #[command(flatten)]
     global: GlobalFlags,
@@ -110,10 +107,6 @@ impl Tool for Rm {
             [
                 ("Remove a file", "rm temp.txt"),
                 ("Remove directory recursively", "rm -rf build/"),
-                (
-                    "Confirm gated removal",
-                    "rm --confirm=4b1e0d9a7c3f28e6b5a0c1d4e7f2938a bigfile.bin",
-                ),
             ],
         )
         .with_operations([KernelOperation::FsRemove.as_str()])
@@ -143,7 +136,6 @@ impl Tool for Rm {
 
         let recursive = parsed.recursive || parsed.recursive_upper;
         let force = parsed.force;
-        let _confirm = parsed.confirm.clone();
 
         let trash_enabled = ctx.scope.trash_enabled();
         let trash_max_size = ctx.scope.trash_max_size();

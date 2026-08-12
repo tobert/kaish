@@ -242,7 +242,7 @@ an `awk` that never surprises.
 | **Text** | awk, base64, cut, diff, grep, head, sed, sort, split, tac, tail, tr, uniq, wc, xxd |
 | **Files** | basename, cat, cd, checksum, cmp, cp, dd, dirname, file, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, readlink, realpath, rm, stat, tee, touch, tree, write |
 | **JSON** | fromjson, fromjsonl, jq, keys, tojson, tojsonl, typeof, values |
-| **System** | alias, approvals, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, printf, ps, push, read, seq, set, sleep, spawn, timeout, tokens, uname, unalias, unset, wait, which |
+| **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, printf, ps, push, read, seq, set, sleep, spawn, timeout, tokens, uname, unalias, unset, wait, which |
 | **Parallel** | scatter, gather |
 | **Meta** | assert, false, test, true |
 | **kaish-*** | kaish-ast, kaish-clear, kaish-ignore, kaish-last, kaish-mounts, kaish-output-limit, kaish-status, kaish-tools, kaish-trash, kaish-validate, kaish-vars, kaish-version, kaish-vfs |
@@ -258,19 +258,17 @@ an `awk` that never surprises.
   feature and they don't exist at all.
 - `--overlay` makes a call copy-on-write: writes stay in memory unless the
   script runs `kaish-vfs commit`.
-- `set -o approvals` (or `KAISH_APPROVALS=1`) gates destructive commands behind
-  an approval — the command returns exit 2 and a typed request naming the
-  operation and the paths, instead of acting. At an interactive terminal the
-  REPL asks and runs the command on `y`; a piped or captured session is never
-  asked and gets the exit-2 request. `kaish --gate <cmd[,cmd...]>` widens what
-  asks to every statement planning one of those commands.
-- `set -o trash` (or `KAISH_TRASH=1`) diverts deletes to the freedesktop.org
-  Trash instead of removing them. Trash wins over approvals: a delete the trash
-  can catch needs no approval, because the trash IS the recovery net.
+- `set -o trash` (or `KAISH_TRASH=1`) diverts deletes and truncating
+  overwrites to the freedesktop.org Trash instead of destroying the prior
+  content, so a mistake is recoverable. `kaish-trash empty --confirm` is the
+  one operation that always asks — it discards the recovery net itself, and
+  no session setting turns that ask off.
+- kaish itself does not decide whether a statement may run — an embedder
+  reads `plan_program(source)` for each statement's commands and variables
+  and decides for itself, before anything executes.
 
-Approvals and trash semantics are covered in [docs/LANGUAGE.md](docs/LANGUAGE.md);
-the embedder-facing contract (`ExecResult.approval`, `ApproverHandle`,
-`Kernel::confirm`) in [docs/EMBEDDING.md](docs/EMBEDDING.md).
+Trash semantics are covered in [docs/LANGUAGE.md](docs/LANGUAGE.md); the
+embedder-facing `plan_program` contract in [docs/EMBEDDING.md](docs/EMBEDDING.md).
 
 ## Terms
 
@@ -288,10 +286,6 @@ error messages.
 | typed | A value keeps its JSON type through substitution. It is not stringified. |
 | overlay | Copy-on-write mode. Writes land in a virtual upper layer until committed. |
 | trash | Recoverable deletion under `set -o trash`. A trash failure is an error, never a permanent delete. |
-| request | One privileged operation asking to proceed. It does not run until a matching grant exists. |
-| grant | One decision to allow a request, or the act of making it. A grant authorizes exactly one *successful* run; a failed attempt does not consume it. |
-| key | The credential that redeems one request — what `--confirm=<token>` carries. The kernel holds it: no public type has a field for it, and only an approval authority can retrieve it. |
-| attempt | One execution reserved against a grant, with its own outcome. "The operation ran" is a fact about an attempt, never about a request. |
 | spill | To write oversize output to a file, or the file that results. |
 | escape hatch | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows, single quotes out of expansion. Never a workaround: an escape hatch is part of the design, and every restriction that has one names it. |
 
