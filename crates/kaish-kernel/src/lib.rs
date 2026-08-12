@@ -91,7 +91,7 @@ pub use scheduler::{BoundedStream, StreamStats, DEFAULT_STREAM_MAX_SIZE, drain_t
 // `PipeReader` via `Kernel::execute_with_pipe_stdin`, so a command that never
 // reads stdin never blocks on an open pipe. See `execute_pipe_stdin_tests`.
 pub use scheduler::{pipe_stream, pipe_stream_default, PipeReader, PipeWriter, PIPE_BUFFER_SIZE};
-pub use vfs::{ApprovalsFs, JobFs};
+pub use vfs::JobFs;
 
 // XDG path primitives (embedders compose their own paths)
 pub use paths::{home_dir, xdg_cache_home, xdg_config_home, xdg_data_home, xdg_runtime_dir};
