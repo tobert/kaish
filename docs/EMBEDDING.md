@@ -770,10 +770,10 @@ A name that a statement both reads and writes lands in `bound_variables`,
 never `free_variables` — the safe direction, since peeking it would judge the
 statement against a value the statement itself replaces.
 
-**What the free set covers.** kaish has no `eval` and no indirect expansion, so
-the read set is complete against the statement's **lexical** surface: every
-`${x}`, interpolation, `${#x}`, `${x:-default}`, `[$k]` subscript, and
-`$((…))` identifier. It does not cover names bound at *runtime* by a builtin
+**What the free set covers.** The read set is complete against the statement's
+**lexical** surface — kaish has no `eval` and no indirect expansion, so every
+read is visible in the source: every `${x}`, interpolation, `${#x}`,
+`${x:-default}`, `[$k]` subscript, and `$((…))` identifier. It does not cover names bound at *runtime* by a builtin
 that takes them as arguments — `read`, `export`, `unset`, and `push` write
 session variables that argv-level analysis cannot see. A statement like
 `read TOKEN && curl -H "Authorization: $TOKEN"` reports `TOKEN` as free, and

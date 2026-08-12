@@ -19,9 +19,10 @@ breaking entries are marked **BREAKING**.
 - **`Plan`/`PlannedCommand`/`PlannedRedirect`/`PlannedValue`** — the statement
   rendered back unexpanded (`${HOME}` as written; truncated at 8 KiB with a
   marker naming the limit), every command it would run, and its variables:
-  `free_variables` (names it reads) and `bound_variables` (names it writes).
-  A name that is both lands bound, never free — the safe direction, since
-  peeking it would judge the statement against a value it replaces.
+  `free_variables` (names it reads) and `bound_variables` (names it lexically
+  binds). A name that is both read and lexically bound lands bound, never
+  free — the safe direction, since peeking it would judge the statement
+  against a value it replaces.
 - **`Kernel::get_var` over `free_variables`** closes the analysis loop — plan
   a statement, look up what it depends on, decide with live values in hand.
   The read set is complete against the statement's **lexical** surface (kaish
@@ -82,17 +83,18 @@ breaking entries are marked **BREAKING**.
   re-run with `--confirm=<nonce>`. kaish no longer holds anything: the op runs.
   Gone with it — `ExecResult.latch`/`latch_request()`, `LatchRequest`,
   `JobInfo.latch`, `JobStatus::Latched` (wire `"latched"`), `/v/jobs/{id}/latch`,
-  `set -o latch`, `KAISH_LATCH`, `KernelConfig::with_latch`, and `dd`'s
-  `confirm=<token>` operand. An embedder that intercepted destructive ops
+  `set -o latch`, `KAISH_LATCH`, `KernelConfig::with_latch`, `dd`'s
+  `confirm=<token>` operand, and the `--confirm=<token>` flag on `rm` and the
+  overwrite builtins (`tee`, `patch`, `sed`, `write`, `cp`, `mv`) — passing it
+  is now a usage error (exit 2). An embedder that intercepted destructive ops
   through the latch now reads `plan_program(source)` before running the
   statement and decides for itself — see `docs/EMBEDDING.md`,
   "Command analysis". `set -o trash` is unchanged and still makes an
   overwrite or delete recoverable.
 
-  Unchanged: exit code **2**, the `--confirm=<token>` flag spelling, and the
-  control-plane discipline (never folded into `.data`, survives
-  `clear_stdout`, survives the `ExecResult`/`ToolResult` roundtrip, overrides
-  a later pipeline stage's success, rides scatter rows).
+  `kaish-trash empty` still refuses without confirmation (exit 2), but the
+  nonce round-trip is gone with the latch: the flag is now bare `--confirm`,
+  and `--confirm=<nonce>` no longer parses.
 - **BREAKING: comma is significant only inside a `[...]`/`{...}` literal or
   pattern** — `sed -n 1,3p`, `cut -f 1,3`, `sort -k 2,2n`, and `echo a,b,c`
   work unquoted; comma stays a separate token wherever a bracket pair actually
@@ -176,7 +178,7 @@ breaking entries are marked **BREAKING**.
 - **`--json` applies to `raw_argv` builtins** (`test`, `kill`).
 - Doc fixes: `wait`'s flag description no longer claims a PID path;
   `help limits` recursion cap corrected to 48 (`MAX_RECURSION_DEPTH`);
-  `cp`/`mv` publish real `-n`/`--no-clobber` and `--confirm` descriptions;
+  `cp`/`mv` publish real `-n`/`--no-clobber` descriptions;
   `cargo doc` builds warning-free and CI denies regressions.
 
 ### Security

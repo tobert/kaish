@@ -128,20 +128,27 @@ pub struct Plan {
     /// Every command the statement contains, control-structure bodies
     /// included.
     pub commands: Vec<PlannedCommand>,
-    /// Session variables the statement reads and does not itself write —
-    /// sorted, deduplicated root names. kaish has no `eval` and no indirect
-    /// expansion, so this set is complete, not best-effort: every variable
-    /// the statement can read is lexically present. An embedder peeks the
-    /// current values with `Kernel::get_var` to judge the statement against
-    /// live state. Special forms (`$1`, `$?`, `$$`, `$@`, `$#`) are not
-    /// session variables and are not listed.
+    /// Session variables the statement reads and does not itself lexically
+    /// bind — sorted, deduplicated root names. Complete against the
+    /// statement's **lexical** surface — kaish has no `eval` and no indirect
+    /// expansion, so every read is visible in the source. It does not cover
+    /// names bound at runtime by a builtin that takes them as arguments:
+    /// `read`, `export`, `unset`, and `push` write session variables that
+    /// argv-level analysis cannot see, so `read TOKEN && echo $TOKEN`
+    /// reports `TOKEN` here, and the value an embedder peeks with
+    /// `Kernel::get_var` is the one from before the `read`. Special forms
+    /// (`$1`, `$?`, `$$`, `$@`, `$#`) are not session variables and are not
+    /// listed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub free_variables: Vec<String>,
-    /// Names the statement itself writes or binds anywhere within it — an
-    /// assignment target, a `for` variable, an env-prefix name, a tool-def
-    /// parameter. Peeking session state for these is misleading (the
-    /// statement supplies its own value), so a name that is both read and
-    /// written lands here, never in `free_variables` — the safe direction.
+    /// Names the statement itself binds **lexically** — an assignment
+    /// target, a `for` variable, an env-prefix name, a tool-def parameter.
+    /// Peeking session state for these is misleading (the statement supplies
+    /// its own value), so a name that is both read and lexically bound lands
+    /// here, never in `free_variables` — the safe direction. A name written
+    /// only through a runtime binder (`read`, `export`, `unset`, `push`) is
+    /// a plain argument, not a lexical bind: it lands in `free_variables`
+    /// when the statement also reads it, and in neither set otherwise.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bound_variables: Vec<String>,
 }

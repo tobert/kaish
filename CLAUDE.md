@@ -164,24 +164,28 @@ that no default gets right. When the answer cannot be immediate, **return the qu
 data and let the embedder come back**, rather than awaiting a callback the kernel then has
 to bound.
 
-Three things follow, and each has a worked example in `docs/approval-ledger.md`:
+Three things follow:
 
 - **The kernel never waits on the embedder.** A bounded wait is a clock-driven decision; an
-  unbounded one is a liveness hazard the kernel cannot cancel correctly. The approval ledger
-  returns `ApprovalOutcome::Pending` with a structured `ResumeAction` instead (§C.1, §C.2).
-- **The kernel keeps what must be correct under concurrency**, and only that: the
-  append-only record, the state machine, the balance rule, the types that make a bypass
-  unrepresentable. Inverting *those* would make every embedder re-implement the hard part
-  (`docs/approval-ledger.md` §0.1).
+  unbounded one is a liveness hazard the kernel cannot cancel correctly. `plan_program` is
+  the shape to copy: it returns every statement's `Plan` as data, and the embedder decides
+  on its own time whether to execute.
+- **The kernel keeps what must be correct under concurrency**, and only that: the job
+  table, the trash contract, the output limits. Inverting *those* would make every
+  embedder re-implement the hard part.
 - **Helpers compose above the seam, never inside it.** A reusable waiter, a pending queue,
-  a retry policy — write them as composable pieces on top of the traits and the record, in
-  the REPL or a util crate that is itself an embedder. A convenience that reads a clock or
-  parks a decision inside the kernel has moved policy back in through the back door.
+  a retry policy — write them as composable pieces in the REPL or a util crate that is
+  itself an embedder. A convenience that reads a clock or parks a decision inside the
+  kernel has moved policy back in through the back door.
 
 The payoff is the point: an embedder that owns the state can do things with it we will not
-think of. kaijutsu parks a decision in a UI, kaibo puts it in front of a different model,
-someone else queues it for a shift change. None of those shapes need a kernel change,
-because the kernel never assumed which one it was serving.
+think of. kaijutsu parks a decision in its own UI, kaibo can put a plan in front of a
+different model, someone else queues it for a shift change. None of those shapes need a
+kernel change, because the kernel never assumed which one it was serving.
+
+The approval ledger is the receipt: kaish once held approval state and decision flow
+inside the kernel, and it was removed before 0.14.0 because every embedder already had
+its own — see `docs/EMBEDDING.md`, "Why this, and not a gate".
 
 ## Testing
 
@@ -265,10 +269,6 @@ every entry below was verified to be in real use in the governed prose.
 | typed | adjective | A value keeps its JSON type through substitution. It is not stringified. |
 | overlay | noun, adjective | Copy-on-write mode. Writes land in a virtual upper layer until committed. |
 | trash | noun, verb | Recoverable deletion under `set -o trash`. A trash failure is an error, never a permanent delete. |
-| request | noun | One privileged operation asking to proceed. It does not run until a matching grant exists. |
-| grant | noun, verb | One decision to allow a request, or the act of making it. A grant authorizes exactly one *successful* run; a failed attempt does not consume it. |
-| key | noun | The credential that redeems one request — what `--confirm=<token>` carries. The kernel holds it: no public type has a field for it, and only an approval authority can retrieve it. |
-| attempt | noun | One execution reserved against a grant, with its own outcome. "The operation ran" is a fact about an attempt, never about a request. |
 | spill | verb, noun | To write oversize output to a file, or the file that results. |
 | escape hatch | noun | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows, single quotes out of expansion. Never a workaround: an escape hatch is part of the design, and every restriction that has one names it. |
 
