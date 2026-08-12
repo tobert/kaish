@@ -19,7 +19,6 @@
 //!
 //! The router finds the longest matching mount point and delegates operations.
 
-mod approvalsfs;
 mod builtin_fs;
 mod jobfs;
 mod router;

@@ -3,7 +3,6 @@
 //! These tools are always available and provide core functionality.
 
 mod alias;
-mod approvals;
 mod assert;
 mod awk;
 mod base64_tool;
