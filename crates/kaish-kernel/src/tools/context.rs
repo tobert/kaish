@@ -1161,74 +1161,56 @@ mod tests {
 
     fn decide(
         trash: bool,
-        approvals: bool,
         real: Option<&str>,
         exists: bool,
         append: bool,
     ) -> MutationAction {
         // Default to a small file well under the cap; the size-cap behavior
         // has its own dedicated test below.
-        decide_mutation_action(trash, approvals, real.map(Path::new), exists, append, 1, 10_000_000)
+        decide_mutation_action(trash, real.map(Path::new), exists, append, 1, 10_000_000)
     }
 
     #[test]
     fn new_file_and_append_always_proceed() {
-        // Non-existent target: nothing to lose, regardless of gates.
-        assert_eq!(decide(true, true, Some("/work/new"), false, false), MutationAction::Proceed);
+        // Non-existent target: nothing to lose.
+        assert_eq!(decide(true, Some("/work/new"), false, false), MutationAction::Proceed);
         // Append to an existing file doesn't destroy prior content.
-        assert_eq!(decide(true, true, Some("/work/log"), true, true), MutationAction::Proceed);
+        assert_eq!(decide(true, Some("/work/log"), true, true), MutationAction::Proceed);
     }
 
     #[test]
-    fn trash_wins_over_the_gate_on_an_existing_file() {
-        assert_eq!(decide(true, true, Some("/work/f"), true, false), MutationAction::TrashFirst);
-        assert_eq!(decide(true, false, Some("/work/f"), true, false), MutationAction::TrashFirst);
+    fn an_existing_file_is_snapshotted_before_it_is_overwritten() {
+        assert_eq!(decide(true, Some("/work/f"), true, false), MutationAction::TrashFirst);
     }
 
     #[test]
-    fn the_policy_gates_when_trash_is_off() {
-        assert_eq!(decide(false, true, Some("/work/f"), true, false), MutationAction::Gate);
+    fn trash_off_proceeds() {
+        assert_eq!(decide(false, Some("/work/f"), true, false), MutationAction::Proceed);
     }
 
     #[test]
-    fn both_gates_off_proceeds() {
-        assert_eq!(decide(false, false, Some("/work/f"), true, false), MutationAction::Proceed);
-    }
-
-    #[test]
-    fn tmp_bypasses_gate_but_real_v_path_stays_gated() {
-        // /tmp scratch proceeds even with both gates on (matches rm).
-        assert_eq!(decide(true, true, Some("/tmp/scratch"), true, false), MutationAction::Proceed);
-        // A *real* path under /v is NOT excluded: mount-coverage routing now
+    fn tmp_is_excluded_but_a_real_v_path_is_still_trashed() {
+        // /tmp scratch proceeds even with trash on (matches rm).
+        assert_eq!(decide(true, Some("/tmp/scratch"), true, false), MutationAction::Proceed);
+        // A *real* path under /v is NOT excluded: mount-coverage routing
         // delegates unclaimed /v/* to the embedder's backend, so its real
-        // content under /v must keep the trash/approval safety net. Trash wins.
-        assert_eq!(decide(true, true, Some("/v/cas/blob.bin"), true, false), MutationAction::TrashFirst);
+        // content under /v keeps the trash safety net.
+        assert_eq!(decide(true, Some("/v/cas/blob.bin"), true, false), MutationAction::TrashFirst);
     }
 
     #[test]
-    fn overlay_no_real_path_stays_gated() {
-        // No real path (overlay/in-memory) is NOT excluded — still trash-first.
-        assert_eq!(decide(true, true, None, true, false), MutationAction::TrashFirst);
-        assert_eq!(decide(false, true, None, true, false), MutationAction::Gate);
-    }
-
-    #[test]
-    fn file_too_big_to_trash_falls_through_like_rm() {
+    fn file_too_big_to_trash_is_written_directly_like_rm() {
         // Prior content larger than the cap can't be snapshotted, so trash is
-        // skipped: the policy gates if on, else the overwrite proceeds unbacked.
+        // skipped and the overwrite proceeds unbacked. Nothing holds it back.
         let big = 100u64;
         let cap = 10u64;
         assert_eq!(
-            decide_mutation_action(true, true, Some(Path::new("/work/f")), true, false, big, cap),
-            MutationAction::Gate
-        );
-        assert_eq!(
-            decide_mutation_action(true, false, Some(Path::new("/work/f")), true, false, big, cap),
+            decide_mutation_action(true, Some(Path::new("/work/f")), true, false, big, cap),
             MutationAction::Proceed
         );
         // Exactly at the cap still trashes (inclusive bound, matches rm).
         assert_eq!(
-            decide_mutation_action(true, false, Some(Path::new("/work/f")), true, false, cap, cap),
+            decide_mutation_action(true, Some(Path::new("/work/f")), true, false, cap, cap),
             MutationAction::TrashFirst
         );
     }

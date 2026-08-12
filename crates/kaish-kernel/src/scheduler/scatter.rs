@@ -994,31 +994,6 @@ mod tests {
         assert_eq!(row["out"], "text", "out stays alongside data");
     }
 
-    #[test]
-    fn test_gather_results_worker_approval_rides_the_row() {
-        // GH #124 part 3: a held worker (exit 2 under the `fs.*` enforce
-        // policy) is otherwise indistinguishable from a plain failure in the
-        // gather row.
-        let view = crate::ledger::sample_view(
-            crate::ledger::KernelOperation::FsRemove,
-            &["precious.txt"],
-        );
-
-        let mut r = ExecResult::failure(2, "rm: approval required");
-        r.approval = Some(Box::new(crate::ledger::PendingApproval::new(view.clone())));
-        let results = vec![ScatterResult { item: item("a"), result: r, timed_out: false }];
-        let out = gather_results(&results, &GatherOptions::default());
-        assert_eq!(out.code, 123, "a held worker still counts as failed for gather's exit code");
-        let row: serde_json::Value = serde_json::from_str(out.text_out().lines().next().unwrap()).unwrap();
-        assert_eq!(row["ok"], false);
-        assert_eq!(row["code"], 2);
-        assert_eq!(
-            row["approval"]["id"], view.id.as_str(),
-            "the approval request must ride the row: {row}"
-        );
-        assert_eq!(row["approval"]["operation"], "fs.remove");
-    }
-
     // GH #212: gather's 0-vs-123 decision reads `result.ok()` (`code == 0`).
     // Before the fix, `run_parallel` never remapped a spilled worker's exit
     // code, so a worker whose output overflowed the shared output limit kept

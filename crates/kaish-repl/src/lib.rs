@@ -472,11 +472,6 @@ impl Repl {
     }
 
     /// Create a new REPL with a custom kernel configuration.
-    ///
-    /// The config decides whether this session may decide its own gates:
-    /// [`interactive_config`] sets [`KernelConfig::with_own_authority`], and
-    /// a config without it builds a REPL that can see pending requests and
-    /// cancel them but not grant them.
     pub fn with_config(config: KernelConfig) -> Result<Self> {
         let mut kernel = Kernel::new(config).context("Failed to create kernel")?;
         let runtime = build_runtime()?;
@@ -501,12 +496,6 @@ impl Repl {
     }
 
     /// Process a single line of input.
-    ///
-    /// `prompt` is where a gate gets decided. A line that ends in **exit 2**
-    /// with a pending approval request is offered to the human through it
-    /// (spec §C.3); [`NoPrompt`](approval::NoPrompt) — a frontend with no
-    /// terminal — leaves the exit-2 result exactly as the kernel produced
-    /// it, which is the non-interactive contract.
     pub fn process_line(&mut self, line: &str) -> ProcessResult {
         let trimmed = line.trim();
 
@@ -830,24 +819,6 @@ pub fn run() -> Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_principal_id_is_never_empty() {
-        assert_eq!(principal_id(Some("amy".to_string()), "unattended"), "amy");
-        // An empty `$USER` is the environment naming no one, not a name.
-        assert_eq!(principal_id(Some(String::new()), "unattended"), "unattended");
-        assert_eq!(principal_id(None, "unattended"), "unattended");
-    }
-
-    #[test]
-    fn the_two_frontends_record_different_kinds_of_principal() {
-        use kaish_types::approval::PrincipalKind;
-        // What separates them is not who launched the process but whether
-        // anyone can be asked: the REPL prompts, `-c` and scripts cannot.
-        assert_eq!(terminal_principal().kind, PrincipalKind::Human);
-        assert_eq!(noninteractive_principal().kind, PrincipalKind::Automation);
-        assert!(!noninteractive_principal().id.is_empty());
-    }
-
     /// Build an env getter over a fixed set of pairs — keeps trace-env tests
     /// off the process-global environment (which races under `cargo test`).
     fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
@@ -1070,52 +1041,6 @@ mod tests {
             candidates.iter().any(|p| p.replacement == "$MYVAR"),
             "expected `$MYVAR` among variable candidates, got {:?}",
             candidates.iter().map(|p| &p.replacement).collect::<Vec<_>>()
-        );
-    }
-
-    // GH #129: an rc-file source that returns `Ok(ExecResult)` with a nonzero
-    // exit code used to be silently discarded — only a hard `Err` warned.
-    /// `ConfirmStatement`'s `index` is the only thing that says how much of
-    /// the line the kernel will not replay, and it says it by number: the
-    /// REPL re-parses to count what is after it, and cannot re-run any of it
-    /// (see [`unrun_remainder`]).
-    #[test]
-    fn the_remainder_of_a_held_line_is_counted_and_named() {
-        let resume = ResumeAction::ConfirmStatement {
-            plan_digest: kaish_types::approval::PlanDigest::new("0badcafe"),
-            index: 0,
-        };
-        let note = unrun_remainder("rm a; touch b; touch c", &resume)
-            .expect("two statements followed the held one");
-        assert!(note.contains('2'), "{note}");
-        assert!(note.contains("did not run"), "{note}");
-    }
-
-    #[test]
-    fn a_held_line_with_nothing_after_it_says_nothing() {
-        let resume = ResumeAction::ConfirmStatement {
-            plan_digest: kaish_types::approval::PlanDigest::new("0badcafe"),
-            index: 0,
-        };
-        assert_eq!(unrun_remainder("rm a", &resume), None);
-        // A trailing separator is not a statement anybody typed.
-        assert_eq!(unrun_remainder("rm a;", &resume), None);
-        // The last statement of a longer line leaves nothing behind either.
-        let last = ResumeAction::ConfirmStatement {
-            plan_digest: kaish_types::approval::PlanDigest::new("0badcafe"),
-            index: 1,
-        };
-        assert_eq!(unrun_remainder("touch a; rm b", &last), None);
-    }
-
-    #[test]
-    fn a_replayable_invocation_leaves_no_remainder_to_report() {
-        // `RetryOperation` is a `Capture::Exact` replay — an `fs.*` gate
-        // inside one statement, which the same halt rule covers, but the
-        // request names no index, so there is nothing to count.
-        assert_eq!(
-            unrun_remainder("rm a; touch b", &ResumeAction::RetryOperation),
-            None
         );
     }
 

@@ -287,64 +287,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_gates_regardless_of_any_policy() {
-        // `trash.empty` is always enforced (spec §F.1): it discards the
-        // recovery net that makes every other fs.* operation survivable, so
-        // it gates with the enforce policy off, which is the default here.
+    async fn empty_always_asks_and_nothing_turns_it_off() {
+        // Emptying the trash discards the recovery net every other fs.*
+        // operation depends on, so it always asks — there is no session
+        // setting that disables this and no token involved.
         let mut ctx = make_ctx();
-        ctx.wire_test_ledger();
-        assert!(!ctx.scope.approvals_enabled(), "precondition: the policy is off");
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("empty".into()));
 
         let result = KaishTrash.execute(args, &mut ctx).await;
-        assert_eq!(result.code, 2);
-        let view = result.approval_request().expect("a pending request");
-        assert_eq!(view.operation.as_str(), "trash.empty");
-        assert!(view.resources.is_empty(), "empty names no path resource");
-        assert!(view.hint.contains("--confirm="), "{}", view.hint);
+        assert_eq!(result.code, 2, "a bare `empty` must refuse: {result:?}");
+        assert!(result.err.contains("irreversible"), "{}", result.err);
+        assert!(result.err.contains("--confirm"), "{}", result.err);
     }
 
-    #[ignore] // calls real OS trash — flaky in CI
     #[tokio::test]
-    async fn empty_with_a_granted_key_on_an_empty_trash() {
-        use kaish_types::approval::GrantTerms;
+    async fn empty_proceeds_once_confirmed() {
+        // The flag is the whole ceremony: no token, nothing recorded.
         let mut ctx = make_ctx();
-        let authority = ctx.wire_test_ledger();
-        ctx.trash_backend = Some(Arc::new(crate::trash_system::SystemTrash));
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("empty".into()));
-        assert_eq!(KaishTrash.execute(args, &mut ctx).await.code, 2);
-
-        let approvals = ctx.ledger_access.as_ref().expect("a wired ledger").approvals.clone();
-        let id = approvals
-            .pending(kaish_types::approval::PageRequest::first(1))
-            .items[0]
-            .id
-            .clone();
-        let chain = approvals.get(&id).expect("the chain");
-        authority
-            .grant(
-                &id,
-                chain.request.revision,
-                GrantTerms::once_for_view(
-                    &chain.request,
-                    std::time::SystemTime::now() + std::time::Duration::from_secs(300),
-                ),
-            )
-            .await
-            .expect("the grant must post");
-        let token = authority.token_for(&id).expect("a credential").reveal().to_string();
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("empty".into()));
-        args.named.insert("confirm".to_string(), Value::String(token));
+        args.named.insert("confirm".to_string(), Value::String(String::new()));
 
         let result = KaishTrash.execute(args, &mut ctx).await;
-        assert!(result.ok(), "{}", result.err);
-        assert!(result.text_out().contains("already empty"));
+        assert_ne!(
+            result.code, 2,
+            "a confirmed empty must not still be refused: {result:?}"
+        );
     }
 
     #[tokio::test]

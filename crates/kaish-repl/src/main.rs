@@ -149,13 +149,12 @@ fn main() -> ExitCode {
 fn run() -> Result<ExitCode> {
     let args: Vec<String> = env::args().collect();
 
-    // `--gate` comes off first, because it takes a value: reading `--overlay`
-    // out of the whole argv would also see the one in `--gate --overlay`,
-    // which is that flag's operand and not a mode.
-    let rest = &args;
-    // Extract --overlay flag (can appear anywhere before positionals).
-    let overlay = rest.iter().any(|a| a == "--overlay");
-    let rest: Vec<&str> = rest.iter()
+    // Skip argv[0]: every arm below matches on the first real argument.
+    // Extract --overlay (can appear anywhere before positionals).
+    let overlay = args.iter().skip(1).any(|a| a == "--overlay");
+    let rest: Vec<&str> = args
+        .iter()
+        .skip(1)
         .filter(|a| *a != "--overlay")
         .map(|a| a.as_str())
         .collect();

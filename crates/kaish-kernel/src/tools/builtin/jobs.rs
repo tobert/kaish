@@ -160,44 +160,6 @@ mod tests {
     }
 
     #[test]
-    fn job_rows_json_carries_the_approval_only_on_held_rows() {
-        use crate::scheduler::{JobId, JobStatus};
-
-        let mut view =
-            crate::ledger::sample_view(crate::ledger::KernelOperation::FsRemove, &["precious.txt"]);
-        view.job_id = Some(1);
-        let jobs = vec![
-            JobInfo::new(JobId(1), "rm precious.txt", JobStatus::Gated)
-                .with_approval(Some(view.clone())),
-            JobInfo::new(JobId(2), "sleep 5", JobStatus::Running),
-        ];
-
-        let rows = job_rows_json(&jobs);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["id"], 1);
-        // GH #241: the JSON spelling of JobStatus is lowercase, matching the
-        // existing `/v/jobs/N/status` vocabulary — NOT the capitalized
-        // `Display` impl this row used to derive from (`"Gated"`).
-        assert_eq!(rows[0]["status"], "gated");
-        assert_eq!(rows[0]["path"], "/v/jobs/1/");
-        assert_eq!(
-            rows[0]["approval"]["id"], view.id.as_str(),
-            "a held row must carry the approval request: {}",
-            rows[0]
-        );
-        assert_eq!(
-            rows[0]["approval"]["job_id"], 1,
-            "the row's request must carry the job_id back-reference (GH #124 part 4): {}",
-            rows[0]
-        );
-        assert!(
-            rows[1].get("approval").is_none(),
-            "a row that is not held must NOT carry an approval key: {}",
-            rows[1]
-        );
-    }
-
-    #[test]
     fn job_rows_json_carries_exit_code_on_failure() {
         // GH #243(a): the audit verified `jobs --json` for a job that exited
         // 42 reported only `{"status":"Failed"}` — the exit code was lost

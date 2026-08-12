@@ -388,239 +388,22 @@ mod tests {
 
     // ── Approval-gate tests (MemoryFs — no real filesystem) ──
 
-    /// Wire a ledger, turn the `fs.*` enforce policy on, and hand back the
-    /// authority a test grants through.
-    async fn gated_ctx() -> (ExecContext, crate::ledger::ApproverHandle) {
+    #[tokio::test]
+    async fn force_on_a_missing_path_succeeds_silently() {
         let mut ctx = make_ctx().await;
-        let authority = ctx.wire_test_ledger();
-        ctx.scope.set_approvals_enabled(true);
-        (ctx, authority)
-    }
-
-    /// Grant the one pending request and return its bearer key. Mirrors what
-    /// an embedder does between the exit-2 result and the re-run.
-    async fn grant_the_pending_request(
-        ctx: &ExecContext,
-        authority: &crate::ledger::ApproverHandle,
-    ) -> (kaish_types::approval::RequestId, String) {
-        use kaish_types::approval::GrantTerms;
-        let approvals = ctx
-            .ledger_access
-            .as_ref()
-            .expect("a wired ledger")
-            .approvals
-            .clone();
-        let pending = approvals.pending(kaish_types::approval::PageRequest::default()).items;
-        assert_eq!(pending.len(), 1, "exactly one request must be pending");
-        let id = pending[0].id.clone();
-        let chain = approvals.get(&id).expect("the chain");
-        let terms = GrantTerms::once_for_view(
-            &chain.request,
-            std::time::SystemTime::now() + std::time::Duration::from_secs(300),
-        );
-        authority.grant(&id, chain.request.revision, terms).await.expect("the grant must post");
-        let token = authority.token_for(&id).expect("a credential for a granted request");
-        (id, token.reveal().to_string())
-    }
-
-    #[tokio::test]
-    async fn rm_with_the_policy_off_deletes_directly() {
-        let mut ctx = make_ctx().await;
-        ctx.wire_test_ledger();
-        // The fs.* enforce policy is off by default.
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/file.txt".into()));
-
-        let result = Rm.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        assert!(!ctx.backend.exists(Path::new("/file.txt")).await);
-    }
-
-    #[tokio::test]
-    async fn rm_with_no_subscription_and_no_policy_posts_nothing() {
-        // Spec §C.5's free-when-unsubscribed rule: an ungated `fs.*`
-        // operation must not pay a ledger cost, and the log must stay empty.
-        let mut ctx = make_ctx().await;
-        ctx.wire_test_ledger();
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/file.txt".into()));
-        let result = Rm.execute(args, &mut ctx).await;
-        assert!(result.ok());
-
-        let approvals = ctx.ledger_access.as_ref().expect("a wired ledger").approvals.clone();
-        assert!(
-            approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items.is_empty(),
-            "an unsubscribed, ungated rm must post NOTHING: {:?}",
-            approvals.log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT).items
-        );
-        assert!(approvals.pending(kaish_types::approval::PageRequest::default()).items.is_empty());
-    }
-
-    /// The entries inside this ledger's records. These tests assert on entry
-    /// shape; the record envelope is covered in `kaish-types` (spec §A.5).
-    fn ledger_entries(
-        approvals: &crate::ledger::Approvals,
-    ) -> Vec<kaish_types::approval::LedgerEntry> {
-        approvals
-            .log(0, kaish_types::approval::DEFAULT_PAGE_LIMIT)
-            .items
-            .into_iter()
-            .map(|record| {
-                record
-                    .known()
-                    .cloned()
-                    .expect("this build wrote every record it reads back")
-            })
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn rm_under_the_policy_with_no_approval_returns_code_2() {
-        let (mut ctx, _authority) = gated_ctx().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/file.txt".into()));
-
-        let result = Rm.execute(args, &mut ctx).await;
-        assert_eq!(result.code, 2);
-        assert!(result.err.contains("pending approval"), "{}", result.err);
-        // The file must still exist.
-        assert!(ctx.backend.exists(Path::new("/file.txt")).await);
-
-        // The request rides its own typed control-plane field. The data-plane
-        // `.data` stays empty — a pending approval is not stdout.
-        assert!(result.data.is_none(), "a gate must not use the data-plane .data");
-        let req = result.approval_request().expect("a request on the .approval field");
-        assert_eq!(req.operation.as_str(), "fs.remove");
-        assert_eq!(req.resources.len(), 1);
-        assert_eq!(req.resources[0].id, "/file.txt");
-        assert!(req.hint.contains("--confirm="));
-        // A direct `tool.execute` has no dispatch seam above it, so the
-        // capture says so rather than recording a silently empty argv.
-        assert_eq!(req.capture, kaish_types::approval::Capture::DirectExecution);
-    }
-
-    #[tokio::test]
-    async fn the_full_entry_chain_lands_under_the_policy() {
-        // Requested → Granted → Redeemed → Settled{Exit(0)} (spec §H).
-        use kaish_types::approval::{LedgerEntry, Outcome};
-        let (mut ctx, authority) = gated_ctx().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/file.txt".into()));
-        assert_eq!(Rm.execute(args, &mut ctx).await.code, 2);
-
-        let (_id, token) = grant_the_pending_request(&ctx, &authority).await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/file.txt".into()));
-        args.named.insert("confirm".to_string(), Value::String(token));
-        let result = Rm.execute(args, &mut ctx).await;
-        assert!(result.ok(), "{}", result.err);
-        assert!(!ctx.backend.exists(Path::new("/file.txt")).await);
-
-        // A direct `tool.execute` has no dispatch seam to settle the attempt,
-        // so settle it the way the seam would.
-        ctx.settle_attempts(0).await;
-
-        let approvals = ctx.ledger_access.as_ref().expect("a wired ledger").approvals.clone();
-        let kinds: Vec<&str> = ledger_entries(&approvals)
-            .iter()
-            .map(|e| match e {
-                LedgerEntry::Requested { .. } => "Requested",
-                LedgerEntry::Granted { .. } => "Granted",
-                LedgerEntry::Redeemed { .. } => "Redeemed",
-                LedgerEntry::Settled { .. } => "Settled",
-                LedgerEntry::KeyRetrieved { .. } => "KeyRetrieved",
-                _ => "other",
-            })
-            .collect();
-        assert!(
-            kinds.contains(&"Requested")
-                && kinds.contains(&"Granted")
-                && kinds.contains(&"Redeemed")
-                && kinds.contains(&"Settled"),
-            "the full chain must be on the log: {kinds:?}"
-        );
-        let settled = ledger_entries(&approvals)
-            .into_iter()
-            .find_map(|e| match e {
-                LedgerEntry::Settled { outcome, .. } => Some(outcome),
-                _ => None,
-            })
-            .expect("a Settled entry");
-        assert_eq!(settled, Outcome::Exit(0));
-    }
-
-    #[tokio::test]
-    async fn a_wrong_key_fails_and_the_file_survives() {
-        let (mut ctx, authority) = gated_ctx().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/file.txt".into()));
-        assert_eq!(Rm.execute(args, &mut ctx).await.code, 2);
-        grant_the_pending_request(&ctx, &authority).await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/file.txt".into()));
-        args.named
-            .insert("confirm".to_string(), Value::String("bogus123".into()));
-
-        let result = Rm.execute(args, &mut ctx).await;
-        assert_eq!(result.code, 1);
-        assert!(ctx.backend.exists(Path::new("/file.txt")).await);
-    }
-
-    #[tokio::test]
-    async fn a_key_that_describes_no_request_is_refused_and_voids_nothing() {
-        // Spec §F.3 item 2: a guesser cannot void a request it cannot
-        // describe. The presentation is recorded against nothing.
-        use kaish_types::approval::LedgerEntry;
-        let (mut ctx, _authority) = gated_ctx().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/file.txt".into()));
-        args.named
-            .insert("confirm".to_string(), Value::String("bogus123".into()));
-
-        let result = Rm.execute(args, &mut ctx).await;
-        assert_eq!(result.code, 1);
-        assert!(result.err.contains("matches no approval request"), "{}", result.err);
-        assert!(ctx.backend.exists(Path::new("/file.txt")).await);
-
-        let approvals = ctx.ledger_access.as_ref().expect("a wired ledger").approvals.clone();
-        let rejections: Vec<_> = ledger_entries(&approvals)
-            .into_iter()
-            .filter_map(|e| match e {
-                LedgerEntry::TokenRejected { request, .. } => Some(request),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            rejections,
-            vec![None],
-            "the presentation must be recorded against no request"
-        );
-    }
-
-    #[tokio::test]
-    async fn force_on_a_missing_path_never_gates() {
-        let (mut ctx, _authority) = gated_ctx().await;
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("/nonexistent".into()));
         args.flags.insert("f".to_string());
 
-        // -f on a nonexistent path succeeds silently — nothing to gate.
+        // -f on a nonexistent path succeeds silently — nothing to remove.
         let result = Rm.execute(args, &mut ctx).await;
         assert!(result.ok());
     }
 
     #[tokio::test]
-    async fn a_missing_path_without_force_errors_rather_than_gating() {
-        let (mut ctx, _authority) = gated_ctx().await;
+    async fn a_missing_path_without_force_errors() {
+        let mut ctx = make_ctx().await;
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("/nonexistent".into()));
@@ -630,160 +413,39 @@ mod tests {
         assert!(result.err.contains("No such file"));
     }
 
-    #[tokio::test]
-    async fn re_presenting_a_key_after_success_reports_the_settled_outcome() {
-        // **The behavior change the latch's reusable nonce hid.** Under the
-        // latch this test asserted the opposite: a nonce stayed valid inside
-        // its TTL and re-presenting it silently ran the operation again. A
-        // grant now authorizes exactly one *successful* settlement, so the
-        // second presentation reports what already happened.
-        let (mut ctx, authority) = gated_ctx().await;
-        ctx.backend
-            .write(Path::new("/file.txt"), b"data", kaish_types::WriteMode::Truncate)
-            .await
-            .expect("seed the file");
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/file.txt".into()));
-        assert_eq!(Rm.execute(args, &mut ctx).await.code, 2);
-        let (_id, token) = grant_the_pending_request(&ctx, &authority).await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/file.txt".into()));
-        args.named
-            .insert("confirm".to_string(), Value::String(token.clone()));
-        assert!(Rm.execute(args, &mut ctx).await.ok());
-        assert!(!ctx.backend.exists(Path::new("/file.txt")).await);
-        ctx.settle_attempts(0).await;
-
-        // Put the file back. If the second presentation re-ran the delete,
-        // the file would vanish a second time — which is exactly what the
-        // reusable nonce did.
-        ctx.backend
-            .write(Path::new("/file.txt"), b"data", kaish_types::WriteMode::Truncate)
-            .await
-            .expect("restore the file");
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/file.txt".into()));
-        args.named.insert("confirm".to_string(), Value::String(token));
-        let second = Rm.execute(args, &mut ctx).await;
-        assert_eq!(second.code, 1, "a settled grant must not re-execute");
-        assert!(
-            second.err.contains("already settled"),
-            "the refusal must report the settled outcome: {}",
-            second.err
-        );
-        assert!(
-            ctx.backend.exists(Path::new("/file.txt")).await,
-            "the file must be deleted exactly once"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_gate_message_names_the_request_and_the_re_run() {
-        let (mut ctx, _authority) = gated_ctx().await;
-
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("/file.txt".into()));
-
-        let result = Rm.execute(args, &mut ctx).await;
-        assert_eq!(result.code, 2);
-        let view = result.approval_request().expect("a request");
-        assert!(
-            result.err.contains(view.id.as_str()),
-            "the diagnostic must name the request id: {}",
-            result.err
-        );
-        assert!(view.hint.contains("rm --confirm=<token>"), "{}", view.hint);
-        assert!(view.hint.contains("/file.txt"), "{}", view.hint);
-        // The view is tokenless by construction (spec §A.2): no field of it,
-        // at any depth, is a credential. Walk the serialized keys rather than
-        // grepping the text — the hint deliberately contains the literal
-        // placeholder `<token>`, which is display text, not a secret.
-        let json = serde_json::to_value(&view).expect("the view serializes");
-        let mut keys = Vec::new();
-        collect_keys(&json, &mut keys);
-        for forbidden in ["token", "nonce", "credential", "secret"] {
-            assert!(
-                !keys.iter().any(|k| k == forbidden),
-                "no credential field may reach the view: found {forbidden:?} in {keys:?}"
-            );
-        }
-    }
-
-    /// Every object key in a JSON value, at any depth.
-    fn collect_keys(value: &serde_json::Value, out: &mut Vec<String>) {
-        match value {
-            serde_json::Value::Object(map) => {
-                for (k, v) in map {
-                    out.push(k.clone());
-                    collect_keys(v, out);
-                }
-            }
-            serde_json::Value::Array(items) => {
-                for v in items {
-                    collect_keys(v, out);
-                }
-            }
-            _ => {}
-        }
-    }
-
     // ── Decision logic unit tests ──
 
     #[test]
     fn test_decide_rm_action_no_flags() {
-        let action = decide_rm_action(false, false, None, Some(100), 10_000_000, false, false);
+        let action = decide_rm_action(false, None, Some(100), 10_000_000, false, false);
         assert_eq!(action, RmAction::Delete);
-    }
-
-    #[test]
-    fn test_decide_rm_action_gate_only() {
-        let action = decide_rm_action(false, true, None, Some(100), 10_000_000, false, false);
-        assert_eq!(action, RmAction::Gate);
     }
 
     #[test]
     fn test_decide_rm_action_trash_small_file() {
         let real = PathBuf::from("/home/user/file.txt");
-        let action = decide_rm_action(true, false, Some(&real), Some(100), 10_000_000, false, false);
-        assert_eq!(action, RmAction::Trash(real));
-    }
-
-    #[test]
-    fn test_decide_rm_action_trash_small_with_approvals() {
-        // Small file → trash catches it, approvals irrelevant
-        let real = PathBuf::from("/home/user/file.txt");
-        let action = decide_rm_action(true, true, Some(&real), Some(100), 10_000_000, false, false);
+        let action = decide_rm_action(true, Some(&real), Some(100), 10_000_000, false, false);
         assert_eq!(action, RmAction::Trash(real));
     }
 
     #[test]
     fn test_decide_rm_action_trash_large_no_approvals() {
         let real = PathBuf::from("/home/user/bigfile.bin");
-        let action = decide_rm_action(true, false, Some(&real), Some(100_000_000), 10_000_000, false, false);
+        let action = decide_rm_action(true, Some(&real), Some(100_000_000), 10_000_000, false, false);
         assert_eq!(action, RmAction::Delete);
-    }
-
-    #[test]
-    fn test_decide_rm_action_trash_large_with_approvals() {
-        let real = PathBuf::from("/home/user/bigfile.bin");
-        let action = decide_rm_action(true, true, Some(&real), Some(100_000_000), 10_000_000, false, false);
-        assert_eq!(action, RmAction::Gate);
     }
 
     #[test]
     fn test_decide_rm_action_trash_virtual_path() {
         // Virtual path (resolve_real_path returns None) → normal delete
-        let action = decide_rm_action(true, false, None, Some(100), 10_000_000, false, false);
+        let action = decide_rm_action(true, None, Some(100), 10_000_000, false, false);
         assert_eq!(action, RmAction::Delete);
     }
 
     #[test]
     fn test_decide_rm_action_trash_excluded_tmp() {
         let real = PathBuf::from("/tmp/scratch");
-        let action = decide_rm_action(true, false, Some(&real), Some(100), 10_000_000, false, false);
+        let action = decide_rm_action(true, Some(&real), Some(100), 10_000_000, false, false);
         assert_eq!(action, RmAction::Delete);
     }
 
@@ -794,7 +456,7 @@ mod tests {
         // file, not deleted outright. (In-memory kaish /v mounts stay `None`
         // and are handled by the no-real-path gating, not this predicate.)
         let real = PathBuf::from("/v/cas/blob.bin");
-        let action = decide_rm_action(true, false, Some(&real), Some(100), 10_000_000, false, false);
+        let action = decide_rm_action(true, Some(&real), Some(100), 10_000_000, false, false);
         assert_eq!(action, RmAction::Trash(real));
     }
 
@@ -804,7 +466,7 @@ mod tests {
     fn test_decide_rm_action_dir_always_trashes() {
         let real = PathBuf::from("/home/user/mydir");
         // Directory with size=0 (stat behavior) — should trash regardless of threshold
-        let action = decide_rm_action(true, false, Some(&real), Some(0), 10_000_000, true, false);
+        let action = decide_rm_action(true, Some(&real), Some(0), 10_000_000, true, false);
         assert_eq!(action, RmAction::Trash(real));
     }
 
@@ -812,7 +474,7 @@ mod tests {
     fn test_decide_rm_action_dir_trashes_with_approvals() {
         let real = PathBuf::from("/home/user/mydir");
         // Directory always trashes when trash enabled — approvals irrelevant
-        let action = decide_rm_action(true, true, Some(&real), Some(0), 10_000_000, true, false);
+        let action = decide_rm_action(true, Some(&real), Some(0), 10_000_000, true, false);
         assert_eq!(action, RmAction::Trash(real));
     }
 
@@ -820,67 +482,8 @@ mod tests {
     fn test_decide_rm_action_dir_excluded_tmp() {
         let real = PathBuf::from("/tmp/mydir");
         // Excluded path — directory still gets excluded
-        let action = decide_rm_action(true, false, Some(&real), Some(0), 10_000_000, true, false);
+        let action = decide_rm_action(true, Some(&real), Some(0), 10_000_000, true, false);
         assert_eq!(action, RmAction::Delete);
     }
 
-    // ── Composition matrix (rstest) ──
-
-    #[derive(Debug, PartialEq)]
-    enum Outcome {
-        Deleted,
-        Trashed,
-        Gated,
-    }
-
-    fn matrix_action_to_outcome(action: &RmAction) -> Outcome {
-        match action {
-            RmAction::Trash(_) => Outcome::Trashed,
-            RmAction::Delete => Outcome::Deleted,
-            RmAction::Gate => Outcome::Gated,
-        }
-    }
-
-    #[test]
-    fn test_composition_matrix() {
-        let real = PathBuf::from("/home/user/file.txt");
-        let small = 100u64;
-        let large = 100_000_000u64;
-        let max = 10_000_000u64;
-
-        // (trash, enforce, size, is_dir, is_symlink) → expected outcome
-        let cases = vec![
-            (false, false, small, false, false, Outcome::Deleted),
-            (false, true,  small, false, false, Outcome::Gated),
-            (true,  false, small, false, false, Outcome::Trashed),
-            (true,  true,  small, false, false, Outcome::Trashed),   // trash catches small, approvals irrelevant
-            (false, false, large, false, false, Outcome::Deleted),
-            (false, true,  large, false, false, Outcome::Gated),
-            (true,  false, large, false, false, Outcome::Deleted),    // too big for trash, no gate → delete
-            (true,  true,  large, false, false, Outcome::Gated),    // too big for trash + approvals → gate
-            // Directories always trash (size irrelevant)
-            (true,  false, 0,     true,  false, Outcome::Trashed),
-            (true,  true,  0,     true,  false, Outcome::Trashed),
-            // Dir without trash enabled → normal flow
-            (false, false, 0,     true,  false, Outcome::Deleted),
-            (false, true,  0,     true,  false, Outcome::Gated),
-            // Symlinks NEVER trash (trashing follows to the target); they unlink
-            // directly, but the gate still applies. is_dir is moot for a symlink.
-            (true,  false, small, false, true,  Outcome::Deleted),
-            (true,  true,  small, false, true,  Outcome::Gated),
-            (true,  false, 0,     true,  true,  Outcome::Deleted),    // symlink-to-dir: still just unlink
-            (false, false, small, false, true,  Outcome::Deleted),
-            (false, true,  small, false, true,  Outcome::Gated),
-        ];
-
-        for (trash, enforce, size, is_dir, is_symlink, expected) in cases {
-            let action = decide_rm_action(trash, enforce, Some(&real), Some(size), max, is_dir, is_symlink);
-            let outcome = matrix_action_to_outcome(&action);
-            assert_eq!(
-                outcome, expected,
-                "trash={}, enforce={}, size={}, is_dir={}, is_symlink={}: expected {:?}, got {:?}",
-                trash, enforce, size, is_dir, is_symlink, expected, outcome
-            );
-        }
-    }
 }

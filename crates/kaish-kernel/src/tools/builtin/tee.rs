@@ -281,60 +281,6 @@ mod tests {
         );
     }
 
-    /// The digest arm is the approval gate's expectation: it never holds the
-    /// prior bytes (the trash is off, or the file is too big for it), so it
-    /// compares the content digest instead. Same refusal, bounded memory.
-    #[tokio::test]
-    async fn overwrite_checked_rejects_concurrent_change_against_a_digest() {
-        let ctx = make_ctx().await; // /existing.txt = "original content\n"
-        let path = Path::new("/existing.txt");
-        let expected = crate::tools::OverwriteExpectation::Digest(
-            crate::ledger::digest_path(&*ctx.backend, path).await.unwrap(),
-        );
-
-        ctx.backend
-            .write(path, b"changed elsewhere\n", WriteMode::Overwrite)
-            .await
-            .unwrap();
-
-        let result = ctx.overwrite_checked(path, b"my content\n", Some(&expected)).await;
-        assert!(result.is_err(), "expected a conflict, got {result:?}");
-        assert_eq!(
-            ctx.backend.read(path, None).await.unwrap(),
-            b"changed elsewhere\n",
-            "the concurrent writer's content must survive"
-        );
-    }
-
-    #[tokio::test]
-    async fn overwrite_checked_writes_when_the_digest_matches() {
-        let ctx = make_ctx().await;
-        let path = Path::new("/existing.txt");
-        let expected = crate::tools::OverwriteExpectation::Digest(
-            crate::ledger::digest_path(&*ctx.backend, path).await.unwrap(),
-        );
-
-        ctx.overwrite_checked(path, b"new content\n", Some(&expected))
-            .await
-            .unwrap();
-        assert_eq!(ctx.backend.read(path, None).await.unwrap(), b"new content\n");
-    }
-
-    /// A target that vanished is a change, not a missing observation: the
-    /// digest arm sees `Absent`, which never equals a content digest.
-    #[tokio::test]
-    async fn overwrite_checked_rejects_a_vanished_target_against_a_digest() {
-        let ctx = make_ctx().await;
-        let path = Path::new("/existing.txt");
-        let expected = crate::tools::OverwriteExpectation::Digest(
-            crate::ledger::digest_path(&*ctx.backend, path).await.unwrap(),
-        );
-        ctx.backend.remove(path, false).await.unwrap();
-
-        let result = ctx.overwrite_checked(path, b"new\n", Some(&expected)).await;
-        assert!(result.is_err(), "a vanished target must error, got {result:?}");
-    }
-
     #[tokio::test]
     async fn overwrite_checked_skips_cas_without_expectation() {
         let ctx = make_ctx().await;

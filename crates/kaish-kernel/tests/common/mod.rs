@@ -36,7 +36,6 @@ pub fn kernel_at(dir: &Path) -> Kernel {
     // the developer's KAISH_APPROVALS / KAISH_TRASH env (which `repl()` reads).
     let config = KernelConfig::repl()
         .with_cwd(dir.to_path_buf())
-        .with_approvals(false)
         .with_trash(false);
     Kernel::new(config).expect("failed to create kernel")
 }

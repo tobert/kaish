@@ -21,14 +21,6 @@
 //!   through `ctx.backend()`.
 //! - [`GlobalFlags`], [`schema_from_clap`], [`validate_against_schema`] — the
 //!   clap-reflection and validation machinery shared by all builtins.
-//! - [`StateResolver`] — reads one resource kind's current state, so a
-//!   grant's preconditions are re-checked at redemption (ledger PR 6). The
-//!   kernel ships the `path` resolver; a plugin registers one per kind it
-//!   names in a `Resource`.
-//! - [`StatementClassifier`] — decides which top-level statements must ask
-//!   before they run (ledger PR 10). An embedder registers one with
-//!   `KernelConfig::with_statement_classifier`; [`CommandNameClassifier`] is
-//!   the reference implementation.
 //!
 //! The pure-data types tools traffic in (`Value`, `ToolArgs`, `ToolSchema`,
 //! `ExecResult`, `OutputData`, …) live one layer down in `kaish-types`.

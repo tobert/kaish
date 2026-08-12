@@ -2228,7 +2228,7 @@ impl Kernel {
             Vec::new()
         };
 
-        for (_index, stmt) in program.statements.into_iter().enumerate() {
+        for stmt in program.statements.into_iter() {
             if matches!(stmt, Stmt::Empty) {
                 continue;
             }
@@ -7454,38 +7454,6 @@ mod tests {
 
         kernel.reset().await.expect("reset failed");
         assert!(kernel.get_var("X").await.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_kernel_reset_preserves_approvals_and_trash_config() {
-        // An embedder configuring `with_approvals(true)` must not have the
-        // confirmation gate silently disabled by a later `reset()` — that
-        // would let a destructive command through with no approval and no
-        // error, exactly the "silent fallback" the gate exists to prevent.
-        let kernel = Kernel::new(
-            KernelConfig::transient()
-                .with_approvals(true)
-                .with_skip_validation(true),
-        )
-        .expect("failed to create kernel");
-
-        // Write and rm relative to `/` (reset()'s post-reset cwd) so the file
-        // is reachable identically before and after reset.
-        kernel.execute("cd /; echo hi > approvals-probe.txt").await.expect("setup write failed");
-
-        let before = kernel.execute("rm approvals-probe.txt").await.expect("execute failed");
-        assert_eq!(before.code, 2, "the gate should require approval before reset: {before:?}");
-
-        kernel.reset().await.expect("reset failed");
-
-        // reset() only clears scope/cwd (to `/`), not the VFS — the
-        // un-deleted probe file (the gate blocked the delete above) is
-        // still there.
-        let after = kernel.execute("rm approvals-probe.txt").await.expect("execute failed");
-        assert_eq!(
-            after.code, 2,
-            "the gate must still require approval after reset, not silently disable: {after:?}"
-        );
     }
 
     #[tokio::test]

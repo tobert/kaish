@@ -1294,38 +1294,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_held_jobs_request_carries_its_job_id_from_the_record() {
-        // GH #124 part 4, under the ledger: correlation is stamped ONCE, at
-        // post time, by the fork that already knows which job it runs for.
-        // `Job::approval()` reads it straight off the record — it does not
-        // re-stamp — so `wait` and `jobs` cannot disagree about which job a
-        // held request belongs to.
-        let manager = JobManager::new();
-
-        let id = manager
-            .spawn("gated".to_string(), async {
-                let mut result = ExecResult::failure(2, "approval required");
-                let mut view = crate::ledger::sample_view(
-                    crate::ledger::KernelOperation::FsRemove,
-                    &["x"],
-                );
-                view.job_id = Some(1);
-                result.approval = Some(Box::new(crate::ledger::PendingApproval::new(view)));
-                result
-            })
-            .await;
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        let approval = manager.get_approval(id).await.expect("the job must be held");
-        assert_eq!(
-            approval.job_id,
-            Some(id.0),
-            "the surfaced request must carry the job it was posted for"
-        );
-    }
-
-    #[tokio::test]
     async fn test_job_status_after_completion() {
         let manager = JobManager::new();
 
@@ -1534,41 +1502,6 @@ mod tests {
 
         // And it's actually gone from tracking.
         assert!(manager.list().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_reap_finished_never_reaps_gated_jobs() {
-        // GH #131 / GH #96: a Gated job is "done" in the sense that its
-        // future resolved, but it's held on a pending destructive-operation
-        // gate — reaping it would silently destroy the only reference to the
-        // approval request. Must never be auto-reaped or reported as a
-        // finished job.
-        let manager = JobManager::new();
-        manager.set_persist_output_files(false);
-        let (tx, rx) = oneshot::channel();
-        let id = manager.register("rm precious.txt".to_string(), rx).await;
-
-        let mut gated = ExecResult::failure(2, "rm: approval required");
-        gated.approval = Some(Box::new(crate::ledger::PendingApproval::new(
-            crate::ledger::sample_view(crate::ledger::KernelOperation::FsRemove, &["precious.txt"]),
-        )));
-        tx.send(gated).expect("send gated result");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        // Confirm it's actually seen as Gated before reaping.
-        let info = manager.get(id).await.expect("job exists");
-        assert_eq!(info.status, JobStatus::Gated);
-
-        let removed = manager.reap_finished().await;
-        assert!(
-            removed.is_empty(),
-            "a held job must never be auto-reaped: {removed:?}"
-        );
-        assert_eq!(
-            manager.list().await.len(),
-            1,
-            "the gated job must still be tracked so its gate can be fulfilled"
-        );
     }
 
     #[tokio::test]

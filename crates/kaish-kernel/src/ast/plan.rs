@@ -83,11 +83,17 @@ pub struct PlannedStatement {
 /// Plan every statement of `source` without executing anything.
 ///
 /// A plan is parse information: `${HOME}` and `$(...)` appear exactly as
-/// written, no substitution has run, and no filesystem has been touched. The
-/// same walk feeds the kernel's own statement gate, so what an embedder reads
-/// here is what a [`StatementClassifier`](crate::ledger::StatementClassifier)
-/// would judge and what the ledger's `Observed` entries record — one
-/// metadata surface, whether or not the kaish ledger is the one consuming it.
+/// written, no substitution has run, and no filesystem has been touched. That
+/// is the point — an embedder judges what the statement *asked for*, before
+/// anything it names can happen.
+///
+/// Each plan carries the statement's rendered text, every command it would
+/// run (control-structure bodies, `if` conditions, and `$(...)` bodies
+/// included), the variables it reads ([`Plan::free_variables`]) and the ones
+/// it writes ([`Plan::bound_variables`]). Reading live session state for the
+/// free set with [`Kernel::get_var`](crate::Kernel::get_var) closes the loop:
+/// plan a statement, look up what it depends on, and decide with the values
+/// in hand.
 ///
 /// Every literal `--confirm=<key>` is redacted from the plans and **not
 /// returned**: the caller holds `source` and can read its own credentials;
