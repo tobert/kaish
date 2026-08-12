@@ -147,12 +147,12 @@ impl Tool for Patch {
 
         let groups = group_by_file(&hunks);
 
-        // Gate truncating overwrites through approvals + trash (no-op when both are
-        // off; skipped for --dry-run, which never writes). patch always rewrites
-        // an existing file, so every target is a non-append overwrite; one nonce
-        // scopes the whole set of files the diff touches. The snapshot copies
-        // the prior content (it doesn't move the file), so the read + CAS write
-        // below still see the file in place.
+        // Under trash, truncating overwrites snapshot the prior content
+        // (no-op with trash off; skipped for --dry-run, which never writes).
+        // patch always rewrites an existing file, so every target is a
+        // non-append overwrite. The snapshot copies the prior content (it
+        // doesn't move the file), so the read + CAS write below still see
+        // the file in place.
         if !dry_run {
             let targets: Vec<(String, bool)> = groups
                 .iter()

@@ -242,7 +242,6 @@ impl Job {
     /// - `"running"` if the job is still running
     /// - `"stopped"` if the job is stopped (Ctrl-Z / SIGTSTP)
     /// - `"done:0"` if the job completed successfully
-    /// - `"gated"` if the job is held on an unsatisfied approval gate
     /// - `"killed:{code}"` if the job was terminated by `kill %N`
     /// - `"failed:{code}"` if the job failed with an exit code
     ///
@@ -463,12 +462,12 @@ impl Job {
         v
     }
 
-    /// Build the full `JobInfo` snapshot for this job. `status`/`approval` are
-    /// taken as parameters rather than recomputed here because both require
-    /// `&mut self` (they poll) — callers (`list`/`get`/`reap_finished`)
-    /// already did that poll to decide reap-safety before calling this. The
+    /// Build the full `JobInfo` snapshot for this job. `status` is taken as a
+    /// parameter rather than recomputed here because computing it requires
+    /// `&mut self` (it polls) — callers (`list`/`get`/`reap_finished`)
+    /// already did that poll before calling this. The
     /// single chokepoint that populates every `JobInfo` field (GH #243), so
-    /// the three call sites can't drift on which fields they remember to set.
+    /// the call sites can't drift on which fields they remember to set.
     fn to_info(&self, status: JobStatus) -> JobInfo {
         let exit_code = self.result.as_ref().map(|r| r.code);
         JobInfo::new(self.id, self.command.clone(), status)
@@ -882,11 +881,6 @@ impl JobManager {
     /// Remove completed jobs from tracking and clean up their temp files,
     /// returning info for each job removed.
     ///
-    /// A held job is "done" but its cached result holds the only pending
-    /// approval request for the gated operation — reaping it would silently
-    /// destroy the reference an embedder needs to fulfill it (GH #96). It
-    /// stays until confirmed or explicitly discarded (`kill --discard %N`).
-    ///
     /// Shared by `jobs --cleanup` (which only needs a count) and the REPL's
     /// pre-prompt notification (GH #131, which needs the id/command/status of
     /// each job so it can print `[N]+ Done ...` before reaping it) — one rule
@@ -913,8 +907,8 @@ impl JobManager {
 
     /// Remove completed jobs from tracking and clean up their temp files.
     ///
-    /// See [`reap_finished`](Self::reap_finished) for the gate-safety rule;
-    /// this is the count-only form `jobs --cleanup` reports.
+    /// The count-only form of [`reap_finished`](Self::reap_finished) that
+    /// `jobs --cleanup` reports.
     pub async fn cleanup(&self) {
         self.reap_finished().await;
     }
@@ -926,9 +920,8 @@ impl JobManager {
     /// embedder that stops registering but keeps observing stays bounded
     /// without a background sweeper (GH #244). A session that registers jobs
     /// and then never calls anything at all holds what it registered; there
-    /// is no sweeper task by design. "Finished" follows `reap_finished`'s reap-safety
-    /// rule: gated jobs are never evicted (their cached result holds the only
-    /// pending approval request) and stopped jobs are not finished. Eviction
+    /// is no sweeper task by design. "Finished" follows `reap_finished`'s
+    /// rule: stopped jobs are not finished. Eviction
     /// is oldest `finished_at` first, so the survivors are the newest N.
     fn enforce_retention_locked(&self, jobs: &mut HashMap<JobId, Job>) {
         let keep = self.finished_retention.load(Ordering::Relaxed) as usize;

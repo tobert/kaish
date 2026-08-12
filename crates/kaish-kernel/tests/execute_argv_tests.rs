@@ -8,7 +8,7 @@
 //!    oracle for free.
 //!  - **The semantic contract that only the argv door can express**: tokens are
 //!    literal (no glob/`$VAR`/split), typed `Value`s ride through as positionals,
-//!    and the shared tail (`--json`, the approval gate, error codes) is
+//!    and the shared tail (`--json`, error codes) is
 //!    reachable.
 //!
 //! The classifier itself is unit-/property-tested in-crate
@@ -155,7 +155,7 @@ async fn typed_values_ride_through_as_positionals() {
 }
 
 // ============================================================================
-// Shared tail is reachable: --json, error codes, the approval gate
+// Shared tail is reachable: --json, error codes
 // ============================================================================
 
 #[tokio::test]

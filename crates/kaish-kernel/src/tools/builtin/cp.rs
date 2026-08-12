@@ -105,10 +105,11 @@ impl Tool for Cp {
             }
         }
 
-        // Gate a direct file clobber (`cp SRC EXISTING_FILE`) through approvals +
-        // trash. Copying *into* a directory or a recursive directory merge is
-        // not a single-file truncation, so it stays ungated (documented
-        // write-model residual). Only the named destination is gated here.
+        // Under trash, a direct file clobber (`cp SRC EXISTING_FILE`)
+        // snapshots the prior destination. Copying *into* a directory or a
+        // recursive directory merge is not a single-file truncation, so it
+        // is not snapshotted (documented write-model residual). Only the
+        // named destination is covered here.
         let mut expected_dst: Option<crate::tools::OverwriteExpectation> = None;
         if sources.len() == 1 {
             let dst_is_existing_file = ctx

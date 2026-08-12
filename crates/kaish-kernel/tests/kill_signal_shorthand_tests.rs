@@ -291,10 +291,9 @@ async fn double_dash_ends_option_parsing() {
     assert_already_killed(&kernel, "%1").await;
 }
 
-/// A literal `--` also ends option parsing for control tokens like
-/// `--discard`, not just the signal shorthand — `kill -- --discard %1`
-/// must try to signal a target literally named `--discard`, not discard
-/// job 1's held approval request.
+/// A literal `--` also ends option parsing for flag-shaped tokens, not just
+/// the signal shorthand — `kill -- --discard %1` must try to signal a target
+/// literally named `--discard`, not treat it as an option.
 ///
 /// Same operand-count note as the test above: `--discard` and `%1` are two
 /// targets, so job 1 is signalled on its own account. The old "job 1 must be

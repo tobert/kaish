@@ -70,7 +70,7 @@ async fn test_jobs_creates_vfs_entry() {
     assert!(names.contains(&"stderr"));
     assert!(names.contains(&"status"));
     assert!(names.contains(&"command"));
-    assert!(names.contains(&"approval"));
+    assert!(!names.contains(&"approval"), "the approval node went with the ledger");
 }
 
 #[tokio::test]

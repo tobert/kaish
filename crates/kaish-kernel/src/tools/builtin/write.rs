@@ -88,9 +88,8 @@ impl Tool for Write {
 
         let resolved = ctx.resolve_path(&path);
 
-        // Gate the truncating overwrite through approvals + trash (no-op when both
-        // are off). Under the enforce policy this returns an exit-2 pending-approval result; under trash
-        // the prior content is snapshotted and returned for the CAS below.
+        // Under trash, the truncating overwrite snapshots the prior content,
+        // returned for the CAS below (no-op with trash off).
         let snapshots = match ctx
             .snapshot_overwrites("write",
                 &[(path.clone(), false)])

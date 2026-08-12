@@ -558,8 +558,6 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
         }
         return result;
     }
-    // An approval request is control-plane, not stdout data — surface
-    // it under its own `approval` key in ONE canonical envelope regardless of
     if !result.has_output() && result.text_out().is_empty() {
         // No stdout to format. A failure that carries a diagnostic message must
         // still honor --json — otherwise the message leaks out as plain text
@@ -871,28 +869,25 @@ mod tests {
 
     #[test]
     fn apply_output_format_preserves_structured_data_on_error() {
-        // A gate result is a failure (exit 2, empty stdout, populated err) that
-        // ALSO carries a structured payload on .data. Under --json the
-        // error-envelope path must not clobber that payload — it stays
-        // reachable, nested under `data`, alongside the error/code envelope.
-        let mut result = ExecResult::failure(2, "rm: approval required (fs.* enforce policy)");
+        // A failure (exit 2, empty stdout, populated err) that ALSO carries a
+        // structured payload on .data. Under --json the error-envelope path
+        // must not clobber that payload — it stays reachable, nested under
+        // `data`, alongside the error/code envelope.
+        let mut result = ExecResult::failure(2, "rm: refusing without --recursive");
         result.data = Some(crate::value::Value::Json(serde_json::json!({
-            "request": "req_9c1a4f2e_42",
             "operation": "fs.remove",
             "paths": ["important.dat"],
-            "hint": "rm --confirm=<token> important.dat",
         })));
 
         let formatted = apply_output_format(result, OutputFormat::Json);
         let out = formatted.text_out().into_owned();
         let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
-        assert_eq!(parsed["error"], "rm: approval required (fs.* enforce policy)");
+        assert_eq!(parsed["error"], "rm: refusing without --recursive");
         assert_eq!(parsed["code"], 2);
-        assert_eq!(parsed["data"]["request"], "req_9c1a4f2e_42");
         assert_eq!(parsed["data"]["operation"], "fs.remove");
         // .data mirrors the serialized envelope (reachable from the struct too).
         match &formatted.data {
-            Some(crate::value::Value::Json(v)) => assert_eq!(v["data"]["request"], "req_9c1a4f2e_42"),
+            Some(crate::value::Value::Json(v)) => assert_eq!(v["data"]["operation"], "fs.remove"),
             other => panic!("expected nested JSON data, got {other:?}"),
         }
     }

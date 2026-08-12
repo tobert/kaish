@@ -43,13 +43,8 @@ fn generate_blob_id() -> String {
 /// ```ignore
 /// use kaish_client::EmbeddedClient;
 /// use kaish_kernel::{Kernel, KernelConfig};
-/// use kaish_types::approval::{Principal, PrincipalKind};
 ///
-/// // Name who this kernel runs for — an unnamed principal cannot be traced
-/// // back to anyone once it raises an approval request.
-/// let kernel = Kernel::new(
-///     KernelConfig::transient().with_principal(Principal::new("my-agent", PrincipalKind::Agent)),
-/// )?;
+/// let kernel = Kernel::new(KernelConfig::transient())?;
 /// let client = EmbeddedClient::new(kernel);
 ///
 /// let result = client.execute("X=42").await?;

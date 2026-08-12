@@ -264,18 +264,17 @@ mod tests {
         }
     }
 
-    // ── serde: JobInfo round-trip, including the approval payload ──
+    // ── serde: JobInfo round-trip ──
 
     #[test]
     fn job_info_omits_unset_optional_fields_from_the_wire() {
         // A plain running job (the common case) must not carry dead weight:
-        // no output_file/pid/approval/exit_code/finished_at, no pgids array.
+        // no output_file/pid/exit_code/finished_at, no pgids array.
         let info = JobInfo::new(JobId(4), "sleep 5", JobStatus::Running);
         let json = serde_json::to_value(&info).unwrap();
         let obj = json.as_object().unwrap();
         assert!(!obj.contains_key("output_file"), "{json}");
         assert!(!obj.contains_key("pid"), "{json}");
-        assert!(!obj.contains_key("approval"), "{json}");
         assert!(!obj.contains_key("exit_code"), "{json}");
         assert!(!obj.contains_key("finished_at"), "{json}");
         assert!(!obj.contains_key("pgids"), "{json}");

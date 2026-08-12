@@ -30,7 +30,7 @@ fn tempdir() -> tempfile::TempDir {
 }
 
 /// The free function needs no kernel at all: same source, same plans, no
-/// filesystem and no ledger anywhere in sight.
+/// filesystem anywhere in sight.
 #[test]
 fn plan_program_needs_no_kernel() {
     let plans = plan_program("echo before\nrm f.txt\necho after").expect("parses");

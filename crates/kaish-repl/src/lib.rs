@@ -424,10 +424,8 @@ pub struct Repl {
     runtime: Runtime,
 }
 
-/// The `KernelConfig` the interactive REPL runs on: passthrough filesystem,
-/// the OS environment, a human principal, and the approval authority
-/// installed on its own session so `approvals grant` works at the prompt
-/// (spec §C.3).
+/// The `KernelConfig` the interactive REPL runs on: passthrough filesystem
+/// and the OS environment.
 pub fn interactive_config() -> KernelConfig {
     KernelConfig::repl()
         .with_interactive(true)
@@ -437,10 +435,8 @@ pub fn interactive_config() -> KernelConfig {
 /// The `KernelConfig` `kaish -c` and `kaish script.kai` run on: the same
 /// passthrough filesystem and OS environment as the interactive REPL.
 ///
-/// Both non-interactive entry points share this one constructor because the
-/// alternative drifted: `-c` and script runs each built their own config,
-/// neither named a principal, and every request they raised went into the
-/// record unattributed.
+/// Both non-interactive entry points share this one constructor — when `-c`
+/// and script runs each built their own config, the two drifted apart.
 pub fn noninteractive_config(overlay: bool) -> KernelConfig {
     KernelConfig::repl()
         .with_initial_vars(os_env_vars())
@@ -701,12 +697,6 @@ fn resolve_prompt(repl: &Repl) -> String {
 /// Check the JobManager for jobs that finished since the last prompt, print a
 /// one-line notification for each (matching the `jobs` builtin's own
 /// `[id] status command` line), and reap them.
-///
-/// A `Gated` job is excluded by `reap_finished` itself — it's "done" in the
-/// sense that its future resolved, but it's awaiting confirmation of a
-/// pending destructive-operation gate (`set -o approvals`) and must stay tracked
-/// until confirmed or explicitly discarded (GH #96), not be silently
-/// destroyed by an automatic background sweep (GH #131).
 fn notify_finished_jobs(repl: &Repl) {
     let manager = repl.client.kernel().jobs();
     for info in repl.runtime.block_on(manager.reap_finished()) {
@@ -726,8 +716,8 @@ pub fn run_with_overlay(overlay: bool) -> Result<()> {
 
 /// Run the interactive REPL on `config`.
 ///
-/// One loop, whatever the entry point: `kaish`, `kaish --overlay`, and
-/// `kaish --gate rm` differ only in the config they hand in.
+/// One loop, whatever the entry point: `kaish` and `kaish --overlay` differ
+/// only in the config they hand in.
 pub fn run_interactive(config: KernelConfig, overlay: bool) -> Result<()> {
     println!("会sh — kaish v{}", env!("CARGO_PKG_VERSION"));
     use kaish_kernel::help::{compose, Recipe, SchemaContent};
@@ -764,10 +754,6 @@ pub fn run_interactive(config: KernelConfig, overlay: bool) -> Result<()> {
                     tracing::warn!("Failed to add history entry: {}", e);
                 }
 
-                // The gate prompt reads through this same editor, so Ctrl-C
-                // at an approval question is ordinary input handling in the
-                // REPL's own read loop rather than a signal racing a
-                // decision (spec §C.3).
                 let outcome = repl.process_line(&line);
                 match outcome {
                     ProcessResult::Output(output) => {

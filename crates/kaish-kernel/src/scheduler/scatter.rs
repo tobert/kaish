@@ -558,16 +558,6 @@ fn result_row(i: usize, r: &ScatterResult) -> serde_json::Value {
     if let Some(data) = &r.result.data {
         row.insert("data".into(), kaish_types::value_to_json(data));
     }
-    // A held worker (exit 2 under the `fs.*` enforce policy) is otherwise
-    // indistinguishable from a plain failure in the row — carry the request
-    // so a caller can act on the gate straight from the row (GH #124 part 3).
-    // Just the view, matching `apply_output_format`'s `--json` envelope: the
-    // resume route ExecResult.approval also carries (kaish#312) is a
-    // Rust-level concern for a caller driving the kernel in-process, not
-    // part of this row's wire shape. The view is plain data, so
-    // serialization cannot fail; a failure is dropped rather than replacing
-    // the row.
-
     if r.timed_out {
         row.insert("timed_out".into(), serde_json::json!(true));
     }

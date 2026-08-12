@@ -17,17 +17,6 @@ kaish-types = { path = "../kaish-types", version = "0.13.0", features = [] }
 
 async-trait = { workspace = true }
 clap = { workspace = true }
-# `PendingApproval`/`ResumeAction` derive Serialize/Deserialize (ledger PR
-# R5, item b) so an ACP-style embedder can persist pending decisions across
-# a restart.
-serde = { workspace = true }
-
-[dev-dependencies]
-serde_json = { workspace = true }
-# Test-only: the ledger PR 3 default-impl tests exercise `request_approval`'s
-# `async fn`, which needs a runtime to `.await` even though the lib itself
-# has none. Minimal features, matching `kaish-client`'s identical dev-only need.
-tokio = { version = "1", features = ["rt", "macros"] }
 
 [lints]
 workspace = true

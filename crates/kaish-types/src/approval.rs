@@ -6,27 +6,19 @@
 //! whether to run a statement; nothing here decides anything itself.
 //!
 //! [`PlannedValue`] is the one place redaction appears. The kernel redacts
-//! exactly one thing — its own `--confirm=<key>`, which it minted and knows
-//! outright — and a redacted value keeps a *kind*, never the credential.
-//! kaish ships no secret detector, because a shell cannot define what a
-//! secret is; an embedder that wants more redacts the plans it holds.
+//! exactly one thing — the `--confirm=<key>` flag spelling, kaish's own
+//! convention for a confirmation credential — and a redacted value keeps a
+//! *kind*, never the credential. kaish ships no secret detector, because a
+//! shell cannot define what a secret is; an embedder that wants more redacts
+//! the plans it holds.
 
 use serde::{Deserialize, Serialize};
 
-// ───────────────────────── Identity: RequestId ─────────────────────────
-
-// ───────────────────────── Identity: Token ─────────────────────────
-
-// ───────────────────────── Identity: the rest ─────────────────────────
-
-// ───────────────────────── Principal ─────────────────────────
-
-// ───────────────────────── Scope ─────────────────────────
-
-// ───────────────────────── Replay binding ─────────────────────────
-
-/// A digest over what was judged (spec §A.9). The kernel computes it; this
-/// type only carries the value, so `kaish-types` stays dependency-light.
+/// A content identity for a plan — a digest over its rendered text with any
+/// presented credential stripped, so `rm x` and `rm --confirm=<key> x`
+/// digest the same. The embedder computes it (e.g. SHA-256 over the
+/// kernel's `strip_confirm_tokens(rendered)`); this type only carries the
+/// value, so `kaish-types` stays dependency-light.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PlanDigest(String);
@@ -43,9 +35,7 @@ impl PlanDigest {
     }
 }
 
-// ───────────────────────── Risk, resources, transitions ─────────────────────────
-
-// ───────────────────────── Redaction (spec §A.8) ─────────────────────────
+// ───────────────────────── Redaction ─────────────────────────
 
 /// One value inside a rendered plan. A sink serializes `PlannedValue`, never
 /// a bare `String`, so a value reaches a sink only after something decided
@@ -53,10 +43,8 @@ impl PlanDigest {
 ///
 /// The kernel builds every `PlannedValue` at one normalization point
 /// (`kaish-kernel`'s `ast::plan::plan_statement`), before the plan reaches
-/// any of its sinks — the statement classifier, the ledger's `Observed`
-/// entry, tracing, and the `/v/approvals` projection. A sink added later
-/// reads the same already-decided values instead of re-deriving its own
-/// redaction.
+/// any consumer. A consumer added later reads the same already-decided
+/// values instead of re-deriving its own redaction.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -242,26 +230,6 @@ impl PlannedRedirect {
         }
     }
 }
-
-// ───────────────────────── Assessments ─────────────────────────
-
-// ───────────────────────── Capture ─────────────────────────
-
-// ───────────────────────── Request context (tracing) ─────────────────────────
-
-// ───────────────────────── ApprovalRequest + builder ─────────────────────────
-
-// ───────────────────────── The result-boundary pending decision ─────────────────────────
-
-// ───────────────────────── Grant side ─────────────────────────
-
-// ───────────────────────── Attempt outcome ─────────────────────────
-
-// ───────────────────────── The entry log ─────────────────────────
-
-// ───────────────────────── The record envelope ─────────────────────────
-
-// ───────────────────────── Pagination (spec §D.2) ─────────────────────────
 
 #[cfg(test)]
 mod tests {

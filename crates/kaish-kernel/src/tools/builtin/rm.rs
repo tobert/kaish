@@ -1,9 +1,8 @@
 //! rm — Remove files and directories.
 //!
-//! Gated by the approval ledger's `fs.*` enforce policy (`set -o approvals`) and
-//! by trash-on-delete (`set -o trash`) for safe autonomous operation. Trash
-//! wins over the gate — the trash IS the recovery net, so a delete it can
-//! catch needs no approval.
+//! Under trash-on-delete (`set -o trash`) a delete lands in the trash first,
+//! so a mistake is recoverable — the trash IS the recovery net for safe
+//! autonomous operation.
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
@@ -378,7 +377,7 @@ mod tests {
         assert!(!ctx.backend.exists(Path::new("/deep/a/b")).await);
     }
 
-    // ── Approval-gate tests (MemoryFs — no real filesystem) ──
+    // ── Decision-table tests (MemoryFs — no real filesystem) ──
 
     #[tokio::test]
     async fn force_on_a_missing_path_succeeds_silently() {
@@ -421,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_rm_action_trash_large_no_approvals() {
+    fn test_decide_rm_action_trash_large_falls_through() {
         let real = PathBuf::from("/home/user/bigfile.bin");
         let action = decide_rm_action(true, Some(&real), Some(100_000_000), 10_000_000, false, false);
         assert_eq!(action, RmAction::Delete);
@@ -463,9 +462,9 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_rm_action_dir_trashes_with_approvals() {
+    fn test_decide_rm_action_dir_trashes() {
         let real = PathBuf::from("/home/user/mydir");
-        // Directory always trashes when trash enabled — approvals irrelevant
+        // Directory always trashes when trash enabled
         let action = decide_rm_action(true, Some(&real), Some(0), 10_000_000, true, false);
         assert_eq!(action, RmAction::Trash(real));
     }

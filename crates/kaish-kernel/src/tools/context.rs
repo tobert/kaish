@@ -161,20 +161,6 @@ pub struct ExecContext {
     /// don't touch it.
     pub output_format: Option<OutputFormat>,
 
-    /// The command currently executing, captured at the dispatch seam as
-    /// `(dispatch_name, argv)` where `argv` is the canonical `ToolArgs::to_argv`.
-    /// A gate site stamps this into the request's `Capture` so
-    /// `Kernel::confirm` can replay the *exact* invocation — no re-parsing of
-    /// the human `hint`. `None` for a direct `tool.execute` call in a unit
-    /// test (no dispatch seam ran), which records `Capture::DirectExecution`
-    /// rather than a silently empty argv.
-    ///
-    /// Boxed to keep `ExecContext` lean: it is cloned/rebuilt at every recursion
-    /// level (pipeline stages, `$(...)`, functions), so an inline `(String,
-    /// Vec<String>)` would grow every frame and eat into the interpreter's stack
-    /// headroom (see GH #46/#47). The box is allocated once per gated command.
-    pub current_invocation: Option<Box<(String, Vec<String>)>>,
-
     /// Shared VFS memory budget for this kernel's `MemoryFs` mounts.
     ///
     /// `Arc`-cloned from the owning `Kernel` (or its fork parent) so all
@@ -210,28 +196,23 @@ pub(crate) enum MutationAction {
     TrashFirst,
 }
 
-/// What a gated overwrite must still find at the target before it writes —
-/// the compare-and-swap expectation `overwrite_checked` enforces.
+/// What a snapshotted overwrite must still find at the target before it
+/// writes — the compare-and-swap expectation `overwrite_checked` enforces.
 ///
-/// Two forms, because the two gate paths hold different things. The trash
-/// path already has the prior bytes (it had to copy them to the trash), so it
-/// compares bytes. The approval path never holds the content — it only
-/// digested it for the ledger condition — so it compares digests, which also
-/// bounds its memory: a 10 GiB target costs one 256 KiB window, not 10 GiB.
-/// That matters, because the oversize file the trash cannot snapshot is
-/// exactly the file that falls through to the approval gate.
+/// The trash path already holds the prior bytes (it had to copy them to the
+/// trash), so the expectation compares bytes.
 #[derive(Debug, Clone)]
 pub enum OverwriteExpectation {
     /// The exact prior bytes, from the trash snapshot.
     Bytes(Vec<u8>),
 }
 
-/// What each gated target must still look like when the caller writes it,
-/// keyed by resolved path (see `overwrite_checked`).
+/// What each snapshotted target must still look like when the caller writes
+/// it, keyed by resolved path (see `overwrite_checked`).
 ///
-/// Every existing target the gate held appears — trash-snapshotted or
-/// approval-gated. A new file, an append, and an excluded or ungated path are
-/// absent, because none of them has prior content to lose.
+/// Every existing target the trash snapshotted appears. A new file, an
+/// append, and an excluded or unsnapshotted path are absent, because none of
+/// them has prior content to lose.
 pub type GateExpectations = std::collections::HashMap<PathBuf, OverwriteExpectation>;
 
 /// Real paths the trash gate skips: host scratch under `/tmp`, where
@@ -244,26 +225,25 @@ pub type GateExpectations = std::collections::HashMap<PathBuf, OverwriteExpectat
 /// None`, so they are handled by the no-real-path gating path, not here — there
 /// is deliberately no lexical `/v` exclusion. Mount-coverage routing delegates
 /// unclaimed `/v/*` to the embedder's backend, whose *real* content under `/v`
-/// (a real path like `/v/cas/blob.bin`) must keep the trash/approval safety net; a
+/// (a real path like `/v/cas/blob.bin`) must keep the trash safety net; a
 /// `/v` prefix exclusion here would silently strip it.
 pub(crate) fn is_trash_excluded(real_path: Option<&Path>) -> bool {
     matches!(real_path, Some(rp) if rp.starts_with("/tmp"))
 }
 
-/// Decide how to gate a truncating overwrite, mirroring `rm`'s trash/approval
-/// priority. Pure so the decision table is unit-testable in isolation.
+/// Decide whether a truncating overwrite snapshots to trash first, mirroring
+/// `rm`'s trash priority. Pure so the decision table is unit-testable in
+/// isolation.
 ///
 /// - A non-existent target or an append has nothing to lose → `Proceed`.
 /// - A real path under `/tmp` (host scratch) is excluded (matches `rm`) → `Proceed`.
-/// - Trash wins over the gate (trash IS the safety net): `TrashFirst` when
-///   trash is on **and** the prior content fits under `trash_max_size` (a
-///   file too big to snapshot can't be backed up, so it falls through,
-///   exactly like `rm`); else `Gate` when the `fs.*` enforce policy is on;
-///   else `Proceed`.
+/// - `TrashFirst` when trash is on **and** the prior content fits under
+///   `trash_max_size` (a file too big to snapshot can't be backed up, so it
+///   falls through, exactly like `rm`); else `Proceed`.
 ///
-/// An overlay/in-memory target has `real_path == None`, so it is *not* excluded
-/// and stays gated — the protection is about agent-operation safety, not just
-/// real-FS data (Amy, 2026-06-17).
+/// An overlay/in-memory target has `real_path == None`, so it is *not*
+/// excluded and still snapshots — the protection is about agent-operation
+/// safety, not just real-FS data (Amy, 2026-06-17).
 pub(crate) fn decide_mutation_action(
     trash_enabled: bool,
     real_path: Option<&Path>,
@@ -295,12 +275,10 @@ pub(crate) fn decide_mutation_action(
 /// `ExecContext::overwrite_checked` (`tee`/`write`/`dd`) and directly by
 /// `cp`'s free copy path.
 ///
-/// This is the write-side half of the ledger's precondition check, and it is
-/// the half that matters at the mutation: the ledger detects an
-/// authorization that went stale between the grant and the redemption, and
-/// this catches a change between the redemption and the write. Neither makes
-/// the write OS-atomic — a crash mid-write can still truncate (the atomic
-/// write-temp-then-rename primitive is a tracked write-model residual).
+/// This catches a change between the snapshot and the write. It does not
+/// make the write OS-atomic — a crash mid-write can still truncate (the
+/// atomic write-temp-then-rename primitive is a tracked write-model
+/// residual).
 pub(crate) async fn cas_overwrite(
     backend: &dyn KernelBackend,
     resolved: &Path,
@@ -325,9 +303,8 @@ pub(crate) async fn cas_overwrite(
         .await
 }
 
-/// One wording for "somebody else wrote this while the gate was deciding",
-/// whether the expectation was bytes or a digest — a reader should not have
-/// to learn which form the gate happened to hold.
+/// One wording for "somebody else wrote this while the write-model gate was
+/// deciding".
 fn concurrent_change_error(resolved: &Path) -> crate::backend::BackendError {
     crate::backend::BackendError::InvalidOperation(format!(
         "{}: changed since the write-model gate checked it (concurrent write); \
@@ -369,7 +346,6 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
-            current_invocation: None,
             vfs_budget: None,
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
@@ -409,7 +385,6 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
-            current_invocation: None,
             vfs_budget: None,
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
@@ -446,7 +421,6 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
-            current_invocation: None,
             vfs_budget: None,
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
@@ -483,7 +457,6 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
-            current_invocation: None,
             vfs_budget: None,
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
@@ -523,7 +496,6 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
-            current_invocation: None,
             vfs_budget: None,
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
@@ -560,7 +532,6 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
-            current_invocation: None,
             vfs_budget: None,
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
@@ -752,8 +723,6 @@ impl ExecContext {
             cancel: self.cancel.clone(),
             // Output format is per-execution; child pipeline stages start fresh.
             output_format: None,
-            // Per-command; each pipeline stage stamps its own at the dispatch seam.
-            current_invocation: None,
             // Budget is shared: the child draws from the same pool as the parent.
             vfs_budget: self.vfs_budget.clone(),
             // Watchdog is shared: a patient hold in a pipeline stage or fork
@@ -762,14 +731,6 @@ impl ExecContext {
             // Overlay handle is shared: pipeline stages share the same transaction.
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: self.overlay_handle.clone(),
-            // Ledger access is shared: a pipeline stage gates through the
-            // same ledger as its parent.
-            // Per-invocation: a child stage correlates its own replay and
-            // owns its own reservations. Copying either would let one gate's
-            // authorization travel to another command.
-            // Parenthood does travel: a gate reached from inside a gated
-            // statement is nested under it however many stages deep the
-            // execution went (spec §A.7). It authorizes nothing on its own.
         }
     }
 

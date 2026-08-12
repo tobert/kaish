@@ -161,19 +161,9 @@ impl Tool for Dd {
             Some(out) => {
                 let out_resolved = ctx.resolve_path(&out);
 
-                // Gate the truncating `of=` overwrite through approvals + trash. The
-                // the re-run hint reinjects the operands `dd` can't run without
-                // (otherwise the advertised command would do nothing).
-                let _hint_cmd = {
-                    let mut s = format!("dd if={input} of={out} bs={bs}");
-                    if let Some(c) = count {
-                        s.push_str(&format!(" count={c}"));
-                    }
-                    if skip > 0 {
-                        s.push_str(&format!(" skip={skip}"));
-                    }
-                    s
-                };
+                // Under trash, the truncating `of=` overwrite snapshots the
+                // prior content before the CAS write below (no-op with trash
+                // off).
                 let snapshots = match ctx
                     .snapshot_overwrites("dd",
                         &[(out.clone(), false)])

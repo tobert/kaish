@@ -139,17 +139,7 @@ impl Tool for Wait {
 }
 
 /// Classify one waited job's result into a display word, threading the
-/// aggregate `any_failed` flag and the first-seen held request. A gated job
-/// (the `fs.*` enforce policy, exit 2 with a stored request) is `Gated`,
-/// *not* `Failed` — the op is held, and the request must reach the caller so
-/// a backgrounded gate is fulfillable (GH #96).
-///
-/// No `job_id` stamping here. The latch had two stamping sites — this one and
-/// `Job::approval()`'s predecessor — because a gate site could not know which
-/// job it ran for. A ledger request carries `job_id` from the moment it is
-/// posted (the fork that runs a background job stamps it), so `wait` reads
-/// the same correlation `jobs` and `/v/jobs/{id}/approval` read, and the two
-/// cannot drift.
+/// aggregate `any_failed` flag.
 fn classify(result: &ExecResult, killed: bool, any_failed: &mut bool) -> &'static str {
     if result.ok() {
         "Done"

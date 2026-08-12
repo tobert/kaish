@@ -24,8 +24,6 @@ pub enum KernelOperation {
     FsRename,
     /// `kaish-trash empty` discarding the recovery net itself.
     TrashEmpty,
-    /// One top-level statement — what `plan_program` describes.
-    CmdExecute,
 }
 
 impl KernelOperation {
@@ -36,7 +34,6 @@ impl KernelOperation {
             Self::FsOverwrite => "fs.overwrite",
             Self::FsRename => "fs.rename",
             Self::TrashEmpty => "trash.empty",
-            Self::CmdExecute => "cmd.execute",
         }
     }
 }
@@ -52,7 +49,6 @@ mod tests {
             KernelOperation::FsOverwrite,
             KernelOperation::FsRename,
             KernelOperation::TrashEmpty,
-            KernelOperation::CmdExecute,
         ] {
             let id = op.as_str();
             let parts: Vec<&str> = id.split('.').collect();
@@ -71,7 +67,6 @@ mod tests {
             KernelOperation::FsOverwrite.as_str(),
             KernelOperation::FsRename.as_str(),
             KernelOperation::TrashEmpty.as_str(),
-            KernelOperation::CmdExecute.as_str(),
         ];
         let unique: std::collections::BTreeSet<_> = ids.iter().collect();
         assert_eq!(unique.len(), ids.len(), "two operations share a dotted id");

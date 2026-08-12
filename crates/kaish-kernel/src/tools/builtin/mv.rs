@@ -97,12 +97,12 @@ impl Tool for Mv {
             }
         }
 
-        // Gate a direct file clobber (`mv SRC EXISTING_FILE`) through approvals +
-        // trash. The gate snapshots the prior destination content to trash (the
-        // recovery copy) and handles the approval prompt; the move itself replaces
-        // it (an atomic same-mount `rename`, or unlink+write cross-mount), so no
-        // CAS is threaded. Moving *into* a directory or a recursive merge isn't
-        // a single-file truncation and stays ungated (documented residual).
+        // Under trash, a direct file clobber (`mv SRC EXISTING_FILE`)
+        // snapshots the prior destination content to trash (the recovery
+        // copy); the move itself replaces it (an atomic same-mount `rename`,
+        // or unlink+write cross-mount), so no CAS is threaded. Moving *into*
+        // a directory or a recursive merge isn't a single-file truncation
+        // and is not snapshotted (documented residual).
         if sources.len() == 1 {
             let dst_is_existing_file = ctx
                 .backend

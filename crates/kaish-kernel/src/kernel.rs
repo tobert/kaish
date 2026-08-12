@@ -1292,8 +1292,8 @@ impl Kernel {
 
     /// Plan every statement of `source` without executing anything —
     /// [`plan_program`](crate::ast::plan::plan_program) as a method, so an
-    /// embedder holding a kernel reads the same metadata the kernel's gate
-    /// and record read for the same source.
+    /// embedder holding a kernel can pair the plans with `get_var` lookups
+    /// against this kernel's live state.
     ///
     /// # Errors
     ///
@@ -1430,9 +1430,6 @@ impl Kernel {
             // parent — background jobs and scatter workers count against the same
             // cap as foreground writes.
             vfs_budget: self.vfs_budget.clone(),
-            // One ledger for the whole session: a background job's requests
-            // must land in the log the foreground reads, and its chain must
-            // be the same chain.
             request_timeout: self.request_timeout,
             kill_grace: self.kill_grace,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
@@ -1599,9 +1596,8 @@ impl Kernel {
     /// doors converge **late** (at the shared dispatch chain) rather than one
     /// wrapping the other. From argv classification onward `execute_argv` reuses
     /// the exact path a `Stmt::Command` takes — command resolution (aliases, user
-    /// tools, `.kai` scripts, externals, backend tools), arg binding, the `--json`
-    /// transform, and the approval gate — so a gated `rm` still emits an
-    /// approval request and an `ls --json` still applies output formatting. The kernel's
+    /// tools, `.kai` scripts, externals, backend tools), arg binding, and the
+    /// `--json` transform — so an `ls --json` still applies output formatting. The kernel's
     /// pre-execution *syntax* validator does not run: argv has no shell syntax to
     /// validate (a tool's own `validate()`/clap parse still runs at dispatch).
     ///
@@ -1617,16 +1613,6 @@ impl Kernel {
     }
 
     /// [`Self::execute_argv`]'s body, with the execute lock assumed **held**.
-    ///
-    /// Split out for [`Self::confirm`], which has to hold that lock across
-    /// more than the dispatch: it reserves a ledger attempt and stamps a
-    /// replay correlation onto the shared `exec_ctx` *before* dispatching, and
-    /// both of those are single slots. Re-acquiring the lock inside would
-    /// leave a window in which a second concurrent `confirm` overwrites the
-    /// correlation — the first replay would then adopt the second's
-    /// authorization, and the second would post a fresh request. The lock is
-    /// not reentrant, so the reservation, the correlation, the dispatch, and
-    /// the clear are one critical section by construction.
     async fn execute_argv_locked(&self, name: &str, argv: &[Value]) -> Result<ExecResult> {
         // Fresh cancel surface for this call: `execute_pipeline` reads
         // `self.cancel_token`, so a stale cancelled token from a prior call must be
@@ -2197,22 +2183,6 @@ impl Kernel {
         // Reset cancellation token for this execution.
         let cancel = self.reset_cancel();
 
-        // Every credential this program presents, from **any** of its
-        // statements (spec §A.2). A `Capture::Statement` records the whole
-        // source, so a key on line 1 would ride along in the capture of a
-        // statement held on line 5 — redacting only the held statement's own
-        // key would leave that one behind. Scanned once, and only for a source
-        // that mentions the flag at all, so the ordinary line pays nothing.
-        let _program_keys: Vec<String> = if input.contains("confirm=") {
-            program
-                .statements
-                .iter()
-                .flat_map(|stmt| crate::ast::plan::plan_statement(stmt).presented_keys)
-                .collect()
-        } else {
-            Vec::new()
-        };
-
         for stmt in program.statements.into_iter() {
             if matches!(stmt, Stmt::Empty) {
                 continue;
@@ -2248,14 +2218,6 @@ impl Kernel {
                         let combined = format!("{}{}", drained_stderr, r.err);
                         r.err = combined;
                     }
-                    // A gate raised *inside* the statement — an `fs.*` gate
-                    // under `set -o approvals` — halts the program exactly
-                    // the way a statement-level gate does, and for the same
-                    // reason: exit 2 means "this has not happened yet", and
-                    // the statements after it were written expecting it had
-                    // Without this,
-                    // `rm x; touch y` creates `y` whether or not `rm x` is
-                    // ever approved, and nothing un-creates it.
                     on_output(&r);
                     // Carry the last statement's structured output for MCP TOON encoding.
                     // Must be done here (not in accumulate_result) because accumulate_result
@@ -2921,7 +2883,6 @@ impl Kernel {
             dispatcher: self.dispatcher(),
             cancel,
             output_format: None,
-            current_invocation: None,
             vfs_budget: self.vfs_budget.clone(),
             watchdog: ec.watchdog.clone(),
             #[cfg(all(feature = "localfs", feature = "overlay"))]
@@ -3019,7 +2980,7 @@ impl Kernel {
     ///
     /// The command is spawned as a tokio task and registered with the
     /// JobManager. The job is observable via `/v/jobs/{id}/status`,
-    /// `/v/jobs/{id}/command`, `/v/jobs/{id}/approval`, and — while it is
+    /// `/v/jobs/{id}/command`, and — while it is
     /// still running — `/v/jobs/{id}/stdout` and `/stderr`.
     ///
     /// GH #240 removed those two nodes because they filled once, at
@@ -3297,11 +3258,9 @@ impl Kernel {
                 let backend = ctx.backend.clone();
                 match backend.call_tool(name, tool_args, &mut *ctx).await {
                     Ok(tool_result) => {
-                        // An embedder tool can gate too — settle whatever it
-                        // reserved with the code it reported.
                         let mut scope = self.scope.write().await;
                         *scope = ctx.scope.clone();
-                        // Preserve every field (data/content_type/baggage/approval,
+                        // Preserve every field (data/content_type/baggage,
                         // not just stdout text) — this is the embedder seam:
                         // `x=$(embedder_tool)` and structured iteration over
                         // its result depend on `.data` surviving the crossing
@@ -3418,50 +3377,7 @@ impl Kernel {
         // The builtin's own `parsed.global.apply(ctx)` becomes idempotent.
         GlobalFlags::apply_from_args(&tool_args, &mut *ctx);
 
-        // Capture the exact invocation at the dispatch seam so a gate site can
-        // record it as the request's `Capture` and `Kernel::confirm` can
-        // replay it precisely — no re-parsing of the human `hint`.
-        // `to_argv()` is computed before `tool_args` moves into execute.
-        //
-        // Captured **unconditionally**, NOT gated on the `fs.*` enforce
-        // policy: `kaish-trash empty` gates every time (it discards the
-        // recovery net, independent of any subscription — see
-        // `KernelOperation::always_enforced`), so a policy-gated capture
-        // would leave its invocation unrecorded and break `confirm` for it.
-        // Spec §C.5's free-when-unsubscribed fast path belongs at the gate
-        // sites, NOT here: moving it here would silently break trash-empty's
-        // confirm path, which is a coupling worth naming rather than
-        // rediscovering. The cost is a small argv clone per command —
-        // marginal beside the per-command ExecContext snapshot above — and it
-        // does NOT reintroduce the deep-`$()` stack overflow (that was the
-        // inline request payload in `ExecResult`, now boxed; the capture's
-        // temporaries don't survive into the recursive `tool.execute` below).
-        //
-        // `to_argv()` can fail loud on a `Value::Bytes` named argument (GH
-        // #164). This capture is bookkeeping only, so a failure here must NOT
-        // gate whether the tool runs: not every builtin routes its own named
-        // args through `to_argv()` — `export`'s `NAME=VALUE` pairs are
-        // arbitrary user variable names, not schema flags, so `export` reads
-        // `args.named` directly and a Bytes value there is completely
-        // legitimate (see `export.rs`). A builtin that DOES call `to_argv()`
-        // internally (nearly all of them) raises the identical loud,
-        // tool-prefixed error a few lines below inside `tool.execute()`.
-        //
-        // What changed with the ledger: a failure no longer substitutes an
-        // empty argv, which was a silent fallback into a *wrong* replay
-        // (spec §B.4). It records `Capture::CaptureFailed` instead, so
-        // `confirm` refuses to replay it and says why.
-        if let Ok(argv) = tool_args.to_argv() {
-            ctx.current_invocation = Some(Box::new((name.to_string(), argv)));
-        }
-
         let result = tool.execute(tool_args, &mut *ctx).await;
-
-        // Settle every attempt this invocation reserved with its real exit
-        // code (spec §C.1). One place, no forgetting — and a path that never
-        // reaches this line (a dropped future, a panic) settles
-        // `Unknown{Cancelled}` when the guards drop instead, because a tool
-        // that was interrupted may already have written.
 
         // Sync mutations back. Tools may have changed scope (set/cd),
         // cwd/prev_cwd (cd), and aliases (alias). Also return any unused pipe
@@ -4229,13 +4145,6 @@ impl Kernel {
         let mut accumulated_err = String::new();
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
-        // The last statement's pending approval, carried the same way `.data`
-        // is. A body that ends in a gated operation must hand its caller the
-        // request, not just exit 2 — otherwise a gated `rm` inside a function,
-        // a sourced script, a `$(…)`, or a `.kai` script is indistinguishable
-        // from an ordinary failure, and inside `$(…)` the outer statement even
-        // reads as success. The latch had this same gap; a dropped
-        // control-plane signal IS the silent bypass, so it gets fixed here.
 
         fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
             match r.out_bytes() {
@@ -4334,13 +4243,6 @@ impl Kernel {
         let mut accumulated_err = String::new();
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
-        // The last statement's pending approval, carried the same way `.data`
-        // is. A body that ends in a gated operation must hand its caller the
-        // request, not just exit 2 — otherwise a gated `rm` inside a function,
-        // a sourced script, a `$(…)`, or a `.kai` script is indistinguishable
-        // from an ordinary failure, and inside `$(…)` the outer statement even
-        // reads as success. The latch had this same gap; a dropped
-        // control-plane signal IS the silent bypass, so it gets fixed here.
 
         // Append a statement's stdout as raw bytes (binary) or its UTF-8 bytes.
         fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
@@ -4470,13 +4372,6 @@ impl Kernel {
         let mut accumulated_err = String::new();
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
-        // The last statement's pending approval, carried the same way `.data`
-        // is. A body that ends in a gated operation must hand its caller the
-        // request, not just exit 2 — otherwise a gated `rm` inside a function,
-        // a sourced script, a `$(…)`, or a `.kai` script is indistinguishable
-        // from an ordinary failure, and inside `$(…)` the outer statement even
-        // reads as success. The latch had this same gap; a dropped
-        // control-plane signal IS the silent bypass, so it gets fixed here.
 
         for stmt in program.statements {
             if matches!(stmt, crate::ast::Stmt::Empty) {
@@ -4613,11 +4508,10 @@ impl Kernel {
             // Build tool_args from args (async for command substitution support)
             let tool_args = self.build_args_async(args, None).await?;
 
-            // Create isolated scope (like user tools). The approval policy
-            // and its pin are NOT session state a script may shed: a `.kai`
-            // script starting from a blank scope would run **ungated** under a
-            // pinned-on policy, which is precisely the hole the pin exists to
-            // close. Carry both, and the trash rail with them.
+            // Create isolated scope (like user tools). The trash rail is NOT
+            // session state a script may shed: a `.kai` script starting from
+            // a blank scope would otherwise overwrite and delete without the
+            // recovery net `set -o trash` promised. Carry it.
             let mut isolated_scope = Scope::new();
             {
                 let scope = self.scope.read().await;
@@ -4653,13 +4547,6 @@ impl Kernel {
             let mut accumulated_err = String::new();
             let mut last_code = 0i64;
             let mut last_data: Option<Value> = None;
-            // The last statement's pending approval, carried the same way `.data`
-            // is. A body that ends in a gated operation must hand its caller the
-            // request, not just exit 2 — otherwise a gated `rm` inside a function,
-            // a sourced script, a `$(…)`, or a `.kai` script is indistinguishable
-            // from an ordinary failure, and inside `$(…)` the outer statement even
-            // reads as success. The latch had this same gap; a dropped
-            // control-plane signal IS the silent bypass, so it gets fixed here.
             let mut exec_error: Option<anyhow::Error> = None;
             let mut exit_code: Option<i64> = None;
 
@@ -5491,11 +5378,11 @@ impl Kernel {
     ///
     /// Clears in-memory variables and resets cwd to root. History is not
     /// cleared (it persists across resets). The kernel's `$$` identity, the
-    /// approval gate / trash-on-delete configuration, and any
-    /// frontend-seeded `initial_vars` (HOME/PATH/etc, from `KernelConfig`)
-    /// are re-applied to the fresh scope rather than silently reverting to
-    /// defaults — an embedder that opted into `with_approvals(true)` must not
-    /// find the gate quietly disabled after a `reset()` between requests.
+    /// trash-on-delete configuration, and any frontend-seeded `initial_vars`
+    /// (HOME/PATH/etc, from `KernelConfig`) are re-applied to the fresh
+    /// scope rather than silently reverting to defaults — an embedder that
+    /// opted into trash must not find it quietly disabled after a `reset()`
+    /// between requests.
     ///
     /// **Background jobs are untouched** (GH #245) — `reset()` is a scope/cwd
     /// reset, not a session boundary for `&`. A job started before `reset()`
@@ -5533,18 +5420,12 @@ impl Kernel {
     /// This is the same lever `kill %N` uses: a *running* job's in-process
     /// future exits at its next checkpoint, and any external children it
     /// spawned get the SIGTERM→SIGKILL cascade; it then stays tracked with
-    /// status `Killed` once it unwinds. For a *gated* or already-finished
-    /// job the token trip is a no-op — its future has already resolved and
-    /// the job keeps reporting `Gated`/its terminal status. This only
+    /// status `Killed` once it unwinds. For an already-finished job the
+    /// token trip is a no-op — its future has already resolved and the job
+    /// keeps reporting its terminal status. This only
     /// *starts* cancellation, it does not wait (pair with
     /// [`JobManager::wait`]/`wait_all` if the caller needs to block on the
     /// unwind, bounded as [`Self::shutdown`] does).
-    ///
-    /// **A gated job's held request is cancelled here**
-    /// Nothing times a request out, so a job cancelled with a request still
-    /// `Requested` would hold a live ledger slot for the life of the
-    /// process — and forever, in an embedder where several kernels share
-    /// one ledger.
     ///
     /// A job registered by an embedder via [`JobManager::register`] with no
     /// cancel token attached has no lever to cancel — silently skipped here,
@@ -5564,10 +5445,7 @@ impl Kernel {
 
     /// Shut down the kernel.
     ///
-    /// Cancels every tracked background job ([`Self::cancel_all_jobs`]),
-    /// closes every approval request left live in this kernel's scope
-    /// (nothing times a job out, so a kernel
-    /// that shares a ledger with other sessions would strand them), then
+    /// Cancels every tracked background job ([`Self::cancel_all_jobs`]), then
     /// waits up to `kill_grace + 3s` **per job** — the same bound `kill %N`
     /// gives a single target (GH #244) — for it to actually unwind. The
     /// waits are sequential, so the worst case is additive: N jobs that all
@@ -6565,10 +6443,6 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     accumulated.original_code = new.original_code;
     accumulated.content_type = new.content_type.clone();
     accumulated.baggage.clone_from(&new.baggage);
-    // A pending approval (exit 2 + the request) rides the control-plane
-    // field through accumulation, or the request is lost. It is always the
-    // *last* result's, because a statement that carries one halts the
-    // top-level loop (spec §I.5) — nothing runs after it to overwrite it.
 }
 
 /// Fold a loop's accumulated output into a break/continue signal that is

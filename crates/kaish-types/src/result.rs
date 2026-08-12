@@ -834,8 +834,8 @@ mod tests {
 
 
     #[test]
-    fn clear_stdout_drops_data_but_never_the_approval() {
-        // A stdout redirect clears the data-plane .data unconditionally, but
+    fn clear_stdout_drops_data() {
+        // A stdout redirect clears the data-plane .data unconditionally.
         let mut result = ExecResult::success_data(Value::Json(serde_json::json!([1, 2, 3])));
         result.clear_stdout();
         assert!(result.data.is_none(), "data-plane .data must clear");

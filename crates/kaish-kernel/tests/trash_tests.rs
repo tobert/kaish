@@ -20,7 +20,7 @@ use kaish_kernel::{Kernel, KernelConfig};
 
 fn tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
-        .prefix("approval-trash-")
+        .prefix("kaish-trash-")
         .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
         .expect("tempdir under CARGO_TARGET_TMPDIR")
 }
@@ -43,25 +43,6 @@ fn kernel_at(dir: &Path) -> Session {
 async fn run(session: &Session, script: &str) -> ExecResult {
     session.kernel.execute(script).await.expect("kernel execute")
 }
-
-// ============================================================================
-// The fs.* enforce policy (`set -o approvals`) — rm exit 2 → grant → confirm
-// ============================================================================
-
-// `confirm_without_captured_invocation_errors` (the old latch's bare,
-// hand-constructed `LatchRequest` with empty tool/argv) has no equivalent
-// under the ledger: `LatchRequest` no longer exists, and every request this
-// test file can raise goes through `kernel.execute()`'s dispatch seam, which
-// always captures `Capture::Exact` (see `ExecContext::capture` in
-// `tools/context.rs`). Producing a `Capture::DirectExecution`/`Unavailable`/
-// `CaptureFailed` request requires calling `ToolCtx::request_approval`
-// directly, bypassing the kernel dispatcher entirely — there is no such path
-// from a `Kernel`+`ApproverHandle` pair, which is all this file has to work
-// with. `Kernel::confirm`'s refusal of a non-`Exact` capture (exit 2, naming
-// the variant) is exercised at the right altitude instead, by
-// `tool_ctx_approval_tests.rs`'s `kernel_request_approval_round_trips_a_request_through_the_ledger`
-// (which asserts the `DirectExecution` capture itself) and by `kernel.rs`'s
-// own doc comment on `confirm`. Deleted rather than faked.
 
 // ============================================================================
 // Trash-on-delete — mock TrashBackend covering the RmAction::Trash arm
@@ -191,12 +172,10 @@ async fn trash_catches_a_small_file() {
     let mock = Arc::new(MockTrash::default());
     let session = kernel_with_trash(dir.path(), &mock);
 
-    run(&session, "set -o approvals").await;
     run(&session, "set -o trash").await;
-    // Priority: trash catches small files before the enforce policy gates
-    // them — no exit 2, no request, straight to the backend.
+    // Trash catches a small file — no refusal, straight to the backend.
     let r = run(&session, "rm small.txt").await;
-    assert_eq!(r.code, 0, "trash should win over the gate, err: {}", r.err);
+    assert_eq!(r.code, 0, "trash should catch the delete, err: {}", r.err);
     assert_eq!(mock.trashed_paths().len(), 1);
 }
 
@@ -244,7 +223,7 @@ async fn trash_backend_absent_fails_loud() {
 }
 
 // ============================================================================
-// Write-model gate: tee overwrites honor approvals + trash (like rm gates deletes)
+// Write model: tee overwrites snapshot to trash (like rm's deletes)
 // ============================================================================
 
 /// In-memory kernel (`/v` mounts have no real path) wired to the mock trash —
@@ -287,8 +266,7 @@ async fn tee_new_file_and_append_are_not_overwrites() {
     let mock = Arc::new(MockTrash::default());
     let session = kernel_with_trash(dir.path(), &mock);
 
-    run(&session, "set -o approvals").await;
-    // New file: nothing to lose, no gate.
+    // New file: nothing to lose, no snapshot.
     let r = run(&session, "echo hi | tee fresh.txt").await;
     assert_eq!(r.code, 0, "new file should not gate: {}", r.err);
     // Append: doesn't destroy prior content, no gate.
@@ -322,7 +300,7 @@ async fn tee_overlay_overwrite_snapshots_bytes_via_trash_bytes() {
 }
 
 // ============================================================================
-// Write-model gate: patch overwrites honor approvals + trash (same gate as tee)
+// Write model: patch overwrites snapshot to trash (same rule as tee)
 // ============================================================================
 
 /// A one-line unified diff turning `old` into `new` in `f.txt`, fed via a
@@ -391,7 +369,6 @@ async fn patch_dry_run_snapshots_nothing() {
     let mock = Arc::new(MockTrash::default());
     let session = kernel_with_trash(dir.path(), &mock);
 
-    run(&session, "set -o approvals").await;
     let dry = PATCH_SCRIPT.replace("patch f.txt", "patch --dry-run f.txt");
     let r = run(&session, &dry).await;
     assert_eq!(r.code, 0, "dry-run never writes, so it never gates: {}", r.err);
@@ -403,7 +380,7 @@ async fn patch_dry_run_snapshots_nothing() {
 }
 
 // ============================================================================
-// Write-model gate: sed -i in-place edits honor approvals + trash (same gate)
+// Write model: sed -i in-place edits snapshot to trash (same rule)
 // ============================================================================
 
 #[tokio::test]
@@ -469,8 +446,8 @@ async fn sed_in_place_without_operands_is_a_loud_error() {
 }
 
 // ============================================================================
-// Write-model gate: write / dd / cp / mv overwrites honor approvals + trash too
-// (the same gate as tee/patch/sed -i). These builtins previously bypassed it.
+// Write model: write / dd / cp / mv overwrites snapshot to trash too
+// (the same rule as tee/patch/sed -i). These builtins previously bypassed it.
 // ============================================================================
 
 #[tokio::test]
@@ -495,9 +472,8 @@ async fn write_new_file_is_not_an_overwrite() {
     let dir = tempdir();
     let mock = Arc::new(MockTrash::default());
     let session = kernel_with_trash(dir.path(), &mock);
-    run(&session, "set -o approvals").await;
     let r = run(&session, "write fresh.txt \"hi\"").await;
-    assert_eq!(r.code, 0, "a new file has nothing to lose, no gate: {}", r.err);
+    assert_eq!(r.code, 0, "a new file has nothing to lose: {}", r.err);
     assert_eq!(std::fs::read_to_string(dir.path().join("fresh.txt")).unwrap(), "hi");
 }
 
@@ -551,9 +527,8 @@ async fn cp_into_existing_directory_does_not_snapshot_the_dir() {
     let mock = Arc::new(MockTrash::default());
     let session = kernel_with_trash(dir.path(), &mock);
 
-    run(&session, "set -o approvals").await;
     let r = run(&session, "cp src.txt d").await;
-    assert_eq!(r.code, 0, "cp into a directory must not gate the dir: {}", r.err);
+    assert_eq!(r.code, 0, "cp into a directory must not snapshot the dir: {}", r.err);
     assert_eq!(std::fs::read_to_string(dir.path().join("d/src.txt")).unwrap(), "data");
 }
 
@@ -591,14 +566,6 @@ async fn dd_of_overwrite_under_trash_snapshots_prior_bytes() {
     assert_eq!(std::fs::read_to_string(dir.path().join("out.bin")).unwrap(), "fresh");
 }
 
-// ─── GH #96: a *backgrounded* confirmation gate reaches its consumers ───────
-// `rm x &` under `set -o approvals` gates in the background — exit 2 + a stored
-// approval request — but the gate was invisible to every job consumer: `wait`
-// reported "Failed", `jobs`/`JobInfo` had no request, `/v/jobs/{id}` had no
-// approval node, and `JobStatus` mapped exit 2 to `Failed`. So a backgrounded
-// gate could never be *fulfilled* — the request was unreachable. These pin
-// the surfaces.
-
 /// `kaish-trash empty` always asks, and the flag it names actually works.
 ///
 /// Routed through `kernel.execute` on purpose: an earlier version of this
@@ -630,5 +597,13 @@ async fn trash_empty_asks_and_the_confirm_flag_it_names_is_accepted() {
         !confirmed.err.contains("a value is required"),
         "--confirm must take no value: {}",
         confirmed.err
+    );
+
+    // The 0.13.0 nonce spelling is a loud usage error now, not a silent
+    // accept — the flag takes no value.
+    let old_spelling = run(&session, "kaish-trash empty --confirm=deadbeef").await;
+    assert_eq!(
+        old_spelling.code, 2,
+        "--confirm=<nonce> no longer parses: {old_spelling:?}"
     );
 }

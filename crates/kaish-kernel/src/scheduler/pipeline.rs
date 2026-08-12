@@ -96,8 +96,7 @@ pub(crate) async fn apply_redirects(
                 // drop out/output AND the .data sideband (same as a file
                 // redirect), or a structured result leaks past `x=$(cmd >&2)`
                 // and `cmd >&2 | consumer`. Unconditional so a .data-only,
-                // empty-.out result is cleared too. clear_stdout preserves a
-                // control-plane approval request.
+                // empty-.out result is cleared too.
                 result.clear_stdout();
             }
             RedirectKind::StdoutOverwrite => {
@@ -689,8 +688,6 @@ impl PipelineRunner {
         // (e.g., `echo "Alice" | read NAME`).
         let mut last_result = ExecResult::success("");
         let mut panics: Vec<String> = Vec::new();
-        // GH #125: a confirmation gate (`set -o approvals`) raised by an EARLIER
-        // stage must not be swallowed by a later stage's nominal success —
 
         for (i, handle) in handles.into_iter().enumerate() {
             match handle.await {
@@ -711,11 +708,8 @@ impl PipelineRunner {
         }
 
 
-        // Checked LAST (so it wins over the gate override above): mirrors the
-        // existing precedent that ANY stage panicking overrides `last_result`
-        // regardless of which stage, and keeps a gate raised earlier in the same
-        // run HELD (unconfirmed) rather than presenting a ready-to-redeem key
-        // after a crash elsewhere in the pipeline.
+        // ANY stage panicking overrides `last_result`, regardless of which
+        // stage.
         if !panics.is_empty() {
             last_result = ExecResult::failure(
                 1,

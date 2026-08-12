@@ -211,10 +211,6 @@ Usage:
 Options:
   --overlay                    Enable copy-on-write overlay mode (writes are
                                virtual; use kaish-vfs commit to apply them)
-  --gate <cmd[,cmd...]>        Ask before running any statement that names one
-                               of these commands. The REPL asks at the prompt;
-                               -c and script runs exit 2 with the request
-                               pending, for an operator to grant out of band.
   -c <command>                 Execute command string and exit
   -h, --help                   Show this help
   -V, --version                Show version
@@ -222,7 +218,6 @@ Options:
 Examples:
   kaish                        # Start interactive REPL
   kaish --overlay              # REPL with virtual writes (overlay mode)
-  kaish --gate rm,kaish-trash  # REPL that asks before rm and kaish-trash
   kaish -c 'echo hello'       # Run a command
   kaish --overlay -c 'echo test > file.txt; kaish-vfs diff'
   kaish deploy.kai             # Run a deployment script

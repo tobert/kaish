@@ -162,11 +162,10 @@ fn build_fixture() -> tempfile::TempDir {
 }
 
 /// A kernel shaped like an embedder's: sandboxed to a root it owns, hermetic
-/// env, validation on, approvals/trash forced off so the measurement doesn't depend
-/// on the developer's `KAISH_APPROVALS` / `KAISH_TRASH`.
+/// env, validation on, trash forced off so the measurement doesn't depend
+/// on the developer's `KAISH_TRASH`.
 fn build_kernel(root: &Path) -> Kernel {
     let config = KernelConfig::agent_with_root(root.to_path_buf())
-        .with_approvals(false)
         .with_trash(false);
     Kernel::new(config).expect("build kernel")
 }
