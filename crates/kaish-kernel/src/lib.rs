@@ -23,6 +23,7 @@ pub mod interpreter;
 pub mod output_limit;
 pub mod kernel;
 pub mod lexer;
+pub mod operation;
 pub mod parser;
 pub mod paths;
 #[cfg(all(unix, feature = "subprocess"))]

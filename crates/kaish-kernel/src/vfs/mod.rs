@@ -23,7 +23,6 @@ mod builtin_fs;
 mod jobfs;
 mod router;
 
-pub use approvalsfs::ApprovalsFs;
 pub use builtin_fs::BuiltinFs;
 pub use jobfs::JobFs;
 pub use router::{MountInfo, VfsRouter};

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::{BackendError, KernelBackend, WriteMode};
 use crate::interpreter::ExecResult;
-use crate::ledger::KernelOperation;
+use crate::operation::KernelOperation;
 use crate::tools::{cas_overwrite, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Cp tool: copy files and directories.
@@ -133,13 +133,8 @@ impl Tool for Cp {
             // take a spurious trash snapshot of a file that's never overwritten.
             if dst_is_existing_file && !src_is_dir {
                 let snapshots = match ctx
-                    .gate_overwrites(
-                        KernelOperation::FsOverwrite,
-                        "cp",
-                        &[(dest.clone(), false)],
-                        parsed.confirm.as_deref(),
-                        |joined| format!("cp --confirm=<token> {src_display} {joined}"),
-                    )
+                    .snapshot_overwrites("cp",
+                        &[(dest.clone(), false)])
                     .await
                 {
                     Ok(s) => s,

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::ledger::KernelOperation;
+use crate::operation::KernelOperation;
 use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -95,13 +95,8 @@ impl Tool for Write {
         // are off). Under the enforce policy this returns an exit-2 pending-approval result; under trash
         // the prior content is snapshotted and returned for the CAS below.
         let snapshots = match ctx
-            .gate_overwrites(
-                KernelOperation::FsOverwrite,
-                "write",
-                &[(path.clone(), false)],
-                parsed.confirm.as_deref(),
-                |joined| format!("write --confirm=<token> {joined}"),
-            )
+            .snapshot_overwrites("write",
+                &[(path.clone(), false)])
             .await
         {
             Ok(s) => s,

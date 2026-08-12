@@ -8,7 +8,7 @@ use clap::{CommandFactory, Parser};
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::trash::TrashBackend;
-use crate::ledger::KernelOperation;
+use crate::operation::KernelOperation;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// KaishTrash tool: manage the system trash.

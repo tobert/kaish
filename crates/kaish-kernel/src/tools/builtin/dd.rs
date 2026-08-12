@@ -13,7 +13,7 @@ use std::path::Path;
 use crate::ast::Value;
 use crate::backend::ReadRange;
 use crate::interpreter::{value_to_string, ExecResult};
-use crate::ledger::KernelOperation;
+use crate::operation::KernelOperation;
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolCtx, ToolSchema};
 
 /// dd tool.
@@ -179,13 +179,8 @@ impl Tool for Dd {
                     s
                 };
                 let snapshots = match ctx
-                    .gate_overwrites(
-                        KernelOperation::FsOverwrite,
-                        "dd",
-                        &[(out.clone(), false)],
-                        confirm.as_deref(),
-                        |_joined| format!("{hint_cmd} confirm=<token>"),
-                    )
+                    .snapshot_overwrites("dd",
+                        &[(out.clone(), false)])
                     .await
                 {
                     Ok(s) => s,

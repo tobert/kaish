@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::backend::WriteMode;
 use crate::interpreter::ExecResult;
-use crate::ledger::KernelOperation;
+use crate::operation::KernelOperation;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Tee tool: duplicate stdin to stdout and files.
@@ -85,13 +85,8 @@ impl Tool for Tee {
         // trash the prior content is snapshotted before we write below.
         let targets: Vec<(String, bool)> = paths.iter().map(|p| (p.clone(), append)).collect();
         let snapshots = match ctx
-            .gate_overwrites(
-                KernelOperation::FsOverwrite,
-                "tee",
-                &targets,
-                parsed.confirm.as_deref(),
-                |joined| format!("tee --confirm=<token> {joined}"),
-            )
+            .snapshot_overwrites("tee",
+                &targets)
             .await
         {
             Ok(s) => s,

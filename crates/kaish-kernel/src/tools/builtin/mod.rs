@@ -200,7 +200,6 @@ pub(crate) fn get_path_string(
 pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(alias::Alias);
     registry.register(alias::Unalias);
-    registry.register(approvals::Approvals);
     registry.register(assert::Assert);
     registry.register(awk::Awk);
     registry.register(base64_tool::Base64Tool);

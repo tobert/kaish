@@ -360,12 +360,10 @@ pub struct LedgerAccess {
 /// What the write-model gate chose for a single truncating overwrite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MutationAction {
-    /// Write now — new file, append, excluded path, or both gates off.
+    /// Write now — new file, append, excluded path, or trash off.
     Proceed,
     /// Snapshot the prior content to trash, then write.
     TrashFirst,
-    /// Hold behind an approval request (exit 2 until it is granted).
-    Gate,
 }
 
 /// What a gated overwrite must still find at the target before it writes —
@@ -587,7 +585,6 @@ pub(crate) fn prefix_error(command: &str, mut result: ExecResult) -> ExecResult 
 /// real-FS data (Amy, 2026-06-17).
 pub(crate) fn decide_mutation_action(
     trash_enabled: bool,
-    enforce: bool,
     real_path: Option<&Path>,
     target_exists: bool,
     is_append: bool,
@@ -603,9 +600,9 @@ pub(crate) fn decide_mutation_action(
     if trash_enabled && file_size <= trash_max_size {
         return MutationAction::TrashFirst;
     }
-    if enforce {
-        return MutationAction::Gate;
-    }
+    // A target too large for the trash is written directly. kaish does not
+    // hold it back: nothing in the kernel decides whether an overwrite is
+    // allowed — an embedder that wants to refuse one reads the plan first.
     MutationAction::Proceed
 }
 
@@ -2121,68 +2118,41 @@ impl ExecContext {
         }
     }
 
-    /// Gate a batch of truncating overwrites through the approval ledger +
-    /// trash, the way `rm` gates deletes — so `tee`/`patch`/`sed -i` can't
-    /// silently clobber a file with no recoverable prior copy and no
-    /// approval.
+    /// Snapshot a batch of truncating overwrites into the trash, the way `rm`
+    /// snapshots deletes — so `tee`/`patch`/`sed -i` can't clobber a file
+    /// under `set -o trash` without leaving a recoverable prior copy.
     ///
     /// Each target is `(display_path, is_append)`. A path that doesn't exist
     /// yet or is an append has nothing to lose and passes. For an existing
     /// file under `set -o trash`, the prior content is copied to trash first
     /// (via `trash_bytes`) so it's recoverable; the file is left in place for
-    /// the caller to overwrite. Under the `fs.*` enforce policy (and trash
-    /// off) the batch needs approval: the first call returns an exit-2 result
-    /// with one request covering every gated path.
+    /// the caller to overwrite. With trash off, every target passes: the
+    /// kernel does not decide whether an overwrite is allowed.
     ///
     /// `Ok(snapshots)` means every snapshot is done and the caller may write
     /// all targets; `snapshots` maps each trash-snapshotted target's resolved
     /// path to its prior bytes, so a byte-oriented caller can pass them as the
     /// `expected` to `overwrite_checked` for a binary-safe compare-and-swap.
-    /// `Err(result)` is what the caller must return verbatim (the pending
-    /// request, a rejected key, or a trash failure — never fall through to a
-    /// destructive overwrite on error).
-    ///
-    /// `confirm_hint` builds the re-run command shown in the prompt, given
-    /// the space-joined gated paths. Most callers want
-    /// `|joined| format!("{command} --confirm=<token> {joined}")`, but a tool
-    /// whose argv carries operands the operation can't run without — e.g.
-    /// `sed -i`'s expression — must reinject them here, or the advertised
-    /// re-run will misbehave (or hang on stdin).
-    ///
-    /// `operation` is explicit rather than derived from `command`: spec §A.6
-    /// wants a new gate site to be a *compile* error until it names its
-    /// operation, and a string sniff on the command name would instead pick
-    /// a plausible wrong default in silence.
-    pub async fn gate_overwrites(
+    /// `Err(result)` is what the caller must return verbatim — a trash failure
+    /// is an error, never a fall-through to a destructive overwrite.
+    pub async fn snapshot_overwrites(
         &mut self,
-        operation: KernelOperation,
         command: &str,
         targets: &[(String, bool)],
-        confirm: Option<&str>,
-        confirm_hint: impl FnOnce(&str) -> String,
     ) -> Result<GateExpectations, ExecResult> {
         let mut expectations = GateExpectations::new();
         let trash_enabled = self.scope.trash_enabled();
-        let subscriptions = self.fs_subscriptions();
-        // Fast path: nothing is subscribed and nothing is trashed, so this
-        // costs one branch and allocates nothing. A large tree must not pay
-        // a per-path ledger cost unless an operator asked for one.
-        if !trash_enabled && !subscriptions.engaged() {
+        // Fast path: nothing is trashed, so this costs one branch and
+        // allocates nothing.
+        if !trash_enabled {
             return Ok(expectations);
         }
         let trash_max_size = self.scope.trash_max_size();
-        let operation_id = operation.id();
 
         struct Decided {
             display: String,
             resolved: PathBuf,
             action: MutationAction,
-            /// The `observe` subscription covering this target, when one
-            /// does. Kept beside the gate decision rather than folded into
-            /// it: observe records what happened, so it fires for a target
-            /// the trash caught and for a new file, neither of which the
-            /// gate holds.
-            observed: Option<kaish_types::approval::SubscriptionId>,
         }
         // Dedup by resolved path (keep first): a multi-file patch with an
         // explicit target lists the same file once per hunk-group, and we must
@@ -2209,18 +2179,8 @@ impl ExecContext {
             } else {
                 0
             };
-            // Matched on the **resolved** path, recorded under the display
-            // path. Matching the resolved path is what makes the glob a
-            // scope: `cd /workspace && tee secret` must match
-            // `/workspace/**`, and a relative path that escaped the glob
-            // would leave the scope meaningless. The record still shows what
-            // the command named, because that is the string an auditor
-            // reading the log can recognize.
-            let posture =
-                subscriptions.posture(&operation_id, PATH_KIND, &resolved.to_string_lossy());
             let action = decide_mutation_action(
                 trash_enabled,
-                posture.enforces(),
                 real.as_deref(),
                 exists,
                 *is_append,
@@ -2231,92 +2191,8 @@ impl ExecContext {
                 display: display.clone(),
                 resolved,
                 action,
-                observed: match posture {
-                    Posture::Observe(id) => Some(id),
-                    _ => None,
-                },
             });
         }
-
-        // One request covers every gated path in the batch. Each gated
-        // target declares the digest its content has *right now* as the
-        // transition's `from`, which becomes a redemption-time condition
-        // (spec §B.4): this is `cas_overwrite`'s snapshot-compare, lifted
-        // onto the ledger. The ledger stores the digest, never the content —
-        // the byte snapshot stays with the trash, where the recovery copy
-        // lives.
-        let gated: Vec<&Decided> = decided
-            .iter()
-            .filter(|d| matches!(d.action, MutationAction::Gate))
-            .collect();
-        if !gated.is_empty() {
-            let joined = gated
-                .iter()
-                .map(|d| d.display.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
-            let mut resources = Vec::with_capacity(gated.len());
-            for d in &gated {
-                // A target whose prior content cannot be digested cannot be
-                // protected by the condition, so it must not be written
-                // under one either — refuse rather than gate on a claim
-                // nobody can check later.
-                let from = crate::ledger::digest_path(&*self.backend, &d.resolved)
-                    .await
-                    .map_err(|e| {
-                        ExecResult::failure(
-                            1,
-                            format!("{command}: {}: cannot record the prior state: {e}", d.display),
-                        )
-                    })?;
-                // The same digest becomes this target's write-time
-                // expectation, so the gate pays for it once. The ledger
-                // catches a file that moved while the operator was deciding;
-                // this catches one that moves between the ledger's check and
-                // the write itself.
-                expectations.insert(
-                    d.resolved.clone(),
-                    OverwriteExpectation::Digest(from.clone()),
-                );
-                resources.push(Resource::transition(
-                    PATH_KIND,
-                    d.display.clone(),
-                    from,
-                    // The resulting content is not known here — `patch` and
-                    // `sed -i` compute it from the prior bytes — and an
-                    // unclaimed post-state is exactly what `Unspecified` is
-                    // for.
-                    kaish_types::approval::StateClaim::Unspecified,
-                ));
-            }
-            self.request_gate(
-                operation,
-                resources,
-                "the fs.* enforce policy is on and this overwrite has no recoverable prior copy",
-                confirm_hint(&joined),
-                confirm,
-            )
-            .await
-            .map_err(|result| prefix_error(command, result))?;
-        }
-
-        // The observe record goes on the log only once the enforce gate has
-        // authorized the batch. A batch held at exit 2 never runs, so
-        // recording it would claim an operation happened that did not.
-        let observed: Vec<kaish_types::approval::ObservedResource> = decided
-            .iter()
-            .filter_map(|d| {
-                d.observed.map(|subscription| {
-                    kaish_types::approval::ObservedResource::new(
-                        PATH_KIND,
-                        d.display.clone(),
-                        d.resolved.to_string_lossy(),
-                        subscription,
-                    )
-                })
-            })
-            .collect();
-        self.record_observed(operation, command, observed).await?;
 
         // Snapshot prior content for every trash-first target before any write,
         // keeping the bytes so a byte-oriented caller can CAS against them.

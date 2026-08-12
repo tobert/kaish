@@ -17,7 +17,7 @@ use std::path::Path;
 use crate::ast::Value;
 use crate::backend::PatchOp;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::ledger::KernelOperation;
+use crate::operation::KernelOperation;
 use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -168,13 +168,8 @@ impl Tool for Patch {
                 })
                 .collect();
             if let Err(blocked) = ctx
-                .gate_overwrites(
-                    KernelOperation::FsOverwrite,
-                    "patch",
-                    &targets,
-                    parsed.confirm.as_deref(),
-                    |joined| format!("patch --confirm=<token> {joined}"),
-                )
+                .snapshot_overwrites("patch",
+                    &targets)
                 .await
             {
                 return blocked;

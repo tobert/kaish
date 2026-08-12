@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::BackendError;
 use crate::interpreter::ExecResult;
-use crate::ledger::KernelOperation;
+use crate::operation::KernelOperation;
 use crate::tools::{is_trash_excluded, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// clap-derived argv layer for rm.

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::{BackendError, KernelBackend, WriteMode};
 use crate::interpreter::ExecResult;
-use crate::ledger::KernelOperation;
+use crate::operation::KernelOperation;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Mv tool: move/rename files and directories.
@@ -116,13 +116,8 @@ impl Tool for Mv {
             if dst_is_existing_file {
                 let src_display = &sources[0];
                 if let Err(blocked) = ctx
-                    .gate_overwrites(
-                        KernelOperation::FsRename,
-                        "mv",
-                        &[(dest.clone(), false)],
-                        parsed.confirm.as_deref(),
-                        |joined| format!("mv --confirm=<token> {src_display} {joined}"),
-                    )
+                    .snapshot_overwrites("mv",
+                        &[(dest.clone(), false)])
                     .await
                 {
                     return blocked;
