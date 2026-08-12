@@ -51,14 +51,11 @@ enum RmAction {
     Trash(PathBuf),
     /// Permanent delete (via backend).
     Delete,
-    /// Hold behind an approval request (exit 2 until it is granted).
-    Gate,
 }
 
-/// Determine the rm action based on trash/approval settings and file properties.
+/// Determine the rm action from the trash settings and the file's properties.
 fn decide_rm_action(
     trash_enabled: bool,
-    enforce: bool,
     real_path: Option<&Path>,
     file_size: Option<u64>,
     trash_max_size: u64,
@@ -69,11 +66,7 @@ fn decide_rm_action(
     // *through* the link, so trashing a symlink would move its TARGET to trash —
     // exactly the follow-the-symlink hazard we're closing. The link itself is
     // trivially recreatable, so symlinks bypass trash and are unlinked directly.
-    // The gate still applies (it gates on the kaish path, not the resolved target).
     if is_symlink {
-        if enforce {
-            return RmAction::Gate;
-        }
         return RmAction::Delete;
     }
 
@@ -91,18 +84,13 @@ fn decide_rm_action(
                 if size <= trash_max_size {
                     return RmAction::Trash(rp.to_path_buf());
                 }
-                // File too big for trash — fall through to the gate check
-                if enforce {
-                    return RmAction::Gate;
-                }
+                // File too big for trash — deleted directly. Nothing in
+                // the kernel holds a delete back; an embedder that wants to
+                // refuse one reads the plan before it runs.
                 return RmAction::Delete;
             }
         }
         // Virtual path (no real path) or excluded path — fall through
-    }
-
-    if enforce {
-        return RmAction::Gate;
     }
 
     RmAction::Delete
@@ -159,28 +147,12 @@ impl Tool for Rm {
 
         let trash_enabled = ctx.scope.trash_enabled();
         let trash_max_size = ctx.scope.trash_max_size();
-        // The subscription filter, taken once for the whole batch. With
-        // nothing subscribed and no enforce policy, `operation_id` is never
-        // built and no path is classified, so a 10,000-path `rm -rf` does no
-        // ledger work at all — the same early-out `gate_overwrites` takes.
-        let subscriptions = ctx.fs_subscriptions();
-        let operation_id = subscriptions
-            .engaged()
-            .then(|| KernelOperation::FsRemove.id());
-
-        // Collect per-path decisions in one pass so ONE approval request
-        // covers the whole batch — a request names its resources as a set, and
-        // a grant authorizes exactly that set. Stat-failures short-circuit
-        // unless -f.
+        // Collect per-path decisions in one pass. Stat failures
+        // short-circuit unless -f.
         struct Decision {
             path: String,
             resolved: PathBuf,
             action: RmAction,
-            /// The `observe` subscription covering this path, when one does.
-            /// Separate from `action` because observe records the delete
-            /// whether the trash caught it or not — a subscription records
-            /// every mutation, not only the gated ones.
-            observed: Option<kaish_types::approval::SubscriptionId>,
         }
         let mut decisions: Vec<Decision> = Vec::with_capacity(args.positional.len());
         for value in &args.positional {
@@ -204,20 +176,8 @@ impl Tool for Rm {
             let file_size = entry.as_ref().map(|s| s.size);
             let is_dir = entry.as_ref().is_some_and(|s| s.is_dir());
             let is_symlink = entry.as_ref().is_some_and(|s| s.is_symlink());
-            // Matched on the **resolved** path so a relative path cannot
-            // escape the glob; the record carries both spellings.
-            // `gate_overwrites` does the same.
-            let posture = match operation_id.as_ref() {
-                Some(operation) => subscriptions.posture(
-                    operation,
-                    crate::ledger::PATH_KIND,
-                    &resolved.to_string_lossy(),
-                ),
-                None => crate::ledger::Posture::Unsubscribed,
-            };
             let action = decide_rm_action(
                 trash_enabled,
-                posture.enforces(),
                 real_path.as_deref(),
                 file_size,
                 trash_max_size,
@@ -228,73 +188,12 @@ impl Tool for Rm {
                 path,
                 resolved,
                 action,
-                observed: match posture {
-                    crate::ledger::Posture::Observe(id) => Some(id),
-                    _ => None,
-                },
             });
         }
 
         if decisions.is_empty() {
             // All paths were missing under -f; nothing to do.
             return ExecResult::success("");
-        }
-
-        // If ANY decision is Gate, one request covers the full set of gated
-        // paths so the operator approves the batch once and the user re-runs
-        // the same argv with `--confirm=<token>`. Without an approval, return
-        // the pending request listing every path that raised it.
-        let gated_paths: Vec<&str> = decisions
-            .iter()
-            .filter(|d| matches!(d.action, RmAction::Gate))
-            .map(|d| d.path.as_str())
-            .collect();
-        if !gated_paths.is_empty() {
-            let joined = gated_paths.join(" ");
-            if let Err(result) = ctx
-                .request_gate(
-                    KernelOperation::FsRemove,
-                    // No transition claim: a delete's prior state is the
-                    // whole subtree, and digesting one per path would make
-                    // `rm -rf` over a large tree pay a full read per file.
-                    // A resource with no transition implies no condition, so
-                    // the grant is unconditioned — and the record says so.
-                    gated_paths
-                        .iter()
-                        .map(|p| kaish_types::approval::Resource::plain("path", *p))
-                        .collect(),
-                    "the fs.* enforce policy is on and the trash cannot catch this delete",
-                    format!("rm --confirm=<token> {joined}"),
-                    confirm.as_deref(),
-                )
-                .await
-            {
-                return crate::tools::prefix_error("rm", result);
-            }
-            // Authorized — fall through and execute each decision.
-        }
-
-        // The observe record lands after the gate authorized the batch. A
-        // delete held at exit 2 never happens, so recording it would put an
-        // operation on the log that never ran.
-        let observed: Vec<kaish_types::approval::ObservedResource> = decisions
-            .iter()
-            .filter_map(|d| {
-                d.observed.map(|subscription| {
-                    kaish_types::approval::ObservedResource::new(
-                        crate::ledger::PATH_KIND,
-                        d.path.clone(),
-                        d.resolved.to_string_lossy(),
-                        subscription,
-                    )
-                })
-            })
-            .collect();
-        if let Err(result) = ctx
-            .record_observed(KernelOperation::FsRemove, "rm", observed)
-            .await
-        {
-            return result;
         }
 
         // Execute each decision. Continue past per-path errors so users see
@@ -318,7 +217,7 @@ impl Tool for Rm {
                         )
                     })
                 }
-                RmAction::Gate | RmAction::Delete => {
+                RmAction::Delete => {
                     // Single recursive remover lives on the backend (symlink-safe:
                     // it lstats the recurse decision and unlinks links directly).
                     match ctx.backend.remove(Path::new(&d.resolved), recursive).await {
