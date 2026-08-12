@@ -21,11 +21,6 @@
 //!   through `ctx.backend()`.
 //! - [`GlobalFlags`], [`schema_from_clap`], [`validate_against_schema`] — the
 //!   clap-reflection and validation machinery shared by all builtins.
-//! - [`ApprovalOutcome`], [`AttemptHandle`], [`Approvals`] — the
-//!   approval-ledger surface behind [`ToolCtx::request_approval`]
-//!   (`docs/approval-ledger.md`, ledger PR 3). A plugin depending on only
-//!   this crate can gate a privileged operation with no `kaish-kernel`
-//!   dependency and no downcast.
 //! - [`StateResolver`] — reads one resource kind's current state, so a
 //!   grant's preconditions are re-checked at redemption (ledger PR 6). The
 //!   kernel ships the `path` resolver; a plugin registers one per kind it
@@ -38,7 +33,6 @@
 //! The pure-data types tools traffic in (`Value`, `ToolArgs`, `ToolSchema`,
 //! `ExecResult`, `OutputData`, …) live one layer down in `kaish-types`.
 
-mod approval;
 mod backend;
 mod clap_schema;
 mod ctx;
@@ -47,10 +41,6 @@ mod issue;
 mod statement;
 mod tool;
 
-pub use approval::{
-    ApprovalOutcome, Approvals, AttemptHandle, PendingApproval, ResolverError,
-    ResumeAction, StateResolver,
-};
 pub use statement::{
     ClassificationError, CommandNameClassifier, ExecutionContext, MountAccess, MountClass,
     MountDescriptor, StatementAssessment, StatementClassificationInput, StatementClassifier,

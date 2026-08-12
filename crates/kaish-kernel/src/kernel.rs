@@ -1298,7 +1298,6 @@ impl Kernel {
                 for (name, value) in initial_vars.clone() {
                     scope.set_exported(name, value);
                 }
-                scope.set_policy_pinned(policy_pinned);
                 scope.set_trash_enabled(trash_enabled);
                 scope
             }),
@@ -1331,13 +1330,6 @@ impl Kernel {
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
         })
-    }
-
-    /// The decision chain this kernel's gate sites run
-    /// (spec §C.2). The seam `ToolCtx::request_approval` (PR 3) and the
-    /// rewritten gate sites (PR 5) call.
-    pub fn decision_chain(&self) -> &Arc<crate::ledger::DecisionChain> {
-        &self.approvals.chain
     }
 
     /// Plan every statement of `source` without executing anything —
@@ -1483,7 +1475,6 @@ impl Kernel {
             // One ledger for the whole session: a background job's requests
             // must land in the log the foreground reads, and its chain must
             // be the same chain.
-            approvals: self.approvals.clone(),
             request_timeout: self.request_timeout,
             kill_grace: self.kill_grace,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
@@ -1699,262 +1690,23 @@ impl Kernel {
             redirects: Vec::new(),
         };
 
-        let stmt = Stmt::Command(command.clone());
         let pipeline = crate::ast::Pipeline {
             commands: vec![command],
             background: false,
         };
-        // Tap and dispatch run under one watchdog, as they do at the string
-        // door: the tap can post a ledger entry and run the decision chain,
-        // and a watchdog installed only around the dispatch would leave that
-        // work outside the bound the caller asked for.
         let work = async {
-            // The second — and last — statement tap site (spec §C.6). The
-            // argv door bypasses the statement loop entirely, and a door the
-            // gate does not watch is not a gate. Its capture is `Exact`, not
-            // `Statement`: it already holds a tool name and an argv, and
-            // `confirm`'s existing arm replays that form.
-            let planned = crate::ast::plan::plan_statement(&stmt);
-            let capture = argv_capture(name, argv, &planned.presented_keys);
-            let gated = match self.tap_statement(planned, capture).await {
-                crate::tools::StatementTap::Proceed { gated } => gated,
-                crate::tools::StatementTap::Halt(held) => return Ok(*held),
-            };
             let result = self.execute_pipeline(&pipeline).await?;
             // A gate raised while evaluating inside the dispatched tool — a
             // user tool body's `$(…)` — surfaces as this call's own held
             // result, and must not strand in the slot for the next serialized
-            // call to mis-take (spec §I.5; the statement loop and the confirm
-            // replay door take the slot the same way).
+            // call to mis-take.
             if let Some(held) = self.take_eval_hold() {
-                if gated {
-                    self.exec_ctx.write().await.settle_attempts(held.code).await;
-                }
                 return Ok(*held);
-            }
-            if gated {
-                self.exec_ctx.write().await.settle_attempts(result.code).await;
             }
             Ok(result)
         };
         let result = self.run_under_watchdog(timeout, &cancel, work).await?;
         self.update_last_result(&result).await;
-        Ok(result)
-    }
-
-    /// Fulfill a granted approval request by replaying exactly what was
-    /// captured — the highest-fidelity approval path (spec §B.4).
-    ///
-    /// Inspect a gated result with [`ExecResult::approval_request`], apply
-    /// whatever policy (allowlist, model review) over `view.operation` and
-    /// `view.resources`, `handle.grant(...)` it, then call this to perform
-    /// it. The replay reserves the attempt **first** and dispatches with
-    /// that correlation on the context, so the gate site it re-enters
-    /// *matches* its fresh draft against the granted request instead of
-    /// posting a second one. A draft that does not match is refused
-    /// (`DraftMismatch`) and nothing is performed.
-    ///
-    /// Two captures replay. `Capture::Exact` re-dispatches the captured tool
-    /// and argv. `Capture::Statement` re-parses the captured program source
-    /// and runs exactly the held statement (spec §C.6), in the originating
-    /// session — earlier statements already ran there, and their variables
-    /// and cwd still hold, so they are not re-run.
-    ///
-    /// The handle is a required argument because that is what makes this an
-    /// authority action: the signature cannot be satisfied without one, so
-    /// there is no bridge to it from anything holding only a `Kernel`.
-    ///
-    /// # Errors
-    ///
-    /// Exits 2 when the request's [`Capture`](kaish_types::approval::Capture)
-    /// is neither `Exact` nor `Statement`, naming the variant found — a
-    /// request raised outside a dispatch seam (`Capture::DirectExecution`, a
-    /// unit test) is still grantable and still redeemable by presenting its
-    /// key with `--confirm=<token>`; what it is not is replayable from here.
-    ///
-    /// Exits 1 when a `Capture::Statement`'s source no longer parses, or
-    /// parses to fewer statements than the captured index — the record names
-    /// a statement that is not there, and running a different one would be a
-    /// wrong replay.
-    ///
-    /// Exits 1 when the request has no live grant, was already settled
-    /// successfully (the settled outcome is reported instead of re-running
-    /// the operation — spec §B.4), or is otherwise terminal.
-    ///
-    /// If the request carries a `job_id` (the gate came from a *backgrounded*
-    /// job — `rm x &` reaching its gate), a successful replay also retires
-    /// that job from the `JobManager` (GH #124 part 4) — mirroring the manual
-    /// discard path (`kill --discard %N`), automated. A failed replay leaves
-    /// the job in place for inspection or retry. Guarded by `is_gated` so a
-    /// stale or foreign `job_id` can never remove an unrelated running job.
-    pub async fn confirm(
-        &self,
-        handle: &crate::ledger::ApproverHandle,
-        request_id: &kaish_types::approval::RequestId,
-    ) -> Result<ExecResult> {
-        // The handle is the capability, not a lookup key — naming it here
-        // keeps `confirm` unreachable from a session that holds only a
-        // `Kernel`. It also has to be *this* ledger's handle, or the request
-        // it names is not the one about to be replayed.
-        let Some(chain) = handle.approvals_view().get(request_id) else {
-            return Ok(ExecResult::failure(
-                1,
-                format!("confirm: no approval request {request_id} in this ledger"),
-            ));
-        };
-        // Two replayable capture forms, and the re-parse happens here —
-        // outside the execute lock, because parsing is pure computation and
-        // holding the lock across it buys nothing (spec §C.6).
-        let replay = match &chain.request.capture {
-            kaish_types::approval::Capture::Exact(invocation) => Replay::Argv(invocation.clone()),
-            kaish_types::approval::Capture::Statement { source, index } => {
-                let program = match parse(source) {
-                    Ok(program) => program,
-                    Err(errors) => {
-                        let detail = errors
-                            .iter()
-                            .map(|e| e.format(source))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        return Ok(ExecResult::failure(
-                            1,
-                            format!("confirm: the held statement's source no longer parses:\n{detail}"),
-                        ));
-                    }
-                };
-                match program.statements.into_iter().nth(*index) {
-                    Some(stmt) => Replay::Statement(Box::new(stmt)),
-                    None => {
-                        return Ok(ExecResult::failure(
-                            1,
-                            format!(
-                                "confirm: request {request_id} holds statement {index}, and its \
-                                 source parses to fewer statements than that"
-                            ),
-                        ))
-                    }
-                }
-            }
-            other => {
-                let variant = match other {
-                    kaish_types::approval::Capture::DirectExecution => "DirectExecution",
-                    kaish_types::approval::Capture::Unavailable { .. } => "Unavailable",
-                    kaish_types::approval::Capture::CaptureFailed { .. } => "CaptureFailed",
-                    // `Capture` is `#[non_exhaustive]`; an unknown variant is
-                    // still not replayable.
-                    _ => "an unrecognized capture status",
-                };
-                return Ok(ExecResult::failure(
-                    2,
-                    format!(
-                        "confirm: request {request_id} has capture {variant}, which cannot be \
-                         replayed from here; re-run the command with --confirm=<token> instead"
-                    ),
-                ));
-            }
-        };
-
-        // Everything from here to the clear is one critical section. The
-        // reservation and the replay correlation are single slots on shared
-        // kernel state, so two concurrent confirms that interleave would let
-        // one replay adopt the other's authorization (see
-        // `execute_argv_locked`).
-        let _guard = self.acquire_execute_lock().await;
-
-        // Re-observe the grant's preconditions before reserving anything
-        // (spec §B.4). This is the redemption the check exists for: minutes
-        // may have passed between the request and the operator's decision,
-        // and the whole point is that a file which moved in that window does
-        // not get overwritten. The I/O runs here, outside the ledger lock;
-        // the ledger decides on what it saw.
-        let report = {
-            let ctx = self.exec_ctx.read().await;
-            let conditions = chain
-                .grant
-                .as_ref()
-                .map(|grant| grant.conditions.clone())
-                .unwrap_or_default();
-            ctx.observe_conditions(&conditions).await
-        };
-
-        // Reserve the attempt before dispatching (spec §B.4): a bare replay
-        // would re-enter the gate site, build a fresh draft, and post a
-        // *second* request — the approval would authorize a request nobody
-        // is waiting on.
-        let attempt = match self
-            .approvals
-            .requester
-            .redeem(request_id, self.approvals.principal.clone(), report)
-            .await
-        {
-            Ok(attempt) => attempt,
-            Err(err) => return Ok(ExecResult::failure(1, format!("confirm: {err}"))),
-        };
-
-        {
-            let mut ctx = self.exec_ctx.write().await;
-            ctx.set_redemption(request_id.clone(), attempt.attempt_id());
-        }
-        let result = match &replay {
-            Replay::Argv(invocation) => {
-                let argv: Vec<Value> =
-                    invocation.argv.iter().map(|a| Value::String(a.clone())).collect();
-                self.execute_argv_locked(&invocation.tool, &argv).await
-            }
-            // Exactly the held statement, through the statement machinery, in
-            // the originating session — earlier statements' effects
-            // (variables, cwd) are session state and still hold (spec §C.6).
-            // The tap is suppressed under the redemption correlation, so this
-            // posts no second `Observed`; the statement gate still runs, so
-            // the draft matcher checks the replay against what was granted.
-            Replay::Statement(stmt) => {
-                self.replay_statement_locked(stmt, chain.request.capture.clone()).await
-            }
-        };
-        {
-            // Clear it whatever happened: a stale correlation would let the
-            // *next* command adopt an authorization that was not for it.
-            let mut ctx = self.exec_ctx.write().await;
-            ctx.clear_redemption();
-        }
-        // Settle the reservation with what the replay actually did — **before
-        // the `?`**, so an execution error settles too. Usually redundant:
-        // the gate site adopted the attempt and the dispatch seam already
-        // settled it, and settlement is idempotent by `AttemptId`, so this
-        // appends nothing. It is load-bearing for the replay that never
-        // reaches its gate at all: `rm` on a path that vanished between the
-        // grant and the replay fails at its `lstat` and returns before
-        // `request_gate`, which would otherwise leave the attempt `Reserved`
-        // forever and make every later redemption fail `AttemptInFlight` —
-        // a grant an operator could no longer use. An erroring replay is the
-        // same hazard reached the other way, which is why `Outcome::Error`
-        // is recorded rather than propagated past an unsettled attempt.
-        // A non-zero settlement does not consume the grant (spec §A.1), so
-        // the retry stays available either way.
-        let outcome = match &result {
-            Ok(result) => kaish_types::approval::Outcome::Exit(result.code),
-            Err(err) => kaish_types::approval::Outcome::Error(err.to_string()),
-        };
-        if let Err(err) = self
-            .approvals
-            .requester
-            .settle_by_ids(request_id, attempt.attempt_id(), outcome)
-            .await
-        {
-            tracing::debug!(error = %err, "confirm: settling the replayed attempt did not apply");
-        }
-
-        let result = result?;
-
-        if result.ok()
-            && let Some(id) = chain.request.job_id
-        {
-            let job_id = crate::scheduler::JobId(id);
-            if self.jobs.is_gated(job_id).await {
-                self.jobs.remove(job_id).await;
-            }
-        }
-
         Ok(result)
     }
 
@@ -1995,9 +1747,6 @@ impl Kernel {
             // replay's own held result, and must not strand in the slot for a
             // later door to mis-take (spec §I.5).
             if let Some(held) = self.take_eval_hold() {
-                if gated {
-                    self.exec_ctx.write().await.settle_attempts(held.code).await;
-                }
                 return Ok(*held);
             }
             let flow = flow_result?;
@@ -2013,9 +1762,6 @@ impl Kernel {
             };
             if !drained.is_empty() {
                 result.err = format!("{}{}", drained, result.err);
-            }
-            if gated {
-                self.exec_ctx.write().await.settle_attempts(result.code).await;
             }
             Ok(result)
         };
@@ -2764,39 +2510,6 @@ impl Kernel {
         Ok(result)
     }
 
-    /// Record one top-level statement and gate it if the classifier says so
-    /// (`docs/approval-ledger.md` §C.6).
-    ///
-    /// Called from exactly two sites: the top-level statement loop, and
-    /// [`Self::execute_argv_locked`] — the argv door bypasses the statement
-    /// loop, and a door the gate does not watch is not a gate. Never called
-    /// inside `execute_stmt_flow` or a nested statement loop (`source`, a
-    /// user tool's body, a `$(…)` block): one entry per top-level statement
-    /// is the rule, so a 1,000-iteration loop posts one entry rather than a
-    /// thousand.
-    ///
-    /// The `exec_ctx` write lock is held across the decision chain, which
-    /// returns in microseconds: the chain is a ledger lookup plus a
-    /// synchronous [`Policy::evaluate`](crate::ledger::Policy::evaluate),
-    /// and nothing in it awaits an embedder (spec §C.2). A
-    /// [`Policy`](crate::ledger::Policy) reaches the ledger through its own
-    /// handles rather than through this context.
-    /// `capture` is built from the statement's presented credentials, so a
-    /// caller that captures source text can redact it — see
-    /// [`crate::ast::plan::redact_keys`]. The keys reach the gate as
-    /// `presented` and are stripped from nothing that executes.
-    async fn tap_statement(
-        &self,
-        planned: crate::ast::plan::StatementPlan,
-        capture: kaish_types::approval::Capture,
-    ) -> crate::tools::StatementTap {
-        let classifier = self.approvals.statement_classifier.clone();
-        let presented = planned.presented_keys.first().map(String::as_str);
-        let mut ctx = self.exec_ctx.write().await;
-        ctx.tap_statement(planned.plan, capture, presented, classifier.as_ref())
-            .await
-    }
-
     /// Settle the attempt the statement gate reserved, with what the
     /// statement actually did. One call per authorized statement — an
     /// attempt left `Reserved` blocks every later redemption of its grant.
@@ -2807,7 +2520,6 @@ impl Kernel {
             ControlFlow::Return { value } => value.code,
             ControlFlow::Break { result, .. } | ControlFlow::Continue { result, .. } => result.code,
         };
-        self.exec_ctx.write().await.settle_attempts(code).await;
     }
 
     /// Execute a single statement, returning control flow information.
@@ -3440,7 +3152,6 @@ impl Kernel {
             overlay_handle: self.overlay_handle.clone(),
             // Correlate this command's requests with the background job it
             // runs for, if any — the ONE place `job_id` is stamped.
-            ledger_access: Some(self.approvals.access(self.bg_job_id.map(|j| j.0))),
             // A replay correlation belongs to exactly one dispatch. Moved
             // (not cloned) out of the parent context at the dispatch seam —
             // see the stdin hand-off below, which takes it under the same
@@ -3452,7 +3163,6 @@ impl Kernel {
             gate_parent: ec.gate_parent.clone(),
             redemption: None,
             capture_failure: None,
-            attempts: Vec::new(),
         })
     }
 
@@ -3816,7 +3526,6 @@ impl Kernel {
                     Ok(tool_result) => {
                         // An embedder tool can gate too — settle whatever it
                         // reserved with the code it reported.
-                        ctx.settle_attempts(i64::from(tool_result.code)).await;
                         let mut scope = self.scope.write().await;
                         *scope = ctx.scope.clone();
                         // Preserve every field (data/content_type/baggage/approval,
@@ -3928,7 +3637,6 @@ impl Kernel {
             // reason: an authorization `Kernel::confirm` reserved is for
             // exactly one dispatch, and a copy left behind would let the
             // next command adopt it.
-            ctx.adopt_redemption(ec.take_redemption());
         }
 
         // Honor --json before the builtin runs so its setting survives a clap
@@ -3982,7 +3690,6 @@ impl Kernel {
         // reaches this line (a dropped future, a panic) settles
         // `Unknown{Cancelled}` when the guards drop instead, because a tool
         // that was interrupted may already have written.
-        ctx.settle_attempts(result.code).await;
 
         // Sync mutations back. Tools may have changed scope (set/cd),
         // cwd/prev_cwd (cd), and aliases (alias). Also return any unused pipe
@@ -5229,8 +4936,6 @@ impl Kernel {
             {
                 let scope = self.scope.read().await;
                 isolated_scope.set_pid(scope.pid());
-                isolated_scope.set_approvals_enabled(scope.approvals_enabled());
-                isolated_scope.set_policy_pinned(scope.policy_pinned());
                 isolated_scope.set_trash_enabled(scope.trash_enabled());
                 isolated_scope.set_trash_max_size(scope.trash_max_size());
             }
@@ -6121,19 +5826,15 @@ impl Kernel {
         {
             let mut scope = self.scope.write().await;
             let pid = scope.pid();
-            let approvals_enabled = scope.approvals_enabled();
-            let policy_pinned = scope.policy_pinned();
             let trash_enabled = scope.trash_enabled();
             let mut fresh = Scope::new();
             fresh.set_pid(pid);
             for (name, value) in self.initial_vars.clone() {
                 fresh.set_exported(name, value);
             }
-            fresh.set_approvals_enabled(approvals_enabled);
             // The pin travels with the policy it pins — a `reset()` between
             // requests that dropped it would hand the next request an
             // unpinned session (spec §F.3 item 3).
-            fresh.set_policy_pinned(policy_pinned);
             fresh.set_trash_enabled(trash_enabled);
             *scope = fresh;
         }
@@ -6173,14 +5874,6 @@ impl Kernel {
         let ids = self.jobs.list_ids().await;
         let mut cancelled = 0;
         for id in ids {
-            crate::ledger::cancel_job_request(
-                &self.approvals.requester,
-                &self.approvals.principal,
-                &self.jobs,
-                id,
-                kaish_types::approval::CancelReason::Withdrawn,
-            )
-            .await;
             if self.jobs.mark_killed_and_cancel(id, false).await {
                 cancelled += 1;
             }
@@ -6216,20 +5909,6 @@ impl Kernel {
     pub async fn shutdown(&self) -> Result<()> {
         let ids = self.jobs.list_ids().await;
         self.cancel_all_jobs().await;
-        // Every request this kernel's scope still owns, whether or not a job
-        // holds it (`docs/approval-ledger.md` §B.5, rows 3 and 4). A kaish
-        // session *is* a kernel, so the session and kernel obligations are
-        // one call: `with_session` names the session, and the scope is what
-        // separates this kernel's requests from another session's sharing
-        // the same ledger.
-        crate::ledger::cancel_scope(
-            &self.approvals.requester,
-            &self.approvals.approvals,
-            &self.approvals.principal,
-            &self.approvals.scope,
-            kaish_types::approval::CancelReason::Withdrawn,
-        )
-        .await;
 
         let bound = self.jobs.kill_grace() + Duration::from_secs(3);
         for id in ids {
@@ -6330,7 +6009,6 @@ impl Kernel {
             // reason: an authorization `Kernel::confirm` reserved is for
             // exactly one dispatch, and a copy left behind would let the
             // next command adopt it.
-            ctx.adopt_redemption(ec.take_redemption());
         }
 
         Ok(result)

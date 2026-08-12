@@ -217,7 +217,7 @@ pub struct ExecContext {
     /// value in production — is what makes `ToolCtx::request_approval`
     /// return `Unsupported`: no `KernelConfig::with_ledger` exists yet
     /// (that builder is PR 4), so nothing sets this outside a test.
-    pub ledger_access: Option<LedgerAccess>,
+
 
     /// Kernel-internal replay correlation (`docs/approval-ledger.md` §B.4).
     /// `Kernel::confirm` reserves the attempt against an already-granted
@@ -247,15 +247,6 @@ pub struct ExecContext {
     /// only: a grant on a parent never authorizes a child (spec §A.7).
     pub(crate) gate_parent: Option<RequestId>,
 
-    /// Attempts reserved during this invocation, each in its drop-safe
-    /// guard (spec §C.1). The dispatch seam settles them with the real exit
-    /// code when `tool.execute()` returns; dropping this context instead —
-    /// a cancelled future, a panic — settles them `Unknown{Cancelled}`,
-    /// because a tool that was interrupted may already have written.
-    ///
-    /// Also the ownership record `settle_with` checks: a tool may report an
-    /// outcome for an attempt *this* context reserved and no other.
-    pub(crate) attempts: Vec<AttemptGuard>,
 }
 
 /// The resource kind a statement's commands are named under (spec §C.6):
@@ -284,14 +275,7 @@ pub(crate) enum StatementTap {
 ///
 /// A distinct type rather than a sentinel outcome, because the two are not
 /// the same answer: `Authorized` is final and the caller returns it, and
-/// `Rebind` means "keep going, post a fresh request" — the difference between
-/// refusing an operation and re-asking for it.
-enum Rebind {
-    /// The redemption path reached a decision. Return it.
-    Authorized(kaish_tool_api::ApprovalOutcome),
-    /// The binding moved. Nothing was redeemed; post a new request.
-    Rebind,
-}
+
 
 /// Kernel-internal correlation between a replay and the request it fulfills
 /// (`docs/approval-ledger.md` §B.4). Never crosses a public API, never
@@ -302,55 +286,6 @@ pub(crate) struct RedemptionContext {
     pub request_id: RequestId,
     /// The attempt `Kernel::confirm` already reserved against it.
     pub attempt_id: AttemptId,
-}
-
-/// Everything [`ExecContext`]'s `ToolCtx::request_approval` needs to post a
-/// request against a real ledger (`docs/approval-ledger.md` §D.1, ledger PR
-/// 3). Grouped into one field rather than four scattered ones so a future
-/// `KernelConfig::with_ledger` (PR 4) has a single seam to populate.
-#[derive(Clone)]
-pub struct LedgerAccess {
-    /// The obligations handle — posts `Requested`/`Redeemed`/`Settled`.
-    pub requester: Requester,
-    /// The read side, for `ToolCtx::approvals`.
-    pub approvals: Approvals,
-    /// The decision chain (spec §C.2) a fresh request runs
-    /// through. Holds the ledger's authority internally; nothing reachable
-    /// from script or tool code can get that authority back out of it.
-    pub chain: Arc<DecisionChain>,
-    /// The backgrounded job this context runs on behalf of, stamped onto
-    /// every request it posts. **The one stamping site** — `Job::approval()`
-    /// and `wait` both read it back off the record rather than each
-    /// re-stamping their own copy.
-    pub job_id: Option<u64>,
-    /// Who this context's requests are attributed to. Set by
-    /// `KernelConfig::with_principal`.
-    pub principal: Principal,
-    /// Which kernel, session, and actor this context's requests belong to
-    /// (spec §A.7). Stamped onto every request and every `Observed` entry
-    /// this context posts, and recorded in the [`PlanBinding`] a redemption
-    /// must still match. Set by `KernelConfig::with_session`; a
-    /// single-session kernel like the REPL carries a kernel id and nothing
-    /// else.
-    pub scope: ApprovalScope,
-    /// The approval authority **this session** holds, if any (spec §D.3).
-    /// `None` means the session may not approve anything, and `approvals
-    /// grant` exits 1 naming that.
-    ///
-    /// The `approvals` builtin is the only reader, and the registry test in
-    /// `approvals_builtin_tests.rs` is what keeps it that way. This is a
-    /// deliberate widening of what a builtin can reach: the type-system tier
-    /// of the enforcement ladder (§E.2, tier 1) stops at the crate boundary,
-    /// and inside the crate the boundary is the one builtin that reads this
-    /// field. The threat model says so explicitly — the ledger does not
-    /// defend against hostile Rust compiled into the process (§A.2).
-    pub session_authority: Option<crate::ledger::ApproverHandle>,
-    /// The embedder- and plugin-registered [`StateResolver`]s a redemption
-    /// consults for non-`path` resource kinds (spec §B.4). `path` is not in
-    /// here — it is served by a [`PathResolver`] built from *this* context's
-    /// backend and cwd, so a request posted inside an overlay is re-observed
-    /// through the same overlay.
-    pub resolvers: Arc<StateResolvers>,
 }
 
 /// What the write-model gate chose for a single truncating overwrite.
@@ -376,9 +311,6 @@ pub(crate) enum MutationAction {
 pub enum OverwriteExpectation {
     /// The exact prior bytes, from the trash snapshot.
     Bytes(Vec<u8>),
-    /// The prior content's digest, re-derived through the backend at write
-    /// time. The same claim the ledger holds as the grant's condition.
-    Digest(kaish_types::approval::StateClaim),
 }
 
 /// What each gated target must still look like when the caller writes it,
@@ -403,114 +335,6 @@ pub type GateExpectations = std::collections::HashMap<PathBuf, OverwriteExpectat
 /// `/v` prefix exclusion here would silently strip it.
 pub(crate) fn is_trash_excluded(real_path: Option<&Path>) -> bool {
     matches!(real_path, Some(rp) if rp.starts_with("/tmp"))
-}
-
-/// The resource references a draft names, as the draft matcher compares them.
-pub(crate) fn resource_refs(draft: &ApprovalRequestDraft) -> Vec<ResourceRef> {
-    let mut refs: Vec<ResourceRef> = draft.resources.iter().map(|r| r.to_ref()).collect();
-    refs.sort_by(|a, b| (&a.kind, &a.id).cmp(&(&b.kind, &b.id)));
-    refs.dedup();
-    refs
-}
-
-/// Whether a fresh draft claims the same prior state for each resource as
-/// the request that was approved (spec §B.4).
-///
-/// **The replay path only.** `draft_matches` compares resources through
-/// `Resource::to_ref()`, which drops the transition — deliberately, because
-/// the credential router (`Approvals::match_draft`) has to find the request a
-/// *wrong* presentation was aimed at so the rejection counts against it, and
-/// a presentation whose state claim drifted still names the same request. The
-/// replay has no such need: `Kernel::confirm` already knows which request it
-/// is replaying, so it can afford to be strict — and it must be, because the
-/// gate site builds its draft from the world as it stands *now*, after the
-/// ledger already observed and reserved. A claim that drifted in that window
-/// is the last signal that the approval no longer describes the operation.
-///
-/// `Err(detail)` names both claims: "this replay is not what was approved" is
-/// only actionable if it says how.
-fn transitions_match(
-    draft: &ApprovalRequestDraft,
-    resources: &[Resource],
-) -> Result<(), String> {
-    for approved in resources {
-        let reference = approved.to_ref();
-        let Some(presented) = draft
-            .resources
-            .iter()
-            .find(|r| r.to_ref() == reference)
-        else {
-            // `draft_matches` runs first and compares the reference sets, so
-            // this is unreachable in practice. It is still not an occasion to
-            // assume a match.
-            return Err(format!(
-                "it does not name {}:{}, which was approved",
-                reference.kind, reference.id
-            ));
-        };
-        if presented.transition != approved.transition {
-            return Err(format!(
-                "it claims {}:{} is at {} where {} was approved",
-                reference.kind,
-                reference.id,
-                render_claim(presented.transition.as_ref()),
-                render_claim(approved.transition.as_ref()),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// One resource's prior-state claim, for a diagnostic an operator reads. A
-/// missing transition reads the same as an unspecified one — neither claims
-/// anything about the prior state.
-fn render_claim(transition: Option<&kaish_types::approval::Transition>) -> String {
-    match transition.map(|t| &t.from) {
-        None => "no claimed prior state".to_string(),
-        Some(claim) => crate::ledger::error::render_state_claim(claim),
-    }
-}
-
-/// Whether a fresh draft describes the operation and resources that were
-/// approved (spec §B.4). Set semantics on resources, matching how a standing
-/// grant covers them (§C.4): a duplicate imposes no extra requirement.
-///
-/// Compares resources by reference (kind + id) only — the transition claim is
-/// checked separately by [`transitions_match`], and only on the replay path.
-/// See that function for why the two differ.
-///
-/// `Err(detail)` names the first difference, because "this replay is not what
-/// was approved" is only actionable if it says *how*.
-pub(crate) fn draft_matches(
-    draft: &ApprovalRequestDraft,
-    operation: &kaish_types::approval::OperationId,
-    resources: &[Resource],
-) -> Result<(), String> {
-    if draft.operation != *operation {
-        return Err(format!(
-            "it requests {} where {operation} was approved",
-            draft.operation
-        ));
-    }
-    let mut approved: Vec<ResourceRef> = resources.iter().map(|r| r.to_ref()).collect();
-    approved.sort_by(|a, b| (&a.kind, &a.id).cmp(&(&b.kind, &b.id)));
-    approved.dedup();
-    let presented = resource_refs(draft);
-    if presented != approved {
-        return Err(format!(
-            "it touches [{}] where [{}] was approved",
-            render_refs(&presented),
-            render_refs(&approved)
-        ));
-    }
-    Ok(())
-}
-
-fn render_refs(refs: &[ResourceRef]) -> String {
-    refs.iter()
-        .map(|r| format!("{}:{}", r.kind, r.id))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// Extract a human-readable message from a caught panic payload (spec
@@ -605,19 +429,6 @@ pub(crate) async fn cas_overwrite(
                 return Err(concurrent_change_error(resolved));
             }
         }
-        Some(OverwriteExpectation::Digest(exp)) => {
-            let current = crate::ledger::digest_path(backend, resolved)
-                .await
-                .map_err(|e| {
-                    crate::backend::BackendError::InvalidOperation(format!(
-                        "{}: cannot re-check the approved content before overwriting it: {e}",
-                        resolved.display()
-                    ))
-                })?;
-            if current != *exp {
-                return Err(concurrent_change_error(resolved));
-            }
-        }
         None => {}
     }
     backend
@@ -674,11 +485,9 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            ledger_access: None,
             redemption: None,
             capture_failure: None,
             gate_parent: None,
-            attempts: Vec::new(),
         }
     }
 
@@ -719,11 +528,9 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            ledger_access: None,
             redemption: None,
             capture_failure: None,
             gate_parent: None,
-            attempts: Vec::new(),
         }
     }
 
@@ -761,11 +568,9 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            ledger_access: None,
             redemption: None,
             capture_failure: None,
             gate_parent: None,
-            attempts: Vec::new(),
         }
     }
 
@@ -803,11 +608,9 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            ledger_access: None,
             redemption: None,
             capture_failure: None,
             gate_parent: None,
-            attempts: Vec::new(),
         }
     }
 
@@ -848,11 +651,9 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            ledger_access: None,
             redemption: None,
             capture_failure: None,
             gate_parent: None,
-            attempts: Vec::new(),
         }
     }
 
@@ -890,11 +691,9 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
-            ledger_access: None,
             redemption: None,
             capture_failure: None,
             gate_parent: None,
-            attempts: Vec::new(),
         }
     }
 
@@ -1094,7 +893,6 @@ impl ExecContext {
             overlay_handle: self.overlay_handle.clone(),
             // Ledger access is shared: a pipeline stage gates through the
             // same ledger as its parent.
-            ledger_access: self.ledger_access.clone(),
             // Per-invocation: a child stage correlates its own replay and
             // owns its own reservations. Copying either would let one gate's
             // authorization travel to another command.
@@ -1104,7 +902,6 @@ impl ExecContext {
             // statement is nested under it however many stages deep the
             // execution went (spec §A.7). It authorizes nothing on its own.
             gate_parent: self.gate_parent.clone(),
-            attempts: Vec::new(),
         }
     }
 
@@ -1115,22 +912,6 @@ impl ExecContext {
         use crate::backend_walker_fs::BackendWalkerFs;
         let fs = BackendWalkerFs(self.backend.as_ref());
         self.ignore_config.build_filter(root, &fs).await
-    }
-
-    /// Settle every attempt this invocation reserved with its real exit code
-    /// — the dispatch seam's one call after `tool.execute()` returns (spec
-    /// §C.1). Draining the guards here is what makes the normal path a
-    /// reported `Exit(code)` rather than the `Unknown{Cancelled}` their
-    /// `Drop` would otherwise queue.
-    pub(crate) async fn settle_attempts(&mut self, code: i64) {
-        for guard in std::mem::take(&mut self.attempts) {
-            if let Err(err) = guard.settle(Outcome::Exit(code)).await {
-                // Already-terminal is an expected race (the tool reported its
-                // own richer outcome through `settle_with`); anything else is
-                // worth a trace so it is not silently lost.
-                tracing::debug!(error = %err, "settling a reserved attempt did not apply");
-            }
-        }
     }
 
     /// Snapshot a batch of truncating overwrites into the trash, the way `rm`
@@ -1440,73 +1221,6 @@ impl kaish_tool_api::ToolCtx for ExecContext {
         match &self.watchdog {
             Some(watchdog) => kaish_tool_api::PatientGuard::held(Box::new(watchdog.hold(budget))),
             None => kaish_tool_api::PatientGuard::inert(),
-        }
-    }
-
-    /// Post an approval request against this context's ledger and run it
-    /// through the decision chain (`docs/approval-ledger.md` §C.1, §C.2).
-    ///
-    /// A context with no ledger returns `Unsupported`, the fail-closed
-    /// default. Otherwise the request is posted, decided, and — when a stage
-    /// granted — redeemed into a reserved attempt before this returns, so a
-    /// tool that gets `Authorized` may proceed immediately.
-    ///
-    /// `presented` is a plugin's own `--confirm=<token>` value, when its argv
-    /// carried one — the same bearer-key path `ExecContext::request_gate`
-    /// takes for an in-tree gate site, so both land on the same draft
-    /// matcher (`gate`, above).
-    async fn request_approval(
-        &mut self,
-        req: kaish_types::approval::ApprovalRequestDraft,
-        presented: Option<&str>,
-    ) -> kaish_tool_api::ApprovalOutcome {
-        self.gate(req, presented, None).await
-    }
-
-    fn approvals(&self) -> kaish_tool_api::Approvals {
-        match &self.ledger_access {
-            // `PageRequest::default()`'s limit already covers every
-            // realistic pending set (spec §D.4's `live_capacity`); a tool
-            // reading this snapshot has no cursor of its own to page with.
-            Some(access) => kaish_tool_api::Approvals::from_pending(
-                access.approvals.pending(kaish_types::approval::PageRequest::default()).items,
-            ),
-            None => kaish_tool_api::Approvals::empty(),
-        }
-    }
-
-    /// Report a richer outcome for an attempt **this context reserved**.
-    ///
-    /// The ownership check is the security boundary, not the handle type:
-    /// `settle` has no way to prove who reserved an attempt, so without this
-    /// a tool holding any `&mut dyn ToolCtx` could settle another
-    /// execution's live attempt by naming its ids. A handle for an attempt
-    /// this context did not reserve is refused and traced.
-    async fn settle_with(&mut self, attempt: &kaish_tool_api::AttemptHandle, outcome: kaish_types::approval::Outcome) {
-        let Some(access) = self.ledger_access.clone() else {
-            return;
-        };
-        let owned = self.attempts.iter().any(|g| {
-            g.attempt().request_id() == attempt.request_id()
-                && g.attempt().attempt_id() == attempt.attempt_id()
-        });
-        if !owned {
-            tracing::warn!(
-                request = %attempt.request_id(),
-                attempt = %attempt.attempt_id(),
-                "settle_with names an attempt this execution did not reserve — refused"
-            );
-            return;
-        }
-        if let Err(err) = access
-            .requester
-            .settle_by_ids(attempt.request_id(), attempt.attempt_id(), outcome)
-            .await
-        {
-            // Not found / already-terminal are expected races (someone else
-            // — the dispatcher's `AttemptGuard` — settled first); anything
-            // else is worth a trace so it isn't silently lost.
-            tracing::debug!(error = %err, "ToolCtx::settle_with: settle did not apply");
         }
     }
 
