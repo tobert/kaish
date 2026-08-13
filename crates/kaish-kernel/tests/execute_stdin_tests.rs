@@ -14,7 +14,7 @@
 use kaish_kernel::{ExecuteOptions, Kernel, KernelConfig};
 
 fn kernel() -> Kernel {
-    Kernel::new(KernelConfig::repl().with_approvals(false).with_trash(false))
+    Kernel::new(KernelConfig::repl().with_trash(false))
         .expect("failed to create kernel")
 }
 

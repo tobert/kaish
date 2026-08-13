@@ -111,7 +111,7 @@ use crate::tools::{resolve_in_path, virtual_cwd_error};
 use crate::validator::{Severity, Validator};
 #[cfg(feature = "localfs")]
 use crate::vfs::LocalFs;
-use crate::vfs::{ApprovalsFs, BuiltinFs, DevFs, JobFs, MemoryFs, VfsRouter};
+use crate::vfs::{BuiltinFs, DevFs, JobFs, MemoryFs, VfsRouter};
 use kaish_vfs::ByteBudget;
 #[cfg(all(feature = "localfs", feature = "overlay"))]
 use kaish_vfs::OverlayFs;
@@ -227,28 +227,6 @@ pub struct KernelConfig {
     /// untrusted input.
     pub allow_external_commands: bool,
 
-    /// Enable the `fs.*` enforce policy for dangerous operations
-    /// (`set -o approvals`).
-    ///
-    /// When enabled, a destructive operation with no recoverable prior copy
-    /// goes through the approval ledger's decision chain
-    /// (`docs/approval-ledger.md` §C.5) instead of running. Can also be set
-    /// at runtime with `set -o approvals` (unless pinned — see
-    /// [`Self::policy_pinned`]) or via `KAISH_APPROVALS=1`.
-    ///
-    /// Named for the option it seeds: `set -o approvals`. The latch's
-    /// spelling was retired with the latch itself (spec §F.2, §I.4).
-    pub approvals_enabled: bool,
-
-    /// Pin this session's approval policy so script code cannot change it
-    /// (spec §F.3 item 3).
-    ///
-    /// With this set, `set -o approvals` and `set +o approvals` both fail with exit
-    /// 1 and a message naming the pin — loud, never a silent no-op, because
-    /// a silent no-op teaches an agent that its `set +o approvals` worked. The
-    /// pin is copied into every fork and pipeline stage, so `$(set +o
-    /// approvals)`, a background job, and a `.kai` script are all covered.
-    pub policy_pinned: bool,
 
     /// Enable trash-on-delete for rm (set -o trash).
     ///
@@ -256,20 +234,6 @@ pub struct KernelConfig {
     /// being permanently deleted. Can also be enabled at runtime with `set -o trash`
     /// or via `KAISH_TRASH=1`.
     pub trash_enabled: bool,
-
-    /// How this kernel's approval ledger is configured: retention, capacity,
-    /// and the rejected-credential limit (spec §D.4). `None` takes
-    /// [`LedgerConfig::default`](crate::ledger::LedgerConfig).
-    ///
-    /// Ignored — loudly, at build time — when
-    /// [`ApprovalConfig::approver_handle`] is also set, because adopting
-    /// another kernel's authority means adopting its ledger and the
-    /// configuration that ledger was built with.
-    pub ledger_config: Option<crate::ledger::LedgerConfig>,
-
-    /// Where this kernel's ledger posts its audit entries (spec §D.4).
-    /// `None` is purely in-memory: bounded retention, no external record.
-    pub ledger_sink: Option<Arc<dyn crate::ledger::LedgerSink>>,
 
     /// Variables to populate the root scope with at construction, all marked
     /// for export to child processes.
@@ -337,12 +301,6 @@ pub struct KernelConfig {
     /// Frontends (REPL, MCP) expose `--overlay` as an explicit opt-in flag.
     pub overlay: bool,
 
-    /// The approval side: who this session is, what decides its gated
-    /// operations, and whether it may approve anything
-    /// (`docs/approval-ledger.md` §D.2). Defaults to no approver and no
-    /// authority, which is exactly today's behavior — every gate defers.
-    pub approval: ApprovalConfig,
-
     /// The [`JobManager`] this kernel adopts. `None` — the default — builds a
     /// fresh one, so every kernel owns its own job table.
     ///
@@ -394,81 +352,6 @@ pub struct KernelConfig {
     pub kill_children_on_parent_death: bool,
 }
 
-/// A kernel's approval-side configuration (spec §D.2), grouped so the
-/// surface stays one field on [`KernelConfig`] as later PRs add
-/// `policy_pinned`, `deny_self_approval`, and the state resolvers.
-///
-/// Set through [`KernelConfig::with_policy`],
-/// [`KernelConfig::with_principal`], and
-/// [`KernelConfig::with_approver_handle`].
-#[derive(Clone, Default)]
-pub struct ApprovalConfig {
-    /// The synchronous decision policy stage 2 of the chain calls. `None`
-    /// — the default — skips that stage, so every request no standing grant
-    /// covers defers to exit 2.
-    pub policy: Option<Arc<dyn crate::ledger::Policy>>,
-    /// Who this session is. Recorded as the decider on grants made through
-    /// the authority this kernel mints, and stamped on the requests it
-    /// posts. `None` takes the ledger's own placeholder identity.
-    pub principal: Option<kaish_types::approval::Principal>,
-    /// Which conversation, connection, or task this kernel is serving (spec
-    /// §A.7). Stamped onto every request and record it produces, and the
-    /// scope a `ApproverHandle::scope`/`Approvals::scope` view filters on.
-    /// `None` — the default — is a single-session kernel like the REPL: its
-    /// requests carry a kernel id and no session, and are therefore
-    /// invisible to every scoped handle.
-    pub session: Option<kaish_types::approval::SessionId>,
-    /// The authority this session holds. **Absent means the session may not
-    /// approve anything** — that is the enforcement mechanism itself (spec
-    /// §E.2, tier 1). Supplying one also adopts its ledger, so two kernels
-    /// built from one handle share a single log.
-    pub approver_handle: Option<crate::ledger::ApproverHandle>,
-    /// Whether this session holds the authority its **own** kernel mints
-    /// (spec §D.2). `false` — the default — is the agent posture:
-    /// [`Kernel::build`] hands the handle to the embedder and the session
-    /// has no method that grants.
-    ///
-    /// Set through [`KernelConfig::with_own_authority`], for the embedder
-    /// that is itself the operator. [`Self::approver_handle`] gives the
-    /// session authority too, and additionally adopts that handle's ledger.
-    pub own_authority: bool,
-    /// The state resolvers redemption consults, one per non-`path` resource
-    /// kind (spec §B.4). The kernel serves `path` itself; a resolver
-    /// claiming that kind, or a second resolver for a kind already
-    /// registered, fails [`Kernel::build`] loudly.
-    pub resolvers: Vec<Arc<dyn crate::ledger::StateResolver>>,
-    /// Decides which top-level statements must ask before they run (spec
-    /// §C.6). `None` — the default — makes every statement `Observe`. There
-    /// is no script surface that changes this: the classifier is
-    /// embedder-registered, like the policy.
-    pub statement_classifier: Option<Arc<dyn crate::ledger::StatementClassifier>>,
-    /// The clock the approval ledger reads (spec §A.5). `None` — the
-    /// default — installs [`SystemClock`](crate::ledger::SystemClock).
-    /// Ignored when [`Self::approver_handle`] is set, because that adopts a
-    /// ledger that already has one.
-    pub clock: Option<Arc<dyn crate::ledger::Clock>>,
-}
-
-/// Names what is configured without printing an opaque `dyn Policy`
-/// address — `KernelConfig` keeps its `#[derive(Debug)]` this way rather
-/// than taxing every embedder's hook with a `Debug` bound.
-impl std::fmt::Debug for ApprovalConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ApprovalConfig")
-            .field("policy", &self.policy.is_some())
-            .field("principal", &self.principal)
-            .field("session", &self.session)
-            .field("approver_handle", &self.approver_handle)
-            .field("own_authority", &self.own_authority)
-            .field(
-                "resolvers",
-                &self.resolvers.iter().map(|r| r.kind()).collect::<Vec<_>>(),
-            )
-            .field("statement_classifier", &self.statement_classifier.is_some())
-            .finish()
-    }
-}
-
 /// Get the default sandbox root ($HOME).
 #[cfg(feature = "localfs")]
 fn default_sandbox_root() -> PathBuf {
@@ -491,17 +374,12 @@ impl Default for KernelConfig {
                 ignore_config: crate::ignore_config::IgnoreConfig::none(),
                 output_limit: crate::output_limit::OutputLimitConfig::none(),
                 allow_external_commands: cfg!(feature = "subprocess"),
-                approvals_enabled: std::env::var("KAISH_APPROVALS").is_ok_and(|v| v == "1"),
-                policy_pinned: false,
                 trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
-                ledger_config: None,
-            ledger_sink: None,
                 initial_vars: HashMap::new(),
                 request_timeout: None,
                 kill_grace: Duration::from_secs(2),
                 vfs_budget_bytes: None,
                 overlay: false,
-                approval: ApprovalConfig::default(),
                 job_manager: None,
                 kill_children_on_parent_death: false,
             }
@@ -517,17 +395,12 @@ impl Default for KernelConfig {
                 ignore_config: crate::ignore_config::IgnoreConfig::none(),
                 output_limit: crate::output_limit::OutputLimitConfig::none(),
                 allow_external_commands: false,
-                approvals_enabled: false,
-                policy_pinned: false,
                 trash_enabled: false,
-                ledger_config: None,
-            ledger_sink: None,
                 initial_vars: HashMap::new(),
                 request_timeout: None,
                 kill_grace: Duration::from_secs(2),
                 vfs_budget_bytes: None,
                 overlay: false,
-                approval: ApprovalConfig::default(),
                 job_manager: None,
                 kill_children_on_parent_death: false,
             }
@@ -549,17 +422,12 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: cfg!(feature = "subprocess"),
-            approvals_enabled: false,
-            policy_pinned: false,
             trash_enabled: false,
-            ledger_config: None,
-            ledger_sink: None,
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
             vfs_budget_bytes: None,
             overlay: false,
-            approval: ApprovalConfig::default(),
             job_manager: None,
             kill_children_on_parent_death: false,
         }
@@ -584,17 +452,12 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: cfg!(feature = "subprocess"),
-            approvals_enabled: false,
-            policy_pinned: false,
             trash_enabled: false,
-            ledger_config: None,
-            ledger_sink: None,
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
             vfs_budget_bytes: None,
             overlay: false,
-            approval: ApprovalConfig::default(),
             job_manager: None,
             kill_children_on_parent_death: false,
         }
@@ -627,17 +490,12 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::interactive(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: cfg!(feature = "subprocess"),
-            approvals_enabled: std::env::var("KAISH_APPROVALS").is_ok_and(|v| v == "1"),
-            policy_pinned: false,
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
-            ledger_config: None,
-            ledger_sink: None,
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
             vfs_budget_bytes: None,
             overlay: false,
-            approval: ApprovalConfig::default(),
             job_manager: None,
             kill_children_on_parent_death: false,
         }
@@ -667,17 +525,12 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::agent(),
             output_limit: crate::output_limit::OutputLimitConfig::agent(),
             allow_external_commands: cfg!(feature = "subprocess"),
-            approvals_enabled: std::env::var("KAISH_APPROVALS").is_ok_and(|v| v == "1"),
-            policy_pinned: false,
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
-            ledger_config: None,
-            ledger_sink: None,
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
             vfs_budget_bytes: Some(64 * 1024 * 1024),
             overlay: false,
-            approval: ApprovalConfig::default(),
             job_manager: None,
             // An agent embedder must never leave an invisible `cargo build` running
             // after its process is hard-killed; see the field doc for why this is
@@ -703,17 +556,12 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::agent(),
             output_limit: crate::output_limit::OutputLimitConfig::agent(),
             allow_external_commands: cfg!(feature = "subprocess"),
-            approvals_enabled: std::env::var("KAISH_APPROVALS").is_ok_and(|v| v == "1"),
-            policy_pinned: false,
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
-            ledger_config: None,
-            ledger_sink: None,
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
             vfs_budget_bytes: Some(64 * 1024 * 1024),
             overlay: false,
-            approval: ApprovalConfig::default(),
             job_manager: None,
             // Same reasoning as `agent()`.
             kill_children_on_parent_death: true,
@@ -734,17 +582,12 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: false,
-            approvals_enabled: false,
-            policy_pinned: false,
             trash_enabled: false,
-            ledger_config: None,
-            ledger_sink: None,
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
             vfs_budget_bytes: None,
             overlay: false,
-            approval: ApprovalConfig::default(),
             job_manager: None,
             kill_children_on_parent_death: false,
         }
@@ -796,92 +639,9 @@ impl KernelConfig {
         self
     }
 
-    /// Turn the `fs.*` enforce policy on or off at startup (`set -o approvals`).
-    pub fn with_approvals(mut self, enabled: bool) -> Self {
-        self.approvals_enabled = enabled;
-        self
-    }
-
-    /// Pin the approval policy so script code cannot change it (spec §F.3
-    /// item 3). See [`Self::policy_pinned`].
-    pub fn with_policy_pinned(mut self, pinned: bool) -> Self {
-        self.policy_pinned = pinned;
-        self
-    }
-
     /// Enable or disable trash-on-delete at startup.
     pub fn with_trash(mut self, enabled: bool) -> Self {
         self.trash_enabled = enabled;
-        self
-    }
-
-    /// Configure the approval ledger this kernel mints: retention, capacity,
-    /// and the rejected-credential limit (spec §D.4).
-    ///
-    /// Cross-request continuity — the reason `with_nonce_store` existed — is
-    /// now [`Self::with_approver_handle`]: a handle carries its whole
-    /// ledger, so a second kernel built from one joins that log rather than
-    /// sharing a bag of credentials. Setting both is refused at build time,
-    /// because an adopted ledger already has a configuration.
-    pub fn with_ledger(mut self, config: crate::ledger::LedgerConfig) -> Self {
-        self.ledger_config = Some(config);
-        self
-    }
-
-    /// Refuse a grant whose issuing principal equals the request's own
-    /// principal (spec §D.2, §E.7). Default false: a solo human at the REPL
-    /// is legitimately both requester and approver, so this is an opt-in
-    /// policy for multi-principal embedders, not a blanket
-    /// approver-never-equals-requester invariant. Enforced ledger-wide at
-    /// grant-posting time — it catches misconfiguration (an agent session
-    /// handed a handle it should not use to approve its own requests), not
-    /// resisting an attacker.
-    ///
-    /// Sets [`crate::ledger::LedgerConfig::deny_self_approval`] on this
-    /// kernel's own ledger config, creating a default one if
-    /// [`Self::with_ledger`] was not called; call order between the two
-    /// matters exactly the way it does for any field both touch — the last
-    /// call wins. Like [`Self::with_ledger`], this is refused together with
-    /// [`Self::with_approver_handle`] (an adopted ledger already has a
-    /// configuration).
-    pub fn with_deny_self_approval(mut self, deny: bool) -> Self {
-        let mut config = self.ledger_config.take().unwrap_or_default();
-        config.deny_self_approval = deny;
-        self.ledger_config = Some(config);
-        self
-    }
-
-    /// Post every ledger entry to `sink` as it commits (spec §D.4). Without
-    /// one the ledger is purely in-memory: bounded retention, no external
-    /// record. The sink applies backpressure and a full queue fails a
-    /// request **closed** rather than dropping the entry.
-    pub fn with_ledger_sink(mut self, sink: Arc<dyn crate::ledger::LedgerSink>) -> Self {
-        self.ledger_sink = Some(sink);
-        self
-    }
-
-    /// Install the clock the approval ledger reads
-    /// (`docs/approval-ledger.md` §A.5). The default is
-    /// [`SystemClock`](crate::ledger::SystemClock).
-    ///
-    /// **This is the ledger's clock and nothing else's.** It is not the
-    /// script watchdog's timer — `timeout`, `ToolCtx::patient`, and the
-    /// per-statement deadline run on `Instant` and are unaffected — which is
-    /// why the name says which clock rather than claiming the kernel's.
-    ///
-    /// One clock stamps every entry and answers every bound comparison in
-    /// that ledger, so a record's timestamps and the decisions taken
-    /// alongside them can never come from two different sources. The
-    /// ledger's *view* of whatever you install is monotone non-decreasing:
-    /// it latches the largest reading it has seen and clamps a smaller one
-    /// up to it, so an expired grant stays expired and entry stamps never
-    /// regress, whatever the clock does.
-    ///
-    /// Incompatible with [`Self::with_approver_handle`], which adopts a
-    /// ledger that already has a clock; setting both fails
-    /// [`Kernel::build`] loudly.
-    pub fn with_approval_clock(mut self, clock: Arc<dyn crate::ledger::Clock>) -> Self {
-        self.approval.clock = Some(clock);
         self
     }
 
@@ -971,139 +731,8 @@ impl KernelConfig {
         self
     }
 
-    /// Install the synchronous decision policy stage 2 of the approval
-    /// chain calls (`docs/approval-ledger.md` §C.2).
-    ///
-    /// With no policy — the default — a gated operation is decided by
-    /// standing grants alone, and anything they do not cover defers to exit
-    /// 2. Installing one whose `evaluate` returns `Defer` changes nothing.
-    ///
-    /// **The kernel never awaits this** — [`Policy::evaluate`](crate::ledger::Policy::evaluate) is
-    /// synchronous and contractually non-blocking. A decision that has to
-    /// be thought about is not made here: the gate site returns
-    /// `ApprovalOutcome::Pending` and the embedder decides in its own task,
-    /// then grants through its [`ApproverHandle`](crate::ledger::ApproverHandle).
-    ///
-    /// Distinct from [`Self::with_policy_pinned`], which pins the `fs.*`
-    /// enforce posture (`set -o approvals`) against script code and has
-    /// nothing to do with this trait.
-    pub fn with_policy(mut self, policy: Arc<dyn crate::ledger::Policy>) -> Self {
-        self.approval.policy = Some(policy);
-        self
-    }
-
-    /// Name who this session is (spec §A.3, §E.2).
-    ///
-    /// The kernel trusts this assignment — it is the embedder's job to know
-    /// which session belongs to which actor, and the whole session-boundary
-    /// enforcement tier is only as strong as that assignment. It is recorded
-    /// as the decider on grants made through the authority this kernel
-    /// mints.
-    pub fn with_principal(mut self, principal: kaish_types::approval::Principal) -> Self {
-        self.approval.principal = Some(principal);
-        self
-    }
-
-    /// Name the session this kernel serves (spec §A.7).
-    ///
-    /// Every request and every ledger record this kernel produces carries
-    /// it, so a process hosting several sessions can answer "whose request
-    /// is this?" from the request itself rather than from an external map —
-    /// and a handle scoped to one session sees only that session's requests.
-    ///
-    /// A kernel with no session is a single-session kernel: its requests
-    /// belong to the kernel and no scoped handle sees them.
-    pub fn with_session(mut self, session: kaish_types::approval::SessionId) -> Self {
-        self.approval.session = Some(session);
-        self
-    }
-
-    /// Give this session approval authority, and bind it to that handle's
-    /// ledger (spec §D.2).
-    ///
-    /// **Withholding this is the enforcement.** A session built without a
-    /// handle has no method that grants — not a redacted one, not a checked
-    /// one, none — which is what keeps an agent from approving its own
-    /// operations (§E.2, tier 1). Pass a handle only to a session that
-    /// should be able to approve: a REPL the human watches, an embedder's
-    /// UI session, a clearance session.
-    pub fn with_approver_handle(mut self, handle: crate::ledger::ApproverHandle) -> Self {
-        self.approval.approver_handle = Some(handle);
-        self
-    }
-
-    /// Give this session the authority its **own** kernel mints, for an
-    /// embedder that is itself the operator (spec §D.2).
-    ///
-    /// [`Self::with_approver_handle`] is the multi-kernel door: it installs
-    /// an authority *and* adopts that handle's ledger, so it needs a handle
-    /// that already exists. A single-kernel embedder whose one session is
-    /// the operator — the reference REPL, a desktop app with a human in
-    /// front of it — has no earlier kernel to take a handle from, and
-    /// building a throwaway one to obtain it would put a kernel id in the
-    /// record that names nothing. This says the same thing directly:
-    /// [`Kernel::build`] returns the handle *and* leaves a clone on the
-    /// session, so `approvals grant` works at that session's own prompt.
-    ///
-    /// **The default is `false`, and that is the enforcement** (§E.2, tier
-    /// 1): an agent session is built without this and has no method that
-    /// grants. Pass it only where a human decides.
-    pub fn with_own_authority(mut self, holds: bool) -> Self {
-        self.approval.own_authority = holds;
-        self
-    }
-
-    /// Register a [`StateResolver`](crate::ledger::StateResolver) for one
-    /// resource kind, so a grant over that kind's resources is re-checked at
-    /// redemption (spec §B.4).
-    ///
-    /// The kernel already resolves `path` through its own backend;
-    /// registering a second resolver for `path`, or two for the same kind,
-    /// fails [`Kernel::build`] rather than picking one — which resolver
-    /// decides whether a resource changed must not depend on registration
-    /// order.
-    ///
-    /// A resource kind with no registered resolver **refuses** any grant
-    /// that claims a prior state for it. Registering the resolver is
-    /// therefore part of shipping the resource kind, not an optimization.
-    pub fn with_state_resolver(mut self, resolver: Arc<dyn crate::ledger::StateResolver>) -> Self {
-        self.approval.resolvers.push(resolver);
-        self
-    }
-
-    /// Install what decides which top-level statements must ask before they
-    /// run (`docs/approval-ledger.md` §C.6).
-    ///
-    /// With no classifier — the default — every statement is recorded and
-    /// runs. Recording is not optional and this does not turn it off: an
-    /// agent getting an automatic second opinion is a property of kaish, not
-    /// a posture an embedder selects. What a classifier adds is *scope* — it
-    /// says which statements go through the same decision chain a gated `rm`
-    /// goes through.
-    ///
-    /// The classifier cannot deny. Refusal is a chain decision
-    /// ([`Policy::evaluate`](crate::ledger::Policy::evaluate)), because a
-    /// scoping seam that can refuse is a second decision chain.
-    pub fn with_statement_classifier(
-        mut self,
-        classifier: Arc<dyn crate::ledger::StatementClassifier>,
-    ) -> Self {
-        self.approval.statement_classifier = Some(classifier);
-        self
-    }
-
 }
 
-/// The two replayable capture forms [`Kernel::confirm`] dispatches
-/// (`docs/approval-ledger.md` §B.4, §C.6).
-enum Replay {
-    /// An exactly-captured tool invocation, re-dispatched through the argv
-    /// door.
-    Argv(kaish_types::approval::Invocation),
-    /// One top-level statement, re-parsed from the captured source and run
-    /// through the statement machinery.
-    Statement(Box<Stmt>),
-}
 
 /// Handle to an active overlay session, kept on the kernel and shared to
 /// `ExecContext` so the `kaish-vfs` builtin can reach the `OverlayFs`.
@@ -1219,81 +848,6 @@ pub struct Kernel {
     /// the recursion chain is single-threaded (top-level `execute` is
     /// serialized by `execute_lock`; concurrency happens on forks).
     recursion_depth: AtomicUsize,
-    /// The held result of a gate raised during expression evaluation, stashed
-    /// at the raise site because the `HeldByGate` error that unwinds the
-    /// statement can be caught and stringified on the way up (the pipeline's
-    /// redirect and argument builders convert eval errors to `failure(1, …)`
-    /// results). The statement loop takes this after every statement and
-    /// surfaces it as the statement's own held result — whatever the
-    /// intermediate layers did to the error. Per-kernel like
-    /// [`Self::recursion_depth`]: top-level `execute` is serialized by
-    /// `execute_lock`, and forks get a fresh empty slot.
-    held_in_eval: std::sync::Mutex<Option<Box<ExecResult>>>,
-    /// This kernel's approval side (spec §D.2). Shared by every fork, so a
-    /// background job's requests land in the same log the foreground reads.
-    approvals: KernelApprovals,
-}
-
-/// One kernel's approval side: the ledger handles it holds, the chain that
-/// decides its gated operations, and its identity (spec §D.2).
-///
-/// Grouped rather than spread across six `Kernel` fields because every one
-/// of them is cloned together on `fork` and handed out together by
-/// [`Kernel::build`].
-#[derive(Clone)]
-struct KernelApprovals {
-    /// Posts obligations. Cannot grant — there is no method on it that
-    /// produces a `Grant`.
-    requester: crate::ledger::Requester,
-    /// The read side. Safe to hand anywhere.
-    approvals: crate::ledger::Approvals,
-    /// The decision chain. Holds the ledger's authority internally so it
-    /// can post the decision it reaches; nothing reachable from script code
-    /// can get that authority back out of it.
-    chain: Arc<crate::ledger::DecisionChain>,
-    /// Who this session is.
-    principal: kaish_types::approval::Principal,
-    /// Which kernel and session this is (spec §A.7). Stamped on every
-    /// request and record this kernel produces; cloned by `fork`, so a
-    /// background job's requests carry the same scope as the foreground's.
-    scope: kaish_types::approval::ApprovalScope,
-    /// The one authority this ledger minted, returned by [`Kernel::build`]
-    /// to the embedder. Held privately: an embedder decides which sessions
-    /// get a clone, and a session does not help itself to one.
-    authority: crate::ledger::ApproverHandle,
-    /// The authority *this session* was given, if any. `None` means this
-    /// session may not approve anything (spec §E.2, tier 1).
-    session_authority: Option<crate::ledger::ApproverHandle>,
-    /// The registered state resolvers, by resource kind (spec §B.4). Shared
-    /// by every fork, so a background job re-checks a precondition through
-    /// the same resolver the foreground would.
-    resolvers: Arc<crate::ledger::StateResolvers>,
-    /// What decides which top-level statements must ask before they run
-    /// (spec §C.6). `None` — the default — makes every statement `Observe`:
-    /// recorded and run.
-    statement_classifier: Option<Arc<dyn crate::ledger::StatementClassifier>>,
-}
-
-impl KernelApprovals {
-    /// What an `ExecContext` needs to post and decide: the obligation
-    /// handle, the read side, the chain, this session's identity, and the
-    /// background job (if any) every request it posts is correlated with.
-    fn access(&self, job_id: Option<u64>) -> crate::tools::LedgerAccess {
-        crate::tools::LedgerAccess {
-            requester: self.requester.clone(),
-            approvals: self.approvals.clone(),
-            chain: Arc::clone(&self.chain),
-            principal: self.principal.clone(),
-            scope: self.scope.clone(),
-            job_id,
-            resolvers: Arc::clone(&self.resolvers),
-            // `session_authority`, not `authority`: a context gets what the
-            // *session* was given, never the minted authority the embedder
-            // kept. A session built without one has no bridge to `grant`,
-            // which is the property `approvals grant` enforces (spec §D.3).
-            session_authority: self.session_authority.clone(),
-        }
-    }
 }
 
 /// RAII balance for [`Kernel::recursion_depth`]: increments on construction
@@ -1319,35 +873,6 @@ struct VfsSetupResult {
 }
 
 impl Kernel {
-    /// Create a new kernel and the one approval authority its construction
-    /// mints (`docs/approval-ledger.md` §D.2).
-    ///
-    /// The authority is in the signature because that is what enforces the
-    /// separation: the only way to obtain an
-    /// [`ApproverHandle`](crate::ledger::ApproverHandle) is to build
-    /// a kernel, and the embedder then decides which sessions get a clone
-    /// (through [`KernelConfig::with_approver_handle`], or
-    /// [`KernelConfig::with_own_authority`] for the session that is itself
-    /// the operator). A session built without one has no method that grants.
-    ///
-    /// When the config already carries a handle, this returns that same
-    /// handle and the kernel joins its ledger rather than minting a fresh
-    /// one — that is how several kernels in a process share one log.
-    ///
-    /// [`Kernel::new`] is this with the authority dropped, which is what
-    /// every caller that does not participate in approvals wants.
-    ///
-    /// # Errors
-    ///
-    /// Everything [`Kernel::new`] fails on, plus a ledger that cannot mint
-    /// its id epoch because the OS supplied no entropy. There is no fallback
-    /// — a guessable id epoch is worse than failing to build.
-    pub fn build(config: KernelConfig) -> Result<(Self, crate::ledger::ApproverHandle)> {
-        let kernel = Self::new(config)?;
-        let authority = kernel.approvals.authority.clone();
-        Ok((kernel, authority))
-    }
-
     /// Create a new kernel with the given configuration.
     pub fn new(config: KernelConfig) -> Result<Self> {
         let mut setup = Self::setup_vfs(&config)?;
@@ -1681,9 +1206,7 @@ impl Kernel {
         let no_host_side_channel =
             no_host_filesystem || matches!(config.vfs_mode, VfsMountMode::NoLocal);
 
-        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_external_commands, approvals_enabled, policy_pinned, trash_enabled, ledger_config, ledger_sink, initial_vars, request_timeout, kill_grace, approval, kill_children_on_parent_death, .. } = config;
-
-        let approvals = Self::build_approvals(approval, ledger_config, ledger_sink)?;
+        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_external_commands, trash_enabled, initial_vars, request_timeout, kill_grace, kill_children_on_parent_death, .. } = config;
 
         if no_host_side_channel {
             output_limit.set_spill_mode(crate::output_limit::SpillMode::Memory);
@@ -1697,12 +1220,6 @@ impl Kernel {
 
         // Mount BuiltinFs so `ls /v/bin` lists builtins
         vfs.mount("/v/bin", BuiltinFs::new(tools.clone()));
-
-        // Mount ApprovalsFs so `cat /v/approvals/pending` reads the ledger.
-        // Here rather than beside `/v/jobs` because the ledger does not exist
-        // until `build_approvals` above has run — and it must be the same
-        // ledger the gate sites post to, not a second one.
-        vfs.mount("/v/approvals", ApprovalsFs::new(approvals.approvals.clone()));
 
         let vfs = Arc::new(vfs);
 
@@ -1723,7 +1240,6 @@ impl Kernel {
         exec_ctx.output_limit = output_limit;
         exec_ctx.allow_external_commands = allow_external_commands;
         exec_ctx.vfs_budget = vfs_budget.clone();
-        exec_ctx.ledger_access = Some(approvals.access(None));
 
         Ok(Self {
             name,
@@ -1741,8 +1257,6 @@ impl Kernel {
                 for (name, value) in initial_vars.clone() {
                     scope.set_exported(name, value);
                 }
-                scope.set_approvals_enabled(approvals_enabled);
-                scope.set_policy_pinned(policy_pinned);
                 scope.set_trash_enabled(trash_enabled);
                 scope
             }),
@@ -1767,8 +1281,6 @@ impl Kernel {
             self_weak: std::sync::OnceLock::new(),
             execute_lock: tokio::sync::Mutex::new(()),
             recursion_depth: AtomicUsize::new(0),
-            held_in_eval: std::sync::Mutex::new(None),
-            approvals,
             bg_job_id: None,
             // Overlay handle is set by Kernel::new after assemble returns;
             // assemble itself doesn't know the handle (it's constructed in setup_vfs).
@@ -1778,126 +1290,10 @@ impl Kernel {
         })
     }
 
-    /// Assemble the approval side from its config (spec §D.2).
-    ///
-    /// A configured `approver_handle` is adopted whole — the kernel joins
-    /// that handle's ledger instead of minting one, so kernels built from
-    /// one handle share a single log. Otherwise a fresh ledger is minted
-    /// here, and its authority is what [`Kernel::build`] hands back.
-    ///
-    /// Either way the authority is re-attributed to the configured
-    /// principal, so grants made through it name a real actor rather than
-    /// the ledger's placeholder.
-    fn build_approvals(
-        config: ApprovalConfig,
-        ledger_config: Option<crate::ledger::LedgerConfig>,
-        ledger_sink: Option<Arc<dyn crate::ledger::LedgerSink>>,
-    ) -> Result<KernelApprovals> {
-        let ApprovalConfig {
-            policy,
-            principal,
-            session,
-            approver_handle,
-            own_authority,
-            resolvers,
-            statement_classifier,
-            clock,
-        } = config;
-        // One kernel, one kernel id (spec §A.7) — including a kernel that
-        // joins another's ledger through `with_approver_handle`, which is
-        // exactly the two-kernels-one-log shape the id exists to tell apart.
-        let mut scope = kaish_types::approval::ApprovalScope::kernel(
-            kaish_types::approval::KernelId::mint(),
-        );
-        if let Some(session) = session.clone() {
-            scope = scope.with_session(session);
-        }
-
-        let resolvers = crate::ledger::StateResolvers::from_registrations(resolvers)
-            .context("the approval ledger's state resolvers conflict")?;
-
-        if approver_handle.is_some()
-            && (ledger_config.is_some() || ledger_sink.is_some() || clock.is_some())
-        {
-            anyhow::bail!(
-                "with_approver_handle adopts that handle's ledger, so with_ledger/with_ledger_sink/\
-                 with_approval_clock cannot also apply — configure the ledger on the kernel that \
-                 mints it"
-            );
-        }
-        let (requester, approvals, authority) = match &approver_handle {
-            Some(handle) => handle.join(),
-            None => crate::ledger::Ledger::build(
-                ledger_config.unwrap_or_default(),
-                scope.clone(),
-                ledger_sink,
-                clock.unwrap_or_else(|| Arc::new(crate::ledger::SystemClock)),
-            )
-            .context("approval ledger could not mint its id epoch — the OS supplied no entropy")?,
-        };
-        let authority = match &principal {
-            Some(principal) => authority.with_principal(principal.clone()),
-            None => authority,
-        };
-        // Either door installs the same capability: an adopted handle, or
-        // this kernel's own (spec §D.2). Withholding both is what keeps a
-        // session from approving itself.
-        let session_authority =
-            (approver_handle.is_some() || own_authority).then(|| authority.clone());
-        let chain = Arc::new(crate::ledger::DecisionChain::new(
-            authority.clone(),
-            approvals.clone(),
-            policy,
-        ));
-
-        Ok(KernelApprovals {
-            requester,
-            approvals,
-            chain,
-            scope,
-            principal: principal.unwrap_or_default(),
-            authority,
-            session_authority,
-            resolvers: Arc::new(resolvers),
-            statement_classifier,
-        })
-    }
-
-    /// The read side of this kernel's approval ledger (spec §D.2). Grants
-    /// nothing — pending requests, states, standing rules, and the log tail.
-    pub fn approvals(&self) -> crate::ledger::Approvals {
-        self.approvals.approvals.clone()
-    }
-
-    /// The obligation side: what posts `Requested`, `Redeemed`, and
-    /// `Settled`. Cannot grant.
-    pub fn requester(&self) -> &crate::ledger::Requester {
-        &self.approvals.requester
-    }
-
-    /// The decision chain this kernel's gate sites run
-    /// (spec §C.2). The seam `ToolCtx::request_approval` (PR 3) and the
-    /// rewritten gate sites (PR 5) call.
-    pub fn decision_chain(&self) -> &Arc<crate::ledger::DecisionChain> {
-        &self.approvals.chain
-    }
-
-    /// Who this session is (spec §A.3). Stamped on the requests it posts.
-    pub fn principal(&self) -> &kaish_types::approval::Principal {
-        &self.approvals.principal
-    }
-
-    /// The approval authority **this session** holds, if any. `None` means
-    /// the session may not approve anything — the check the `approvals`
-    /// builtin makes (spec §D.3, PR 7).
-    pub fn session_authority(&self) -> Option<&crate::ledger::ApproverHandle> {
-        self.approvals.session_authority.as_ref()
-    }
-
     /// Plan every statement of `source` without executing anything —
     /// [`plan_program`](crate::ast::plan::plan_program) as a method, so an
-    /// embedder holding a kernel reads the same metadata the kernel's gate
-    /// and record read for the same source.
+    /// embedder holding a kernel can pair the plans with `get_var` lookups
+    /// against this kernel's live state.
     ///
     /// # Errors
     ///
@@ -2034,10 +1430,6 @@ impl Kernel {
             // parent — background jobs and scatter workers count against the same
             // cap as foreground writes.
             vfs_budget: self.vfs_budget.clone(),
-            // One ledger for the whole session: a background job's requests
-            // must land in the log the foreground reads, and its chain must
-            // be the same chain.
-            approvals: self.approvals.clone(),
             request_timeout: self.request_timeout,
             kill_grace: self.kill_grace,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
@@ -2051,7 +1443,6 @@ impl Kernel {
             // budget is independent of the parent's current depth (GH #46).
             recursion_depth: AtomicUsize::new(0),
             // A fork surfaces its own holds; the parent's slot stays put.
-            held_in_eval: std::sync::Mutex::new(None),
             bg_job_id,
             // Arc-clone the overlay handle so forks (background jobs, scatter
             // workers, pipeline stages) can reach the same overlay transaction
@@ -2205,9 +1596,8 @@ impl Kernel {
     /// doors converge **late** (at the shared dispatch chain) rather than one
     /// wrapping the other. From argv classification onward `execute_argv` reuses
     /// the exact path a `Stmt::Command` takes — command resolution (aliases, user
-    /// tools, `.kai` scripts, externals, backend tools), arg binding, the `--json`
-    /// transform, and the approval gate — so a gated `rm` still emits an
-    /// approval request and an `ls --json` still applies output formatting. The kernel's
+    /// tools, `.kai` scripts, externals, backend tools), arg binding, and the
+    /// `--json` transform — so an `ls --json` still applies output formatting. The kernel's
     /// pre-execution *syntax* validator does not run: argv has no shell syntax to
     /// validate (a tool's own `validate()`/clap parse still runs at dispatch).
     ///
@@ -2223,16 +1613,6 @@ impl Kernel {
     }
 
     /// [`Self::execute_argv`]'s body, with the execute lock assumed **held**.
-    ///
-    /// Split out for [`Self::confirm`], which has to hold that lock across
-    /// more than the dispatch: it reserves a ledger attempt and stamps a
-    /// replay correlation onto the shared `exec_ctx` *before* dispatching, and
-    /// both of those are single slots. Re-acquiring the lock inside would
-    /// leave a window in which a second concurrent `confirm` overwrites the
-    /// correlation — the first replay would then adopt the second's
-    /// authorization, and the second would post a fresh request. The lock is
-    /// not reentrant, so the reservation, the correlation, the dispatch, and
-    /// the clear are one critical section by construction.
     async fn execute_argv_locked(&self, name: &str, argv: &[Value]) -> Result<ExecResult> {
         // Fresh cancel surface for this call: `execute_pipeline` reads
         // `self.cancel_token`, so a stale cancelled token from a prior call must be
@@ -2253,373 +1633,21 @@ impl Kernel {
             redirects: Vec::new(),
         };
 
-        let stmt = Stmt::Command(command.clone());
         let pipeline = crate::ast::Pipeline {
             commands: vec![command],
             background: false,
         };
-        // Tap and dispatch run under one watchdog, as they do at the string
-        // door: the tap can post a ledger entry and run the decision chain,
-        // and a watchdog installed only around the dispatch would leave that
-        // work outside the bound the caller asked for.
         let work = async {
-            // The second — and last — statement tap site (spec §C.6). The
-            // argv door bypasses the statement loop entirely, and a door the
-            // gate does not watch is not a gate. Its capture is `Exact`, not
-            // `Statement`: it already holds a tool name and an argv, and
-            // `confirm`'s existing arm replays that form.
-            let planned = crate::ast::plan::plan_statement(&stmt);
-            let capture = argv_capture(name, argv, &planned.presented_keys);
-            let gated = match self.tap_statement(planned, capture).await {
-                crate::tools::StatementTap::Proceed { gated } => gated,
-                crate::tools::StatementTap::Halt(held) => return Ok(*held),
-            };
             let result = self.execute_pipeline(&pipeline).await?;
             // A gate raised while evaluating inside the dispatched tool — a
             // user tool body's `$(…)` — surfaces as this call's own held
             // result, and must not strand in the slot for the next serialized
-            // call to mis-take (spec §I.5; the statement loop and the confirm
-            // replay door take the slot the same way).
-            if let Some(held) = self.take_eval_hold() {
-                if gated {
-                    self.exec_ctx.write().await.settle_attempts(held.code).await;
-                }
-                return Ok(*held);
-            }
-            if gated {
-                self.exec_ctx.write().await.settle_attempts(result.code).await;
-            }
+            // call to mis-take.
             Ok(result)
         };
         let result = self.run_under_watchdog(timeout, &cancel, work).await?;
         self.update_last_result(&result).await;
         Ok(result)
-    }
-
-    /// Fulfill a granted approval request by replaying exactly what was
-    /// captured — the highest-fidelity approval path (spec §B.4).
-    ///
-    /// Inspect a gated result with [`ExecResult::approval_request`], apply
-    /// whatever policy (allowlist, model review) over `view.operation` and
-    /// `view.resources`, `handle.grant(...)` it, then call this to perform
-    /// it. The replay reserves the attempt **first** and dispatches with
-    /// that correlation on the context, so the gate site it re-enters
-    /// *matches* its fresh draft against the granted request instead of
-    /// posting a second one. A draft that does not match is refused
-    /// (`DraftMismatch`) and nothing is performed.
-    ///
-    /// Two captures replay. `Capture::Exact` re-dispatches the captured tool
-    /// and argv. `Capture::Statement` re-parses the captured program source
-    /// and runs exactly the held statement (spec §C.6), in the originating
-    /// session — earlier statements already ran there, and their variables
-    /// and cwd still hold, so they are not re-run.
-    ///
-    /// The handle is a required argument because that is what makes this an
-    /// authority action: the signature cannot be satisfied without one, so
-    /// there is no bridge to it from anything holding only a `Kernel`.
-    ///
-    /// # Errors
-    ///
-    /// Exits 2 when the request's [`Capture`](kaish_types::approval::Capture)
-    /// is neither `Exact` nor `Statement`, naming the variant found — a
-    /// request raised outside a dispatch seam (`Capture::DirectExecution`, a
-    /// unit test) is still grantable and still redeemable by presenting its
-    /// key with `--confirm=<token>`; what it is not is replayable from here.
-    ///
-    /// Exits 1 when a `Capture::Statement`'s source no longer parses, or
-    /// parses to fewer statements than the captured index — the record names
-    /// a statement that is not there, and running a different one would be a
-    /// wrong replay.
-    ///
-    /// Exits 1 when the request has no live grant, was already settled
-    /// successfully (the settled outcome is reported instead of re-running
-    /// the operation — spec §B.4), or is otherwise terminal.
-    ///
-    /// If the request carries a `job_id` (the gate came from a *backgrounded*
-    /// job — `rm x &` reaching its gate), a successful replay also retires
-    /// that job from the `JobManager` (GH #124 part 4) — mirroring the manual
-    /// discard path (`kill --discard %N`), automated. A failed replay leaves
-    /// the job in place for inspection or retry. Guarded by `is_gated` so a
-    /// stale or foreign `job_id` can never remove an unrelated running job.
-    pub async fn confirm(
-        &self,
-        handle: &crate::ledger::ApproverHandle,
-        request_id: &kaish_types::approval::RequestId,
-    ) -> Result<ExecResult> {
-        // The handle is the capability, not a lookup key — naming it here
-        // keeps `confirm` unreachable from a session that holds only a
-        // `Kernel`. It also has to be *this* ledger's handle, or the request
-        // it names is not the one about to be replayed.
-        let Some(chain) = handle.approvals_view().get(request_id) else {
-            return Ok(ExecResult::failure(
-                1,
-                format!("confirm: no approval request {request_id} in this ledger"),
-            ));
-        };
-        // Two replayable capture forms, and the re-parse happens here —
-        // outside the execute lock, because parsing is pure computation and
-        // holding the lock across it buys nothing (spec §C.6).
-        let replay = match &chain.request.capture {
-            kaish_types::approval::Capture::Exact(invocation) => Replay::Argv(invocation.clone()),
-            kaish_types::approval::Capture::Statement { source, index } => {
-                let program = match parse(source) {
-                    Ok(program) => program,
-                    Err(errors) => {
-                        let detail = errors
-                            .iter()
-                            .map(|e| e.format(source))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        return Ok(ExecResult::failure(
-                            1,
-                            format!("confirm: the held statement's source no longer parses:\n{detail}"),
-                        ));
-                    }
-                };
-                match program.statements.into_iter().nth(*index) {
-                    Some(stmt) => Replay::Statement(Box::new(stmt)),
-                    None => {
-                        return Ok(ExecResult::failure(
-                            1,
-                            format!(
-                                "confirm: request {request_id} holds statement {index}, and its \
-                                 source parses to fewer statements than that"
-                            ),
-                        ))
-                    }
-                }
-            }
-            other => {
-                let variant = match other {
-                    kaish_types::approval::Capture::DirectExecution => "DirectExecution",
-                    kaish_types::approval::Capture::Unavailable { .. } => "Unavailable",
-                    kaish_types::approval::Capture::CaptureFailed { .. } => "CaptureFailed",
-                    // `Capture` is `#[non_exhaustive]`; an unknown variant is
-                    // still not replayable.
-                    _ => "an unrecognized capture status",
-                };
-                return Ok(ExecResult::failure(
-                    2,
-                    format!(
-                        "confirm: request {request_id} has capture {variant}, which cannot be \
-                         replayed from here; re-run the command with --confirm=<token> instead"
-                    ),
-                ));
-            }
-        };
-
-        // Everything from here to the clear is one critical section. The
-        // reservation and the replay correlation are single slots on shared
-        // kernel state, so two concurrent confirms that interleave would let
-        // one replay adopt the other's authorization (see
-        // `execute_argv_locked`).
-        let _guard = self.acquire_execute_lock().await;
-
-        // Re-observe the grant's preconditions before reserving anything
-        // (spec §B.4). This is the redemption the check exists for: minutes
-        // may have passed between the request and the operator's decision,
-        // and the whole point is that a file which moved in that window does
-        // not get overwritten. The I/O runs here, outside the ledger lock;
-        // the ledger decides on what it saw.
-        let report = {
-            let ctx = self.exec_ctx.read().await;
-            let conditions = chain
-                .grant
-                .as_ref()
-                .map(|grant| grant.conditions.clone())
-                .unwrap_or_default();
-            ctx.observe_conditions(&conditions).await
-        };
-
-        // Reserve the attempt before dispatching (spec §B.4): a bare replay
-        // would re-enter the gate site, build a fresh draft, and post a
-        // *second* request — the approval would authorize a request nobody
-        // is waiting on.
-        let attempt = match self
-            .approvals
-            .requester
-            .redeem(request_id, self.approvals.principal.clone(), report)
-            .await
-        {
-            Ok(attempt) => attempt,
-            Err(err) => return Ok(ExecResult::failure(1, format!("confirm: {err}"))),
-        };
-
-        {
-            let mut ctx = self.exec_ctx.write().await;
-            ctx.set_redemption(request_id.clone(), attempt.attempt_id());
-        }
-        let result = match &replay {
-            Replay::Argv(invocation) => {
-                let argv: Vec<Value> =
-                    invocation.argv.iter().map(|a| Value::String(a.clone())).collect();
-                self.execute_argv_locked(&invocation.tool, &argv).await
-            }
-            // Exactly the held statement, through the statement machinery, in
-            // the originating session — earlier statements' effects
-            // (variables, cwd) are session state and still hold (spec §C.6).
-            // The tap is suppressed under the redemption correlation, so this
-            // posts no second `Observed`; the statement gate still runs, so
-            // the draft matcher checks the replay against what was granted.
-            Replay::Statement(stmt) => {
-                self.replay_statement_locked(stmt, chain.request.capture.clone()).await
-            }
-        };
-        {
-            // Clear it whatever happened: a stale correlation would let the
-            // *next* command adopt an authorization that was not for it.
-            let mut ctx = self.exec_ctx.write().await;
-            ctx.clear_redemption();
-        }
-        // Settle the reservation with what the replay actually did — **before
-        // the `?`**, so an execution error settles too. Usually redundant:
-        // the gate site adopted the attempt and the dispatch seam already
-        // settled it, and settlement is idempotent by `AttemptId`, so this
-        // appends nothing. It is load-bearing for the replay that never
-        // reaches its gate at all: `rm` on a path that vanished between the
-        // grant and the replay fails at its `lstat` and returns before
-        // `request_gate`, which would otherwise leave the attempt `Reserved`
-        // forever and make every later redemption fail `AttemptInFlight` —
-        // a grant an operator could no longer use. An erroring replay is the
-        // same hazard reached the other way, which is why `Outcome::Error`
-        // is recorded rather than propagated past an unsettled attempt.
-        // A non-zero settlement does not consume the grant (spec §A.1), so
-        // the retry stays available either way.
-        let outcome = match &result {
-            Ok(result) => kaish_types::approval::Outcome::Exit(result.code),
-            Err(err) => kaish_types::approval::Outcome::Error(err.to_string()),
-        };
-        if let Err(err) = self
-            .approvals
-            .requester
-            .settle_by_ids(request_id, attempt.attempt_id(), outcome)
-            .await
-        {
-            tracing::debug!(error = %err, "confirm: settling the replayed attempt did not apply");
-        }
-
-        let result = result?;
-
-        if result.ok()
-            && let Some(id) = chain.request.job_id
-        {
-            let job_id = crate::scheduler::JobId(id);
-            if self.jobs.is_gated(job_id).await {
-                self.jobs.remove(job_id).await;
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Replay exactly one held statement, with the execute lock **held** and
-    /// a redemption correlation already stamped on the shared context
-    /// (`docs/approval-ledger.md` §C.6).
-    ///
-    /// Runs the statement machinery, not the program loop: earlier statements
-    /// of the captured source already ran in this session, and their effects
-    /// — variables, cwd — are session state that still holds. Re-running them
-    /// would repeat work nobody asked to repeat.
-    async fn replay_statement_locked(
-        &self,
-        stmt: &Stmt,
-        capture: kaish_types::approval::Capture,
-    ) -> Result<ExecResult> {
-        let cancel = self.reset_cancel();
-        let timeout = self.request_timeout;
-        if timeout == Some(Duration::ZERO) {
-            return Ok(ExecResult::failure(124, "timeout: timed out after 0s".to_string()));
-        }
-
-        // Tap and statement run under one watchdog, as they do at both other
-        // doors: the gate this replay re-enters is inside the bound the
-        // caller asked for, not outside it.
-        let work = async {
-            // The captured source was recorded credential-free, so a replayed
-            // statement presents no key: the redemption correlation on the
-            // context is what authorizes it.
-            let planned = crate::ast::plan::plan_statement(stmt);
-            let gated = match self.tap_statement(planned, capture).await {
-                crate::tools::StatementTap::Proceed { gated } => gated,
-                crate::tools::StatementTap::Halt(held) => return Ok(*held),
-            };
-            let flow_result = self.execute_stmt_flow(stmt).await;
-            // A fresh gate raised while *evaluating* the replayed statement —
-            // a defense-in-depth gate inside its `$(…)` — surfaces as this
-            // replay's own held result, and must not strand in the slot for a
-            // later door to mis-take (spec §I.5).
-            if let Some(held) = self.take_eval_hold() {
-                if gated {
-                    self.exec_ctx.write().await.settle_attempts(held.code).await;
-                }
-                return Ok(*held);
-            }
-            let flow = flow_result?;
-            let drained = {
-                let mut receiver = self.stderr_receiver.lock().await;
-                receiver.drain_lossy()
-            };
-            let mut result = match flow {
-                ControlFlow::Normal(r) => r,
-                ControlFlow::Exit { code } => ExecResult::success("").with_code(code),
-                ControlFlow::Return { value } => value,
-                ControlFlow::Break { result, .. } | ControlFlow::Continue { result, .. } => result,
-            };
-            if !drained.is_empty() {
-                result.err = format!("{}{}", drained, result.err);
-            }
-            if gated {
-                self.exec_ctx.write().await.settle_attempts(result.code).await;
-            }
-            Ok(result)
-        };
-        let result = self.run_under_watchdog(timeout, &cancel, work).await?;
-        self.update_last_result(&result).await;
-        Ok(result)
-    }
-
-    /// Close an undecided approval request (`docs/approval-ledger.md` §B.5).
-    ///
-    /// **Nothing times a request out** (spec §A.10), so this is the only way
-    /// a request nobody decides ever ends. An embedder that wants a horizon
-    /// runs its own timer and calls this with
-    /// [`CancelReason::DeadlinePassed`](kaish_types::approval::CancelReason::DeadlinePassed);
-    /// one that wants none never calls it.
-    ///
-    /// **Cancelling is not denying.** A cancelled request is closed with no
-    /// decision recorded against it, and asking again posts a **new**
-    /// request linked by `supersedes` — the thread of intent stays walkable.
-    ///
-    /// Takes no [`ApproverHandle`](crate::ledger::ApproverHandle), unlike
-    /// [`Self::confirm`]: cancellation is a *requester* action, so a session
-    /// holding no authority closes its own requests. It cannot close another
-    /// principal's.
-    ///
-    /// `rev` is the revision the caller's view of the request was at (spec
-    /// §B.6) — this is what makes a deadline timer racing a human's decision
-    /// safe: whichever commits first invalidates the other's quote, and the
-    /// loser is refused and recorded as `RevisionRejected` rather than
-    /// silently applied against a request that has already moved on.
-    ///
-    /// # Errors
-    ///
-    /// The request is unknown, is already terminal, has an attempt in
-    /// flight, quotes a stale revision, or belongs to another principal in a
-    /// session with no authority.
-    /// Named `cancel_approval` rather than the spec's bare `cancel`:
-    /// [`Kernel::cancel`] already means "interrupt the running execution",
-    /// and one name for two unrelated cancellations is exactly the
-    /// collision the style guide's one-term-one-meaning rule forbids.
-    pub async fn cancel_approval(
-        &self,
-        request_id: &kaish_types::approval::RequestId,
-        rev: u64,
-        reason: kaish_types::approval::CancelReason,
-    ) -> Result<()> {
-        let ctx = self.exec_ctx.read().await;
-        ctx.cancel_request(request_id, rev, reason)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
     }
 
     /// Run `work` under the movable-deadline watchdog for `timeout`, shared by the
@@ -3155,23 +2183,7 @@ impl Kernel {
         // Reset cancellation token for this execution.
         let cancel = self.reset_cancel();
 
-        // Every credential this program presents, from **any** of its
-        // statements (spec §A.2). A `Capture::Statement` records the whole
-        // source, so a key on line 1 would ride along in the capture of a
-        // statement held on line 5 — redacting only the held statement's own
-        // key would leave that one behind. Scanned once, and only for a source
-        // that mentions the flag at all, so the ordinary line pays nothing.
-        let program_keys: Vec<String> = if input.contains("confirm=") {
-            program
-                .statements
-                .iter()
-                .flat_map(|stmt| crate::ast::plan::plan_statement(stmt).presented_keys)
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        for (index, stmt) in program.statements.into_iter().enumerate() {
+        for stmt in program.statements.into_iter() {
             if matches!(stmt, Stmt::Empty) {
                 continue;
             }
@@ -3185,57 +2197,8 @@ impl Kernel {
             // The statement tap and gate (spec §C.6) — one of exactly two
             // sites. It runs before `execute_stmt_flow`, so a held statement
             // has run *nothing*: no substitution, no redirect opened, no
-            // first loop iteration. The capture is source-plus-index because
-            // statements carry no source spans; `confirm` re-parses and runs
-            // exactly this index — with every `--confirm=<key>` removed from
-            // the recorded source, because the capture lands in the ledger
-            // and no entry may carry a credential (spec §A.2).
-            let planned = crate::ast::plan::plan_statement(&stmt);
-            let capture = kaish_types::approval::Capture::Statement {
-                source: crate::ast::plan::redact_keys(input, &program_keys),
-                index,
-            };
-            let gated = match self.tap_statement(planned, capture).await {
-                crate::tools::StatementTap::Proceed { gated } => gated,
-                crate::tools::StatementTap::Halt(held) => {
-                    on_output(&held);
-                    accumulate_result(&mut result, &held);
-                    if !surfaced_warnings.is_empty() {
-                        result.err = format!("{surfaced_warnings}{}", result.err);
-                    }
-                    return Ok(result);
-                }
-            };
-
-            // A gate raised during *evaluation* — a `$(…)` body or a
-            // condition command — means the statement never got the value it
-            // needed: it surfaces the gate site's own held result and the
-            // program halts here, exactly as a statement-level hold does
-            // (spec §I.5). The stash is authoritative because the unwinding
-            // `HeldByGate` error can be stringified into an ordinary failure,
-            // or swallowed into an apparent success, by an intermediate catch
-            // (the pipeline's redirect and argument builders) — the slot
-            // survives whatever happened to the error.
             let flow_result = self.execute_stmt_flow(&stmt).await;
-            if let Some(held) = self.take_eval_hold() {
-                let held_result = *held;
-                if gated {
-                    // The statement tap reserved an attempt for this
-                    // statement; the inner hold ends it at exit 2.
-                    let held_flow = ControlFlow::Normal(held_result.clone());
-                    self.settle_statement_attempt(&held_flow).await;
-                }
-                on_output(&held_result);
-                accumulate_result(&mut result, &held_result);
-                if !surfaced_warnings.is_empty() {
-                    result.err = format!("{surfaced_warnings}{}", result.err);
-                }
-                return Ok(result);
-            }
             let flow = flow_result?;
-            if gated {
-                self.settle_statement_attempt(&flow).await;
-            }
 
             // Drain any stderr written by pipeline stages during this statement.
             // This captures stderr from intermediate pipeline stages that would
@@ -3255,15 +2218,6 @@ impl Kernel {
                         let combined = format!("{}{}", drained_stderr, r.err);
                         r.err = combined;
                     }
-                    // A gate raised *inside* the statement — an `fs.*` gate
-                    // under `set -o approvals` — halts the program exactly
-                    // the way a statement-level gate does, and for the same
-                    // reason: exit 2 means "this has not happened yet", and
-                    // the statements after it were written expecting it had
-                    // (`docs/approval-ledger.md` §I.5). Without this,
-                    // `rm x; touch y` creates `y` whether or not `rm x` is
-                    // ever approved, and nothing un-creates it.
-                    let held = r.approval.is_some();
                     on_output(&r);
                     // Carry the last statement's structured output for MCP TOON encoding.
                     // Must be done here (not in accumulate_result) because accumulate_result
@@ -3271,12 +2225,6 @@ impl Kernel {
                     let last_output = r.output().cloned();
                     accumulate_result(&mut result, &r);
                     result.set_output(last_output);
-                    if held {
-                        if !surfaced_warnings.is_empty() {
-                            result.err = format!("{surfaced_warnings}{}", result.err);
-                        }
-                        return Ok(result);
-                    }
                 }
                 ControlFlow::Exit { code } => {
                     if !drained_stderr.is_empty() {
@@ -3316,52 +2264,6 @@ impl Kernel {
             result.err = format!("{surfaced_warnings}{}", result.err);
         }
         Ok(result)
-    }
-
-    /// Record one top-level statement and gate it if the classifier says so
-    /// (`docs/approval-ledger.md` §C.6).
-    ///
-    /// Called from exactly two sites: the top-level statement loop, and
-    /// [`Self::execute_argv_locked`] — the argv door bypasses the statement
-    /// loop, and a door the gate does not watch is not a gate. Never called
-    /// inside `execute_stmt_flow` or a nested statement loop (`source`, a
-    /// user tool's body, a `$(…)` block): one entry per top-level statement
-    /// is the rule, so a 1,000-iteration loop posts one entry rather than a
-    /// thousand.
-    ///
-    /// The `exec_ctx` write lock is held across the decision chain, which
-    /// returns in microseconds: the chain is a ledger lookup plus a
-    /// synchronous [`Policy::evaluate`](crate::ledger::Policy::evaluate),
-    /// and nothing in it awaits an embedder (spec §C.2). A
-    /// [`Policy`](crate::ledger::Policy) reaches the ledger through its own
-    /// handles rather than through this context.
-    /// `capture` is built from the statement's presented credentials, so a
-    /// caller that captures source text can redact it — see
-    /// [`crate::ast::plan::redact_keys`]. The keys reach the gate as
-    /// `presented` and are stripped from nothing that executes.
-    async fn tap_statement(
-        &self,
-        planned: crate::ast::plan::StatementPlan,
-        capture: kaish_types::approval::Capture,
-    ) -> crate::tools::StatementTap {
-        let classifier = self.approvals.statement_classifier.clone();
-        let presented = planned.presented_keys.first().map(String::as_str);
-        let mut ctx = self.exec_ctx.write().await;
-        ctx.tap_statement(planned.plan, capture, presented, classifier.as_ref())
-            .await
-    }
-
-    /// Settle the attempt the statement gate reserved, with what the
-    /// statement actually did. One call per authorized statement — an
-    /// attempt left `Reserved` blocks every later redemption of its grant.
-    async fn settle_statement_attempt(&self, flow: &ControlFlow) {
-        let code = match flow {
-            ControlFlow::Normal(r) => r.code,
-            ControlFlow::Exit { code } => *code,
-            ControlFlow::Return { value } => value.code,
-            ControlFlow::Break { result, .. } | ControlFlow::Continue { result, .. } => result.code,
-        };
-        self.exec_ctx.write().await.settle_attempts(code).await;
     }
 
     /// Execute a single statement, returning control flow information.
@@ -3786,9 +2688,6 @@ impl Kernel {
                         // Pending is not failure (spec §I.5) — see the
                         // `OrChain` twin. The stash check matters here for a
                         // hold swallowed into an apparent success below.
-                        if left_result.approval.is_some() || self.eval_hold_pending() {
-                            return Ok(ControlFlow::ok(left_result));
-                        }
                         if left_result.ok() {
                             let right_flow = self.execute_stmt_flow(right).await?;
                             match right_flow {
@@ -3842,9 +2741,6 @@ impl Kernel {
                         // statement boundary discards it and surfaces the
                         // slot's result instead. Do not "fix" this by taking
                         // the slot here: only statement boundaries take it.
-                        if left_result.approval.is_some() || self.eval_hold_pending() {
-                            return Ok(ControlFlow::ok(left_result));
-                        }
                         if !left_result.ok() {
                             let right_flow = self.execute_stmt_flow(right).await?;
                             match right_flow {
@@ -3987,14 +2883,12 @@ impl Kernel {
             dispatcher: self.dispatcher(),
             cancel,
             output_format: None,
-            current_invocation: None,
             vfs_budget: self.vfs_budget.clone(),
             watchdog: ec.watchdog.clone(),
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: self.overlay_handle.clone(),
             // Correlate this command's requests with the background job it
             // runs for, if any — the ONE place `job_id` is stamped.
-            ledger_access: Some(self.approvals.access(self.bg_job_id.map(|j| j.0))),
             // A replay correlation belongs to exactly one dispatch. Moved
             // (not cloned) out of the parent context at the dispatch seam —
             // see the stdin hand-off below, which takes it under the same
@@ -4003,10 +2897,6 @@ impl Kernel {
             // A forked or backgrounded execution keeps its parenthood: a
             // gate reached from inside a gated statement is nested under it
             // (spec §A.7).
-            gate_parent: ec.gate_parent.clone(),
-            redemption: None,
-            capture_failure: None,
-            attempts: Vec::new(),
         })
     }
 
@@ -4090,7 +2980,7 @@ impl Kernel {
     ///
     /// The command is spawned as a tokio task and registered with the
     /// JobManager. The job is observable via `/v/jobs/{id}/status`,
-    /// `/v/jobs/{id}/command`, `/v/jobs/{id}/approval`, and — while it is
+    /// `/v/jobs/{id}/command`, and — while it is
     /// still running — `/v/jobs/{id}/stdout` and `/stderr`.
     ///
     /// GH #240 removed those two nodes because they filled once, at
@@ -4368,12 +3258,9 @@ impl Kernel {
                 let backend = ctx.backend.clone();
                 match backend.call_tool(name, tool_args, &mut *ctx).await {
                     Ok(tool_result) => {
-                        // An embedder tool can gate too — settle whatever it
-                        // reserved with the code it reported.
-                        ctx.settle_attempts(i64::from(tool_result.code)).await;
                         let mut scope = self.scope.write().await;
                         *scope = ctx.scope.clone();
-                        // Preserve every field (data/content_type/baggage/approval,
+                        // Preserve every field (data/content_type/baggage,
                         // not just stdout text) — this is the embedder seam:
                         // `x=$(embedder_tool)` and structured iteration over
                         // its result depend on `.data` surviving the crossing
@@ -4482,7 +3369,6 @@ impl Kernel {
             // reason: an authorization `Kernel::confirm` reserved is for
             // exactly one dispatch, and a copy left behind would let the
             // next command adopt it.
-            ctx.adopt_redemption(ec.take_redemption());
         }
 
         // Honor --json before the builtin runs so its setting survives a clap
@@ -4491,52 +3377,7 @@ impl Kernel {
         // The builtin's own `parsed.global.apply(ctx)` becomes idempotent.
         GlobalFlags::apply_from_args(&tool_args, &mut *ctx);
 
-        // Capture the exact invocation at the dispatch seam so a gate site can
-        // record it as the request's `Capture` and `Kernel::confirm` can
-        // replay it precisely — no re-parsing of the human `hint`.
-        // `to_argv()` is computed before `tool_args` moves into execute.
-        //
-        // Captured **unconditionally**, NOT gated on the `fs.*` enforce
-        // policy: `kaish-trash empty` gates every time (it discards the
-        // recovery net, independent of any subscription — see
-        // `KernelOperation::always_enforced`), so a policy-gated capture
-        // would leave its invocation unrecorded and break `confirm` for it.
-        // Spec §C.5's free-when-unsubscribed fast path belongs at the gate
-        // sites, NOT here: moving it here would silently break trash-empty's
-        // confirm path, which is a coupling worth naming rather than
-        // rediscovering. The cost is a small argv clone per command —
-        // marginal beside the per-command ExecContext snapshot above — and it
-        // does NOT reintroduce the deep-`$()` stack overflow (that was the
-        // inline request payload in `ExecResult`, now boxed; the capture's
-        // temporaries don't survive into the recursive `tool.execute` below).
-        //
-        // `to_argv()` can fail loud on a `Value::Bytes` named argument (GH
-        // #164). This capture is bookkeeping only, so a failure here must NOT
-        // gate whether the tool runs: not every builtin routes its own named
-        // args through `to_argv()` — `export`'s `NAME=VALUE` pairs are
-        // arbitrary user variable names, not schema flags, so `export` reads
-        // `args.named` directly and a Bytes value there is completely
-        // legitimate (see `export.rs`). A builtin that DOES call `to_argv()`
-        // internally (nearly all of them) raises the identical loud,
-        // tool-prefixed error a few lines below inside `tool.execute()`.
-        //
-        // What changed with the ledger: a failure no longer substitutes an
-        // empty argv, which was a silent fallback into a *wrong* replay
-        // (spec §B.4). It records `Capture::CaptureFailed` instead, so
-        // `confirm` refuses to replay it and says why.
-        match tool_args.to_argv() {
-            Ok(argv) => ctx.current_invocation = Some(Box::new((name.to_string(), argv))),
-            Err(e) => ctx.set_capture_failed(e.to_string()),
-        }
-
         let result = tool.execute(tool_args, &mut *ctx).await;
-
-        // Settle every attempt this invocation reserved with its real exit
-        // code (spec §C.1). One place, no forgetting — and a path that never
-        // reaches this line (a dropped future, a panic) settles
-        // `Unknown{Cancelled}` when the guards drop instead, because a tool
-        // that was interrupted may already have written.
-        ctx.settle_attempts(result.code).await;
 
         // Sync mutations back. Tools may have changed scope (set/cd),
         // cwd/prev_cwd (cd), and aliases (alias). Also return any unused pipe
@@ -4809,10 +3650,6 @@ impl Kernel {
                 // as a typed error the statement loop converts back into a
                 // held result, and is stashed for the boundary in case an
                 // intermediate catch stringifies the error.
-                if result.approval.is_some() {
-                    self.stash_eval_hold(&result);
-                    return Err(anyhow::Error::new(HeldByGate(Box::new(result))));
-                }
 
                 // A binary result is preserved as bytes — never lossy-decoded to
                 // a string. No trailing-newline trim (every byte is significant).
@@ -4892,18 +3729,6 @@ impl Kernel {
             Expr::Command(cmd) => {
                 // Execute command and return boolean based on exit code
                 let result = self.execute_command(&cmd.name, &cmd.args).await?;
-                // Pending is not failure (spec §I.5): a held condition must
-                // not read as false — neither branch may run on a decision
-                // nobody has made yet. The second arm catches a hold from
-                // deeper inside the command whose typed error an intermediate
-                // layer already stringified into an ordinary failure.
-                if result.approval.is_some() {
-                    self.stash_eval_hold(&result);
-                    return Err(anyhow::Error::new(HeldByGate(Box::new(result))));
-                }
-                if let Some(held) = self.clone_eval_hold() {
-                    return Err(anyhow::Error::new(HeldByGate(held)));
-                }
                 Ok(Value::Bool(result.code == 0))
             }
             Expr::LastExitCode => {
@@ -5218,10 +4043,6 @@ impl Kernel {
                 // A held body stops the enclosing statement before its
                 // missing output is spliced in (spec §I.5) — same conversion
                 // and stash as the bare `$(…)` arm.
-                if result.approval.is_some() {
-                    self.stash_eval_hold(&result);
-                    return Err(anyhow::Error::new(HeldByGate(Box::new(result))));
-                }
 
                 // Embedding binary into a string is a text context: fail loud
                 // rather than splice in U+FFFD garbage.
@@ -5324,14 +4145,6 @@ impl Kernel {
         let mut accumulated_err = String::new();
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
-        // The last statement's pending approval, carried the same way `.data`
-        // is. A body that ends in a gated operation must hand its caller the
-        // request, not just exit 2 — otherwise a gated `rm` inside a function,
-        // a sourced script, a `$(…)`, or a `.kai` script is indistinguishable
-        // from an ordinary failure, and inside `$(…)` the outer statement even
-        // reads as success. The latch had this same gap; a dropped
-        // control-plane signal IS the silent bypass, so it gets fixed here.
-        let mut last_approval: Option<Box<kaish_types::approval::PendingApproval>> = None;
 
         fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
             match r.out_bytes() {
@@ -5362,7 +4175,6 @@ impl Kernel {
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
                             last_data = r.data;
-                            last_approval = r.approval;
                         }
                         ControlFlow::Return { value } => {
                             push_out(&mut accumulated_out, &value);
@@ -5380,7 +4192,6 @@ impl Kernel {
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
                             last_data = r.data;
-                            last_approval = r.approval;
                         }
                     }
                 }
@@ -5406,63 +4217,7 @@ impl Kernel {
         let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
         result.err = accumulated_err;
         result.data = last_data;
-        result.approval = last_approval;
         Ok(result)
-    }
-
-    /// Execute a command-substitution body — a block of statements — and return
-    /// the combined result. Stdout/stderr accumulate across statements with **no
-    /// inserted separator** (matching bash and the `;`/`&&`/`||` output model),
-    /// and the last statement's exit code and structured `.data` ride through,
-    /// so `for x in $(seq 3)` still iterates the array and `$(printf a; printf b)`
-    /// captures `ab`. Scope/cwd snapshotting (so `$(cd / && pwd)` cannot leak the
-    /// cwd) is the caller's responsibility.
-    /// Enter one level of dynamic statement-engine re-entry (command
-    /// substitution / function call / script source), returning an RAII guard
-    /// that releases the level on drop. Past [`MAX_RECURSION_DEPTH`] it returns
-    /// a loud, catchable error instead of letting the native stack overflow
-    /// (GH #46). `what` names the re-entry kind for the message.
-    ///
-    /// The guard is constructed *before* the ceiling check so the error path
-    /// unwinds it too — the counter is always balanced, even when we reject.
-    /// Record a gate raised during expression evaluation. The paired
-    /// [`Self::take_eval_hold`] surfaces it at the statement boundary even
-    /// when the unwinding [`HeldByGate`] error is stringified — or swallowed
-    /// outright — by an intermediate catch (the pipeline's redirect and
-    /// argument builders convert eval errors to `failure(1, …)` results).
-    fn stash_eval_hold(&self, held: &ExecResult) {
-        let mut slot = match self.held_in_eval.lock() {
-            Ok(guard) => guard,
-            // A poisoned lock means a panic elsewhere; the slot itself is a
-            // plain Option and still usable.
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *slot = Some(Box::new(held.clone()));
-    }
-
-    /// Whether an eval-raised hold is waiting to be surfaced.
-    fn eval_hold_pending(&self) -> bool {
-        match self.held_in_eval.lock() {
-            Ok(guard) => guard.is_some(),
-            Err(poisoned) => poisoned.into_inner().is_some(),
-        }
-    }
-
-    /// A copy of the pending eval-raised hold, leaving the slot set for the
-    /// statement boundary to take.
-    fn clone_eval_hold(&self) -> Option<Box<ExecResult>> {
-        match self.held_in_eval.lock() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
-    }
-
-    /// Take the pending eval-raised hold, emptying the slot.
-    fn take_eval_hold(&self) -> Option<Box<ExecResult>> {
-        match self.held_in_eval.lock() {
-            Ok(mut guard) => guard.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        }
     }
 
     fn enter_recursion(&self, what: &str) -> Result<RecursionGuard<'_>> {
@@ -5488,14 +4243,6 @@ impl Kernel {
         let mut accumulated_err = String::new();
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
-        // The last statement's pending approval, carried the same way `.data`
-        // is. A body that ends in a gated operation must hand its caller the
-        // request, not just exit 2 — otherwise a gated `rm` inside a function,
-        // a sourced script, a `$(…)`, or a `.kai` script is indistinguishable
-        // from an ordinary failure, and inside `$(…)` the outer statement even
-        // reads as success. The latch had this same gap; a dropped
-        // control-plane signal IS the silent bypass, so it gets fixed here.
-        let mut last_approval: Option<Box<kaish_types::approval::PendingApproval>> = None;
 
         // Append a statement's stdout as raw bytes (binary) or its UTF-8 bytes.
         fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
@@ -5526,7 +4273,6 @@ impl Kernel {
                     accumulated_err.push_str(&r.err);
                     last_code = r.code;
                     last_data = r.data;
-                    last_approval = r.approval;
                 }
                 ControlFlow::Return { value } => {
                     push_out(&mut accumulated_out, &value);
@@ -5545,7 +4291,6 @@ impl Kernel {
         let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(last_code);
         result.err = accumulated_err;
         result.data = last_data;
-        result.approval = last_approval;
         Ok(result)
     }
 
@@ -5627,14 +4372,6 @@ impl Kernel {
         let mut accumulated_err = String::new();
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
-        // The last statement's pending approval, carried the same way `.data`
-        // is. A body that ends in a gated operation must hand its caller the
-        // request, not just exit 2 — otherwise a gated `rm` inside a function,
-        // a sourced script, a `$(…)`, or a `.kai` script is indistinguishable
-        // from an ordinary failure, and inside `$(…)` the outer statement even
-        // reads as success. The latch had this same gap; a dropped
-        // control-plane signal IS the silent bypass, so it gets fixed here.
-        let mut last_approval: Option<Box<kaish_types::approval::PendingApproval>> = None;
 
         for stmt in program.statements {
             if matches!(stmt, crate::ast::Stmt::Empty) {
@@ -5656,7 +4393,6 @@ impl Kernel {
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
                             last_data = r.data.clone();
-                            last_approval = r.approval.clone();
                             self.update_last_result(&r).await;
                         }
                         ControlFlow::Break { .. } | ControlFlow::Continue { .. } => {
@@ -5679,7 +4415,6 @@ impl Kernel {
                                 ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
                             result.err = accumulated_err;
                             result.data = last_data;
-                            result.approval = last_approval;
                             return Ok(result);
                         }
                     }
@@ -5693,7 +4428,6 @@ impl Kernel {
         let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(last_code);
         result.err = accumulated_err;
         result.data = last_data;
-        result.approval = last_approval;
         Ok(result)
     }
 
@@ -5774,17 +4508,14 @@ impl Kernel {
             // Build tool_args from args (async for command substitution support)
             let tool_args = self.build_args_async(args, None).await?;
 
-            // Create isolated scope (like user tools). The approval policy
-            // and its pin are NOT session state a script may shed: a `.kai`
-            // script starting from a blank scope would run **ungated** under a
-            // pinned-on policy, which is precisely the hole the pin exists to
-            // close. Carry both, and the trash rail with them.
+            // Create isolated scope (like user tools). The trash rail is NOT
+            // session state a script may shed: a `.kai` script starting from
+            // a blank scope would otherwise overwrite and delete without the
+            // recovery net `set -o trash` promised. Carry it.
             let mut isolated_scope = Scope::new();
             {
                 let scope = self.scope.read().await;
                 isolated_scope.set_pid(scope.pid());
-                isolated_scope.set_approvals_enabled(scope.approvals_enabled());
-                isolated_scope.set_policy_pinned(scope.policy_pinned());
                 isolated_scope.set_trash_enabled(scope.trash_enabled());
                 isolated_scope.set_trash_max_size(scope.trash_max_size());
             }
@@ -5816,14 +4547,6 @@ impl Kernel {
             let mut accumulated_err = String::new();
             let mut last_code = 0i64;
             let mut last_data: Option<Value> = None;
-            // The last statement's pending approval, carried the same way `.data`
-            // is. A body that ends in a gated operation must hand its caller the
-            // request, not just exit 2 — otherwise a gated `rm` inside a function,
-            // a sourced script, a `$(…)`, or a `.kai` script is indistinguishable
-            // from an ordinary failure, and inside `$(…)` the outer statement even
-            // reads as success. The latch had this same gap; a dropped
-            // control-plane signal IS the silent bypass, so it gets fixed here.
-            let mut last_approval: Option<Box<kaish_types::approval::PendingApproval>> = None;
             let mut exec_error: Option<anyhow::Error> = None;
             let mut exit_code: Option<i64> = None;
 
@@ -5847,7 +4570,6 @@ impl Kernel {
                                 accumulated_err.push_str(&r.err);
                                 last_code = r.code;
                                 last_data = r.data;
-                                last_approval = r.approval;
                             }
                             ControlFlow::Return { value } => {
                                 push_out(&mut accumulated_out, &value);
@@ -5865,7 +4587,6 @@ impl Kernel {
                                 accumulated_err.push_str(&r.err);
                                 last_code = r.code;
                                 last_data = r.data;
-                                last_approval = r.approval;
                             }
                         }
                     }
@@ -5890,7 +4611,6 @@ impl Kernel {
             let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
             result.err = accumulated_err;
             result.data = last_data;
-            result.approval = last_approval;
             return Ok(Some(result));
         }
 
@@ -6658,11 +5378,11 @@ impl Kernel {
     ///
     /// Clears in-memory variables and resets cwd to root. History is not
     /// cleared (it persists across resets). The kernel's `$$` identity, the
-    /// approval gate / trash-on-delete configuration, and any
-    /// frontend-seeded `initial_vars` (HOME/PATH/etc, from `KernelConfig`)
-    /// are re-applied to the fresh scope rather than silently reverting to
-    /// defaults — an embedder that opted into `with_approvals(true)` must not
-    /// find the gate quietly disabled after a `reset()` between requests.
+    /// trash-on-delete configuration, and any frontend-seeded `initial_vars`
+    /// (HOME/PATH/etc, from `KernelConfig`) are re-applied to the fresh
+    /// scope rather than silently reverting to defaults — an embedder that
+    /// opted into trash must not find it quietly disabled after a `reset()`
+    /// between requests.
     ///
     /// **Background jobs are untouched** (GH #245) — `reset()` is a scope/cwd
     /// reset, not a session boundary for `&`. A job started before `reset()`
@@ -6675,19 +5395,15 @@ impl Kernel {
         {
             let mut scope = self.scope.write().await;
             let pid = scope.pid();
-            let approvals_enabled = scope.approvals_enabled();
-            let policy_pinned = scope.policy_pinned();
             let trash_enabled = scope.trash_enabled();
             let mut fresh = Scope::new();
             fresh.set_pid(pid);
             for (name, value) in self.initial_vars.clone() {
                 fresh.set_exported(name, value);
             }
-            fresh.set_approvals_enabled(approvals_enabled);
             // The pin travels with the policy it pins — a `reset()` between
             // requests that dropped it would hand the next request an
             // unpinned session (spec §F.3 item 3).
-            fresh.set_policy_pinned(policy_pinned);
             fresh.set_trash_enabled(trash_enabled);
             *scope = fresh;
         }
@@ -6704,19 +5420,12 @@ impl Kernel {
     /// This is the same lever `kill %N` uses: a *running* job's in-process
     /// future exits at its next checkpoint, and any external children it
     /// spawned get the SIGTERM→SIGKILL cascade; it then stays tracked with
-    /// status `Killed` once it unwinds. For a *gated* or already-finished
-    /// job the token trip is a no-op — its future has already resolved and
-    /// the job keeps reporting `Gated`/its terminal status. This only
+    /// status `Killed` once it unwinds. For an already-finished job the
+    /// token trip is a no-op — its future has already resolved and the job
+    /// keeps reporting its terminal status. This only
     /// *starts* cancellation, it does not wait (pair with
     /// [`JobManager::wait`]/`wait_all` if the caller needs to block on the
     /// unwind, bounded as [`Self::shutdown`] does).
-    ///
-    /// **A gated job's held request is cancelled here**
-    /// (`docs/approval-ledger.md` §B.5, "a job is cancelled or killed").
-    /// Nothing times a request out, so a job cancelled with a request still
-    /// `Requested` would hold a live ledger slot for the life of the
-    /// process — and forever, in an embedder where several kernels share
-    /// one ledger.
     ///
     /// A job registered by an embedder via [`JobManager::register`] with no
     /// cancel token attached has no lever to cancel — silently skipped here,
@@ -6727,14 +5436,6 @@ impl Kernel {
         let ids = self.jobs.list_ids().await;
         let mut cancelled = 0;
         for id in ids {
-            crate::ledger::cancel_job_request(
-                &self.approvals.requester,
-                &self.approvals.principal,
-                &self.jobs,
-                id,
-                kaish_types::approval::CancelReason::Withdrawn,
-            )
-            .await;
             if self.jobs.mark_killed_and_cancel(id, false).await {
                 cancelled += 1;
             }
@@ -6744,10 +5445,7 @@ impl Kernel {
 
     /// Shut down the kernel.
     ///
-    /// Cancels every tracked background job ([`Self::cancel_all_jobs`]),
-    /// closes every approval request left live in this kernel's scope
-    /// (`docs/approval-ledger.md` §B.5 — nothing times one out, so a kernel
-    /// that shares a ledger with other sessions would strand them), then
+    /// Cancels every tracked background job ([`Self::cancel_all_jobs`]), then
     /// waits up to `kill_grace + 3s` **per job** — the same bound `kill %N`
     /// gives a single target (GH #244) — for it to actually unwind. The
     /// waits are sequential, so the worst case is additive: N jobs that all
@@ -6770,20 +5468,6 @@ impl Kernel {
     pub async fn shutdown(&self) -> Result<()> {
         let ids = self.jobs.list_ids().await;
         self.cancel_all_jobs().await;
-        // Every request this kernel's scope still owns, whether or not a job
-        // holds it (`docs/approval-ledger.md` §B.5, rows 3 and 4). A kaish
-        // session *is* a kernel, so the session and kernel obligations are
-        // one call: `with_session` names the session, and the scope is what
-        // separates this kernel's requests from another session's sharing
-        // the same ledger.
-        crate::ledger::cancel_scope(
-            &self.approvals.requester,
-            &self.approvals.approvals,
-            &self.approvals.principal,
-            &self.approvals.scope,
-            kaish_types::approval::CancelReason::Withdrawn,
-        )
-        .await;
 
         let bound = self.jobs.kill_grace() + Duration::from_secs(3);
         for id in ids {
@@ -6884,7 +5568,6 @@ impl Kernel {
             // reason: an authorization `Kernel::confirm` reserved is for
             // exactly one dispatch, and a copy left behind would let the
             // next command adopt it.
-            ctx.adopt_redemption(ec.take_redemption());
         }
 
         Ok(result)
@@ -7734,28 +6417,6 @@ fn finalize_output(
 /// each command's output concatenates raw, matching bash (`printf a; printf b`
 /// and `printf a && printf b` both yield `ab`; a trailing newline only appears
 /// when a command emits its own, as `echo` does).
-/// A gate raised while *evaluating* an expression — a `$(…)` body or a
-/// condition command — carried as a typed error to the statement loop, which
-/// surfaces it as the enclosing statement's own held result (spec §I.5).
-///
-/// Without this, the enclosing statement runs on a missing value: the
-/// substitution expands to empty, the condition reads as false, and the
-/// pending request is stranded behind an exit 0 — enforcement held the
-/// operation, but nothing told the caller. The boxed result is the gate
-/// site's own (exit 2, the request on `.approval`, the message naming it),
-/// so the surfaced result is exactly what a direct invocation would return.
-#[derive(Debug)]
-struct HeldByGate(Box<ExecResult>);
-
-impl std::fmt::Display for HeldByGate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The inner result's err already names the operation and request.
-        write!(f, "{}", self.0.err.trim_end())
-    }
-}
-
-impl std::error::Error for HeldByGate {}
-
 fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     // Materialize lazy OutputData into .out before accumulating.
     // Without this, the first command's output stays in .output while
@@ -7782,11 +6443,6 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     accumulated.original_code = new.original_code;
     accumulated.content_type = new.content_type.clone();
     accumulated.baggage.clone_from(&new.baggage);
-    // A pending approval (exit 2 + the request) rides the control-plane
-    // field through accumulation, or the request is lost. It is always the
-    // *last* result's, because a statement that carries one halts the
-    // top-level loop (spec §I.5) — nothing runs after it to overwrite it.
-    accumulated.approval = new.approval.clone();
 }
 
 /// Fold a loop's accumulated output into a break/continue signal that is
@@ -7867,59 +6523,6 @@ fn apply_tilde_expansion(value: Value, home: Option<&str>) -> Value {
 /// typed passthrough the string-native door cannot offer.
 pub(crate) fn argv_to_args(argv: &[Value]) -> Vec<Arg> {
     argv.iter().map(classify_argv_token).collect()
-}
-
-/// How an [`Kernel::execute_argv`] call is captured for replay (spec §B.4):
-/// the tool name and its argv as text, which is exactly what `Kernel::confirm`
-/// re-dispatches.
-///
-/// Binary is the one thing that cannot make the crossing. `Value::Bytes`
-/// records `CaptureFailed` naming the size rather than a lossy placeholder a
-/// replay would run as a literal string — a wrong replay is worse than a
-/// refused one.
-///
-/// `presented_keys` are the credentials this argv carries; their tokens are
-/// dropped from the capture. The record must not hold a credential (spec
-/// §A.2), and a replay is authorized by its redemption correlation, so
-/// re-presenting a spent key would only count a rejection somewhere.
-fn argv_capture(
-    name: &str,
-    argv: &[Value],
-    presented_keys: &[String],
-) -> kaish_types::approval::Capture {
-    use kaish_types::approval::{Capture, Invocation};
-    let mut tokens = Vec::with_capacity(argv.len());
-    for value in argv {
-        match value {
-            Value::String(s) if presents_a_key(s, presented_keys) => continue,
-            Value::String(s) => tokens.push(s.clone()),
-            Value::Int(i) => tokens.push(i.to_string()),
-            Value::Float(f) => tokens.push(f.to_string()),
-            Value::Bool(b) => tokens.push(b.to_string()),
-            Value::Null => tokens.push(String::new()),
-            Value::Json(j) => tokens.push(j.to_string()),
-            Value::Bytes(data) => {
-                return Capture::CaptureFailed {
-                    reason: format!(
-                        "argv carries {} bytes of binary, which has no text form to replay",
-                        data.len()
-                    ),
-                }
-            }
-        }
-    }
-    Capture::Exact(Invocation {
-        tool: name.to_string(),
-        argv: tokens,
-    })
-}
-
-/// Whether one argv token is a `--confirm=<key>` (or `confirm=<key>`) for
-/// one of the credentials this statement presented.
-fn presents_a_key(token: &str, presented_keys: &[String]) -> bool {
-    presented_keys.iter().any(|key| {
-        token == format!("--confirm={key}") || token == format!("confirm={key}")
-    })
 }
 
 fn classify_argv_token(token: &Value) -> Arg {
@@ -8564,38 +7167,6 @@ mod tests {
 
         kernel.reset().await.expect("reset failed");
         assert!(kernel.get_var("X").await.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_kernel_reset_preserves_approvals_and_trash_config() {
-        // An embedder configuring `with_approvals(true)` must not have the
-        // confirmation gate silently disabled by a later `reset()` — that
-        // would let a destructive command through with no approval and no
-        // error, exactly the "silent fallback" the gate exists to prevent.
-        let kernel = Kernel::new(
-            KernelConfig::transient()
-                .with_approvals(true)
-                .with_skip_validation(true),
-        )
-        .expect("failed to create kernel");
-
-        // Write and rm relative to `/` (reset()'s post-reset cwd) so the file
-        // is reachable identically before and after reset.
-        kernel.execute("cd /; echo hi > approvals-probe.txt").await.expect("setup write failed");
-
-        let before = kernel.execute("rm approvals-probe.txt").await.expect("execute failed");
-        assert_eq!(before.code, 2, "the gate should require approval before reset: {before:?}");
-
-        kernel.reset().await.expect("reset failed");
-
-        // reset() only clears scope/cwd (to `/`), not the VFS — the
-        // un-deleted probe file (the gate blocked the delete above) is
-        // still there.
-        let after = kernel.execute("rm approvals-probe.txt").await.expect("execute failed");
-        assert_eq!(
-            after.code, 2,
-            "the gate must still require approval after reset, not silently disable: {after:?}"
-        );
     }
 
     #[tokio::test]

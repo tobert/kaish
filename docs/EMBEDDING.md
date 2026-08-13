@@ -54,26 +54,21 @@ code is something agents can branch on:
 |--------|---------|----------|
 | 0 | Success | — |
 | 1 | Failure | Read `err` |
-| 2 | Approval required (`set -o approvals`) | Grant the request, then re-run with `--confirm="<token>"` — embedders read the typed `ExecResult.approval` (or call `Kernel::confirm`); the request's `hint` shows the re-run for humans |
+| 2 | Usage error, or a refusal that names what to do instead (e.g. `kaish-trash empty` without `--confirm`) | Read `err` |
 | 3 | Output truncated by the output limit | `original_code` holds the real exit code. With disk spill the message names the spill file — `cat` it, or narrow the query; memory-spill kernels (`with_backend`, `SpillMode::Memory`) truncate in place with no file |
 | 124 | Timeout (`timeout_ms`, default 30 s) | — |
 | 130 | Cancelled | — |
 
 **Assert on the code and the kind, never on the wording.** The exit code is
 contract, and so is the `std::io::ErrorKind` a VFS refusal carries — a write
-anywhere under `/v/approvals` is `ErrorKind::Unsupported` (not
+to a read-only synthetic mount is `ErrorKind::Unsupported` (not
 `PermissionDenied`: no permission would make it work) and the statement exits
 **1**. The text in `err` is prose written for a human and improves between
 releases without notice, so a boundary test that pins it fails on a wording
 change that changed no behavior.
 
-Embedders typically run a fresh kernel per request (variables, functions,
-aliases, `set -o` options, and `cwd` reset each time) while trash and
-approval requests persist across calls — share one ledger with
-`KernelConfig::with_approver_handle()` (see
-[Destructive-op rails](#destructive-op-rails-inspecting-and-fulfilling-an-approval-gate)).
-An undecided request lives until you decide it or cancel it: kaish does not expire
-requests, because how long one should live is yours to choose.
+Embedders typically run a fresh kernel per request — variables, functions,
+aliases, `set -o` options, and `cwd` reset each time.
 
 ## Stack size — size your execution threads
 
@@ -214,705 +209,26 @@ let config = KernelConfig::isolated();
 let config = KernelConfig::agent();
 ```
 
-Other builders: `.with_approvals(bool)` / `.with_trash(bool)` (destructive-op
+Other builders: `.with_trash(bool)` (destructive-op
 rails — see below), `.with_vfs_budget(bytes)` / `.without_vfs_budget()` (cap
 in-memory VFS growth), `.with_skip_validation(bool)`, `.with_initial_vars(map)`
 (below).
 
-#### Destructive-op rails: inspecting and fulfilling an approval gate
-
-With `.with_approvals(true)`, a destructive op (`rm`'s delete, and the truncating
-overwrite behind `tee` / `patch` / `sed -i` / `write` / `cp` / `mv` / `dd of=`)
-does not run on first call — it returns an `ExecResult` with **exit code 2** and a
-pending approval request. Copying or moving *into* a directory, and recursive
-`cp -r`/`mv` of a tree, gate only the named destination, not per-child overwrites.
-`kaish-trash empty` gates **always**, whatever the option says. The output
-contract:
-
-- **`ExecResult.err`** (which a frontend routes to stderr) carries the
-  human-readable message;
-- **stdout** is empty (nothing happened, so there is no success output);
-- **`ExecResult.approval`** carries the pending decision as a first-class
-  typed field — `Option<Box<PendingApproval>>`, control-plane and distinct
-  from the data-plane `.data`. `PendingApproval { request, resume }` pairs
-  the tokenless view with the route that resumes it.
-
-The view is the whole inspect contract, and it is **tokenless by
-construction** — there is no credential field to redact, so it is safe to log,
-serialize, and hand to a reviewing model:
-
-```rust
-pub struct ApprovalRequestView {
-    pub id: RequestId,            // the request's public name
-    pub operation: OperationId,   // "fs.remove", "fs.overwrite", "fs.rename", "trash.empty"
-    pub risk: RiskClass,
-    pub resources: Vec<Resource>, // what it would touch (kind + id, e.g. path)
-    pub principal: Principal,     // who is asking
-    pub capture: Capture,         // Exact(tool, argv) when replayable
-    pub job_id: Option<u64>,      // set when a backgrounded job raised it
-    pub reason: String,           // why the gate fired
-    pub hint: String,             // human re-run string (display only)
-    pub deadline: Option<SystemTime>, // yours to set; compared when observed,
-                                      // never enforced on a timer
-    // … see kaish_types::approval for the full record
-}
-```
-
-**Authority is a capability, not a flag.** `Kernel::build(config)` returns
-`(Kernel, ApproverHandle)` — building the kernel is the only way to obtain one,
-and you decide which sessions get a clone. `Kernel::new` is `build` with the
-handle dropped, which is the right posture for a session that must not approve
-its own work.
-
-Two doors install it *on a session*, which is what makes `approvals
-grant`/`deny`/`revoke` work there:
-
-- `KernelConfig::with_approver_handle(handle)` — for a second kernel, which
-  also adopts that handle's ledger, so several kernels share one log.
-- `KernelConfig::with_own_authority(true)` — for the embedder that is itself
-  the operator, with one kernel and no earlier handle to adopt. The reference
-  REPL uses this; `Kernel::build` still returns the handle, and a clone is left
-  on the session.
-
-Neither is the default. An agent session is built with neither and has no
-method that grants.
-
-**Inspect** with the typed accessor (works before or after `--json` —
-`.approval` survives formatting):
-
-```rust
-if let Some(req) = result.approval_request() {
-    // apply preapproval policy / model review over (req.operation, req.resources),
-    // or inspect req.capture — the exact argv a confirm would replay …
-}
-```
-
-**Fulfill** by granting through the handle, then replaying with
-`Kernel::confirm`. The replay reserves the attempt *first* and dispatches the
-captured invocation with that correlation, so the gate it re-enters matches its
-fresh draft against the granted request instead of posting a second one:
-
-```rust
-let (kernel, authority) = Kernel::build(config)?;
-let gated = kernel.execute("rm 'my notes.txt'").await?;
-if let Some(req) = gated.approval_request() {
-    if approve(&req) {                                    // your policy
-        authority.grant(&req.id, req.revision, terms).await?;
-        let done = kernel.confirm(&authority, &req.id).await?;  // replays exactly
-    }
-}
-```
-
-`req.revision` is the revision this same read of the request saw — quote it back
-(spec §B.6). A grant, denial, or cancellation quoting anything else is refused as
-`LedgerError::StaleRevision` and recorded as `RevisionRejected` rather than
-applied: your view of the request has gone stale, because something else already
-decided, cancelled, or superseded it since you read it. This is what makes
-out-of-band approval safe across an unbounded gap — a human answering a prompt
-for a request that was cancelled while they were thinking cannot revive it.
-
-**The wait is yours, and that is deliberate.** `approve(&req)` above can return
-immediately, or it can pop a dialog, call a model, or sit in a queue until someone
-comes back from lunch — `execute` has already returned, so nothing in kaish is
-holding a statement open while you decide. There is no approval callback for the
-kernel to await, because awaiting one would mean the kernel bounding your work with
-a timeout it picked and cancelling your in-flight dialog or RPC when that timeout
-fired. Run the decision on your own task, with your own timeout if you want one,
-and end an abandoned request with `cancel` rather than letting it sit live.
-
-`ApprovalOutcome::Pending` carries a `PendingApproval { request, resume }`, and
-`resume` is a structured `ResumeAction` rather than something to infer from the
-capture's shape: `ConfirmStatement { plan_digest, index }` for a held statement,
-`RetryOperation` for an invocation `Kernel::confirm` can replay, and
-`NotReplayable { reason }` for a capture the kernel cannot re-issue at all.
-
-**`ExecResult.approval` carries the whole `PendingApproval` — read the route,
-don't rebuild it.** `ExecResult::pending_approval()` hands back the same
-`{ request, resume }` pair `ApprovalOutcome::Pending` carried at the gate
-site; `result.approval_request()` stays the narrower accessor for a caller
-that only wants the view. Read `.resume` off what `pending_approval()`
-returns rather than calling `ResumeAction::for_capture` yourself — that
-function is what built the route the first time, and calling it again at the
-read site is exactly the duplicate-derivation this pairing exists to avoid.
-`PendingApproval` and `ResumeAction` are re-exported from
-`kaish_kernel::ledger`; `ApprovalRequestView` is reached through
-`PendingApproval::request` (or imported from `kaish_types::approval`).
-
-Two consequences worth planning for:
-
-- **A gate stops the program there — exit 2 halts the statement loop.** This
-  holds whether the gate was raised on the statement itself or by an `fs.*`
-  operation inside it: exit 2 means *this has not happened yet*, so the
-  statements written after it do not run. `confirm` replays the held statement
-  and nothing after it. If you submitted `a; b; c` and `b` gated, running `c` is
-  yours to do — the session still holds the variables and cwd that `a` set, and
-  `ResumeAction::ConfirmStatement`'s `index` says where to pick up (`index + 1`).
-- **Decide the requests you are handed.** With no expiry, an undecided request holds
-  a live slot until something closes it, so an embedder that ignores pending requests
-  eventually fills the ledger (`live_capacity`). Read `ExecResult.approval` on every
-  result, not only the ones you expected to gate.
-
-**Persisting a pending decision across a restart.** `PendingApproval` and
-`ResumeAction` derive `Serialize`/`Deserialize`, so an ACP-style embedder that
-parks a decision outside the process — a queue, a database row, a chat
-message waiting on a human's reply — does not have to lose it if the process
-exits before the answer arrives:
-
-```rust
-let pending: PendingApproval = gated.pending_approval().expect("a gated result");
-let json = serde_json::to_string(&pending)?;
-queue.push(json); // survives a restart; `pending.request.id` names the request to grant later
-```
-
-The request the JSON names is still live in the ledger regardless of whether
-the process that raised it restarted — the ledger is what persists the
-chain, not this snapshot; `pending`/`resume` are what a *reader* needed to
-show and re-drive it, not the record of it.
-
-Prefer `confirm` over hand-building the re-run. The `hint` field is a
-*human-display* string and does **not** robustly quote paths (`rm
---confirm="T" my notes.txt` re-parses as two paths); `confirm` replays the
-captured argv through the argv door and sidesteps that entirely. A session
-without a handle can still fulfill a gate by presenting a key it was given:
-re-run with `--confirm=<token>`, retrieved by an authority via
-`ApproverHandle::token_for`.
-
-**A grant authorizes exactly one successful run.** A key presented after a
-successful settlement reports the recorded outcome instead of running the
-operation a second time. A *failed* attempt does not consume the grant, so a
-transient failure retries inside the grant's lifetime. Repetition that is
-genuinely wanted has a first-class form: a standing grant with a use count.
-
-**A grant is re-checked against the world before it runs.** A request may
-declare a `transition` on a resource — the state it expects to find. The
-kernel's gated overwrite declares the target's `sha256` content digest; a
-grant copies those claims into its `conditions`, and redemption reads the
-resource again before reserving anything. A resource that moved in between
-appends `Refused` + `Voided`, returns **exit 1** naming what changed, and the
-operation does not run. This *detects* a stale authorization; it does not make
-the write atomic, which only a conditional write at the resource itself can do.
-
-Build a grant's terms with `GrantTerms::once_for_view(&view, not_after)` — it
-carries the request's declared transitions into the grant's conditions. Terms
-that drop one are rejected as widening (**exit 1**,
-`LedgerError::ConditionsWidened`).
-
-**A resource kind you introduce needs a resolver.** The kernel resolves `path`
-through its own backend. A tool that names any other kind registers a
-`StateResolver` for it:
-
-```rust
-#[async_trait]
-impl StateResolver for GitRefResolver {
-    fn kind(&self) -> &str { "git.ref" }
-    async fn observe(&self, id: &str) -> Result<StateClaim, ResolverError> {
-        Ok(StateClaim::Exact(self.repo.oid_of(id)?))  // Err refuses; never Ok(Unspecified)
-    }
-}
-
-let config = KernelConfig::repl().with_state_resolver(Arc::new(GitRefResolver::new(repo)));
-```
-
-Three rules the mechanism does not bend on:
-
-- A kind with **no registered resolver refuses** any grant that claims a prior
-  state for it. Registering the resolver is part of shipping the kind.
-- A resolver that returns `Err` **refuses**. There is no `Ok(Unspecified)`
-  escape — an unobservable precondition is never a passing one.
-- Registering a resolver for `path`, or two for one kind, fails
-  `Kernel::build`. Which resolver decides whether a resource changed must not
-  depend on registration order.
-
-A transition of `StateClaim::Unspecified` claims nothing and is never checked,
-so a resource that declares none (`Resource::plain`) costs no I/O at
-redemption. `rm` uses that form deliberately: digesting an `rm -rf` tree would
-cost a full read per path. The `Redeemed` entry records the observations, so an
-empty observation set is the record that a grant was unconditioned.
-
-The kernel owns the *mechanism* (posting the request, capturing the argv at the
-dispatch seam, minting and checking the credential); the embedder owns the
-*judgment*. The request is **never** folded into `.data` — a stdout redirect
-(`rm big > log`) clears the data-plane `.data` but can't touch the
-control-plane `.approval`, so the gate can't be silently bypassed.
-
-> **Note:** the argv is captured at the kernel's dispatch seam, so it's present
-> for every kaish builtin and any tool you register in the kernel's registry
-> (the `Kernel::with_backend` tools closure). A tool served *only* by a custom
-> `KernelBackend::call_tool` that raises its own gate records a non-`Exact`
-> `Capture`; `confirm` then fails loud (exit 2) naming the variant it found,
-> rather than replaying an empty argv. Those requests are still grantable and
-> still redeemable by presenting the key with `--confirm=<token>`.
-
-If you executed with `--json` (`OutputFormat::Json`), the gate is a non-zero exit
-with a diagnostic, so the result is wrapped in the standard JSON error envelope
-and the request is surfaced under its own `approval` key:
-`{ "error": "...", "code": 2, "approval": { "id": ..., "operation": ...,
-"resources": [...], "hint": ..., ... } }`. The typed `approval_request()`
-accessor works the same either way, so it's the recommended path.
-
-**A request nobody decides does not expire.** It stays `Requested` until you
-decide it or cancel it — kaish never reads a clock to end one, because how long
-an unanswered request should live differs per embedder and a kernel default is
-silently wrong for someone. What bounds the ledger instead is capacity:
-`live_capacity` refuses a new request with a number when the ledger is full,
-which is a failure someone can act on rather than a request that quietly
-vanished.
-
-**So closing what you no longer want is yours to do.**
-`Kernel::cancel_approval(&id, rev, why)` closes an undecided request. (It is not
-spelled `cancel`: `Kernel::cancel` already means "interrupt the running
-execution".) Four properties an embedder should know:
-
-- **Cancellation takes no `ApproverHandle`.** It is a requester action: a
-  session holding no authority cancels its own requests, which is what lets a
-  gated agent withdraw an ask it has given up on. Cancelling another
-  principal's request without authority exits 1, naming both principals.
-  `approvals cancel <id>` is the same call from the shell.
-- **Only an undecided request is cancellable.** A decision that already landed
-  is not undone by the requester losing interest — cancelling a granted request
-  exits 1 — and a granted-but-unredeemed chain closes on its own at the grant's
-  `not_after`.
-- **`rev` is revision-checked, the same as `grant`/`deny` (§B.6).** Quote the
-  revision your view of the request was at; a stale quote is refused as
-  `LedgerError::StaleRevision` rather than applied. This is what keeps a
-  deadline timer from cancelling a request a human just decided out from under
-  it — whichever transition commits first invalidates the other's quote.
-- **Asking again is a new request, not a revival.** Re-run the command; the
-  fresh request starts undecided and is linked to the closed one by
-  `supersedes`, so the whole thread of intent stays walkable.
-
-**A deadline is a timer you run, not one the kernel runs.** Set
-`RequestOrigin::with_deadline(Some(when))` if you want the request to *record*
-one — it is compared when the request is next observed — and run your own timer
-that calls `cancel_approval(&id, rev, CancelReason::DeadlinePassed)` when it
-fires. An embedder that wants no horizon never calls it.
-
-**And the clock those bounds are read against is yours too.**
-`KernelConfig::with_approval_clock(Arc<dyn Clock>)` installs it; the default is
-`SystemClock`. The kernel keeps no opinion about which clock is true — it keeps
-two properties:
-
-- **One clock per ledger.** The reading an entry is stamped with and the reading
-  a bound is compared against come from the same source, so a record's
-  timestamps and the decisions taken alongside them can never mean two different
-  clocks. `Ledger::build` takes the clock as a required argument for exactly
-  that reason.
-- **A monotone non-decreasing view of it.** The ledger latches the largest
-  reading it has taken and clamps a smaller one up to that latch, so an expired
-  grant stays expired and entry stamps never regress — whatever your clock does.
-  You do not have to promise the kernel a well-behaved clock.
-
-This is the *ledger's* clock, not the kernel's: `timeout`, the script watchdog,
-and `ToolCtx::patient` run on `Instant` and are unaffected. It is also
-incompatible with `with_approver_handle`, which adopts a ledger that already has
-one — setting both fails `Kernel::build` loudly.
-
-**kaish closes what its own teardown would strand.** `kill --discard %N`,
-`Kernel::cancel_all_jobs`, and `Kernel::shutdown` cancel the requests they would
-otherwise orphan — the last sweeping every live request in that kernel's scope,
-which matters when several kernels share one ledger through
-`with_approver_handle`. What kaish cannot close is a session that goes away
-without calling `shutdown`; page through `Approvals::pending(PageRequest::default())`
-and cancel what you recognize.
-
-**Gated backgrounded jobs surface on the job, not on the result.** `cmd &` that
-gates inside tool execution puts the request on `JobInfo.approval` and
-`/v/jobs/{id}/approval`; the statement that spawned it has already returned. An
-embedder that reads only `ExecResult.approval` will not see it. Poll
-`jobs --json` for gated entries, or page `Approvals::pending(..)`, which is
-the authoritative set either way.
-
-**Reading the ledger.** `Kernel::approvals()` is the read side (it grants
-nothing): `pending(PageRequest)`, `ids()`, `get(&id)`, `standing()`,
-`subscriptions()`, `any_subscriptions()`, `log(since, limit)`, and `watch(since)`.
-
-`pending`/`log` return a **page**, not a bare `Vec` — `ApprovalPage`/`LedgerPage`,
-each `{ items, next: Option<LedgerCursor> }`. The statement tap posts an
-`Observed` entry per top-level statement, so both sets are unbounded in
-principle; a `next` cursor means more remain. Resume with it —
-`PageRequest::default().with_cursor(next)` for `pending`, `next.seq()` as the
-next call's `since` for `log` — and a reader that stops and resumes this way
-never misses an entry or sees one twice. `PageRequest::default()`'s limit
-(1024) already covers a realistic pending set in one page; reach for the
-builder methods (`.with_limit`, `.with_scope`, `.with_state`, `.with_since`)
-to filter or to page deliberately.
-
-`log(since, limit)` returns `LedgerRecord`s, never bare entries: each carries
-`schema_version`, `sequence`, `at`, and the `scope` the entry belongs to,
-alongside the entry itself. Read `record.known()` for the entry — `None` means
-a **newer writer's entry this build does not recognize**, kept verbatim as
-`RecordedEntry::Unknown` with its sequence and scope intact. Surface it as
-unknown; never drop it, or the history you report is one you did not verify.
-`record.schema_is_known()` answers the same question for the envelope.
-`LedgerSink::post` receives the same `LedgerRecord`.
-
-**Watching instead of polling.** `Approvals::watch(since)` is the one
-convenience the kernel offers around waiting: it backfills the retained tail
-from `since`, then yields every further append live, in the same order,
-until the stream is dropped. There is no deadline argument and no filter —
-those are policy an embedder builds on top, not something the kernel decides
-for it (§0.1's line: mechanism, not policy).
-
-```rust
-let mut stream = kernel.approvals().watch(0);
-loop {
-    match stream.next().await {
-        Some(WatchEvent::Entry(record)) => {
-            // react to `record.known()` — a Requested you should surface to
-            // a human, a Granted that unblocks a queue, whatever this
-            // embedder's own event loop wants.
-        }
-        Some(WatchEvent::Lagged { count }) => {
-            // this consumer fell behind the broadcast buffer — `count`
-            // entries were dropped, never silently. Catch up before
-            // resuming the live tail:
-            let page = kernel.approvals().log(last_seen_seq, 4096);
-            // .. process page.items, remember the new last_seen_seq ..
-        }
-        None => break, // the ledger itself is gone — process shutdown
-    }
-}
-```
-
-A lagging consumer is reported, not dropped silently — `WatchEvent::Lagged`
-names how many entries this stream's subscriber missed, so the recovery
-above is `Approvals::log` from the last `seq` this stream actually delivered,
-not a guess.
-
-The same read model is projected at **`/v/approvals`** — `pending`,
-`standing`, and `log` at the root, and `{id}/{request,state,attempts,grant}`
-per request — and surfaced by the `approvals` builtin (`list`, `show`,
-`log`). `/v/approvals` is **read-only: every write path returns
-`Unsupported`**, because granting by file write would make "the agent can
-write files" equivalent to "the agent can approve its own operations". No
-projection carries a credential; there is no redaction step, because no
-projected type has a credential field.
-
-**The reference REPL is a worked example of all of the above**, and it is a
-plain embedder with no privileged hook: `crates/kaish-repl/src/approval.rs`
-plus `Repl::fulfill_gate`/`decide` in `lib.rs` are the whole of it — get
-`Pending` back from `execute`, render it, read one answer, `grant_with_grounds`
-+ `Kernel::confirm`, or `deny`. Copy its two rules whatever your frontend is:
-
-- **An approval prompt is never the agent's output stream.** This is a
-  requirement, not a preference: a question a model can read as data is a
-  question it can answer, and an approval surface a model can reach is not an
-  approval surface. The REPL renders the request to **stderr** and asks only
-  when **stdin and stdout are both terminals**; a piped or captured session
-  gets the exit-2 result and no question at all. Segregate the prompt the same
-  way in whatever you build — a separate pty, a UI channel, a socket the model's
-  side cannot write.
-
-  **Put the terminal check beside the write, not at the construction site.**
-  `TerminalPrompt::ask` calls `IsTerminal` on the line immediately above
-  `eprint!`, so the rule lives where the output happens and there is no
-  configuration path that can construct a prompt that asks into a pipe. A check
-  made once at startup is a check that stops being true when a frontend is
-  reused, re-parented, or handed a different stream, and it fails open.
-- **Anything that is not an answer denies.** `n`, an empty line, Ctrl-C,
-  Ctrl-D, a terminal that went away: all of them close the request. A gate left
-  live because nobody could be asked is a slot nothing will ever return.
-
-**Deciding from inside a session.** `KernelConfig::with_approver_handle()` (or
-`with_own_authority(true)` for a single-kernel embedder) installs an authority
-*on the session*, which is what lets `approvals grant`/`deny`/`revoke` work
-there. Without one those three exit **1** naming
-the reason, while `list`, `show`, `log`, and `cancel` keep working. That is
-the whole separation: an agent that can run any shell command can see what is
-pending and withdraw its own requests, and cannot approve itself.
-
-To decide a request raised in one `execute()` call from
-a *later* call — or from a different kernel — share the ledger with
-`KernelConfig::with_approver_handle()`; the default is a fresh ledger per
-kernel. `KernelConfig::with_ledger(LedgerConfig::default().with_…())` tunes
-capacity, retention, the sink queue, and the rejected-credential limit;
-`LedgerConfig` is `#[non_exhaustive]`, so use the builder rather than a struct
-literal.
-
-**The audit sink, and what a slow or failing one costs you.**
-`KernelConfig::with_ledger_sink(Arc<dyn LedgerSink>)` posts every `LedgerRecord`
-to your sink as it commits, in commit order, from a background drain task. Your
-`post` must be fast and non-blocking: it always has a queue slot reserved for it
-already, so it never negotiates capacity with the ledger and only ever does its
-own I/O.
-
-```rust
-pub trait LedgerSink: Send + Sync {
-    fn post(&self, record: &LedgerRecord) -> Result<(), LedgerSinkError>;
-}
-```
-
-Four rules, each of which will bite an embedder that writes to a network log:
-
-- **A full queue refuses new privileged operations — exit 1.** The queue is
-  `LedgerConfig::sink_queue` deep (default **1024**). Once every permit is
-  reserved, the next `post_request`/`grant`/`deny` fails with
-  `LedgerError::SinkUnavailable`, which reaches the gate site as
-  `ApprovalOutcome::LedgerUnavailable` and exits **1**. The ledger never blocks
-  the executor and never drops an audit record to make room.
-- **A terminal entry is never refused.** `Settled`, and attempt-level
-  `Abandoned`, have their slot banked with the `Redeemed` entry that opened the
-  attempt, before the attempt is allowed to begin — an operation that already
-  ran can always record what happened, whatever the queue is doing.
-- **An `Err` trips the sink permanently. There is no retry.** The drain task
-  stops consuming, and the failed record plus everything queued behind it is
-  counted as undelivered and named in every later refusal: `"audit sink failed;
-  N audit entries undelivered — refusing further privileged operations until the
-  process is restarted"`. The loss is accounted, never silent. Recovery is a
-  process restart; there is no reset call, deliberately, because an unrecorded
-  privileged operation is exactly the corruption this design refuses.
-- **Buffering is your call to make explicitly.** A sink fronting something that
-  can be unavailable — a network collector, a remote audit service — should
-  buffer internally and return `Ok` quickly, accepting the buffering risk in
-  your own code. The kernel will not silently trade a complete record for
-  availability on your behalf.
-
-The sink is an **export, not a source of truth**. It is post-only: nothing reads
-back through it, so a restart does not reconstruct prior chains from sink output
-(`docs/approval-ledger.md` §B.1 — v1 is in-process only, with no durability
-claim). What recovery there is happens in-process: a periodic sweep closes
-attempts whose guard was dropped without draining, as `Abandoned`.
-
-**Hosting several sessions in one process.** Every request carries an
-`ApprovalScope` — a kernel id, an optional session, and an optional actor — so
-"whose request is this?" is answerable from the request itself rather than from
-a map you keep beside it. Name the session with
-`KernelConfig::with_session(SessionId::new("conversation-7"))`; a kernel with
-none is the single-session shape.
-
-`Approvals::scope(session)` and `ApproverHandle::scope(session)` derive views
-restricted to one session. The scoped read side sees only that session's
-requests and records, and the scoped authority decides only within it —
-`grant`, `deny`, and `token_for` on another session's request return
-`LedgerError::OutOfScope`. **Scope the read side too**: the statement tap puts
-the command text that raised a request into the request, so an unscoped reader
-in a multi-session process reads every session's commands. A request with no
-session belongs to the kernel and is invisible to every scoped handle.
-
-This is API hygiene, not a process boundary. It stops a session's code from
-reaching another session's requests by accident or by confusion; it does not
-stop hostile Rust in the same process, which can reach anything the process
-can.
-
-**A grant is a decision about an operation in a context.** Every request
-records the `PlanBinding` it was judged under: a digest of what was judged, the
-working directory, the scope, and the sandbox profile when you name one. A
-`--confirm=<token>` presented — or a `Kernel::confirm` replay dispatched — from
-outside that binding **redeems nothing**. The kernel posts a fresh request and
-returns exit 2 with it, rather than authorizing an operation nobody judged in
-that context; the grant it did not redeem stays live and untouched. The
-common case is a changed working directory, which no precondition resolver can
-catch, because nothing declares the cwd as a precondition.
-
-**Recording without gating: `fs.*` subscriptions.** `set -o approvals` is one
-posture — enforce, over the whole `fs.*` namespace. A subscription generalizes
-it: `ApproverHandle::subscribe(Subscription::new(operations, resources, mode,
-reason))` registers a glob over (operation, resource) in one of two modes.
-
-| Mode | What matching operations do |
-|---|---|
-| `SubscriptionMode::Observe` | Post one `LedgerEntry::Observed` and **run**. Never defers, never blocks, never returns exit 2. A record, not a decision — no request is built, no grant exists, nothing enters the live index, and the entry is evictable the moment it commits. |
-| `SubscriptionMode::Enforce` | Go through the full decision chain, exactly as `set -o approvals` does — but scoped to the glob instead of the whole namespace. |
-
-Operations glob (`fs.*` covers the namespace); resource **kinds match exactly
-and only the `id` globs**, so `ResourcePattern::new("path", "/workspace/**")`
-never matches a `git.ref`. An empty pattern list matches nothing rather than
-everything. `subscribe` returns a `SubscriptionId`; `unsubscribe(&id, reason)`
-revokes it, and both append their own ledger entry (`Subscribed`,
-`Unsubscribed`) — an audit scope that changed with no record of the change
-makes the record it produced unreadable. Revocation takes effect for
-operations not yet posted; a request already granted under the subscription is
-unaffected.
-
-Three rules worth knowing before writing a glob:
-
-- **Unsubscribed and ungated means unposted.** An `fs.*` operation nothing
-  covers posts **nothing at all** — no `Requested`, no allocation. The gate
-  sites take one relaxed atomic load (`Approvals::any_subscriptions()`) before
-  building anything, so a 10,000-path delete on a session with no subscription
-  costs one branch. `ApprovalRequest::constructed_count()` is the counter that
-  proves it: read it either side of a command and the difference is **0**.
-- **`enforce` beats `observe`** when both cover a path. Enforce is strictly
-  stronger and its record is a superset, so the other precedence could
-  downgrade a gate to a note.
-- **Matching is per resource, and against the resolved path.** `rm
-  /workspace/a /tmp/b` under an observe subscription on `/workspace/**`
-  records `/workspace/a` and stays silent about `/tmp/b`. The glob is matched
-  against the path the kernel resolved — so a relative path cannot step
-  outside the scope — and each recorded `ObservedResource` carries both
-  spellings: `id` is the path the command wrote (what an auditor recognizes),
-  `resolved` is the path the glob matched, and `subscription` names the
-  covering subscription. One command's covered paths post as one entry, even
-  when their coverage comes from different subscriptions.
-
-`trash.empty` gates regardless of any subscription: it discards the recovery
-net every other `fs.*` operation relies on. `Approvals::subscriptions()` lists
-the live registry; there is no shell surface for `subscribe` — a session that
-could subscribe itself could also unsubscribe itself.
-
-**The statement tap: every statement is recorded, always.** Above the `fs.*`
-layer sits a second one. Every top-level statement posts one chainless
-`LedgerEntry::Observed` entry under operation `cmd.execute`, carrying a `Plan`
-— the statement rendered back to shell text unexpanded, its kind, and every
-command it contains. **There is no configuration that turns this off**: an
-agent getting an automatic second opinion is a property of kaish, not a
-posture an embedder selects. The two layers are independent by design and join
-through trace context, not through the kernel: `fs.*` records what a command
-**touched**, `cmd.execute` records what was **asked to run**, before any of it
-runs.
-
-The cost is one entry per top-level statement. A 1,000-iteration loop posts
-one; a 10,000-path `rm` posts one; a `$(…)`, a sourced script, and a user
-tool's body post none of their own, because their statements belong to the
-enclosing top-level statement's plan.
-
-**So every kernel's log accumulates, including one with approvals off** —
-"approvals off" means nothing gates, not that nothing is observed, and a
-kernel that never raises a request still records a `cmd.execute` entry per
-statement (the `cat` that reads the log included). Growth is bounded at
-`LedgerConfig::retained_entries`, **4096** entries by default and settable with
-`with_retained_entries`; a chainless observation always evicts freely, so the
-oldest ones age out rather than filling the ledger. Read them with `approvals
-log --limit N` (200 by default, `--since SEQ` to page) or `cat
-/v/approvals/log`.
-
-**The tap is advisory, not a durable audit trail.** A tap append that cannot
-commit — sink backpressure, a full retention ring — emits a **warn** event and
-the statement **still runs**. Nobody opted into a completeness guarantee here;
-an operator who registers an `fs.*` subscription did, which is why that path
-exits 1 and this one does not. An embedder that needs the record to be
-complete gets that from the sink's own reliability (`with_ledger_sink`), not
-from the tap. A gate-classified statement keeps every fail-closed rule: a
-decision that cannot be recorded is not made, and the statement exits **1**.
-
-**The classifier scopes; the chain decides.**
-`KernelConfig::with_statement_classifier(Arc<dyn StatementClassifier>)`
-installs one. It is called once per top-level statement, synchronously, and
-must not block — it runs on the execution path of every statement.
-
-```rust
-use kaish_kernel::ledger::{
-    ClassificationError, ExecutionContext, StatementAssessment, StatementClassificationInput,
-    StatementClassifier, StatementPosture,
-};
-use kaish_types::approval::{AssessorId, RiskClass};
-
-struct GateWrites;
-impl StatementClassifier for GateWrites {
-    fn classify(
-        &self,
-        input: &StatementClassificationInput<'_>,
-    ) -> Result<StatementAssessment, ClassificationError> {
-        let posture = if input.plan.commands.iter().any(|c| !c.redirects.is_empty()) {
-            StatementPosture::gate(
-                "the statement redirects to a file",
-                RiskClass::Recoverable,
-            )
-        } else {
-            StatementPosture::Observe
-        };
-        Ok(StatementAssessment::new(posture, AssessorId::new("gate-writes")))
-    }
-}
-```
-
-With none registered every statement is `StatementPosture::Observe` — recorded
-and run. A `StatementPosture::Gate { reason, risk }` builds an
-`ApprovalRequest` under `cmd.execute` with the plan attached and one
-`Resource { kind: "cmd", id: <argv0> }` per planned command, then runs the same
-three-stage chain a gated `rm` runs: a standing grant auto-approves it
-(all-or-nothing over every `cmd` resource), `Policy::evaluate` may grant or deny
-it on the request path, and `Defer` through both is **exit 2** with the view
-on `.approval` and **nothing of the statement executed** — no substitution, no
-redirect target created, no first loop iteration, and no statement after it in
-the same program. The classifier has no deny:
-refusal is a chain decision (`Policy::evaluate`), because a scoping seam that
-can refuse is a second decision chain.
-
-**`Err` means `Gate`, never `Observe` — and a panic means the same thing.**
-`classify` returns `Result<StatementAssessment, ClassificationError>`. An
-`Err` — the model backing a classifier is unreachable, the input is outside
-what it can judge, anything it cannot answer — maps to `Gate`, never to a
-silent `Observe`: a classifier that cannot answer must not be able to turn
-the statement gate off. A panic inside `classify` is caught (`catch_unwind`
-at the tap site) and mapped the same way, so a bug in an embedder-authored
-classifier gates the one statement it broke on rather than crashing the rest
-of the program. This is a **looser** contract than `Policy::evaluate`'s,
-which still propagates a panic unguarded — `evaluate` only runs once a
-decision is genuinely being asked for, while a classifier runs in front of
-*every* statement, including the ones nobody would ever gate. A classifier
-may also **raise** the posture a kernel-owned static rule already set, but
-never **lower** it — `kaish-trash empty` gates even under a classifier that
-always answers `Observe`.
-
-**`ExecutionContext` carries no host path.** `StatementClassificationInput`
-pairs the plan with an `ExecutionContext { cwd, scope, sandbox_profile,
-mounts }`. `cwd` is a `String` holding the logical VFS path — the spelling
-the router resolves against, the same convention `PlanBinding::cwd` uses —
-never a raw host `PathBuf`. A classifier is frequently a call into a model,
-and that input frequently leaves the process; `/home/amy/clients/acme` says
-things a `MountClass::Project` does not.
-
-`CommandNameClassifier::new(names, reason, risk)` is the reference
-implementation: it gates a statement when any command it plans is named in
-`names`, matched on argv0 exactly as written. Classifying the plan is what
-tells `rm target.txt` from `echo 'rm target.txt'` and from `grep rm
-changelog.txt` — the plan carries the parse, and a raw line does not.
-
-**Every classifier judgment that leads to a `Gate` is recorded as an
-`Assessed` entry** (`docs/approval-ledger.md` §C.7) — `assessor`, `stage:
-Classifier`, `outcome`, `reason`, and the model identity/confidence a
-`StatementAssessment` carried, once the request it explains exists. An
-embedder's own deliberation pipeline appends more of the same shape through
-`ApproverHandle::assessments()`, so `Approvals::get(id).assessments` reads
-the whole chain of reasoning that led to a decision — or that never reached
-one, when the request was abandoned instead.
-
-**Replay of a held statement.** A deferred statement's capture is
-`Capture::Statement { source, index }`: statements carry no source spans, so
-the capture is the program source plus the held statement's index.
-`Kernel::confirm(&handle, &id)` re-parses that source and runs exactly that
-statement, in the originating session — earlier statements' effects
-(variables, cwd) are session state and still hold, and they are not re-run. A
-gated `execute_argv` call captures `Capture::Exact` instead, because it
-already holds a tool name and an argv.
-
-**Redeeming a held statement by re-running it.** The statement gate reads a
-`--confirm=<key>` off the statement's own argv before it drafts, so re-running
-the held line with the key an operator hands back redeems **the original
-request** rather than minting a second one. The same pass keeps the credential
-out of the record: the rendering shows `--confirm=<confirm-key>` and the
-captured source drops the token entirely, because plan and capture both land
-in the ledger and no ledger entry carries a credential. What *executes* is
-untouched — the builtin's own gate may legitimately consume the same key.
-
-Only a literal key is visible to any of this. `--confirm=${key}` renders
-unexpanded, so nothing is lifted and nothing needs redacting: what the plan
-cannot see, it cannot leak either. A credential a script puts somewhere the
-taxonomy cannot name — the right-hand side of an assignment — is recorded like
-any other text. The kernel redacts what it minted; nothing else — the kernel
-ships no secret detector, because a shell cannot define what a secret is.
-
-**Embedder-side redaction.** Every other value in a `Plan`
-(`PlannedCommand::args`, `PlannedRedirect::target`) is `PlannedValue::Plain`.
-An embedder with its own idea of what a secret looks like redacts over the
-surfaces it holds: the plans `plan_program` returns before anything runs, and
-the records its `LedgerSink` receives before persisting them. The
-`PlannedValue::Redacted { kind, fingerprint }` variant is the shared
-vocabulary for that pass — the same shape the kernel's confirm-key redaction
-produces. Two kernel-held surfaces cannot be rewritten from outside
-(`/v/approvals` and the retained in-kernel log), so a secret typed as a
-*literal* argument on a held statement is visible there until the request is
-decided; secrets that travel as variables never were — a plan renders
-`${TOKEN}` unexpanded.
-
-**Pinning the policy.** `KernelConfig::with_policy_pinned(true)` makes
-`set +o approvals` fail with **exit 1** and a message naming the pin, rather
-than silently doing nothing — a silent no-op would teach an agent that its
-`set +o approvals` worked. The pin is copied into every fork and pipeline
-stage, and survives `Kernel::reset`.
-
-See [LANGUAGE.md](LANGUAGE.md) for the full approvals/trash semantics.
+#### Deciding what a statement may do
+
+kaish does not decide. It tells you what a statement would do, exactly and
+before anything happens, and you decide — see
+[Command analysis](#command-analysis-plan_program) below, which is the
+mechanism for all of it.
+
+The one exception is `set -o trash`, and it is not a decision: a truncating
+overwrite or delete copies the prior content to the trash first so the write
+is recoverable. `kaish-trash empty` always asks, because it discards the
+recovery net every other operation depends on — `--confirm` there is a flag,
+not a policy, takes no token, records nothing, and no session setting turns
+it off.
+
+See [LANGUAGE.md](LANGUAGE.md) for the full trash semantics.
 
 ### Custom Backend (`Kernel::with_backend`)
 
@@ -1018,10 +334,10 @@ and external commands launched from inside the kernel see only the
 variables kaish has marked as exported.
 
 > **One exception, and it only ever turns a rail *on*.** Four `KernelConfig`
-> presets read `KAISH_APPROVALS` and `KAISH_TRASH` from the process
+> presets read `KAISH_TRASH` from the process
 > environment at construction (`repl()` and the agent presets — the ones a
 > frontend uses). Nothing else in the kernel touches `std::env`, and the
-> direction is safe: env can enable the approval gate or the trash, never
+> direction is safe: env can enable the trash, never
 > disable one an embedder asked for. The right long-term shape is for the
 > *frontend* to read env and pass `KernelConfig`; until then, an embedder that
 > needs a guaranteed-hermetic construction builds its own `KernelConfig`
@@ -1251,9 +567,7 @@ Semantics:
   not a subset that drops expressiveness, it's a different door that converges with
   the string door at the shared dispatch chain.
 - **Same tail as the string door.** Command resolution (aliases, user tools,
-  `.kai` scripts, externals, backend tools), `--json`, and the approval gate
-  all apply, so a gated `rm` still returns exit 2 with a request on
-  `ExecResult.approval` (see [Destructive-op rails](#destructive-op-rails-inspecting-and-fulfilling-an-approval-gate)).
+  `.kai` scripts, externals, backend tools) and `--json`.
   The kernel's pre-execution *syntax* validator does not run — argv carries no
   shell syntax — but a tool's own `validate()`/clap parse still does.
 - **Typed-passthrough caveat.** Because builtins re-parse their own `to_argv()`
@@ -1413,17 +727,36 @@ escape as internal (`/v/bin/cat` and `.kai`/backend tools over-report as
 `External`). The consent UX and the block-the-script loop are embedder policy —
 the kernel supplies only the classification.
 
-### Statement metadata without the ledger: `plan_program`
+### Command analysis: `plan_program`
 
 `plan_program(source)` returns one `PlannedStatement` per statement of
 `source` — its position (`index`) and its `Plan`: the statement rendered back
 to shell text **unexpanded**, its kind, every command it contains (loop
 bodies and `$(...)` substitutions included), and its variable analysis —
 `free_variables` (session names the statement reads) and `bound_variables`
-(names it writes or binds itself). Nothing executes: a plan is parse
-information, and `${HOME}` appears as written. kaish has no `eval` and no
-indirect expansion, so `free_variables` is complete, not best-effort — and
-`Kernel::get_var` closes the loop:
+(names it writes or binds itself).
+
+Nothing executes. A plan is parse information: `${HOME}` and `$(...)` appear
+exactly as written, no substitution has run, and no filesystem has been
+touched. That is the point — you judge what the statement *asked for*, before
+anything it names can happen.
+
+```rust
+use kaish_kernel::plan_program;
+
+for planned in plan_program(src).map_err(|_errors| /* parse errors */ ())? {
+    for cmd in &planned.plan.commands {
+        // cmd.name, cmd.args (redaction-aware), cmd.redirects, cmd.background
+    }
+    // Decide however your policy needs, keyed by planned.index.
+}
+```
+
+`Kernel::plan_program(source)` is the same read as a method on a kernel.
+
+**Judging against live state.** `free_variables` names what a statement reads,
+so `Kernel::get_var` closes the loop — plan, look up what it depends on, and
+decide with the values in hand:
 
 ```rust
 for planned in kernel.plan_program(script)? {
@@ -1433,35 +766,50 @@ for planned in kernel.plan_program(script)? {
 }
 ```
 
-`Kernel::plan_program(source)` is the same read as a method on a kernel.
+A name that a statement both reads and writes lands in `bound_variables`,
+never `free_variables` — the safe direction, since peeking it would judge the
+statement against a value the statement itself replaces.
 
-This is the same walk that feeds the kernel's statement gate, and the two stay
-correlated end-to-end:
+**What the free set covers.** The read set is complete against the statement's
+**lexical** surface — kaish has no `eval` and no indirect expansion, so every
+read is visible in the source: every `${x}`, interpolation, `${#x}`,
+`${x:-default}`, `[$k]` subscript, and `$((…))` identifier. It does not cover names bound at *runtime* by a builtin
+that takes them as arguments — `read`, `export`, `unset`, and `push` write
+session variables that argv-level analysis cannot see. A statement like
+`read TOKEN && curl -H "Authorization: $TOKEN"` reports `TOKEN` as free, and
+the value you peek is the one from *before* the `read`.
 
-- `PlannedStatement.index` is the index a held statement's
-  `ResumeAction::ConfirmStatement` quotes and `Kernel::confirm` replays.
-- The grant's binding digest is computable from the metadata alone: SHA-256 of
-  `strip_confirm_tokens(plan.rendered)`.
-- Every literal `--confirm=<key>` is redacted from the plans and **not
-  returned** — the caller holds `source` and needs no second copy of its
-  credentials.
+**Credentials.** Every literal `--confirm=<key>` is redacted from the plans and
+**not** returned — you hold `source` and need no second copy. That is the only
+redaction kaish performs: it minted that key and knows it outright. kaish
+ships no secret detector, because a shell cannot define what a secret is. Run
+your own pass over the plans if you need more.
 
-```rust
-use kaish_kernel::plan_program;
+**What this is not.** A plan tells you what a statement would run, not what it
+will produce. `rm $(find / -name '*.tmp')` plans as an `rm` whose argument is
+produced by a `find` — you see the shape and the producer, never the resolved
+paths. Judge accordingly.
 
-for planned in plan_program(src, None).map_err(|_errors| /* parse errors */ ())? {
-    for cmd in &planned.plan.commands {
-        // cmd.name, cmd.args (redaction-aware), cmd.redirects, cmd.background
-    }
-    // Judge planned.plan however your policy needs, keyed by planned.index.
-}
-```
+#### Why this, and not a gate
 
-What this surface does **not** give you is the enforcement the ledger keeps:
-single-successful-run redemption, revision checks, and condition re-checks are
-decisions made under the kernel's lock about state only it holds, and metadata
-cannot replace them. Compose policy over the plans; leave redemption to the
-kernel.
+kaish used to carry an approval ledger: requests, grants, attempts, an
+append-only record, a policy language, and a decision chain the kernel ran
+inside its own lock. It was removed before 0.14.0, and what replaced it is the
+surface above.
+
+The reason is that the kernel was the wrong place for it. Holding a decision
+means owning a task, a clock, and a cancellation policy on the embedder's
+behalf — three choices no default gets right, made once for every embedder.
+And an interception mechanism the kernel defines is one an embedder has to
+adopt whole: kaijutsu had already built its own confirmation flow and was
+using kaish's only as a transport for a decision it had already made.
+
+An embedder that can *see* a statement precisely does not need the kernel to
+hold state on its behalf. It plans, decides with its own policy in its own
+storage, and either runs the statement or does not. That composes with
+whatever the embedder already has — a UI prompt, a model review, a queue for a
+shift change — none of which need a kernel change, because the kernel never
+assumed which one it was serving.
 
 ## Path Composition with XDG Primitives
 
@@ -1578,11 +926,10 @@ job state:
 ```
 /v/jobs/
 ├── 1/
-│   ├── status    # "running", "stopped", "done:0", "gated", "killed:N", or "failed:N"
+│   └── status    # "running", "stopped", "done:0", "killed:N", or "failed:N"
 │   ├── command   # Original command string
 │   ├── stdout    # Job's stdout so far — live while it runs
 │   ├── stderr    # Job's stderr so far — live while it runs
-│   └── approval  # Pending approval request (JSON) if gated, else empty
 ├── 2/
 │   └── ...
 ```
@@ -1639,19 +986,7 @@ loop {
 The streams close when the job's result is in, so `stats.closed` is the
 caller's stop condition — no timeout guessing.
 
-A destructive op backgrounded under `set -o approvals` (`rm x &`) gates in the
-background rather than running: `status` is `gated`, `JobInfo.approval` (from
-`JobManager::list`/`get`) and `/v/jobs/{id}/approval` (JSON) carry the pending
-request, and `wait` surfaces it on the result's `.approval` field (exit 2). The
-request carries the `job_id` it was posted for, stamped once at post time, so
-every one of those surfaces reports the same correlation. Waiting on several
-gated jobs still surfaces **one** request on `.approval` — one operation, one
-request — while the message names the total (`wait: 3 approvals pending — run
-`approvals list``); `/v/approvals/pending` enumerates all of them. An embedder fulfills
-the backgrounded gate with `Kernel::confirm(&handle, &id)` — the
-same API as a foreground gate.
-
-The status strings are exactly `running`, `stopped`, `done:0`, `gated`,
+The status strings are exactly `running`, `stopped`, `done:0`,
 `killed:{code}`, and `failed:{code}` — match on those, not on `completed`.
 `killed:{code}` marks a job terminated by `kill %N` (or an embedder cancel):
 the job stays tracked with its result and output until reaped, so a killed
@@ -1660,7 +995,7 @@ returns its result (GH #244). `kill %N` waits for the job to actually unwind
 (bounded by `kill_grace` + 3s) before exiting 0; `kill --no-wait %N` returns
 at dispatch. The `JobManager` keeps at most 100 finished jobs — enforced at
 registration and whenever completion is observed (`list`, `wait`); oldest
-evicted first, gated jobs never evicted — tune with
+evicted first — tune with
 `JobManager::set_finished_retention`. A session that registers jobs and then
 never calls anything holds what it registered; there is no background
 sweeper.
@@ -1669,7 +1004,7 @@ sweeper.
 `Deserialize` (plus `schemars::JsonSchema` behind the `schema` feature), so an
 embedder can serialize `JobManager::list()`/`get()` output directly rather
 than hand-rolling a mirror struct. `JobStatus`'s wire spelling under
-serde is lowercase (`"running"`/`"stopped"`/`"done"`/`"gated"`/`"killed"`/`"failed"`),
+serde is lowercase (`"running"`/`"stopped"`/`"done"`/`"killed"`/`"failed"`),
 matching the `/v/jobs/N/status` text vocabulary above — not the capitalized
 `Display` impl used for human-facing text (the `jobs` table). `JobInfo` also
 carries `exit_code: Option<i64>` (set once the job finishes), `started_at` /
@@ -1770,15 +1105,8 @@ The `kaish_kernel` crate root re-exports the embedding surface:
   `xdg_cache_home`, `xdg_runtime_dir`, `expand_tilde`
 - **VFS** (module `kaish_kernel::vfs`): `Filesystem`, `VfsRouter`,
   `MemoryFs`, `LocalFs`, `MountInfo`
-- **Approvals** (module `kaish_kernel::ledger`): `Ledger`, `Approvals`,
-  `Requester`, `ApproverHandle`, `AttemptHandle`, `RequestChain`,
-  `LedgerConfig`, `LedgerSink`, `LedgerSinkError`, `LedgerError`,
-  `Clock`, `SystemClock`, `Policy`, `StateResolver`, `PathResolver`,
-  `ResolverError`, `StatementClassifier`, `CommandNameClassifier`,
-  `StatementPosture`, `StatementAssessment`, `ClassificationError`,
-  `ExecutionContext`, `MountDescriptor`,
-  `ApprovalOutcome`, `PendingApproval`, `ResumeAction`, `LedgerStream`,
-  `WatchEvent`, `AssessmentRecorder`, `KernelOperation`
+- **Operations** (module `kaish_kernel::operation`): `KernelOperation` — the
+  effect classes a builtin declares through `ToolSchema::with_operations`
 
 Pure data types (`ExecResult`, `OutputData`, `Value`, `ToolSchema`,
 `ToolArgs`, …) live in the leaf crate `kaish-types`; the tool author API

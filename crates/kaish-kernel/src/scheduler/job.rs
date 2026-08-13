@@ -230,10 +230,6 @@ impl Job {
         self.try_poll();
         match &self.result {
             Some(r) if r.ok() => JobStatus::Done,
-            // A gated destructive op (exit 2 with a stored approval
-            // request) is *held*, not failed — surface it distinctly so
-            // `Kernel::confirm` can still fulfill it (GH #96).
-            Some(r) if r.approval_request().is_some() => JobStatus::Gated,
             Some(_) if self.killed => JobStatus::Killed,
             Some(_) => JobStatus::Failed,
             None => JobStatus::Running,
@@ -246,7 +242,6 @@ impl Job {
     /// - `"running"` if the job is still running
     /// - `"stopped"` if the job is stopped (Ctrl-Z / SIGTSTP)
     /// - `"done:0"` if the job completed successfully
-    /// - `"gated"` if the job is held on an unsatisfied approval gate
     /// - `"killed:{code}"` if the job was terminated by `kill %N`
     /// - `"failed:{code}"` if the job failed with an exit code
     ///
@@ -262,26 +257,10 @@ impl Job {
         self.try_poll();
         match &self.result {
             Some(r) if r.ok() => "done:0".to_string(),
-            Some(r) if r.approval_request().is_some() => "gated".to_string(),
             Some(r) if self.killed => format!("killed:{}", r.code),
             Some(r) => format!("failed:{}", r.code),
             None => "running".to_string(),
         }
-    }
-
-    /// The job's pending approval request, if it is held
-    /// (`JobStatus::Gated`). `None` otherwise. Backs `JobInfo.approval` and
-    /// the `/v/jobs/{id}/approval` node so a backgrounded gate is fulfillable
-    /// (#96).
-    ///
-    /// Reads `job_id` straight off the record rather than stamping it here:
-    /// the request was posted by a fork that already knew which job it ran
-    /// for, so correlation is stamped **once**, at post time. The latch had
-    /// two stamping sites (this chokepoint and `wait`'s own `classify`) and
-    /// they could drift; the ledger has one.
-    pub fn approval(&mut self) -> Option<kaish_types::approval::ApprovalRequestView> {
-        self.try_poll();
-        self.result.as_ref().and_then(|r| r.approval_request())
     }
 
     /// Write job output to a temp file.
@@ -483,22 +462,17 @@ impl Job {
         v
     }
 
-    /// Build the full `JobInfo` snapshot for this job. `status`/`approval` are
-    /// taken as parameters rather than recomputed here because both require
-    /// `&mut self` (they poll) — callers (`list`/`get`/`reap_finished`)
-    /// already did that poll to decide reap-safety before calling this. The
+    /// Build the full `JobInfo` snapshot for this job. `status` is taken as a
+    /// parameter rather than recomputed here because computing it requires
+    /// `&mut self` (it polls) — callers (`list`/`get`/`reap_finished`)
+    /// already did that poll before calling this. The
     /// single chokepoint that populates every `JobInfo` field (GH #243), so
-    /// the three call sites can't drift on which fields they remember to set.
-    fn to_info(
-        &self,
-        status: JobStatus,
-        approval: Option<kaish_types::approval::ApprovalRequestView>,
-    ) -> JobInfo {
+    /// the call sites can't drift on which fields they remember to set.
+    fn to_info(&self, status: JobStatus) -> JobInfo {
         let exit_code = self.result.as_ref().map(|r| r.code);
         JobInfo::new(self.id, self.command.clone(), status)
             .with_output_file(self.output_file.clone())
             .with_pid(self.pid)
-            .with_approval(approval)
             .with_exit_code(exit_code)
             .with_started_at(self.started_at)
             .with_finished_at(self.finished_at)
@@ -884,8 +858,7 @@ impl JobManager {
             .values_mut()
             .map(|job| {
                 let status = job.status();
-                let approval = job.approval();
-                job.to_info(status, approval)
+                job.to_info(status)
             })
             .collect();
         infos.sort_by_key(|info| info.id);
@@ -908,11 +881,6 @@ impl JobManager {
     /// Remove completed jobs from tracking and clean up their temp files,
     /// returning info for each job removed.
     ///
-    /// A held job is "done" but its cached result holds the only pending
-    /// approval request for the gated operation — reaping it would silently
-    /// destroy the reference an embedder needs to fulfill it (GH #96). It
-    /// stays until confirmed or explicitly discarded (`kill --discard %N`).
-    ///
     /// Shared by `jobs --cleanup` (which only needs a count) and the REPL's
     /// pre-prompt notification (GH #131, which needs the id/command/status of
     /// each job so it can print `[N]+ Done ...` before reaping it) — one rule
@@ -921,7 +889,7 @@ impl JobManager {
         let mut jobs = self.jobs.lock().await;
         let done_ids: Vec<JobId> = jobs
             .iter_mut()
-            .filter_map(|(id, job)| (job.is_done() && job.approval().is_none()).then_some(*id))
+            .filter_map(|(id, job)| job.is_done().then_some(*id))
             .collect();
 
         let mut removed = Vec::with_capacity(done_ids.len());
@@ -930,8 +898,7 @@ impl JobManager {
                 continue;
             };
             let status = job.status();
-            let approval = job.approval();
-            let info = job.to_info(status, approval);
+            let info = job.to_info(status);
             job.cleanup_files();
             removed.push(info);
         }
@@ -940,8 +907,8 @@ impl JobManager {
 
     /// Remove completed jobs from tracking and clean up their temp files.
     ///
-    /// See [`reap_finished`](Self::reap_finished) for the gate-safety rule;
-    /// this is the count-only form `jobs --cleanup` reports.
+    /// The count-only form of [`reap_finished`](Self::reap_finished) that
+    /// `jobs --cleanup` reports.
     pub async fn cleanup(&self) {
         self.reap_finished().await;
     }
@@ -953,16 +920,15 @@ impl JobManager {
     /// embedder that stops registering but keeps observing stays bounded
     /// without a background sweeper (GH #244). A session that registers jobs
     /// and then never calls anything at all holds what it registered; there
-    /// is no sweeper task by design. "Finished" follows `reap_finished`'s reap-safety
-    /// rule: gated jobs are never evicted (their cached result holds the only
-    /// pending approval request) and stopped jobs are not finished. Eviction
+    /// is no sweeper task by design. "Finished" follows `reap_finished`'s
+    /// rule: stopped jobs are not finished. Eviction
     /// is oldest `finished_at` first, so the survivors are the newest N.
     fn enforce_retention_locked(&self, jobs: &mut HashMap<JobId, Job>) {
         let keep = self.finished_retention.load(Ordering::Relaxed) as usize;
         let mut finished: Vec<(JobId, SystemTime)> = jobs
             .iter_mut()
             .filter_map(|(id, job)| {
-                (job.is_done() && job.approval().is_none())
+                job.is_done()
                     .then(|| (*id, job.finished_at.unwrap_or(job.started_at)))
             })
             .collect();
@@ -986,23 +952,12 @@ impl JobManager {
         jobs.contains_key(&id)
     }
 
-    /// Whether the job's cached result is a pending approval gate
-    /// (`JobStatus::Gated`). Consumers that would drop the job (`kill`,
-    /// cleanup paths) check this so a held request is never destroyed
-    /// silently. Keeps the `gated` spelling the status itself keeps
-    /// (`docs/approval-ledger.md` §F.2).
-    pub async fn is_gated(&self, id: JobId) -> bool {
-        let mut jobs = self.jobs.lock().await;
-        jobs.get_mut(&id).is_some_and(|job| job.approval().is_some())
-    }
-
     /// Get info for a specific job.
     pub async fn get(&self, id: JobId) -> Option<JobInfo> {
         let mut jobs = self.jobs.lock().await;
         jobs.get_mut(&id).map(|job| {
             let status = job.status();
-            let approval = job.approval();
-            job.to_info(status, approval)
+            job.to_info(status)
         })
     }
 
@@ -1016,15 +971,6 @@ impl JobManager {
     pub async fn get_status_string(&self, id: JobId) -> Option<String> {
         let mut jobs = self.jobs.lock().await;
         jobs.get_mut(&id).map(|job| job.status_string())
-    }
-
-    /// Get a held job's pending approval request (for
-    /// `/v/jobs/{id}/approval` and any embedder reaching a backgrounded
-    /// gate). `Some(None)` vs `None` distinguishes "job exists, not held"
-    /// from "no such job"; jobfs flattens both to an empty node body. GH #96.
-    pub async fn get_approval(&self, id: JobId) -> Option<kaish_types::approval::ApprovalRequestView> {
-        let mut jobs = self.jobs.lock().await;
-        jobs.get_mut(&id).and_then(|job| job.approval())
     }
 
     /// List all job IDs, sorted (GH #247 — see [`Self::list`]'s doc for why
@@ -1183,11 +1129,6 @@ impl JobManager {
     }
 
     /// Remove a job from tracking.
-    ///
-    /// NOTE: this bypasses the gate guard — a caller that might hit a held
-    /// job must check [`is_gated`](Self::is_gated) first (see the `kill`
-    /// builtin), or the job's pending approval request is destroyed with it.
-    /// `cleanup()` is the gate-safe bulk path.
     pub async fn remove(&self, id: JobId) {
         let mut jobs = self.jobs.lock().await;
         if let Some(mut job) = jobs.remove(&id) {
@@ -1291,38 +1232,6 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].command, "test job");
         assert_eq!(jobs[0].status, JobStatus::Running);
-    }
-
-    #[tokio::test]
-    async fn a_held_jobs_request_carries_its_job_id_from_the_record() {
-        // GH #124 part 4, under the ledger: correlation is stamped ONCE, at
-        // post time, by the fork that already knows which job it runs for.
-        // `Job::approval()` reads it straight off the record — it does not
-        // re-stamp — so `wait` and `jobs` cannot disagree about which job a
-        // held request belongs to.
-        let manager = JobManager::new();
-
-        let id = manager
-            .spawn("gated".to_string(), async {
-                let mut result = ExecResult::failure(2, "approval required");
-                let mut view = crate::ledger::sample_view(
-                    crate::ledger::KernelOperation::FsRemove,
-                    &["x"],
-                );
-                view.job_id = Some(1);
-                result.approval = Some(Box::new(crate::ledger::PendingApproval::new(view)));
-                result
-            })
-            .await;
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        let approval = manager.get_approval(id).await.expect("the job must be held");
-        assert_eq!(
-            approval.job_id,
-            Some(id.0),
-            "the surfaced request must carry the job it was posted for"
-        );
     }
 
     #[tokio::test]
@@ -1534,41 +1443,6 @@ mod tests {
 
         // And it's actually gone from tracking.
         assert!(manager.list().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_reap_finished_never_reaps_gated_jobs() {
-        // GH #131 / GH #96: a Gated job is "done" in the sense that its
-        // future resolved, but it's held on a pending destructive-operation
-        // gate — reaping it would silently destroy the only reference to the
-        // approval request. Must never be auto-reaped or reported as a
-        // finished job.
-        let manager = JobManager::new();
-        manager.set_persist_output_files(false);
-        let (tx, rx) = oneshot::channel();
-        let id = manager.register("rm precious.txt".to_string(), rx).await;
-
-        let mut gated = ExecResult::failure(2, "rm: approval required");
-        gated.approval = Some(Box::new(crate::ledger::PendingApproval::new(
-            crate::ledger::sample_view(crate::ledger::KernelOperation::FsRemove, &["precious.txt"]),
-        )));
-        tx.send(gated).expect("send gated result");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        // Confirm it's actually seen as Gated before reaping.
-        let info = manager.get(id).await.expect("job exists");
-        assert_eq!(info.status, JobStatus::Gated);
-
-        let removed = manager.reap_finished().await;
-        assert!(
-            removed.is_empty(),
-            "a held job must never be auto-reaped: {removed:?}"
-        );
-        assert_eq!(
-            manager.list().await.len(),
-            1,
-            "the gated job must still be tracked so its gate can be fulfilled"
-        );
     }
 
     #[tokio::test]

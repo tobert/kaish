@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::{BackendError, KernelBackend, WriteMode};
 use crate::interpreter::ExecResult;
-use crate::ledger::KernelOperation;
+use crate::operation::KernelOperation;
 use crate::tools::{cas_overwrite, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Cp tool: copy files and directories.
@@ -20,9 +20,6 @@ struct CpArgs {
     #[arg(short = 'r', long = "recursive")]
     recursive: bool,
 
-    /// Approval token for a gated overwrite (`--confirm=<token>`).
-    #[arg(long = "confirm")]
-    confirm: Option<String>,
 
     /// Do not overwrite existing files (-n)
     #[arg(short = 'n', long = "no-clobber", visible_alias = "no_clobber")]
@@ -108,10 +105,11 @@ impl Tool for Cp {
             }
         }
 
-        // Gate a direct file clobber (`cp SRC EXISTING_FILE`) through approvals +
-        // trash. Copying *into* a directory or a recursive directory merge is
-        // not a single-file truncation, so it stays ungated (documented
-        // write-model residual). Only the named destination is gated here.
+        // Under trash, a direct file clobber (`cp SRC EXISTING_FILE`)
+        // snapshots the prior destination. Copying *into* a directory or a
+        // recursive directory merge is not a single-file truncation, so it
+        // is not snapshotted (documented write-model residual). Only the
+        // named destination is covered here.
         let mut expected_dst: Option<crate::tools::OverwriteExpectation> = None;
         if sources.len() == 1 {
             let dst_is_existing_file = ctx
@@ -133,13 +131,8 @@ impl Tool for Cp {
             // take a spurious trash snapshot of a file that's never overwritten.
             if dst_is_existing_file && !src_is_dir {
                 let snapshots = match ctx
-                    .gate_overwrites(
-                        KernelOperation::FsOverwrite,
-                        "cp",
-                        &[(dest.clone(), false)],
-                        parsed.confirm.as_deref(),
-                        |joined| format!("cp --confirm=<token> {src_display} {joined}"),
-                    )
+                    .snapshot_overwrites("cp",
+                        &[(dest.clone(), false)])
                     .await
                 {
                     Ok(s) => s,

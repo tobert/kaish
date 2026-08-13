@@ -1,7 +1,6 @@
 //! RFC 3339 UTC timestamps for the wire.
 //!
-//! kaish pins every `SystemTime` on its serde surface (`JobInfo`, the
-//! `approval` module) to one
+//! kaish pins every `SystemTime` on its serde surface (`JobInfo`) to one
 //! spelling: `YYYY-MM-DDTHH:MM:SS.mmmZ` — UTC only, exactly three fractional
 //! digits, truncated never rounded. Fixed width keeps string order equal to
 //! time order, and `Date()` / `datetime.fromisoformat()` parse it natively.

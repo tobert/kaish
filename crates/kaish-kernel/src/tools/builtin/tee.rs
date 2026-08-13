@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::backend::WriteMode;
 use crate::interpreter::ExecResult;
-use crate::ledger::KernelOperation;
+use crate::operation::KernelOperation;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Tee tool: duplicate stdin to stdout and files.
@@ -20,9 +20,6 @@ struct TeeArgs {
     #[arg(id = "append", short = 'a', long = "append")]
     _append: bool,
 
-    /// Approval token for a gated overwrite (`--confirm=<token>`).
-    #[arg(long = "confirm")]
-    confirm: Option<String>,
 
     #[command(flatten)]
     global: GlobalFlags,
@@ -79,19 +76,14 @@ impl Tool for Tee {
             Err(e) => return ExecResult::failure(1, format!("tee: {e}")),
         };
 
-        // Gate truncating overwrites through approvals + trash (no-op when both are
-        // off). Append never gates (it doesn't destroy prior content); a new
-        // file just writes. Under the enforce policy this returns an exit-2 pending-approval result; under
-        // trash the prior content is snapshotted before we write below.
+        // Under trash, a truncating overwrite snapshots the prior content
+        // before we write below (no-op with trash off). Append never
+        // snapshots (it doesn't destroy prior content); a new file just
+        // writes.
         let targets: Vec<(String, bool)> = paths.iter().map(|p| (p.clone(), append)).collect();
         let snapshots = match ctx
-            .gate_overwrites(
-                KernelOperation::FsOverwrite,
-                "tee",
-                &targets,
-                parsed.confirm.as_deref(),
-                |joined| format!("tee --confirm=<token> {joined}"),
-            )
+            .snapshot_overwrites("tee",
+                &targets)
             .await
         {
             Ok(s) => s,
@@ -284,60 +276,6 @@ mod tests {
             ctx.backend.read(path, None).await.unwrap(),
             b"new content\n"
         );
-    }
-
-    /// The digest arm is the approval gate's expectation: it never holds the
-    /// prior bytes (the trash is off, or the file is too big for it), so it
-    /// compares the content digest instead. Same refusal, bounded memory.
-    #[tokio::test]
-    async fn overwrite_checked_rejects_concurrent_change_against_a_digest() {
-        let ctx = make_ctx().await; // /existing.txt = "original content\n"
-        let path = Path::new("/existing.txt");
-        let expected = crate::tools::OverwriteExpectation::Digest(
-            crate::ledger::digest_path(&*ctx.backend, path).await.unwrap(),
-        );
-
-        ctx.backend
-            .write(path, b"changed elsewhere\n", WriteMode::Overwrite)
-            .await
-            .unwrap();
-
-        let result = ctx.overwrite_checked(path, b"my content\n", Some(&expected)).await;
-        assert!(result.is_err(), "expected a conflict, got {result:?}");
-        assert_eq!(
-            ctx.backend.read(path, None).await.unwrap(),
-            b"changed elsewhere\n",
-            "the concurrent writer's content must survive"
-        );
-    }
-
-    #[tokio::test]
-    async fn overwrite_checked_writes_when_the_digest_matches() {
-        let ctx = make_ctx().await;
-        let path = Path::new("/existing.txt");
-        let expected = crate::tools::OverwriteExpectation::Digest(
-            crate::ledger::digest_path(&*ctx.backend, path).await.unwrap(),
-        );
-
-        ctx.overwrite_checked(path, b"new content\n", Some(&expected))
-            .await
-            .unwrap();
-        assert_eq!(ctx.backend.read(path, None).await.unwrap(), b"new content\n");
-    }
-
-    /// A target that vanished is a change, not a missing observation: the
-    /// digest arm sees `Absent`, which never equals a content digest.
-    #[tokio::test]
-    async fn overwrite_checked_rejects_a_vanished_target_against_a_digest() {
-        let ctx = make_ctx().await;
-        let path = Path::new("/existing.txt");
-        let expected = crate::tools::OverwriteExpectation::Digest(
-            crate::ledger::digest_path(&*ctx.backend, path).await.unwrap(),
-        );
-        ctx.backend.remove(path, false).await.unwrap();
-
-        let result = ctx.overwrite_checked(path, b"new\n", Some(&expected)).await;
-        assert!(result.is_err(), "a vanished target must error, got {result:?}");
     }
 
     #[tokio::test]

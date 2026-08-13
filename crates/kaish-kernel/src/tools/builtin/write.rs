@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::ledger::KernelOperation;
+use crate::operation::KernelOperation;
 use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -25,9 +25,6 @@ struct WriteArgs {
     #[arg(long)]
     content: Option<String>,
 
-    /// Approval token for a gated overwrite (`--confirm=<token>`).
-    #[arg(long = "confirm")]
-    confirm: Option<String>,
 
     #[command(flatten)]
     global: GlobalFlags,
@@ -91,17 +88,11 @@ impl Tool for Write {
 
         let resolved = ctx.resolve_path(&path);
 
-        // Gate the truncating overwrite through approvals + trash (no-op when both
-        // are off). Under the enforce policy this returns an exit-2 pending-approval result; under trash
-        // the prior content is snapshotted and returned for the CAS below.
+        // Under trash, the truncating overwrite snapshots the prior content,
+        // returned for the CAS below (no-op with trash off).
         let snapshots = match ctx
-            .gate_overwrites(
-                KernelOperation::FsOverwrite,
-                "write",
-                &[(path.clone(), false)],
-                parsed.confirm.as_deref(),
-                |joined| format!("write --confirm=<token> {joined}"),
-            )
+            .snapshot_overwrites("write",
+                &[(path.clone(), false)])
             .await
         {
             Ok(s) => s,

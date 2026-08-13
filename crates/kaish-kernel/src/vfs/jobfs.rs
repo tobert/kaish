@@ -5,11 +5,10 @@
 //! ```text
 //! /v/jobs/
 //! └── {job_id}/
-//!     ├── status   ← "running" | "stopped" | "done:0" | "gated" | "killed:N" | "failed:N"
+//!     ├── status   ← "running" | "stopped" | "done:0" | "killed:N" | "failed:N"
 //!     ├── command  ← the original command string
 //!     ├── stdout   ← the job's stdout so far, live while it runs
-//!     ├── stderr   ← the job's stderr so far, live while it runs
-//!     └── approval ← pending approval request (JSON) if gated, else empty
+//!     └── stderr   ← the job's stderr so far, live while it runs
 //! ```
 //!
 //! This is a read-only, synthesized filesystem. Content is generated from
@@ -41,10 +40,9 @@ use crate::scheduler::{JobId, JobManager};
 ///
 /// Mounted at `/v/jobs`, this filesystem synthesizes content from the JobManager:
 /// - List root to see all job IDs as directories
-/// - Read `{id}/status` for job status ("running", "stopped", "done:0", "gated", "killed:N", "failed:N")
+/// - Read `{id}/status` for job status ("running", "stopped", "done:0", "killed:N", "failed:N")
 /// - Read `{id}/command` for the original command string
 /// - Read `{id}/stdout` / `{id}/stderr` for the job's output so far — live
-/// - Read `{id}/approval` for a pending approval request (JSON), empty if not gated
 pub struct JobFs {
     jobs: Arc<JobManager>,
 }
@@ -60,7 +58,7 @@ impl JobFs {
     /// Expected formats:
     /// - "" or "/" → root (list jobs)
     /// - "{id}" → job directory
-    /// - "{id}/{file}" → specific file (status, command, stdout, stderr, approval)
+    /// - "{id}/{file}" → specific file (status, command, stdout, stderr)
     fn parse_path(path: &Path) -> Option<(Option<JobId>, Option<&str>)> {
         let path_str = path.to_str()?;
         let path_str = path_str.trim_start_matches('/');
@@ -148,22 +146,6 @@ impl Filesystem for JobFs {
                     .await
                     .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "job not found"))
             }
-            "approval" => {
-                // A held job's pending approval request as JSON, so a VFS
-                // consumer can read it and fulfill a backgrounded gate (GH
-                // #96). Tokenless by construction (`docs/approval-ledger.md`
-                // §A.2), so this node carries no credential. Empty body when
-                // the job is not held — a consumer reads, then parses only if
-                // non-empty.
-                match self.jobs.get_approval(job_id).await {
-                    Some(approval) => {
-                        let json = serde_json::to_string_pretty(&approval)
-                            .map_err(|e| io::Error::other(format!("approval serialize: {e}")))?;
-                        Ok(format!("{json}\n").into_bytes())
-                    }
-                    None => Ok(Vec::new()),
-                }
-            }
             _ => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("unknown file: {}", file),
@@ -209,7 +191,7 @@ impl Filesystem for JobFs {
                 Ok(entries)
             }
             Some(id) => {
-                // List job directory: status, command, stdout, stderr, approval
+                // List job directory: status, command, stdout, stderr
                 if !self.jobs.exists(id).await {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
@@ -253,14 +235,6 @@ impl Filesystem for JobFs {
                         size: 0,
                         symlink_target: None,
                     },
-                    DirEntry {
-                        name: "approval".to_string(),
-                        kind: DirEntryKind::File,
-                        modified: None,
-                        permissions: None,
-                        size: 0, // JSON when held, empty otherwise
-                        symlink_target: None,
-                    },
                 ])
             }
         }
@@ -301,7 +275,7 @@ impl Filesystem for JobFs {
                 }
 
                 // Validate file name
-                if !["status", "command", "stdout", "stderr", "approval"].contains(&file) {
+                if !["status", "command", "stdout", "stderr"].contains(&file) {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
                         format!("unknown file: {}", file),
@@ -393,7 +367,7 @@ mod tests {
         assert!(names.contains(&&"stderr".to_string()), "stderr node is back, and live");
         assert!(names.contains(&&"status".to_string()));
         assert!(names.contains(&&"command".to_string()));
-        assert!(names.contains(&&"approval".to_string()));
+        assert!(!names.contains(&&"approval".to_string()), "the approval node went with the ledger");
     }
 
     #[tokio::test]

@@ -558,20 +558,6 @@ fn result_row(i: usize, r: &ScatterResult) -> serde_json::Value {
     if let Some(data) = &r.result.data {
         row.insert("data".into(), kaish_types::value_to_json(data));
     }
-    // A held worker (exit 2 under the `fs.*` enforce policy) is otherwise
-    // indistinguishable from a plain failure in the row — carry the request
-    // so a caller can act on the gate straight from the row (GH #124 part 3).
-    // Just the view, matching `apply_output_format`'s `--json` envelope: the
-    // resume route ExecResult.approval also carries (kaish#312) is a
-    // Rust-level concern for a caller driving the kernel in-process, not
-    // part of this row's wire shape. The view is plain data, so
-    // serialization cannot fail; a failure is dropped rather than replacing
-    // the row.
-    if let Some(pending) = &r.result.approval
-        && let Ok(v) = serde_json::to_value(&pending.request)
-    {
-        row.insert("approval".into(), v);
-    }
     if r.timed_out {
         row.insert("timed_out".into(), serde_json::json!(true));
     }
@@ -992,31 +978,6 @@ mod tests {
         let row: serde_json::Value = serde_json::from_str(out.text_out().lines().next().unwrap()).unwrap();
         assert_eq!(row["data"]["k"], 1, "worker .data lands typed in the row");
         assert_eq!(row["out"], "text", "out stays alongside data");
-    }
-
-    #[test]
-    fn test_gather_results_worker_approval_rides_the_row() {
-        // GH #124 part 3: a held worker (exit 2 under the `fs.*` enforce
-        // policy) is otherwise indistinguishable from a plain failure in the
-        // gather row.
-        let view = crate::ledger::sample_view(
-            crate::ledger::KernelOperation::FsRemove,
-            &["precious.txt"],
-        );
-
-        let mut r = ExecResult::failure(2, "rm: approval required");
-        r.approval = Some(Box::new(crate::ledger::PendingApproval::new(view.clone())));
-        let results = vec![ScatterResult { item: item("a"), result: r, timed_out: false }];
-        let out = gather_results(&results, &GatherOptions::default());
-        assert_eq!(out.code, 123, "a held worker still counts as failed for gather's exit code");
-        let row: serde_json::Value = serde_json::from_str(out.text_out().lines().next().unwrap()).unwrap();
-        assert_eq!(row["ok"], false);
-        assert_eq!(row["code"], 2);
-        assert_eq!(
-            row["approval"]["id"], view.id.as_str(),
-            "the approval request must ride the row: {row}"
-        );
-        assert_eq!(row["approval"]["operation"], "fs.remove");
     }
 
     // GH #212: gather's 0-vs-123 decision reads `result.ok()` (`code == 0`).

@@ -10,7 +10,6 @@ use serde_json::Value as JsonValue;
 use thiserror::Error;
 
 use crate::output::OutputData;
-use crate::approval::ApprovalRequestView;
 use crate::result::{json_to_value_no_envelope, value_to_json, ExecResult};
 use crate::tool::ToolSchema;
 
@@ -256,19 +255,6 @@ pub struct ToolResult {
     pub content_type: Option<String>,
     /// Opaque key-value context (propagated from ExecResult).
     pub baggage: BTreeMap<String, String>,
-    /// A pending approval request (propagated from ExecResult), so a
-    /// backend-tool gate survives the ExecResult↔ToolResult roundtrip. Its own
-    /// typed field — never folded into `data`. Boxed like `ExecResult.approval`,
-    /// for the same stack-frame reason (GH #46/#47).
-    ///
-    /// Deliberately the tokenless view alone, not the whole
-    /// `ExecResult.approval` [`crate::approval::PendingApproval`] — a
-    /// backend tool crosses the FFI-shaped `KernelBackend` boundary, where
-    /// the resume route (an in-process replay via `Kernel::confirm`) has no
-    /// meaning; the two `From` impls below re-derive it on the way back into
-    /// `ExecResult`, which is exact because [`crate::approval::PendingApproval::new`]
-    /// is a pure function of the view's own `capture`/`binding` fields.
-    pub approval: Option<Box<ApprovalRequestView>>,
 }
 
 impl ToolResult {
@@ -284,7 +270,6 @@ impl ToolResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            approval: None,
         }
     }
 
@@ -300,7 +285,6 @@ impl ToolResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            approval: None,
         }
     }
 
@@ -316,7 +300,6 @@ impl ToolResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            approval: None,
         }
     }
 
@@ -340,12 +323,6 @@ impl ToolResult {
     /// Replace the baggage map, returning self for chaining.
     pub fn with_baggage(mut self, baggage: BTreeMap<String, String>) -> Self {
         self.baggage = baggage;
-        self
-    }
-
-    /// Set the pending approval request, returning self for chaining.
-    pub fn with_approval(mut self, approval: Option<ApprovalRequestView>) -> Self {
-        self.approval = approval.map(Box::new);
         self
     }
 
@@ -396,10 +373,6 @@ impl From<ExecResult> for ToolResult {
             original_code: exec.original_code,
             content_type: exec.content_type,
             baggage: exec.baggage,
-            // Project to the view: a backend tool crossing this boundary
-            // never needs the in-process resume route (see `Self::approval`'s
-            // doc).
-            approval: exec.approval.map(|pending| Box::new(pending.request)),
         }
     }
 }
@@ -424,13 +397,6 @@ impl From<ToolResult> for ExecResult {
         exec.original_code = result.original_code;
         exec.content_type = result.content_type;
         exec.baggage = result.baggage;
-        // Re-derive the resume route from the view: `PendingApproval::new`
-        // is a pure function of `capture`/`binding`, both already on the
-        // view, so this is exact — never a guess (see `ToolResult::approval`'s
-        // doc).
-        exec.approval = result
-            .approval
-            .map(|view| Box::new(crate::approval::PendingApproval::new(*view)));
         exec
     }
 }
@@ -521,50 +487,19 @@ mod tests {
         let mut baggage = BTreeMap::new();
         baggage.insert("k".to_string(), "v".to_string());
 
-        let approval = crate::approval::sample_view("fs.remove", &["f"]);
 
         let result = ToolResult::success("hi")
             .with_output(Some(OutputData::text("hi")))
             .with_content_type("text/plain")
             .with_baggage(baggage.clone())
-            .with_approval(Some(approval.clone()))
             .with_did_spill(true)
             .with_original_code(Some(2));
 
         assert!(result.output.is_some());
         assert_eq!(result.content_type.as_deref(), Some("text/plain"));
         assert_eq!(result.baggage, baggage);
-        assert_eq!(result.approval.as_deref(), Some(&approval));
         assert!(result.did_spill);
         assert_eq!(result.original_code, Some(2));
     }
 
-    #[test]
-    fn exec_result_approval_round_trips_through_tool_result_with_the_same_resume_route() {
-        // ExecResult.approval carries the whole PendingApproval (kaish#312);
-        // ToolResult.approval carries only the tokenless view, since a
-        // backend tool's resume route has no meaning across the
-        // `KernelBackend` boundary. The two `From` impls must still agree:
-        // crossing out and back must reproduce the exact resume route
-        // `PendingApproval::new` derived the first time, not a different one.
-        let view = crate::approval::sample_view("fs.remove", &["f"]);
-        let mut exec = ExecResult::success("");
-        exec.approval = Some(Box::new(crate::approval::PendingApproval::new(view.clone())));
-        let original_resume = exec.approval.as_ref().unwrap().resume.clone();
-
-        let tool_result = ToolResult::from(exec);
-        assert_eq!(
-            tool_result.approval.as_deref(),
-            Some(&view),
-            "crossing into ToolResult keeps the view, drops only the route"
-        );
-
-        let back = ExecResult::from(tool_result);
-        let pending = back.approval.expect("the approval must survive the round trip");
-        assert_eq!(pending.request, view, "the view itself is unchanged");
-        assert_eq!(
-            pending.resume, original_resume,
-            "re-deriving the route on the way back must reproduce the original"
-        );
-    }
 }

@@ -312,81 +312,33 @@ sed 's/(a)\1/x/'                    # ERROR — no backreference IN a pattern
 
 ```sh
 set -e                    # exit on first error
-set -o approvals          # require approval to delete/overwrite (exit code 2)
 set -o trash              # move rm'd / overwritten files to Trash
 set -o glob               # enable bare glob expansion (on by default)
-set +o approvals          # disable approvals
 set +o trash              # disable trash
 set +o glob               # disable bare glob expansion
 ```
 
-Env vars: `KAISH_APPROVALS=1`, `KAISH_TRASH=1` enable at startup.
+Env var: `KAISH_TRASH=1` enables trash at startup.
 
-`set` ignores an unknown `-o` name and exits **0**. `set -o latch` is the
-retired spelling and turns nothing on — the option is `approvals`. Exit code
-**2** and `--confirm=<token>` are unchanged.
+`set` ignores an unknown `-o` name and exits **0**. `set -o approvals` and
+`set -o latch` are retired spellings — from the removed approval subsystem
+and the confirmation latch — and turn nothing on.
 
-**Approvals:** `set -o approvals` gates every filesystem mutation with no
-recoverable prior copy. A gated command exits **2** and returns a typed
-approval request naming the operation (`fs.remove`, `fs.overwrite`,
-`fs.rename`) and the exact paths. Applies to `rm` and to truncating
-overwrites (`cp`, `dd`, `mv`, `patch`, `sed -i`, `tee`, `write`); `tee -a`
-append, new files, and `patch --dry-run` don't gate. `kaish-trash empty`
-gates **always**, whatever the option says — it discards the recovery net
-itself.
+**Trash:** `rm` and a truncating overwrite (`cp`, `dd`, `mv`, `patch`,
+`sed -i`, `tee`, `write`) snapshot the prior content under `set -o trash`
+before they run, so the mistake is recoverable from Trash; `tee -a` append,
+new files, and `patch --dry-run` have no prior content to snapshot. Files
+<= 10MB and directories always trash; `/tmp`, `/v/*` are excluded. A
+**symlink** is the exception: `rm` unlinks the link itself rather than
+trashing its target, which is trivially recreatable while the target may
+not be. If trash fails, the op errors — no silent fallthrough to a
+destructive delete/overwrite. Configure threshold: `kaish-trash config
+max-size <bytes>`.
 
-Approve out of band, then re-run the same command with `--confirm=<token>`.
-A grant authorizes exactly **one successful** run: a key presented after
-success reports what already happened instead of running it again, while a
-failed attempt leaves the grant live to retry. The prompt prints to stderr
-(stdout stays empty); the request is on the result's typed `approval` field —
-surfaced under an `approval` key in the error envelope when `--json` is on.
-It never carries the token.
-
-**At a terminal, the REPL asks.** It prints the request to stderr and reads
-one answer: `y` grants and runs it, `a` grants it and stops asking for that
-operation on those resources for the rest of the session, and `n`, Enter, or
-Ctrl-C denies and closes the request. A piped or captured session is never
-asked — it gets exit **2** and the pending request. `kaish --gate
-<cmd[,cmd...]>` widens what asks to every statement planning one of those
-commands.
-
-**Reading and deciding:** `approvals list` names what is pending, `approvals
-show <id>` one request with its decision and attempts, and `approvals log`
-the retained entries. `/v/approvals` projects the same read model as files
-and is read-only — every write returns `Unsupported`, because granting by
-file write would make "can write files" mean "can approve itself".
-`approvals grant`, `deny`, and `revoke` exit **1** in a session with no
-approval authority; the REPL session holds one, an agent session does not.
-
-**A gate stops the program.** Exit **2** means *this has not happened yet*,
-so the statements after it do not run: `rm x; echo ok` with `rm` gated prints
-nothing and exits 2.
-
-**No expiry; cancel instead:** an undecided request stays pending until
-somebody decides or cancels it. `approvals cancel <id>` closes one you no
-longer want; cancelling your own needs no authority, and cancelling one that
-was already granted or denied exits **1**. Asking again means running the
-command again — the fresh request is linked to the closed one by
-`supersedes`.
-
-An embedder can pin the policy so `set +o approvals` fails with exit 1
-instead of disarming the session.
-
-**Trash:** Files <= 10MB and directories always trash. `/tmp`, `/v/*` excluded.
-Trash wins over approvals — a delete the trash can catch needs no approval,
-because the trash IS the recovery net. A **symlink** is the exception: `rm`
-unlinks the link rather than trashing its target, so it still asks under
-`approvals`. A truncating overwrite under `trash`
-snapshots the file's prior content first (recoverable from Trash). If trash
-fails, the op errors (no silent fallthrough to a destructive delete/overwrite).
-Configure threshold: `kaish-trash config max-size <bytes>`.
-
-**Across calls:** requests and grants live in the kernel's approval ledger,
-so a request raised in one `execute()` call is approvable and confirmable in
-a later one. The REPL keeps one kernel alive, so this is automatic; embedders
-share a ledger between kernels with
-`KernelConfig::with_approver_handle()`.
+`kaish-trash empty --confirm` is the one operation that always asks — it
+discards the recovery net itself. A bare `kaish-trash empty` refuses and
+names the flag; the flag carries no token, records nothing, and no session
+setting disables the ask.
 
 ## Error Handling
 

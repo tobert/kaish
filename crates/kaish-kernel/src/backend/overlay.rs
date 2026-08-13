@@ -683,7 +683,7 @@ mod tests {
 
         // Unclaimed /v/* now resolves to the embedder's REAL path (was `None`
         // under the old lexical reservation). This is the path that reaches the
-        // trash/approval gate, so `is_trash_excluded` must NOT lexically exclude
+        // trash gate, so `is_trash_excluded` must NOT lexically exclude
         // `/v` — otherwise this real content silently loses its safety net
         // (see tools/context.rs).
         let real = overlay.resolve_real_path(Path::new("/v/cas/blob.bin"));

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::{BackendError, KernelBackend, WriteMode};
 use crate::interpreter::ExecResult;
-use crate::ledger::KernelOperation;
+use crate::operation::KernelOperation;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Mv tool: move/rename files and directories.
@@ -16,9 +16,6 @@ pub struct Mv;
 #[derive(Parser, Debug)]
 #[command(name = "mv", about = "Move (rename) files and directories")]
 struct MvArgs {
-    /// Approval token for a gated overwrite (`--confirm=<token>`).
-    #[arg(long = "confirm")]
-    confirm: Option<String>,
 
     /// Do not overwrite existing files (-n)
     #[arg(short = 'n', long = "no-clobber", visible_alias = "no_clobber")]
@@ -100,12 +97,12 @@ impl Tool for Mv {
             }
         }
 
-        // Gate a direct file clobber (`mv SRC EXISTING_FILE`) through approvals +
-        // trash. The gate snapshots the prior destination content to trash (the
-        // recovery copy) and handles the approval prompt; the move itself replaces
-        // it (an atomic same-mount `rename`, or unlink+write cross-mount), so no
-        // CAS is threaded. Moving *into* a directory or a recursive merge isn't
-        // a single-file truncation and stays ungated (documented residual).
+        // Under trash, a direct file clobber (`mv SRC EXISTING_FILE`)
+        // snapshots the prior destination content to trash (the recovery
+        // copy); the move itself replaces it (an atomic same-mount `rename`,
+        // or unlink+write cross-mount), so no CAS is threaded. Moving *into*
+        // a directory or a recursive merge isn't a single-file truncation
+        // and is not snapshotted (documented residual).
         if sources.len() == 1 {
             let dst_is_existing_file = ctx
                 .backend
@@ -114,15 +111,10 @@ impl Tool for Mv {
                 .map(|info| !info.is_dir())
                 .unwrap_or(false);
             if dst_is_existing_file {
-                let src_display = &sources[0];
+                let _src_display = &sources[0];
                 if let Err(blocked) = ctx
-                    .gate_overwrites(
-                        KernelOperation::FsRename,
-                        "mv",
-                        &[(dest.clone(), false)],
-                        parsed.confirm.as_deref(),
-                        |joined| format!("mv --confirm=<token> {src_display} {joined}"),
-                    )
+                    .snapshot_overwrites("mv",
+                        &[(dest.clone(), false)])
                     .await
                 {
                     return blocked;

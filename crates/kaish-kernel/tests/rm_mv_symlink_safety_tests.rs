@@ -33,11 +33,10 @@ fn tempdir() -> tempfile::TempDir {
         .expect("tempdir under CARGO_TARGET_TMPDIR")
 }
 
-/// Approvals/trash forced OFF unless a test opts in via `set -o`.
+/// Trash forced OFF unless a test opts in via `set -o trash`.
 fn kernel_at(dir: &Path) -> Kernel {
     let config = KernelConfig::repl()
         .with_cwd(dir.to_path_buf())
-        .with_approvals(false)
         .with_trash(false);
     Kernel::new(config).expect("kernel")
 }

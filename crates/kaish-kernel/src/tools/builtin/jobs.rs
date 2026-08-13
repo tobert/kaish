@@ -8,7 +8,7 @@ use crate::scheduler::JobInfo;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Build `jobs --json` rows: the full serialized `JobInfo` (GH #241 — id,
-/// status, command, exit_code, started_at/finished_at, pgids, approval, ... —
+/// status, command, exit_code, started_at/finished_at, pgids, ... —
 /// whatever `JobInfo`'s own `Serialize` impl emits) plus one bolt-on `path`
 /// field.
 ///
@@ -17,7 +17,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// not an intrinsic property of the job itself, so the builtin adds it here
 /// rather than the type baking in a `jobs`-specific presentation detail.
 /// Before GH #241 this function hand-built every field with `serde_json::json!`
-/// (including re-deriving `status` from `Display` and re-serializing `approval`)
+/// (including re-deriving `status` from `Display`)
 /// because `JobInfo` couldn't serialize itself — now that it can, the only
 /// thing left to bolt on is `path`.
 fn job_rows_json(jobs: &[JobInfo]) -> Vec<serde_json::Value> {
@@ -96,14 +96,7 @@ impl Tool for Jobs {
             manager.cleanup().await;
             let remaining = manager.list().await;
             let removed = before - remaining.len();
-            let held = remaining.iter().filter(|j| j.approval.is_some()).count();
-            let mut msg = format!("Cleaned up {} completed job(s)\n", removed);
-            if held > 0 {
-                msg.push_str(&format!(
-                    "Kept {held} gated job(s) awaiting approval — \
-                     grant the request or abandon with kill --discard %N\n"
-                ));
-            }
+            let msg = format!("Cleaned up {} completed job(s)\n", removed);
             return ExecResult::with_output(OutputData::text(msg));
         }
 
@@ -129,8 +122,7 @@ impl Tool for Jobs {
             "PATH".to_string(),
         ];
 
-        // rich_json rows carry `approval` for a `Gated` row (GH #124 part 2) —
-        // computed from `&jobs` before the text loop below consumes it by value.
+        // Computed from `&jobs` before the text loop below consumes it by value.
         let rows = job_rows_json(&jobs);
         let output = OutputData::table(headers, nodes)
             .with_rich_json(serde_json::Value::Array(rows));
@@ -157,44 +149,6 @@ mod tests {
         let mut vfs = VfsRouter::new();
         vfs.mount("/", MemoryFs::new());
         ExecContext::new(Arc::new(vfs))
-    }
-
-    #[test]
-    fn job_rows_json_carries_the_approval_only_on_held_rows() {
-        use crate::scheduler::{JobId, JobStatus};
-
-        let mut view =
-            crate::ledger::sample_view(crate::ledger::KernelOperation::FsRemove, &["precious.txt"]);
-        view.job_id = Some(1);
-        let jobs = vec![
-            JobInfo::new(JobId(1), "rm precious.txt", JobStatus::Gated)
-                .with_approval(Some(view.clone())),
-            JobInfo::new(JobId(2), "sleep 5", JobStatus::Running),
-        ];
-
-        let rows = job_rows_json(&jobs);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["id"], 1);
-        // GH #241: the JSON spelling of JobStatus is lowercase, matching the
-        // existing `/v/jobs/N/status` vocabulary — NOT the capitalized
-        // `Display` impl this row used to derive from (`"Gated"`).
-        assert_eq!(rows[0]["status"], "gated");
-        assert_eq!(rows[0]["path"], "/v/jobs/1/");
-        assert_eq!(
-            rows[0]["approval"]["id"], view.id.as_str(),
-            "a held row must carry the approval request: {}",
-            rows[0]
-        );
-        assert_eq!(
-            rows[0]["approval"]["job_id"], 1,
-            "the row's request must carry the job_id back-reference (GH #124 part 4): {}",
-            rows[0]
-        );
-        assert!(
-            rows[1].get("approval").is_none(),
-            "a row that is not held must NOT carry an approval key: {}",
-            rows[1]
-        );
     }
 
     #[test]

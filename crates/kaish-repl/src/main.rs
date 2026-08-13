@@ -146,58 +146,15 @@ fn main() -> ExitCode {
     }
 }
 
-/// The command names `--gate` named, and the args with the flag removed.
-///
-/// Accepts `--gate rm`, `--gate=rm`, and a comma-separated list
-/// (`--gate rm,kaish-trash`); repeating the flag adds to the set. An empty
-/// name is dropped rather than registering a classifier that matches a
-/// command called "".
-fn extract_gate(args: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut names = Vec::new();
-    let mut rest = Vec::new();
-    let mut expecting_value = false;
-    for arg in args.iter().skip(1) {
-        if expecting_value {
-            expecting_value = false;
-            names.extend(split_names(arg));
-            continue;
-        }
-        match arg.as_str() {
-            "--gate" => expecting_value = true,
-            value if value.starts_with("--gate=") => names.extend(split_names(&value[7..])),
-            other => rest.push(other.to_string()),
-        }
-    }
-    (names, rest)
-}
-
-fn split_names(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-/// Install the `--gate` classifier when the session asked for one. With none,
-/// every statement is `Observe` — recorded and run (spec §C.6).
-fn with_gate(config: kaish_kernel::KernelConfig, gates: &[String]) -> kaish_kernel::KernelConfig {
-    if gates.is_empty() {
-        return config;
-    }
-    config.with_statement_classifier(kaish_repl::gate_classifier(gates.to_vec()))
-}
-
 fn run() -> Result<ExitCode> {
     let args: Vec<String> = env::args().collect();
 
-    // `--gate` comes off first, because it takes a value: reading `--overlay`
-    // out of the whole argv would also see the one in `--gate --overlay`,
-    // which is that flag's operand and not a mode.
-    let (gates, rest) = extract_gate(&args);
-    // Extract --overlay flag (can appear anywhere before positionals).
-    let overlay = rest.iter().any(|a| a == "--overlay");
-    let rest: Vec<&str> = rest.iter()
+    // Skip argv[0]: every arm below matches on the first real argument.
+    // Extract --overlay (can appear anywhere before positionals).
+    let overlay = args.iter().skip(1).any(|a| a == "--overlay");
+    let rest: Vec<&str> = args
+        .iter()
+        .skip(1)
         .filter(|a| *a != "--overlay")
         .map(|a| a.as_str())
         .collect();
@@ -206,10 +163,7 @@ fn run() -> Result<ExitCode> {
     match rest.first().copied() {
         None => {
             // No args: interactive REPL
-            let config = with_gate(
-                kaish_repl::interactive_config().with_overlay(overlay),
-                &gates,
-            );
+            let config = kaish_repl::interactive_config().with_overlay(overlay);
             kaish_repl::run_interactive(config, overlay)?;
             Ok(ExitCode::SUCCESS)
         }
@@ -230,12 +184,12 @@ fn run() -> Result<ExitCode> {
         Some("-c") => {
             let cmd = rest.get(1).copied()
                 .context("-c requires a command argument")?;
-            run_command(cmd, overlay, &gates)
+            run_command(cmd, overlay)
         }
 
         Some(path) if !path.starts_with('-') => {
             // Treat as script file
-            run_script(path, overlay, &gates)
+            run_script(path, overlay)
         }
 
         Some(unknown) => {
@@ -257,10 +211,6 @@ Usage:
 Options:
   --overlay                    Enable copy-on-write overlay mode (writes are
                                virtual; use kaish-vfs commit to apply them)
-  --gate <cmd[,cmd...]>        Ask before running any statement that names one
-                               of these commands. The REPL asks at the prompt;
-                               -c and script runs exit 2 with the request
-                               pending, for an operator to grant out of band.
   -c <command>                 Execute command string and exit
   -h, --help                   Show this help
   -V, --version                Show version
@@ -268,7 +218,6 @@ Options:
 Examples:
   kaish                        # Start interactive REPL
   kaish --overlay              # REPL with virtual writes (overlay mode)
-  kaish --gate rm,kaish-trash  # REPL that asks before rm and kaish-trash
   kaish -c 'echo hello'       # Run a command
   kaish --overlay -c 'echo test > file.txt; kaish-vfs diff'
   kaish deploy.kai             # Run a deployment script
@@ -276,7 +225,7 @@ Examples:
 }
 
 /// Run a script file.
-fn run_script(path: &str, overlay: bool, gates: &[String]) -> Result<ExitCode> {
+fn run_script(path: &str, overlay: bool) -> Result<ExitCode> {
     use kaish_client::EmbeddedClient;
     use kaish_kernel::Kernel;
 
@@ -298,7 +247,7 @@ fn run_script(path: &str, overlay: bool, gates: &[String]) -> Result<ExitCode> {
 
     // Non-interactive: pipe stdout so command substitution captures output.
     // The streaming callback below still prints output for the user.
-    let config = with_gate(kaish_repl::noninteractive_config(overlay), gates);
+    let config = kaish_repl::noninteractive_config(overlay);
     let kernel = Kernel::new(config)
         .context("Failed to create kernel")?;
 
@@ -320,13 +269,13 @@ fn run_script(path: &str, overlay: bool, gates: &[String]) -> Result<ExitCode> {
 }
 
 /// Execute a command string and exit.
-fn run_command(cmd: &str, overlay: bool, gates: &[String]) -> Result<ExitCode> {
+fn run_command(cmd: &str, overlay: bool) -> Result<ExitCode> {
     use kaish_client::EmbeddedClient;
     use kaish_kernel::Kernel;
 
     // Non-interactive: pipe stdout so command substitution captures output.
     // The streaming callback below still prints output for the user.
-    let config = with_gate(kaish_repl::noninteractive_config(overlay), gates);
+    let config = kaish_repl::noninteractive_config(overlay);
     let kernel = Kernel::new(config)
         .context("Failed to create kernel")?;
 

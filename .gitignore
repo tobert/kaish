@@ -24,5 +24,4 @@ Thumbs.db
 /fuzz/corpus/
 
 # signoff.md — ephemeral, personal cross-session handoff; never commit.
-# Shared working notes live in docs/issues.md and docs/devlog.md.
 signoff.md

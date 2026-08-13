@@ -19,7 +19,7 @@ use std::time::Duration;
 use kaish_kernel::{pipe_stream_default, ExecuteOptions, Kernel, KernelConfig};
 
 fn kernel() -> Kernel {
-    Kernel::new(KernelConfig::repl().with_approvals(false).with_trash(false))
+    Kernel::new(KernelConfig::repl().with_trash(false))
         .expect("failed to create kernel")
 }
 
@@ -99,7 +99,6 @@ async fn lazy_stdin_feeds_an_external_command() {
     // an absolute path forces the external path (not the `cat` builtin).
     let kernel = Kernel::new(
         KernelConfig::repl()
-            .with_approvals(false)
             .with_trash(false)
             .with_allow_external_commands(true),
     )

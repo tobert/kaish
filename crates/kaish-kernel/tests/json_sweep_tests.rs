@@ -76,9 +76,6 @@ const SKIPS: &[Skip] = &[
 
 const CASES: &[Case] = &[
     Case { name: "alias", setup: &["alias g=grep"], cmd: "alias --json", expect: Expect::Array },
-    // An empty ledger still answers with an array — "nothing pending" must
-    // not be a different JSON shape from "one request".
-    Case { name: "approvals", setup: &[], cmd: "approvals list --json", expect: Expect::Array },
     Case { name: "assert", setup: &[], cmd: "assert 1 --json", expect: Expect::Empty },
     Case { name: "awk", setup: &[], cmd: r#"printf 'a b\nc d\n' | awk '{print $1}' --json"#, expect: Expect::String },
     Case { name: "base64", setup: &[], cmd: "echo hi | base64 --json", expect: Expect::String },

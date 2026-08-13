@@ -1,11 +1,9 @@
-//! The statement plan: an AST rendered back to shell text, **unexpanded**
-//! (`docs/approval-ledger.md` §C.6).
+//! The statement plan: an AST rendered back to shell text, **unexpanded**.
 //!
 //! A plan is parse information. It is built after validation and before
-//! execution, so `${HOME}` and `$(...)` appear exactly as written — a
-//! classifier judges what was asked, not what it resolved to, and the
-//! substitution that would resolve them has not run and must not run before
-//! a gate decides.
+//! execution, so `${HOME}` and `$(...)` appear exactly as written — an
+//! embedder judges what was asked, not what it resolved to, and the
+//! substitution that would resolve them has not run.
 //!
 //! Two products, one AST walk each: [`render_stmt`] produces the text, and
 //! [`planned_commands`] produces one [`PlannedCommand`] per command the
@@ -13,30 +11,21 @@
 //! command substitutions included, because every one of them is a command
 //! this statement would run.
 //!
+//! The same walk collects the statement's variables: the names it reads
+//! (`free_variables`) and the names it writes (`bound_variables`). A name
+//! that is both lands bound, never free.
+//!
 //! The collection walk also lifts out any literal `--confirm=<key>` the
 //! statement's argv carries ([`StatementPlan::presented_keys`]) — the same
 //! spellings the rendering redacts. One predicate decides all three of lift,
 //! redact, and render, so they cannot disagree about what the statement
 //! presented.
 //!
-//! [`plan_statement`] is **the one redaction point** the seam promises
-//! (spec §A.8): the kernel redacts exactly one thing — its own confirm
-//! key, which it minted and knows outright — and it does so here, before
-//! the `Plan` reaches any of its sinks. The statement classifier, the
-//! ledger's `Observed` entry, tracing, and the `/v/approvals` projection
-//! all read the same already-redacted `Plan::commands`, never the raw AST.
-//! Embedder-defined redaction is an embedder-side pass over the plans and
-//! records it holds — the kernel ships no detector, because a shell cannot
-//! define what a secret is.
-//!
-//! **Not normalized here**: [`redact_keys`], which builds
-//! `Capture::Statement`'s replay source. `Kernel::confirm` re-parses and
-//! re-executes that source verbatim, so it must stay exactly what the user
-//! typed — an embedder-redacted value baked into it would replay as the
-//! literal marker text instead of the real argument. Only the kernel's own
-//! confirm-key token is stripped there, because redemption authorizes
-//! through the `ApproverHandle`, never the literal key, so replay needs
-//! nothing else out of it.
+//! Redaction is the `--confirm=<key>` flag spelling and nothing else — that
+//! spelling carries a confirmation credential, and a credential must never
+//! ride into a stored plan. kaish ships no secret detector — a shell cannot
+//! define what a secret is — so an embedder that wants more redacts the
+//! plans it holds.
 
 use std::collections::BTreeSet;
 
@@ -56,22 +45,16 @@ pub struct StatementPlan {
     /// argv carries, in source order.
     ///
     /// **Literal only.** A plan is unexpanded, so `--confirm=${key}` reads as
-    /// `${key}` here and nothing is lifted — which is exactly right both
-    /// ways: what the record cannot see, the record cannot leak, and what
-    /// the gate cannot see, the builtin's own gate still gets, because
-    /// nothing is stripped from the argv that executes.
+    /// `${key}` here and nothing is lifted — what the plan cannot see, the
+    /// plan cannot leak, and nothing is stripped from the argv that executes.
     pub presented_keys: Vec<String>,
 }
 
 /// One statement of a planned program: its [`Plan`] and where it sits in the
 /// parsed source.
 ///
-/// `index` is the statement's position in the parsed program — the same
-/// number a [`Capture::Statement`](kaish_types::approval::Capture) records
-/// and a
-/// [`ResumeAction::ConfirmStatement`](kaish_types::approval::ResumeAction)
-/// quotes, so a plan built here correlates with any request the kernel later
-/// raises for the same statement.
+/// `index` is the statement's position in the parsed program, so an embedder
+/// can name which statement it is talking about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedStatement {
     /// The statement's position in the parsed program.
@@ -83,11 +66,17 @@ pub struct PlannedStatement {
 /// Plan every statement of `source` without executing anything.
 ///
 /// A plan is parse information: `${HOME}` and `$(...)` appear exactly as
-/// written, no substitution has run, and no filesystem has been touched. The
-/// same walk feeds the kernel's own statement gate, so what an embedder reads
-/// here is what a [`StatementClassifier`](crate::ledger::StatementClassifier)
-/// would judge and what the ledger's `Observed` entries record — one
-/// metadata surface, whether or not the kaish ledger is the one consuming it.
+/// written, no substitution has run, and no filesystem has been touched. That
+/// is the point — an embedder judges what the statement *asked for*, before
+/// anything it names can happen.
+///
+/// Each plan carries the statement's rendered text, every command it would
+/// run (control-structure bodies, `if` conditions, and `$(...)` bodies
+/// included), the variables it reads ([`Plan::free_variables`]) and the ones
+/// it writes ([`Plan::bound_variables`]). Reading live session state for the
+/// free set with [`Kernel::get_var`](crate::Kernel::get_var) closes the loop:
+/// plan a statement, look up what it depends on, and decide with the values
+/// in hand.
 ///
 /// Every literal `--confirm=<key>` is redacted from the plans and **not
 /// returned**: the caller holds `source` and can read its own credentials;
@@ -118,7 +107,7 @@ pub fn plan_program(
 
 /// Build the plan for one top-level statement. Every value is
 /// [`PlannedValue::Plain`] except a presented confirm key, which the kernel
-/// redacts unconditionally (spec §A.8).
+/// redacts unconditionally.
 pub fn plan_statement(stmt: &Stmt) -> StatementPlan {
     let collected = collect(stmt);
     // Free = read and never written in-statement. A name that is both read
@@ -145,12 +134,10 @@ pub fn plan_statement(stmt: &Stmt) -> StatementPlan {
 /// Remove every `--confirm=` (or `confirm=`) token from rendered plan text,
 /// whatever it carries.
 ///
-/// What a [`PlanBinding`](kaish_types::approval::PlanBinding) digests is the
-/// operation that was *judged*, and the credential is not part of that — it
-/// is the authorization for it (spec §A.9). Without this, the held statement
-/// `rm x` and its re-run `rm --confirm=<confirm-key> x` would digest
-/// differently, and every key presentation would be read as a moved binding
-/// and re-asked, which is exactly the loop the binding exists to prevent.
+/// An embedder computing a content identity over rendered text (see
+/// `PlanDigest` in kaish-types) wants the identity to cover the operation,
+/// not any credential presented with it — `rm x` and
+/// `rm --confirm=<confirm-key> x` should digest the same.
 ///
 /// Unlike [`redact_keys`], this does not need to know the key: it removes the
 /// whole token whether it carries a literal credential, the `<confirm-key>`
@@ -166,14 +153,10 @@ pub fn strip_confirm_tokens(rendered: &str) -> String {
         .join(" ")
 }
 
-/// Remove every one of `keys` from captured source text.
-///
-/// The capture is what `Kernel::confirm` replays, and it lands in the ledger
-/// on the way there — where no entry may carry a credential (spec §A.2). The
-/// whole `--confirm=<key>` token goes, not just its value: a replay runs
-/// under a redemption correlation and is authorized by that, so a replayed
-/// statement re-presenting a spent key would only count a rejection against
-/// some request. Leaving `<confirm-key>` in the argv would do exactly that.
+/// Remove every one of `keys` from captured source text — for an embedder
+/// storing source alongside plans, so the stored text never carries a
+/// credential. The whole `--confirm=<key>` token goes, not just its value,
+/// so re-running the stored text cannot re-present a spent key.
 pub fn redact_keys(source: &str, keys: &[String]) -> String {
     let mut out = source.to_string();
     for key in keys {
@@ -563,11 +546,10 @@ pub fn render_command(cmd: &Command) -> String {
 }
 
 /// The one argument whose value never reaches a plan unredacted:
-/// `--confirm=<token>` carries a redemption credential, and a plan is
-/// written straight into the ledger and projected into `/v/approvals`
-/// (spec §A.2 — no entry carries a credential). This is the kernel's own,
-/// unconditional redaction (spec §A.8) — possible exactly because the
-/// kernel minted this string and knows it outright.
+/// `--confirm=<token>` carries a confirmation credential, and a plan is
+/// built to be stored and shown. This is kaish's own, unconditional
+/// redaction — possible exactly because the flag spelling is kaish's
+/// convention and needs no secret detector to recognize.
 const CONFIRM_KEY: &str = "confirm";
 
 /// The [`PlannedValue::Redacted`] `kind` the kernel's confirm-key redaction
@@ -580,9 +562,8 @@ const CONFIRM_KEY_KIND: &str = "confirm-key";
 ///
 /// A non-literal value (`--confirm=${key}`, `--confirm=$(cat key)`) yields
 /// `None`: the plan is unexpanded, so the value is not knowable here. That
-/// costs nothing — the statement gate does not see the key, the record does
-/// not carry it either, and the argv that executes is untouched, so the
-/// builtin's own gate still receives whatever it resolves to.
+/// costs nothing — what the plan cannot see, it cannot leak, and the argv
+/// that executes is untouched.
 fn presented_key(arg: &Arg) -> Option<String> {
     let value = match arg {
         Arg::Named { key, value } | Arg::WordAssign { key, value } if key == CONFIRM_KEY => value,
@@ -598,10 +579,10 @@ fn presented_key(arg: &Arg) -> Option<String> {
 /// [`PlannedValue`] (for [`PlannedCommand::args`]), derived together so the
 /// two representations cannot disagree about what this argument was.
 ///
-/// A `confirm` argument carrying a *literal* is the kernel's own credential
-/// and is redacted unconditionally; every other value's flag/key prefix (if
-/// any) stays visible even when its value is redacted, so the record still
-/// shows *that* a value was presented at that flag, never *what*.
+/// A `confirm` argument carrying a *literal* is a credential and is redacted
+/// unconditionally; every other value's flag/key prefix (if any) stays
+/// visible even when its value is redacted, so the plan still shows *that* a
+/// value was presented at that flag, never *what*.
 fn plan_arg(arg: &Arg) -> (String, PlannedValue) {
     if presented_key(arg).is_some() {
         let value = PlannedValue::redacted(CONFIRM_KEY_KIND, None);
@@ -815,7 +796,7 @@ fn render_literal(value: &Value) -> String {
         Value::Json(j) => j.to_string(),
         // Binary reaches a plan only through `execute_argv`, which takes
         // typed values. Naming the length is honest; printing the bytes
-        // would put unreadable data in an audit record.
+        // would put unreadable data in a stored plan.
         Value::Bytes(b) => format!("<bytes len={}>", b.len()),
     }
 }

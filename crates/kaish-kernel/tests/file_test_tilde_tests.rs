@@ -33,7 +33,6 @@ fn kernel_with_cwd_home(cwd: &Path, home: &Path) -> Kernel {
     let config = KernelConfig::repl()
         .with_cwd(cwd.to_path_buf())
         .with_initial_vars(vars)
-        .with_approvals(false)
         .with_trash(false);
     Kernel::new(config).expect("kernel")
 }

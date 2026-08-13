@@ -21,7 +21,6 @@ In sandboxed mode, paths look native but access outside `$HOME` fails (except `/
 /v/blobs/      memory storage for blobs
 /v/bin/        read-only listing of builtins (can invoke: /v/bin/echo hello)
 /v/jobs/{id}/  background job state (see below)
-/v/approvals/  the approval ledger, read-only (see below)
 ```
 
 Git is an ordinary external command (`git status`, `git log`, `git diff`) — it
@@ -32,11 +31,10 @@ runs via the `subprocess` capability against your system `git`, not a VFS mount.
 Each background job gets a directory:
 
 ```
-/v/jobs/{id}/status    "running" | "stopped" | "done:0" | "gated" | "killed:N" | "failed:N"
+/v/jobs/{id}/status    "running" | "stopped" | "done:0" | "killed:N" | "failed:N"
 /v/jobs/{id}/command   original command string
 /v/jobs/{id}/stdout    the job's stdout so far — live while it runs
 /v/jobs/{id}/stderr    the job's stderr so far — live while it runs
-/v/jobs/{id}/approval  pending approval request (JSON) if gated, else empty
 ```
 
 ```sh
@@ -56,44 +54,6 @@ is the next stage's stdin); `stderr` takes every stage's.
 Each node holds at most 10MB and evicts its oldest bytes past that. Redirect
 to a file (`cargo build > /tmp/build.log 2>&1 &`) when the whole output
 matters.
-
-A destructive op backgrounded under `set -o approvals` (`rm x &`) gates in the
-background: status is `gated`, and `/v/jobs/{id}/approval` carries the JSON
-request (operation, resources, and the job it belongs to) so the gate can be
-fulfilled. The node never carries a token — approve the request, then re-run
-with `--confirm=<token>`, or, from an embedder, `Kernel::confirm`.
-
-## /v/approvals — The Approval Ledger
-
-The requests `set -o approvals` raises, and what was decided about them:
-
-```
-/v/approvals/pending      JSON array of requests awaiting a decision
-/v/approvals/standing     JSON array of live standing grants
-/v/approvals/log          NDJSON of the retained entries, oldest first
-/v/approvals/{id}/request the request as JSON
-/v/approvals/{id}/state   "requested" | "granted" | "consumed" | "denied" | ...
-/v/approvals/{id}/attempts JSON array of attempts and their outcomes
-/v/approvals/{id}/grant   the grant as JSON, empty until it is decided
-```
-
-**Read-only, and every write returns `Unsupported`** — granting by writing a
-file would make "the agent can write files" mean "the agent can approve its
-own operations". Decide with the `approvals` builtin, which needs approval
-authority on the session for `grant`, `deny`, and `revoke`.
-
-**No node carries a token.** The redemption credential lives only in the
-kernel and is retrievable through an embedder's `ApproverHandle::token_for`.
-A grant carries `token_prefix`, four characters that correlate a rejected key
-with the grant it was aimed at — never the key.
-
-```sh
-rm precious.txt &                     # gates in the background
-cat /v/approvals/pending              # every request, across every job
-approvals list                        # the same, as a table
-approvals show req_9c1a4f2e_42        # one request, its decision, its attempts
-approvals cancel req_9c1a4f2e_42      # close it — nothing times a request out
-```
 
 ## /tmp — Interop
 

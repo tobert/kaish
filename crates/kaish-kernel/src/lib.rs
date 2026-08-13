@@ -20,10 +20,10 @@ pub mod duration;
 pub mod help;
 pub mod ignore_config;
 pub mod interpreter;
-pub mod ledger;
 pub mod output_limit;
 pub mod kernel;
 pub mod lexer;
+pub mod operation;
 pub mod parser;
 pub mod paths;
 #[cfg(all(unix, feature = "subprocess"))]
@@ -91,7 +91,7 @@ pub use scheduler::{BoundedStream, StreamStats, DEFAULT_STREAM_MAX_SIZE, drain_t
 // `PipeReader` via `Kernel::execute_with_pipe_stdin`, so a command that never
 // reads stdin never blocks on an open pipe. See `execute_pipe_stdin_tests`.
 pub use scheduler::{pipe_stream, pipe_stream_default, PipeReader, PipeWriter, PIPE_BUFFER_SIZE};
-pub use vfs::{ApprovalsFs, JobFs};
+pub use vfs::JobFs;
 
 // XDG path primitives (embedders compose their own paths)
 pub use paths::{home_dir, xdg_cache_home, xdg_config_home, xdg_data_home, xdg_runtime_dir};
@@ -100,7 +100,7 @@ pub use paths::{home_dir, xdg_cache_home, xdg_config_home, xdg_data_home, xdg_ru
 pub use interpreter::expand_tilde;
 
 // Tool registration (for embedders registering custom tools)
-pub use tools::{LedgerAccess, Tool, ToolRegistry, ExecContext};
+pub use tools::{Tool, ToolRegistry, ExecContext};
 
 // Statement metadata without execution (embedders compose their own
 // approval machinery over it — see docs/EMBEDDING.md)

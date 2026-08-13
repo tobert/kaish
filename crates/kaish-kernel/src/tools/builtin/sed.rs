@@ -13,7 +13,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::backend::PatchOp;
-use crate::ledger::KernelOperation;
+use crate::operation::KernelOperation;
 use crate::tools::builtin::get_path_string;
 use crate::tools::builtin::regex_dialect::{append_dialect_hint, bre_metas_to_ere};
 use crate::interpreter::{ExecResult, OutputData};
@@ -55,9 +55,6 @@ struct SedArgs {
     #[arg(short = 'i', long = "in-place")]
     in_place: bool,
 
-    /// Approval token for a gated in-place overwrite (`--confirm=<token>`).
-    #[arg(long = "confirm")]
-    confirm: Option<String>,
 
     #[command(flatten)]
     global: GlobalFlags,
@@ -166,11 +163,10 @@ impl Tool for Sed {
 
         let quiet = parsed.quiet || args.has_flag("quiet") || args.has_flag("n");
 
-        // In-place editing (-i [SUFFIX]) and its approval key — captured before
-        // `parsed` is shadowed by the built program below. Read raw too: the
-        // kernel may surface `-i.bak` as named["i"]=".bak" or bare `-i` as a flag.
+        // In-place editing (-i [SUFFIX]) — captured before `parsed` is
+        // shadowed by the built program below. Read raw too: the kernel may
+        // surface `-i.bak` as named["i"]=".bak" or bare `-i` as a flag.
         let in_place = parsed.in_place || args.has_flag("i");
-        let confirm = parsed.confirm.clone();
         // Regex dialect: `-E`/`-r` is strict ERE; default rewrites GNU BRE metas.
         // Captured before `parsed` is shadowed by the built program below.
         let extended = parsed.extended;
@@ -205,9 +201,9 @@ impl Tool for Sed {
         let file_pos = if expression_from_flag(&args) { 0 } else { 1 };
 
         // In-place: edit each file operand on disk instead of streaming to
-        // stdout. It is *always* a truncating overwrite of an existing file, so
-        // it routes through the same approval+trash gate as tee/patch. Editing a
-        // stream in place is meaningless, so no operands is a loud error.
+        // stdout. It is *always* a truncating overwrite of an existing file,
+        // so it takes the same trash snapshot as tee/patch. Editing a stream
+        // in place is meaningless, so no operands is a loud error.
         if in_place {
             let operands = args.positional.get(file_pos..).unwrap_or(&[]);
             let files: Vec<String> = match crate::interpreter::values_to_text_sink_named(operands, "a path") {
@@ -221,11 +217,6 @@ impl Tool for Sed {
                 );
             }
 
-            // Gate every target with one nonce before touching any file. The
-            // the hint must reinject the flags the operation can't run without:
-            // a bare `sed --confirm=… file` would read `file` as the expression
-            // and then hang on stdin. Rebuild `-i [-n] -e '<expr>'…` so the
-            // advertised re-run actually does the in-place edit.
             let mut hint_prefix = String::from("sed -i");
             if quiet {
                 hint_prefix.push_str(" -n");
@@ -236,13 +227,8 @@ impl Tool for Sed {
             }
             let targets: Vec<(String, bool)> = files.iter().map(|f| (f.clone(), false)).collect();
             if let Err(blocked) = ctx
-                .gate_overwrites(
-                    KernelOperation::FsOverwrite,
-                    "sed",
-                    &targets,
-                    confirm.as_deref(),
-                    |joined| format!("{hint_prefix} --confirm=<token> {joined}"),
-                )
+                .snapshot_overwrites("sed",
+                    &targets)
                 .await
             {
                 return blocked;

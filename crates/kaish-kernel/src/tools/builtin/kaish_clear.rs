@@ -58,21 +58,15 @@ impl Tool for KaishClear {
         // the variables/cwd were cleared. A user comparing $$ before and
         // after kaish-clear would expect the same identifier.
         //
-        // The safety rails come with it, for a sharper reason: this builtin
-        // clears *variables and cwd*, and a policy is neither. A blank
-        // `Scope::new()` defaults the approval policy off and unpinned, so
-        // clearing the session would have been a script-reachable way to
-        // disarm a pinned gate — the exact bypass `policy_pinned` exists to
-        // refuse (`docs/approval-ledger.md` §F.3 item 3).
+        // The trash settings come with it for the same reason: this builtin
+        // clears *variables and cwd*, and `set -o trash` is neither. A blank
+        // `Scope::new()` defaults trash off, so clearing the session would
+        // otherwise be a script-reachable way to disarm the recovery net.
         let pid = ctx.scope.pid();
-        let approvals_enabled = ctx.scope.approvals_enabled();
-        let policy_pinned = ctx.scope.policy_pinned();
         let trash_enabled = ctx.scope.trash_enabled();
         let trash_max_size = ctx.scope.trash_max_size();
         ctx.scope = Scope::new();
         ctx.scope.set_pid(pid);
-        ctx.scope.set_approvals_enabled(approvals_enabled);
-        ctx.scope.set_policy_pinned(policy_pinned);
         ctx.scope.set_trash_enabled(trash_enabled);
         ctx.scope.set_trash_max_size(trash_max_size);
         ctx.cwd = std::path::PathBuf::from("/");

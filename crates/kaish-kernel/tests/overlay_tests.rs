@@ -16,7 +16,6 @@ mod overlay_tests {
     fn overlay_kernel(dir: &Path) -> Kernel {
         let config = KernelConfig::agent_with_root(dir.to_path_buf())
             .with_overlay(true)
-            .with_approvals(false)
             .with_trash(false)
             .with_allow_external_commands(false);
         Kernel::new(config).expect("failed to create overlay kernel")
@@ -392,7 +391,6 @@ mod overlay_tests {
         let config = KernelConfig::agent_with_root(root.to_path_buf())
             .with_overlay(true)
             .with_vfs_budget(100)
-            .with_approvals(false)
             .with_trash(false)
             .with_allow_external_commands(false);
         let kernel = Kernel::new(config).expect("kernel");
@@ -643,7 +641,6 @@ mod diff_header_tests {
 
         let config = KernelConfig::agent_with_root(root.to_path_buf())
             .with_overlay(true)
-            .with_approvals(false)
             .with_trash(false)
             .with_allow_external_commands(false);
         let kernel = Kernel::new(config).expect("kernel");
