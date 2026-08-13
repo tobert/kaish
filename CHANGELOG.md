@@ -10,6 +10,12 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+- **`exit` and `return` inside a loop no longer discard the loop's output** —
+  `for f in a b; do echo $f; exit 3; done` printed nothing and exited 3; it now
+  prints `a`. Leaving a loop early stops it, it does not unprint the iterations
+  that already ran. `break`/`continue` were already correct.
+
 ## [0.14.0] - 2026-08-13
 
 ### Added
