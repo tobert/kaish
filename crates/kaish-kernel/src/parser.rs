@@ -52,6 +52,46 @@ fn parse_var_expr(raw: &str) -> Expr {
     Expr::VarRef(parse_varpath(raw))
 }
 
+/// Detect bash's `${VAR:offset:length}` substring form and explain the kaish
+/// spelling; `None` if this is not that shape.
+///
+/// kaish slices with brackets — `${s[start:end]}`, end-exclusive, the same rule
+/// as a list slice — so bash's colon form means something different here and
+/// used to expand to nothing at all. Silently: `"${d:0:4}/file"` became
+/// `/file`, pointing a destructive command at the wrong path.
+///
+/// `var_content` is the inside of `${…}`. A colon inside brackets is a slice
+/// subscript (`${r[a:b]}`) and is left alone; only a colon at bracket depth 0
+/// is the bash form. `${VAR:-default}` is matched earlier and never gets here.
+pub(crate) fn bash_substring_hint(var_content: &str) -> Option<String> {
+    let mut depth = 0usize;
+    let colon = var_content.char_indices().find_map(|(i, c)| match c {
+        '[' => {
+            depth += 1;
+            None
+        }
+        ']' => {
+            depth = depth.saturating_sub(1);
+            None
+        }
+        ':' if depth == 0 => Some(i),
+        _ => None,
+    })?;
+    let (name, rest) = var_content.split_at(colon);
+    let range = rest.trim_start_matches(':');
+    // `${v:0:5}` → `${v[0:5]}`; a lone `${v:5}` (bash: from offset 5) → `${v[5:]}`.
+    let suggestion = if range.contains(':') {
+        format!("${{{name}[{range}]}}")
+    } else {
+        format!("${{{name}[{range}:]}}")
+    };
+    Some(format!(
+        "${{{var_content}}}: kaish slices with brackets, not `:offset:length` — \
+         write {suggestion}. Brackets are start:end and end-exclusive, so \
+         ${{{name}[0:5]}} is the first five characters and ${{{name}[-3:]}} the last three."
+    ))
+}
+
 /// Remove shell quoting from a `${VAR:-WORD}` default word, bash-style, before
 /// the word is parsed for interpolation.
 ///
@@ -308,7 +348,10 @@ fn strip_empty_stmts(statements: Vec<Stmt>) -> Vec<Stmt> {
 /// for now; unifying them behind a position-tracking core is a follow-up
 /// cleanup. Behaviour MUST stay aligned for the non-escape paths — bug fixes
 /// for the shared interpolation logic here should land there as well.
-fn parse_interpolated_string_spanned(s: &str, base_offset: usize) -> Vec<SpannedPart> {
+fn parse_interpolated_string_spanned(
+    s: &str,
+    base_offset: usize,
+) -> Result<Vec<SpannedPart>, String> {
     let s = s.replace("__KAISH_ESCAPED_DOLLAR__", "\x00DOLLAR\x00");
 
     let chars_vec: Vec<char> = s.chars().collect();
@@ -515,6 +558,8 @@ fn parse_interpolated_string_spanned(s: &str, base_offset: usize) -> Vec<Spanned
                     let default = parse_interpolated_string(&default_word)
                         .unwrap_or_else(|_| vec![StringPart::Literal(default_word.clone())]);
                     StringPart::VarWithDefault { path, default }
+                } else if let Some(msg) = bash_substring_hint(&var_content) {
+                    return Err(msg);
                 } else {
                     StringPart::Var(parse_varpath(&format!("${{{}}}", var_content)))
                 };
@@ -620,7 +665,7 @@ fn parse_interpolated_string_spanned(s: &str, base_offset: usize) -> Vec<Spanned
 
     push_literal(&mut current_text, &mut current_text_start, pos, &mut parts);
 
-    parts
+    Ok(parts)
 }
 
 fn parse_interpolated_string(s: &str) -> Result<Vec<StringPart>, String> {
@@ -745,6 +790,8 @@ fn parse_interpolated_string(s: &str) -> Result<Vec<StringPart>, String> {
                     let default_str = &var_content[colon_idx + 2..];
                     let default = parse_interpolated_string(&unquote_default_word(default_str))?;
                     StringPart::VarWithDefault { path, default }
+                } else if let Some(msg) = bash_substring_hint(&var_content) {
+                    return Err(msg);
                 } else {
                     // Regular variable: ${VAR} or ${VAR.field}
                     StringPart::Var(parse_varpath(&format!("${{{}}}", var_content)))
@@ -894,6 +941,34 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
         .into_iter()
         .map(|spanned| (spanned.token, (spanned.span.start..spanned.span.end).into()))
         .collect();
+
+    // bash's `${VAR:offset:length}` is checked on the token stream, before the
+    // grammar runs, for the reason documented on `command_parser`: a `try_map`
+    // rejection inside `choice` loses its own message to a competing
+    // alternative's. This shape needs to *teach* the bracket form, so it is
+    // caught where nothing can outvote it.
+    for (tok, span) in &tokens {
+        let message = match tok {
+            Token::VarRef(raw) => raw
+                .strip_prefix("${")
+                .and_then(|s| s.strip_suffix('}'))
+                .filter(|_| find_default_separator(raw).is_none())
+                .and_then(bash_substring_hint),
+            // A quoted `"${d:0:4}/file"` arrives as one string token. The
+            // guard keeps this off the hot path — an interpolation with a
+            // top-level colon is the only thing worth re-scanning for.
+            Token::String(s) if s.contains("${") && s.contains(':') => {
+                parse_interpolated_string(s).err()
+            }
+            _ => None,
+        };
+        if let Some(message) = message {
+            return Err(vec![ParseError {
+                span: *span,
+                message,
+            }]);
+        }
+    }
 
     // End-of-input span
     let end_span: Span = (source.len()..source.len()).into();
@@ -2063,7 +2138,7 @@ where
     // aligned with the original source for span reporting.
     let heredoc_redirect = just(Token::HereDocStart)
         .ignore_then(select! { Token::HereDoc(data) => data })
-        .map(|data: HereDocData| {
+        .try_map(|data: HereDocData, span| {
             let target = if data.literal {
                 let body = if data.strip_tabs {
                     crate::interpreter::strip_leading_tabs(&data.content)
@@ -2072,19 +2147,18 @@ where
                 };
                 Expr::Literal(Value::String(body))
             } else {
-                let parts = parse_interpolated_string_spanned(
-                    &data.content,
-                    data.body_start_offset,
-                );
+                let parts =
+                    parse_interpolated_string_spanned(&data.content, data.body_start_offset)
+                        .map_err(|msg| Rich::custom(span, msg))?;
                 // If there's only one literal part and no tab stripping is
                 // needed, simplify to Expr::Literal — keeps the AST shape
                 // identical to the pre-spans path for trivial bodies.
                 if parts.len() == 1 && !data.strip_tabs {
                     if let StringPart::Literal(text) = &parts[0].part {
-                        return Redirect {
+                        return Ok(Redirect {
                             kind: RedirectKind::HereDoc,
                             target: Expr::Literal(Value::String(text.clone())),
-                        };
+                        });
                     }
                 }
                 Expr::HereDocBody {
@@ -2092,10 +2166,10 @@ where
                     strip_tabs: data.strip_tabs,
                 }
             };
-            Redirect {
+            Ok(Redirect {
                 kind: RedirectKind::HereDoc,
                 target,
-            }
+            })
         });
 
     // Here-string redirect: <<< word
@@ -2656,10 +2730,26 @@ fn var_expr_parser<'tokens, I>(
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    select! {
-        Token::VarRef(raw) => parse_var_expr(&raw),
-        Token::SimpleVarRef(name) => Expr::VarRef(VarPath::simple(name)),
-    }
+    choice((
+        select! { Token::VarRef(raw) => raw }.try_map(|raw, span| {
+            // The unquoted twin of the check in `parse_interpolated_string`:
+            // bash's `${v:0:5}` is a different slice convention here, and used
+            // to expand to nothing at all.
+            let inner = raw
+                .strip_prefix("${")
+                .and_then(|s| s.strip_suffix('}'))
+                .unwrap_or(&raw);
+            if !raw.starts_with("${?}")
+                && !raw.starts_with("${$}")
+                && find_default_separator(&raw).is_none()
+                && let Some(msg) = bash_substring_hint(inner)
+            {
+                return Err(Rich::custom(span, msg));
+            }
+            Ok(parse_var_expr(&raw))
+        }),
+        select! { Token::SimpleVarRef(name) => Expr::VarRef(VarPath::simple(name)) },
+    ))
     .labelled("variable reference")
 }
 
@@ -4755,7 +4845,7 @@ cmd < "input.txt"
 
     #[test]
     fn spanned_literal_only_records_byte_range() {
-        let parts = parse_interpolated_string_spanned("hello world", 100);
+        let parts = parse_interpolated_string_spanned("hello world", 100).unwrap();
         assert_eq!(parts.len(), 1);
         assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "hello world"));
         assert_eq!(parts[0].offset, 100, "base_offset must propagate to literals");
@@ -4764,7 +4854,7 @@ cmd < "input.txt"
 
     #[test]
     fn spanned_braced_var_at_zero() {
-        let parts = parse_interpolated_string_spanned("${X}", 50);
+        let parts = parse_interpolated_string_spanned("${X}", 50).unwrap();
         assert_eq!(parts.len(), 1);
         assert!(matches!(&parts[0].part, StringPart::Var(_)));
         assert_eq!(parts[0].offset, 50);
@@ -4773,7 +4863,7 @@ cmd < "input.txt"
 
     #[test]
     fn spanned_simple_var_then_literal() {
-        let parts = parse_interpolated_string_spanned("$X end", 10);
+        let parts = parse_interpolated_string_spanned("$X end", 10).unwrap();
         assert_eq!(parts.len(), 2);
         assert!(matches!(&parts[0].part, StringPart::Var(_)));
         assert_eq!(parts[0].offset, 10);
@@ -4785,7 +4875,7 @@ cmd < "input.txt"
 
     #[test]
     fn spanned_mixed_literal_var_literal() {
-        let parts = parse_interpolated_string_spanned("hi ${X} bye", 0);
+        let parts = parse_interpolated_string_spanned("hi ${X} bye", 0).unwrap();
         assert_eq!(parts.len(), 3);
         // "hi "
         assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "hi "));
@@ -4803,7 +4893,7 @@ cmd < "input.txt"
 
     #[test]
     fn spanned_positional_param() {
-        let parts = parse_interpolated_string_spanned("$1 done", 0);
+        let parts = parse_interpolated_string_spanned("$1 done", 0).unwrap();
         assert_eq!(parts.len(), 2);
         assert!(matches!(&parts[0].part, StringPart::Positional(1)));
         assert_eq!(parts[0].offset, 0);
@@ -4812,7 +4902,7 @@ cmd < "input.txt"
 
     #[test]
     fn spanned_special_dollar_dollar() {
-        let parts = parse_interpolated_string_spanned("$$", 5);
+        let parts = parse_interpolated_string_spanned("$$", 5).unwrap();
         assert_eq!(parts.len(), 1);
         assert!(matches!(&parts[0].part, StringPart::CurrentPid));
         assert_eq!(parts[0].offset, 5);
@@ -4824,14 +4914,14 @@ cmd < "input.txt"
         // The lexer wraps arithmetic markers as ${__ARITH:expr__} for
         // interpolated heredocs; the spanned parser must produce
         // StringPart::Arithmetic for that shape.
-        let parts = parse_interpolated_string_spanned("${__ARITH:1+2__}", 0);
+        let parts = parse_interpolated_string_spanned("${__ARITH:1+2__}", 0).unwrap();
         assert_eq!(parts.len(), 1);
         assert!(matches!(&parts[0].part, StringPart::Arithmetic(e) if e == "1+2"));
     }
 
     #[test]
     fn spanned_default_separator_yields_var_with_default() {
-        let parts = parse_interpolated_string_spanned("${X:-fallback}", 0);
+        let parts = parse_interpolated_string_spanned("${X:-fallback}", 0).unwrap();
         assert_eq!(parts.len(), 1);
         assert!(matches!(&parts[0].part, StringPart::VarWithDefault { .. }));
         assert_eq!(parts[0].offset, 0);
@@ -4840,7 +4930,7 @@ cmd < "input.txt"
 
     #[test]
     fn spanned_no_dollar_runs_one_literal() {
-        let parts = parse_interpolated_string_spanned("plain text only", 7);
+        let parts = parse_interpolated_string_spanned("plain text only", 7).unwrap();
         assert_eq!(parts.len(), 1);
         assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "plain text only"));
         assert_eq!(parts[0].offset, 7);
@@ -4862,7 +4952,7 @@ cmd < "input.txt"
         ];
         for s in &cases {
             let unspanned = parse_interpolated_string(s).expect("test input parses");
-            let spanned = parse_interpolated_string_spanned(s, 0);
+            let spanned = parse_interpolated_string_spanned(s, 0).unwrap();
             assert_eq!(
                 unspanned.len(),
                 spanned.len(),
@@ -4878,7 +4968,7 @@ cmd < "input.txt"
         // prefix is 5 bytes total. `${X}` then sits at byte offset 5.
         // Right-by-luck for char-vs-byte indexing is precisely what this
         // test catches: if someone swaps .len_utf8() for 1, offset becomes 2.
-        let parts = parse_interpolated_string_spanned("🚀 ${X}", 0);
+        let parts = parse_interpolated_string_spanned("🚀 ${X}", 0).unwrap();
         assert_eq!(parts.len(), 2);
 
         assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "🚀 "));
@@ -4894,7 +4984,7 @@ cmd < "input.txt"
     fn spanned_multibyte_utf8_pure_literal_is_byte_length() {
         // "hello 世界 world": 5 + 1 + 6 (3 per CJK char) + 1 + 5 = 18 bytes,
         // 13 chars. The `len` field must report 18, not 13.
-        let parts = parse_interpolated_string_spanned("hello 世界 world", 0);
+        let parts = parse_interpolated_string_spanned("hello 世界 world", 0).unwrap();
         assert_eq!(parts.len(), 1);
         assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "hello 世界 world"));
         assert_eq!(parts[0].offset, 0);
@@ -4905,7 +4995,7 @@ cmd < "input.txt"
     fn spanned_escape_dollar_consumes_two_bytes_emits_one_char() {
         // `\$` is 2 source bytes and resolves to a single literal `$`.
         // The literal part's `len` should reflect the SOURCE length (2).
-        let parts = parse_interpolated_string_spanned("\\$", 0);
+        let parts = parse_interpolated_string_spanned("\\$", 0).unwrap();
         assert_eq!(parts.len(), 1);
         assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "$"));
         assert_eq!(parts[0].offset, 0);
@@ -4914,7 +5004,7 @@ cmd < "input.txt"
 
     #[test]
     fn spanned_escape_backslash_collapses_pair_to_one() {
-        let parts = parse_interpolated_string_spanned("\\\\", 0);
+        let parts = parse_interpolated_string_spanned("\\\\", 0).unwrap();
         assert_eq!(parts.len(), 1);
         assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "\\"));
         assert_eq!(parts[0].len, 2);
@@ -4929,7 +5019,7 @@ cmd < "input.txt"
         // advance past the consumed `\`+`\r`, the following literal run would
         // be misreported starting at byte 0 instead of byte 2, corrupting
         // every subsequent span in the string (here, the `${x}` var's offset).
-        let parts = parse_interpolated_string_spanned("\\\rCD${x}", 0);
+        let parts = parse_interpolated_string_spanned("\\\rCD${x}", 0).unwrap();
         assert_eq!(parts.len(), 2);
         assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "CD"));
         assert_eq!(parts[0].offset, 2, "literal run must start after the consumed \\+CR");
@@ -4945,7 +5035,7 @@ cmd < "input.txt"
         // "AB") — current_text_start must stay anchored to the run's true
         // start (0), not jump to the post-continuation position, so "AB"
         // and "CD" merge into one literal spanning the whole source run.
-        let parts = parse_interpolated_string_spanned("AB\\\rCD${x}", 0);
+        let parts = parse_interpolated_string_spanned("AB\\\rCD${x}", 0).unwrap();
         assert_eq!(parts.len(), 2);
         assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "ABCD"));
         assert_eq!(parts[0].offset, 0);

@@ -348,9 +348,11 @@ ${u[name]}                # record key (bareword = literal key)
 ${u[$k]}                  # dynamic key ($var)
 ${xs[0]}   ${xs[-1]}      # list index; negative counts from the end
 ${xs[0:2]}                # slice (end-exclusive) → a list
+${s[0:5]}   ${s[-3:]}     # SAME slice on a string → characters, not bytes
 ${u[tags][0]}             # nested path
 ${#xs}   ${#u}            # length: list elements / record keys
 ${u.name}                 # error — brackets only, use ${u[name]}
+${s:0:5}                  # error — that is bash; use ${s[0:5]}
 
 # ENUMERATE — always wrap the collection in $(keys ...) or $(values ...).
 # A bare `for x in $xs` is an ERROR (E012): there is no word splitting.

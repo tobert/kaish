@@ -133,16 +133,18 @@ fn classify_slice(
     end: Option<i64>,
     path: &str,
 ) -> Result<Step, PathError> {
-    let arr = match json {
-        serde_json::Value::Array(a) => a,
+    // A string slices by CHARACTERS, not bytes: kaish refuses lossy text
+    // everywhere else, and a byte range can split a multi-byte sequence.
+    let len = match json {
+        serde_json::Value::Array(a) => a.len() as i64,
+        serde_json::Value::String(s) => s.chars().count() as i64,
         serde_json::Value::Object(_) => {
             return Err(PathError::Shape(format!(
                 "${{{path}[..]}}: cannot slice a record"
             )))
         }
-        _ => unreachable!("resolve_step guards non-collection containers"),
+        _ => unreachable!("resolve_step guards non-sliceable containers"),
     };
-    let len = arr.len() as i64;
     let norm = |b: i64| -> i64 {
         let b = if b < 0 { len + b } else { b };
         b.clamp(0, len)
@@ -201,6 +203,20 @@ fn resolve_step(
         return Err(dotted_access_error(path, name));
     }
 
+    // A string is sliceable but not indexable. `${s[0:5]}` is the first five
+    // characters; `${s[0]}` has no meaning kaish defines, since an index picks
+    // an element and a string has no elements. The error says which is which
+    // rather than only refusing.
+    if matches!(container, serde_json::Value::String(_)) {
+        return match seg {
+            VarSegment::Slice(start, end) => classify_slice(container, *start, *end, path),
+            _ => Err(PathError::Shape(format!(
+                "${{{path}…}}: cannot subscript a string — slice it instead, \
+                 e.g. ${{{path}[0:5]}} for the first five characters"
+            ))),
+        };
+    }
+
     // Every remaining subscript needs a collection container.
     if !matches!(
         container,
@@ -252,12 +268,16 @@ fn descend<'a>(
     path: &str,
 ) -> Result<Cow<'a, serde_json::Value>, PathError> {
     match step {
-        Step::Slice(s, e) => {
-            let Some(arr) = current.as_array() else {
-                unreachable!("slice classified against an array")
-            };
-            Ok(Cow::Owned(serde_json::Value::Array(arr[s..e].to_vec())))
-        }
+        Step::Slice(s, e) => match current.as_ref() {
+            serde_json::Value::Array(arr) => {
+                Ok(Cow::Owned(serde_json::Value::Array(arr[s..e].to_vec())))
+            }
+            // Char-indexed, matching `classify_slice`'s char-based bounds.
+            serde_json::Value::String(text) => Ok(Cow::Owned(serde_json::Value::String(
+                text.chars().skip(s).take(e - s).collect(),
+            ))),
+            _ => unreachable!("slice classified against an array or string"),
+        },
         Step::Index(i) => match current {
             Cow::Borrowed(j) => {
                 let Some(arr) = j.as_array() else {
@@ -754,11 +774,19 @@ impl Scope {
             return Err(dotted_access_error(root_name, name));
         }
 
-        // Subscripted: the root must be a collection to descend into. A scalar
-        // root reports the same "not a collection" message a mid-path scalar
-        // would (via `resolve_step`).
+        // Subscripted: the root must be a collection to descend into — or a
+        // string, which is sliceable (`${s[0:5]}`) though not indexable. A
+        // native `Value::String` root is lifted into JSON here so the one walk
+        // handles both; `resolve_step` then decides slice-versus-index and
+        // owns the message. Any other scalar reports the same "not a
+        // collection" message a mid-path scalar would.
+        let lifted;
         let root_json = match root {
             Value::Json(j) => j,
+            Value::String(s) => {
+                lifted = serde_json::Value::String(s.clone());
+                &lifted
+            }
             other => {
                 return Err(PathError::Shape(format!(
                     "${{{root_name}…}}: cannot subscript {} — it is not a collection",
