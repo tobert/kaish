@@ -10,6 +10,13 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+- **Leaving a block early no longer discards what it already printed** —
+  `for f in a b; do echo $f; exit 3; done` and `if true; then echo x; exit 1; fi`
+  both exited with the right code and printed nothing. `exit`, `return`, and
+  `break N`/`continue N` now carry the output out of loop bodies, `if`/`case`
+  branches, and `&&`/`||` chains alike.
+
 ## [0.14.0] - 2026-08-13
 
 ### Added

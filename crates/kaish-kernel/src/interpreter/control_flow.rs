@@ -20,7 +20,12 @@ pub enum ControlFlow {
     /// Return from a function with a result.
     Return { value: ExecResult },
     /// Exit the entire script with an exit code.
-    Exit { code: i64 },
+    ///
+    /// `result` carries the output produced before the exit. An immediate exit
+    /// stops the script; it does not discard the iterations that already ran.
+    /// `code` stays authoritative for the script's status — `result.code` is
+    /// never read.
+    Exit { code: i64, result: ExecResult },
 }
 
 impl ControlFlow {
@@ -66,9 +71,15 @@ impl ControlFlow {
         ControlFlow::Return { value }
     }
 
-    /// Create an exit with a code.
+    /// Create an exit with a code, carrying no output yet.
+    ///
+    /// Each loop the exit passes through folds its own accumulated output in,
+    /// so the output arrives with the signal rather than being left behind.
     pub fn exit_code(code: i64) -> Self {
-        ControlFlow::Exit { code }
+        ControlFlow::Exit {
+            code,
+            result: ExecResult::success(""),
+        }
     }
 
     /// Check if this is normal flow.

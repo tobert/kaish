@@ -2226,10 +2226,15 @@ impl Kernel {
                     accumulate_result(&mut result, &r);
                     result.set_output(last_output);
                 }
-                ControlFlow::Exit { code } => {
+                ControlFlow::Exit { code, result: carried } => {
                     if !drained_stderr.is_empty() {
                         result.err.push_str(&drained_stderr);
                     }
+                    // Output produced before the exit — e.g. by the loop the
+                    // `exit` ran inside — arrives on the signal. Emit it like
+                    // any other statement's, then let `code` decide the status.
+                    on_output(&carried);
+                    accumulate_result(&mut result, &carried);
                     result.code = code;
                     if !surfaced_warnings.is_empty() {
                         result.err = format!("{surfaced_warnings}{}", result.err);
@@ -2361,8 +2366,9 @@ impl Kernel {
                             accumulate_result(&mut result, &r);
                             self.drain_stderr_into(&mut result).await;
                         }
-                        other => {
+                        mut other => {
                             self.drain_stderr_into(&mut result).await;
+                            fold_block_output_into_flow(std::mem::take(&mut result), &mut other);
                             return Ok(other);
                         }
                     }
@@ -2503,7 +2509,7 @@ impl Kernel {
                                     accumulate_flow_output(&mut result, &flow);
                                     break 'outer;
                                 }
-                                fold_loop_output_into_flow(std::mem::take(&mut result), &mut flow);
+                                fold_block_output_into_flow(std::mem::take(&mut result), &mut flow);
                                 let mut scope = self.scope.write().await;
                                 scope.pop_frame();
                                 return Ok(flow);
@@ -2513,12 +2519,16 @@ impl Kernel {
                                     accumulate_flow_output(&mut result, &flow);
                                     continue 'outer;
                                 }
-                                fold_loop_output_into_flow(std::mem::take(&mut result), &mut flow);
+                                fold_block_output_into_flow(std::mem::take(&mut result), &mut flow);
                                 let mut scope = self.scope.write().await;
                                 scope.pop_frame();
                                 return Ok(flow);
                             }
                             ControlFlow::Return { .. } | ControlFlow::Exit { .. } => {
+                                fold_block_output_into_flow(
+                                    std::mem::take(&mut result),
+                                    &mut flow,
+                                );
                                 let mut scope = self.scope.write().await;
                                 scope.pop_frame();
                                 return Ok(flow);
@@ -2569,7 +2579,7 @@ impl Kernel {
                                     accumulate_flow_output(&mut result, &flow);
                                     break 'outer;
                                 }
-                                fold_loop_output_into_flow(std::mem::take(&mut result), &mut flow);
+                                fold_block_output_into_flow(std::mem::take(&mut result), &mut flow);
                                 return Ok(flow);
                             }
                             ControlFlow::Continue { .. } => {
@@ -2577,10 +2587,14 @@ impl Kernel {
                                     accumulate_flow_output(&mut result, &flow);
                                     continue 'outer;
                                 }
-                                fold_loop_output_into_flow(std::mem::take(&mut result), &mut flow);
+                                fold_block_output_into_flow(std::mem::take(&mut result), &mut flow);
                                 return Ok(flow);
                             }
                             ControlFlow::Return { .. } | ControlFlow::Exit { .. } => {
+                                fold_block_output_into_flow(
+                                    std::mem::take(&mut result),
+                                    &mut flow,
+                                );
                                 return Ok(flow);
                             }
                         }
@@ -2615,8 +2629,12 @@ impl Kernel {
                                     accumulate_result(&mut result, &r);
                                     self.drain_stderr_into(&mut result).await;
                                 }
-                                other => {
+                                mut other => {
                                     self.drain_stderr_into(&mut result).await;
+                                    fold_block_output_into_flow(
+                                        std::mem::take(&mut result),
+                                        &mut other,
+                                    );
                                     return Ok(other);
                                 }
                             }
@@ -2698,7 +2716,13 @@ impl Kernel {
                                     accumulate_result(&mut combined, &right_result);
                                     Ok(ControlFlow::ok(combined))
                                 }
-                                other => Ok(other),
+                                mut other => {
+                                    // The left side already ran and printed;
+                                    // a signal out of the right side must not
+                                    // unprint it.
+                                    fold_block_output_into_flow(left_result, &mut other);
+                                    Ok(other)
+                                }
                             }
                         } else {
                             Ok(ControlFlow::ok(left_result))
@@ -2751,7 +2775,13 @@ impl Kernel {
                                     accumulate_result(&mut combined, &right_result);
                                     Ok(ControlFlow::ok(combined))
                                 }
-                                other => Ok(other),
+                                mut other => {
+                                    // The left side already ran and printed;
+                                    // a signal out of the right side must not
+                                    // unprint it.
+                                    fold_block_output_into_flow(left_result, &mut other);
+                                    Ok(other)
+                                }
                             }
                         } else {
                             Ok(ControlFlow::ok(left_result))
@@ -4182,7 +4212,9 @@ impl Kernel {
                             last_data = value.data;
                             break;
                         }
-                        ControlFlow::Exit { code } => {
+                        ControlFlow::Exit { code, result: r } => {
+                            push_out(&mut accumulated_out, &r);
+                            accumulated_err.push_str(&r.err);
                             exit_code = Some(code);
                             break;
                         }
@@ -4280,7 +4312,9 @@ impl Kernel {
                     last_data = value.data;
                     break;
                 }
-                ControlFlow::Exit { code } => {
+                ControlFlow::Exit { code, result: r } => {
+                    push_out(&mut accumulated_out, &r);
+                    accumulated_err.push_str(&r.err);
                     last_code = code;
                     break;
                 }
@@ -4409,7 +4443,9 @@ impl Kernel {
                             result.data = value.data;
                             return Ok(result);
                         }
-                        ControlFlow::Exit { code } => {
+                        ControlFlow::Exit { code, result: r } => {
+                            push_out(&mut accumulated_out, &r);
+                            accumulated_err.push_str(&r.err);
                             let mut result =
                                 ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
                             result.err = accumulated_err;
@@ -4577,7 +4613,9 @@ impl Kernel {
                                 last_data = value.data;
                                 break;
                             }
-                            ControlFlow::Exit { code } => {
+                            ControlFlow::Exit { code, result: r } => {
+                                push_out(&mut accumulated_out, &r);
+                                accumulated_err.push_str(&r.err);
                                 exit_code = Some(code);
                                 break;
                             }
@@ -6443,17 +6481,26 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     accumulated.baggage.clone_from(&new.baggage);
 }
 
-/// Fold a loop's accumulated output into a break/continue signal that is
-/// propagating to an *outer* loop. Output printed before `break N`/`continue N`
-/// (with `N > 1`) would otherwise be discarded when the signal replaces the
-/// loop's result on its way up. The loop's output comes first (it ran before
-/// the signal was raised), then the signal's already-carried output.
-fn fold_loop_output_into_flow(loop_output: ExecResult, flow: &mut ControlFlow) {
-    if let ControlFlow::Break { result, .. } | ControlFlow::Continue { result, .. } = flow {
-        let mut merged = loop_output;
-        accumulate_result(&mut merged, result);
-        *result = merged;
-    }
+/// Fold a block's accumulated output into a signal that is leaving the block.
+///
+/// Any block that builds up a result — a loop body, an `if`/`case` branch, the
+/// left side of a `&&`/`||` chain — hands that result back when it finishes.
+/// When `break`/`continue`/`return`/`exit` leaves early instead, the signal
+/// replaces the result on the way up, so output printed before the signal
+/// would otherwise be discarded. Leaving early stops the block; it does not
+/// unprint what already ran. The block's output comes first (it ran before the
+/// signal was raised), then the signal's already-carried output.
+fn fold_block_output_into_flow(block_output: ExecResult, flow: &mut ControlFlow) {
+    let carried = match flow {
+        ControlFlow::Break { result, .. }
+        | ControlFlow::Continue { result, .. }
+        | ControlFlow::Exit { result, .. } => result,
+        ControlFlow::Return { value } => value,
+        ControlFlow::Normal(_) => return,
+    };
+    let mut merged = block_output;
+    accumulate_result(&mut merged, carried);
+    *carried = merged;
 }
 
 /// Accumulate the output a break/continue signal carried (from inner loops it
