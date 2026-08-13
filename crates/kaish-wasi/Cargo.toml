@@ -8,6 +8,10 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
+# Never published: a wasm binary target with no library consumers. Its kaish
+# deps are path-only, so a stray `cargo publish -p kaish-wasi` would fail at
+# the registry anyway — this makes the refusal immediate and states the intent.
+publish = false
 
 [dependencies]
 kaish-kernel = { path = "../kaish-kernel", default-features = false }

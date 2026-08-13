@@ -4,10 +4,6 @@
 //! It exists so that consumers (kaijutsu, external tools) can work with kaish's
 //! type system without pulling kaish-kernel's ~60 transitive deps.
 
-// `approval` is deliberately NOT in the flat re-export block below: its names
-// are generic (Plan, PlannedCommand, PlannedValue) and would collide at the
-// crate root. Consumers write `kaish_types::approval::Plan`, like `clock`.
-pub mod approval;
 pub mod backend;
 pub mod bytes;
 pub mod clock;
@@ -16,6 +12,10 @@ pub mod dir_entry;
 pub mod job;
 pub mod kernel;
 pub mod output;
+// `plan` is deliberately NOT in the flat re-export block below: its names
+// are generic (Plan, PlannedCommand, PlannedValue) and would collide at the
+// crate root. Consumers write `kaish_types::plan::Plan`, like `clock`.
+pub mod plan;
 pub mod result;
 pub mod rfc3339;
 pub mod tool;

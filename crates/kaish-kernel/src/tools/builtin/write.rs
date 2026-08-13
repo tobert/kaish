@@ -65,9 +65,9 @@ impl Tool for Write {
         // for keys a builtin *does* read via the clap-parsed field, so
         // exclude `content` from argv (GH #218's `to_argv_excluding` — a
         // first-class alternative to hand-cloning `ToolArgs` and removing the
-        // key). Every other flag (`path`/`confirm`/global) still gets the
-        // full guard, and `parsed.content` simply stays `None`, which is fine
-        // since nothing reads it.
+        // key). Every other flag (`path`/global) still gets the full guard,
+        // and `parsed.content` simply stays `None`, which is fine since
+        // nothing reads it.
         let argv = match args.to_argv_excluding(&["content"]) {
             Ok(v) => v,
             Err(e) => return ExecResult::failure(2, format!("write: {e}")),

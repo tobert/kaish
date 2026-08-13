@@ -3366,9 +3366,8 @@ impl Kernel {
             ctx.pipe_stdin = ec.pipe_stdin.take();
             ctx.pipe_stdout = ec.pipe_stdout.take();
             // Same take-don't-clone discipline as stdin, and for the same
-            // reason: an authorization `Kernel::confirm` reserved is for
-            // exactly one dispatch, and a copy left behind would let the
-            // next command adopt it.
+            // reason: these belong to exactly one dispatch, and a copy left
+            // behind would let the next command adopt it.
         }
 
         // Honor --json before the builtin runs so its setting survives a clap
@@ -5565,9 +5564,8 @@ impl Kernel {
             ctx.pipe_stdin = ec.pipe_stdin.take();
             ctx.pipe_stdout = ec.pipe_stdout.take();
             // Same take-don't-clone discipline as stdin, and for the same
-            // reason: an authorization `Kernel::confirm` reserved is for
-            // exactly one dispatch, and a copy left behind would let the
-            // next command adopt it.
+            // reason: these belong to exactly one dispatch, and a copy left
+            // behind would let the next command adopt it.
         }
 
         Ok(result)

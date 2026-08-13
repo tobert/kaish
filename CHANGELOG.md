@@ -10,6 +10,8 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-13
+
 ### Added
 - **`plan_program(source)` and `Kernel::plan_program(source)`** — every
   statement's `Plan` plus its parsed index, without executing anything, so an
@@ -23,13 +25,16 @@ breaking entries are marked **BREAKING**.
   binds). A name that is both read and lexically bound lands bound, never
   free — the safe direction, since peeking it would judge the statement
   against a value it replaces.
-- **`Kernel::get_var` over `free_variables`** closes the analysis loop — plan
-  a statement, look up what it depends on, decide with live values in hand.
-  The read set is complete against the statement's **lexical** surface (kaish
-  has no `eval` and no indirect expansion), but not against runtime binders:
-  `read`, `export`, `unset`, and `push` take variable names as arguments, so
-  `read TOKEN && curl -H "Authorization: $TOKEN"` reports `TOKEN` as free and
-  the value peeked is the one from before the `read`.
+- **`Kernel::get_var` over `free_variables`** closes the analysis loop — plan a
+  statement, look up what it depends on, decide with live values in hand.
+- **The read set is complete against a statement's *lexical* surface, not
+  against runtime binders** — `read`, `export`, `unset`, and `push` take
+  variable names as arguments, so `read TOKEN && curl -H "Authorization:
+  $TOKEN"` reports `TOKEN` as free and peeks the value from before the `read`.
+- **`PlanDigest`** — a content identity for a plan, digested over its rendered
+  text with any presented credential stripped, so `rm x` and
+  `rm --confirm=<key> x` digest the same. The embedder computes it; the type
+  only carries it, which keeps `kaish-types` dependency-light.
 - **`ToolSchema.operations`** — the dotted effect ids a tool declares
   (`fs.remove`, `fs.overwrite`, …), in `tools --json`, so an embedder learns
   that `rm` removes a path without having to recognize the name `rm`.
@@ -77,24 +82,6 @@ breaking entries are marked **BREAKING**.
 
 ### Changed
 
-- **BREAKING: the confirmation latch is removed, with nothing replacing it.**
-  0.13.0 held a destructive op (`rm`, and the truncating overwrite behind
-  `tee`/`patch`/`sed -i`/`write`/`cp`/`mv`/`dd of=`) at exit 2 until it was
-  re-run with `--confirm=<nonce>`. kaish no longer holds anything: the op runs.
-  Gone with it — `ExecResult.latch`/`latch_request()`, `LatchRequest`,
-  `JobInfo.latch`, `JobStatus::Latched` (wire `"latched"`), `/v/jobs/{id}/latch`,
-  `set -o latch`, `KAISH_LATCH`, `KernelConfig::with_latch`, `dd`'s
-  `confirm=<token>` operand, and the `--confirm=<token>` flag on `rm` and the
-  overwrite builtins (`tee`, `patch`, `sed`, `write`, `cp`, `mv`) — passing it
-  is now a usage error (exit 2). An embedder that intercepted destructive ops
-  through the latch now reads `plan_program(source)` before running the
-  statement and decides for itself — see `docs/EMBEDDING.md`,
-  "Command analysis". `set -o trash` is unchanged and still makes an
-  overwrite or delete recoverable.
-
-  `kaish-trash empty` still refuses without confirmation (exit 2), but the
-  nonce round-trip is gone with the latch: the flag is now bare `--confirm`,
-  and `--confirm=<nonce>` no longer parses.
 - **BREAKING: comma is significant only inside a `[...]`/`{...}` literal or
   pattern** — `sed -n 1,3p`, `cut -f 1,3`, `sort -k 2,2n`, and `echo a,b,c`
   work unquoted; comma stays a separate token wherever a bracket pair actually
@@ -143,6 +130,27 @@ breaking entries are marked **BREAKING**.
   allocates 70% fewer bytes, many-command scripts make 18% fewer allocations,
   brace-free glob patterns skip brace expansion.
 
+### Removed
+
+- **BREAKING: the confirmation latch is removed, with nothing replacing it** —
+  0.13.0 held `rm` and every truncating overwrite at exit 2 until it was re-run
+  with `--confirm=<nonce>`; the operation now runs.
+- **BREAKING: `--confirm=<token>` no longer parses** on `rm`, `tee`, `patch`,
+  `sed`, `write`, `cp`, `mv`, or as `dd`'s `confirm=` operand — passing it is a
+  usage error (exit 2), because the latch it answered is gone.
+- **BREAKING: the latch's embedder surface is removed** —
+  `Kernel::confirm`, `ExecResult.latch`/`latch_request()`, `LatchRequest`,
+  `JobInfo.latch`, `JobStatus::Latched` (wire `"latched"`),
+  `/v/jobs/{id}/latch`, `set -o latch`, `KAISH_LATCH`, and
+  `KernelConfig::with_latch`.
+- **An embedder that gated destructive operations through the latch now reads
+  `plan_program(source)` and decides for itself** before running the statement —
+  see `docs/EMBEDDING.md`, "Command analysis".
+- **BREAKING: `kaish-trash empty` takes a bare `--confirm`** — it still refuses
+  without it (exit 2), but the nonce round-trip went with the latch.
+- **`set -o trash` is untouched** — an overwrite or delete stays recoverable,
+  so the recoverable path out of a destructive operation survives the latch.
+
 ### Fixed
 - **`help limits` and `docs/LANGUAGE.md` said scatter returns results in
   completion order** — it returns them in item order and always has.
@@ -180,8 +188,6 @@ breaking entries are marked **BREAKING**.
   `help limits` recursion cap corrected to 48 (`MAX_RECURSION_DEPTH`);
   `cp`/`mv` publish real `-n`/`--no-clobber` descriptions;
   `cargo doc` builds warning-free and CI denies regressions.
-
-### Security
 
 ## [0.13.0] - 2026-07-18
 
@@ -1761,7 +1767,8 @@ Initial public release of **kaish** (会sh) — a predictable Bourne-like shell 
 - **REPL** (`kaish-repl`) with multi-line input, completion, and history; **MCP server** (`kaish-mcp`) exposing `kaish_execute` with help resources and structured + plain-text content blocks.
 - **`KernelClient` trait** + `EmbeddedClient` for in-process embedding; topic-based help system; `kaish-wasi` `wasm32-wasip1` target.
 
-[Unreleased]: https://github.com/tobert/kaish/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/tobert/kaish/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/tobert/kaish/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/tobert/kaish/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/tobert/kaish/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/tobert/kaish/compare/v0.10.0...v0.11.0

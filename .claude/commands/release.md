@@ -138,7 +138,8 @@ Find them all with:
 ```
 grep -n 'kaish-.*version = "' crates/*/Cargo.toml
 ```
-As of 0.8.x that is:
+Trust that grep over this list — the list goes stale, the grep does not. As of
+0.14.0 it finds 17 pins:
 ```
 crates/kaish-tool-api/Cargo.toml   → kaish-types
 crates/kaish-glob/Cargo.toml       → (no kaish deps)
@@ -148,11 +149,29 @@ crates/kaish-tools-host/Cargo.toml → kaish-types, kaish-tool-api
 crates/kaish-kernel/Cargo.toml     → kaish-glob, kaish-types, kaish-help,
                                      kaish-tool-api, kaish-vfs,
                                      kaish-tools-host (optional dep — still pinned)
-crates/kaish-client/Cargo.toml     → kaish-kernel
-crates/kaish-repl/Cargo.toml       → kaish-kernel, kaish-client
+crates/kaish-client/Cargo.toml     → kaish-kernel, kaish-types, and a
+                                     kaish-kernel dev-dependency
+crates/kaish-repl/Cargo.toml       → kaish-kernel, kaish-client, kaish-types
 ```
+`kaish-wasi` is absent on purpose: it is `publish = false` and its kaish deps
+are path-only, so it has no version pin to bump.
 
 After editing, run `cargo check --all` to verify the versions resolve correctly.
+
+### Hand-written version strings in the docs
+
+`cargo` never sees these, so nothing fails when they go stale — they have
+shipped wrong twice (0.13.0 published with `docs/EMBEDDING.md` still saying
+"currently 0.11.x"). Bump both:
+
+```
+README.md          → the `[dependencies]` block's `kaish-kernel = "0.X"`
+docs/EMBEDDING.md  → the Stability section's "currently 0.X.y"
+```
+
+Find any stragglers with `grep -rn '0\.<prev-minor>' README.md docs/*.md`.
+Leave historical notes alone — a line like `> **v0.13.0:** …` documenting when
+a change landed is correct as written and must not be bumped.
 
 ### Stamp the changelog
 
@@ -234,8 +253,8 @@ and retry once.
 ## Known Issues
 
 - All crates use `version.workspace = true`, so Phase 5 is just the root
-  workspace version plus the inter-crate `path + version` pins (20 strings as of
-  0.8.3). `kaish-glob` is no longer special-cased.
+  workspace version plus the inter-crate `path + version` pins (18 strings as of
+  0.14.0). `kaish-glob` is no longer special-cased.
 - All inter-crate deps pin exact versions. These must match what's being published.
 - crates.io has a propagation delay — `cargo publish` blocks until the crate is
   available at the registry before returning, which covers it (the 15s waits are
