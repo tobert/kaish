@@ -154,6 +154,21 @@ crates/kaish-repl/Cargo.toml       → kaish-kernel, kaish-client
 
 After editing, run `cargo check --all` to verify the versions resolve correctly.
 
+### Hand-written version strings in the docs
+
+`cargo` never sees these, so nothing fails when they go stale — they have
+shipped wrong twice (0.13.0 published with `docs/EMBEDDING.md` still saying
+"currently 0.11.x"). Bump both:
+
+```
+README.md          → the `[dependencies]` block's `kaish-kernel = "0.X"`
+docs/EMBEDDING.md  → the Stability section's "currently 0.X.y"
+```
+
+Find any stragglers with `grep -rn '0\.<prev-minor>' README.md docs/*.md`.
+Leave historical notes alone — a line like `> **v0.13.0:** …` documenting when
+a change landed is correct as written and must not be bumped.
+
 ### Stamp the changelog
 
 Now rename the changelog's `Unreleased` section to this release:

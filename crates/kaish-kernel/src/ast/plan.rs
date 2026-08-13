@@ -29,7 +29,7 @@
 
 use std::collections::BTreeSet;
 
-use kaish_types::approval::{Plan, PlannedCommand, PlannedRedirect, PlannedValue, PLAN_RENDER_LIMIT};
+use kaish_types::plan::{Plan, PlannedCommand, PlannedRedirect, PlannedValue, PLAN_RENDER_LIMIT};
 use kaish_types::Value;
 
 use super::types::{
