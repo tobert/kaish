@@ -3004,8 +3004,9 @@ impl Kernel {
             // reader discards that tail with no error — `read x; wc -c` over
             // 100 KiB counted 8187 bytes and said nothing.
             //
-            // For a multi-stage pipeline both are already `None` here (stage 0
-            // took them), so this only carries the single-command case.
+            // A multi-stage pipeline reaches here with the remainder already
+            // returned by `run_pipeline`'s join, so this carries the
+            // single-command and the pipeline case alike.
             ec.stdin = ctx.stdin.take();
             ec.pipe_stdin = ctx.pipe_stdin.take();
         }

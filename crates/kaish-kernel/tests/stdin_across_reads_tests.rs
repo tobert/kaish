@@ -238,3 +238,69 @@ async fn a_pipe_read_does_not_block_a_command_that_never_reads() {
     assert_eq!(result.text_out(), "hi\n");
     drop(writer);
 }
+
+// ---------------------------------------------------------------------------
+// A pipeline does not swallow the session's stdin. Stage 0 is handed the
+// stream; whatever it does not consume belongs to the next statement, exactly
+// as in bash. The `seq` case is the sharp one — that stage never reads stdin
+// at all, so dropping the stream would be pure loss.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_pipeline_returns_the_stdin_its_first_stage_did_not_consume() {
+    // bash: `printf 'a\nb\nc\n' | { read x | cat; cat; }` prints b, c.
+    let (out, code) = run_with_pipe_stdin("read x | cat; cat", b"a\nb\nc\n").await;
+    assert_eq!(code, 0, "the trailing cat should succeed: {out:?}");
+    assert_eq!(out, "b\nc\n");
+}
+
+#[tokio::test]
+async fn a_pipeline_whose_first_stage_never_reads_stdin_leaves_it_all() {
+    // bash: `printf 'a\nb\nc\n' | { seq 1 2 | cat; cat; }` prints 1,2 then a,b,c.
+    let (out, code) = run_with_pipe_stdin("seq 1 2 | cat; cat", b"a\nb\nc\n").await;
+    assert_eq!(code, 0, "the trailing cat should succeed: {out:?}");
+    assert_eq!(
+        out, "1\n2\na\nb\nc\n",
+        "a stage that never reads stdin must not consume the session's stream"
+    );
+}
+
+#[tokio::test]
+async fn a_buffered_stdin_survives_a_pipeline_too() {
+    let (out, code) = run_with_stdin("seq 1 2 | cat; cat", "a\nb\n").await;
+    assert_eq!(code, 0, "the trailing cat should succeed: {out:?}");
+    assert_eq!(out, "1\n2\na\nb\n");
+}
+
+#[tokio::test]
+async fn a_pipeline_stage_with_its_own_redirect_leaves_the_session_stream_alone() {
+    // `read x <<< "h"` takes its input from the here-string, so the session's
+    // stdin was never handed to the stage and is still the parent's. Returning
+    // the redirect's leftover over it would lose the stream AND substitute the
+    // wrong bytes. bash prints the session's a/b/c here.
+    let (out, code) = run_with_pipe_stdin(r#"read x <<< "h" | cat; cat"#, b"a\nb\nc\n").await;
+    assert_eq!(code, 0, "the trailing cat should succeed: {out:?}");
+    assert_eq!(out, "a\nb\nc\n");
+}
+
+#[tokio::test]
+async fn a_pipeline_read_with_a_short_line_returns_the_unread_pipe_too() {
+    // The remainder after a partial read lives in two places at once: the
+    // over-read bytes in the buffer, and the rest still in the pipe. A short
+    // first line is what forces both to be non-empty — with a small input the
+    // first read drains everything and a dropped `pipe_stdin` goes unnoticed.
+    let rest = "y".repeat(20_000);
+    let input = format!("keep\n{rest}\n");
+    let (out, code) = run_with_pipe_stdin("read x | cat; cat", input.as_bytes()).await;
+    assert_eq!(code, 0, "the trailing cat should succeed");
+    assert_eq!(out.len(), 20_001, "trailing cat saw {} bytes, want 20001", out.len());
+}
+
+#[tokio::test]
+async fn a_pipeline_that_drains_stdin_leaves_nothing_and_repeats_nothing() {
+    // The duplication guard: `cat | cat` consumes the whole stream, so the
+    // trailing `cat` must see nothing — and the bytes must appear exactly once.
+    let (out, code) = run_with_pipe_stdin("cat | cat; cat", b"a\nb\nc\n").await;
+    assert_eq!(code, 0);
+    assert_eq!(out, "a\nb\nc\n", "each byte exactly once");
+}

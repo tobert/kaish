@@ -538,6 +538,9 @@ impl PipelineRunner {
         }
 
         let mut handles: Vec<tokio::task::JoinHandle<(ExecResult, ExecContext)>> = Vec::with_capacity(stage_count);
+        // Set when stage 0 receives the session's stdin rather than a redirect's.
+        // Only then may its remainder be returned at the join.
+        let mut stage0_took_session_stdin = false;
 
         for (i, cmd) in commands.iter().enumerate() {
             let mut stage_ctx = ctx.child_for_pipeline();
@@ -556,6 +559,13 @@ impl PipelineRunner {
 
             // Wire pipe_stdin: stage 0 gets parent stdin (if no redirect), others get pipe reader
             if i == 0 {
+                // Whether the session's stdin was actually handed to this stage
+                // decides whether its remainder may be handed back at the join.
+                // A redirect (`read x < file | …`) leaves the session stream in
+                // `ctx` untouched, and returning the *file's* leftover over it
+                // would both lose the session stream and substitute the wrong
+                // bytes for it.
+                stage0_took_session_stdin = stage_ctx.stdin.is_none();
                 // First stage inherits the parent's stdin, but only if redirects didn't
                 // already set stdin (e.g., heredoc). Don't overwrite redirect-provided stdin.
                 if stage_ctx.stdin.is_none() {
@@ -691,7 +701,21 @@ impl PipelineRunner {
 
         for (i, handle) in handles.into_iter().enumerate() {
             match handle.await {
-                Ok((result, stage_ctx)) => {
+                Ok((result, mut stage_ctx)) => {
+                    // Stage 0 was handed the session's stdin. Whatever it did
+                    // not consume comes back, or it dies here — `seq 1 2 | cat`
+                    // never reads stdin at all, yet the stream it was handed
+                    // would vanish and the next statement would see nothing.
+                    // bash leaves it for the next reader; so do we.
+                    //
+                    // Only when the stage got the *session's* stdin: with a
+                    // redirect (`read x < file | …`) the session stream is
+                    // still sitting in `ctx`, and writing the file's leftover
+                    // over it would lose the stream and substitute wrong bytes.
+                    if i == 0 && stage0_took_session_stdin {
+                        ctx.stdin = stage_ctx.stdin.take();
+                        ctx.pipe_stdin = stage_ctx.pipe_stdin.take();
+                    }
                     if i == last_idx {
                         last_result = result;
                         // Sync last stage's scope and cwd changes back
