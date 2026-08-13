@@ -2997,6 +2997,17 @@ impl Kernel {
             ec.aliases = ctx.aliases.clone();
             ec.ignore_config = ctx.ignore_config.clone();
             ec.output_limit = ctx.output_limit.clone();
+            // Unconsumed stdin goes back to the session, or it dies here with
+            // `ctx`. A partial read (`read` takes one line) leaves the rest
+            // split across two places: the bytes it over-read sit in `stdin`,
+            // and the pipe still holds everything past them. Dropping the
+            // reader discards that tail with no error — `read x; wc -c` over
+            // 100 KiB counted 8187 bytes and said nothing.
+            //
+            // For a multi-stage pipeline both are already `None` here (stage 0
+            // took them), so this only carries the single-command case.
+            ec.stdin = ctx.stdin.take();
+            ec.pipe_stdin = ctx.pipe_stdin.take();
         }
         {
             let mut scope = self.scope.write().await;
@@ -3435,6 +3446,11 @@ impl Kernel {
             ec.ignore_config = ctx.ignore_config.clone();
             ec.pipe_stdin = ctx.pipe_stdin.take();
             ec.pipe_stdout = ctx.pipe_stdout.take();
+            // What a partial read left behind goes back too: `read` takes one
+            // line and keeps the rest, and that remainder belongs to the next
+            // reader. Without this it dies with the tool's context and
+            // `read x; read y` loses the second line.
+            ec.stdin = ctx.stdin.take();
         }
 
         // Builtins parse --json via the GlobalFlags flatten in their clap
@@ -4948,8 +4964,19 @@ impl Kernel {
         // is written verbatim (no text detour), so binary stdin survives.
         let stdin_task: Option<tokio::task::JoinHandle<()>> = if let Some(mut pipe_in) = pipe_stdin {
             child.stdin.take().map(|mut child_stdin| {
+                // A buffered prefix and a live pipe are one stream, not two
+                // candidates. After `read x`, the bytes `read` over-read sit in
+                // the buffer and the rest is still in the pipe; picking the pipe
+                // and dropping the buffer would silently skip the front of the
+                // child's input.
+                let prefix = stdin_bytes;
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    if let Some(data) = prefix
+                        && child_stdin.write_all(&data).await.is_err()
+                    {
+                        return; // child closed stdin; dropping it signals EOF
+                    }
                     let mut buf = [0u8; 8192];
                     loop {
                         match pipe_in.read(&mut buf).await {
@@ -5601,6 +5628,13 @@ impl Kernel {
             // between calls.
             ctx.pipe_stdin = ec.pipe_stdin.take();
             ctx.pipe_stdout = ec.pipe_stdout.take();
+            // Unconsumed buffered stdin comes back the same way, and for a
+            // sharper reason than symmetry: a partial read (`read` takes one
+            // line) leaves its remainder in `ec`, and the caller's own
+            // end-of-statement sync writes `ctx.stdin` back over `ec.stdin`.
+            // Without this the caller writes its stale `None` over the
+            // remainder and the rest of the stream is gone.
+            ctx.stdin = ec.stdin.take();
             // Same take-don't-clone discipline as stdin, and for the same
             // reason: these belong to exactly one dispatch, and a copy left
             // behind would let the next command adopt it.

@@ -679,14 +679,82 @@ impl ExecContext {
     /// an empty pipe yields `Some(vec![])`. The buffered source is already
     /// bytes-typed (GH #176), so this is a plain move, never a re-encode.
     /// See `docs/binary-data.md`.
+    ///
+    /// Anything an earlier [`Self::read_stdin_line`] left behind comes first,
+    /// then the rest of the pipe — `read x; cat` gives `cat` everything after
+    /// the line `read` took, in order, and nothing twice.
     pub async fn read_stdin_to_bytes(&mut self) -> Option<Vec<u8>> {
-        if let Some(mut reader) = self.pipe_stdin.take() {
-            use tokio::io::AsyncReadExt;
-            let mut buf = Vec::new();
-            reader.read_to_end(&mut buf).await.ok()?;
-            Some(buf)
-        } else {
-            self.stdin.take()
+        let leftover = self.stdin.take();
+        match self.pipe_stdin.take() {
+            Some(mut reader) => {
+                use tokio::io::AsyncReadExt;
+                let mut buf = leftover.unwrap_or_default();
+                reader.read_to_end(&mut buf).await.ok()?;
+                Some(buf)
+            }
+            None => leftover,
+        }
+    }
+
+    /// Read one line from stdin, leaving the rest for the next reader.
+    ///
+    /// This is the stream-shaped counterpart to [`Self::read_stdin_to_bytes`]:
+    /// it takes a single line and keeps everything after it, so `read x; read y`
+    /// binds two lines and `read x; cat` hands `cat` the remainder. Draining to
+    /// EOF for one line would discard the rest of the stream — there is no way
+    /// to put it back once a pipe has been read.
+    ///
+    /// The trailing newline is stripped, and a final line without one is still
+    /// a line. Returns `Ok(None)` at end of input — no line left, which is a
+    /// fact the caller reports, not an empty binding. `Err` on non-UTF-8, with
+    /// the same message shape as [`Self::read_stdin_to_text`].
+    pub async fn read_stdin_line(&mut self) -> Result<Option<String>, String> {
+        loop {
+            // A complete line already buffered? Take it and keep the rest.
+            if let Some(buf) = self.stdin.as_mut()
+                && let Some(nl) = buf.iter().position(|b| *b == b'\n')
+            {
+                let rest = buf.split_off(nl + 1);
+                let mut line = std::mem::replace(buf, rest);
+                line.pop(); // the '\n' itself
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                // Drop an emptied buffer only when nothing can refill it, so
+                // `read_stdin_to_bytes` can still tell "no stdin" (None) from
+                // "stdin that is now empty" (Some(vec![])).
+                if self.pipe_stdin.is_none()
+                    && self.stdin.as_ref().is_some_and(|b| b.is_empty())
+                {
+                    self.stdin = None;
+                }
+                return decode_stdin_line(line).map(Some);
+            }
+
+            // No newline buffered — pull another chunk from the pipe. The
+            // reader stays in place: taking it would strand the remainder.
+            if let Some(reader) = self.pipe_stdin.as_mut() {
+                use tokio::io::AsyncReadExt;
+                let mut chunk = [0u8; 8192];
+                match reader.read(&mut chunk).await {
+                    Ok(0) => {
+                        self.pipe_stdin = None; // EOF; fall through to the tail
+                    }
+                    Ok(n) => {
+                        self.stdin
+                            .get_or_insert_with(Vec::new)
+                            .extend_from_slice(&chunk[..n]);
+                    }
+                    Err(e) => return Err(format!("reading stdin: {e}")),
+                }
+                continue;
+            }
+
+            // Nothing left to read: whatever is buffered is the last line.
+            return match self.stdin.take() {
+                Some(buf) if !buf.is_empty() => decode_stdin_line(buf).map(Some),
+                _ => Ok(None),
+            };
         }
     }
 
@@ -1060,6 +1128,18 @@ impl kaish_tool_api::ToolCtx for ExecContext {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
+}
+
+/// Decode one line of stdin as UTF-8, refusing binary rather than mangling it.
+///
+/// Same rule and same wording as [`ExecContext::read_stdin_to_text`] — a
+/// line-at-a-time reader must not be the one place where `U+FFFD` creeps in.
+fn decode_stdin_line(bytes: Vec<u8>) -> Result<String, String> {
+    String::from_utf8(bytes).map_err(|_| {
+        "input is not valid UTF-8 (binary data?) — pipe through base64/xxd \
+         or use a binary-aware tool (cat, dd, cmp, wc -c)"
+            .to_string()
+    })
 }
 
 /// Normalize a path by resolving `.` and `..` components lexically (no filesystem access).
