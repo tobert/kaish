@@ -198,6 +198,32 @@ async fn a_short_first_line_then_cat_delivers_every_remaining_byte() {
     assert!(out.starts_with("yyy"), "and it must start where `read` stopped");
 }
 
+// A builtin that streams the pipe directly must not skip the buffered front of
+// the stream. `head` takes `pipe_stdin` for early termination
+// (`seq 1 1000000 | head -5`); after a `read` the first lines are in the buffer,
+// not the pipe, so it has to fall back to the joined path.
+
+#[tokio::test]
+async fn head_after_a_read_sees_the_lines_read_left_behind() {
+    let (out, code) = run_with_pipe_stdin("read x; head -n 2", b"a\nb\nc\nd\n").await;
+    assert_eq!(code, 0, "head should succeed: {out:?}");
+    assert_eq!(
+        out, "b\nc\n",
+        "head must resume where `read` stopped, not skip to the pipe's tail"
+    );
+}
+
+#[tokio::test]
+async fn head_still_terminates_early_when_nothing_was_read_first() {
+    // The guard above must not cost `head` its streaming fast path.
+    let kernel = kernel();
+    let result = kernel
+        .execute("seq 1 100000 | head -n 3")
+        .await
+        .expect("kernel execute");
+    assert_eq!(result.text_out(), "1\n2\n3\n");
+}
+
 #[tokio::test]
 async fn a_pipe_read_does_not_block_a_command_that_never_reads() {
     // The lazy-stdin guarantee must survive the line reader: an open, silent

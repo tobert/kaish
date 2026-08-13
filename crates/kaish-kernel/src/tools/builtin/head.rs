@@ -117,7 +117,12 @@ impl Tool for Head {
 
         // Streaming path: read from pipe_stdin line by line, stop after N lines
         // This enables early termination — `seq 1 1000000 | head -5` stops after 5 lines
-        if paths.is_empty() && let Some(pipe_in) = ctx.pipe_stdin.take() {
+        //
+        // Skipped when a buffered leftover exists: after `read x`, the front of
+        // the stream sits in `ctx.stdin` and the rest is still in the pipe.
+        // Streaming the pipe alone would silently skip those first lines, so
+        // fall through to the buffered path, which joins the two in order.
+        if paths.is_empty() && ctx.stdin.is_none() && let Some(pipe_in) = ctx.pipe_stdin.take() {
             let (count, all_but_last) = Self::line_spec(&args);
             if bytes.is_some() || all_but_last {
                 // Bytes mode and `-n -N` (all but last N) both need the whole

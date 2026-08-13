@@ -4964,8 +4964,19 @@ impl Kernel {
         // is written verbatim (no text detour), so binary stdin survives.
         let stdin_task: Option<tokio::task::JoinHandle<()>> = if let Some(mut pipe_in) = pipe_stdin {
             child.stdin.take().map(|mut child_stdin| {
+                // A buffered prefix and a live pipe are one stream, not two
+                // candidates. After `read x`, the bytes `read` over-read sit in
+                // the buffer and the rest is still in the pipe; picking the pipe
+                // and dropping the buffer would silently skip the front of the
+                // child's input.
+                let prefix = stdin_bytes;
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    if let Some(data) = prefix
+                        && child_stdin.write_all(&data).await.is_err()
+                    {
+                        return; // child closed stdin; dropping it signals EOF
+                    }
                     let mut buf = [0u8; 8192];
                     loop {
                         match pipe_in.read(&mut buf).await {

@@ -919,3 +919,35 @@ async fn external_command_not_in_path_under_overlay_stays_generic_not_found() {
          not-found message, not the virtual-cwd one: {msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A partial `read` leaves a buffered prefix AND a live pipe. They are one
+// stream: an external command's stdin must receive the prefix first, then the
+// rest of the pipe. Choosing one and dropping the other silently skips the
+// front of the child's input.
+// ---------------------------------------------------------------------------
+
+// An absolute path so the spawn is unconditional — a bare `cat` resolves to
+// kaish's builtin, which would test the wrong code path entirely.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_external_command_after_a_partial_read_sees_the_remainder() {
+    use kaish_kernel::{pipe_stream_default, ExecuteOptions};
+
+    let (writer, reader) = pipe_stream_default();
+    writer.write_bytes(b"first\nsecond\nthird\n").await.unwrap();
+    drop(writer); // EOF
+
+    let kernel = repl_kernel();
+    let result = kernel
+        .execute_with_pipe_stdin("read x; /bin/cat", ExecuteOptions::new(), reader)
+        .await
+        .expect("kernel execute");
+
+    assert_eq!(result.code, 0, "cat should succeed: {}", result.err);
+    assert_eq!(
+        result.text_out(),
+        "second\nthird\n",
+        "the external command must resume where `read` stopped"
+    );
+}

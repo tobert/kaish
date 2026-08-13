@@ -396,8 +396,17 @@ impl BackendDispatcher {
 
         // Stream stdin: copy pipe_stdin → child stdin in chunks (bounded memory)
         let stdin_task: Option<tokio::task::JoinHandle<()>> = if let Some(mut pipe_in) = ctx.pipe_stdin.take() {
+            let prefix = ctx.stdin.take();
             child.stdin.take().map(|mut child_stdin| {
                 tokio::spawn(async move {
+                    // A buffered prefix and a live pipe are one stream, not two
+                    // candidates — see the same reasoning in
+                    // `kernel.rs::try_execute_external`, which this twin mirrors.
+                    if let Some(data) = prefix
+                        && child_stdin.write_all(&data).await.is_err()
+                    {
+                        return; // child closed stdin; drop signals EOF
+                    }
                     let mut buf = [0u8; 8192];
                     loop {
                         match pipe_in.read(&mut buf).await {
