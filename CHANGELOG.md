@@ -11,6 +11,10 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Fixed
+- **A pipeline no longer swallows the session's stdin** — `seq 1 2 | cat; cat`
+  dropped everything piped into kaish, even though `seq` never reads stdin at
+  all. What the first stage does not consume is left for the next statement,
+  matching bash.
 - **`read` takes one line and leaves the rest** (GH #199) — it drained stdin to
   EOF and kept only the first line, so `read x; read y` bound `x` and then
   failed "no input available", and everything after line one was gone.

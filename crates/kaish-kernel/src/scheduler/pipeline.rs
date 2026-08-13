@@ -691,7 +691,16 @@ impl PipelineRunner {
 
         for (i, handle) in handles.into_iter().enumerate() {
             match handle.await {
-                Ok((result, stage_ctx)) => {
+                Ok((result, mut stage_ctx)) => {
+                    // Stage 0 was handed the session's stdin. Whatever it did
+                    // not consume comes back, or it dies here — `seq 1 2 | cat`
+                    // never reads stdin at all, yet the stream it was handed
+                    // would vanish and the next statement would see nothing.
+                    // bash leaves it for the next reader; so do we.
+                    if i == 0 {
+                        ctx.stdin = stage_ctx.stdin.take();
+                        ctx.pipe_stdin = stage_ctx.pipe_stdin.take();
+                    }
                     if i == last_idx {
                         last_result = result;
                         // Sync last stage's scope and cwd changes back

@@ -238,3 +238,36 @@ async fn a_pipe_read_does_not_block_a_command_that_never_reads() {
     assert_eq!(result.text_out(), "hi\n");
     drop(writer);
 }
+
+// ---------------------------------------------------------------------------
+// A pipeline does not swallow the session's stdin. Stage 0 is handed the
+// stream; whatever it does not consume belongs to the next statement, exactly
+// as in bash. The `seq` case is the sharp one — that stage never reads stdin
+// at all, so dropping the stream would be pure loss.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_pipeline_returns_the_stdin_its_first_stage_did_not_consume() {
+    // bash: `printf 'a\nb\nc\n' | { read x | cat; cat; }` prints b, c.
+    let (out, code) = run_with_pipe_stdin("read x | cat; cat", b"a\nb\nc\n").await;
+    assert_eq!(code, 0, "the trailing cat should succeed: {out:?}");
+    assert_eq!(out, "b\nc\n");
+}
+
+#[tokio::test]
+async fn a_pipeline_whose_first_stage_never_reads_stdin_leaves_it_all() {
+    // bash: `printf 'a\nb\nc\n' | { seq 1 2 | cat; cat; }` prints 1,2 then a,b,c.
+    let (out, code) = run_with_pipe_stdin("seq 1 2 | cat; cat", b"a\nb\nc\n").await;
+    assert_eq!(code, 0, "the trailing cat should succeed: {out:?}");
+    assert_eq!(
+        out, "1\n2\na\nb\nc\n",
+        "a stage that never reads stdin must not consume the session's stream"
+    );
+}
+
+#[tokio::test]
+async fn a_buffered_stdin_survives_a_pipeline_too() {
+    let (out, code) = run_with_stdin("seq 1 2 | cat; cat", "a\nb\n").await;
+    assert_eq!(code, 0, "the trailing cat should succeed: {out:?}");
+    assert_eq!(out, "1\n2\na\nb\n");
+}
