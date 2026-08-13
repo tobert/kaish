@@ -31,6 +31,10 @@ breaking entries are marked **BREAKING**.
   against runtime binders** — `read`, `export`, `unset`, and `push` take
   variable names as arguments, so `read TOKEN && curl -H "Authorization:
   $TOKEN"` reports `TOKEN` as free and peeks the value from before the `read`.
+- **`PlanDigest`** — a content identity for a plan, digested over its rendered
+  text with any presented credential stripped, so `rm x` and
+  `rm --confirm=<key> x` digest the same. The embedder computes it; the type
+  only carries it, which keeps `kaish-types` dependency-light.
 - **`ToolSchema.operations`** — the dotted effect ids a tool declares
   (`fs.remove`, `fs.overwrite`, …), in `tools --json`, so an embedder learns
   that `rm` removes a path without having to recognize the name `rm`.
@@ -78,22 +82,6 @@ breaking entries are marked **BREAKING**.
 
 ### Changed
 
-- **BREAKING: the confirmation latch is removed, with nothing replacing it** —
-  0.13.0 held `rm` and every truncating overwrite at exit 2 until it was re-run
-  with `--confirm=<nonce>`; the operation now runs.
-- **BREAKING: `--confirm=<token>` no longer parses** on `rm`, `tee`, `patch`,
-  `sed`, `write`, `cp`, `mv`, or as `dd`'s `confirm=` operand — passing it is a
-  usage error (exit 2), because the latch it answered is gone.
-- **BREAKING: the latch's embedder surface is removed** —
-  `ExecResult.latch`/`latch_request()`, `LatchRequest`, `JobInfo.latch`,
-  `JobStatus::Latched` (wire `"latched"`), `/v/jobs/{id}/latch`, `set -o latch`,
-  `KAISH_LATCH`, and `KernelConfig::with_latch`.
-- **An embedder that gated destructive operations through the latch now reads
-  `plan_program(source)` and decides for itself** before running the statement —
-  see `docs/EMBEDDING.md`, "Command analysis".
-- **BREAKING: `kaish-trash empty` takes a bare `--confirm`** — it still refuses
-  without it (exit 2), but the nonce round-trip went with the latch.
-- **`set -o trash` is unchanged** — an overwrite or delete stays recoverable.
 - **BREAKING: comma is significant only inside a `[...]`/`{...}` literal or
   pattern** — `sed -n 1,3p`, `cut -f 1,3`, `sort -k 2,2n`, and `echo a,b,c`
   work unquoted; comma stays a separate token wherever a bracket pair actually
@@ -141,6 +129,27 @@ breaking entries are marked **BREAKING**.
 - Allocator churn cuts, behavior unchanged (GH #48): `grep` over a tree
   allocates 70% fewer bytes, many-command scripts make 18% fewer allocations,
   brace-free glob patterns skip brace expansion.
+
+### Removed
+
+- **BREAKING: the confirmation latch is removed, with nothing replacing it** —
+  0.13.0 held `rm` and every truncating overwrite at exit 2 until it was re-run
+  with `--confirm=<nonce>`; the operation now runs.
+- **BREAKING: `--confirm=<token>` no longer parses** on `rm`, `tee`, `patch`,
+  `sed`, `write`, `cp`, `mv`, or as `dd`'s `confirm=` operand — passing it is a
+  usage error (exit 2), because the latch it answered is gone.
+- **BREAKING: the latch's embedder surface is removed** —
+  `Kernel::confirm`, `ExecResult.latch`/`latch_request()`, `LatchRequest`,
+  `JobInfo.latch`, `JobStatus::Latched` (wire `"latched"`),
+  `/v/jobs/{id}/latch`, `set -o latch`, `KAISH_LATCH`, and
+  `KernelConfig::with_latch`.
+- **An embedder that gated destructive operations through the latch now reads
+  `plan_program(source)` and decides for itself** before running the statement —
+  see `docs/EMBEDDING.md`, "Command analysis".
+- **BREAKING: `kaish-trash empty` takes a bare `--confirm`** — it still refuses
+  without it (exit 2), but the nonce round-trip went with the latch.
+- **`set -o trash` is untouched** — an overwrite or delete stays recoverable,
+  so the recoverable path out of a destructive operation survives the latch.
 
 ### Fixed
 - **`help limits` and `docs/LANGUAGE.md` said scatter returns results in
