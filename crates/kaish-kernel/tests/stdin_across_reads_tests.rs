@@ -168,6 +168,36 @@ async fn a_read_spanning_more_than_one_pipe_chunk_still_takes_one_line() {
     assert_eq!(out.trim(), "len=20000 b=second");
 }
 
+// The case that matters most, and the one small inputs hide: a SHORT first
+// line leaves bytes unread *in the pipe*, not merely in the buffer. Every test
+// above fits in one 8 KiB chunk, so the first `read` happens to drain the whole
+// stream and nothing is left in the reader to lose. These do not.
+
+#[tokio::test]
+async fn a_short_first_line_does_not_strand_the_rest_of_the_pipe() {
+    let rest = "x".repeat(20_000);
+    let input = format!("keep\n{rest}\n");
+    let (out, code) = run_with_pipe_stdin("read x; wc -c", input.as_bytes()).await;
+    assert_eq!(code, 0, "wc should succeed: {out:?}");
+    // 20_000 x's + the newline that ended them.
+    assert_eq!(
+        out.trim(),
+        "20001",
+        "everything after the first line must survive, including the part still \
+         unread in the pipe when `read` returned"
+    );
+}
+
+#[tokio::test]
+async fn a_short_first_line_then_cat_delivers_every_remaining_byte() {
+    let rest = "y".repeat(20_000);
+    let input = format!("head\n{rest}\n");
+    let (out, code) = run_with_pipe_stdin("read x; cat", input.as_bytes()).await;
+    assert_eq!(code, 0, "cat should succeed");
+    assert_eq!(out.len(), 20_001, "cat saw {} bytes, want 20001", out.len());
+    assert!(out.starts_with("yyy"), "and it must start where `read` stopped");
+}
+
 #[tokio::test]
 async fn a_pipe_read_does_not_block_a_command_that_never_reads() {
     // The lazy-stdin guarantee must survive the line reader: an open, silent
