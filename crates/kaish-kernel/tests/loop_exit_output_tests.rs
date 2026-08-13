@@ -41,10 +41,36 @@ async fn continue_keeps_the_output_of_every_iteration() {
         .await
         .unwrap();
     assert!(result.ok(), "script should succeed: err={}", result.err);
-    let text = result.text_out();
-    for want in ["a", "b", "c"] {
-        assert!(text.contains(want), "missing {want:?} in:\n{text}");
-    }
+    assert_eq!(result.text_out().trim(), "a\nb\nc");
+}
+
+// `break N`/`continue N` with N > 1 is the case the fold helper was originally
+// written for. Widening it to `return`/`exit` must not disturb them, and
+// nothing else in the suite would catch it.
+
+#[tokio::test]
+async fn break_2_carries_both_loops_output_out_exactly_once() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("for o in x; do echo outer=$o; for i in p q; do echo inner=$i; break 2; done; done")
+        .await
+        .unwrap();
+    assert!(result.ok(), "script should succeed: err={}", result.err);
+    assert_eq!(result.text_out().trim(), "outer=x\ninner=p");
+}
+
+#[tokio::test]
+async fn continue_2_carries_the_inner_output_out_exactly_once() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("for o in x y; do echo outer=$o; for i in p; do echo inner=$i; continue 2; done; done")
+        .await
+        .unwrap();
+    assert!(result.ok(), "script should succeed: err={}", result.err);
+    assert_eq!(
+        result.text_out().trim(),
+        "outer=x\ninner=p\nouter=y\ninner=p"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -85,27 +111,101 @@ async fn exit_keeps_both_earlier_statements_and_the_loop_output() {
         .await
         .unwrap();
     assert_eq!(result.code, 3);
-    let text = result.text_out();
-    assert!(text.contains("pre"), "earlier statement's output lost:\n{text}");
-    assert!(text.contains('a'), "loop's own output lost:\n{text}");
+    // Exact, not `contains`: a fold that emitted twice would still contain
+    // both, and double-emission is the failure this fix could plausibly have.
+    assert_eq!(result.text_out().trim(), "pre\na");
 }
 
 #[tokio::test]
-async fn exit_from_a_nested_loop_keeps_both_levels_of_output() {
+async fn exit_from_a_nested_loop_emits_each_level_exactly_once() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel
         .execute("for o in x; do echo outer=$o; for i in p q; do echo inner=$i; exit 4; done; done")
         .await
         .unwrap();
     assert_eq!(result.code, 4);
-    let text = result.text_out();
-    assert!(text.contains("outer=x"), "outer loop output lost:\n{text}");
-    assert!(text.contains("inner=p"), "inner loop output lost:\n{text}");
+    // The inner loop folds into the signal, then the outer loop folds into the
+    // same signal. Exact equality is what proves neither level was duplicated.
+    assert_eq!(result.text_out().trim(), "outer=x\ninner=p");
 }
 
 // ---------------------------------------------------------------------------
 // return: same rule, from inside a function.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// A loop is not the only block that accumulates. `if`/`case` branches and the
+// left side of a `&&` chain hand a result back the same way, and lost it the
+// same way — including with no loop anywhere in sight.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn exit_from_an_if_branch_keeps_the_branch_output() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("if true; then echo x; exit 1; fi")
+        .await
+        .unwrap();
+    assert_eq!(result.code, 1);
+    assert_eq!(result.text_out().trim(), "x");
+}
+
+#[tokio::test]
+async fn exit_from_a_case_branch_keeps_the_branch_output() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("case a in a) echo hit; exit 1;; esac")
+        .await
+        .unwrap();
+    assert_eq!(result.code, 1);
+    assert_eq!(result.text_out().trim(), "hit");
+}
+
+#[tokio::test]
+async fn exit_from_the_right_of_an_and_chain_keeps_the_left_output() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute("echo pre && exit 1").await.unwrap();
+    assert_eq!(result.code, 1);
+    assert_eq!(result.text_out().trim(), "pre");
+}
+
+#[tokio::test]
+async fn exit_from_an_if_inside_a_loop_keeps_both() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("for f in a; do echo loop=$f; if true; then echo branch; exit 1; fi; done")
+        .await
+        .unwrap();
+    assert_eq!(result.code, 1);
+    assert_eq!(result.text_out().trim(), "loop=a\nbranch");
+}
+
+// ---------------------------------------------------------------------------
+// return: same rule, from inside a function. The function-body path is a
+// different consumption site from the top-level one.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn exit_from_a_loop_in_a_function_keeps_the_output() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("f() { for x in a b; do echo $x; exit 3; done; }; f")
+        .await
+        .unwrap();
+    assert_eq!(result.code, 3);
+    assert_eq!(result.text_out().trim(), "a");
+}
+
+#[tokio::test]
+async fn return_from_a_nested_loop_in_a_function_keeps_both_levels() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("f() { for o in x; do echo outer=$o; for i in p q; do echo inner=$i; return 5; done; done; }; f")
+        .await
+        .unwrap();
+    assert_eq!(result.code, 5);
+    assert_eq!(result.text_out().trim(), "outer=x\ninner=p");
+}
 
 #[tokio::test]
 async fn return_from_a_loop_in_a_function_keeps_the_output() {
