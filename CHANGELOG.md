@@ -10,7 +10,18 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`${s[0:5]}` slices a string** — the same brackets as a list slice and the
+  same rules: start:end, end-exclusive, negatives counting from the end
+  (`${s[-3:]}`), either bound omittable. Counts **characters, not bytes**, so a
+  multi-byte character is never split. A string is sliceable but not indexable:
+  `${s[0]}` is a loud error naming the slice form.
+
 ### Fixed
+- **`${s:0:5}` is a loud error instead of silently expanding to nothing** —
+  bash's `:offset:length` is a different convention from kaish's start:end
+  brackets, and it used to vanish: `"${d:0:4}/file"` became `/file`, pointing a
+  destructive command at the wrong path. The error names the form to write.
 - **A pipeline no longer swallows the session's stdin** — `seq 1 2 | cat; cat`
   dropped everything piped into kaish, even though `seq` never reads stdin at
   all. What the first stage does not consume is left for the next statement,

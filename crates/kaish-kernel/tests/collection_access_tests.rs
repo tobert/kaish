@@ -238,10 +238,25 @@ async fn dotted_access_is_a_loud_error_with_bracket_hint() {
 }
 
 #[tokio::test]
-async fn subscript_on_scalar_is_a_loud_error() {
-    // Scalars never auto-coerce to collections.
+async fn indexing_a_string_is_a_loud_error_that_points_at_slicing() {
+    // A string is sliceable (`${s[0:5]}`) but not indexable — an index picks an
+    // element, and a string has no elements. The error says which is which
+    // instead of only refusing.
     let k = setup().await;
     let (_, code, err) = run(&k, r#"s=hello; echo ${s[0]}"#).await;
+    assert_ne!(code, 0, "indexing a string must be an error");
+    assert!(
+        err.contains("slice it instead") && err.contains("[0:5]"),
+        "error should point at the slice form: {err}"
+    );
+}
+
+#[tokio::test]
+async fn subscript_on_a_non_string_scalar_is_a_loud_error() {
+    // Scalars never auto-coerce to collections. A number has no slice either,
+    // which is the arm the string case above no longer covers.
+    let k = setup().await;
+    let (_, code, err) = run(&k, r#"n=42; echo ${n[0]}"#).await;
     assert_ne!(code, 0, "subscripting a scalar must be an error");
     assert!(err.contains("not a collection"), "got: {err}");
 }

@@ -132,10 +132,20 @@ ${u["a key"]}       # quoted key (spaces / punctuation)
 ${xs[0]}            # list index (0-based)
 ${xs[-1]}           # negative index counts from the end
 ${xs[0:2]}          # slice — end-exclusive, yields a list
+${s[0:5]}           # the same slice on a string — first five CHARACTERS
+${s[-3:]}           # last three characters
 ${u[tags][0]}       # nested path
 ${#xs}   ${#u}      # length: list element count / record key count
 ${#u[tags]}         # length of a nested value (path-aware)
 ```
+
+**Slicing a string uses the same brackets as slicing a list** — start:end,
+end-exclusive, negatives counting from the end. bash's `${s:offset:length}` is
+a different convention (offset-and-length rather than start-and-end), so kaish
+rejects it loudly and names the bracket form to write instead. A string slices
+by **characters, not bytes**, so a multi-byte character is never split. A
+string is sliceable but not indexable: `${s[0]}` is an error, because an index
+picks an element and a string has no elements.
 
 A subscript that lands on a JSON **scalar** unwraps to a native value, so
 comparisons and arithmetic are typed (not stringly):
