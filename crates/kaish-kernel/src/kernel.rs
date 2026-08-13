@@ -3435,6 +3435,11 @@ impl Kernel {
             ec.ignore_config = ctx.ignore_config.clone();
             ec.pipe_stdin = ctx.pipe_stdin.take();
             ec.pipe_stdout = ctx.pipe_stdout.take();
+            // What a partial read left behind goes back too: `read` takes one
+            // line and keeps the rest, and that remainder belongs to the next
+            // reader. Without this it dies with the tool's context and
+            // `read x; read y` loses the second line.
+            ec.stdin = ctx.stdin.take();
         }
 
         // Builtins parse --json via the GlobalFlags flatten in their clap

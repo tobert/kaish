@@ -96,12 +96,14 @@ impl Tool for Read {
         // (In a real interactive shell this would display before reading)
         let prompt_output = prompt.as_deref().unwrap_or("");
 
-        // Get input from stdin
-        let input = match ctx.read_stdin_to_text().await {
+        // Take one line and leave the rest of the stream for the next reader:
+        // `read x; read y` binds two lines, and a later `cat` still sees
+        // everything after them.
+        let line = match ctx.read_stdin_line().await {
             Ok(Some(s)) => s,
             Ok(None) => {
-                // No stdin provided - return failure (no data to read)
-                // Include the prompt in the error so it's visible
+                // Nothing left to read — no stdin at all, or already exhausted.
+                // Include the prompt in the error so it's visible.
                 let mut result = ExecResult::failure(1, "read: no input available");
                 if !prompt_output.is_empty() {
                     result.err = format!("{}{}", prompt_output, result.err);
@@ -110,9 +112,7 @@ impl Tool for Read {
             }
             Err(e) => return ExecResult::failure(2, format!("read: {e}")),
         };
-
-        // Process the input
-        let line = input.lines().next().unwrap_or("");
+        let line = line.as_str();
 
         // Process backslash escapes unless raw mode
         let processed = if raw_mode {
@@ -278,8 +278,12 @@ mod tests {
         assert!(result.err.contains("missing variable name"));
     }
 
+    /// Empty stdin is end of input, not an empty line — `read` fails, matching
+    /// bash (`printf '' | read x` exits 1). It used to succeed and bind `""`,
+    /// which made "there was nothing to read" indistinguishable from "the line
+    /// was blank".
     #[tokio::test]
-    async fn test_read_empty_input() {
+    async fn test_read_empty_input_is_end_of_input() {
         let mut ctx = make_ctx();
         ctx.set_stdin("".to_string());
 
@@ -287,8 +291,43 @@ mod tests {
         args.positional.push(Value::String("NAME".to_string()));
 
         let result = Read.execute(args, &mut ctx).await;
-        assert!(result.ok());
+        assert!(!result.ok(), "empty stdin is EOF: {result:?}");
+        assert_eq!(result.code, 1);
+        assert_eq!(ctx.scope.get("NAME"), None, "nothing to bind");
+    }
+
+    /// A lone newline *is* a line, and an empty one — `read` succeeds and binds
+    /// `""`. The counterpart to the test above; together they pin the
+    /// distinction bash draws.
+    #[tokio::test]
+    async fn test_read_a_single_blank_line_binds_empty_and_succeeds() {
+        let mut ctx = make_ctx();
+        ctx.set_stdin("\n".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("NAME".to_string()));
+
+        let result = Read.execute(args, &mut ctx).await;
+        assert!(result.ok(), "a blank line is still a line: {result:?}");
         assert_eq!(ctx.scope.get("NAME"), Some(&Value::String("".into())));
+    }
+
+    /// A second `read` picks up where the first stopped.
+    #[tokio::test]
+    async fn test_two_reads_take_successive_lines() {
+        let mut ctx = make_ctx();
+        ctx.set_stdin("first\nsecond\n".to_string());
+
+        let mut first = ToolArgs::new();
+        first.positional.push(Value::String("A".to_string()));
+        assert!(Read.execute(first, &mut ctx).await.ok());
+
+        let mut second = ToolArgs::new();
+        second.positional.push(Value::String("B".to_string()));
+        assert!(Read.execute(second, &mut ctx).await.ok());
+
+        assert_eq!(ctx.scope.get("A"), Some(&Value::String("first".into())));
+        assert_eq!(ctx.scope.get("B"), Some(&Value::String("second".into())));
     }
 
     #[tokio::test]

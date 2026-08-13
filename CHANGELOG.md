@@ -11,6 +11,15 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Fixed
+- **`read` takes one line and leaves the rest** (GH #199) — it drained stdin to
+  EOF and kept only the first line, so `read x; read y` bound `x` and then
+  failed "no input available", and everything after line one was gone.
+  `read x; cat` now hands `cat` the remainder, over a buffered stdin and a
+  streaming pipe alike.
+- **`read` on empty stdin fails (exit 1) instead of binding an empty string** —
+  end of input and a blank line were indistinguishable; `printf '' | kaish -c
+  'read x'` now exits 1 and `printf '\n' | …` still binds `""` and exits 0,
+  matching bash.
 - **Leaving a block early no longer discards what it already printed** —
   `for f in a b; do echo $f; exit 3; done` and `if true; then echo x; exit 1; fi`
   both exited with the right code and printed nothing. `exit`, `return`, and
