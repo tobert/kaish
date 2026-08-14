@@ -13,8 +13,8 @@ categories.workspace = true
 readme = "../../README.md"
 
 [dependencies]
-kaish-types = { path = "../kaish-types", version = "0.14.0", features = [] }
-kaish-tool-api = { path = "../kaish-tool-api", version = "0.14.0" }
+kaish-types = { path = "../kaish-types", version = "0.14.1", features = [] }
+kaish-tool-api = { path = "../kaish-tool-api", version = "0.14.1" }
 
 async-trait = { workspace = true }
 clap = { workspace = true }
