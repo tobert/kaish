@@ -541,6 +541,13 @@ impl PipelineRunner {
         // Set when stage 0 receives the session's stdin rather than a redirect's.
         // Only then may its remainder be returned at the join.
         let mut stage0_took_session_stdin = false;
+        // Set only when stage 0 actually takes the session's live pipe reader
+        // out of `ctx`. An embedder that seeds both `ExecuteOptions::with_stdin`
+        // and `execute_with_pipe_stdin` on the same call leaves `ctx.pipe_stdin`
+        // untouched here (the buffered bytes win, see below) — without this
+        // flag the join below would still overwrite `ctx.pipe_stdin` with
+        // stage 0's (always-`None`) leftover and silently drop the live reader.
+        let mut stage0_took_session_pipe_stdin = false;
 
         for (i, cmd) in commands.iter().enumerate() {
             let mut stage_ctx = ctx.child_for_pipeline();
@@ -559,16 +566,17 @@ impl PipelineRunner {
 
             // Wire pipe_stdin: stage 0 gets parent stdin (if no redirect), others get pipe reader
             if i == 0 {
-                // Whether the session's stdin was actually handed to this stage
-                // decides whether its remainder may be handed back at the join.
-                // A redirect (`read x < file | …`) leaves the session stream in
-                // `ctx` untouched, and returning the *file's* leftover over it
-                // would both lose the session stream and substitute the wrong
-                // bytes for it.
-                stage0_took_session_stdin = stage_ctx.stdin.is_none();
+                // A redirect (`read x < file | …`) has already set `stage_ctx.stdin`
+                // by this point, and leaves the session stream in `ctx` untouched —
+                // returning the *file's* leftover over it would both lose the
+                // session stream and substitute the wrong bytes for it. Capture
+                // this before the session's own stdin gets folded in below, so it
+                // reflects "a redirect provided it", not "stdin is now non-empty".
+                let redirect_set_stdin = stage_ctx.stdin.is_some();
+                stage0_took_session_stdin = !redirect_set_stdin;
                 // First stage inherits the parent's stdin, but only if redirects didn't
                 // already set stdin (e.g., heredoc). Don't overwrite redirect-provided stdin.
-                if stage_ctx.stdin.is_none() {
+                if !redirect_set_stdin {
                     stage_ctx.stdin = ctx.stdin.take();
                 }
                 if stage_ctx.stdin_data.is_none() {
@@ -577,8 +585,14 @@ impl PipelineRunner {
                 // Inherit a frontend-seeded lazy stdin pipe (non-Clone, so moved),
                 // unless a redirect already provided stdin — `read_stdin_*` prefers
                 // `pipe_stdin`, and `set_stdin` clears it, so `< file` still wins.
-                if stage_ctx.stdin.is_none() && stage_ctx.pipe_stdin.is_none() {
+                // Gated on `redirect_set_stdin`, not `stage_ctx.stdin.is_none()`: the
+                // session's own buffered `stdin` and its `pipe_stdin` are one stream
+                // (a peeked prefix plus the live remainder, see
+                // `ExecContext::read_stdin_to_bytes`), so a session-seeded buffer must
+                // not block the matching pipe reader from riding along to stage 0.
+                if !redirect_set_stdin && stage_ctx.pipe_stdin.is_none() {
                     stage_ctx.pipe_stdin = ctx.pipe_stdin.take();
+                    stage0_took_session_pipe_stdin = true;
                 }
             } else {
                 // Intermediate/last stages read from pipe
@@ -714,6 +728,8 @@ impl PipelineRunner {
                     // over it would lose the stream and substitute wrong bytes.
                     if i == 0 && stage0_took_session_stdin {
                         ctx.stdin = stage_ctx.stdin.take();
+                    }
+                    if i == 0 && stage0_took_session_pipe_stdin {
                         ctx.pipe_stdin = stage_ctx.pipe_stdin.take();
                     }
                     if i == last_idx {

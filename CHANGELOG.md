@@ -35,6 +35,17 @@ breaking entries are marked **BREAKING**.
   end of input and a blank line were indistinguishable; `printf '' | kaish -c
   'read x'` now exits 1 and `printf '\n' | …` still binds `""` and exits 0,
   matching bash.
+- **A pipeline's first stage now gets the whole of a combined stdin, not just
+  the buffered half** — an embedder seeding both `ExecuteOptions::with_stdin`
+  (a peeked prefix) and `execute_with_pipe_stdin` (the live remainder) on one
+  call had the remainder silently dropped from the first stage: a non-empty
+  buffered prefix was mistaken for a redirect, so the live half never rode
+  along and any downstream filter (`grep`, `wc`) never saw it.
+- **`grep` and `cat`'s streaming fast path no longer skips a buffered stdin
+  prefix** — after `read x`, `read x | grep pattern` and `read x | cat`
+  streamed only the live pipe, silently never searching or copying the bytes
+  `read` had already buffered. `head` already guarded against this; `grep`
+  and `cat` now do too.
 - **Leaving a block early no longer discards what it already printed** —
   `for f in a b; do echo $f; exit 3; done` and `if true; then echo x; exit 1; fi`
   both exited with the right code and printed nothing. `exit`, `return`, and

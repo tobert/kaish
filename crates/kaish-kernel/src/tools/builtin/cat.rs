@@ -67,8 +67,16 @@ impl Tool for Cat {
 
         // If no files specified, read from stdin (like POSIX cat)
         if args.positional.is_empty() {
-            // Streaming path: pipe_stdin → pipe_stdout without buffering
-            if !number_lines && ctx.pipe_stdin.is_some() && ctx.pipe_stdout.is_some() {
+            // Streaming path: pipe_stdin → pipe_stdout without buffering.
+            // Skipped when a buffered leftover exists (`ctx.stdin`, e.g. after
+            // `read x`): the streaming loop below reads only `pipe_stdin`, so a
+            // non-empty buffered prefix would be silently dropped instead of
+            // being written to `pipe_out` first.
+            if !number_lines
+                && ctx.stdin.is_none()
+                && ctx.pipe_stdin.is_some()
+                && ctx.pipe_stdout.is_some()
+            {
                 if let (Some(mut pipe_in), Some(mut pipe_out)) =
                     (ctx.pipe_stdin.take(), ctx.pipe_stdout.take())
                 {

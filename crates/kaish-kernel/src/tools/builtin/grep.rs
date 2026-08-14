@@ -523,10 +523,15 @@ impl Tool for Grep {
 
         // Streaming path: pipe_stdin → pipe_stdout, process line by line.
         // Only for simple grep (no context, no count, no quiet, no files-only, no only-matching).
+        // `ctx.stdin.is_none()` matters as much as the pipe checks: `stream_grep`
+        // below reads only `pipe_stdin`, so a buffered leftover (e.g. after
+        // `read x`) would never be searched or written out — silently skipped
+        // rather than matched or passed through.
         let is_simple = !count_only && !quiet && !files_only && !only_matching
             && before_context.is_none() && after_context.is_none();
         let can_stream = args.get_string("path", 1).is_none()
             && is_simple
+            && ctx.stdin.is_none()
             && ctx.pipe_stdin.is_some() && ctx.pipe_stdout.is_some();
         if can_stream {
             // Both checked with is_some() above — take() cannot return None.

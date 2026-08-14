@@ -78,12 +78,16 @@ pub(crate) fn bash_substring_hint(var_content: &str) -> Option<String> {
         _ => None,
     })?;
     let (name, rest) = var_content.split_at(colon);
-    let range = rest.trim_start_matches(':');
-    // `${v:0:5}` → `${v[0:5]}`; a lone `${v:5}` (bash: from offset 5) → `${v[5:]}`.
-    let suggestion = if range.contains(':') {
-        format!("${{{name}[{range}]}}")
+    // `rest` still carries the colon we split on; strip exactly that one.
+    let after_offset = &rest[1..];
+    // `${v:0:5}` → `${v[0:5]}`; `${v::5}` (bash: offset omitted, so 0) →
+    // `${v[0:5]}`; a lone `${v:5}` (bash: from offset 5 to end) → `${v[5:]}`.
+    let suggestion = if let Some(length) = after_offset.strip_prefix(':') {
+        format!("${{{name}[0:{length}]}}")
+    } else if after_offset.contains(':') {
+        format!("${{{name}[{after_offset}]}}")
     } else {
-        format!("${{{name}[{range}:]}}")
+        format!("${{{name}[{after_offset}:]}}")
     };
     Some(format!(
         "${{{var_content}}}: kaish slices with brackets, not `:offset:length` — \

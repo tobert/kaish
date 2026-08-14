@@ -47,6 +47,22 @@ async fn run_with_pipe_stdin(prog: &str, stdin: &[u8]) -> (String, i64) {
     (result.text_out().to_string(), result.code)
 }
 
+/// Both seams at once — an embedder handing a peeked prefix (`with_stdin`)
+/// and the live remainder of the same stream (`execute_with_pipe_stdin`) in
+/// one call. `ExecContext::read_stdin_to_bytes` treats the two as one
+/// stream, buffer first: the wiring must carry both to a pipeline's first
+/// stage together, not let the buffer block the pipe from riding along.
+async fn run_with_stdin_and_pipe(prog: &str, stdin_prefix: &str, pipe_rest: &[u8]) -> (String, i64) {
+    let (writer, reader) = pipe_stream_default();
+    writer.write_bytes(pipe_rest).await.unwrap();
+    drop(writer); // EOF
+    let result = kernel()
+        .execute_with_pipe_stdin(prog, ExecuteOptions::new().with_stdin(stdin_prefix), reader)
+        .await
+        .expect("kernel execute");
+    (result.text_out().to_string(), result.code)
+}
+
 // ---------------------------------------------------------------------------
 // The core rule: one `read` takes one line.
 // ---------------------------------------------------------------------------
@@ -303,4 +319,26 @@ async fn a_pipeline_that_drains_stdin_leaves_nothing_and_repeats_nothing() {
     let (out, code) = run_with_pipe_stdin("cat | cat; cat", b"a\nb\nc\n").await;
     assert_eq!(code, 0);
     assert_eq!(out, "a\nb\nc\n", "each byte exactly once");
+}
+
+#[tokio::test]
+async fn a_pipeline_carries_a_buffered_prefix_and_its_live_pipe_together() {
+    // An embedder that already peeked a prefix off an open process stdin and
+    // wants to forward the rest lazily seeds both `with_stdin` (the prefix)
+    // and `execute_with_pipe_stdin` (the remainder) on the same call. Stage 0
+    // must see the whole combined stream, not just the buffered prefix — a
+    // filter that only sees the prefix silently misses matches that live in
+    // the live-pipe half, and those bytes leak past the filter to whatever
+    // runs next instead of being filtered at all.
+    let stdin_prefix = "aaa\n";
+    let pipe_rest = b"bbb\npipeword\nccc\n";
+    let (out, code) =
+        run_with_stdin_and_pipe("grep pipeword | cat; cat", stdin_prefix, pipe_rest).await;
+    assert_eq!(code, 0, "the trailing cat should succeed: {out:?}");
+    assert_eq!(
+        out, "pipeword\n",
+        "grep must see (and filter) the whole stream, not just the buffered prefix; \
+         a wiring bug that drops the live pipe from stage 0 would instead leak every \
+         unfiltered line from the pipe out through the trailing cat: {out:?}"
+    );
 }
