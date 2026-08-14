@@ -67,8 +67,11 @@ pub struct ExecuteOptions {
     /// span. Independent of `traceparent`: baggage with no trace context starts
     /// a fresh root that still carries the identifiers.
     pub baggage: BTreeMap<String, String>,
-    /// Standard input for this call, consumed by the first top-level command
-    /// that reads stdin (shell semantics — a later reader sees nothing).
+    /// Standard input for this call, seeded to the first top-level command
+    /// that reads stdin. A command that consumes less than the whole buffer
+    /// (`read`, a pipeline stage that never reads stdin) leaves the remainder
+    /// for the next statement in the same call — it is not drained wholesale
+    /// to the first reader.
     ///
     /// Lets a non-interactive frontend feed piped input, e.g.
     /// `printf '…' | kaish -c 'sort'`. Without it a bare top-level builtin
@@ -160,7 +163,9 @@ impl ExecuteOptions {
         self
     }
 
-    /// Set the standard input fed to this call's first stdin-reading command.
+    /// Set the standard input fed to this call, starting with the first
+    /// stdin-reading command; whatever a command doesn't consume carries
+    /// forward to the next one in the same call.
     ///
     /// Accepts anything `Into<Vec<u8>>` — a `&str`/`String` (the common text
     /// case) or a raw `Vec<u8>` (binary, GH #176) both work.
