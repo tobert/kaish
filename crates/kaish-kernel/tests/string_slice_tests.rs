@@ -161,6 +161,19 @@ async fn the_bash_substring_form_is_a_loud_error_naming_the_kaish_form() {
 }
 
 #[tokio::test]
+async fn the_bash_form_with_an_omitted_offset_names_the_right_kaish_slice() {
+    // bash's `${v::5}` omits the offset (defaults to 0); the kaish suggestion
+    // must be `[0:5]`, not `[5:]` — trimming the two leading colons naively
+    // discarded the "offset is zero, not five" distinction.
+    let (_, code, err) = run(r#"v="abcdefghij"; echo "[${v::5}]""#).await;
+    assert_ne!(code, 0, "the bash form must not silently expand to nothing");
+    assert!(
+        err.contains("[0:5]"),
+        "an omitted offset means 0, so the suggestion must be [0:5], not [5:]: {err}"
+    );
+}
+
+#[tokio::test]
 async fn the_bash_form_does_not_silently_collapse_a_path() {
     // The shape that made this urgent: a path built from a substring silently
     // became root-relative, so `rm "${d:0:4}/file"` targeted `/file`.

@@ -230,6 +230,24 @@ async fn head_after_a_read_sees_the_lines_read_left_behind() {
 }
 
 #[tokio::test]
+async fn cat_in_a_pipeline_after_a_read_sees_the_buffered_remainder_too() {
+    // `cat`'s own streaming pipe_stdin -> pipe_stdout fast path (only reachable
+    // as a non-last pipeline stage, hence `cat | wc -c` rather than a bare
+    // `cat`) had the same gap `head` was already guarded against: it read only
+    // the live pipe and skipped whatever `read` had already buffered. A short
+    // first line forces both the buffer and the pipe to be non-empty.
+    let rest = "y".repeat(20_000);
+    let input = format!("keep\n{rest}\n");
+    let (out, code) = run_with_pipe_stdin("read x; cat | wc -c", input.as_bytes()).await;
+    assert_eq!(code, 0, "wc should succeed: {out:?}");
+    assert_eq!(
+        out.trim(),
+        "20001",
+        "cat's streaming fast path dropped the buffered remainder: {out:?}"
+    );
+}
+
+#[tokio::test]
 async fn head_still_terminates_early_when_nothing_was_read_first() {
     // The guard above must not cost `head` its streaming fast path.
     let kernel = kernel();

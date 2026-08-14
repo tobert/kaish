@@ -542,11 +542,10 @@ impl PipelineRunner {
         // Only then may its remainder be returned at the join.
         let mut stage0_took_session_stdin = false;
         // Set only when stage 0 actually takes the session's live pipe reader
-        // out of `ctx`. An embedder that seeds both `ExecuteOptions::with_stdin`
-        // and `execute_with_pipe_stdin` on the same call leaves `ctx.pipe_stdin`
-        // untouched here (the buffered bytes win, see below) — without this
-        // flag the join below would still overwrite `ctx.pipe_stdin` with
-        // stage 0's (always-`None`) leftover and silently drop the live reader.
+        // out of `ctx` (see the `redirect_set_stdin` wiring below — a session-
+        // seeded buffer rides along with its pipe, a redirect's doesn't).
+        // Without this flag the join below would overwrite `ctx.pipe_stdin`
+        // with a stage that never got it, silently dropping the live reader.
         let mut stage0_took_session_pipe_stdin = false;
 
         for (i, cmd) in commands.iter().enumerate() {
