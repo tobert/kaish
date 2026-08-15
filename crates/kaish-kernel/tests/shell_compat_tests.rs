@@ -318,8 +318,13 @@ shell_compat! {
 // ran, and the previous statement's status must not survive it. The stale
 // status was invisible in the statement's own result — `||` never fired and
 // `set -e` never tripped — so only `$?` could see it, which is exactly the
-// failure that does not announce itself. `$(printf '')` is the empty-list
-// source: deterministic, and no host path baked in.
+// failure that does not announce itself.
+//
+// The for-loop's empty-list source must be a command that FAILS, not merely
+// one that prints nothing: `$(printf '')` succeeds, so it overwrites the
+// stale status on its own and the row passes with the fix removed. `$(false)`
+// is the honest source — empty AND non-zero, the shape of `$(grep pat file)`
+// with no matches, without baking in a host path.
 
 shell_compat! {
     name: if_with_no_branch_taken_clears_stale_status,
@@ -335,7 +340,7 @@ shell_compat! {
 
 shell_compat! {
     name: for_with_zero_iterations_clears_stale_status,
-    script: "false; for i in $(printf ''); do true; done; echo $?",
+    script: "for i in $(false); do true; done; echo $?",
     eq: "0",
 }
 
