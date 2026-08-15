@@ -109,9 +109,24 @@ impl Tool for Write {
         } else if let Some(v) = args.positional.get(1) {
             value_to_bytes(v)
         } else {
+            // Zero bytes only means "write an empty file" when something
+            // deliberately supplied them. An upstream stage did (`printf '' |
+            // write f`), and so did a redirect or an embedder-supplied buffer
+            // (`write f < empty`, `ExecuteOptions::with_stdin`) — those are
+            // truncate requests and stay exit 0. The session's own stdin did
+            // not: `write f` with the process reading from /dev/null or a
+            // closed fd is a missing operand, and treating it as empty content
+            // truncates the file and reports success. Capture which case this
+            // is BEFORE reading, since the read consumes the buffer that tells
+            // them apart.
+            let content_was_offered = ctx.stdin.is_some()
+                || ctx.pipeline_position != crate::dispatch::PipelinePosition::Only;
             match ctx.read_stdin_to_bytes().await {
+                Ok(Some(bytes)) if bytes.is_empty() && !content_was_offered => {
+                    return ExecResult::failure(1, missing_content_error(&path))
+                }
                 Ok(Some(bytes)) => bytes,
-                Ok(None) => return ExecResult::failure(1, "write: missing content argument"),
+                Ok(None) => return ExecResult::failure(1, missing_content_error(&path)),
                 Err(e) => return ExecResult::failure(1, format!("write: {e}")),
             }
         };
@@ -124,6 +139,18 @@ impl Tool for Write {
             Err(e) => ExecResult::failure(1, format!("write: {}: {}", path, e)),
         }
     }
+}
+
+/// The refusal when `write` was given no content by any route.
+///
+/// Says the file was left alone, because the failure this replaces did the
+/// opposite quietly: `write FILE` with nothing to write truncated FILE to zero
+/// bytes and exited 0. An agent reading only the exit code could not tell.
+fn missing_content_error(path: &str) -> String {
+    format!(
+        "write: no content to write — pass it as an operand (write {path} CONTENT), \
+         pipe it in, or redirect a file into it; '{path}' is unchanged"
+    )
 }
 
 /// Render a value as the raw bytes to write. `Bytes` is written verbatim;

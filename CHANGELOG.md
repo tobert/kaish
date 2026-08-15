@@ -18,6 +18,17 @@ breaking entries are marked **BREAKING**.
   inside brackets and braces the colon stays structural.
 
 ### Fixed
+- **`write FILE` with no content no longer truncates FILE and reports success**
+  — data loss. Whenever the process's stdin was an exhausted pipe (`/dev/null`,
+  a closed fd, an empty pipe — what `kaish -c` normally hands the kernel), a
+  missing content operand read as zero bytes of content: the file was emptied
+  and `write` exited 0. **`set -o trash` did not protect it** — the file is
+  truncated in place, so there was no delete for trash to intercept. It now
+  exits 1 and leaves the file byte-identical. Zero bytes that something
+  deliberately supplied still truncate: `printf '' | write f`, `write f < empty`,
+  and an embedder's `ExecuteOptions::with_stdin(vec![])` are truncate requests.
+  Interactive sessions were never affected — stdin is a TTY, so no pipe is
+  bridged and the refusal already fired.
 - **A binary value bound to an accumulating flag exits 1 instead of binding the
   base64 envelope as text** — `jq -n --arg x $bin '$x'` used to exit 0 with `$x`
   set to the literal `{"_type":"bytes",…}` JSON, which looks like data and
